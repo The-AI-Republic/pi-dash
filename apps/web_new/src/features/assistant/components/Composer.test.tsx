@@ -9,6 +9,32 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
+// Stand-in for the router Link (SetupCard.test.tsx precedent): the
+// keyless dictation links target the migrated /settings/profile prefix
+// (NEWFRONT-586), so they render as router links whose navigation is
+// TanStack's own tested behavior. Full prop passthrough keeps the
+// testids and labels the suite asserts.
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@tanstack/react-router")>();
+  return {
+    ...original,
+    Link: (props: { to?: string; hash?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+      const { to, hash, children, ...rest } = props;
+      return (
+        <a
+          data-router-link=""
+          data-to={to}
+          data-hash={hash}
+          href={to}
+          {...(rest as React.AnchorHTMLAttributes<HTMLAnchorElement>)}
+        >
+          {children as React.ReactNode}
+        </a>
+      );
+    },
+  };
+});
+
 import type { DictationHandle } from "../../../shared/dictation/index.js";
 import type { ComposerDictation } from "../lib/dictation.js";
 import { Composer } from "./Composer.js";
@@ -308,10 +334,14 @@ describe("Composer dictation", () => {
     const mic = screen.getByTestId("assistant-mic");
     expect(mic.tagName).toBe("A");
     expect(mic).toHaveAttribute("aria-label", "Set up voice dictation");
-    expect(mic).toHaveAttribute("href", "/settings/profile/ai-assistant#voice-dictation");
+    expect(mic).toHaveAttribute("data-router-link");
+    expect(mic).toHaveAttribute("data-to", "/settings/profile/ai-assistant");
+    expect(mic).toHaveAttribute("data-hash", "voice-dictation");
     expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Voice dictation isn't set up.");
     const setup = screen.getByRole("link", { name: "Configure it" });
-    expect(setup).toHaveAttribute("href", "/settings/profile/ai-assistant#voice-dictation");
+    expect(setup).toHaveAttribute("data-router-link");
+    expect(setup).toHaveAttribute("data-to", "/settings/profile/ai-assistant");
+    expect(setup).toHaveAttribute("data-hash", "voice-dictation");
   });
 
   it("keeps a keyless microphone shut while the composer locks", () => {

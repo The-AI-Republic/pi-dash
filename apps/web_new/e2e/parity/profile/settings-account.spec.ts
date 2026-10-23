@@ -191,16 +191,23 @@ test(
         await driver.settingsProfileGeneralFillField("last_name", original.last);
         await driver.settingsProfileGeneralFillField("display_name", original.display);
         await driver.settingsProfileGeneralSave();
+        // Gate on the write landing first: both saves toast identically, so
+        // a toast poll here can match the previous save's still-visible card
+        // while this write is in flight (read pre-write state twice under
+        // load). The feedback assertion after still pins the success toast.
+        await expect
+          .poll(() => serverSettingsUserRecord(member.session), { timeout: 30_000 })
+          .toMatchObject({
+            firstName: original.first,
+            lastName: original.last,
+            displayName: original.display,
+          });
         await expect
           .poll(() => driver.rulesLastToast(), { timeout: 30_000 })
           .toMatchObject({
             title: "Success!",
             message: "Profile updated successfully.",
           });
-        const record = await serverSettingsUserRecord(member.session);
-        expect(record.firstName).toBe(original.first);
-        expect(record.lastName).toBe(original.last);
-        expect(record.displayName).toBe(original.display);
       });
     } finally {
       await cleanupMember(seed, ownerSession, member.userId);
@@ -222,8 +229,14 @@ test(
       // carries no required star yet reports a missing name.
       await driver.settingsProfileGeneralFillField("last_name", "");
       await driver.settingsProfileGeneralSave();
-      expect(await driver.settingsProfileGeneralFieldError("last_name")).toBe("Name is required");
-      expect((await serverSettingsUserRecord(member.session)).lastName).toBe("Member");
+      if (driver.target === "web_new") {
+        // Target for NEWFRONT-432 (PROF-011): an emptied last name saves.
+        expect(await driver.settingsProfileGeneralFieldError("last_name")).toBeNull();
+        expect((await serverSettingsUserRecord(member.session)).lastName).toBe("");
+      } else {
+        expect(await driver.settingsProfileGeneralFieldError("last_name")).toBe("Name is required");
+        expect((await serverSettingsUserRecord(member.session)).lastName).toBe("Member");
+      }
     } finally {
       await cleanupMember(seed, ownerSession, member.userId);
     }
@@ -297,9 +310,15 @@ test(
       });
 
       await test.step("the cover control is still present (main#523/#574 pending)", async () => {
-        // Gap: the row targets no cover control, but the removal PRs are
-        // unmerged, so the control still renders. Rework this step then.
-        expect(await driver.settingsProfileCoverControlVisible()).toBe(true);
+        if (driver.target === "web_new") {
+          // Target per main#565 (PROF-012): web_new ships no cover
+          // control anywhere on the tab.
+          expect(await driver.settingsProfileCoverControlVisible()).toBe(false);
+        } else {
+          // Gap: the row targets no cover control, but the removal PRs are
+          // unmerged, so the control still renders. Rework this step then.
+          expect(await driver.settingsProfileCoverControlVisible()).toBe(true);
+        }
       });
     } finally {
       await cleanupMember(seed, ownerSession, member.userId);

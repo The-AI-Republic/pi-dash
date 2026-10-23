@@ -167,7 +167,13 @@ function ProfileIdentity({
             {profileInitial(identity)}
           </span>
         ) : (
-          <Avatar name={profileFullName(identity)} src={avatarSrc} size="large" className="text-h3 size-16" />
+          // The photo branch exposes its resolved src as an attribute so
+          // readers never depend on the bytes loading (the static asset
+          // endpoint redirects to object storage, which not every
+          // topology serves back to the browser).
+          <span data-profile-avatar="image" data-profile-avatar-src={avatarSrc} className="contents">
+            <Avatar name={profileFullName(identity)} src={avatarSrc} size="large" className="text-h3 size-16" />
+          </span>
         )}
         <div className="flex flex-col items-center gap-(--space-1) text-center">
           <p data-profile-name="full" className="text-body font-semibold text-(--text)">

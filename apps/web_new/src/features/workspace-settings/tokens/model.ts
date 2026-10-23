@@ -133,18 +133,27 @@ export function resolveExpiry(draft: TokenDraft, now: Date = new Date()): string
   }
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
-
-function clock(date: Date): string {
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-/** `Expires Jun 15, 2030 at 12:00` — the wording rows and the reveal use. */
-export function expiryLine(expiredAt: string | null | undefined): string {
+/**
+ * `Expires Jun 15, 2030 at 12:00` — the wording rows, the reveal and the
+ * preview use. Rendered in the member's timezone (UTC until the member
+ * picks one), never the browser's: the stored instant is absolute, but
+ * the day and clock the member reads follow their own zone.
+ */
+export function expiryLine(expiredAt: string | null | undefined, timeZone = "UTC"): string {
   if (expiredAt === null || expiredAt === undefined) return "Never expires";
   const date = new Date(expiredAt);
   if (Number.isNaN(date.getTime())) return "Never expires";
-  return `Expires ${MONTHS[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()} at ${clock(date)}`;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const pick = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "";
+  return `Expires ${pick("month")} ${pick("day")}, ${pick("year")} at ${pick("hour")}:${pick("minute")}`;
 }
 
 function pluralize(count: number, unit: string): string {
@@ -170,11 +179,12 @@ export function expiredAgoLine(expiredAt: string, now: Date = new Date()): strin
 /** The row's human expiry line: future, never, or relative past wording. */
 export function rowExpiryLine(
   token: Pick<PersonalApiToken, "is_active" | "expired_at">,
-  now: Date = new Date()
+  now: Date = new Date(),
+  timeZone = "UTC"
 ): string {
   if (token.expired_at === null) return "Never expires";
   if (!token.is_active) return expiredAgoLine(token.expired_at, now);
-  return expiryLine(token.expired_at);
+  return expiryLine(token.expired_at, timeZone);
 }
 
 /** True when the server marked the row inactive (expired). */
@@ -183,8 +193,8 @@ export function isExpiredToken(token: Pick<PersonalApiToken, "is_active">): bool
 }
 
 /** The reveal's expiry line, for the freshly-created token's persisted value. */
-export function revealExpiryLine(expiredAt: string | null): string {
-  return expiryLine(expiredAt);
+export function revealExpiryLine(expiredAt: string | null, timeZone = "UTC"): string {
+  return expiryLine(expiredAt, timeZone);
 }
 
 /** Empty descriptions do not render as a row paragraph. */

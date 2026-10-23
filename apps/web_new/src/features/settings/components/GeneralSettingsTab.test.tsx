@@ -108,6 +108,8 @@ describe("GeneralSettingsTab", () => {
       "src",
       "https://api.test/api/assets/v2/static/abc/"
     );
+    expect(screen.getByTestId("general-identity-name")).toHaveTextContent("Ada Lovelace");
+    expect(screen.getByTestId("general-identity-email")).toHaveTextContent("ada@example.com");
   });
 
   it("shows per-field inline errors and blocks the save", async () => {

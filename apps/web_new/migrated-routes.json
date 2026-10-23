@@ -16,6 +16,8 @@
     "/docs",
     "/downloads",
     "/pricing",
-    "/god-mode"
+    "/god-mode",
+    "/settings/profile",
+    "/profile"
   ]
 }

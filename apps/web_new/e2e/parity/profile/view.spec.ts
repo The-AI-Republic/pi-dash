@@ -654,7 +654,8 @@ test(
         // Target per main#573 (PROF-008): the pencil navigates to the
         // settings general tab instead of opening a dialog.
         await expect.poll(() => driver.layoutsCurrentUrl(), { timeout: 30_000 }).toContain("/settings/profile/general");
-        expect(await driver.profileSettingsActiveTab()).toBe("Profile");
+        // The shell paints after the navigation lands; poll like the shell spec does.
+        await expect.poll(() => driver.profileSettingsActiveTab(), { timeout: 30_000 }).toBe("Profile");
       } else {
         // Current behavior: the pencil opens the settings dialog on its
         // general tab (navigation to /settings/profile/general is the

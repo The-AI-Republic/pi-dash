@@ -219,13 +219,25 @@ test(
     try {
       await test.step("the failed pick reports and rolls back without reloading", async () => {
         await driver.settingsProfileSetTheme("dark");
-        await expect.poll(() => driver.toastText(), { timeout: 15_000 }).toMatch(/failed to update theme/i);
+        if (driver.target === "web_new") {
+          // Target per NEWFRONT-434 (PROF-016): the new app reports with
+          // its own copy and rolls the failed pick back completely.
+          await expect.poll(() => driver.toastText(), { timeout: 15_000 }).toMatch(/couldn't update the theme/i);
+        } else {
+          await expect.poll(() => driver.toastText(), { timeout: 15_000 }).toMatch(/failed to update theme/i);
+        }
         // The store rolled back: the switcher shows light again and the
         // server never saw dark...
         expect(await driver.settingsProfileThemeValue()).toBe("light");
         expect((await serverProfileTheme(session)).theme).toBe("light");
-        // ...while the document still shows the theme that never saved.
-        expect(await driver.settingsProfileAppliedTheme()).toBe("dark");
+        if (driver.target === "web_new") {
+          // ...and the document rolled back with it (the full-rollback
+          // target; the oracle leg below pins the observed split).
+          expect(await driver.settingsProfileAppliedTheme()).toBe("light");
+        } else {
+          // ...while the document still shows the theme that never saved.
+          expect(await driver.settingsProfileAppliedTheme()).toBe("dark");
+        }
       });
     } finally {
       await driver.settingsProfileClearProfileSaveFailure();

@@ -27,6 +27,8 @@ interface StubLocator {
   nth?: (index: number) => StubLocator;
   getByRole?: (role: string, options?: unknown) => StubLocator;
   getByTestId?: (id: string) => StubLocator;
+  getByText?: (text: string, options?: unknown) => StubLocator;
+  or?: (other: StubLocator) => StubLocator;
   locator?: (selector: string) => StubLocator;
   filter?: (options?: unknown) => StubLocator;
   [key: string]: unknown;
@@ -50,6 +52,8 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
     nth: () => node,
     getByRole: () => node,
     getByTestId: () => node,
+    getByText: () => node,
+    or: () => node,
     locator: () => node,
     filter: () => node,
   };
@@ -63,9 +67,12 @@ function pageOf(overrides: Partial<Record<string, unknown>> = {}): Page {
   return {
     getByTestId: () => locator(),
     getByRole: () => locator(),
+    getByText: () => locator(),
     locator: () => locator(),
     keyboard: { press: async () => undefined },
     waitForTimeout: async () => undefined,
+    on: () => undefined,
+    removeListener: () => undefined,
     viewportSize: () => ({ width: 1280, height: 720 }),
     ...overrides,
   } as unknown as Page;
@@ -217,31 +224,61 @@ describe("profileOverviewCards", () => {
 });
 
 describe("profileActivityStallExport / release", () => {
-  it("installs one route, holds the export request, then releases it", async () => {
-    const held: Route = { continue: vi.fn(async () => undefined) } as unknown as Route;
+  function stalledDriver(): {
+    driver: WebNewDriver;
+    installed: () => ((route: Route) => Promise<void>) | null;
+    route: ReturnType<typeof vi.fn>;
+  } {
     let installed: ((route: Route) => Promise<void>) | null = null;
     const route = vi.fn(async (_pattern: string, handler: (route: Route) => Promise<void>) => {
       installed = handler;
     });
-    const unroute = vi.fn(async () => undefined);
-    // The stall uses `expect.poll`; give it a passing target by resolving now.
-    const page = pageOf({ route, unroute });
-    const driver = new WebNewDriver(page);
+    const driver = new WebNewDriver(pageOf({ route }));
+    return { driver, installed: () => installed, route };
+  }
+
+  function exportRoute(method: string, fallback: () => Promise<void>): Route {
+    return { request: () => ({ method: () => method }), fallback } as unknown as Route;
+  }
+
+  it("installs one route, holds stalled POSTs on a gate, then releases them", async () => {
+    const { driver, installed, route } = stalledDriver();
     await driver.profileActivityStallExport();
     await driver.profileActivityStallExport();
     expect(route).toHaveBeenCalledTimes(1);
     expect(route.mock.calls[0][0]).toBe("**/api/workspaces/*/user-activity/*/export/**");
-    await installed!(held);
+
+    const fallback = vi.fn(async () => undefined);
+    let held = false;
+    const pending = installed()!(exportRoute("POST", fallback)).then(() => {
+      held = true;
+    });
+    await Promise.resolve();
+    expect(held).toBe(false);
+    expect(fallback).not.toHaveBeenCalled();
     await driver.profileActivityReleaseExport();
-    expect(unroute).toHaveBeenCalledWith("**/api/workspaces/*/user-activity/*/export/**", expect.anything());
-    expect(held.continue).toHaveBeenCalled();
+    await pending;
+    expect(held).toBe(true);
+    expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets non-POST requests and post-release POSTs fall through", async () => {
+    const { driver, installed } = stalledDriver();
+    await driver.profileActivityStallExport();
+    const getFallback = vi.fn(async () => undefined);
+    await installed()!(exportRoute("GET", getFallback));
+    expect(getFallback).toHaveBeenCalledTimes(1);
+    await driver.profileActivityReleaseExport();
+    const postFallback = vi.fn(async () => undefined);
+    await installed()!(exportRoute("POST", postFallback));
+    expect(postFallback).toHaveBeenCalledTimes(1);
   });
 
   it("releases nothing when no stall was installed", async () => {
-    const unroute = vi.fn(async () => undefined);
-    const driver = new WebNewDriver(pageOf({ unroute }));
+    const route = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route }));
     await driver.profileActivityReleaseExport();
-    expect(unroute).not.toHaveBeenCalled();
+    expect(route).not.toHaveBeenCalled();
   });
 });
 
@@ -513,5 +550,1905 @@ describe("shared layout methods on the profile tab", () => {
     const page = pageOf({ url: () => "https://app.test/acme/profile/u-1/" });
     const driver = new WebNewDriver(page);
     expect(await driver.layoutsCurrentUrl()).toBe("https://app.test/acme/profile/u-1/");
+  });
+});
+
+describe("profileSidebarAvatar", () => {
+  function sidebarPage(initial: StubLocator | null, photo: StubLocator | null): Page {
+    const sidebar = locator({
+      locator: (selector: string) => {
+        if (selector === '[data-profile-avatar="initial"]' && initial !== null) return initial;
+        if (selector === '[data-profile-avatar="image"]' && photo !== null) return photo;
+        return locator({ count: async () => 0 });
+      },
+    });
+    return pageOf({ getByTestId: () => sidebar });
+  }
+
+  it("reads the initial fallback", async () => {
+    const page = sidebarPage(locator({ innerText: async () => " O " }), null);
+    const driver = new WebNewDriver(page);
+    expect(await driver.profileSidebarAvatar()).toEqual({ kind: "initial", initial: "O" });
+  });
+
+  it("reads the photo src attribute without depending on the load", async () => {
+    const page = sidebarPage(null, locator({ getAttribute: async () => "https://api.test/api/assets/v2/static/a-1/" }));
+    const driver = new WebNewDriver(page);
+    expect(await driver.profileSidebarAvatar()).toEqual({
+      kind: "image",
+      src: "https://api.test/api/assets/v2/static/a-1/",
+    });
+  });
+
+  it("refuses a sidebar with neither marker", async () => {
+    const driver = new WebNewDriver(sidebarPage(null, null));
+    await expect(driver.profileSidebarAvatar()).rejects.toThrow("neither an avatar image nor an initial");
+  });
+});
+
+describe("settings shell reads (NEWFRONT-586, PROF-009/010/026)", () => {
+  function settingsPage(overrides: Partial<Record<string, unknown>> = {}): {
+    page: Page;
+    goto: ReturnType<typeof vi.fn>;
+    addCookies: ReturnType<typeof vi.fn>;
+  } {
+    const goto = vi.fn(async () => undefined);
+    const addCookies = vi.fn(async () => undefined);
+    const page = pageOf({
+      context: () => ({ addCookies }),
+      goto,
+      waitForLoadState: async () => undefined,
+      waitForFunction: async () => undefined,
+      url: () => "https://app.test/settings/profile/general",
+      ...overrides,
+    });
+    return { page, goto, addCookies };
+  }
+
+  function sidebarShell(selectors: Record<string, StubLocator>): (id: string) => Locator {
+    return (id: string) => {
+      if (id === "profile-settings-sidebar" || id === "profile-settings-shell") {
+        return locator({
+          count: async () => 1,
+          isVisible: async () => true,
+          locator: (selector: string) => selectors[selector] ?? locator({ count: async () => 0 }),
+          getByRole: (_role: string, options?: unknown) =>
+            (selectors[`role:${JSON.stringify(options)}`] as Locator | undefined) ?? locator({ count: async () => 0 }),
+          getByText: (_text: string) =>
+            (selectors["title"] as Locator | undefined) ?? locator({ count: async () => 0 }),
+          allInnerTexts: async () => selectors["headings"]?.allInnerTexts?.() ?? [],
+        });
+      }
+      return locator({ count: async () => 0 });
+    };
+  }
+
+  it("opens a tab address with cookies and settles on the shell", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const reload = vi.fn(async () => undefined);
+    const { page, goto, addCookies } = settingsPage({
+      getByTestId: () => locator({ waitFor }),
+      reload,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpen("security", [{ name: "s", value: "v", domain: "app.test", path: "/" }]);
+    expect(addCookies).toHaveBeenCalledTimes(1);
+    expect(goto).toHaveBeenCalledWith("/settings/profile/security", { waitUntil: "domcontentloaded" });
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 60_000 });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("reloads once when the shell misses its first paint, then settles", async () => {
+    const waitFor = vi.fn().mockRejectedValueOnce(new Error("Timeout 60000ms exceeded")).mockResolvedValue(undefined);
+    const reload = vi.fn(async () => undefined);
+    const { page } = settingsPage({ getByTestId: () => locator({ waitFor }), reload });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpen("security", []);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledTimes(2);
+    expect(waitFor).toHaveBeenNthCalledWith(1, { state: "visible", timeout: 60_000 });
+    expect(waitFor).toHaveBeenNthCalledWith(2, { state: "visible", timeout: 60_000 });
+  });
+
+  it("throws when the shell still misses after the reload", async () => {
+    const waitFor = vi.fn(async () => {
+      throw new Error("Timeout 60000ms exceeded");
+    });
+    const reload = vi.fn(async () => undefined);
+    const { page } = settingsPage({ getByTestId: () => locator({ waitFor }), reload });
+    const driver = new WebNewDriver(page);
+    await expect(driver.settingsProfileOpen("security", [])).rejects.toThrow("Timeout 60000ms exceeded");
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens tab shortcuts and query variants at their addresses", async () => {
+    const { page, goto } = settingsPage();
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpenTab("integrations", []);
+    await driver.settingsProfileOpenTabWithQuery("ai-assistant", "keep=1", []);
+    expect(goto).toHaveBeenNthCalledWith(1, "/settings/profile/integrations", { waitUntil: "domcontentloaded" });
+    expect(goto).toHaveBeenNthCalledWith(2, "/settings/profile/ai-assistant?keep=1", { waitUntil: "domcontentloaded" });
+  });
+
+  it("returns only after the tab mount reads resolve, then detaches the counter", async () => {
+    const handlers: Record<string, (...args: never[]) => void> = {};
+    const removeListener = vi.fn();
+    let releaseFallback!: () => void;
+    const fallback = new Promise<void>((resolve) => {
+      releaseFallback = resolve;
+    });
+    const { page } = settingsPage({
+      on: (event: string, handler: (...args: never[]) => void) => {
+        handlers[event] = handler;
+      },
+      removeListener,
+      waitForTimeout: () => fallback,
+    });
+    const driver = new WebNewDriver(page);
+    const opened = driver.settingsProfileOpenTab("ai-assistant", []);
+    await Promise.resolve();
+    const respond = handlers["response"];
+    expect(respond).toBeDefined();
+    const get = (url: string) => ({ url: () => url, request: () => ({ method: () => "GET" }) }) as never;
+    // Non-matching traffic never advances the counter.
+    respond!(get("https://app.test/api/users/me/") as never);
+    respond!({
+      url: () => "https://app.test/api/users/me/ai-assistant/config/",
+      request: () => ({ method: () => "PUT" }),
+    } as never);
+    respond!(get("https://app.test/api/users/me/ai-assistant/config/") as never);
+    respond!(get("https://app.test/api/users/me/ai-assistant/stt-config/") as never);
+    respond!(get("https://app.test/api/users/me/ai-assistant/mcp-servers/") as never);
+    // The third mount read releases OpenTab without the fallback.
+    await opened;
+    expect(removeListener).toHaveBeenCalledWith("response", respond);
+    releaseFallback();
+  });
+
+  it("releases through the fallback when mount reads never arrive", async () => {
+    const removeListener = vi.fn();
+    const { page } = settingsPage({ removeListener, waitForTimeout: async () => undefined });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpenTab("auto-project-management", []);
+    expect(removeListener).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the shell, loader, path and query", async () => {
+    const { page } = settingsPage({
+      url: () => "https://app.test/settings/profile/general?keep=1",
+      getByTestId: sidebarShell({}),
+      locator: () => locator({ count: async () => 2 }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileShellVisible()).toBe(true);
+    expect(await driver.settingsProfileLoaderOnly()).toBe(false);
+    expect(await driver.settingsProfileCurrentPath()).toBe("/settings/profile/general");
+    expect(await driver.settingsProfileCurrentQuery()).toBe("keep=1");
+  });
+
+  it("reports loader-only only when the shell is gone and a pulse shows", async () => {
+    const noShell = () => locator({ count: async () => 0 });
+    const noPulse = () => locator({ count: async () => 0 });
+    const pulsed = new WebNewDriver(settingsPage({ getByTestId: noShell, locator: noPulse }).page);
+    expect(await pulsed.settingsProfileLoaderOnly()).toBe(false);
+    const withPulse = new WebNewDriver(
+      settingsPage({ getByTestId: noShell, locator: () => locator({ count: async () => 1 }) }).page
+    );
+    expect(await withPulse.settingsProfileLoaderOnly()).toBe(true);
+  });
+
+  it("reads group labels, group tabs and shortcuts from their sections", async () => {
+    const section = (heading: string, links: string[]): StubLocator => ({
+      locator: (selector: string) =>
+        selector === "h2"
+          ? locator({ textContent: async () => heading })
+          : locator({ allInnerTexts: async () => links }),
+    });
+    const sections = [
+      section("Your Profile", ["Profile", "Security"]),
+      section("Workspace", ["Acme", "Create workspace"]),
+    ];
+    const sidebar = locator({
+      locator: (selector: string) =>
+        selector === "h2"
+          ? locator({ allTextContents: async () => ["Your Profile", "Workspace"] })
+          : locator({ count: async () => sections.length, nth: (index: number) => sections[index]! }),
+    });
+    const driver = new WebNewDriver(settingsPage({ getByTestId: () => sidebar }).page);
+    expect(await driver.settingsProfileGroupLabels()).toEqual(["Your Profile", "Workspace"]);
+    expect(await driver.settingsProfileGroupTabs("Your Profile")).toEqual(["Profile", "Security"]);
+    expect(await driver.settingsProfileGroupTabs("Missing")).toEqual([]);
+    expect(await driver.settingsProfileWorkspaceShortcuts()).toEqual(["Acme", "Create workspace"]);
+  });
+
+  it("reads the back label and sidebar title with absent twins", async () => {
+    const present = new WebNewDriver(
+      settingsPage({
+        getByTestId: sidebarShell({
+          'role:{"name":"Back to home"}': locator({ getAttribute: async () => "Back to home" }),
+          title: locator({ innerText: async () => "Profile settings" }),
+        }),
+      }).page
+    );
+    expect(await present.settingsProfileBackLabel()).toBe("Back to home");
+    expect(await present.settingsProfileSidebarTitle()).toBe("Profile settings");
+    const absent = new WebNewDriver(settingsPage({ getByTestId: sidebarShell({}) }).page);
+    expect(await absent.settingsProfileBackLabel()).toBeNull();
+    expect(await absent.settingsProfileSidebarTitle()).toBeNull();
+  });
+
+  it("switches tabs by link and reports the landed address", async () => {
+    const click = vi.fn(async () => undefined);
+    const link = locator({ click });
+    const sidebar = locator({ getByRole: () => link });
+    const { page, goto } = settingsPage({
+      getByTestId: () => sidebar,
+      url: () => "https://app.test/settings/profile/security/?keep=2",
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSelectTab("Security");
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(await driver.settingsProfileOpenPath("/settings?keep=2", [])).toBe("/settings/profile/security/?keep=2");
+    expect(goto).toHaveBeenCalledWith("/settings?keep=2", { waitUntil: "domcontentloaded" });
+  });
+
+  it("refuses a tab switch that never navigates", async () => {
+    const { page } = settingsPage({
+      waitForFunction: async () => {
+        throw new Error("nope");
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.settingsProfileSelectTab("Security")).rejects.toThrow("never navigated");
+  });
+
+  it("reports dialogs from the page evaluate", async () => {
+    const open = new WebNewDriver(settingsPage({ evaluate: async () => true }).page);
+    expect(await open.settingsProfileDialogOpen()).toBe(true);
+    const shut = new WebNewDriver(settingsPage({ evaluate: async () => false }).page);
+    expect(await shut.settingsProfileDialogOpen()).toBe(false);
+  });
+
+  it("opens home, member profiles, preferences and activity at their markers", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const waitForResponse = vi.fn(async () => null);
+    const { page, goto } = settingsPage({
+      getByTestId: () => locator({ waitFor }),
+      getByRole: () => locator({ first: () => locator({ waitFor }) }),
+      locator: () => locator({ first: () => locator({ waitFor }) }),
+      waitForResponse,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpenHome("acme");
+    await driver.settingsProfileOpenMemberProfile("acme", "u-1");
+    await driver.settingsProfileOpenPreferences();
+    await driver.settingsProfileOpenActivity();
+    expect(goto).toHaveBeenNthCalledWith(1, "/acme", { timeout: 60_000 });
+    expect(goto).toHaveBeenNthCalledWith(2, "/acme/profile/u-1", { timeout: 60_000 });
+    expect(goto).toHaveBeenNthCalledWith(3, "/settings/profile/preferences", { timeout: 60_000 });
+    expect(goto).toHaveBeenNthCalledWith(4, "/settings/profile/activity", { timeout: 60_000 });
+    expect(waitForResponse).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalled();
+  });
+});
+
+describe("settings account reads (NEWFRONT-586, PROF-011..015)", () => {
+  function formPage(ids: Record<string, StubLocator>): Page {
+    const form = locator({
+      locator: (selector: string) => ids[selector] ?? locator({ count: async () => 0 }),
+      getByRole: () => locator(),
+      getByTestId: (id: string) => ids[`testid:${id}`] ?? locator(),
+      getByText: (_text: string) => ids["text"] ?? locator({ count: async () => 0 }),
+    });
+    return pageOf({ getByTestId: () => form });
+  }
+
+  it("reads general field errors with absent twins", async () => {
+    const page = formPage({ "#first_name-error": locator({ innerText: async () => "Please enter first name" }) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileGeneralFieldError("first_name")).toBe("Please enter first name");
+    expect(await driver.settingsProfileGeneralFieldError("last_name")).toBeNull();
+  });
+
+  it("reads the identity header name and email hooks", async () => {
+    const header = locator({
+      getByTestId: (id: string) =>
+        locator({ innerText: async () => (id === "general-identity-name" ? "Opal Whelan" : "opal@example.com") }),
+    });
+    const page = pageOf({ getByTestId: () => header });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileGeneralIdentity()).toEqual({ name: "Opal Whelan", email: "opal@example.com" });
+  });
+
+  it("normalizes the save label", async () => {
+    const page = formPage({});
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileGeneralSaveLabel()).toBe("");
+  });
+
+  it("reads avatar rejections with absent twins and reports no cover control", async () => {
+    const dialog = locator({
+      locator: (selector: string) =>
+        selector === "[role='alert']"
+          ? locator({ innerText: async () => "Too big." })
+          : locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(pageOf({ getByRole: () => dialog, getByTestId: () => dialog }));
+    expect(await driver.settingsProfileAvatarRejection()).toBe("Too big.");
+    const bare = new WebNewDriver(pageOf({ getByRole: () => locator({ count: async () => 0 }) }));
+    expect(await bare.settingsProfileAvatarRejection()).toBeNull();
+    expect(await driver.settingsProfileCoverControlVisible()).toBe(false);
+  });
+
+  it("detects email modal steps", async () => {
+    const closed = new WebNewDriver(pageOf({ getByRole: () => locator({ count: async () => 0 }) }));
+    expect(await closed.settingsProfileEmailModalStep()).toBe("closed");
+    const emailOnly = locator({ getByLabel: () => locator({ count: async () => 0 }) });
+    expect(await new WebNewDriver(pageOf({ getByRole: () => emailOnly })).settingsProfileEmailModalStep()).toBe(
+      "email"
+    );
+    const code = locator({ getByLabel: () => locator({ count: async () => 1 }) });
+    expect(await new WebNewDriver(pageOf({ getByRole: () => code })).settingsProfileEmailModalStep()).toBe("code");
+  });
+
+  it("reads email modal errors and helpers with absent twins", async () => {
+    const dialog = locator({
+      locator: (selector: string) =>
+        selector === "#change-email-code-error"
+          ? locator({ innerText: async () => "Invalid verification code" })
+          : locator({ count: async () => 0 }),
+      getByText: () => locator({ innerText: async () => "Verification code sent to your new email." }),
+    });
+    const driver = new WebNewDriver(pageOf({ getByRole: () => dialog }));
+    expect(await driver.settingsProfileEmailModalError("code")).toBe("Invalid verification code");
+    expect(await driver.settingsProfileEmailModalError("email")).toBeNull();
+    expect(await driver.settingsProfileEmailModalHelper()).toBe("Verification code sent to your new email.");
+    const bareDialog = locator({ count: async () => 0, getByText: () => locator({ count: async () => 0 }) });
+    const bare = new WebNewDriver(pageOf({ getByRole: () => bareDialog }));
+    expect(await bare.settingsProfileEmailModalHelper()).toBeNull();
+  });
+
+  it("reads deactivate titles, descriptions and working flags", async () => {
+    const dialog = locator({ getByText: () => locator({ innerText: async () => "Deactivate your account" }) });
+    const sections = locator({ filter: () => dialog });
+    const driver = new WebNewDriver(pageOf({ getByRole: () => dialog, locator: () => sections }));
+    expect(await driver.settingsProfileDeactivateTitle()).toBe("Deactivate your account");
+    const absent = locator({ count: async () => 0, filter: () => locator({ count: async () => 0 }) });
+    const bare = new WebNewDriver(pageOf({ getByRole: () => absent, locator: () => absent }));
+    expect(await bare.settingsProfileDeactivateTitle()).toBeNull();
+    expect(await bare.settingsProfileDeactivateDescription()).toBeNull();
+    expect(await bare.settingsProfileDeactivateWorking()).toBe(false);
+  });
+
+  it("maps security fields to their input ids and reveal hooks", async () => {
+    const seen: string[] = [];
+    const form = locator({
+      locator: (selector: string) => {
+        seen.push(selector);
+        return locator({
+          fill: async () => undefined,
+          inputValue: async () => "v",
+          getAttribute: async () => "password",
+        });
+      },
+      getByTestId: (id: string) => {
+        seen.push(`testid:${id}`);
+        return locator();
+      },
+    });
+    const driver = new WebNewDriver(pageOf({ getByTestId: () => form }));
+    await driver.settingsProfileSecurityFill("current", "x");
+    await driver.settingsProfileSecurityToggleReveal("new");
+    await driver.settingsProfileSecurityToggleReveal("confirm");
+    expect(await driver.settingsProfileSecurityFieldType("new")).toBe("password");
+    expect(await driver.settingsProfileSecurityFieldValue("confirm")).toBe("v");
+    expect(seen).toContain("#old_password");
+    expect(seen).toContain("#new_password");
+    expect(seen).toContain("#confirm_password");
+    expect(seen).toContain("testid:password-reveal-next");
+    expect(seen).toContain("testid:password-reveal-confirm");
+    expect(await driver.settingsProfileSecurityFieldError("new")).toBeNull();
+  });
+
+  it("fails profile saves through a route and clears it", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route, unroute }));
+    await driver.settingsProfileFailProfileSaves(500);
+    expect(route).toHaveBeenCalledWith("**/api/users/me/profile/", expect.any(Function));
+    await driver.settingsProfileClearProfileSaveFailure();
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/profile/");
+  });
+});
+
+describe("settings preferences (NEWFRONT-586, PROF-016..018)", () => {
+  function responseOf(url: string, method: string): unknown {
+    return { request: () => ({ method: () => method }), url: () => url };
+  }
+
+  function preferencesPage(waitFor: ReturnType<typeof vi.fn>, reload = vi.fn(async () => undefined)): Page {
+    return pageOf({
+      goto: async () => undefined,
+      waitForLoadState: async () => undefined,
+      getByTestId: () => locator({ waitFor }),
+      reload,
+    });
+  }
+
+  it("opens preferences and settles on the tab without reloading when it paints", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const reload = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(preferencesPage(waitFor, reload));
+    await driver.settingsProfileOpenPreferences();
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 60_000 });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("reloads once when the preferences tab misses its first paint, then settles", async () => {
+    const waitFor = vi.fn().mockRejectedValueOnce(new Error("Timeout 60000ms exceeded")).mockResolvedValue(undefined);
+    const reload = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(preferencesPage(waitFor, reload));
+    await driver.settingsProfileOpenPreferences();
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws when preferences still miss after the reload", async () => {
+    const waitFor = vi.fn(async () => {
+      throw new Error("Timeout 60000ms exceeded");
+    });
+    const reload = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(preferencesPage(waitFor, reload));
+    await expect(driver.settingsProfileOpenPreferences()).rejects.toThrow("Timeout 60000ms exceeded");
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps the theme trigger label to its value and nulls unknowns", async () => {
+    const driver = new WebNewDriver(
+      pageOf({ getByRole: () => locator({ textContent: async () => "Dark high contrast" }) })
+    );
+    expect(await driver.settingsProfileThemeValue()).toBe("dark-contrast");
+    const unknown = new WebNewDriver(pageOf({ getByRole: () => locator({ textContent: async () => "Mystery" }) }));
+    expect(await unknown.settingsProfileThemeValue()).toBeNull();
+  });
+
+  it("picks a theme through the combobox and settles on the saved pick", async () => {
+    let current = "Light";
+    const fill = vi.fn(async () => undefined);
+    const seen: Array<Record<string, unknown>> = [];
+    const waitForResponse = vi.fn(async () => ({ ok: () => true }));
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        seen.push({ role, ...(options ?? {}) });
+        if (role === "combobox") return locator({ fill });
+        if (role === "option") {
+          return locator({
+            click: async () => {
+              current = "Dark";
+            },
+          });
+        }
+        return locator({ textContent: async () => current });
+      },
+      waitForResponse,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetTheme("dark");
+    expect(fill).toHaveBeenCalledWith("Dark");
+    expect(seen).toContainEqual({ role: "option", name: "Dark", exact: true });
+    expect(waitForResponse).toHaveBeenCalledTimes(1);
+    const matches = waitForResponse.mock.calls[0]![0] as (response: unknown) => boolean;
+    expect(matches(responseOf("https://app.test/api/users/me/profile/", "PATCH"))).toBe(true);
+    expect(matches(responseOf("https://app.test/api/users/me/profile/", "GET"))).toBe(false);
+    expect(await driver.settingsProfileThemeValue()).toBe("dark");
+  });
+
+  it("settles a rejected theme save back on the previous theme", async () => {
+    const page = pageOf({
+      getByRole: (role: string) => {
+        if (role === "combobox") return locator({ fill: async () => undefined });
+        if (role === "option") return locator({ click: async () => undefined });
+        return locator({ textContent: async () => "Light" });
+      },
+      waitForResponse: async () => ({ ok: () => false }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetTheme("dark");
+    expect(await driver.settingsProfileThemeValue()).toBe("light");
+  });
+
+  it("reads the applied theme and custom vars from the document", async () => {
+    const applied = new WebNewDriver(pageOf({ evaluate: async () => "dark" }));
+    expect(await applied.settingsProfileAppliedTheme()).toBe("dark");
+    const vars = new WebNewDriver(pageOf({ evaluate: async () => true }));
+    expect(await vars.settingsProfileCustomVarsApplied()).toBe(true);
+    const bare = new WebNewDriver(pageOf({ evaluate: async () => false }));
+    expect(await bare.settingsProfileCustomVarsApplied()).toBe(false);
+  });
+
+  it("reads designer visibility and values with absent twins", async () => {
+    const shown = new WebNewDriver(
+      pageOf({
+        locator: (selector: string) =>
+          locator({ inputValue: async () => (selector === 'input[name="primary"]' ? "#ff5151" : "#1a2b3c") }),
+        getByRole: () => locator({ isChecked: async () => true }),
+      })
+    );
+    expect(await shown.settingsProfileCustomDesignerVisible()).toBe(true);
+    expect(await shown.settingsProfileCustomDesignerValues()).toEqual({
+      primary: "#ff5151",
+      background: "#1a2b3c",
+      darkPalette: true,
+    });
+    const hidden = new WebNewDriver(pageOf({ locator: () => locator({ count: async () => 0 }) }));
+    expect(await hidden.settingsProfileCustomDesignerVisible()).toBe(false);
+  });
+
+  it("previews a typed color on its swatch", async () => {
+    const fill = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const page = pageOf({
+      locator: () => locator({ fill }),
+      getByLabel: (label: string) => locator({ waitFor, evaluate: async () => `swatch:${label}` }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfilePreviewCustomColor("primary", "#ff5151")).toBe("swatch:Primary preview");
+    expect(fill).toHaveBeenCalledWith("#ff5151");
+    expect(waitFor).toHaveBeenCalledWith({ state: "attached", timeout: 30_000 });
+    expect(await driver.settingsProfilePreviewCustomColor("background", "#1a2b3c")).toBe("swatch:Background preview");
+  });
+
+  it("sets the palette and saves the custom theme past the reload", async () => {
+    const click = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const waitForResponse = vi.fn(async () => ({ ok: () => true }));
+    const page = pageOf({
+      getByRole: () => locator({ click }),
+      getByTestId: () => locator({ waitFor }),
+      waitForResponse,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetCustomPalette(true);
+    expect(click).toHaveBeenCalledTimes(1);
+    await driver.settingsProfileSaveCustomTheme();
+    expect(waitForResponse).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenNthCalledWith(1, { state: "detached", timeout: 30_000 });
+    expect(waitFor).toHaveBeenNthCalledWith(2, { state: "visible", timeout: 60_000 });
+  });
+
+  it("reads the locale trigger labels", async () => {
+    const labels: Record<string, string> = {
+      Language: "English",
+      Timezone: "(UTC+14:00) Kiritimati",
+      "First day of the week": "Monday",
+    };
+    const page = pageOf({
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({ textContent: async () => labels[options?.["name"] as string] ?? "" }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileLocaleValues()).toEqual({
+      language: "English",
+      timezone: "(UTC+14:00) Kiritimati",
+      weekStart: "Monday",
+    });
+  });
+
+  it("picks a timezone by its catalog label and settles on it", async () => {
+    let current = "(UTC-11:00) Midway";
+    const fill = vi.fn(async () => undefined);
+    const seen: Array<Record<string, unknown>> = [];
+    const waitForResponse = vi.fn(async () => ({ ok: () => true }));
+    const page = pageOf({
+      evaluate: async () => [{ value: "Pacific/Kiritimati", label: "(UTC+14:00) Kiritimati" }],
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        seen.push({ role, ...(options ?? {}) });
+        if (role === "combobox") return locator({ fill });
+        if (role === "option") {
+          return locator({
+            click: async () => {
+              current = "(UTC+14:00) Kiritimati";
+            },
+          });
+        }
+        return locator({ textContent: async () => current });
+      },
+      waitForResponse,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetTimezone("Pacific/Kiritimati");
+    expect(fill).toHaveBeenCalledWith("Pacific/Kiritimati");
+    expect(seen).toContainEqual({ role: "option", name: "(UTC+14:00) Kiritimati", exact: true });
+    const matches = waitForResponse.mock.calls[0]![0] as (response: unknown) => boolean;
+    expect(matches(responseOf("https://app.test/api/users/me/", "PATCH"))).toBe(true);
+    expect(await driver.settingsProfileLocaleValues()).toMatchObject({ timezone: "(UTC+14:00) Kiritimati" });
+  });
+
+  it("picks a language and a week start through their comboboxes", async () => {
+    const triggers: Record<string, string> = { Language: "fr", "First day of the week": "Sunday" };
+    const fills: string[] = [];
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        if (role === "combobox") {
+          return locator({
+            fill: async (value: string) => {
+              fills.push(value);
+            },
+          });
+        }
+        if (role === "option") {
+          return locator({
+            click: async () => {
+              if (fills[fills.length - 1] === "English") triggers["Language"] = "English";
+              else triggers["First day of the week"] = fills[fills.length - 1]!;
+            },
+          });
+        }
+        return locator({ textContent: async () => triggers[options?.["name"] as string] ?? "" });
+      },
+      waitForResponse: async () => ({ ok: () => true }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetLanguage("English");
+    await driver.settingsProfileSetWeekStart("Wednesday");
+    expect(fills).toEqual(["English", "Wednesday"]);
+    expect(await driver.settingsProfileLocaleValues()).toEqual({
+      language: "English",
+      timezone: "",
+      weekStart: "Wednesday",
+    });
+  });
+
+  it("pads the greeting clock and reads the sidebar clock with absent twins", async () => {
+    const page = pageOf({
+      locator: (selector: string) =>
+        locator({
+          textContent: async () =>
+            selector === "#home-date-line" ? "Thursday, October 23 3:45 PM" : " 15:04 Pacific/Kiritimati ",
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileGreetingClockText()).toBe("03:45");
+    expect(await driver.settingsProfileSidebarClockText()).toBe("15:04 Pacific/Kiritimati");
+    const bare = new WebNewDriver(pageOf({ locator: () => locator({ textContent: async () => "" }) }));
+    expect(await bare.settingsProfileGreetingClockText()).toBeNull();
+    expect(await bare.settingsProfileSidebarClockText()).toBeNull();
+  });
+
+  it("reads the calendar header order and drops blanks", async () => {
+    const order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const seen: string[] = [];
+    const page = pageOf({
+      locator: (selector: string) => {
+        seen.push(selector);
+        return locator({
+          count: async () => order.length,
+          nth: (index: number) => locator({ textContent: async () => ` ${order[index]!} ` }),
+        });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileCalendarDayOrder()).toEqual(order);
+    expect(seen).toEqual(['[data-testid="issues-calendar"] .sticky > div > div']);
+  });
+
+  it("switches project layouts through data-layout and detects the calendar", async () => {
+    const click = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const seen: string[] = [];
+    const page = pageOf({
+      getByRole: () => locator({ count: async () => 0 }),
+      locator: (selector: string) => {
+        seen.push(selector);
+        return locator({
+          filter: () => locator({ first: () => locator({ click }) }),
+          first: () => locator({ waitFor }),
+        });
+      },
+      getByTestId: () => locator({ waitFor, isVisible: async () => true }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsSwitchTo("calendar");
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+    expect(await driver.layoutsCalendarVisible()).toBe(true);
+    await driver.layoutsSwitchTo("list");
+    // The list settle matches any labelled box: rows, empty and error
+    // twins use different elements.
+    expect(seen).toContain('[aria-label="Issue list"], [aria-label="Issues"]');
+    const bare = new WebNewDriver(pageOf({ getByTestId: () => locator({ count: async () => 0 }) }));
+    expect(await bare.layoutsCalendarVisible()).toBe(false);
+  });
+
+  it("keeps the profile-tab layout path when its trigger is present", async () => {
+    const clicks: string[] = [];
+    const page = pageOf({
+      getByRole: () => locator({ filter: () => locator({ first: () => locator({ click: async () => undefined }) }) }),
+      locator: (selector: string) =>
+        locator({
+          click: async () => {
+            clicks.push(selector);
+          },
+        }),
+      getByTestId: () => locator({ waitFor: async () => undefined }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsSwitchTo("kanban");
+    expect(clicks).toEqual(['[data-profile-layout-choice="kanban"]']);
+  });
+
+  it("opens the cycle page and settles on the shared list header", async () => {
+    const goto = vi.fn(async () => undefined);
+    const waitForTimeout = vi.fn(async () => undefined);
+    const page = pageOf({
+      goto,
+      waitForLoadState: async () => undefined,
+      waitForTimeout,
+      getByTestId: (id: string) => (id === "issues-header" ? locator() : locator({ count: async () => 0 })),
+      locator: () => locator({ count: async () => 0 }),
+      getByPlaceholder: () => locator({ count: async () => 0 }),
+      getByRole: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.openCyclePage("acme", "p-1", "c-1");
+    expect(goto).toHaveBeenCalledWith("/acme/projects/p-1/cycles/c-1", { timeout: 60_000 });
+    expect(waitForTimeout).not.toHaveBeenCalled();
+  });
+
+  it("settles the cycle page on the labelled list box when the header is hidden", async () => {
+    const page = pageOf({
+      goto: async () => undefined,
+      waitForLoadState: async () => undefined,
+      getByTestId: () => locator({ count: async () => 1, isVisible: async () => false }),
+      locator: (selector: string) =>
+        selector === '[aria-label="Issue list"], [aria-label="Issues"]' ? locator() : locator({ count: async () => 0 }),
+      getByPlaceholder: () => locator({ count: async () => 0 }),
+      getByRole: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.openCyclePage("acme", "p-1", "c-1")).resolves.toBeUndefined();
+  });
+
+  it("returns the cycle page unsettled on a bounce or denial instead of throwing", async () => {
+    const settled = (overrides: Partial<Record<string, unknown>>): Page =>
+      pageOf({
+        goto: async () => undefined,
+        waitForLoadState: async () => undefined,
+        getByTestId: () => locator({ count: async () => 0 }),
+        locator: () => locator({ count: async () => 0 }),
+        getByPlaceholder: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0 }),
+        ...overrides,
+      });
+    const bounced = new WebNewDriver(settled({ getByPlaceholder: () => locator() }));
+    await expect(bounced.openCyclePage("acme", "p-1", "c-1")).resolves.toBeUndefined();
+    const denied = new WebNewDriver(settled({ getByRole: () => locator() }));
+    await expect(denied.openCyclePage("acme", "p-1", "c-1")).resolves.toBeUndefined();
+  });
+
+  it("reloads the cycle page once mid-wait, then settles when the header mounts", async () => {
+    // Time advances a quarter-window per header check, so the loop is a
+    // fixed five iterations whatever else reads the clock (a once-queue
+    // would spin forever if a stray Date.now consumed it): two waits
+    // pre-window, one reload in-window, one post-reload wait, then settle.
+    let step = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => 1_000_000 + step * 15_000);
+    try {
+      const reload = vi.fn(async () => undefined);
+      const waitForTimeout = vi.fn(async () => undefined);
+      const page = pageOf({
+        goto: async () => undefined,
+        waitForLoadState: async () => undefined,
+        waitForTimeout,
+        reload,
+        getByTestId: () =>
+          locator({
+            count: async () => {
+              step += 1;
+              return step >= 5 ? 1 : 0;
+            },
+          }),
+        locator: () => locator({ count: async () => 1, isVisible: async () => false }),
+        getByPlaceholder: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0 }),
+      });
+      const driver = new WebNewDriver(page);
+      await driver.openCyclePage("acme", "p-1", "c-1");
+      expect(reload).toHaveBeenCalledTimes(1);
+      expect(waitForTimeout).toHaveBeenCalledTimes(3);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("gives up the cycle page wait at the deadline instead of throwing", async () => {
+    let step = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => 1_000_000 + step * 61_000);
+    try {
+      const reload = vi.fn(async () => undefined);
+      const page = pageOf({
+        goto: async () => undefined,
+        waitForLoadState: async () => undefined,
+        reload,
+        getByTestId: () =>
+          locator({
+            count: async () => {
+              step += 1;
+              return 0;
+            },
+          }),
+        locator: () => locator({ count: async () => 0 }),
+        getByPlaceholder: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0 }),
+      });
+      const driver = new WebNewDriver(page);
+      await expect(driver.openCyclePage("acme", "p-1", "c-1")).resolves.toBeUndefined();
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("reads the cycle member-timezone date pair from its labelled section", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const texts: Record<string, string | null> = {
+      "cycle-member-start-date": "Nov 19, 2026",
+      "cycle-member-end-date": "Nov 26, 2026",
+    };
+    const page = pageOf({
+      getByTestId: (id: string) =>
+        id === "cycle-member-dates" ? locator({ waitFor }) : locator({ textContent: async () => texts[id] ?? null }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileCycleUserTimezoneDates()).toEqual({
+      start: "Nov 19, 2026",
+      end: "Nov 26, 2026",
+    });
+    expect(waitFor).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("treats a missing or blank cycle date side as null", async () => {
+    const page = (sides: Record<string, { count: number; text: string | null }>): Page =>
+      pageOf({
+        getByTestId: (id: string) => {
+          const canned = sides[id] ?? { count: 0, text: null };
+          return locator({ count: async () => canned.count, textContent: async () => canned.text });
+        },
+      });
+    const missing = new WebNewDriver(page({ "cycle-member-end-date": { count: 1, text: null } }));
+    expect(await missing.settingsProfileCycleUserTimezoneDates()).toEqual({ start: null, end: null });
+    const blank = new WebNewDriver(page({ "cycle-member-start-date": { count: 1, text: "  " } }));
+    expect(await blank.settingsProfileCycleUserTimezoneDates()).toEqual({ start: null, end: null });
+  });
+});
+
+describe("settings own activity (NEWFRONT-586, PROF-019)", () => {
+  it("counts entries and detects the load-more control with absent twins", async () => {
+    const page = pageOf({
+      getByTestId: () => locator({ count: async () => 100 }),
+      getByRole: () => locator({ count: async () => 1, isVisible: async () => true }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileOwnActivityEntryCount()).toBe(100);
+    expect(await driver.settingsProfileOwnActivityLoadMoreVisible()).toBe(true);
+    const bare = new WebNewDriver(
+      pageOf({
+        getByTestId: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0 }),
+      })
+    );
+    expect(await bare.settingsProfileOwnActivityEntryCount()).toBe(0);
+    expect(await bare.settingsProfileOwnActivityLoadMoreVisible()).toBe(false);
+  });
+
+  it("loads more until the row count grows", async () => {
+    let rows = 100;
+    const click = vi.fn(async () => {
+      rows = 105;
+    });
+    const page = pageOf({
+      getByTestId: () => locator({ count: async () => rows }),
+      getByRole: () => locator({ click }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOwnActivityLoadMore();
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(await driver.settingsProfileOwnActivityEntryCount()).toBe(105);
+  });
+
+  it("reads the empty illustration art with absent twins", async () => {
+    const seen: string[] = [];
+    const page = pageOf({
+      locator: (selector: string) => {
+        seen.push(selector);
+        return locator({ getAttribute: async () => "/empty-state/activity/activity-dark.svg" });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileOwnActivityEmptyIllustration()).toBe("/empty-state/activity/activity-dark.svg");
+    expect(seen).toEqual(['section[aria-labelledby="own-activity-heading"] img']);
+    const bare = new WebNewDriver(pageOf({ locator: () => locator({ count: async () => 0 }) }));
+    expect(await bare.settingsProfileOwnActivityEmptyIllustration()).toBeNull();
+  });
+});
+
+describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
+  function sectionPage(section: StubLocator): Page {
+    return pageOf({ getByTestId: () => section });
+  }
+
+  it("reads the newest toast as title plus body with absent twins", async () => {
+    // Newest-first: the first card wins even with an older twin behind it.
+    const texts = [" Saved \n AI provider configuration updated. \n", " Save failed \n Invalid configuration \n"];
+    const cards = locator({
+      count: async () => texts.length,
+      nth: (index: number) => locator({ innerText: async () => texts[index] ?? "" }),
+    });
+    const driver = new WebNewDriver(pageOf({ getByTestId: () => cards }));
+    expect(await driver.settingsProfileLastToast()).toEqual({
+      title: "Saved",
+      message: "AI provider configuration updated.",
+    });
+    const bare = new WebNewDriver(pageOf({ getByTestId: () => locator({ count: async () => 0 }) }));
+    expect(await bare.settingsProfileLastToast()).toBeNull();
+    const blankFirst = locator({
+      count: async () => 2,
+      nth: (index: number) =>
+        locator({ innerText: async () => (index === 0 ? "  " : " Saved \n AI provider configuration updated. \n") }),
+    });
+    const skipped = new WebNewDriver(pageOf({ getByTestId: () => blankFirst }));
+    expect(await skipped.settingsProfileLastToast()).toEqual({
+      title: "Saved",
+      message: "AI provider configuration updated.",
+    });
+    const blank = new WebNewDriver(
+      pageOf({ getByTestId: () => locator({ nth: () => locator({ innerText: async () => "  " }) }) })
+    );
+    expect(await blank.settingsProfileLastToast()).toBeNull();
+  });
+
+  it("reads the assistant facts and drives its controls", async () => {
+    const clicks: string[] = [];
+    const fills: Array<[string, string]> = [];
+    const selected: string[] = [];
+    const section = locator({
+      locator: (selector: string) => {
+        if (selector === "#assistant-llm-base-url") return locator({ inputValue: async () => "http://dead:9" });
+        if (selector === "#assistant-llm-provider") {
+          return locator({
+            inputValue: async () => "openai_compatible",
+            selectOption: async (value: string) => {
+              selected.push(value);
+            },
+          });
+        }
+        if (selector === "#assistant-llm-model")
+          return locator({
+            inputValue: async () => "probe-model",
+            fill: async (value: string) => {
+              fills.push([selector, value]);
+            },
+          });
+        return locator({
+          inputValue: async () => "",
+          fill: async (value: string) => {
+            fills.push([selector, value]);
+          },
+          getAttribute: async () => "Your provider API key",
+        });
+      },
+      getByRole: (_role: string, options?: Record<string, unknown>) => {
+        const name = options?.["name"] as string;
+        return locator({
+          isDisabled: async () => name === "Save",
+          click: async () => {
+            clicks.push(name);
+          },
+        });
+      },
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(sectionPage(section));
+    expect(await driver.settingsProfileAssistantFacts()).toEqual({
+      provider: "openai_compatible",
+      baseUrlVisible: true,
+      baseUrl: "http://dead:9",
+      model: "probe-model",
+      keyValue: "",
+      keyPlaceholder: "Your provider API key",
+      saveDisabled: true,
+      testDisabled: false,
+      removeVisible: true,
+      lastVerified: null,
+    });
+    await driver.settingsProfileAssistantSetProvider("anthropic");
+    await driver.settingsProfileAssistantFill("model", "m");
+    await driver.settingsProfileAssistantSave();
+    await driver.settingsProfileAssistantTest();
+    await driver.settingsProfileAssistantRemove();
+    expect(selected).toEqual(["anthropic"]);
+    expect(fills).toEqual([["#assistant-llm-model", "m"]]);
+    expect(clicks).toEqual(["Save", "Test connection", "Remove"]);
+  });
+
+  it("blanks the base URL when the endpoint hides", async () => {
+    const section = locator({
+      locator: (selector: string) =>
+        selector === "#assistant-llm-base-url"
+          ? locator({ count: async () => 0 })
+          : locator({ inputValue: async () => "", getAttribute: async () => "" }),
+      getByRole: () => locator({ isDisabled: async () => false }),
+      getByText: () => locator({ innerText: async () => "Last verified: whenever" }),
+    });
+    const driver = new WebNewDriver(sectionPage(section));
+    expect(await driver.settingsProfileAssistantFacts()).toMatchObject({
+      baseUrlVisible: false,
+      baseUrl: "",
+      lastVerified: "Last verified: whenever",
+    });
+  });
+
+  it("fails assistant writes through routes and clears them", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route, unroute }));
+    await driver.settingsProfileAssistantFailWrites();
+    expect(route).toHaveBeenCalledWith("**/api/users/me/ai-assistant/**", expect.any(Function));
+    const handler = route.mock.calls[0]![1] as (route: unknown) => void;
+    const fulfilled: unknown[] = [];
+    const continued: number[] = [];
+    const put = {
+      request: () => ({ method: () => "PUT", url: () => "https://app.test/api/users/me/ai-assistant/config/" }),
+      fulfill: async (body: unknown) => {
+        fulfilled.push(body);
+      },
+      continue: async () => {
+        continued.push(1);
+      },
+    };
+    handler(put);
+    expect(fulfilled).toEqual([{ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' }]);
+    handler({
+      request: () => ({ method: () => "GET", url: () => "https://app.test/api/users/me/ai-assistant/config/" }),
+      fulfill: async () => undefined,
+      continue: async () => {
+        continued.push(1);
+      },
+    });
+    expect(continued).toHaveLength(1);
+    await driver.settingsProfileAssistantClearRoutes();
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/ai-assistant/**");
+  });
+
+  it("reads dictation facts with a hidden twin and drives its controls", async () => {
+    const section = locator({
+      locator: (selector: string) => {
+        if (selector === "#assistant-voice-base-url") return locator({ inputValue: async () => "http://dead:9" });
+        if (selector === "#assistant-voice-model") return locator({ inputValue: async () => "whisper-1" });
+        return locator({ inputValue: async () => "", getAttribute: async () => "Your transcription API key" });
+      },
+      getByRole: () => locator({ isDisabled: async () => true, count: async () => 0 }),
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(sectionPage(section));
+    expect(await driver.settingsProfileDictationFacts()).toEqual({
+      sectionVisible: true,
+      baseUrl: "http://dead:9",
+      model: "whisper-1",
+      keyValue: "",
+      keyPlaceholder: "Your transcription API key",
+      saveDisabled: true,
+      testDisabled: true,
+      removeVisible: false,
+      lastVerified: null,
+    });
+    const hidden = new WebNewDriver(pageOf({ getByTestId: () => locator({ count: async () => 0 }) }));
+    expect(await hidden.settingsProfileDictationFacts()).toMatchObject({ sectionVisible: false });
+    const fills: string[] = [];
+    const clicks: string[] = [];
+    const controls = locator({
+      locator: () =>
+        locator({
+          fill: async (value: string) => {
+            fills.push(value);
+          },
+        }),
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          click: async () => {
+            clicks.push(options?.["name"] as string);
+          },
+        }),
+    });
+    const writer = new WebNewDriver(sectionPage(controls));
+    await writer.settingsProfileDictationFill("key", "k");
+    await writer.settingsProfileDictationSave();
+    await writer.settingsProfileDictationTest();
+    await writer.settingsProfileDictationRemove();
+    expect(fills).toEqual(["k"]);
+    expect(clicks).toEqual(["Save", "Test connection", "Remove"]);
+  });
+
+  it("reads tool server rows with disabled, locked and prefix states", async () => {
+    const rows = [
+      {
+        name: "probe-mcp-a",
+        url: "https://mcp-a.example.com/sse",
+        disabled: false,
+        locked: false,
+        prefix: "probe_mcp_a_*",
+      },
+      { name: "probe-mcp-b", url: "https://mcp-b.example.com/mcp", disabled: true, locked: true, prefix: null },
+    ];
+    const element = (row: (typeof rows)[number]) =>
+      ({
+        getAttribute: (name: string) => (name === "data-server-name" ? row.name : null),
+        querySelector: (selector: string) => {
+          if (selector === '[data-testid="tool-server-url"]') return { textContent: row.url };
+          if (selector === "code") return row.prefix === null ? null : { textContent: row.prefix };
+          if (selector === '[role="img"][aria-label="Credentials saved"]') return row.locked ? {} : null;
+          return null;
+        },
+        querySelectorAll: (selector: string) =>
+          selector === "button" && row.disabled ? [{ getAttribute: () => `Enable ${row.name}` }] : [],
+      }) as unknown as Element;
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id !== "tool-server-row") return locator({ isDisabled: async () => true });
+        return locator({ evaluateAll: async (fn) => fn(rows.map(element) as never[]) });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileToolServerRows()).toEqual(rows);
+    expect(await driver.settingsProfileToolServerAddDisabled()).toBe(true);
+  });
+
+  it("adds, toggles and removes tool servers through the section", async () => {
+    const fills: Array<[string, string]> = [];
+    const clicks: string[] = [];
+    const section = locator({
+      getByLabel: (label: string) =>
+        locator({
+          fill: async (value: string) => {
+            fills.push([label, value]);
+          },
+        }),
+      getByRole: (_role: string, options?: Record<string, unknown>) => {
+        const name = options?.["name"] as string;
+        return locator({
+          count: async () => (name === "Disable probe-mcp-a" ? 1 : 1),
+          first: () =>
+            locator({
+              click: async () => {
+                clicks.push(name);
+              },
+            }),
+          click: async () => {
+            clicks.push(name);
+          },
+        });
+      },
+    });
+    const page = pageOf({
+      getByTestId: () => section,
+      locator: () => section,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileToolServerAdd("probe-mcp-b", "https://mcp-b.example.com/mcp", "Bearer x");
+    expect(fills).toEqual([
+      ["Name", "probe-mcp-b"],
+      ["Server URL", "https://mcp-b.example.com/mcp"],
+      ["Authorization header (optional)", "Bearer x"],
+    ]);
+    await driver.settingsProfileToolServerAdd("probe-mcp-a", "https://mcp-a.example.com/sse");
+    expect(fills).toHaveLength(5);
+    await driver.settingsProfileToolServerToggle("probe-mcp-a");
+    await driver.settingsProfileToolServerRemove("probe-mcp-b");
+    expect(clicks).toContain("Add server");
+    expect(clicks).toContain("Disable probe-mcp-a");
+    expect(clicks).toContain("Remove");
+  });
+});
+
+describe("settings upkeep and integrations (NEWFRONT-586, PROF-024..025)", () => {
+  function upkeepPage(
+    jobs: { name: string; interval: string; description: string; enabled: boolean; disabled: boolean }[]
+  ): {
+    page: Page;
+    clicks: string[];
+  } {
+    const clicks: string[] = [];
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id === "upkeep-job") {
+          return locator({
+            count: async () => jobs.length,
+            nth: (index: number) => {
+              const job = jobs[index]!;
+              return locator({
+                locator: () =>
+                  locator({
+                    nth: (span: number) =>
+                      locator({ innerText: async () => [job.name, job.interval, job.description][span]! }),
+                  }),
+                getByRole: () =>
+                  locator({
+                    first: () =>
+                      locator({
+                        getAttribute: async () => (job.enabled ? "true" : "false"),
+                        isDisabled: async () => job.disabled,
+                        click: async () => {
+                          clicks.push(`job:${job.name}`);
+                        },
+                      }),
+                  }),
+              });
+            },
+          });
+        }
+        return locator({
+          getAttribute: async () => "false",
+          click: async () => {
+            clicks.push("master");
+          },
+        });
+      },
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    return { page, clicks };
+  }
+
+  it("reads upkeep facts with an empty twin", async () => {
+    const { page } = upkeepPage([
+      {
+        name: "Close issues when their PR merges",
+        interval: "daily",
+        description: "marks an issue Done",
+        enabled: true,
+        disabled: false,
+      },
+    ]);
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileUpkeepFacts()).toEqual({
+      emptyExplanation: null,
+      masterPaused: false,
+      jobs: [
+        {
+          name: "Close issues when their PR merges",
+          interval: "daily",
+          description: "marks an issue Done",
+          enabled: true,
+          toggleDisabled: false,
+        },
+      ],
+    });
+    const empty = new WebNewDriver(
+      pageOf({
+        getByTestId: () => locator(),
+        getByText: () => locator({ innerText: async () => "Nothing is scheduled on this instance yet." }),
+      })
+    );
+    expect(await empty.settingsProfileUpkeepFacts()).toEqual({
+      emptyExplanation: "Nothing is scheduled on this instance yet.",
+      masterPaused: null,
+      jobs: [],
+    });
+  });
+
+  it("toggles the master and jobs past their write settles", async () => {
+    const waitForResponse = vi.fn(async () => ({ ok: () => true }));
+    const { page, clicks } = upkeepPage([
+      {
+        name: "Close issues when their PR merges",
+        interval: "daily",
+        description: "d",
+        enabled: true,
+        disabled: false,
+      },
+    ]);
+    const driver = new WebNewDriver(pageOf({ ...(page as unknown as Record<string, unknown>), waitForResponse }));
+    await driver.settingsProfileUpkeepToggleMaster(true);
+    await driver.settingsProfileUpkeepToggleJob("Close issues when their PR merges", false);
+    expect(clicks).toEqual(["master", "job:Close issues when their PR merges"]);
+    expect(waitForResponse).toHaveBeenCalledTimes(2);
+    const masterMatches = waitForResponse.mock.calls[0]![0] as (response: unknown) => boolean;
+    const jobMatches = waitForResponse.mock.calls[1]![0] as (response: unknown) => boolean;
+    const response = (url: string, method: string): unknown => ({
+      request: () => ({ method: () => method }),
+      url: () => url,
+    });
+    expect(masterMatches(response("https://app.test/api/users/me/auto-pm/", "PATCH"))).toBe(true);
+    expect(masterMatches(response("https://app.test/api/users/me/auto-pm/jobs/x/", "PATCH"))).toBe(false);
+    expect(jobMatches(response("https://app.test/api/users/me/auto-pm/jobs/x/", "PATCH"))).toBe(true);
+    await expect(driver.settingsProfileUpkeepToggleJob("missing", true)).rejects.toThrow("not found");
+  });
+
+  it("fails and delays upkeep writes through routes", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route, unroute }));
+    await driver.settingsProfileUpkeepFailWrites();
+    expect(route).toHaveBeenCalledWith("**/api/users/me/auto-pm/**", expect.any(Function));
+    const fail = route.mock.calls[0]![1] as (route: unknown) => void;
+    const fulfilled: unknown[] = [];
+    fail({
+      request: () => ({ method: () => "PATCH", url: () => "https://app.test/api/users/me/auto-pm/" }),
+      fulfill: async (body: unknown) => {
+        fulfilled.push(body);
+      },
+      continue: async () => undefined,
+    });
+    expect(fulfilled).toEqual([{ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' }]);
+    await driver.settingsProfileUpkeepDelayWrites(3000);
+    expect(route).toHaveBeenCalledTimes(2);
+    await driver.settingsProfileUpkeepClearRoutes();
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/auto-pm/**");
+  });
+
+  it("reads integrations facts across the settled twins", async () => {
+    const panel = locator({
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        const name = options?.["name"] as string;
+        if (role === "button" && name === "Reconnect")
+          return locator({
+            count: async () => 1,
+            first: () => locator({ innerText: async () => "Reconnect", isDisabled: async () => true }),
+          });
+        if (role === "button" && name === "Refresh")
+          return locator({ count: async () => 1, isVisible: async () => true, first: () => locator({}) });
+        return locator({ count: async () => 0 });
+      },
+      getByTestId: () => locator({ first: () => locator({ evaluate: async () => [] }) }),
+      getByText: (text: string) =>
+        locator({
+          count: async () => (String(text).includes("No GitHub App installation") ? 1 : 0),
+          first: () => locator({ innerText: async () => "No GitHub App installation is connected yet." }),
+        }),
+      locator: (selector: string) =>
+        selector === "h3"
+          ? locator({ first: () => locator({ innerText: async () => "GitHub App" }) })
+          : locator({ first: () => locator({ innerText: async () => "Install the Pi Dash GitHub App for Acme." }) }),
+    });
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === "#integrations-workspace") {
+          return locator({
+            first: () =>
+              locator({
+                evaluate: async () => [{ slug: "acme", name: "Acme" }],
+                inputValue: async () => "acme",
+              }),
+          });
+        }
+        return locator();
+      },
+      getByTestId: (id: string) => {
+        if (id === "integrations-settings-loading") return locator({ count: async () => 0 });
+        if (id === "integrations-no-admin") return locator({ count: async () => 0 });
+        return panel;
+      },
+    });
+    const driver = new WebNewDriver(page);
+    const facts = await driver.settingsProfileIntegrationsFacts();
+    expect(facts).toMatchObject({
+      loading: false,
+      noAdmin: false,
+      connected: true,
+      installLabel: "Reconnect",
+      refreshVisible: true,
+      panelHeading: "GitHub App",
+      selectedSlug: "acme",
+    });
+    expect(facts.workspaceOptions).toEqual([{ slug: "acme", name: "Acme" }]);
+    expect(facts.unconnectedCopy).toBe("No GitHub App installation is connected yet.");
+  });
+
+  it("reports the loading and no-admin twins", async () => {
+    const loading = new WebNewDriver(
+      pageOf({
+        getByTestId: (id: string) =>
+          id === "integrations-settings-loading"
+            ? locator({ isVisible: async () => true })
+            : locator({ count: async () => 0 }),
+      })
+    );
+    expect(await loading.settingsProfileIntegrationsFacts()).toMatchObject({ loading: true });
+    const noAdmin = new WebNewDriver(
+      pageOf({
+        locator: () => locator({ count: async () => 0 }),
+        getByTestId: (id: string) => {
+          if (id === "integrations-settings-loading") return locator({ count: async () => 0 });
+          if (id === "integrations-no-admin") return locator({});
+          return locator({ count: async () => 0 });
+        },
+      })
+    );
+    expect(await noAdmin.settingsProfileIntegrationsFacts()).toMatchObject({
+      loading: false,
+      noAdmin: true,
+      panelHeading: null,
+    });
+  });
+
+  it("selects workspaces, refreshes and fails the refresh through routes", async () => {
+    const selected: string[] = [];
+    const clicks: string[] = [];
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const page = pageOf({
+      locator: () =>
+        locator({
+          evaluate: async () => "Acme",
+          selectOption: async (slug: string) => {
+            selected.push(slug);
+          },
+        }),
+      getByTestId: () =>
+        locator({
+          getByRole: () =>
+            locator({
+              click: async () => {
+                clicks.push("refresh");
+              },
+            }),
+        }),
+      waitForFunction: async () => undefined,
+      waitForResponse: async () => ({ ok: () => true }),
+      route,
+      unroute,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileIntegrationsSelect("acme");
+    expect(selected).toEqual(["acme"]);
+    await driver.settingsProfileIntegrationsRefresh();
+    expect(clicks).toEqual(["refresh"]);
+    await driver.settingsProfileIntegrationsFailRefresh();
+    await driver.settingsProfileIntegrationsClearRoutes();
+    expect(route).toHaveBeenCalledWith("**/api/users/me/integrations/github/app/refresh/", expect.any(Function));
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/integrations/github/app/refresh/");
+    const missing = new WebNewDriver(
+      pageOf({ locator: () => locator({ evaluate: async () => "" }), waitForFunction: async () => undefined })
+    );
+    await expect(missing.settingsProfileIntegrationsSelect("nope")).rejects.toThrow("has no option");
+  });
+});
+
+describe("workspace settings api tokens (NEWFRONT-586, PROF-020)", () => {
+  const COOKIES = [{ name: "session", value: "s", domain: "app.test", path: "/" }];
+
+  function authedPage(overrides: Record<string, unknown> = {}): { page: Page; goto: ReturnType<typeof vi.fn> } {
+    const goto = vi.fn(async () => undefined);
+    const page = pageOf({
+      context: () => ({ addCookies: async () => undefined }),
+      goto,
+      waitForLoadState: async () => undefined,
+      url: () => "https://app.test/settings/profile/api-tokens",
+      ...overrides,
+    });
+    return { page, goto };
+  }
+
+  it("opens tokens directly and via the sidebar entry", async () => {
+    const click = vi.fn(async () => undefined);
+    const { page, goto } = authedPage({
+      getByTestId: () => locator({ getByRole: () => locator({ click }) }),
+      getByRole: () => locator({ click }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsApiTokenOpenTokens(COOKIES);
+    expect(goto).toHaveBeenCalledWith("/settings/profile/api-tokens", { waitUntil: "domcontentloaded" });
+    await driver.wsSettingsApiTokenOpenViaSidebar(COOKIES);
+    expect(goto).toHaveBeenCalledWith("/settings/profile/general", { waitUntil: "domcontentloaded" });
+    expect(click).toHaveBeenCalled();
+  });
+
+  it("reads the heading and add control with absent twins", async () => {
+    const page = pageOf({
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({ textContent: async () => (options?.["name"] as string) ?? "" }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenHeading()).toBe("Personal Access Tokens");
+    expect(await driver.wsSettingsApiTokenAddVisible()).toBe(true);
+    const bare = new WebNewDriver(pageOf({ getByRole: () => locator({ count: async () => 0 }) }));
+    expect(await bare.wsSettingsApiTokenHeading()).toBeNull();
+    expect(await bare.wsSettingsApiTokenAddVisible()).toBe(false);
+  });
+
+  it("observes the loader behind a held list read", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const { page, goto } = authedPage({
+      route,
+      unroute,
+      getByTestId: () => locator(),
+      getByRole: () => locator(),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenLoaderSeen()).toBe(true);
+    expect(route).toHaveBeenCalledWith("**/api/users/api-tokens/", expect.any(Function));
+    expect(goto).toHaveBeenCalledWith("/settings/profile/api-tokens", { timeout: 60_000 });
+    expect(unroute).toHaveBeenCalledWith("**/api/users/api-tokens/");
+  });
+
+  it("reloads once on a stalled boot before verdicting no loader", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const { page, goto } = authedPage({
+      route,
+      unroute,
+      getByTestId: () =>
+        locator({ first: () => locator({ waitFor: async () => Promise.reject(new Error("missed")) }) }),
+      getByRole: () => locator({ count: async () => 0, first: () => locator({ count: async () => 0 }) }),
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenLoaderSeen()).toBe(false);
+    expect(goto).toHaveBeenCalledTimes(2);
+    expect(unroute).toHaveBeenCalledWith("**/api/users/api-tokens/");
+  });
+
+  it("detects the empty state and opens the create form from both actions", async () => {
+    const clicks: string[] = [];
+    const page = pageOf({
+      getByText: () => locator(),
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          first: () =>
+            locator({
+              click: async () => {
+                clicks.push(options?.["name"] as string);
+              },
+            }),
+          click: async () => {
+            clicks.push(options?.["name"] as string);
+          },
+        }),
+      getByPlaceholder: () => locator(),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenEmptyVisible()).toBe(true);
+    await driver.wsSettingsApiTokenEmptyCreate();
+    await driver.wsSettingsApiTokenOpenCreate();
+    expect(clicks).toEqual(["Add API token", "Add personal access token"]);
+    const bare = new WebNewDriver(pageOf({ getByText: () => locator({ count: async () => 0 }) }));
+    expect(await bare.wsSettingsApiTokenEmptyVisible()).toBe(false);
+  });
+
+  it("reads rows with liveness, expiry and description", async () => {
+    const rows = [
+      { label: "a", spans: ["a", "Active"], paras: ["first token", "Expires Mar 10, 2031 at 09:30"] },
+      { label: "b", spans: ["b"], paras: ["Never expires"] },
+    ];
+    const page = pageOf({
+      getByRole: () =>
+        locator({
+          count: async () => rows.length,
+          nth: (index: number) => {
+            const row = rows[index]!;
+            const scope = locator({
+              locator: (selector: string) =>
+                locator({
+                  allTextContents: async () => (selector === "span" ? row.spans : row.paras),
+                }),
+            });
+            return locator({
+              textContent: async () => row.label,
+              locator: () => scope,
+            });
+          },
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenRows()).toEqual([
+      { label: "a", active: true, expiryLine: "Expires Mar 10, 2031 at 09:30", description: "first token" },
+      { label: "b", active: false, expiryLine: "Never expires", description: null },
+    ]);
+    expect(await driver.wsSettingsApiTokenPageText()).toBe("");
+  });
+
+  it("drives the create form fields and reads title errors", async () => {
+    const fills: Array<[string, string]> = [];
+    const page = pageOf({
+      getByPlaceholder: (text: string) =>
+        locator({
+          fill: async (value: string) => {
+            fills.push([text, value]);
+          },
+        }),
+      getByRole: () =>
+        locator({
+          getByText: () => locator({ textContent: async () => "Title is required" }),
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenDialogOpen()).toBe(true);
+    await driver.wsSettingsApiTokenFillTitle("t");
+    await driver.wsSettingsApiTokenFillDescription("d");
+    expect(fills).toEqual([
+      ["Title", "t"],
+      ["Description", "d"],
+    ]);
+    expect(await driver.wsSettingsApiTokenTitleError()).toBe("Title is required");
+    const bare = new WebNewDriver(
+      pageOf({
+        getByPlaceholder: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ getByText: () => locator({ count: async () => 0 }) }),
+      })
+    );
+    expect(await bare.wsSettingsApiTokenDialogOpen()).toBe(false);
+    expect(await bare.wsSettingsApiTokenTitleError()).toBeNull();
+  });
+
+  it("lists presets, picks one and reads the trigger with its preview", async () => {
+    const clicks: string[] = [];
+    const options = ["1 week", "1 month", "3 months", "1 year", "Custom"];
+    const page = pageOf({
+      keyboard: { press: async () => undefined },
+      getByRole: (role: string, opts?: Record<string, unknown>) => {
+        if (role === "option" && opts === undefined) {
+          return locator({
+            allTextContents: async () => options,
+            first: () => locator(),
+            count: async () => (clicks.length === 0 ? 5 : 0),
+          });
+        }
+        if (role === "option") {
+          return locator({
+            click: async () => {
+              clicks.push(opts?.["name"] as string);
+            },
+          });
+        }
+        return locator({
+          first: () =>
+            locator({
+              click: async () => {
+                clicks.push("trigger");
+              },
+              innerText: async () => "1 week",
+              isDisabled: async () => false,
+              getByText: () => locator({ textContent: async () => "Expires Oct 29, 2026 at 07:21" }),
+            }),
+          getByText: () => locator({ textContent: async () => "Expires Oct 29, 2026 at 07:21" }),
+        });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenPresetOptions()).toEqual(options);
+    await driver.wsSettingsApiTokenPickPreset("1 week");
+    expect(clicks).toContain("1 week");
+    expect(await driver.wsSettingsApiTokenExpiryTriggerText()).toBe("1 week");
+    expect(await driver.wsSettingsApiTokenExpiryTriggerDisabled()).toBe(false);
+    expect(await driver.wsSettingsApiTokenExpiryPreview()).toBe("Expires Oct 29, 2026 at 07:21");
+    await driver.wsSettingsApiTokenToggleNeverExpires();
+    const bare = new WebNewDriver(
+      pageOf({ getByRole: () => locator({ getByText: () => locator({ count: async () => 0 }) }) })
+    );
+    expect(await bare.wsSettingsApiTokenExpiryPreview()).toBeNull();
+  });
+
+  it("labels calendar days with ordinals and floors custom picks at tomorrow", async () => {
+    const picked: string[] = [];
+    const disabled: Record<string, boolean> = {};
+    const today = new Date();
+    const fmt = (date: Date): string => {
+      const day = date.getDate();
+      const suffix =
+        day % 100 >= 11 && day % 100 <= 13
+          ? "th"
+          : day % 10 === 1
+            ? "st"
+            : day % 10 === 2
+              ? "nd"
+              : day % 10 === 3
+                ? "rd"
+                : "th";
+      return `${date.toLocaleString("en-US", { weekday: "long" })}, ${date.toLocaleString("en-US", { month: "long" })} ${day}${suffix}, ${date.getFullYear()}`;
+    };
+    disabled[fmt(today)] = true;
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    disabled[fmt(tomorrow)] = false;
+    const page = pageOf({
+      keyboard: { press: async () => undefined },
+      locator: () => locator({ count: async () => 0, first: () => locator() }),
+      getByRole: (role: string, opts?: Record<string, unknown>) => {
+        const name = opts?.["name"] as string | undefined;
+        if (role === "option" && opts === undefined) return locator({ first: () => locator(), count: async () => 0 });
+        return locator({
+          first: () => locator({ click: async () => undefined }),
+          click: async () => {
+            picked.push(name ?? role);
+          },
+          isDisabled: async () => disabled[name ?? ""] ?? false,
+        });
+      },
+      getByText: () => locator({ click: async () => undefined }),
+    });
+    const driver = new WebNewDriver(page);
+    const floor = await driver.wsSettingsApiTokenCustomFloor();
+    expect(floor).toEqual({ todayDisabled: true, tomorrowEnabled: true });
+    await driver.wsSettingsApiTokenPickCustomDayNextMonth("15");
+    const target = new Date(today.getFullYear(), today.getMonth() + 1, 15);
+    expect(picked).toContain(fmt(target));
+  });
+
+  it("submits, captures the backup download and cancels the form", async () => {
+    const clicks: string[] = [];
+    const download = {
+      suggestedFilename: () => "secret-key-123.csv",
+      createReadStream: async () =>
+        (async function* () {
+          yield Buffer.from("Title,Description,Expiry,Secret key\nt,d,Never expires,pi_dash_api_abc\n");
+        })(),
+    };
+    const page = pageOf({
+      waitForEvent: async () => download,
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          click: async () => {
+            clicks.push(options?.["name"] as string);
+          },
+          count: async () => 0,
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsApiTokenSubmit();
+    const backup = await driver.wsSettingsApiTokenSubmitAndCaptureBackup();
+    expect(backup.fileName).toBe("secret-key-123.csv");
+    expect(backup.content).toContain("pi_dash_api_abc");
+    await driver.wsSettingsApiTokenCancelCreate();
+    expect(clicks).toEqual(["Generate token", "Generate token", "Cancel"]);
+  });
+
+  it("reads the reveal, copies the secret and closes it", async () => {
+    const granted: string[][] = [];
+    const clicks: string[] = [];
+    let closed = false;
+    const dialog = locator({
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          click: async () => {
+            clicks.push(options?.["name"] as string);
+          },
+        }),
+      innerText: async () => "Key created\npi_dash_api_abc\nExpires Jun 15, 2030 at 12:00\n",
+    });
+    const page = pageOf({
+      context: () => ({ grantPermissions: async (perms: string[]) => granted.push(perms) }),
+      evaluate: async () => "pi_dash_api_abc",
+      getByTestId: () => locator({ innerText: async () => "pi_dash_api_abc" }),
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        const name = options?.["name"] as string | undefined;
+        if (role === "heading")
+          return locator({ textContent: async () => "Key created", count: async () => (closed ? 0 : 1) });
+        if (role === "dialog") return dialog;
+        return locator({
+          click: async () => {
+            if (name === "Close") closed = true;
+            clicks.push(name ?? role);
+          },
+        });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenRevealHeading()).toBe("Key created");
+    expect(await driver.wsSettingsApiTokenRevealValue()).toBe("pi_dash_api_abc");
+    expect(await driver.wsSettingsApiTokenRevealExpiryLine()).toBe("Expires Jun 15, 2030 at 12:00");
+    expect(await driver.wsSettingsApiTokenRevealCopy()).toBe("pi_dash_api_abc");
+    expect(granted).toEqual([["clipboard-read", "clipboard-write"]]);
+    await driver.wsSettingsApiTokenRevealClose();
+    expect(clicks).toContain("Copy token");
+    expect(clicks).toContain("Close");
+    const bare = new WebNewDriver(
+      pageOf({
+        getByTestId: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0, innerText: async () => "" }),
+      })
+    );
+    expect(await bare.wsSettingsApiTokenRevealHeading()).toBeNull();
+    expect(await bare.wsSettingsApiTokenRevealValue()).toBeNull();
+    expect(await bare.wsSettingsApiTokenRevealExpiryLine()).toBeNull();
+  });
+
+  it("confirms and cancels deletion behind the row hover", async () => {
+    const actions: string[] = [];
+    const row = locator({
+      hover: async () => {
+        actions.push("hover");
+      },
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          click: async () => {
+            actions.push(options?.["name"] as string);
+          },
+        }),
+    });
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        if (role === "heading") return locator({ locator: () => row, count: async () => 0 });
+        return locator({
+          click: async () => {
+            actions.push(options?.["name"] as string);
+          },
+          count: async () => 0,
+          innerText: async () => "Delete personal access token\nThis cannot be undone.\n",
+        });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    const text = await driver.wsSettingsApiTokenDeleteDialogText("doomed");
+    expect(text).toContain("cannot be undone");
+    await driver.wsSettingsApiTokenDeleteCancel();
+    await driver.wsSettingsApiTokenDeleteConfirm("doomed");
+    expect(actions).toEqual(["hover", "Delete doomed", "Cancel", "hover", "Delete doomed", "Delete"]);
+  });
+});
+
+describe("settings cross-cutting probes (NEWFRONT-586, PROF-027..028)", () => {
+  it("presses keys against the blurred body", async () => {
+    const pressed: string[] = [];
+    const page = pageOf({
+      evaluate: async () => undefined,
+      keyboard: {
+        press: async (key: string) => {
+          pressed.push(key);
+        },
+      },
+      waitForTimeout: async () => undefined,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfilePressKeys(["?", "Enter"]);
+    expect(pressed).toEqual(["?", "Enter"]);
+  });
+
+  it("counts tab reads and sockets from watchers", async () => {
+    const handlers: Record<string, (...args: never[]) => void> = {};
+    const page = pageOf({
+      on: (event: string, handler: (...args: never[]) => void) => {
+        handlers[event] = handler;
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileWatchReads();
+    await driver.settingsProfileWatchSockets();
+    handlers["request"]?.({
+      method: () => "GET",
+      url: () => "https://app.test/api/users/me/ai-assistant/config/",
+    } as never);
+    handlers["request"]?.({
+      method: () => "POST",
+      url: () => "https://app.test/api/users/me/ai-assistant/config/",
+    } as never);
+    handlers["request"]?.({ method: () => "GET", url: () => "https://app.test/api/users/api-tokens/" } as never);
+    handlers["websocket"]?.();
+    expect(await driver.settingsProfileReadCount()).toBe(1);
+    expect(await driver.settingsProfileSocketCount()).toBe(1);
+    await driver.settingsProfileWatchReads();
+    await driver.settingsProfileWatchSockets();
+    expect(await driver.settingsProfileReadCount()).toBe(0);
+    expect(await driver.settingsProfileSocketCount()).toBe(0);
+  });
+
+  it("counts draggables, file inputs and member controls from the document", async () => {
+    const driver = new WebNewDriver(pageOf({ evaluate: async () => 3 }));
+    expect(await driver.settingsProfileDraggableCount()).toBe(3);
+    expect(await driver.settingsProfileMemberControlCount()).toBe(3);
+    const files = new WebNewDriver(pageOf({ locator: () => locator({ count: async () => 2 }) }));
+    expect(await files.settingsProfileFileInputCount()).toBe(2);
+  });
+
+  it("collects import/export mentions from the body text", async () => {
+    const page = pageOf({
+      locator: () =>
+        locator({
+          innerText: async () => "Settings\nExport the workspace\nimport wizard\nExport the workspace\nplain line",
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileImportExportMentions()).toEqual(["Export the workspace", "import wizard"]);
+    const bare = new WebNewDriver(pageOf({ locator: () => locator({ innerText: async () => "Settings\nplain" }) }));
+    expect(await bare.settingsProfileImportExportMentions()).toEqual([]);
   });
 });

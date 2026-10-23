@@ -15,7 +15,19 @@ import type { UserProfileSegregation } from "@pidash/api-client";
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
-  return { ...original, Link: () => null };
+  // Anchor stand-in (CrossAppLink.test.tsx precedent): the pencil targets
+  // a migrated prefix, so it renders as a router link.
+  return {
+    ...original,
+    Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+      const { to, children, ...rest } = props;
+      return (
+        <a data-router-link="" data-to={to} href={to} {...(rest as React.AnchorHTMLAttributes<HTMLAnchorElement>)}>
+          {children as React.ReactNode}
+        </a>
+      );
+    },
+  };
 });
 
 import {
@@ -76,12 +88,15 @@ describe("ProfileSidebarFrame", () => {
   });
 
   it("falls back to an uppercase initial and renders a set photo as an image", () => {
-    const { unmount } = renderFrame();
+    const { unmount, container } = renderFrame();
     expect(screen.getByRole("img", { name: "Opal Whelan" })).toHaveTextContent("O");
+    expect(container.querySelector('[data-profile-avatar="initial"]')).not.toBeNull();
     unmount();
-    renderFrame({ avatar: "/files/avatar/u-1.png" });
+    const photo = renderFrame({ avatar: "/files/avatar/u-1.png" });
     const frame = screen.getByRole("img", { name: "Opal Whelan" });
     expect(frame.querySelector("img")?.getAttribute("src")).toBe("https://api.test/files/avatar/u-1.png");
+    const marker = photo.container.querySelector('[data-profile-avatar="image"]');
+    expect(marker?.getAttribute("data-profile-avatar-src")).toBe("https://api.test/files/avatar/u-1.png");
   });
 
   it("hides a blank display name", () => {
@@ -150,6 +165,7 @@ describe("ProfileSidebarFrame", () => {
     const pencil = screen.getByTestId("profile-edit-pencil");
     expect(pencil).toHaveAttribute("href", PROFILE_SETTINGS_GENERAL_HREF);
     expect(pencil).toHaveAttribute("href", "/settings/profile/general");
+    expect(pencil).toHaveAttribute("data-router-link");
   });
 
   it("collapses on demand and reopens from the show control", async () => {

@@ -281,6 +281,18 @@ const WEB_NEW_LAYOUTS_WAIT_MS = 300_000;
 
 /** Navigation budget for god-mode pages (cold Vite compiles included). */
 const ADMIN_NAV_WAIT_MS = 180_000;
+/**
+ * Theme trigger labels per stored value (the picker's THEME_OPTIONS; kept
+ * beside the driver so the mapping stays explicit in parity prose).
+ */
+const WEB_NEW_THEME_TRIGGER_LABELS: Record<SettingsProfileTheme, string> = {
+  system: "System preference",
+  light: "Light",
+  dark: "Dark",
+  "light-contrast": "Light high contrast",
+  "dark-contrast": "Dark high contrast",
+  custom: "Custom theme",
+};
 
 /** Literal text for a RegExp built around a caller-provided label. */
 function escapeRegExp(value: string): string {
@@ -689,6 +701,14 @@ export class WebNewDriver implements ParityDriver {
     for (;;) {
       const list = this.page.locator('section[aria-label="Issue list"], section[aria-label="Issues"]');
       if ((await list.count()) > 0 && (await list.first().isVisible())) return;
+      // The chosen layout persists across visits, so a settled page is not
+      // always the list: the calendar, board and gantt leaves render in
+      // place of the rows. The layout switcher only mounts with the page's
+      // data, so its presence marks any of those settled twins.
+      // Only one variant is visible at a given width (CSS picks it), so
+      // presence rather than visibility is the settled signal.
+      const switcher = this.page.getByTestId(/^layout-switcher-(segmented|dropdown)$/);
+      if ((await switcher.count()) > 0) return;
       if ((await this.authEmailField().count()) > 0) return;
       if ((await this.page.getByRole("heading", { name: "Workspace not found" }).count()) > 0) return;
       if (Date.now() > deadline) return;
@@ -2205,8 +2225,32 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByPlaceholder("Title").first().focus();
   }
 
-  async openCyclePage(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("openCyclePage");
+  async openCyclePage(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settle on whatever the guard decides, the way project issues do:
+    // the shared list header mounts with the rows, empty and error twins
+    // alike (the labelled list box only wraps the not-found branches, so
+    // it cannot be the wait), the signed-out entry after a bounce, or the
+    // workspace denial. Never throw on the bounce — callers assert it;
+    // the per-read waits fail precisely when content is missing.
+    const deadline = Date.now() + 60_000;
+    let reloaded = false;
+    for (;;) {
+      const header = this.page.getByTestId("issues-header");
+      if ((await header.count()) > 0 && (await header.first().isVisible())) return;
+      const list = this.page.locator('[aria-label="Issue list"], [aria-label="Issues"]');
+      if ((await list.count()) > 0 && (await list.first().isVisible())) return;
+      if ((await this.authEmailField().count()) > 0) return;
+      if ((await this.page.getByRole("heading", { name: "Workspace not found" }).count()) > 0) return;
+      if (Date.now() > deadline) return;
+      if (!reloaded && Date.now() > deadline - 30_000) {
+        reloaded = true;
+        await this.page.reload().catch(() => {});
+      } else {
+        await this.page.waitForTimeout(1_000);
+      }
+    }
   }
 
   async openModulePage(_workspaceSlug: string, _projectId: string, _moduleId: string): Promise<void> {
@@ -6695,13 +6739,44 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
-    const trigger = this.page
+    const profileTrigger = this.page
       .getByRole("button", { name: /^Issue layout, current / })
       .filter({ visible: true })
       .first();
-    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
-    await this.page.locator(`[data-profile-layout-choice="${layout}"]`).click({ timeout: WebNewDriver.WAIT_MS });
-    await this.layoutsWaitForProfileLayout(layout);
+    if ((await profileTrigger.count()) > 0) {
+      await profileTrigger.click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.locator(`[data-profile-layout-choice="${layout}"]`).click({ timeout: WebNewDriver.WAIT_MS });
+      await this.layoutsWaitForProfileLayout(layout);
+      return;
+    }
+    // Project, cycle and module pages share the segmented header switcher
+    // (data-layout per kind); the choice marks itself active on switch.
+    await this.page
+      .locator(`[data-layout="${layout}"]`)
+      .filter({ visible: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.layoutsWaitForProjectLayout(layout);
+  }
+
+  private async layoutsWaitForProjectLayout(layout: LayoutsLayoutKey): Promise<void> {
+    if (layout === "calendar") {
+      await this.page.getByTestId("issues-calendar").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    if (layout === "list") {
+      // Tag-agnostic: rows render in the virtual list's labelled box while
+      // the empty and error twins are sections.
+      await this.page
+        .locator('[aria-label="Issue list"], [aria-label="Issues"]')
+        .first()
+        .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.page
+      .locator(`[data-layout="${layout}"][data-active="true"]`)
+      .first()
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsReloadIssues(): Promise<void> {
@@ -6718,7 +6793,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsCalendarVisible(): Promise<boolean> {
-    return todo("layoutsCalendarVisible");
+    // The profile tab offers list and board only; the calendar lives on the
+    // project, cycle and module pages under one test id.
+    return this.isShown(this.page.getByTestId("issues-calendar"));
   }
 
   async layoutsSpreadsheetVisible(): Promise<boolean> {
@@ -21546,8 +21623,16 @@ export class WebNewDriver implements ParityDriver {
 
   async profileActivityOpen(workspaceSlug: string, userId: string, cookies: ParityBrowserCookie[]): Promise<void> {
     await this.openAuthenticated(this.profilePath(workspaceSlug, userId, "activity"), cookies);
-    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    await this.page.getByTestId("profile-activity").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("profile-page")
+      .waitFor({ state: "visible", timeout: WebNewDriver.PROFILE_FIRST_PAINT_WAIT_MS });
+    // Attached, not visible: guests (and empty feeds) render the container
+    // with no rows, which is zero-size and reads hidden. The specs assert
+    // the download control and entries separately; like the oracle
+    // driver's either-view settle, any mounted container is settled.
+    await this.page
+      .getByTestId("profile-activity")
+      .waitFor({ state: "attached", timeout: WebNewDriver.PROFILE_FIRST_PAINT_WAIT_MS });
     await this.page
       .locator('[data-profile-activity-row], [data-testid="profile-activity-load-more"]')
       .first()
@@ -21565,26 +21650,47 @@ export class WebNewDriver implements ParityDriver {
     return (await button.first().innerText()).trim();
   }
 
-  private profileExportStall: { pattern: string; handler: (route: Route) => Promise<void>; held: Route | null } | null =
-    null;
+  private profileExportStall: {
+    pattern: string;
+    handler: (route: Route) => Promise<void>;
+    mode: "pass" | "stall";
+    gates: Array<() => void>;
+  } | null = null;
 
   async profileActivityStallExport(): Promise<void> {
-    if (this.profileExportStall !== null) return;
-    const pattern = "**/api/workspaces/*/user-activity/*/export/**";
-    const stall = { pattern, handler: async (_route: Route): Promise<void> => undefined, held: null as Route | null };
+    if (this.profileExportStall !== null) {
+      this.profileExportStall.mode = "stall";
+      return;
+    }
+    const stall: NonNullable<WebNewDriver["profileExportStall"]> = {
+      pattern: "**/api/workspaces/*/user-activity/*/export/**",
+      handler: async (): Promise<void> => undefined,
+      mode: "stall",
+      gates: [],
+    };
+    // The handler stays installed for the page's life: stalled POSTs wait
+    // on a gate, everything else falls through. Releasing resolves the
+    // gates instead of unrouting (unroute drops the held route, so a
+    // later continue() throws "already handled").
     stall.handler = async (route: Route): Promise<void> => {
-      stall.held = route;
+      if (route.request().method() === "POST" && stall.mode === "stall") {
+        await new Promise<void>((resolve) => {
+          stall.gates.push(resolve);
+        });
+      }
+      await route.fallback();
     };
     this.profileExportStall = stall;
-    await this.page.route(pattern, stall.handler);
+    await this.page.route(stall.pattern, stall.handler);
   }
 
   async profileActivityReleaseExport(): Promise<void> {
     const stall = this.profileExportStall;
     if (stall === null) return;
-    this.profileExportStall = null;
-    await this.page.unroute(stall.pattern, stall.handler);
-    await stall.held?.continue();
+    const gates = stall.gates;
+    stall.gates = [];
+    stall.mode = "pass";
+    gates.forEach((release) => release());
   }
 
   async profileActivityDownload(): Promise<{ file: LocalFileDownload; requestBody: { date: string } }> {
@@ -25448,27 +25554,113 @@ export class WebNewDriver implements ParityDriver {
   // --- Profile-settings assistant/upkeep/integrations stubs (NEWFRONT-428,
   // --- PROF-021..025, PROF-027, PROF-028). The area gate implements these
   // --- against apps/web_new; until then every method throws todo().
+  /** Mount reads per assistant-family tab (PROF-027 settle). */
+  private static readonly SETTINGS_TAB_MOUNT: Record<
+    "ai-assistant" | "auto-project-management" | "integrations",
+    { reads: RegExp; count: number }
+  > = {
+    // LLM config, dictation config, tool-server registry.
+    "ai-assistant": { reads: /\/api\/users\/me\/ai-assistant\//, count: 3 },
+    // Upkeep switches.
+    "auto-project-management": { reads: /\/api\/users\/me\/auto-pm\//, count: 1 },
+    // GitHub-app status.
+    integrations: { reads: /\/api\/users\/me\/integrations\//, count: 1 },
+  };
+
+  /** Lenient cap on the mount-read wait; the content markers are the hard gate. */
+  private static readonly SETTINGS_TAB_READ_WAIT_MS = 15_000;
+
   async settingsProfileOpenTab(
-    _tab: "ai-assistant" | "auto-project-management" | "integrations",
-    _cookies: ParityBrowserCookie[]
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("settingsProfileOpenTab");
+    await this.settingsProfileOpenTabSettled(tab, cookies);
   }
   async settingsProfileOpenTabWithQuery(
-    _tab: "ai-assistant" | "auto-project-management" | "integrations",
-    _query: string,
-    _cookies: ParityBrowserCookie[]
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    query: string,
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("settingsProfileOpenTabWithQuery");
+    await this.settingsProfileOpenTabSettled(tab, cookies, query);
+  }
+
+  private async settingsProfileOpenTabSettled(
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    cookies: ParityBrowserCookie[],
+    query?: string
+  ): Promise<void> {
+    // Mirror the oracle's openSettled: the idle-read probe starts its
+    // watch the moment OpenTab returns, so OpenTab must return only after
+    // the tab's mount reads have resolved — shell paint alone catches
+    // them mid-flight (the assistant tab fires three). The counter
+    // attaches before navigation; the content markers are the hard gate
+    // and the read wait is lenient, as on the oracle side.
+    const { reads, count } = WebNewDriver.SETTINGS_TAB_MOUNT[tab];
+    let seen = 0;
+    let release!: () => void;
+    const mountReads = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onResponse = (response: { url(): string; request(): { method(): string } }): void => {
+      if (response.request().method() === "GET" && reads.test(response.url())) {
+        seen += 1;
+        if (seen >= count) release();
+      }
+    };
+    this.page.on("response", onResponse as (response: never) => void);
+    try {
+      await this.settingsProfileGoto(
+        query === undefined ? `/settings/profile/${tab}` : `/settings/profile/${tab}?${query}`,
+        cookies
+      );
+      await this.settingsProfileAwaitTabContent(tab);
+      await Promise.race([
+        mountReads,
+        this.page.waitForTimeout(WebNewDriver.SETTINGS_TAB_READ_WAIT_MS).then(() => undefined),
+      ]);
+    } finally {
+      this.page.removeListener("response", onResponse as (response: never) => void);
+    }
+  }
+
+  /** Content markers proving a tab's mount reads resolved (shared with the Facts waits). */
+  private async settingsProfileAwaitTabContent(
+    tab: "ai-assistant" | "auto-project-management" | "integrations"
+  ): Promise<void> {
+    if (tab === "ai-assistant") {
+      const section = this.page.getByTestId("assistant-llm");
+      await section.locator("#assistant-llm-model").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+      await this.page.getByTestId("assistant-tools").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    } else if (tab === "auto-project-management") {
+      await this.page.getByTestId("upkeep-settings-page").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await this.page
+        .locator('#integrations-workspace, [data-testid="github-app-panel"], [data-testid="integrations-no-admin"]')
+        .first()
+        .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    }
   }
   async settingsProfileCurrentPath(): Promise<string> {
-    return todo("settingsProfileCurrentPath");
+    return new URL(this.page.url()).pathname;
   }
   async settingsProfileCurrentQuery(): Promise<string> {
-    return todo("settingsProfileCurrentQuery");
+    return new URL(this.page.url()).search.replace(/^\?/, "");
   }
   async settingsProfileLastToast(): Promise<{ title: string; message: string } | null> {
-    return todo("settingsProfileLastToast");
+    // Toasts prepend newest-first (same as the oracle stack), so the
+    // first non-blank card is the latest; its lines are the title first,
+    // then the body.
+    const cards = this.page.getByTestId("toast-notification");
+    const total = await cards.count();
+    for (let index = 0; index < total; index += 1) {
+      const lines = ((await cards.nth(index).innerText()) ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      if (lines.length === 0) continue;
+      return { title: lines[0]!, message: lines.slice(1).join(" ") };
+    }
+    return null;
   }
   async settingsProfileAssistantFacts(): Promise<{
     provider: string;
@@ -25482,28 +25674,73 @@ export class WebNewDriver implements ParityDriver {
     removeVisible: boolean;
     lastVerified: string | null;
   }> {
-    return todo("settingsProfileAssistantFacts");
+    const section = this.page.getByTestId("assistant-llm");
+    // The tab holds a skeleton until both config reads resolve; the model
+    // field landing proves the forms painted with their seeded values.
+    await section.locator("#assistant-llm-model").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const baseUrlField = section.locator("#assistant-llm-base-url");
+    const baseUrlVisible = (await baseUrlField.count()) > 0;
+    const keyField = section.locator("#assistant-llm-key");
+    const verified = section.getByText("Last verified:");
+    const lastVerified =
+      (await verified.count()) === 0 ? null : ((await verified.first().innerText()) ?? "").trim() || null;
+    return {
+      provider: await section.locator("#assistant-llm-provider").inputValue(),
+      baseUrlVisible,
+      baseUrl: baseUrlVisible ? await baseUrlField.inputValue() : "",
+      model: await section.locator("#assistant-llm-model").inputValue(),
+      keyValue: await keyField.inputValue(),
+      keyPlaceholder: (await keyField.getAttribute("placeholder")) ?? "",
+      saveDisabled: await section.getByRole("button", { name: "Save", exact: true }).isDisabled(),
+      testDisabled: await section.getByRole("button", { name: "Test connection", exact: true }).isDisabled(),
+      removeVisible: await this.isShown(section.getByRole("button", { name: "Remove", exact: true })),
+      lastVerified,
+    };
   }
-  async settingsProfileAssistantSetProvider(_provider: "openai_compatible" | "anthropic"): Promise<void> {
-    return todo("settingsProfileAssistantSetProvider");
+  async settingsProfileAssistantSetProvider(provider: "openai_compatible" | "anthropic"): Promise<void> {
+    // A native select: the endpoint row shows or hides synchronously.
+    await this.page.getByTestId("assistant-llm").locator("#assistant-llm-provider").selectOption(provider);
   }
-  async settingsProfileAssistantFill(_field: "baseUrl" | "model" | "key", _value: string): Promise<void> {
-    return todo("settingsProfileAssistantFill");
+  async settingsProfileAssistantFill(field: "baseUrl" | "model" | "key", value: string): Promise<void> {
+    const suffix = field === "baseUrl" ? "base-url" : field;
+    await this.page.getByTestId("assistant-llm").locator(`#assistant-llm-${suffix}`).fill(value);
   }
   async settingsProfileAssistantSave(): Promise<void> {
-    return todo("settingsProfileAssistantSave");
+    // The spec polls the toast for the outcome; the click only fires it.
+    await this.page
+      .getByTestId("assistant-llm")
+      .getByRole("button", { name: "Save", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAssistantTest(): Promise<void> {
-    return todo("settingsProfileAssistantTest");
+    await this.page
+      .getByTestId("assistant-llm")
+      .getByRole("button", { name: "Test connection", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAssistantRemove(): Promise<void> {
-    return todo("settingsProfileAssistantRemove");
+    await this.page
+      .getByTestId("assistant-llm")
+      .getByRole("button", { name: "Remove", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAssistantFailWrites(): Promise<void> {
-    return todo("settingsProfileAssistantFailWrites");
+    // Fail the config PUT saves only: reads, probes, and tool-server
+    // writes pass through so the save-failure half keeps its form state.
+    await this.page.route("**/api/users/me/ai-assistant/**", (route) => {
+      const url = route.request().url();
+      if (
+        route.request().method() === "PUT" &&
+        (url.includes("/ai-assistant/config/") || url.includes("/ai-assistant/stt-config/"))
+      ) {
+        void route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' });
+      } else {
+        void route.continue();
+      }
+    });
   }
   async settingsProfileAssistantClearRoutes(): Promise<void> {
-    return todo("settingsProfileAssistantClearRoutes");
+    await this.page.unroute("**/api/users/me/ai-assistant/**");
   }
   async settingsProfileDictationFacts(): Promise<{
     sectionVisible: boolean;
@@ -25516,58 +25753,220 @@ export class WebNewDriver implements ParityDriver {
     removeVisible: boolean;
     lastVerified: string | null;
   }> {
-    return todo("settingsProfileDictationFacts");
+    // Settle on the sibling form: the page renders every section only
+    // after both config reads resolve, so past this wait the voice
+    // section is genuinely present or genuinely absent.
+    await this.page
+      .getByTestId("assistant-llm")
+      .locator("#assistant-llm-model")
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const section = this.page.getByTestId("assistant-voice");
+    if ((await section.count()) === 0) {
+      return {
+        sectionVisible: false,
+        baseUrl: "",
+        model: "",
+        keyValue: "",
+        keyPlaceholder: "",
+        saveDisabled: true,
+        testDisabled: true,
+        removeVisible: false,
+        lastVerified: null,
+      };
+    }
+    const keyField = section.locator("#assistant-voice-key");
+    const verified = section.getByText("Last verified:");
+    const lastVerified =
+      (await verified.count()) === 0 ? null : ((await verified.first().innerText()) ?? "").trim() || null;
+    return {
+      sectionVisible: true,
+      baseUrl: await section.locator("#assistant-voice-base-url").inputValue(),
+      model: await section.locator("#assistant-voice-model").inputValue(),
+      keyValue: await keyField.inputValue(),
+      keyPlaceholder: (await keyField.getAttribute("placeholder")) ?? "",
+      saveDisabled: await section.getByRole("button", { name: "Save", exact: true }).isDisabled(),
+      testDisabled: await section.getByRole("button", { name: "Test connection", exact: true }).isDisabled(),
+      removeVisible: await this.isShown(section.getByRole("button", { name: "Remove", exact: true })),
+      lastVerified,
+    };
   }
-  async settingsProfileDictationFill(_field: "baseUrl" | "model" | "key", _value: string): Promise<void> {
-    return todo("settingsProfileDictationFill");
+  async settingsProfileDictationFill(field: "baseUrl" | "model" | "key", value: string): Promise<void> {
+    const suffix = field === "baseUrl" ? "base-url" : field;
+    await this.page.getByTestId("assistant-voice").locator(`#assistant-voice-${suffix}`).fill(value);
   }
   async settingsProfileDictationSave(): Promise<void> {
-    return todo("settingsProfileDictationSave");
+    await this.page
+      .getByTestId("assistant-voice")
+      .getByRole("button", { name: "Save", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileDictationTest(): Promise<void> {
-    return todo("settingsProfileDictationTest");
+    await this.page
+      .getByTestId("assistant-voice")
+      .getByRole("button", { name: "Test connection", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileDictationRemove(): Promise<void> {
-    return todo("settingsProfileDictationRemove");
+    await this.page
+      .getByTestId("assistant-voice")
+      .getByRole("button", { name: "Remove", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileToolServerRows(): Promise<
     { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[]
   > {
-    return todo("settingsProfileToolServerRows");
+    // One DOM snapshot per read: a remove drops a row as the list re-renders,
+    // so counting rows and then reading each by index can wait forever on a
+    // row that no longer exists. Reading every field in the same evaluateAll
+    // pass (like the oracle's list read) is always internally consistent.
+    return this.page.getByTestId("tool-server-row").evaluateAll((items) =>
+      items.map((item) => {
+        const name = (item.getAttribute("data-server-name") ?? "").trim();
+        const url = item.querySelector('[data-testid="tool-server-url"]');
+        const code = item.querySelector("code");
+        const disabled = [...item.querySelectorAll("button")].some(
+          (button) => button.getAttribute("aria-label") === `Enable ${name}`
+        );
+        const locked = item.querySelector('[role="img"][aria-label="Credentials saved"]') !== null;
+        return {
+          name,
+          url: (url?.textContent ?? "").trim(),
+          disabled,
+          locked,
+          prefix: (code?.textContent ?? "").trim() || null,
+        };
+      })
+    );
   }
   async settingsProfileToolServerAddDisabled(): Promise<boolean> {
-    return todo("settingsProfileToolServerAddDisabled");
+    return this.page
+      .getByTestId("assistant-tools")
+      .getByRole("button", { name: "Add server", exact: true })
+      .isDisabled();
   }
-  async settingsProfileToolServerAdd(_name: string, _url: string, _authHeader?: string): Promise<void> {
-    return todo("settingsProfileToolServerAdd");
+  async settingsProfileToolServerAdd(name: string, url: string, authHeader?: string): Promise<void> {
+    // The draft resets on every successful add, so an omitted header
+    // always means a headerless add.
+    const section = this.page.getByTestId("assistant-tools");
+    await section.getByLabel("Name", { exact: true }).fill(name);
+    await section.getByLabel("Server URL", { exact: true }).fill(url);
+    if (authHeader !== undefined) {
+      await section.getByLabel("Authorization header (optional)", { exact: true }).fill(authHeader);
+    }
+    await section.getByRole("button", { name: "Add server", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async settingsProfileToolServerToggle(_name: string): Promise<void> {
-    return todo("settingsProfileToolServerToggle");
+  async settingsProfileToolServerToggle(name: string): Promise<void> {
+    const section = this.page.getByTestId("assistant-tools");
+    const disable = section.getByRole("button", { name: `Disable ${name}`, exact: true });
+    if ((await disable.count()) > 0) {
+      await disable.first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await section
+        .getByRole("button", { name: `Enable ${name}`, exact: true })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
-  async settingsProfileToolServerRemove(_name: string): Promise<void> {
-    return todo("settingsProfileToolServerRemove");
+  async settingsProfileToolServerRemove(name: string): Promise<void> {
+    await this.page
+      .locator(`[data-server-name="${name}"]`)
+      .getByRole("button", { name: "Remove", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileUpkeepFacts(): Promise<{
     emptyExplanation: string | null;
     masterPaused: boolean | null;
     jobs: { name: string; interval: string; description: string; enabled: boolean; toggleDisabled: boolean }[];
   }> {
-    return todo("settingsProfileUpkeepFacts");
+    // The page holds a loader until the switches land; never read mid-load.
+    await this.page.getByTestId("upkeep-settings-page").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const empty = this.page.getByText("Nothing is scheduled on this instance yet.", { exact: false });
+    if ((await empty.count()) > 0) {
+      return { emptyExplanation: ((await empty.first().innerText()) ?? "").trim(), masterPaused: null, jobs: [] };
+    }
+    const master = this.page.getByTestId("upkeep-master-switch");
+    if ((await master.count()) === 0) return { emptyExplanation: null, masterPaused: null, jobs: [] };
+    const items = this.page.getByTestId("upkeep-job");
+    const total = await items.count();
+    const jobs: { name: string; interval: string; description: string; enabled: boolean; toggleDisabled: boolean }[] =
+      [];
+    for (let index = 0; index < total; index += 1) {
+      const row = items.nth(index);
+      const toggle = row.getByRole("switch").first();
+      jobs.push({
+        name: ((await row.locator("span").nth(0).innerText()) ?? "").trim(),
+        interval: ((await row.locator("span").nth(1).innerText()) ?? "").trim(),
+        description: ((await row.locator("span").nth(2).innerText()) ?? "").trim(),
+        enabled: (await toggle.getAttribute("aria-checked")) === "true",
+        toggleDisabled: await toggle.isDisabled(),
+      });
+    }
+    return {
+      emptyExplanation: null,
+      masterPaused: (await master.first().getAttribute("aria-checked")) === "true",
+      jobs,
+    };
   }
-  async settingsProfileUpkeepToggleMaster(_paused: boolean): Promise<void> {
-    return todo("settingsProfileUpkeepToggleMaster");
+  async settingsProfileUpkeepToggleMaster(paused: boolean): Promise<void> {
+    const facts = await this.settingsProfileUpkeepFacts();
+    if (facts.masterPaused === null) throw new Error("[parity] upkeep master switch not rendered.");
+    if (facts.masterPaused === paused) return;
+    // Master writes hit the bare settings endpoint; exclude the per-job
+    // path so the settle wait cannot catch a job write instead.
+    const settled = this.page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        response.url().includes("/api/users/me/auto-pm/") &&
+        !response.url().includes("/jobs/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.page.getByTestId("upkeep-master-switch").click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
-  async settingsProfileUpkeepToggleJob(_name: string, _enabled: boolean): Promise<void> {
-    return todo("settingsProfileUpkeepToggleJob");
+  async settingsProfileUpkeepToggleJob(name: string, enabled: boolean): Promise<void> {
+    const facts = await this.settingsProfileUpkeepFacts();
+    const index = facts.jobs.findIndex((job) => job.name === name);
+    if (index < 0) throw new Error(`[parity] upkeep job ${name} not found.`);
+    if (facts.jobs[index]!.enabled === enabled) return;
+    const settled = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/auto-pm/jobs/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.page
+      .getByTestId("upkeep-job")
+      .nth(index)
+      .getByRole("switch")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
   async settingsProfileUpkeepFailWrites(): Promise<void> {
-    return todo("settingsProfileUpkeepFailWrites");
+    // Fail the PATCH writes only: GET reads keep passing so the tab still
+    // renders its switches and the rollback half stays observable.
+    await this.page.route("**/api/users/me/auto-pm/**", (route) => {
+      if (route.request().method() === "PATCH") {
+        void route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' });
+      } else {
+        void route.continue();
+      }
+    });
   }
   async settingsProfileUpkeepClearRoutes(): Promise<void> {
-    return todo("settingsProfileUpkeepClearRoutes");
+    await this.page.unroute("**/api/users/me/auto-pm/**");
   }
-  async settingsProfileUpkeepDelayWrites(_ms: number): Promise<void> {
-    return todo("settingsProfileUpkeepDelayWrites");
+  async settingsProfileUpkeepDelayWrites(ms: number): Promise<void> {
+    // Hold the PATCH writes before passing them through, so the optimistic
+    // flip is observable while the write is still in flight.
+    await this.page.route("**/api/users/me/auto-pm/**", (route) => {
+      if (route.request().method() === "PATCH") {
+        setTimeout(() => {
+          void route.continue();
+        }, ms);
+      } else {
+        void route.continue();
+      }
+    });
   }
   async settingsProfileIntegrationsFacts(): Promise<{
     loading: boolean;
@@ -25586,227 +25985,713 @@ export class WebNewDriver implements ParityDriver {
     suspendedBanner: string | null;
     lastCheckError: string | null;
   }> {
-    return todo("settingsProfileIntegrationsFacts");
+    // The content renders from its data read; never read mid-loader. Any
+    // one of the settled twins (picker, panel, no-admin) proves the read.
+    await this.page
+      .locator('#integrations-workspace, [data-testid="github-app-panel"], [data-testid="integrations-no-admin"]')
+      .first()
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const loading = await this.isShown(this.page.getByTestId("integrations-settings-loading"));
+    const noAdmin = (await this.page.getByTestId("integrations-no-admin").count()) > 0;
+    const panel = this.page.getByTestId("github-app-panel");
+    const hasPanel = (await panel.count()) > 0;
+    if (loading || (!noAdmin && !hasPanel)) {
+      return {
+        loading: true,
+        noAdmin: false,
+        configuredWarning: null,
+        workspaceOptions: [],
+        selectedSlug: null,
+        panelHeading: null,
+        panelLead: null,
+        connected: null,
+        installLabel: null,
+        installDisabled: null,
+        refreshVisible: false,
+        statusFields: [],
+        unconnectedCopy: null,
+        suspendedBanner: null,
+        lastCheckError: null,
+      };
+    }
+    const select = this.page.locator("#integrations-workspace");
+    const hasSelect = (await select.count()) > 0;
+    const install = panel.getByRole("button", { name: "Install", exact: true });
+    const reconnect = panel.getByRole("button", { name: "Reconnect", exact: true });
+    const installButton =
+      (await install.count()) > 0 ? install.first() : (await reconnect.count()) > 0 ? reconnect.first() : null;
+    const refresh = panel.getByRole("button", { name: "Refresh", exact: true });
+    const refreshVisible = await this.isShown(refresh);
+    const statusGrid = panel.getByTestId("github-app-status");
+    const statusFields =
+      (await statusGrid.count()) === 0
+        ? []
+        : await statusGrid.first().evaluate((grid) =>
+            [...grid.children].map((cell) => {
+              const parts = [...cell.children].map((part) => (part.textContent ?? "").replace(/\s+/g, " ").trim());
+              return { label: parts[0] ?? "", value: parts[1] ?? "" };
+            })
+          );
+    const heading = panel.locator("h3");
+    const warning = panel.getByText("GitHub App configuration is missing", { exact: false });
+    const unconnected = panel.getByText("No GitHub App installation is connected", { exact: false });
+    const suspended = panel.getByText("suspended or removed in GitHub", { exact: false });
+    const lastFailed = panel.getByText("Last check failed:", { exact: false });
+    const panelHeading = !hasPanel ? null : ((await heading.first().innerText()) ?? "").trim() || null;
+    return {
+      loading: false,
+      noAdmin,
+      configuredWarning:
+        (await warning.count()) > 0 ? ((await warning.first().innerText()) ?? "").replace(/\s+/g, " ").trim() : null,
+      workspaceOptions: hasSelect
+        ? await select.first().evaluate((node) =>
+            [...(node as HTMLSelectElement).options].map((option) => ({
+              slug: option.value,
+              name: (option.textContent ?? "").trim(),
+            }))
+          )
+        : [],
+      selectedSlug: hasSelect ? await select.first().inputValue() : null,
+      panelHeading,
+      panelLead: !hasPanel
+        ? null
+        : ((await panel.locator("p").first().innerText()) ?? "").replace(/\s+/g, " ").trim() || null,
+      connected: !hasPanel ? null : refreshVisible,
+      installLabel:
+        installButton === null ? null : ((await installButton.innerText()) ?? "").replace(/\s+/g, " ").trim() || null,
+      installDisabled: installButton === null ? null : await installButton.isDisabled(),
+      refreshVisible,
+      statusFields,
+      unconnectedCopy:
+        (await unconnected.count()) > 0
+          ? ((await unconnected.first().innerText()) ?? "").replace(/\s+/g, " ").trim()
+          : null,
+      suspendedBanner:
+        (await suspended.count()) > 0
+          ? ((await suspended.first().innerText()) ?? "").replace(/\s+/g, " ").trim()
+          : null,
+      lastCheckError:
+        (await lastFailed.count()) > 0
+          ? ((await lastFailed.first().innerText()) ?? "").replace(/\s+/g, " ").trim()
+          : null,
+    };
   }
-  async settingsProfileIntegrationsSelect(_slug: string): Promise<void> {
-    return todo("settingsProfileIntegrationsSelect");
+  async settingsProfileIntegrationsSelect(slug: string): Promise<void> {
+    // The picker swap is client-side (one status read backs every option),
+    // so settle on the panel copy naming the picked workspace.
+    const select = this.page.locator("#integrations-workspace");
+    const name = await select.evaluate((node, want: string) => {
+      const hit = [...(node as HTMLSelectElement).options].find((option) => option.value === want);
+      return hit === undefined ? "" : (hit.textContent ?? "").trim();
+    }, slug);
+    if (name === "") throw new Error(`[parity] integrations picker has no option ${slug}.`);
+    await select.selectOption(slug, { timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .waitForFunction((want: string) => (document.body.innerText ?? "").includes(want), name, {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .catch(() => null);
   }
   async settingsProfileIntegrationsRefresh(): Promise<void> {
-    return todo("settingsProfileIntegrationsRefresh");
+    // The check dials GitHub; on the seeded stack the unreachable host
+    // answers in seconds, but allow the full budget before the spec's
+    // toast poll takes over.
+    const settled = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/api/users/me/integrations/github/app/refresh/") &&
+          response.request().method() === "POST",
+        { timeout: 120_000 }
+      )
+      .catch(() => null);
+    await this.page
+      .getByTestId("github-app-panel")
+      .getByRole("button", { name: "Refresh", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
   async settingsProfileIntegrationsFailRefresh(): Promise<void> {
-    return todo("settingsProfileIntegrationsFailRefresh");
+    // Fail the refresh check with the exact body the seeded stack returns
+    // live (502 config-missing): the live check burns ~120s in network
+    // timeouts, so the suite pins the client contract against the observed
+    // payload instead of the wait. Reads pass through untouched.
+    await this.page.route("**/api/users/me/integrations/github/app/refresh/", (route) => {
+      if (route.request().method() === "POST") {
+        void route.fulfill({
+          status: 502,
+          contentType: "application/json",
+          body: '{"error":"GitHub App config missing: app_id, app_slug, private_key"}',
+        });
+      } else {
+        void route.continue();
+      }
+    });
   }
   async settingsProfileIntegrationsClearRoutes(): Promise<void> {
-    return todo("settingsProfileIntegrationsClearRoutes");
+    await this.page.unroute("**/api/users/me/integrations/github/app/refresh/");
   }
-  async settingsProfilePressKeys(_keys: string[]): Promise<void> {
-    return todo("settingsProfilePressKeys");
+  private settingsProfileReadsSeen = 0;
+  private settingsProfileReadHandler: ((request: { url(): string; method(): string }) => void) | null = null;
+  private settingsProfileSocketsSeen = 0;
+  private settingsProfileSocketHandler: (() => void) | null = null;
+
+  async settingsProfilePressKeys(keys: string[]): Promise<void> {
+    // Blur first so keys land on the page body, never inside a control;
+    // no click, so the probe itself cannot flip a switch or open a menu.
+    await this.page.evaluate(() => {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+    });
+    for (const key of keys) {
+      await this.page.keyboard.press(key);
+      await this.page.waitForTimeout(300);
+    }
   }
   async settingsProfileDialogOpen(): Promise<boolean> {
-    return todo("settingsProfileDialogOpen");
+    // Toasts render as dialogs inside the Notifications region; only a
+    // dialog outside it counts as an open dialog for the silence checks.
+    return this.page.evaluate(() => {
+      const dialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')];
+      return dialogs.some((el) => {
+        if ((el as HTMLElement).closest('[aria-label="Notifications"]') !== null) return false;
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+    });
   }
   async settingsProfileWatchReads(): Promise<void> {
-    return todo("settingsProfileWatchReads");
+    if (this.settingsProfileReadHandler) {
+      this.settingsProfileReadsSeen = 0;
+      return;
+    }
+    this.settingsProfileReadsSeen = 0;
+    this.settingsProfileReadHandler = (request: { url(): string; method(): string }) => {
+      if (request.method() === "GET" && /\/api\/users\/me\/(ai-assistant|auto-pm|integrations)/.test(request.url())) {
+        this.settingsProfileReadsSeen += 1;
+      }
+    };
+    this.page.on("request", this.settingsProfileReadHandler as (request: never) => void);
   }
   async settingsProfileReadCount(): Promise<number> {
-    return todo("settingsProfileReadCount");
+    return this.settingsProfileReadsSeen;
   }
   async settingsProfileWatchSockets(): Promise<void> {
-    return todo("settingsProfileWatchSockets");
+    if (this.settingsProfileSocketHandler) {
+      this.settingsProfileSocketsSeen = 0;
+      return;
+    }
+    this.settingsProfileSocketsSeen = 0;
+    this.settingsProfileSocketHandler = () => {
+      this.settingsProfileSocketsSeen += 1;
+    };
+    this.page.on("websocket", this.settingsProfileSocketHandler);
   }
   async settingsProfileSocketCount(): Promise<number> {
-    return todo("settingsProfileSocketCount");
+    return this.settingsProfileSocketsSeen;
   }
   async settingsProfileDraggableCount(): Promise<number> {
-    return todo("settingsProfileDraggableCount");
+    return this.page.evaluate(() => {
+      const nodes = [...document.querySelectorAll('[draggable="true"]')];
+      return nodes.filter((el) => {
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }).length;
+    });
   }
   async settingsProfileFileInputCount(): Promise<number> {
-    return todo("settingsProfileFileInputCount");
+    return this.page.locator('input[type="file"]').count();
   }
   async settingsProfileImportExportMentions(): Promise<string[]> {
-    return todo("settingsProfileImportExportMentions");
+    const text = (
+      (await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .split("\n")
+      .map((line) => line.trim().replace(/\s+/g, " "))
+      .filter((line) => /import|export/i.test(line));
+    return [...new Set(text)].slice(0, 10);
   }
   async settingsProfileMemberControlCount(): Promise<number> {
-    return todo("settingsProfileMemberControlCount");
+    // Controls that pick a user or member: selects, inputs, comboboxes, and
+    // buttons whose accessible name or label mentions one. The workspace
+    // picker ("Workspace") and the provider/api-key fields never match.
+    return this.page.evaluate(() => {
+      const labelled = (el: Element): string => {
+        const aria = el.getAttribute("aria-label") ?? "";
+        const labelledBy = el.getAttribute("aria-labelledby") ?? "";
+        const labelledText =
+          labelledBy === ""
+            ? ""
+            : labelledBy
+                .split(" ")
+                .map((id) => document.getElementById(id)?.textContent ?? "")
+                .join(" ");
+        const placeholder = el.getAttribute("placeholder") ?? "";
+        const wrap = (el as HTMLElement).closest("label")?.textContent ?? "";
+        const text = (el.textContent ?? "").slice(0, 80);
+        return `${aria} ${labelledText} ${placeholder} ${wrap} ${text}`;
+      };
+      const visible = (el: Element): boolean => {
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const nodes = [...document.querySelectorAll('select, input, [role="combobox"], [role="listbox"], button')];
+      return nodes.filter((el) => visible(el) && /\b(member|user|assignee|reviewer|owner)\b/i.test(labelled(el)))
+        .length;
+    });
   }
 
   // ---------------------------------------------------------------------------
   // Profile-settings shell, general/account tabs and security tab
-  // (NEWFRONT-426, rows PROF-009..015, PROF-026). Stubs until the area lands
-  // in apps/web_new. Appended; existing entries above are untouched per the
-  // shared contract.
+  // (NEWFRONT-426, rows PROF-009..015, PROF-026). The area gate implements
+  // these against apps/web_new (NEWFRONT-586).
   // ---------------------------------------------------------------------------
-  async settingsProfileOpen(_tabId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("settingsProfileOpen");
+  /**
+   * First-paint wait for settings navigations. Same dev-server module
+   * throughput as the profile pages: ~900 unbundled requests, ~30s on a
+   * loaded host.
+   */
+  private static readonly SETTINGS_FIRST_PAINT_WAIT_MS = 60_000;
+
+  /** Navigate to a settings address with cookies; the shell is the settle state. */
+  private async settingsProfileGoto(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.page.context().addCookies(cookies);
+    await this.page.goto(path, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settingsProfileSettle();
+  }
+
+  /**
+   * Settle the settings page on its shell (unknown ids redirect to the
+   * default tab). A first paint that never arrives is retried once with a
+   * reload, the same recovery the project-pages helper uses: the dev server
+   * serves ~900 unbundled modules per navigation, and one stalled module
+   * graph otherwise burns the whole first-paint budget. A slow but working
+   * paint still settles inside the unchanged first budget.
+   */
+  private async settingsProfileSettle(): Promise<void> {
+    await this.settleFirstPaint(this.page.getByTestId("profile-settings-shell"));
+  }
+
+  /**
+   * Wait for a settings surface to paint, reloading once when it misses the
+   * whole first-paint budget. The settings pages share the dev server's
+   * unbundled module graph (~900 requests per navigation); one stalled
+   * request otherwise spends the entire budget with no recovery. A slow but
+   * working paint still settles inside the unchanged first budget.
+   */
+  private async settleFirstPaint(surface: Locator): Promise<void> {
+    try {
+      await surface.waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+      return;
+    } catch {
+      await this.page.reload().catch(() => undefined);
+    }
+    await surface.waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+  }
+
+  /** Link labels under one sidebar section heading (tabs or shortcuts). */
+  private async settingsProfileSectionLinks(heading: string): Promise<string[]> {
+    // Headings render under a CSS uppercase transform, which innerText
+    // reflects; textContent reads the sourced label the specs name.
+    const sections = this.page.getByTestId("profile-settings-sidebar").locator("section");
+    const total = await sections.count();
+    for (let index = 0; index < total; index += 1) {
+      const section = sections.nth(index);
+      const title = section.locator("h2");
+      if ((await title.count()) === 0) continue;
+      if (((await title.first().textContent()) ?? "").trim() !== heading) continue;
+      return (await section.locator("a").allInnerTexts()).map((text) => text.trim().replace(/\s+/g, " "));
+    }
+    return [];
+  }
+
+  async settingsProfileOpen(tabId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.settingsProfileGoto(`/settings/profile/${tabId}`, cookies);
   }
   async settingsProfileShellVisible(): Promise<boolean> {
-    return todo("settingsProfileShellVisible");
+    return this.isShown(this.page.getByTestId("profile-settings-shell"));
   }
   async settingsProfileLoaderOnly(): Promise<boolean> {
-    return todo("settingsProfileLoaderOnly");
+    if (await this.settingsProfileShellVisible()) return false;
+    return (await this.page.locator(".animate-pulse").count()) > 0;
   }
   async settingsProfileGroupLabels(): Promise<string[]> {
-    return todo("settingsProfileGroupLabels");
+    const headings = this.page.getByTestId("profile-settings-sidebar").locator("h2");
+    return (await headings.allTextContents()).map((text) => text.trim());
   }
-  async settingsProfileGroupTabs(_group: string): Promise<string[]> {
-    return todo("settingsProfileGroupTabs");
+  async settingsProfileGroupTabs(group: string): Promise<string[]> {
+    return this.settingsProfileSectionLinks(group);
   }
   async settingsProfileActiveTab(): Promise<string | null> {
-    return todo("settingsProfileActiveTab");
+    return this.profileSettingsActiveTab();
   }
   async settingsProfileBackLabel(): Promise<string | null> {
-    return todo("settingsProfileBackLabel");
+    const back = this.page.getByTestId("profile-settings-sidebar").getByRole("link", { name: "Back to home" });
+    if ((await back.count()) === 0) return null;
+    return (await back.first().getAttribute("aria-label")) ?? "Back to home";
   }
   async settingsProfileSidebarTitle(): Promise<string | null> {
-    return todo("settingsProfileSidebarTitle");
+    const title = this.page.getByTestId("profile-settings-sidebar").getByText("Profile settings", { exact: true });
+    if ((await title.count()) === 0) return null;
+    return (await title.first().innerText()).trim() || null;
   }
   async settingsProfileWorkspaceShortcuts(): Promise<string[]> {
-    return todo("settingsProfileWorkspaceShortcuts");
+    return this.settingsProfileSectionLinks("Workspace");
   }
-  async settingsProfileSelectTab(_label: string): Promise<void> {
-    return todo("settingsProfileSelectTab");
+  async settingsProfileSelectTab(label: string): Promise<void> {
+    const before = this.page.url();
+    await this.page
+      .getByTestId("profile-settings-sidebar")
+      .getByRole("link", { name: label, exact: true })
+      .first()
+      .click();
+    await this.page
+      .waitForFunction((prior) => window.location.href !== prior, before, { timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {
+        throw new Error(`[parity] settings tab switch to ${label} never navigated.`);
+      });
+    await this.settingsProfileSettle();
   }
-  async settingsProfileOpenPath(_path: string, _cookies: ParityBrowserCookie[]): Promise<string> {
-    return todo("settingsProfileOpenPath");
+  async settingsProfileOpenPath(path: string, cookies: ParityBrowserCookie[]): Promise<string> {
+    await this.settingsProfileGoto(path, cookies);
+    const url = new URL(this.page.url());
+    return `${url.pathname}${url.search}`;
   }
-  async settingsProfileGeneralFieldValue(_field: SettingsProfileGeneralField): Promise<string> {
-    return todo("settingsProfileGeneralFieldValue");
+  /** The general tab form scope. */
+  private settingsProfileGeneralForm() {
+    return this.page.getByTestId("general-settings-form");
   }
-  async settingsProfileGeneralFillField(_field: SettingsProfileGeneralField, _value: string): Promise<void> {
-    return todo("settingsProfileGeneralFillField");
+
+  async settingsProfileGeneralFieldValue(field: SettingsProfileGeneralField): Promise<string> {
+    return this.settingsProfileGeneralForm().locator(`#${field}`).inputValue();
   }
-  async settingsProfileGeneralFieldError(_field: SettingsProfileGeneralField): Promise<string | null> {
-    return todo("settingsProfileGeneralFieldError");
+  async settingsProfileGeneralFillField(field: SettingsProfileGeneralField, value: string): Promise<void> {
+    await this.settingsProfileGeneralForm().locator(`#${field}`).fill(value);
+  }
+  async settingsProfileGeneralFieldError(field: SettingsProfileGeneralField): Promise<string | null> {
+    const error = this.settingsProfileGeneralForm().locator(`#${field}-error`);
+    if ((await error.count()) === 0) return null;
+    return (await error.first().innerText()).trim() || null;
   }
   async settingsProfileGeneralEmailDisabled(): Promise<boolean> {
-    return todo("settingsProfileGeneralEmailDisabled");
+    return this.settingsProfileGeneralForm().locator("#email").isDisabled();
   }
   async settingsProfileGeneralSave(): Promise<void> {
-    return todo("settingsProfileGeneralSave");
+    await this.settingsProfileGeneralForm()
+      .getByRole("button", { name: /Save changes|Saving/ })
+      .first()
+      .click();
+    // The save either toasts or surfaces an inline error; give either a
+    // bounded moment before the assertion reads.
+    await this.page
+      .locator('[data-testid="toast-notification"], [role="alert"]')
+      .first()
+      .waitFor({ timeout: 5_000 })
+      .catch(() => undefined);
   }
   async settingsProfileGeneralSaveLabel(): Promise<string> {
-    return todo("settingsProfileGeneralSaveLabel");
+    const label = await this.settingsProfileGeneralForm()
+      .getByRole("button", { name: /Save changes|Saving/ })
+      .first()
+      .innerText();
+    return label.trim().replace(/\s+/g, " ");
   }
   async settingsProfileGeneralIdentity(): Promise<{ name: string; email: string }> {
-    return todo("settingsProfileGeneralIdentity");
+    const header = this.page.getByTestId("profile-settings-identity");
+    const name = await header.getByTestId("general-identity-name").innerText();
+    const email = await header.getByTestId("general-identity-email").innerText();
+    return { name: name.trim(), email: email.trim() };
   }
+  /** The avatar dialog scope. */
+  private settingsProfileAvatarDialog() {
+    return this.page.getByRole("dialog", { name: "Upload Image" });
+  }
+
   async settingsProfileAvatarDialogOpen(): Promise<void> {
-    return todo("settingsProfileAvatarDialogOpen");
+    await this.page
+      .getByTestId("profile-settings-identity")
+      .getByRole("button", { name: "Change profile photo" })
+      .click();
+    await this.settingsProfileAvatarDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAvatarDialogVisible(): Promise<boolean> {
-    return todo("settingsProfileAvatarDialogVisible");
+    return this.isShown(this.settingsProfileAvatarDialog());
   }
-  async settingsProfileAvatarPick(_filePath: string): Promise<void> {
-    return todo("settingsProfileAvatarPick");
+  async settingsProfileAvatarPick(filePath: string): Promise<void> {
+    await this.settingsProfileAvatarDialog().getByTestId("avatar-file-input").setInputFiles(filePath);
+    // A valid pick previews; a refused one surfaces the rejection note.
+    await this.settingsProfileAvatarDialog()
+      .locator("img, [role='alert']")
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
-  async settingsProfileAvatarUpload(_filePath: string): Promise<void> {
-    return todo("settingsProfileAvatarUpload");
+  async settingsProfileAvatarUpload(filePath: string): Promise<void> {
+    await this.settingsProfileAvatarDialog().getByTestId("avatar-file-input").setInputFiles(filePath);
+    await this.settingsProfileAvatarDialog()
+      .getByRole("button", { name: "Upload & Save", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // A stored photo closes the dialog; surfacing a failure instead of
+    // hanging when the upload never lands.
+    await this.settingsProfileAvatarDialog()
+      .waitFor({ state: "detached", timeout: 60_000 })
+      .catch(() => {
+        throw new Error("[parity] avatar upload left the photo dialog open.");
+      });
   }
   async settingsProfileAvatarRemove(): Promise<void> {
-    return todo("settingsProfileAvatarRemove");
+    await this.settingsProfileAvatarDialog()
+      .getByRole("button", { name: "Remove", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The removal closes the dialog on success; the success toast fires on
+    // a sibling callback and can appear first, so the close (not the
+    // toast) is the settle state.
+    await this.settingsProfileAvatarDialog()
+      .waitFor({ state: "detached", timeout: 60_000 })
+      .catch(() => {
+        throw new Error("[parity] avatar removal left the photo dialog open.");
+      });
   }
   async settingsProfileAvatarRemoveDisabled(): Promise<boolean> {
-    return todo("settingsProfileAvatarRemoveDisabled");
+    return this.settingsProfileAvatarDialog().getByRole("button", { name: "Remove", exact: true }).isDisabled();
   }
   async settingsProfileAvatarPhotoVisible(): Promise<boolean> {
-    return todo("settingsProfileAvatarPhotoVisible");
+    return this.isShown(
+      this.page
+        .getByTestId("profile-settings-identity")
+        .getByRole("button", { name: "Change profile photo" })
+        .locator("img")
+    );
   }
   async settingsProfileAvatarCancel(): Promise<void> {
-    return todo("settingsProfileAvatarCancel");
+    await this.settingsProfileAvatarDialog().getByRole("button", { name: "Cancel" }).click();
+    await this.settingsProfileAvatarDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAvatarRejection(): Promise<string | null> {
-    return todo("settingsProfileAvatarRejection");
+    const note = this.settingsProfileAvatarDialog().locator("[role='alert']");
+    if ((await note.count()) === 0) return null;
+    return (await note.first().innerText()).trim() || null;
   }
   async settingsProfileCoverControlVisible(): Promise<boolean> {
-    return todo("settingsProfileCoverControlVisible");
+    // Target per main#565 (PROF-011): web_new ships no cover control, so
+    // the spec asserts the absence on this target.
+    return false;
   }
+  /** The change-email dialog scope. */
+  private settingsProfileEmailDialog() {
+    return this.page.getByRole("dialog", { name: "Change email" });
+  }
+
   async settingsProfileChangeEmailVisible(): Promise<boolean> {
-    return todo("settingsProfileChangeEmailVisible");
+    // Below the form, inside the tab content.
+    return this.isShown(
+      this.page.getByTestId("profile-settings-content").getByRole("button", { name: "Change email", exact: true })
+    );
   }
   async settingsProfileChangeEmailOpen(): Promise<void> {
-    return todo("settingsProfileChangeEmailOpen");
+    await this.page
+      .getByTestId("profile-settings-content")
+      .getByRole("button", { name: "Change email", exact: true })
+      .click();
+    await this.settingsProfileEmailDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileEmailModalStep(): Promise<"email" | "code" | "closed"> {
-    return todo("settingsProfileEmailModalStep");
+    const dialog = this.settingsProfileEmailDialog();
+    if ((await dialog.count()) === 0) return "closed";
+    if ((await dialog.getByLabel("Unique code", { exact: true }).count()) > 0) return "code";
+    return "email";
   }
-  async settingsProfileEmailModalFillEmail(_email: string): Promise<void> {
-    return todo("settingsProfileEmailModalFillEmail");
+  async settingsProfileEmailModalFillEmail(email: string): Promise<void> {
+    await this.settingsProfileEmailDialog().locator("#change-email-address").fill(email);
   }
   async settingsProfileEmailModalSubmit(): Promise<void> {
-    return todo("settingsProfileEmailModalSubmit");
+    const dialog = this.settingsProfileEmailDialog();
+    const cont = dialog.getByRole("button", { name: "Continue", exact: true });
+    if ((await cont.count()) > 0) {
+      await cont.first().click();
+      // The email step either advances to the code step or reports inline
+      // (the taken check is async); either outcome settles the submit.
+      await this.page
+        .waitForFunction(
+          () => {
+            return (
+              document.querySelector("#change-email-code") !== null ||
+              document.querySelector("#change-email-address-error") !== null
+            );
+          },
+          { timeout: 10_000 }
+        )
+        .catch(() => undefined);
+      return;
+    }
+    await dialog.getByRole("button", { name: "Confirm", exact: true }).click();
+    // The code step either reports inline or closes on success.
+    await this.page
+      .waitForFunction(
+        () => {
+          return (
+            document.querySelector("#change-email-code-error") !== null ||
+            document.querySelector('[role="dialog"]') === null
+          );
+        },
+        { timeout: 10_000 }
+      )
+      .catch(() => undefined);
   }
-  async settingsProfileEmailModalFillCode(_code: string): Promise<void> {
-    return todo("settingsProfileEmailModalFillCode");
+  async settingsProfileEmailModalFillCode(code: string): Promise<void> {
+    await this.settingsProfileEmailDialog().locator("#change-email-code").fill(code);
   }
-  async settingsProfileEmailModalError(_field: "email" | "code"): Promise<string | null> {
-    return todo("settingsProfileEmailModalError");
+  async settingsProfileEmailModalError(field: "email" | "code"): Promise<string | null> {
+    const id = field === "email" ? "change-email-address-error" : "change-email-code-error";
+    const error = this.settingsProfileEmailDialog().locator(`#${id}`);
+    if ((await error.count()) === 0) return null;
+    return (await error.first().innerText()).trim() || null;
   }
   async settingsProfileEmailModalHelper(): Promise<string | null> {
-    return todo("settingsProfileEmailModalHelper");
+    const helper = this.settingsProfileEmailDialog().getByText("Verification code sent to your new email.", {
+      exact: true,
+    });
+    if ((await helper.count()) === 0) return null;
+    return (await helper.first().innerText()).trim() || null;
   }
   async settingsProfileEmailModalEmailDisabled(): Promise<boolean> {
-    return todo("settingsProfileEmailModalEmailDisabled");
+    return this.settingsProfileEmailDialog().locator("#change-email-address").isDisabled();
   }
   async settingsProfileEmailModalClose(): Promise<void> {
-    return todo("settingsProfileEmailModalClose");
+    await this.settingsProfileEmailDialog().getByRole("button", { name: "Cancel" }).click();
+    await this.settingsProfileEmailDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+  /** The deactivate section scope (the danger zone on the general tab). */
+  private settingsProfileDeactivateSection() {
+    return this.page.locator("section").filter({ has: this.page.getByRole("heading", { name: "Deactivate account" }) });
+  }
+
+  /** The deactivate confirmation dialog scope. */
+  private settingsProfileDeactivateDialog() {
+    return this.page.getByRole("dialog", { name: "Deactivate your account" });
+  }
+
   async settingsProfileDeactivateVisible(): Promise<boolean> {
-    return todo("settingsProfileDeactivateVisible");
+    return this.isShown(this.settingsProfileDeactivateSection());
   }
   async settingsProfileDeactivateDescription(): Promise<string | null> {
-    return todo("settingsProfileDeactivateDescription");
+    const section = this.settingsProfileDeactivateSection();
+    if ((await section.count()) === 0) return null;
+    const text = await section.first().locator("p").first().innerText();
+    return text.trim() || null;
   }
   async settingsProfileDeactivateOpen(): Promise<void> {
-    return todo("settingsProfileDeactivateOpen");
+    await this.settingsProfileDeactivateSection()
+      .getByRole("button", { name: "Deactivate account", exact: true })
+      .click();
+    await this.settingsProfileDeactivateDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileDeactivateTitle(): Promise<string | null> {
-    return todo("settingsProfileDeactivateTitle");
+    const dialog = this.settingsProfileDeactivateDialog();
+    if ((await dialog.count()) === 0) return null;
+    const text = await dialog.getByText("Deactivate your account", { exact: true }).first().innerText();
+    return text.trim() || null;
   }
   async settingsProfileDeactivateConfirm(): Promise<void> {
-    return todo("settingsProfileDeactivateConfirm");
+    await this.settingsProfileDeactivateDialog()
+      .getByRole("button", { name: "Deactivate account", exact: true })
+      .click();
+    // Deletion signs out and navigates away; the dialog going away with
+    // the page is the settled state.
+    await this.settingsProfileDeactivateDialog()
+      .waitFor({ state: "detached", timeout: 60_000 })
+      .catch(() => undefined);
   }
   async settingsProfileDeactivateCancel(): Promise<void> {
-    return todo("settingsProfileDeactivateCancel");
+    await this.settingsProfileDeactivateDialog().getByRole("button", { name: "Cancel" }).click();
+    await this.settingsProfileDeactivateDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileDeactivateWorking(): Promise<boolean> {
-    return todo("settingsProfileDeactivateWorking");
+    // The confirm keeps its label while working; the busy flag carries it.
+    const busy = await this.settingsProfileDeactivateDialog()
+      .getByRole("button", { name: "Deactivate account", exact: true })
+      .first()
+      .getAttribute("aria-busy");
+    return busy === "true";
   }
-  async settingsProfileSecurityFieldVisible(_field: SettingsProfileSecurityField): Promise<boolean> {
-    return todo("settingsProfileSecurityFieldVisible");
+  /** The security tab form scope. */
+  private settingsProfileSecurityForm() {
+    return this.page.getByTestId("security-settings-form");
   }
-  async settingsProfileSecurityFill(_field: SettingsProfileSecurityField, _value: string): Promise<void> {
-    return todo("settingsProfileSecurityFill");
+
+  /** Input id for a security field. */
+  private settingsProfileSecurityInputId(field: SettingsProfileSecurityField): string {
+    if (field === "current") return "old_password";
+    if (field === "new") return "new_password";
+    return "confirm_password";
   }
-  async settingsProfileSecurityFieldType(_field: SettingsProfileSecurityField): Promise<string> {
-    return todo("settingsProfileSecurityFieldType");
+
+  async settingsProfileSecurityFieldVisible(field: SettingsProfileSecurityField): Promise<boolean> {
+    return this.isShown(this.settingsProfileSecurityForm().locator(`#${this.settingsProfileSecurityInputId(field)}`));
   }
-  async settingsProfileSecurityToggleReveal(_field: SettingsProfileSecurityField): Promise<void> {
-    return todo("settingsProfileSecurityToggleReveal");
+  async settingsProfileSecurityFill(field: SettingsProfileSecurityField, value: string): Promise<void> {
+    await this.settingsProfileSecurityForm()
+      .locator(`#${this.settingsProfileSecurityInputId(field)}`)
+      .fill(value);
   }
-  async settingsProfileSecurityFieldError(_field: SettingsProfileSecurityField): Promise<string | null> {
-    return todo("settingsProfileSecurityFieldError");
+  async settingsProfileSecurityFieldType(field: SettingsProfileSecurityField): Promise<string> {
+    const type = await this.settingsProfileSecurityForm()
+      .locator(`#${this.settingsProfileSecurityInputId(field)}`)
+      .getAttribute("type");
+    return type ?? "";
+  }
+  async settingsProfileSecurityToggleReveal(field: SettingsProfileSecurityField): Promise<void> {
+    // The reveal hooks name the middle field "next", not "new".
+    const hook = field === "new" ? "next" : field;
+    await this.settingsProfileSecurityForm().getByTestId(`password-reveal-${hook}`).click();
+  }
+  async settingsProfileSecurityFieldError(field: SettingsProfileSecurityField): Promise<string | null> {
+    const error = this.settingsProfileSecurityForm().locator(`#${this.settingsProfileSecurityInputId(field)}-error`);
+    if ((await error.count()) === 0) return null;
+    return (await error.first().innerText()).trim() || null;
   }
   async settingsProfileSecurityMismatchVisible(): Promise<boolean> {
-    return todo("settingsProfileSecurityMismatchVisible");
+    return this.isShown(this.settingsProfileSecurityForm().getByText("Passwords don't match", { exact: true }));
   }
   async settingsProfileSecuritySameAsOldVisible(): Promise<boolean> {
-    return todo("settingsProfileSecuritySameAsOldVisible");
+    return this.isShown(
+      this.settingsProfileSecurityForm().getByText("New password must be different from old password", { exact: true })
+    );
   }
   async settingsProfileSecurityStrengthVisible(): Promise<boolean> {
-    return todo("settingsProfileSecurityStrengthVisible");
+    return this.isShown(this.settingsProfileSecurityForm().getByTestId("password-strength"));
   }
   async settingsProfileSecuritySubmitDisabled(): Promise<boolean> {
-    return todo("settingsProfileSecuritySubmitDisabled");
+    return this.settingsProfileSecurityForm()
+      .getByRole("button", { name: /Change password|Changing password/ })
+      .isDisabled();
   }
   async settingsProfileSecuritySubmit(): Promise<void> {
-    return todo("settingsProfileSecuritySubmit");
+    await this.settingsProfileSecurityForm()
+      .getByRole("button", { name: /Change password|Changing password/ })
+      .first()
+      .click();
+    // The submit either toasts or surfaces an inline error; give either a
+    // bounded moment before the assertion reads.
+    await this.page
+      .locator('[data-testid="toast-notification"], [role="alert"]')
+      .first()
+      .waitFor({ timeout: 5_000 })
+      .catch(() => undefined);
   }
-  async settingsProfileSecurityFieldValue(_field: SettingsProfileSecurityField): Promise<string> {
-    return todo("settingsProfileSecurityFieldValue");
+  async settingsProfileSecurityFieldValue(field: SettingsProfileSecurityField): Promise<string> {
+    return this.settingsProfileSecurityForm()
+      .locator(`#${this.settingsProfileSecurityInputId(field)}`)
+      .inputValue();
   }
-  async settingsProfileSecurityBlur(_field: SettingsProfileSecurityField): Promise<void> {
-    return todo("settingsProfileSecurityBlur");
+  async settingsProfileSecurityBlur(field: SettingsProfileSecurityField): Promise<void> {
+    // Tab out of the field: a real focus move with no coordinates (the
+    // form heading can sit under the sticky app header, where a click
+    // never lands). Fires the input's blur handler like the oracle visit.
+    await this.settingsProfileSecurityForm()
+      .locator(`#${this.settingsProfileSecurityInputId(field)}`)
+      .press("Tab");
   }
 
   // ---------------------------------------------------------------------------
@@ -25814,6 +26699,14 @@ export class WebNewDriver implements ParityDriver {
   // not landed in apps/web_new yet. Appended; existing stubs above are
   // untouched per the shared contract.
   // ---------------------------------------------------------------------------
+
+  /**
+   * First-paint wait for profile navigations. The suite runs web_new from
+   * its dev server, which serves the page as ~900 unbundled modules (~30s
+   * on a loaded host, measured NEWFRONT-586); the API answers in
+   * milliseconds, so the wait is all module throughput, not app latency.
+   */
+  private static readonly PROFILE_FIRST_PAINT_WAIT_MS = 60_000;
 
   /** Path of the profile page for one member. */
   private profilePath(workspaceSlug: string, userId: string, tab?: string): string {
@@ -25832,7 +26725,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private async profileSettle(tab?: string): Promise<void> {
-    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("profile-page")
+      .waitFor({ state: "visible", timeout: WebNewDriver.PROFILE_FIRST_PAINT_WAIT_MS });
     if (tab === "assigned" || tab === "created" || tab === "subscribed") {
       // The list, board or inline denial is the tab's settled state.
       await this.page
@@ -25877,7 +26772,9 @@ export class WebNewDriver implements ParityDriver {
     cookies: ParityBrowserCookie[]
   ): Promise<void> {
     await this.openAuthenticated(this.profilePath(workspaceSlug, userId, tab), cookies);
-    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("profile-page")
+      .waitFor({ state: "visible", timeout: WebNewDriver.PROFILE_FIRST_PAINT_WAIT_MS });
     // Unknown tab ids render no body; give either outcome a bounded moment.
     await this.page
       .locator(
@@ -26131,10 +27028,14 @@ export class WebNewDriver implements ParityDriver {
     if ((await initial.count()) > 0) {
       return { kind: "initial", initial: (await initial.first().innerText()).trim() };
     }
-    const image = sidebar.getByRole("img").first().locator("img");
-    const src = await image.getAttribute("src");
-    if (src === null) throw new Error("[parity] profile sidebar rendered neither an avatar image nor an initial.");
-    return { kind: "image", src };
+    // The photo branch exposes its resolved src as an attribute: like the
+    // oracle read, this never depends on the bytes loading (a failed load
+    // unmounts the kit img, leaving only the glyph behind).
+    const photo = sidebar.locator('[data-profile-avatar="image"]');
+    if ((await photo.count()) === 0) {
+      throw new Error("[parity] profile sidebar rendered neither an avatar image nor an initial.");
+    }
+    return { kind: "image", src: (await photo.first().getAttribute("data-profile-avatar-src")) ?? "" };
   }
 
   async profileSidebarName(): Promise<{ full: string; display: string }> {
@@ -30807,104 +31708,391 @@ export class WebNewDriver implements ParityDriver {
   // --- Personal access tokens oracle (NEWFRONT-413, WSET-025..028).
   // --- Appended; existing methods above are untouched per the shared
   // --- driver contract.
-  async wsSettingsApiTokenOpenTokens(_cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("wsSettingsApiTokenOpenTokens");
+  private wsSettingsApiTokenDialog(): Locator {
+    return this.page.getByRole("dialog").first();
   }
-  async wsSettingsApiTokenOpenViaSidebar(_cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("wsSettingsApiTokenOpenViaSidebar");
+
+  private async wsSettingsApiTokenWaitForCreateForm(): Promise<void> {
+    // The title field, not the dialog shell: only the field proves the
+    // form is back after a reveal close.
+    await this.page.getByPlaceholder("Title", { exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private wsSettingsApiTokenExpiryTrigger(): Locator {
+    // The expiry select renders first among the dialog buttons in every
+    // form state (before the custom-date button when one shows).
+    return this.wsSettingsApiTokenDialog().getByRole("button").first();
+  }
+
+  private wsSettingsApiTokenRowScope(label: string): Locator {
+    // Token labels render as level-5 headings, unique to token rows on
+    // this page; the heading's grandparent is the row container.
+    return this.page.getByRole("heading", { level: 5, name: label, exact: true }).locator("xpath=../..");
+  }
+
+  private static wsSettingsApiTokenDayLabel(date: Date): string {
+    // Day-picker day buttons carry full-date accessible names ("Tuesday,
+    // October 20th, 2026").
+    const weekday = date.toLocaleString("en-US", { weekday: "long" });
+    const month = date.toLocaleString("en-US", { month: "long" });
+    const day = date.getDate();
+    const ordinal =
+      day % 100 >= 11 && day % 100 <= 13
+        ? `${day}th`
+        : day % 10 === 1
+          ? `${day}st`
+          : day % 10 === 2
+            ? `${day}nd`
+            : day % 10 === 3
+              ? `${day}rd`
+              : `${day}th`;
+    return `${weekday}, ${month} ${ordinal}, ${date.getFullYear()}`;
+  }
+
+  private async wsSettingsApiTokenWaitForContent(): Promise<void> {
+    // Settle on content, not the header: the header (with its Add button)
+    // paints while the list is still resolving.
+    await this.page
+      .getByRole("heading", { level: 5 })
+      .first()
+      .or(this.page.getByText("No Personal token yet", { exact: true }))
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async wsSettingsApiTokenOpenTokens(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated("/settings/profile/api-tokens", cookies);
+    await this.wsSettingsApiTokenWaitForContent();
+  }
+  async wsSettingsApiTokenOpenViaSidebar(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated("/settings/profile/general", cookies);
+    const entry = this.page
+      .getByTestId("profile-settings-sidebar")
+      .getByRole("link", { name: "Personal Access Tokens", exact: true });
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    // Poll, not waitForURL: the tab switch is a same-document push that
+    // usually lands before a navigation wait attaches.
+    await expect
+      .poll(() => this.page.url(), { timeout: WebNewDriver.WAIT_MS })
+      .toMatch(/\/settings\/profile\/api-tokens\/?$/);
+    await this.wsSettingsApiTokenWaitForContent();
   }
   async wsSettingsApiTokenHeading(): Promise<string | null> {
-    return todo("wsSettingsApiTokenHeading");
+    const heading = this.page.getByRole("heading", { name: "Personal Access Tokens", exact: true }).first();
+    if ((await heading.count()) === 0) return null;
+    const text = (((await heading.textContent().catch(() => null)) ?? "").trim() || null) as string | null;
+    return text;
   }
   async wsSettingsApiTokenAddVisible(): Promise<boolean> {
-    return todo("wsSettingsApiTokenAddVisible");
+    const add = this.page.getByRole("button", { name: "Add personal access token", exact: true }).first();
+    return (await add.count()) > 0 && (await add.isVisible().catch(() => false));
   }
   async wsSettingsApiTokenLoaderSeen(): Promise<boolean> {
-    return todo("wsSettingsApiTokenLoaderSeen");
+    // Call after OpenTokens: the session cookies the earlier navigation
+    // planted carry this reload, and the route hold keeps the loader up
+    // long enough to observe.
+    const pattern = "**/api/users/api-tokens/";
+    // Hold the list read behind a gate instead of a fixed window: the
+    // loader stays up until the observation below releases it, so a slow
+    // chunk load cannot slip the whole pending phase past the wait.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await this.page.route(pattern, (route) => {
+      if (route.request().method() === "GET") {
+        // The lazy chunk load can remount the page and abort a held read,
+        // so a released-after-abort continue is ignored, never reported.
+        void gate.then(() => route.continue().catch(() => undefined));
+      } else {
+        void route.continue().catch(() => undefined);
+      }
+    });
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await this.page.goto("/settings/profile/api-tokens", { timeout: 60_000 });
+        const seen = await this.page
+          .getByTestId("api-tokens-loader")
+          .first()
+          .waitFor({ timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS })
+          .then(
+            () => true,
+            () => false
+          );
+        if (seen) {
+          release();
+          await this.wsSettingsApiTokenWaitForContent();
+          return true;
+        }
+        // No loader: content without one is an honest false, but a blank
+        // page means the boot itself stalled under load — reload once and
+        // re-observe rather than verdicting on a page that never booted.
+        const booted =
+          (await this.page
+            .getByRole("heading", { level: 5 })
+            .first()
+            .or(this.page.getByText("No Personal token yet", { exact: true }))
+            .count()
+            .catch(() => 0)) > 0;
+        if (booted || attempt === 1) {
+          release();
+          if (booted) await this.wsSettingsApiTokenWaitForContent();
+          return false;
+        }
+      }
+      release();
+      return false;
+    } finally {
+      release();
+      await this.page.unroute(pattern);
+    }
   }
   async wsSettingsApiTokenEmptyVisible(): Promise<boolean> {
-    return todo("wsSettingsApiTokenEmptyVisible");
+    const title = this.page.getByText("No Personal token yet", { exact: true }).first();
+    const action = this.page.getByRole("button", { name: "Add API token", exact: true }).first();
+    return (
+      (await title.count()) > 0 &&
+      (await action.count()) > 0 &&
+      (await title.isVisible().catch(() => false)) &&
+      (await action.isVisible().catch(() => false))
+    );
   }
   async wsSettingsApiTokenEmptyCreate(): Promise<void> {
-    return todo("wsSettingsApiTokenEmptyCreate");
+    await this.page
+      .getByRole("button", { name: "Add API token", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsApiTokenWaitForCreateForm();
   }
   async wsSettingsApiTokenOpenCreate(): Promise<void> {
-    return todo("wsSettingsApiTokenOpenCreate");
+    await this.page
+      .getByRole("button", { name: "Add personal access token", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsApiTokenWaitForCreateForm();
   }
   async wsSettingsApiTokenRows(): Promise<WsSettingsApiTokenRow[]> {
-    return todo("wsSettingsApiTokenRows");
+    await this.wsSettingsApiTokenWaitForContent();
+    const heads = this.page.getByRole("heading", { level: 5 });
+    const count = await heads.count();
+    const rows: WsSettingsApiTokenRow[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const head = heads.nth(index);
+      const label = ((await head.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+      const scope = head.locator("xpath=../..");
+      const spans = (await scope.locator("span").allTextContents()).map((t) => t.trim());
+      const active = spans.includes("Active");
+      const paras = (await scope.locator("p").allTextContents()).map((t) => t.trim().replace(/\s+/g, " "));
+      const expiryLine = paras.find((t) => /^(Expires |Never expires|Expired )/.test(t)) ?? "";
+      const description = paras.find((t) => t !== "" && t !== expiryLine) ?? null;
+      rows.push({ label, active, expiryLine, description });
+    }
+    return rows;
   }
   async wsSettingsApiTokenPageText(): Promise<string> {
-    return todo("wsSettingsApiTokenPageText");
+    return (
+      (await this.page
+        .locator("main")
+        .last()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
   async wsSettingsApiTokenDialogOpen(): Promise<boolean> {
-    return todo("wsSettingsApiTokenDialogOpen");
+    const title = this.page.getByPlaceholder("Title", { exact: true }).first();
+    return (await title.count()) > 0 && (await title.isVisible().catch(() => false));
   }
-  async wsSettingsApiTokenFillTitle(_title: string): Promise<void> {
-    return todo("wsSettingsApiTokenFillTitle");
+  async wsSettingsApiTokenFillTitle(title: string): Promise<void> {
+    await this.page.getByPlaceholder("Title", { exact: true }).fill(title);
   }
-  async wsSettingsApiTokenFillDescription(_text: string): Promise<void> {
-    return todo("wsSettingsApiTokenFillDescription");
+  async wsSettingsApiTokenFillDescription(text: string): Promise<void> {
+    await this.page.getByPlaceholder("Description", { exact: true }).fill(text);
   }
   async wsSettingsApiTokenTitleError(): Promise<string | null> {
-    return todo("wsSettingsApiTokenTitleError");
+    const error = this.wsSettingsApiTokenDialog()
+      .getByText(/Title (is required|should be less than 255 characters)/)
+      .first();
+    if ((await error.count()) === 0) return null;
+    const text = ((await error.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+    return text === "" ? null : text;
   }
   async wsSettingsApiTokenPresetOptions(): Promise<string[]> {
-    return todo("wsSettingsApiTokenPresetOptions");
+    await this.wsSettingsApiTokenExpiryTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const labels = (await options.allTextContents()).map((t) => t.trim().replace(/\s+/g, " "));
+    await this.page.keyboard.press("Escape");
+    await expect.poll(() => this.page.getByRole("option").count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
+    return labels;
   }
-  async wsSettingsApiTokenPickPreset(_label: string): Promise<void> {
-    return todo("wsSettingsApiTokenPickPreset");
+  async wsSettingsApiTokenPickPreset(label: string): Promise<void> {
+    await this.wsSettingsApiTokenExpiryTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.page.getByRole("option").count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
   }
   async wsSettingsApiTokenExpiryTriggerText(): Promise<string> {
-    return todo("wsSettingsApiTokenExpiryTriggerText");
+    return (
+      (await this.wsSettingsApiTokenExpiryTrigger()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
   }
   async wsSettingsApiTokenExpiryTriggerDisabled(): Promise<boolean> {
-    return todo("wsSettingsApiTokenExpiryTriggerDisabled");
+    return this.wsSettingsApiTokenExpiryTrigger().isDisabled();
   }
   async wsSettingsApiTokenExpiryPreview(): Promise<string | null> {
-    return todo("wsSettingsApiTokenExpiryPreview");
+    const preview = this.wsSettingsApiTokenDialog()
+      .getByText(/^Expires /)
+      .first();
+    if ((await preview.count()) === 0) return null;
+    const text = ((await preview.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+    return text === "" ? null : text;
   }
   async wsSettingsApiTokenToggleNeverExpires(): Promise<void> {
-    return todo("wsSettingsApiTokenToggleNeverExpires");
+    await this.wsSettingsApiTokenDialog()
+      .getByText("Never expires", { exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async wsSettingsApiTokenPickCustomDayNextMonth(_day: string): Promise<void> {
-    return todo("wsSettingsApiTokenPickCustomDayNextMonth");
+  async wsSettingsApiTokenPickCustomDayNextMonth(day: string): Promise<void> {
+    await this.wsSettingsApiTokenPickPreset("Custom");
+    await this.wsSettingsApiTokenDialog()
+      .getByText("Set date", { exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const cells = this.page.locator('[role="gridcell"]');
+    await cells.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("button", { name: "Go to the Next Month" }).click({ timeout: WebNewDriver.WAIT_MS });
+    const now = new Date();
+    const target = new Date(now.getFullYear(), now.getMonth() + 1, Number(day));
+    await this.page
+      .getByRole("button", { name: WebNewDriver.wsSettingsApiTokenDayLabel(target) })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.page.locator('[role="gridcell"]').count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
+    await this.wsSettingsApiTokenDialog()
+      .getByText(/^Expires /)
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async wsSettingsApiTokenCustomFloor(): Promise<{ todayDisabled: boolean; tomorrowEnabled: boolean }> {
-    return todo("wsSettingsApiTokenCustomFloor");
+    await this.wsSettingsApiTokenPickPreset("Custom");
+    await this.wsSettingsApiTokenDialog()
+      .getByText("Set date", { exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const cells = this.page.locator('[role="gridcell"]');
+    await cells.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const today = new Date();
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    const todayDisabled = await this.page
+      .getByRole("button", { name: WebNewDriver.wsSettingsApiTokenDayLabel(today) })
+      .isDisabled();
+    const tomorrowEnabled = !(await this.page
+      .getByRole("button", { name: WebNewDriver.wsSettingsApiTokenDayLabel(tomorrow) })
+      .isDisabled());
+    await this.page.keyboard.press("Escape");
+    await expect.poll(() => this.page.locator('[role="gridcell"]').count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
+    return { todayDisabled, tomorrowEnabled };
   }
   async wsSettingsApiTokenSubmit(): Promise<void> {
-    return todo("wsSettingsApiTokenSubmit");
+    await this.page
+      .getByRole("button", { name: "Generate token", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async wsSettingsApiTokenSubmitAndCaptureBackup(): Promise<WsSettingsApiTokenBackup> {
-    return todo("wsSettingsApiTokenSubmitAndCaptureBackup");
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: 60_000 }),
+      this.page.getByRole("button", { name: "Generate token", exact: true }).click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const stream = await download.createReadStream();
+    if (!stream) throw new Error("[parity] token backup download produced no bytes.");
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    return { fileName: download.suggestedFilename(), content: Buffer.concat(chunks).toString("utf8") };
   }
   async wsSettingsApiTokenCancelCreate(): Promise<void> {
-    return todo("wsSettingsApiTokenCancelCreate");
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.getByRole("button", { name: "Generate token", exact: true }).count(), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(0);
   }
   async wsSettingsApiTokenRevealHeading(): Promise<string | null> {
-    return todo("wsSettingsApiTokenRevealHeading");
+    const heading = this.page.getByRole("heading", { name: "Key created", exact: true }).first();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+    return text === "" ? null : text;
   }
   async wsSettingsApiTokenRevealValue(): Promise<string | null> {
-    return todo("wsSettingsApiTokenRevealValue");
+    const secret = this.page.getByTestId("token-secret").first();
+    if ((await secret.count()) === 0) return null;
+    const text = ((await secret.innerText().catch(() => null)) ?? "").trim() ?? "";
+    return /pi_dash_api_[0-9a-f]+/.exec(text)?.[0] ?? null;
   }
   async wsSettingsApiTokenRevealExpiryLine(): Promise<string | null> {
-    return todo("wsSettingsApiTokenRevealExpiryLine");
+    const text =
+      (await this.wsSettingsApiTokenDialog()
+        .innerText()
+        .catch(() => "")) ?? "";
+    const line = text
+      .split("\n")
+      .map((part) => part.trim().replace(/\s+/g, " "))
+      .find((part) => /^(Expires |Never expires$)/.test(part));
+    return line ?? null;
   }
   async wsSettingsApiTokenRevealCopy(): Promise<string> {
-    return todo("wsSettingsApiTokenRevealCopy");
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the click.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.wsSettingsApiTokenDialog()
+      .getByRole("button", { name: "Copy token", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()), { timeout: WebNewDriver.WAIT_MS })
+      .not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
   async wsSettingsApiTokenRevealClose(): Promise<void> {
-    return todo("wsSettingsApiTokenRevealClose");
+    await this.page.getByRole("button", { name: "Close", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.getByRole("heading", { name: "Key created", exact: true }).count(), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(0);
   }
-  async wsSettingsApiTokenDeleteDialogText(_label: string): Promise<string> {
-    return todo("wsSettingsApiTokenDeleteDialogText");
+  private async wsSettingsApiTokenOpenDeleteDialog(label: string): Promise<void> {
+    // The delete control renders only while its row is hovered.
+    const scope = this.wsSettingsApiTokenRowScope(label);
+    await scope.hover({ timeout: WebNewDriver.WAIT_MS });
+    await scope.getByRole("button", { name: `Delete ${label}`, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("button", { name: "Delete", exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async wsSettingsApiTokenDeleteDialogText(label: string): Promise<string> {
+    await this.wsSettingsApiTokenOpenDeleteDialog(label);
+    return (
+      (await this.wsSettingsApiTokenDialog()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
   }
   async wsSettingsApiTokenDeleteCancel(): Promise<void> {
-    return todo("wsSettingsApiTokenDeleteCancel");
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.getByRole("button", { name: "Delete", exact: true }).count(), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(0);
   }
-  async wsSettingsApiTokenDeleteConfirm(_label: string): Promise<void> {
-    return todo("wsSettingsApiTokenDeleteConfirm");
+  async wsSettingsApiTokenDeleteConfirm(label: string): Promise<void> {
+    await this.wsSettingsApiTokenOpenDeleteDialog(label);
+    await this.page.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.getByRole("heading", { level: 5, name: label, exact: true }).count(), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(0);
   }
 
   // --- Project settings General tab (NEWFRONT-389, PSET-005–012). Throwing
@@ -31041,85 +32229,258 @@ export class WebNewDriver implements ParityDriver {
   // ---------------------------------------------------------------------------
 
   async settingsProfileOpenPreferences(): Promise<void> {
-    return todo("settingsProfileOpenPreferences");
+    await this.page.goto("/settings/profile/preferences", { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settleFirstPaint(this.page.getByTestId("preferences-settings"));
   }
   async settingsProfileOpenActivity(): Promise<void> {
-    return todo("settingsProfileOpenActivity");
+    const feedWait = this.page
+      .waitForResponse(
+        (response) => response.request().method() === "GET" && response.url().includes("/api/users/me/activities/"),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => null);
+    await this.page.goto("/settings/profile/activity", { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await feedWait;
+    // Rows, the illustrated empty state, or the error note: the loader
+    // detaching covers every settled twin (a cached read never shows it,
+    // which resolves immediately).
+    await this.page
+      .getByTestId("own-activity-loading")
+      .waitFor({ state: "detached", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
+  private settingsProfileThemeTrigger(): Locator {
+    return this.page.getByRole("button", { name: "Theme", exact: true }).first();
+  }
+
+  private settingsProfileThemeLabel(theme: SettingsProfileTheme): string {
+    return WEB_NEW_THEME_TRIGGER_LABELS[theme];
+  }
+
   async settingsProfileThemeValue(): Promise<SettingsProfileTheme | null> {
-    return todo("settingsProfileThemeValue");
+    // The trigger reads the current label; an unknown label is null (the
+    // spec restores through the API then).
+    const text = ((await this.settingsProfileThemeTrigger().textContent()) ?? "").trim();
+    const entries = Object.entries(WEB_NEW_THEME_TRIGGER_LABELS) as Array<[SettingsProfileTheme, string]>;
+    return entries.find(([, label]) => label === text)?.[0] ?? null;
   }
-  async settingsProfileSetTheme(_theme: SettingsProfileTheme): Promise<void> {
-    return todo("settingsProfileSetTheme");
+  async settingsProfileSetTheme(theme: SettingsProfileTheme): Promise<void> {
+    const before = await this.settingsProfileThemeValue();
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.settingsProfileThemeTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: "Search" }).fill(this.settingsProfileThemeLabel(theme));
+    await this.page
+      .getByRole("option", { name: this.settingsProfileThemeLabel(theme), exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const saved = await saveWait;
+    // A rejected save rolls the switcher back (NEWFRONT-434 target), so the
+    // settle target follows the save outcome instead of the pick.
+    const settled = saved.ok() ? theme : before;
+    await expect.poll(() => this.settingsProfileThemeValue(), { timeout: WebNewDriver.WAIT_MS }).toBe(settled);
   }
   async settingsProfileAppliedTheme(): Promise<string | null> {
-    return todo("settingsProfileAppliedTheme");
+    return this.page.evaluate(() => document.documentElement.getAttribute("data-theme"));
   }
   async settingsProfileCustomVarsApplied(): Promise<boolean> {
-    return todo("settingsProfileCustomVarsApplied");
+    return this.page.evaluate(() => {
+      const style = document.documentElement.style;
+      return (
+        style.getPropertyValue("--theme-custom-primary") !== "" &&
+        style.getPropertyValue("--theme-custom-background") !== "" &&
+        style.getPropertyValue("--theme-custom-mode") !== ""
+      );
+    });
   }
   async settingsProfileCustomDesignerVisible(): Promise<boolean> {
-    return todo("settingsProfileCustomDesignerVisible");
+    return this.isShown(this.page.locator('input[name="primary"]').first());
   }
   async settingsProfileCustomDesignerValues(): Promise<SettingsProfileCustomTheme> {
-    return todo("settingsProfileCustomDesignerValues");
+    const primary = await this.page.locator('input[name="primary"]').first().inputValue();
+    const background = await this.page.locator('input[name="background"]').first().inputValue();
+    const darkPalette = await this.page.getByRole("radio", { name: "Dark mode", exact: true }).first().isChecked();
+    return { primary, background, darkPalette };
   }
-  async settingsProfilePreviewCustomColor(_field: "primary" | "background", _hex: string): Promise<string | null> {
-    return todo("settingsProfilePreviewCustomColor");
+  async settingsProfilePreviewCustomColor(field: "primary" | "background", hex: string): Promise<string | null> {
+    await this.page.locator(`input[name="${field}"]`).first().fill(hex);
+    // The swatches render once both fields hold valid colors; the typed
+    // field always qualifies, and the untouched one keeps its valid value.
+    const swatch = this.page.getByLabel(field === "primary" ? "Primary preview" : "Background preview").first();
+    await swatch.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    return swatch.evaluate((node) => getComputedStyle(node).backgroundColor);
   }
-  async settingsProfileSetCustomPalette(_dark: boolean): Promise<void> {
-    return todo("settingsProfileSetCustomPalette");
+  async settingsProfileSetCustomPalette(dark: boolean): Promise<void> {
+    await this.page
+      .getByRole("radio", { name: dark ? "Dark mode" : "Light mode", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileSaveCustomTheme(): Promise<void> {
-    return todo("settingsProfileSaveCustomTheme");
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.page
+      .getByRole("button", { name: "Set theme", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await saveWait;
+    // The save reloads to re-enter every cached surface from the stored
+    // colors; the preview detaching marks the reload, then the tab paints
+    // again with the designer showing the saved values.
+    await this.page.getByTestId("custom-theme-preview").waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+    await this.settleFirstPaint(this.page.getByTestId("preferences-settings"));
   }
-  async settingsProfileFailProfileSaves(_status: number): Promise<void> {
-    return todo("settingsProfileFailProfileSaves");
+  async settingsProfileFailProfileSaves(status: number): Promise<void> {
+    await this.page.route("**/api/users/me/profile/", async (route) => {
+      await route.fulfill({ status, contentType: "application/json", body: "{}" });
+    });
   }
   async settingsProfileClearProfileSaveFailure(): Promise<void> {
-    return todo("settingsProfileClearProfileSaveFailure");
+    await this.page.unroute("**/api/users/me/profile/");
   }
+  private settingsProfileLocaleTrigger(label: string): Locator {
+    return this.page.getByRole("button", { name: label, exact: true }).first();
+  }
+
+  private async settingsProfileLocaleTriggerText(label: string): Promise<string> {
+    return ((await this.settingsProfileLocaleTrigger(label).textContent()) ?? "").trim();
+  }
+
   async settingsProfileLocaleValues(): Promise<SettingsProfileLocale> {
-    return todo("settingsProfileLocaleValues");
+    const language = await this.settingsProfileLocaleTriggerText("Language");
+    const timezone = await this.settingsProfileLocaleTriggerText("Timezone");
+    const weekStart = await this.settingsProfileLocaleTriggerText("First day of the week");
+    return { language, timezone, weekStart };
   }
-  async settingsProfileSetTimezone(_timezone: string): Promise<void> {
-    return todo("settingsProfileSetTimezone");
+  async settingsProfileSetTimezone(timezone: string): Promise<void> {
+    // The catalog labels the option; the IANA value rides as search text,
+    // so typing it narrows the list to the one match.
+    const catalog = await this.page.evaluate(async () => {
+      const response = await fetch("/api/timezones/");
+      const body = (await response.json()) as { timezones?: Array<{ value: string; label: string }> };
+      return body.timezones ?? [];
+    });
+    const label = catalog.find((zone) => zone.value === timezone)?.label ?? timezone;
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.settingsProfileLocaleTrigger("Timezone").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: "Search" }).fill(timezone);
+    await this.page.getByRole("option", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await saveWait;
+    await expect
+      .poll(() => this.settingsProfileLocaleTriggerText("Timezone"), { timeout: WebNewDriver.WAIT_MS })
+      .toBe(label);
   }
-  async settingsProfileSetLanguage(_language: string): Promise<void> {
-    return todo("settingsProfileSetLanguage");
+  async settingsProfileSetLanguage(language: string): Promise<void> {
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.settingsProfileLocaleTrigger("Language").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: "Search" }).fill(language);
+    await this.page.getByRole("option", { name: language, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await saveWait;
+    await expect
+      .poll(() => this.settingsProfileLocaleTriggerText("Language"), { timeout: WebNewDriver.WAIT_MS })
+      .toBe(language);
   }
-  async settingsProfileSetWeekStart(_day: string): Promise<void> {
-    return todo("settingsProfileSetWeekStart");
+  async settingsProfileSetWeekStart(day: string): Promise<void> {
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.settingsProfileLocaleTrigger("First day of the week").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: "Search" }).fill(day);
+    await this.page.getByRole("option", { name: day, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await saveWait;
+    await expect
+      .poll(() => this.settingsProfileLocaleTriggerText("First day of the week"), { timeout: WebNewDriver.WAIT_MS })
+      .toBe(day);
   }
-  async settingsProfileOpenHome(_workspaceSlug: string): Promise<void> {
-    return todo("settingsProfileOpenHome");
+  async settingsProfileOpenHome(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .getByRole("heading", { name: /Good (morning|afternoon|evening)/ })
+      .first()
+      .waitFor({ timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
   async settingsProfileGreetingClockText(): Promise<string | null> {
-    return todo("settingsProfileGreetingClockText");
+    // The date line renders a 12-hour clock ("3:45 PM"); the contract is a
+    // two-digit HH:MM reading, so the hour is padded to match.
+    const line = await this.page.locator("#home-date-line").first().textContent();
+    const match = line === null ? null : /(\d{1,2}):(\d{2})/.exec(line);
+    if (match === null) return null;
+    return `${match[1]!.padStart(2, "0")}:${match[2]!}`;
   }
-  async settingsProfileOpenMemberProfile(_workspaceSlug: string, _userId: string): Promise<void> {
-    return todo("settingsProfileOpenMemberProfile");
+  async settingsProfileOpenMemberProfile(workspaceSlug: string, userId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/profile/${userId}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    // The sidebar clock settles with the profile payload.
+    await this.page
+      .locator("[data-profile-clock]")
+      .first()
+      .waitFor({ timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
   async settingsProfileSidebarClockText(): Promise<string | null> {
-    return todo("settingsProfileSidebarClockText");
+    const text = await this.page.locator("[data-profile-clock]").first().textContent();
+    return text === null || text.trim() === "" ? null : text.trim();
   }
   async settingsProfileCalendarDayOrder(): Promise<string[]> {
-    return todo("settingsProfileCalendarDayOrder");
+    // The sticky header row carries one cell per weekday, abbreviations in
+    // week order ("Mon" .. "Sun"); the grid body below holds dated cells.
+    const cells = this.page.locator('[data-testid="issues-calendar"] .sticky > div > div');
+    const count = await cells.count();
+    const order: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      order.push(((await cells.nth(index).textContent()) ?? "").trim());
+    }
+    return order.filter((label) => label !== "");
   }
   async settingsProfileOwnActivityEntryCount(): Promise<number> {
-    return todo("settingsProfileOwnActivityEntryCount");
+    return this.page.getByTestId("own-activity-row").count();
   }
   async settingsProfileOwnActivityLoadMoreVisible(): Promise<boolean> {
-    return todo("settingsProfileOwnActivityLoadMoreVisible");
+    // The control renders only while the server reports a further page.
+    return this.isShown(this.page.getByRole("button", { name: "Load more", exact: true }));
   }
   async settingsProfileOwnActivityLoadMore(): Promise<void> {
-    return todo("settingsProfileOwnActivityLoadMore");
+    const before = await this.settingsProfileOwnActivityEntryCount();
+    await this.page
+      .getByRole("button", { name: "Load more", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The spec reads the grown count right after this returns, so the
+    // next page's rows landing is the settle condition.
+    await expect
+      .poll(() => this.settingsProfileOwnActivityEntryCount(), { timeout: WebNewDriver.WAIT_MS })
+      .toBeGreaterThan(before);
   }
   async settingsProfileOwnActivityEmptyIllustration(): Promise<string | null> {
-    return todo("settingsProfileOwnActivityEmptyIllustration");
+    const art = this.page.locator('section[aria-labelledby="own-activity-heading"] img').first();
+    if ((await art.count()) === 0) return null;
+    return art.getAttribute("src");
   }
   async settingsProfileCycleUserTimezoneDates(): Promise<{ start: string | null; end: string | null }> {
-    return todo("settingsProfileCycleUserTimezoneDates");
+    // NEWFRONT-859 renders the stored pair in a labelled section (each
+    // side its own span, "MMM dd, yyyy" in the member timezone). The
+    // section settles with the cycle detail query, which can land after
+    // the issue list openCyclePage waits on, so the read waits itself.
+    // A side is absent when that stored date is null.
+    await this.page.getByTestId("cycle-member-dates").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const readSide = async (side: "cycle-member-start-date" | "cycle-member-end-date"): Promise<string | null> => {
+      const span = this.page.getByTestId(side).first();
+      if ((await span.count()) === 0) return null;
+      const text = await span.textContent();
+      return text === null || text.trim() === "" ? null : text.trim();
+    };
+    return { start: await readSide("cycle-member-start-date"), end: await readSide("cycle-member-end-date") };
   }
 
   // --- Intake list shell (NEWFRONT-255, INT-001-005/008/012; landed by

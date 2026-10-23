@@ -125,6 +125,39 @@ describe("PersonalAccessTokensPage", () => {
     expect(screen.queryByText("No Personal token yet")).toBeNull();
   });
 
+  it("renders row expiry lines in the member timezone", async () => {
+    const tokens = [
+      token({ id: "11111111-1111-4111-8111-111111111111", label: "Future", expired_at: "2030-06-15T12:00:00Z" }),
+    ];
+    const me = {
+      id: USER_ID,
+      email: "member@example.com",
+      username: "member",
+      first_name: "Member",
+      last_name: "User",
+      display_name: "Member User",
+      avatar: "",
+      avatar_url: null,
+      cover_image: null,
+      cover_image_url: null,
+      date_joined: "2026-01-01T00:00:00Z",
+      user_timezone: "Pacific/Kiritimati",
+      is_active: true,
+      is_bot: false,
+      is_email_verified: true,
+      is_password_autoset: false,
+      last_login_medium: "password",
+      last_login_time: null,
+    };
+    const { wrapper } = harness((url) =>
+      url.endsWith("/api/users/me/") ? json(url, JSON.stringify(me)) : json(url, JSON.stringify(tokens))
+    );
+    render(<PersonalAccessTokensPage now={new Date("2026-10-19T12:00:00Z")} />, { wrapper });
+    expect(await screen.findByRole("heading", { name: "Future", level: 5 })).toBeInTheDocument();
+    const future = screen.getByRole("heading", { name: "Future", level: 5 }).closest("li") as HTMLElement;
+    expect(future).toHaveTextContent("Expires Jun 16, 2030 at 02:00");
+  });
+
   it("confirms deletion, cancels without a request, and deletes with a notice", async () => {
     const user = userEvent.setup();
     const deletes: string[] = [];

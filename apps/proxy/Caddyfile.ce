@@ -67,6 +67,10 @@
 	reverse_proxy /pricing/* web_new:3000
 	redir /god-mode /god-mode/ permanent
 	reverse_proxy /god-mode/* web_new:3000
+	redir /settings/profile /settings/profile/ permanent
+	reverse_proxy /settings/profile/* web_new:3000
+	redir /profile /profile/ permanent
+	reverse_proxy /profile/* web_new:3000
 	# END MIGRATED ROUTES
 	reverse_proxy /* web:3000
 }

@@ -59,11 +59,16 @@ export interface TimezoneChoice {
   detail: string;
 }
 
+/** The server default zone, which the catalog omits but the row must offer. */
+const UTC_CHOICE: TimezoneChoice = { value: "UTC", label: "UTC", detail: "UTC" };
+
 /**
  * The timezone row's options and current label. A stored zone the
  * catalog no longer lists stays pickable at the top of the list, so the
  * row always names the value the server holds; a member with no zone
- * reads "Not set".
+ * reads "Not set". UTC is pinned to the top of the list because the
+ * catalog omits it while the server defaults members to it — without
+ * the pin a member who picks away from UTC can never pick it back.
  */
 export function timezoneChoices(
   zones: ReadonlyArray<{ value: string; label: string; utc_offset: string }>,
@@ -74,10 +79,11 @@ export function timezoneChoices(
     label: zone.label,
     detail: `${zone.utc_offset} ${zone.label}`,
   }));
-  if (timezone === "") return { options: rows, label: "Not set" };
-  const known = rows.find((row) => row.value === timezone);
+  const offered = rows.some((row) => row.value === UTC_CHOICE.value) ? rows : [UTC_CHOICE, ...rows];
+  if (timezone === "") return { options: offered, label: "Not set" };
+  const known = offered.find((row) => row.value === timezone);
   if (known === undefined) {
-    return { options: [{ value: timezone, label: timezone, detail: timezone }, ...rows], label: timezone };
+    return { options: [{ value: timezone, label: timezone, detail: timezone }, ...offered], label: timezone };
   }
-  return { options: rows, label: known.label };
+  return { options: offered, label: known.label };
 }

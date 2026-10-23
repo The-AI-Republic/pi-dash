@@ -10,6 +10,7 @@ import {
   languageLabel,
   normalizeWeekStart,
   THEME_SELECT_OPTIONS,
+  timezoneChoices,
   weekStartLabel,
   WEEK_START_OPTIONS,
   WEEKDAY_LABELS,
@@ -75,5 +76,29 @@ describe("preference choices", () => {
     expect(languageLabel("fr", supported)).toBe("Français");
     expect(languageLabel("de", supported)).toBe("de");
     expect(languageLabel("", supported)).toBe("");
+  });
+
+  it("labels a known zone and keeps an unknown stored zone pickable", () => {
+    const zones = [{ value: "Pacific/Midway", label: "Midway Island", utc_offset: "UTC-11:00" }];
+    const known = timezoneChoices(zones, "Pacific/Midway");
+    expect(known.label).toBe("Midway Island");
+    expect(known.options.map((option) => option.value)).toEqual(["UTC", "Pacific/Midway"]);
+    const unknown = timezoneChoices(zones, "Mars/Olympus");
+    expect(unknown.label).toBe("Mars/Olympus");
+    expect(unknown.options[0]).toEqual({ value: "Mars/Olympus", label: "Mars/Olympus", detail: "Mars/Olympus" });
+    expect(timezoneChoices(zones, "").label).toBe("Not set");
+  });
+
+  it("pins UTC to the top unless the catalog lists it", () => {
+    const zones = [{ value: "Pacific/Midway", label: "Midway Island", utc_offset: "UTC-11:00" }];
+    const pinned = timezoneChoices(zones, "Pacific/Midway");
+    expect(pinned.options[0]).toEqual({ value: "UTC", label: "UTC", detail: "UTC" });
+    expect(timezoneChoices(zones, "UTC").label).toBe("UTC");
+    const listed = timezoneChoices(
+      [{ value: "UTC", label: "Coordinated Universal Time", utc_offset: "UTC+00:00" }, ...zones],
+      "Pacific/Midway"
+    );
+    expect(listed.options.filter((option) => option.value === "UTC")).toHaveLength(1);
+    expect(timezoneChoices([], "").options).toEqual([{ value: "UTC", label: "UTC", detail: "UTC" }]);
   });
 });

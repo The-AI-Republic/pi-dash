@@ -47,9 +47,13 @@ describe("isMigratedPath", () => {
         "/signin",
         "/login",
         "/register",
+        "/settings/profile",
+        "/profile",
       ])
     );
     expect(isMigratedPath("/sign-in")).toBe(true);
+    expect(isMigratedPath("/settings/profile/security")).toBe(true);
+    expect(isMigratedPath("/profile/general")).toBe(true);
     expect(isMigratedPath("/acme/projects/1/issues")).toBe(false);
   });
 });
