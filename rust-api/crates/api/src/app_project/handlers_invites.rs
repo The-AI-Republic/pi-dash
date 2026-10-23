@@ -2962,13 +2962,16 @@ async fn fav_list(
     .map_err(|_| Denial::ServerError)?;
     let mut rendered = Vec::with_capacity(rows.len());
     for row in &rows {
-        let favorite = favorite_row_from_pg(row)?;
+        // The shared helpers fail with the app_issues `Denial`; every
+        // failure there is a server error.
+        let favorite = favorite_row_from_pg(row).map_err(|_| Denial::ServerError)?;
         let entity = fetch_favorite_entity(
             &pool,
             &favorite.entity_type,
             favorite.entity_identifier.as_deref(),
         )
-        .await?;
+        .await
+        .map_err(|_| Denial::ServerError)?;
         rendered.push(render_favorite(&favorite, entity.as_ref()));
     }
     Ok(json_response(

@@ -2883,8 +2883,8 @@ fn json_float_str(value: f64) -> String {
 /// assembler — see `render_favorite`).
 pub(crate) struct FavoriteRow {
     id: String,
-    entity_type: String,
-    entity_identifier: Option<String>,
+    pub(crate) entity_type: String,
+    pub(crate) entity_identifier: Option<String>,
     name: Option<String>,
     is_folder: bool,
     sequence: f64,
