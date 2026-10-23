@@ -783,14 +783,24 @@ export class WebNewDriver implements ParityDriver {
     // name is the row anchor's paragraph (the key rides in the anchor's
     // accessible name). (NEWFRONT-557)
     const anchored = this.page.getByRole("region", { name: "Issues" }).locator('article a[data-row-anchor="true"] > p');
-    if ((await anchored.count()) > 0) {
+    if (typeof anchored.allInnerTexts === "function" && (await anchored.count()) > 0) {
       const texts = await anchored.allInnerTexts();
       return texts.map((text) => text.trim()).filter((text) => text.length > 0);
     }
-    // Fallback, same as the oracle reader (NEWFRONT-662): every non-blank
-    // paragraph in the content area, in order.
+    // Same as the oracle reader (NEWFRONT-662): every non-blank paragraph
+    // in the content area, in order. Covers layouts whose rows are not
+    // anchor paragraphs.
     const texts = await this.page.getByRole("main").locator("p").allTextContents();
-    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+    const named = texts.map((text) => text.trim()).filter((text) => text.length > 0);
+    if (named.length > 0) return named;
+    // Last resort: the scaffold-tier selector (each row's second span).
+    const rows = this.page.locator('section[aria-label="Issue list"] article');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      names.push(((await rows.nth(i).locator("span").nth(1).innerText()) ?? "").trim());
+    }
+    return names;
   }
 
   // --- Mention flows (NEWFRONT-115). Throwing stubs per the shared driver
