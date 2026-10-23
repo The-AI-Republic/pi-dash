@@ -52,8 +52,8 @@ pub mod shape;
 pub use issue_move::{
     cancel_frame, failed_cancel_line, handoff_run_config, is_executing_run, issue_activity_kwargs,
     move_model_activity_kwargs, move_work_item_to_project, offline_cancel_line, py_dumps,
-    repoint_sql, send_project_move_cancel, target_ref_text, AgentRunTrigger, CancelOutcome,
-    HandoffRunRow, IssueMoveError, MoveError, MoveOutcome, MovePostCommit, MoveResult, MoveStore,
+    repoint_sql, send_project_move_cancel, target_ref_text, CancelOutcome, HandoffRunRow,
+    IssueMoveError, MoveError, MoveOutcome, MovePostCommit, MoveResult, MoveStore,
     MovedIssueFields, MovedIssueRow, PodRow, ProjectRow, RepointTarget, SourceIssueRow, StateRow,
     AGENT_RUN_COLUMNS, ASSIGNEE_IDS_SQL, ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL,
     CHILDREN_DETACH_SQL, COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL,
