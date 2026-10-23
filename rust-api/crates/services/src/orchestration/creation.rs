@@ -175,7 +175,8 @@ pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_i
 /// The project projection (`service.py` reads `issue.project` for the
 /// executor scope, repo snapshot, creator fallback and clock policy).
 /// `$1` is the project id.
-pub const PROJECT_SELECT_SQL: &str = "SELECT id, workspace_id, identifier, name, description, \
+pub const PROJECT_SELECT_SQL: &str =
+    "SELECT id, workspace_id, identifier, name, description, context, \
     repo_url, base_branch, default_agent_executor, project_lead_id, default_assignee_id, \
     agent_default_max_ticks, agent_default_interval_seconds, \
     agent_review_default_interval_seconds, agent_test_default_interval_seconds \
@@ -532,6 +533,7 @@ pub struct ProjectView {
     pub identifier: String,
     pub name: String,
     pub description: Option<String>,
+    pub context: Option<String>,
     pub repo_url: Option<String>,
     pub base_branch: Option<String>,
     pub default_agent_executor: String,
@@ -1111,6 +1113,7 @@ pub fn render_first_turn(
         project_id: project.id.to_string(),
         project_name: project.name.clone(),
         project_description: project.description.clone(),
+        project_context: project.context.clone(),
         repo,
         code_reviews: context::code_reviews_context(&bundle.reviews),
         parent: bundle.parent.clone(),
@@ -2103,6 +2106,7 @@ mod tests {
             identifier: "FX6".to_owned(),
             name: "FX6".to_owned(),
             description: None,
+            context: None,
             repo_url: Some("https://example.com/fx6.git".to_owned()),
             base_branch: Some("main".to_owned()),
             default_agent_executor: "local_runner".to_owned(),

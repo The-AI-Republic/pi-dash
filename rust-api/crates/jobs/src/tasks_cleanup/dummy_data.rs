@@ -384,14 +384,14 @@ impl PgDummyData {
                  is_default, guest_view_all_features, timezone, members_can_edit_states,
                  repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks,
                  agent_review_default_interval_seconds, agent_test_default_interval_seconds,
-                 agent_ticking_enabled, default_agent_executor)
+                 agent_ticking_enabled, default_agent_executor, context)
                 VALUES ($1::uuid, $2::uuid, $3, $4, NULL, TRUE, $5, $5,
                  '', 2, FALSE, FALSE, FALSE, TRUE,
                  0, 0, '{}', FALSE, FALSE,
                  $6, FALSE, $7, TRUE,
                  '', 'main', 10800, 10,
                  10800, 10800,
-                 TRUE, $8)"#,
+                 TRUE, $8, '')"#,
         )
         .bind(&project_id)
         .bind(workspace_id)

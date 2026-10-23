@@ -2865,7 +2865,7 @@ mod tests {
             "t_",
         ));
         let actual = full_row_aliases();
-        assert_eq!(actual.len(), 175);
+        assert_eq!(actual.len(), 176);
         assert_eq!(actual, expected);
         // Spot the group boundaries: a shifted block fails loudly.
         assert_eq!(actual[0], "i_created_at");
@@ -2873,15 +2873,15 @@ mod tests {
         assert_eq!(actual[34], "cycle_id");
         assert_eq!(actual[42], "is_intake");
         assert_eq!(actual[43], "p_created_at");
-        assert_eq!(actual[88], "p_default_agent_executor");
-        assert_eq!(actual[89], "w_created_at");
-        assert_eq!(actual[102], "w_background_color");
-        assert_eq!(actual[103], "par_created_at");
-        assert_eq!(actual[136], "par_agent_executor");
-        assert_eq!(actual[137], "s_created_at");
-        assert_eq!(actual[154], "s_external_id");
-        assert_eq!(actual[155], "t_created_at");
-        assert_eq!(actual[174], "t_resume_parent_run_id");
+        assert_eq!(actual[89], "p_default_agent_executor");
+        assert_eq!(actual[90], "w_created_at");
+        assert_eq!(actual[103], "w_background_color");
+        assert_eq!(actual[104], "par_created_at");
+        assert_eq!(actual[137], "par_agent_executor");
+        assert_eq!(actual[138], "s_created_at");
+        assert_eq!(actual[155], "s_external_id");
+        assert_eq!(actual[156], "t_created_at");
+        assert_eq!(actual[175], "t_resume_parent_run_id");
         // Unique: no `row_to_json` key collision survives.
         let mut unique = actual.clone();
         unique.sort();

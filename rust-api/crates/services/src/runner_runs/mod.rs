@@ -404,6 +404,7 @@ pub(crate) const PROJECT_COLUMNS: &[&str] = &[
     "id",
     "name",
     "description",
+    "context",
     "description_text",
     "description_html",
     "network",
@@ -582,7 +583,7 @@ mod tests {
             ]
         );
         assert!(ISSUE_COLUMNS.contains(&"sequence_id"));
-        assert_eq!(PROJECT_COLUMNS.len(), 46);
+        assert_eq!(PROJECT_COLUMNS.len(), 47);
         assert_eq!(
             &PROJECT_COLUMNS[..6],
             [
@@ -595,7 +596,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            &PROJECT_COLUMNS[44..],
+            &PROJECT_COLUMNS[45..],
             ["agent_ticking_enabled", "default_agent_executor"]
         );
         assert!(PROJECT_COLUMNS.contains(&"agent_default_max_ticks"));

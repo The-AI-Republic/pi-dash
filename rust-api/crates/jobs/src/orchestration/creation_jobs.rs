@@ -313,6 +313,7 @@ fn map_project(row: &PgRow) -> Result<ProjectView, sqlx::Error> {
         identifier: row.try_get("identifier")?,
         name: row.try_get("name")?,
         description: row.try_get("description")?,
+        context: row.try_get("context")?,
         repo_url: row.try_get("repo_url")?,
         base_branch: row.try_get("base_branch")?,
         default_agent_executor: row.try_get("default_agent_executor")?,
@@ -1854,7 +1855,7 @@ mod tests {
         .await
         .expect("seed workspace");
         sqlx::query(
-            "INSERT INTO projects (id, created_at, updated_at, name, identifier, description, \
+            "INSERT INTO projects (id, created_at, updated_at, name, identifier, description, context, \
              network, module_view, cycle_view, issue_views_view, page_view, intake_view, \
              is_time_tracking_enabled, is_issue_type_enabled, is_default, \
              guest_view_all_features, members_can_edit_states, archive_in, close_in, \
@@ -1862,7 +1863,7 @@ mod tests {
              agent_default_max_ticks, agent_review_default_interval_seconds, \
              agent_test_default_interval_seconds, agent_ticking_enabled, \
              default_agent_executor, workspace_id) \
-             VALUES ($1, $2, $2, 'FX6', 'FX6', '', 2, false, false, false, true, false, false, \
+             VALUES ($1, $2, $2, 'FX6', 'FX6', '', '', 2, false, false, false, true, false, false, \
              false, false, false, true, 0, 0, '{}', 'UTC', 'https://example.com/fx6.git', \
              'main', 10800, 10, 10800, 10800, true, 'local_runner', $3)",
         )

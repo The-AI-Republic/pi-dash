@@ -1561,7 +1561,7 @@ impl SeedStore for PgSeedStore {
                external_id, external_source, members_can_edit_states, repo_url, base_branch,
                agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled,
                is_default, agent_review_default_interval_seconds, default_agent_executor,
-               agent_test_default_interval_seconds)
+               agent_test_default_interval_seconds, context)
              VALUES ($1, $1, $2, $3, $4,
                NULL, NULL, $5, $6, $7,
                NULL, NULL, NULL, $8, NULL,
@@ -1572,7 +1572,7 @@ impl SeedStore for PgSeedStore {
                NULL, NULL, true, '', 'main',
                10800, 10, true,
                $12, 10800, $13,
-               10800)
+               10800, '')
              RETURNING id",
         )
         .bind(self.now)

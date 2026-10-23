@@ -3176,7 +3176,7 @@ mod live_tests {
         }
         let project_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO projects (id, name, description, network, identifier,
+            "INSERT INTO projects (id, name, description, context, network, identifier,
                 workspace_id, created_by_id, cycle_view, module_view,
                 issue_views_view, page_view, intake_view, archive_in, close_in,
                 logo_props, is_time_tracking_enabled, is_issue_type_enabled,
@@ -3185,7 +3185,7 @@ mod live_tests {
                 agent_default_max_ticks, agent_ticking_enabled, is_default,
                 agent_review_default_interval_seconds, default_agent_executor,
                 agent_test_default_interval_seconds, created_at, updated_at)
-             VALUES ($1, $2, '', 0, $3,
+             VALUES ($1, $2, '', '', 0, $3,
                 $4, $5, true, true,
                 true, true, false, 0, 0,
                 '{}', true, true,

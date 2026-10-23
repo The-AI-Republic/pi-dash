@@ -933,6 +933,7 @@ pub struct IssueContextInput {
     pub project_id: String,
     pub project_name: String,
     pub project_description: Option<String>,
+    pub project_context: Option<String>,
     pub repo: Value,
     pub code_reviews: Value,
     pub parent: Option<ParentView>,
@@ -1031,6 +1032,7 @@ pub fn build_context(input: &IssueContextInput) -> Value {
             "identifier": input.project_identifier,
             "name": input.project_name,
             "description": or_empty(&input.project_description),
+            "context": or_empty(&input.project_context),
         },
         "repo": input.repo,
         "code_reviews": input.code_reviews,
@@ -1116,6 +1118,7 @@ pub struct SchedulerContextInput {
     pub project_identifier: String,
     pub project_name: String,
     pub project_description: Option<String>,
+    pub project_context: Option<String>,
     pub scheduler_slug: String,
     pub scheduler_name: String,
     pub scheduler_description: Option<String>,
@@ -1165,6 +1168,7 @@ pub fn build_scheduler_context(input: &SchedulerContextInput) -> Value {
             "identifier": input.project_identifier,
             "name": input.project_name,
             "description": or_empty(&input.project_description),
+            "context": or_empty(&input.project_context),
         },
         "scheduler": {
             "slug": input.scheduler_slug,
@@ -1343,6 +1347,7 @@ pub struct DirectContextInput {
     pub project_identifier: String,
     pub project_name: String,
     pub project_description: Option<String>,
+    pub project_context: Option<String>,
     pub trigger: Option<String>,
     pub available_tools: Value,
     pub unavailable_capabilities: Value,
@@ -1359,6 +1364,7 @@ pub fn direct_context(input: &DirectContextInput) -> Value {
             "identifier": input.project_identifier,
             "name": input.project_name,
             "description": or_empty(&input.project_description),
+            "context": or_empty(&input.project_context),
         },
         "run": {
             "id": input.run_id,
@@ -1798,6 +1804,7 @@ mod tests {
             project_id: "project-1".to_owned(),
             project_name: "Project".to_owned(),
             project_description: None,
+            project_context: None,
             repo: repo_context(
                 &ProjectRepoView {
                     url: None,
@@ -1904,6 +1911,76 @@ mod tests {
         for key in build["relation_keys"].as_array().expect("array") {
             let key = key.as_str().expect("str");
             assert!(context.get(key).is_some(), "relation key {key}");
+        }
+    }
+
+    // PDASHOSS01-294: built-in prompts read `project.context`; `project.description`
+    // stays in the dict for custom templates only.
+
+    #[test]
+    fn build_context_carries_project_context_and_description() {
+        let mut input = minimal_issue_input();
+        input.project_description = Some("Billing admin tool.".to_owned());
+        input.project_context = Some("Prefer additive migrations. Never push to main.".to_owned());
+        let context = build_context(&input);
+        assert_eq!(
+            context["project"]["context"],
+            json!("Prefer additive migrations. Never push to main.")
+        );
+        assert_eq!(
+            context["project"]["description"],
+            json!("Billing admin tool.")
+        );
+        // "" (never null) so the built-in `{% if project.context %}` guard behaves.
+        assert_eq!(
+            build_context(&minimal_issue_input())["project"]["context"],
+            json!("")
+        );
+    }
+
+    fn issue_turns(input: &IssueContextInput) -> Vec<String> {
+        let ctx = build_context(input);
+        let index = composer::OverrideIndex::new();
+        let mut out = Vec::new();
+        for kind in [
+            recipes::KIND_CODING_TASK,
+            recipes::KIND_REVIEW,
+            recipes::KIND_TEST,
+        ] {
+            for executor in [None, Some("cloud_agent")] {
+                let turn = build_first_turn(kind, &ctx, &index, Some("ws-1"), None, executor, 1)
+                    .expect("turn");
+                out.push((kind, executor, turn.text));
+            }
+        }
+        out.into_iter()
+            // The Cloud implement recipe has no project block (PDASHOSS01-302).
+            .filter(|(kind, executor, _)| {
+                !(*kind == recipes::KIND_CODING_TASK && executor.is_some())
+            })
+            .map(|(_, _, text)| text)
+            .collect()
+    }
+
+    #[test]
+    fn issue_turns_render_project_context_not_description() {
+        let mut input = minimal_issue_input();
+        input.project_description = Some("Human-facing summary only.".to_owned());
+        input.project_context = Some("Never push to main.".to_owned());
+        for text in issue_turns(&input) {
+            assert!(text.contains("Never push to main."));
+            assert!(!text.contains("Human-facing summary only."));
+        }
+    }
+
+    #[test]
+    fn issue_turns_omit_empty_project_context() {
+        let mut input = minimal_issue_input();
+        input.project_description = Some("Only a description, no agent context.".to_owned());
+        for text in issue_turns(&input) {
+            assert!(!text.contains("Only a description, no agent context."));
+            assert!(!text.contains("Project-level instructions in the project context"));
+            assert!(text.contains("This issue belongs to the Project:"));
         }
     }
 
@@ -2138,6 +2215,7 @@ mod tests {
             project_identifier: "FX".to_owned(),
             project_name: "Project".to_owned(),
             project_description: None,
+            project_context: None,
             scheduler_slug: "security-audit".to_owned(),
             scheduler_name: "Security Audit".to_owned(),
             scheduler_description: Some("Scans.".to_owned()),
@@ -2259,6 +2337,7 @@ mod tests {
             project_identifier: "FX".to_owned(),
             project_name: "Project".to_owned(),
             project_description: None,
+            project_context: None,
             trigger: None,
             available_tools: Value::Array(vec![]),
             unavailable_capabilities: Value::Array(vec![]),
@@ -2403,7 +2482,8 @@ mod tests {
     #[test]
     fn cloud_scheduler_turn_renders_project_and_scheduler_identity() {
         let mut input = scheduler_input();
-        input.project_description = Some("Internal admin tool for billing operators.".to_owned());
+        input.project_description = Some("Human-facing summary of the billing tool.".to_owned());
+        input.project_context = Some("Internal admin tool for billing operators.".to_owned());
         let ctx = build_scheduler_context(&input);
         let index = composer::OverrideIndex::new();
         let out =
@@ -2413,7 +2493,11 @@ mod tests {
         assert!(out.text.contains("Project"));
         assert!(out
             .text
-            .contains("Internal admin tool for billing operators."));
+            .contains("- Project context: Internal admin tool for billing operators."));
+        // The plain description is for humans; it never reaches the prompt.
+        assert!(!out
+            .text
+            .contains("Human-facing summary of the billing tool."));
         assert!(out.text.contains("Security Audit"));
         assert!(out.text.contains("`security-audit`"));
         assert!(out.text.contains("- Purpose: Scans."));
@@ -2447,7 +2531,8 @@ mod tests {
             "project": {
                 "identifier": "FX",
                 "name": "Project",
-                "description": "Internal admin tool for billing operators.",
+                "description": "Human-facing summary of the billing tool.",
+                "context": "Internal admin tool for billing operators.",
             },
             "scheduler": {
                 "slug": "security-audit",
@@ -2464,21 +2549,24 @@ mod tests {
              - Scheduler: Security Audit (`security-audit`)\n\
              - Purpose: Scans.\n\
              - Project: Project (FX)\n\
-             - Project description: Internal admin tool for billing operators.\n\
+             - Project context: Internal admin tool for billing operators.\n\
              - Run id: run-1"
         );
     }
 
     #[test]
-    fn cloud_scheduler_turn_omits_empty_project_description() {
-        for description in [None, Some(String::new())] {
+    fn cloud_scheduler_turn_omits_empty_project_context() {
+        for context in [None, Some(String::new())] {
             let mut input = scheduler_input();
-            input.project_description = description;
+            input.project_description = Some("Only a description, no agent context.".to_owned());
+            input.project_context = context;
             let ctx = build_scheduler_context(&input);
             let index = composer::OverrideIndex::new();
             let out = build_scheduler_turn(&ctx, &index, Some("ws-1"), Some("cloud_agent"), 1)
                 .expect("turn");
+            assert!(!out.text.contains("Project context:"));
             assert!(!out.text.contains("Project description:"));
+            assert!(!out.text.contains("Only a description, no agent context."));
             assert!(out.text.contains("Project: Project (FX)"));
         }
     }

@@ -359,6 +359,7 @@ class Seed:
             "projects",
             name=f"CT80 {identifier}",
             description="",
+            context="",
             network=0,
             identifier=identifier,
             workspace_id=workspace_id,
@@ -867,7 +868,7 @@ def create_project(
     pid = new_id()
     now = now_iso()
     conn.execute(
-        """INSERT INTO projects (id, name, description, network, identifier,
+        """INSERT INTO projects (id, name, description, context, network, identifier,
             workspace_id, cycle_view, module_view, issue_views_view, page_view,
             intake_view, archive_in, close_in, logo_props,
             is_time_tracking_enabled, is_issue_type_enabled,
@@ -877,7 +878,7 @@ def create_project(
             agent_review_default_interval_seconds, default_agent_executor,
             agent_test_default_interval_seconds, created_at, updated_at,
             created_by_id)
-        VALUES (%s,%s,'Seeded for contract tests',1,%s,%s,
+        VALUES (%s,%s,'Seeded for contract tests','',1,%s,%s,
             true,true,true,true,true,30,30,'{}',
             true,true,false,'UTC',true,'','main',60,10,true,false,
             60,'local_runner',60,%s,%s,%s)""",
@@ -1116,7 +1117,7 @@ class Seeder:
         project_identifier = f"CT{self._n % 100000:05d}"
         self.db.execute(
             """INSERT INTO projects
-               (id, name, description, network, workspace_id, identifier,
+               (id, name, description, context, network, workspace_id, identifier,
                 module_view, cycle_view, issue_views_view, page_view, intake_view,
                 is_time_tracking_enabled, is_issue_type_enabled, is_default,
                 guest_view_all_features, members_can_edit_states,
@@ -1125,7 +1126,7 @@ class Seeder:
                 agent_review_default_interval_seconds, agent_test_default_interval_seconds,
                 agent_ticking_enabled, default_agent_executor,
                 created_at, updated_at)
-               VALUES (%s,%s,'',2,%s,%s,
+               VALUES (%s,%s,'','',2,%s,%s,
                        false,false,false,true,false,
                        false,false,false,
                        false,true,
@@ -2149,6 +2150,7 @@ def issue_chain(conn, slug: str) -> dict:
             "workspace_id": str(ws["id"]),
             "name": f"contract {slug}",
             "description": "",
+            "context": "",
             "identifier": "CT",
             "network": 2,
             "module_view": False,
@@ -2409,6 +2411,7 @@ def project(conn, workspace_id, name: str = "Contract Project", **over) -> dict:
         "name": "%s %s" % (name, tag),
         "identifier": "CP%s" % tag.upper(),
         "description": "",
+        "context": "",
         "network": 0,
         "workspace_id": str(workspace_id),
         "cycle_view": False,
