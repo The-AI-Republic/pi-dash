@@ -109,6 +109,7 @@ function transportFor(me: { status: number; body: unknown }, instance: { status:
   return async (url) => {
     if (url.includes("/api/users/me/")) return reply(me.status, me.body);
     if (url.includes("/api/instances/")) return reply(instance.status, instance.body);
+    if (url.includes("/auth/get-csrf-token/")) return reply(200, { csrf_token: "csrf-test" });
     throw new Error(`unexpected request ${url}`);
   };
 }

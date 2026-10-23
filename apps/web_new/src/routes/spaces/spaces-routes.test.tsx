@@ -114,6 +114,7 @@ function renderSpace(path: string, overrides: { settings?: () => Awaited<ReturnT
     }
     if (url.includes("/states/")) return reply(200, []);
     if (url.includes("/meta/")) return reply(200, { name: "Public board", description: "Team roadmap" });
+    if (url.includes("/auth/get-csrf-token/")) return reply(200, { csrf_token: "csrf-test" });
     if (url.includes("/anchor/")) return reply(200, settings);
     throw new Error(`unexpected request ${url}`);
   };

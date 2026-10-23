@@ -8,7 +8,8 @@
 // replace-navigated to it; signed-in visitors without one get the
 // paste-a-link guidance view. Dropped return addresses land on the
 // guidance view, and a return address naming the landing itself never
-// navigates (it would loop). The account control and the product badge
+// navigates (it would loop). The card's JSON calls run on the public
+// runtime's client, injected as services. The account control and the product badge
 // are slice D's (SPC-012, SPC-014) and arrive through the documented
 // slots; the gate renders fine without them.
 //
@@ -30,6 +31,7 @@ import { useDocumentHead } from "../../../shared/shell/document.js";
 import { spaceRuntime } from "../api/client.js";
 import { spaceInstanceQueryOptions, spaceViewerQueryOptions } from "../api/queries.js";
 import { SpaceAuthCard, type SpaceAuthInstanceCapabilities } from "../auth/SpaceAuthCard.js";
+import { createSpaceAuthServices } from "../auth/spaceAuthServices.js";
 import { SPACE_HEAD_ROBOTS } from "../lib/boardHead.js";
 import {
   isSpaceLandingTarget,
@@ -135,6 +137,7 @@ export function LandingGate({ search, account, badge }: LandingGateProps): React
   useDocumentHead({ title: SPACE_LANDING_TITLE, robots: SPACE_HEAD_ROBOTS });
   const viewer = useQuery(spaceViewerQueryOptions(spaceRuntime.client));
   const instance = useQuery(spaceInstanceQueryOptions(spaceRuntime.client));
+  const services = React.useMemo(() => createSpaceAuthServices(spaceRuntime.client), []);
   if (viewer.isPending || instance.isPending) return <LandingLoader />;
   // A settled viewer is either the member or null (anonymous); anything
   // else would be a transient TanStack state that resolves on its own.
@@ -149,6 +152,7 @@ export function LandingGate({ search, account, badge }: LandingGateProps): React
           nextPath={validatedNextPath(search)}
           initialEmail={search.email}
           initialErrorCode={search.errorCode}
+          services={services}
         />
         {badge}
       </main>
