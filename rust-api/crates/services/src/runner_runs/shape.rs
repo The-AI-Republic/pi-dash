@@ -1395,6 +1395,8 @@ mod tests {
             enrolled_at: None,
             revoked_at: None,
             revoked_reason: "",
+            paused_at: None,
+            paused_by: None,
             created_at: "2026-10-02T23:03:54.579295Z",
             updated_at: "2026-10-02T23:03:54.579295Z",
         };

@@ -163,6 +163,21 @@ pub fn chat_approval_kind(raw: &Value) -> Result<&'static str, FrameError> {
     })
 }
 
+/// `_runner_unavailable_error` (`chat.py:119-130`, `09738d222` adds the
+/// paused arm): the 409 body for a runner that cannot take chat, or
+/// `None` when it can. Offline/revoked (and, by the callers, missing)
+/// runners report `runner_unavailable`; a paused runner reports
+/// `runner_paused`.
+pub fn runner_unavailable_error(status: &str, paused: bool) -> Option<&'static str> {
+    if status == "offline" || status == "revoked" {
+        Some(r#"{"error":"runner_unavailable"}"#)
+    } else if paused {
+        Some(r#"{"error":"runner_paused"}"#)
+    } else {
+        None
+    }
+}
+
 /// `_runner_unavailable` (`chat.py:119-120`): `OFFLINE` or `REVOKED`.
 pub fn runner_unavailable(status: &str) -> bool {
     status == "offline" || status == "revoked"
@@ -723,6 +738,8 @@ pub struct RunnerDetailOwned {
     pub enrolled_at: Option<String>,
     pub revoked_at: Option<String>,
     pub revoked_reason: String,
+    pub paused_at: Option<String>,
+    pub paused_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -840,6 +857,8 @@ impl RunnerDetailOwned {
             enrolled_at: self.enrolled_at.as_deref(),
             revoked_at: self.revoked_at.as_deref(),
             revoked_reason: &self.revoked_reason,
+            paused_at: self.paused_at.as_deref(),
+            paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
         }
@@ -856,17 +875,18 @@ pub async fn fetch_runner_detail(
 ) -> Result<RunnerDetailOwned, Response> {
     use pidash_services::runner_runs::shape::drf_datetime;
     use sqlx::Row;
-    // Twenty-one columns exceed sqlx's 16-tuple `FromRow`: decode by
+    // Twenty-three columns exceed sqlx's 16-tuple `FromRow`: decode by
     // position. Order: id, name, status, host_label, provisioning,
     // os, arch, runner_version, dev_metadata, protocol_version,
     // capabilities, last_heartbeat_at, owner, dev_machine,
     // visibility, pod, enrolled_at, revoked_at, revoked_reason,
-    // created_at, updated_at.
+    // created_at, updated_at, paused_at, paused_by_id.
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT "id", "name", "status", "host_label", "provisioning", "os", "arch",
               "runner_version", "dev_metadata", "protocol_version", "capabilities",
               "last_heartbeat_at", "owner_id", "dev_machine_id", "visibility", "pod_id",
-              "enrolled_at", "revoked_at", "revoked_reason", "created_at", "updated_at"
+              "enrolled_at", "revoked_at", "revoked_reason", "created_at", "updated_at",
+              "paused_at", "paused_by_id"
            FROM "runner" WHERE "id" = $1"#,
     )
     .bind(runner_id)
@@ -973,6 +993,8 @@ pub async fn fetch_runner_detail(
     let revoked_reason = get_string(18)?;
     let created_at = get_moment(19)?;
     let updated_at = get_moment(20)?;
+    let paused_at = get_opt_moment(21)?;
+    let paused_by_id = get_opt_uuid(22)?;
     Ok(RunnerDetailOwned {
         id: id.to_string(),
         name,
@@ -1016,6 +1038,8 @@ pub async fn fetch_runner_detail(
         enrolled_at: drf_opt(&enrolled_at),
         revoked_at: drf_opt(&revoked_at),
         revoked_reason,
+        paused_at: drf_opt(&paused_at),
+        paused_by: paused_by_id.map(|id| id.to_string()),
         created_at: drf_datetime(&created_at),
         updated_at: drf_datetime(&updated_at),
     })
@@ -2111,6 +2135,10 @@ pub async fn chat_sessions_list(
     json_response(StatusCode::OK, format!("[{}]", rendered.join(",")))
 }
 
+/// The locked runner row for session create
+/// (`id, owner_id, visibility, status, pod_id, paused_at`).
+type ChatCreateRunnerRow = (Uuid, Uuid, i16, String, Uuid, Option<DateTime<Utc>>);
+
 /// `POST /api/runners/chat/sessions/` (`chat.py:192-237`): scope to a
 /// live membership, lock the runner, reuse an empty open session
 /// (200) or create one (201).
@@ -2161,8 +2189,8 @@ pub async fn chat_session_create(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    let runner: Option<(Uuid, Uuid, i16, String, Uuid)> = match sqlx::query_as(
-        r#"SELECT "id", "owner_id", "visibility", "status", "pod_id" FROM "runner"
+    let runner: Option<ChatCreateRunnerRow> = match sqlx::query_as(
+        r#"SELECT "id", "owner_id", "visibility", "status", "pod_id", "paused_at" FROM "runner"
            WHERE ("id" = $1 AND "workspace_id" = $2) LIMIT 1 FOR UPDATE"#,
     )
     .bind(runner_id)
@@ -2179,7 +2207,7 @@ pub async fn chat_session_create(
             r#"{"error":"runner_not_found"}"#.to_owned(),
         )
     };
-    let Some((_, owner_id, visibility, status, pod_id)) = runner else {
+    let Some((_, owner_id, visibility, status, pod_id, paused_at)) = runner else {
         return not_found();
     };
     if visibility != pidash_auth::permissions::runner::VISIBILITY_PRIVATE as i16
@@ -2187,11 +2215,8 @@ pub async fn chat_session_create(
     {
         return not_found();
     }
-    if runner_unavailable(&status) {
-        return json_response(
-            StatusCode::CONFLICT,
-            r#"{"error":"runner_unavailable"}"#.to_owned(),
-        );
+    if let Some(body) = runner_unavailable_error(&status, paused_at.is_some()) {
+        return json_response(StatusCode::CONFLICT, body.to_owned());
     }
     // Empty-session reuse: the newest open session by this user on
     // this runner with no messages at all.
@@ -2402,8 +2427,8 @@ pub async fn chat_session_warm(
     if !can_send_session(&pool, user_id, &locked.session, &locked.runner).await {
         return chat_not_found();
     }
-    let runner_status: Option<String> = match sqlx::query_scalar(
-        r#"SELECT "status" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
+    let runner_state: Option<(String, Option<DateTime<Utc>>)> = match sqlx::query_as(
+        r#"SELECT "status", "paused_at" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
     )
     .bind(locked.session.runner_id)
     .fetch_optional(&mut *tx)
@@ -2420,9 +2445,15 @@ pub async fn chat_session_warm(
             r#"{"error":"chat_session_closed"}"#.to_owned(),
         );
     }
-    match runner_status {
-        Some(status) if !runner_unavailable(&status) => {}
-        _ => {
+    match runner_state {
+        Some((status, paused_at)) => {
+            if let Some(body) = runner_unavailable_error(&status, paused_at.is_some()) {
+                return json_response(StatusCode::CONFLICT, body.to_owned());
+            }
+        }
+        // A deleted runner reads as unavailable, exactly as the source
+        // reports a missing runner.
+        None => {
             return json_response(
                 StatusCode::CONFLICT,
                 r#"{"error":"runner_unavailable"}"#.to_owned(),
@@ -2575,8 +2606,8 @@ pub async fn chat_message_create(
     if !can_send_session(&pool, user_id, &locked.session, &locked.runner).await {
         return chat_not_found();
     }
-    let runner_status: Option<String> = match sqlx::query_scalar(
-        r#"SELECT "status" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
+    let runner_state: Option<(String, Option<DateTime<Utc>>)> = match sqlx::query_as(
+        r#"SELECT "status", "paused_at" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
     )
     .bind(locked.session.runner_id)
     .fetch_optional(&mut *tx)
@@ -2591,9 +2622,15 @@ pub async fn chat_message_create(
             r#"{"error":"chat_session_closed"}"#.to_owned(),
         );
     }
-    match runner_status {
-        Some(status) if !runner_unavailable(&status) => {}
-        _ => {
+    match runner_state {
+        Some((status, paused_at)) => {
+            if let Some(body) = runner_unavailable_error(&status, paused_at.is_some()) {
+                return json_response(StatusCode::CONFLICT, body.to_owned());
+            }
+        }
+        // A deleted runner reads as unavailable, exactly as the source
+        // reports a missing runner.
+        None => {
             return json_response(
                 StatusCode::CONFLICT,
                 r#"{"error":"runner_unavailable"}"#.to_owned(),
@@ -4500,6 +4537,30 @@ mod tests {
         assert!(!runner_unavailable("online"));
         assert!(!runner_unavailable("busy"));
         assert!(!runner_unavailable(""));
+    }
+
+    #[test]
+    fn runner_unavailable_error_reports_paused() {
+        assert_eq!(
+            runner_unavailable_error("offline", false),
+            Some(r#"{"error":"runner_unavailable"}"#)
+        );
+        // Offline/revoked win over paused (checked first, as in Python).
+        assert_eq!(
+            runner_unavailable_error("revoked", true),
+            Some(r#"{"error":"runner_unavailable"}"#)
+        );
+        assert_eq!(
+            runner_unavailable_error("online", true),
+            Some(r#"{"error":"runner_paused"}"#)
+        );
+        assert_eq!(
+            runner_unavailable_error("busy", true),
+            Some(r#"{"error":"runner_paused"}"#)
+        );
+        assert_eq!(runner_unavailable_error("online", false), None);
+        assert_eq!(runner_unavailable_error("busy", false), None);
+        assert_eq!(runner_unavailable_error("", false), None);
     }
 
     #[test]

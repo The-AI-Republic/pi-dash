@@ -1382,6 +1382,8 @@ pub async fn insert_runner(
         .bind(now)
         .bind(None::<DateTime<Utc>>)
         .bind("")
+        .bind(None::<DateTime<Utc>>)
+        .bind(None::<Uuid>)
         .execute(&mut **tx)
         .await;
     match inserted {

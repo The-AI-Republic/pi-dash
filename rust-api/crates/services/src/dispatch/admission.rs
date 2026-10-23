@@ -334,13 +334,17 @@ pub struct LlmProfile {
 /// `user` reuses L3's [`UserFlags`]; the verdict reuses L3's
 /// [`ManagedAvailability`]. `llm_profile` is consulted only when reached;
 /// `enrolled_exists` / `online_exists` are the [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`]
-/// / [`ONLINE_MANAGED_RUNNER_SQL`] verdicts.
+/// / [`ONLINE_MANAGED_RUNNER_SQL`] verdicts. `paused_exists` is the
+/// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`] verdict — evaluated only
+/// when a runner is enrolled but none is online, exactly as Python's
+/// `if` runs the paused probe last (`09738d222`).
 pub fn managed_runner_availability<F>(
     managed: &ManagedRunnerSettings,
     user: Option<&UserFlags>,
     llm_profile: F,
     enrolled_exists: bool,
     online_exists: bool,
+    paused_exists: bool,
 ) -> ManagedAvailability
 where
     F: FnOnce() -> LlmProfile,
@@ -370,6 +374,11 @@ where
         return unavailable(ManagedRunnerReason::NO_RUNNER_FOR_PROJECT);
     }
     if !online_exists {
+        // `09738d222`: enrolled-but-unreachable splits into "paused"
+        // (resume it) and "not connected" (open the desktop app).
+        if paused_exists {
+            return unavailable(ManagedRunnerReason::RUNNER_PAUSED);
+        }
         return unavailable(ManagedRunnerReason::NOT_CONNECTED);
     }
     ManagedAvailability {
@@ -405,7 +414,8 @@ pub const HEARTBEAT_GRACE_SECS: i64 = 90;
 /// The `online_managed_runner(...) is None` leg
 /// (`managed_runner/policy.py:58-73,94-95`): the viewer's bundled runner that
 /// can take work now — enrolled, `ONLINE`, heartbeat within
-/// [`HEARTBEAT_GRACE_SECS`], newest heartbeat wins
+/// [`HEARTBEAT_GRACE_SECS`], unpaused (`09738d222` runs the lookup
+/// through `assignable()`), newest heartbeat wins
 /// (`.order_by("-last_heartbeat_at").first()`, `:71-72`).
 ///
 /// Projects `runner.id` (the stable handle + existence check): the full
@@ -416,7 +426,16 @@ pub const HEARTBEAT_GRACE_SECS: i64 = 90;
 /// `timezone.now() - HEARTBEAT_GRACE` (`:69`). Params: `$1` owner id (uuid),
 /// `$2` project id (uuid), `$3` workspace id (uuid), `$4` heartbeat threshold
 /// (timestamptz).
-pub const ONLINE_MANAGED_RUNNER_SQL: &str = "SELECT runner.id FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.status = 'online' AND runner.last_heartbeat_at >= $4 ORDER BY runner.last_heartbeat_at DESC LIMIT 1";
+pub const ONLINE_MANAGED_RUNNER_SQL: &str = "SELECT runner.id FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.status = 'online' AND runner.last_heartbeat_at >= $4 AND runner.paused_at IS NULL ORDER BY runner.last_heartbeat_at DESC LIMIT 1";
+
+/// The paused tiebreaker (`managed_runner/policy.py`, `09738d222`):
+/// whether the viewer owns any paused desktop-bundled runner on the
+/// project's pod. Same enrolled shape as
+/// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`] plus the `IS NOT NULL`
+/// arm — no heartbeat or status gate, matching Python's plain
+/// `.filter(paused_at__isnull=False)`. Params: `$1` owner id (uuid),
+/// `$2` project id (uuid), `$3` workspace id (uuid).
+pub const ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.paused_at IS NOT NULL LIMIT 1";
 
 // ---------------------------------------------------------------------------
 // Desktop-only permission (`permissions.py:12-28`)
@@ -1371,6 +1390,7 @@ mod tests {
             },
             true,
             true,
+            false,
         );
         assert!(!verdict.available);
         assert_eq!(verdict.reason_code, ManagedRunnerReason::DISABLED);
@@ -1390,8 +1410,14 @@ mod tests {
                 is_bot: true,
             }),
         ] {
-            let verdict =
-                managed_runner_availability(&managed, viewer, || profile(true, ""), true, true);
+            let verdict = managed_runner_availability(
+                &managed,
+                viewer,
+                || profile(true, ""),
+                true,
+                true,
+                false,
+            );
             assert!(!verdict.available);
             assert_eq!(verdict.reason_code, ManagedRunnerReason::NOT_CONNECTED);
         }
@@ -1402,30 +1428,67 @@ mod tests {
             || profile(false, ManagedRunnerReason::BYOK_UNSUPPORTED),
             false,
             false,
+            false,
         );
         assert!(!verdict.available);
         assert_eq!(verdict.reason_code, ManagedRunnerReason::BYOK_UNSUPPORTED);
         // Gate 3b: empty profile reason falls back to llm_config_missing.
-        let verdict =
-            managed_runner_availability(&managed, Some(&user), || profile(false, ""), true, true);
+        let verdict = managed_runner_availability(
+            &managed,
+            Some(&user),
+            || profile(false, ""),
+            true,
+            true,
+            false,
+        );
         assert!(!verdict.available);
         assert_eq!(verdict.reason_code, ManagedRunnerReason::LLM_CONFIG_MISSING);
         // Gate 4: enrolled but offline.
-        let verdict =
-            managed_runner_availability(&managed, Some(&user), || profile(true, ""), false, false);
+        let verdict = managed_runner_availability(
+            &managed,
+            Some(&user),
+            || profile(true, ""),
+            false,
+            false,
+            false,
+        );
         assert!(!verdict.available);
         assert_eq!(
             verdict.reason_code,
             ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
         );
         // Gate 5: enrolled, none online.
-        let verdict =
-            managed_runner_availability(&managed, Some(&user), || profile(true, ""), true, false);
+        let verdict = managed_runner_availability(
+            &managed,
+            Some(&user),
+            || profile(true, ""),
+            true,
+            false,
+            false,
+        );
         assert!(!verdict.available);
         assert_eq!(verdict.reason_code, ManagedRunnerReason::NOT_CONNECTED);
+        // Gate 5b: enrolled, none online, but at least one paused —
+        // resume it instead of opening the desktop app (`09738d222`).
+        let verdict = managed_runner_availability(
+            &managed,
+            Some(&user),
+            || profile(true, ""),
+            true,
+            false,
+            true,
+        );
+        assert!(!verdict.available);
+        assert_eq!(verdict.reason_code, ManagedRunnerReason::RUNNER_PAUSED);
         // Pass: (True, "").
-        let verdict =
-            managed_runner_availability(&managed, Some(&user), || profile(true, ""), true, true);
+        let verdict = managed_runner_availability(
+            &managed,
+            Some(&user),
+            || profile(true, ""),
+            true,
+            true,
+            false,
+        );
         assert_eq!(
             verdict,
             ManagedAvailability {
@@ -1446,7 +1509,13 @@ mod tests {
         assert_eq!(HEARTBEAT_GRACE_SECS, 90);
         assert_eq!(
             ONLINE_MANAGED_RUNNER_SQL,
-            "SELECT runner.id FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.status = 'online' AND runner.last_heartbeat_at >= $4 ORDER BY runner.last_heartbeat_at DESC LIMIT 1"
+            "SELECT runner.id FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.status = 'online' AND runner.last_heartbeat_at >= $4 AND runner.paused_at IS NULL ORDER BY runner.last_heartbeat_at DESC LIMIT 1"
+        );
+        // The paused tiebreaker is the enrolled shape plus `IS NOT NULL`
+        // (`09738d222`); params keep their positions.
+        assert_eq!(
+            ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL,
+            "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.paused_at IS NOT NULL LIMIT 1"
         );
     }
 }

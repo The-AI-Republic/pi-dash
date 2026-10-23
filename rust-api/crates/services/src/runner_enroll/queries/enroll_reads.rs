@@ -969,6 +969,8 @@ mod tests {
         "updated_at",
         "revoked_at",
         "revoked_reason",
+        "paused_at",
+        "paused_by_id",
     ];
     const POD_COLS: &[&str] = &[
         "id",
@@ -1364,7 +1366,7 @@ mod tests {
     }
 
     #[test]
-    fn e7_insert_binds_all_thirty_columns() {
+    fn e7_insert_binds_all_thirty_two_columns() {
         let sql = runner_insert_sql();
         let cols = RUNNER_COLS
             .iter()
@@ -1375,7 +1377,7 @@ mod tests {
             sql,
             format!(
                 "INSERT INTO \"runner\" ({cols}) VALUES ({})",
-                (1..=30)
+                (1..=32)
                     .map(|i| format!("${i}"))
                     .collect::<Vec<_>>()
                     .join(", "),

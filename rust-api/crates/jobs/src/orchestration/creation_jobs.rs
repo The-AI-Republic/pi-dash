@@ -70,7 +70,7 @@ use pidash_services::orchestration::creation::{
     finalize_lock_sql, AdmissionError as ServiceAdmissionError, CreationError, CreationSeam,
     ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
     FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RunView, RunnerView, StateView, TickerBudget,
+    RunView, RunnerSelectRow, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_types::dispatch::AgentExecutorKind;
@@ -402,20 +402,20 @@ where
     }
 
     async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        let row: Option<(Uuid, Uuid, String, Option<DateTime<Utc>>)> =
-            sqlx::query_as(RUNNER_SELECT_SQL)
-                .bind(runner_id)
-                .fetch_optional(&mut **self.tx.inner())
-                .await
-                .map_err(Self::db)?;
-        Ok(
-            row.map(|(id, pod_id, status, last_heartbeat_at)| RunnerView {
+        let row: Option<RunnerSelectRow> = sqlx::query_as(RUNNER_SELECT_SQL)
+            .bind(runner_id)
+            .fetch_optional(&mut **self.tx.inner())
+            .await
+            .map_err(Self::db)?;
+        Ok(row.map(
+            |(id, pod_id, status, last_heartbeat_at, paused_at)| RunnerView {
                 id,
                 pod_id,
                 status,
                 last_heartbeat_at,
-            }),
-        )
+                paused_at,
+            },
+        ))
     }
 
     async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {

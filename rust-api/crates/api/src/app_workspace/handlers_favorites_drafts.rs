@@ -127,8 +127,8 @@ use pidash_services::app_workspace::ser_account_token as fav;
 use pidash_services::app_workspace::tasks as wtask;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
 use pidash_services::dispatch::admission::{
-    LlmProfile, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL, HEARTBEAT_GRACE_SECS,
-    ONLINE_MANAGED_RUNNER_SQL,
+    LlmProfile, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL, ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL,
+    HEARTBEAT_GRACE_SECS, ONLINE_MANAGED_RUNNER_SQL,
 };
 use pidash_services::dispatch::policy::{
     cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
@@ -6229,6 +6229,23 @@ async fn online_runner(
     Ok(row.is_some())
 }
 
+/// The paused tiebreaker (`policy.py:88-91`, `09738d222`).
+async fn paused_runner(
+    pool: &sqlx::PgPool,
+    user_id: &Uuid,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+) -> Result<bool, Denial> {
+    let row: Option<(i32,)> = sqlx::query_as(ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
 /// `request.user` flags for the executor arm (in-memory on Django; one
 /// read here, issued only past a managed pin + resolved project).
 async fn viewer_user_flags(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<UserFlags, Denial> {
@@ -6348,6 +6365,7 @@ async fn run_issue_create_validate(
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
+    let mut paused_exists = false;
     let mut viewer: Option<UserFlags> = None;
     if !pod_pure_fail {
         if let Some(Some(executor)) = agent_executor {
@@ -6396,6 +6414,18 @@ async fn run_issue_create_validate(
                                     )
                                     .await
                                     .map_err(|_| db_error())?;
+                                    // `09738d222`: the paused tiebreaker
+                                    // runs only when nothing is online.
+                                    if !online_exists {
+                                        paused_exists = paused_runner(
+                                            pool,
+                                            actor,
+                                            &resolved.project_id,
+                                            &resolved.workspace_id,
+                                        )
+                                        .await
+                                        .map_err(|_| db_error())?;
+                                    }
                                 }
                             }
                         }
@@ -6482,6 +6512,7 @@ async fn run_issue_create_validate(
         llm_profile: &|| llm_profile.clone(),
         enrolled_exists: &|| enrolled_exists,
         online_exists: &|| online_exists,
+        paused_exists: &|| paused_exists,
     };
     let ctx = ValidateContext {
         project_id: Some(*project_id),
