@@ -22,9 +22,9 @@ import { cn, renderFormattedDate, getFileURL } from "@pi-dash/utils";
 import { CoverImage } from "@/components/common/cover-image";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
-import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useProject } from "@/hooks/store/use-project";
 import { useUser } from "@/hooks/store/user";
+import { useAppRouter } from "@/hooks/use-app-router";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // components
 import { ProfileSidebarTime } from "./time";
@@ -40,11 +40,11 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
   const ref = useRef<HTMLDivElement>(null);
   // router
   const { userId } = useParams();
+  const router = useAppRouter();
   // store hooks
   const { data: currentUser } = useUser();
   const { profileSidebarCollapsed, toggleProfileSidebar } = useAppTheme();
   const { getProjectById } = useProject();
-  const { toggleProfileSettingsModal } = useCommandPalette();
   const { isMobile } = usePlatformOS();
   const { t } = useTranslation();
   // derived values
@@ -100,12 +100,7 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
                 <IconButton
                   variant="secondary"
                   icon={EditIcon}
-                  onClick={() =>
-                    toggleProfileSettingsModal({
-                      activeTab: "general",
-                      isOpen: true,
-                    })
-                  }
+                  onClick={() => router.push("/settings/profile/general")}
                 />
               </div>
             )}
