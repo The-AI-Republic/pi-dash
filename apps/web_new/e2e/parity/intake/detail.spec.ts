@@ -441,7 +441,7 @@ test(
 );
 
 test(
-  specTitle(["INT-024"], "a guest copies and opens a resolved request they could not copy while open"),
+  specTitle(["INT-024"], "a guest copies and opens a resolved request"),
   { tag: specTags(["INT-024"]) },
   async ({ driver, seed }) => {
     // Own test (own browser context): re-signing in over an active

@@ -3,13 +3,14 @@
 // See the LICENSE file for details.
 // Request detail pane (parity/specs/intake.md INT-019/024/026–029). The
 // one-shot detail read composed through the shared detail root: the
-// intake header (chevrons, copy/open controls) above, the triage-state
+// intake header (chevrons, copy/open controls) above, the request
 // properties beside, the work item's attachments below. Title and
 // description save through the intake update; the permission matrix
 // decides what edits. Arrow keys step between requests unless typing
 // or an overlay owns them; a stale or forbidden id reports missing so
 // the screen falls back to the tab.
 
+import { INTAKE_STATUS } from "@pidash/api-client";
 import * as React from "react";
 
 import { useMe } from "../../../core/session/index.js";
@@ -158,6 +159,7 @@ export function IntakeDetail({
             projectId={projectId}
             issue={issue}
             canEdit={editability.canEditProperties}
+            accepted={detail.data.status === INTAKE_STATUS.accepted}
           />
         }
       />

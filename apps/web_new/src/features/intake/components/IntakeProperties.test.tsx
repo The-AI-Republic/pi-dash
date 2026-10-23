@@ -30,6 +30,7 @@ const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
 const ADA = "323e4567-e89b-12d3-a456-426614174002";
 const ME = "023e4567-e89b-12d3-a456-426614174009";
 const TRIAGE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const BACKLOG = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LABEL = "b23e4567-e89b-12d3-a456-42661417400a";
 
 const ME_PAYLOAD = {
@@ -212,7 +213,8 @@ function harness(options: HarnessOptions = {}) {
         status: 200,
         url,
         headers: { get: () => null },
-        text: async () => JSON.stringify([stateRow(TRIAGE, "Triage", "triage")]),
+        text: async () =>
+          JSON.stringify([stateRow(TRIAGE, "Triage", "triage"), stateRow(BACKLOG, "Backlog", "backlog")]),
       };
     }
     if (url.includes(`/projects/${PROJECT}/members/`)) {
@@ -241,7 +243,14 @@ function harness(options: HarnessOptions = {}) {
 function renderPanel(queryClient: QueryClient, props: Partial<React.ComponentProps<typeof IntakeProperties>> = {}) {
   render(
     <QueryClientProvider client={queryClient}>
-      <IntakeProperties workspaceSlug={SLUG} projectId={PROJECT} issue={issueFixture()} canEdit {...props} />
+      <IntakeProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture()}
+        canEdit
+        accepted={false}
+        {...props}
+      />
     </QueryClientProvider>
   );
 }
@@ -273,6 +282,13 @@ describe("IntakeProperties (INT-019)", () => {
     expect(screen.getByRole("group", { name: "Priority" })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Due date" })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Labels" })).toBeInTheDocument();
+  });
+
+  it("names the workflow state once the request is accepted", async () => {
+    const { queryClient } = harness();
+    renderPanel(queryClient, { accepted: true, issue: issueFixture({ state_id: BACKLOG }) });
+    const state = screen.getByRole("group", { name: "State" });
+    expect(await within(state).findByRole("button", { name: "Backlog" })).toBeDisabled();
   });
 
   it("ignores state selections", () => {

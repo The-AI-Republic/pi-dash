@@ -33,6 +33,7 @@ const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
 const ADA = "323e4567-e89b-12d3-a456-426614174002";
 const ME = "023e4567-e89b-12d3-a456-426614174009";
 const TRIAGE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const BACKLOG = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LABEL = "b23e4567-e89b-12d3-a456-42661417400a";
 const V1 = "c23e4567-e89b-12d3-a456-42661417400c";
 
@@ -262,7 +263,8 @@ function harness(server: DetailServer, options: { meStatus?: number } = {}) {
     if (url.includes(`/description-versions/${V1}/`)) return ok(versionDetail(hourAgo));
     if (url.includes("description-versions")) return ok(versionsEnvelope(hourAgo));
     if (url.endsWith(`/projects/${PROJECT}/intake-state/`)) return ok(stateRow(TRIAGE, "Triage", "triage"));
-    if (url.endsWith(`/projects/${PROJECT}/states/`)) return ok([stateRow(TRIAGE, "Triage", "triage")]);
+    if (url.endsWith(`/projects/${PROJECT}/states/`))
+      return ok([stateRow(TRIAGE, "Triage", "triage"), stateRow(BACKLOG, "Backlog", "backlog")]);
     if (url.includes(`/projects/${PROJECT}/members/`)) return ok(PROJECT_MEMBERS);
     if (url.endsWith(`/workspaces/${SLUG}/members/`)) return ok(DIRECTORY);
     if (url.endsWith(`/projects/${PROJECT}/issue-labels/`)) return ok(LABELS);
@@ -330,6 +332,19 @@ describe("IntakeDetail content (INT-019/024)", () => {
     expect(await screen.findByText("spec.png")).toBeInTheDocument();
     expect(screen.getByTestId("intake-properties")).toBeInTheDocument();
     expect(screen.getByTestId("intake-detail-menu")).toBeInTheDocument();
+  });
+
+  it("names the workflow state for an accepted request", async () => {
+    const server: DetailServer = {
+      detailStatus: 200,
+      detail: detailPayload(1, { state_id: BACKLOG }),
+      writes: [],
+    };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+    await screen.findByTestId("intake-detail-header");
+    const state = screen.getByRole("group", { name: "State" });
+    expect(await within(state).findByRole("button", { name: "Backlog" })).toBeDisabled();
   });
 
   it("saves a title edit through the intake update", async () => {

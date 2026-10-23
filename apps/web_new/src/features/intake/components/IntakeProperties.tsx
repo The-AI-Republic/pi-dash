@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Request properties panel (parity/specs/intake.md INT-019/026). The
-// shared pickers composed for intake's limited subset: the triage state
-// read-only, assignees, priority, due date and labels editable — every
-// write through the intake update, which reverts to the server value
-// with a notice when refused. Viewers who may not edit get the same
-// rows disabled, and the labels row omits its add control.
+// shared pickers composed for intake's limited subset: the state
+// read-only (the triage state, or the workflow state once accepted),
+// assignees, priority, due date and labels editable — every write
+// through the intake update, which reverts to the server value with a
+// notice when refused. Viewers who may not edit get the same rows
+// disabled, and the labels row omits its add control.
 
 import { cn, type ButtonVariant } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
@@ -16,6 +17,7 @@ import {
   IntakeStatePicker,
   MemberPicker,
   PriorityPicker,
+  StatePicker,
   usePickerStates,
   type PriorityLevel,
 } from "../../../shared/pickers/index.js";
@@ -40,7 +42,8 @@ const ROW_VARIANT: ButtonVariant = "ghost";
 /**
  * The state row is display-only (INT-019/026): the picker never opens,
  * so selections are impossible, and it keeps its trigger shape so the
- * row reads like the other property rows.
+ * row reads like the other property rows. One noop serves both state
+ * pickers — accepted and open requests alike never select.
  */
 export function ignoreIntakeStateSelection(_id: string): void {}
 
@@ -50,6 +53,11 @@ export interface IntakePropertiesProps {
   issue: Issue;
   /** Admin or non-guest creator on an open request; everyone else reads. */
   canEdit: boolean;
+  /**
+   * The request was accepted, so its work item lives in a workflow
+   * state rather than triage; the row names that workflow state.
+   */
+  accepted: boolean;
 }
 
 export function IntakeProperties({
@@ -57,6 +65,7 @@ export function IntakeProperties({
   projectId,
   issue,
   canEdit,
+  accepted,
 }: IntakePropertiesProps): React.ReactElement {
   const disabled = !canEdit;
   const update = useUpdateIntakeIssue({
@@ -77,15 +86,27 @@ export function IntakeProperties({
   return (
     <div data-testid="intake-properties" className="flex flex-col gap-(--space-1)">
       <SidebarRow label="State">
-        <IntakeStatePicker
-          workspaceSlug={workspaceSlug}
-          projectId={projectId}
-          value={issue.state_id}
-          disabled
-          variant={ROW_VARIANT}
-          preload
-          onChange={ignoreIntakeStateSelection}
-        />
+        {accepted ? (
+          <StatePicker
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            value={issue.state_id}
+            disabled
+            variant={ROW_VARIANT}
+            preload
+            onChange={ignoreIntakeStateSelection}
+          />
+        ) : (
+          <IntakeStatePicker
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            value={issue.state_id}
+            disabled
+            variant={ROW_VARIANT}
+            preload
+            onChange={ignoreIntakeStateSelection}
+          />
+        )}
       </SidebarRow>
       <SidebarRow label="Assignees">
         <MemberPicker
