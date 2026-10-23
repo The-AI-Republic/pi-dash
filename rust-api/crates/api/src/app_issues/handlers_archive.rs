@@ -709,6 +709,7 @@ struct DetailOwned {
     latest_run: Option<OwnedRun>,
     active_run: Option<OwnedRun>,
     run_count: i64,
+    run_total_tokens: i64,
     blockers: pidash_services::orchestration::blockers::RelationsSummary,
 }
 
@@ -778,6 +779,7 @@ impl DetailOwned {
         let latest_run = fetch_agent_run(pool, true, issue_id).await?;
         let active_run = fetch_agent_run(pool, false, issue_id).await?;
         let run_count = fetch_run_count(pool, issue_id).await?;
+        let run_total_tokens = fetch_run_total_tokens(pool, issue_id).await?;
         let blockers = fetch_blockers(pool, issue_id).await?;
         Ok(Self {
             id,
@@ -811,6 +813,7 @@ impl DetailOwned {
             latest_run,
             active_run,
             run_count,
+            run_total_tokens,
             blockers,
         })
     }
@@ -867,6 +870,7 @@ impl DetailOwned {
             latest_run: self.latest_run.as_ref().map(OwnedRun::view),
             active_run: self.active_run.as_ref().map(OwnedRun::view),
             run_count: self.run_count,
+            run_total_tokens: self.run_total_tokens,
             blockers: &self.blockers,
         }
     }
@@ -1167,6 +1171,17 @@ async fn fetch_run_count(pool: &sqlx::PgPool, issue_id: uuid::Uuid) -> Result<i6
         .await
         .map_err(|_| Denial::ServerError)?;
     row.map(|row| row.0).ok_or(Denial::ServerError)
+}
+
+/// `AGENT_RUN_TOTAL_TOKENS_SQL`.
+async fn fetch_run_total_tokens(pool: &sqlx::PgPool, issue_id: uuid::Uuid) -> Result<i64, Denial> {
+    use pidash_services::app_issues::AGENT_RUN_TOTAL_TOKENS_SQL;
+    let row: (i64,) = sqlx::query_as(AGENT_RUN_TOTAL_TOKENS_SQL)
+        .bind(issue_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.0)
 }
 
 /// One cached `relations_summary` over the two summary statements plus
@@ -2248,6 +2263,7 @@ mod tests {
             latest_run: None,
             active_run: None,
             run_count: 0,
+            run_total_tokens: 0,
             blockers: &blockers,
         };
         let view = issue_detail_to_representation(&row);
