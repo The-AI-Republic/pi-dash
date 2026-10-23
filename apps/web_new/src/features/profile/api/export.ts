@@ -1,11 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Today's-activity export (parity/specs/profile.md §3): posts the local
-// calendar day, receives the server's CSV bytes and hands them to the
-// browser as a download named for the export. The date is computed by the
-// caller in the viewer's own calendar so a member near midnight exports
-// their today, not UTC's.
+// Today's-activity export (parity/specs/profile.md §3; exports-owned per
+// specs/exports.md §0.4, EXP-022): posts the local calendar day, receives
+// the server's CSV bytes and hands them to the browser as a download
+// named for the click — the server's disposition name is ignored. The
+// date is computed in the viewer's own calendar so a member near
+// midnight exports their today, not UTC's.
 
 import { exportUserProfileActivity, type ApiClient, type ActivityExport } from "@pidash/api-client";
 
@@ -58,11 +59,12 @@ export async function downloadProfileActivity(
   userId: string,
   sink: ExportSink = browserSink()
 ): Promise<ActivityExport> {
+  const clickedAt = sink.now();
   const exported = await exportUserProfileActivity(client, workspaceSlug, userId, localIsoDate());
   const blob = new Blob([exported.csv], { type: exported.contentType === "" ? "text/csv" : exported.contentType });
   const url = sink.createObjectUrl(blob);
   try {
-    sink.save(url, activityExportFilename(sink.now()));
+    sink.save(url, activityExportFilename(clickedAt));
   } finally {
     sink.revokeObjectUrl(url);
   }

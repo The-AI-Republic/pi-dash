@@ -5,7 +5,7 @@
 // Today's-activity download (parity/specs/profile.md §3, PROF-007): the
 // button shows a working label until the export settles, then returns to
 // idle; failures toast and also return to idle.
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -47,6 +47,29 @@ describe("ProfileActivityDownload", () => {
     expect(button).toBeDisabled();
     expect(PROFILE_DOWNLOAD_WORKING_LABEL).toBe("Downloading");
     await userEvent.click(button);
+    expect(run).toHaveBeenCalledTimes(1);
+    release();
+    await waitFor(() => expect(button).toHaveTextContent(PROFILE_DOWNLOAD_IDLE_LABEL));
+    expect(button).toBeEnabled();
+  });
+
+  it("ignores a second click dispatched while the export runs", async () => {
+    // Both clicks land inside one act scope, so no re-render (and no
+    // disabled attribute) sits between them — the pre-render window a
+    // rapid double-click hits before the working state lands.
+    let release!: () => void;
+    const run = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    render(<ProfileActivityDownload workspaceSlug="acme" userId="u-1" run={run} />);
+    const button = screen.getByTestId("profile-activity-download");
+    act(() => {
+      fireEvent.click(button);
+      fireEvent.click(button);
+    });
     expect(run).toHaveBeenCalledTimes(1);
     release();
     await waitFor(() => expect(button).toHaveTextContent(PROFILE_DOWNLOAD_IDLE_LABEL));
