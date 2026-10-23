@@ -305,8 +305,10 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // daemon result route merges under `RouteGroup::Runner` below);
         // D-13 desktop enroll + project lists, PIDASHCONV-595; D-14
         // machine sessions, PIDASHCONV-559; D-13 refresh + revokes,
-        // PIDASHCONV-592; sibling handler issues extend the merge;
-        // merges keep both sides).
+        // PIDASHCONV-592; instance-admin runner list under
+        // `/api/instances/runners/`, PDASHOSS01-209 — served when the
+        // `api/instances/` (License) flip is on, like the loop admin;
+        // sibling handler issues extend the merge; merges keep both sides).
         // Registration is the cutover granularity — sibling paths have
         // no Rust route and keep proxying to Django through the
         // fallback.
@@ -316,7 +318,8 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::runner_enroll::enroll::web_routes())
             .merge(crate::runner_enroll::delete_cmds::web_routes())
             .merge(crate::runner_enroll::teardown::web_routes())
-            .merge(crate::runner_enroll::projects::web_routes()),
+            .merge(crate::runner_enroll::projects::web_routes())
+            .merge(crate::runner_enroll::admin::routes()),
         RouteGroup::Runner => crate::runner_runs::run_endpoints::routes()
             .merge(crate::runner_runs::chat::daemon_routes())
             .merge(crate::runner_runs::daemon_routes())

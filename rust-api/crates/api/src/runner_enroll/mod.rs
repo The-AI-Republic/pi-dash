@@ -30,11 +30,16 @@
 //!   `runner/views/machine_commands.py:63-257`, PIDASHCONV-593) —
 //!   fixture ids D13-F5 + D13-F6 + D13-F7 + D13-F8.
 //!
+//! - [`admin`]: the instance-admin runner list
+//!   (`runner/admin_views.py`, `GET /api/instances/runners/`,
+//!   PDASHOSS01-209).
+//!
 //! The shared request-body layer lives here ([`read_request_data`] and the
 //! `data_*`/`or_empty_*` field helpers) so both handlers parse `request.data`
 //! identically; sibling handler issues add their own `pub mod` lines above,
 //! keeping both sides on conflict.
 
+pub mod admin;
 pub mod auth;
 pub mod delete_cmds;
 pub mod desktop;

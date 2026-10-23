@@ -1891,6 +1891,80 @@ class Seeder:
         self._put("dev_machine", machine_id)
         return {"id": machine_id, "host_label": host_label}
 
+    def create_runner(
+        self,
+        owner_id: str,
+        workspace_id: str,
+        pod_id: str,
+        *,
+        name: str | None = None,
+        provisioning: str = "manual",
+        status: str = "offline",
+        runner_version: str = "",
+        host_label: str = "",
+        dev_metadata: Any = None,
+        created_at: str | None = None,
+        last_heartbeat_at: str | None = None,
+        revoked_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Bare ``runner`` row with no tokens (PDASHOSS01-209 admin list).
+
+        ``dev_metadata`` is stored as given (``None`` → ``{}``), so a test
+        can seed non-object JSON; timestamps are ISO strings or ``now()``.
+        """
+        self._n += 1
+        runner_id = _uid()
+        runner_name = name or f"runner-{self.tag}-{self._n}"[:120]
+        self.db.execute(
+            """INSERT INTO runner
+               (id, owner_id, workspace_id, pod_id, name, host_label,
+                provisioning, visibility, status, capabilities,
+                os, arch, runner_version,
+                refresh_token_hash, refresh_token_fingerprint,
+                refresh_token_generation, previous_refresh_token_hash,
+                access_token_signing_key_version,
+                enrollment_token_hash, enrollment_token_fingerprint,
+                enrolled_at, revoked_at, revoked_reason,
+                dev_machine_id, dev_metadata, protocol_version,
+                last_heartbeat_at, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,0,%s,'[]',
+                       '','',%s,
+                       '','',0,'',1,
+                       '','',
+                       NULL,%s,'',
+                       NULL,%s,1,
+                       %s,COALESCE(%s::timestamptz, now()),now())""",
+            (
+                runner_id, owner_id, workspace_id, pod_id, runner_name, host_label,
+                provisioning, status, runner_version, revoked_at,
+                Json({} if dev_metadata is None else dev_metadata),
+                last_heartbeat_at, created_at,
+            ),
+        )
+        self._put("runner", runner_id)
+        return {"id": runner_id, "name": runner_name}
+
+    def create_instance_admin(self, user_id: str, *, role: int = 20) -> dict[str, Any]:
+        """``InstanceAdmin`` on the instance ``InstanceAdminPermission`` reads.
+
+        The permission checks ``Instance.objects.first()`` (newest live row),
+        so the admin row binds to that instance — seeding one first when the
+        database has none.
+        """
+        self.ensure_instance()
+        instance_id = self.db.fetchval(
+            "SELECT id FROM instances WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"
+        )
+        admin_id = _uid()
+        self.db.execute(
+            """INSERT INTO instance_admins
+               (id, user_id, instance_id, role, is_verified, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,true,now(),now())""",
+            (admin_id, user_id, instance_id, role),
+        )
+        self._put("instance_admins", admin_id)
+        return {"id": admin_id, "instance_id": str(instance_id)}
+
     def create_machine_token(
         self,
         user_id: str,

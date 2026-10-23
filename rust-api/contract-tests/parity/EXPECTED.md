@@ -20,7 +20,7 @@ id, and filed as a fix issue first.
 Counts (2026-10-17, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
-  9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
+  10 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
 - Jobs: 77 tasks — 77 OWNED, 0 PROXIED, 0 MISSING;
   beat 28/28 OWNED (same task, same cadence on both sides).
 
@@ -117,7 +117,7 @@ G6 :: /api/workspaces/{slug}/workspace-themes/ :: PUT:serves-but-django-405;PATC
 G6 :: /api/workspaces/{slug}/workspace-themes/{pk}/ :: POST:serves-but-django-405;PUT:serves-but-django-405
 ```
 
-### Rust-only routes (9, all justified in-script)
+### Rust-only routes (10, all justified in-script)
 
 New Rust-only surface fails the check until a justification is added to
 `RUST_ONLY_JUSTIFICATIONS` in `route_inventory.py` (reviewed). Current:
@@ -139,6 +139,10 @@ New Rust-only surface fails the check until a justification is added to
   rust-dev's Django is frozen pre-drift, so the check sees them as
   Rust-only until PIDASHCONV-1055 syncs `main` into `rust-dev` (then
   they reclassify to OWNED and the justifications are deleted).
+- `/api/instances/runners/` — PDASHOSS01-209 instance-admin runner
+  list: live on `main` via Python PR #534 but rust-dev's Django predates
+  it, so the check sees it as Rust-only until the next `main` → `rust-dev`
+  sync (then it reclassifies to OWNED and the justification is deleted).
 
 ## Jobs
 

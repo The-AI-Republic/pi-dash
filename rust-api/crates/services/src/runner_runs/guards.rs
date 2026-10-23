@@ -108,7 +108,7 @@ fn py_int_or(raw: Option<&str>, default: i128) -> i128 {
 /// Known divergence (shared with the merged `params.rs` precedent):
 /// CPython also accepts non-ASCII decimal digits (`int('１２')` → 12);
 /// this port reads ASCII digits only and falls back to the default there.
-fn py_int_saturated(text: &str) -> Option<i128> {
+pub fn py_int_saturated(text: &str) -> Option<i128> {
     let trimmed = text.trim();
     let (negative, core) = match trimmed.strip_prefix(['+', '-']) {
         Some(rest) => (trimmed.starts_with('-'), rest),
