@@ -622,6 +622,7 @@ pub struct IssueRow {
     pub git_work_branch: String,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub created_by_id: Option<Uuid>,
     pub updated_by_id: Option<Uuid>,
     pub project_id: Uuid,
@@ -650,8 +651,8 @@ async fn fetch_issue(
          name, description_html, description_stripped, description_binary, priority, \
          complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, \
          archived_at, is_draft, external_source, external_id, git_work_branch, created_via, \
-         agent_executor, created_by_id, updated_by_id, project_id, workspace_id, parent_id, \
-         estimate_point_id, type_id, assigned_pod_id \
+         agent_executor, work_type, created_by_id, updated_by_id, project_id, workspace_id, \
+         parent_id, estimate_point_id, type_id, assigned_pod_id \
          FROM issues WHERE id = $1{guard}"
     );
     let row: Option<sqlx::postgres::PgRow> =
@@ -682,6 +683,7 @@ async fn fetch_issue(
         git_work_branch: row.get("git_work_branch"),
         created_via: row.try_get("created_via").unwrap_or(None),
         agent_executor: row.try_get("agent_executor").unwrap_or(None),
+        work_type: row.try_get("work_type").unwrap_or(None),
         created_by_id: row.try_get("created_by_id").unwrap_or(None),
         updated_by_id: row.try_get("updated_by_id").unwrap_or(None),
         project_id: row.get("project_id"),
@@ -861,6 +863,7 @@ pub fn render_issue(
     );
     out.insert("created_via".to_owned(), opt_str(&row.created_via));
     out.insert("agent_executor".to_owned(), opt_str(&row.agent_executor));
+    out.insert("work_type".to_owned(), opt_str(&row.work_type));
     out.insert("created_by".to_owned(), opt_uuid(&row.created_by_id));
     out.insert("updated_by".to_owned(), opt_uuid(&row.updated_by_id));
     out.insert("project".to_owned(), uuid_value(&row.project_id));
@@ -1881,6 +1884,7 @@ mod tests {
             git_work_branch: g["git_work_branch"].as_str().unwrap().to_owned(),
             created_via: str_opt(&g["created_via"]),
             agent_executor: str_opt(&g["agent_executor"]),
+            work_type: str_opt(&g["work_type"]),
             created_by_id: uid_opt(&g["created_by"]),
             updated_by_id: uid_opt(&g["updated_by"]),
             project_id: uid(&g["project"]),

@@ -286,6 +286,7 @@ struct IssueRow {
     created_via: Option<String>,
     assigned_pod_id: Option<Uuid>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
 }
 
 impl IssueRow {
@@ -324,11 +325,12 @@ impl IssueRow {
             created_via: row.try_get("created_via")?,
             assigned_pod_id: row.try_get("assigned_pod_id")?,
             agent_executor: row.try_get("agent_executor")?,
+            work_type: row.try_get("work_type")?,
         })
     }
 }
 
-const ISSUE_COLUMNS: &str = "id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, created_via, assigned_pod_id, agent_executor";
+const ISSUE_COLUMNS: &str = "id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, created_via, assigned_pod_id, agent_executor, work_type";
 
 /// `Issue.objects.get(pk, workspace_id, project_id)` (`:199-203,:250-254`).
 async fn fetch_issue(
@@ -1269,6 +1271,7 @@ fn render_app_detail(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_string(), opt_string(&issue.work_type));
     map.insert("created_by".to_string(), opt_uuid(&issue.created_by_id));
     map.insert("updated_by".to_string(), opt_uuid(&issue.updated_by_id));
     map.insert("project".to_string(), uuid_string(&issue.project_id));
@@ -1414,6 +1417,7 @@ fn render_app_issue_create(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_string(), opt_string(&issue.work_type));
     map.insert("created_by".to_string(), opt_uuid(&issue.created_by_id));
     map.insert("updated_by".to_string(), opt_uuid(&issue.updated_by_id));
     map.insert("project".to_string(), uuid_string(&issue.project_id));
@@ -1514,6 +1518,7 @@ fn render_issue_snapshot(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_string(), opt_string(&issue.work_type));
     map.insert(
         "created_at".to_string(),
         serde_json::Value::String(render_dt(&issue.created_at, timezone)),

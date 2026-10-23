@@ -180,6 +180,7 @@ ISSUE_CREATE_KEYS = {
     "type",
     "updated_at",
     "updated_by",
+    "work_type",
     "workspace",
     "workspace_id",
 }

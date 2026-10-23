@@ -867,6 +867,7 @@ const ISSUE_ORDER_COLUMNS: &[&str] = &[
     "created_via",
     "assigned_pod_id",
     "agent_executor",
+    "work_type",
 ];
 
 const STATE_ORDER_COLUMNS: &[&str] = &[

@@ -488,6 +488,7 @@ const ISSUE_ORDER_COLUMNS: &[(&str, &str)] = &[
     ("assigned_pod", "assigned_pod_id"),
     ("assigned_pod_id", "assigned_pod_id"),
     ("agent_executor", "agent_executor"),
+    ("work_type", "work_type"),
 ];
 
 /// Look a Django field (or attname) spelling up in an order map.

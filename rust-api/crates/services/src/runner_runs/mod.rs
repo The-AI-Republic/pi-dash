@@ -391,6 +391,7 @@ pub(crate) const ISSUE_COLUMNS: &[&str] = &[
     "created_via",
     "assigned_pod_id",
     "agent_executor",
+    "work_type",
 ];
 
 /// `projects` columns in Django `_meta` order (captured from
@@ -560,7 +561,7 @@ mod tests {
 
     #[test]
     fn shared_column_snapshots_match_django_meta() {
-        assert_eq!(ISSUE_COLUMNS.len(), 34);
+        assert_eq!(ISSUE_COLUMNS.len(), 35);
         assert_eq!(
             &ISSUE_COLUMNS[..6],
             [
@@ -579,7 +580,8 @@ mod tests {
                 "workpad",
                 "created_via",
                 "assigned_pod_id",
-                "agent_executor"
+                "agent_executor",
+                "work_type"
             ]
         );
         assert!(ISSUE_COLUMNS.contains(&"sequence_id"));

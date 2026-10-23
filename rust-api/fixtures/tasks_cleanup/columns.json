@@ -167,6 +167,7 @@
         "created_via": "CharField",
         "assigned_pod_id": "ForeignKey",
         "agent_executor": "CharField",
+        "work_type": "CharField",
         "assignees": "ManyToManyField",
         "labels": "ManyToManyField"
       }

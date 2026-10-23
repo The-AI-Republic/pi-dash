@@ -2302,6 +2302,15 @@ const ISSUE_FIELDS: &[FieldSpec] = &[
         allow_null: true,
     },
     FieldSpec {
+        name: "work_type",
+        shape: FieldShape::Char {
+            max: Some(32),
+            allow_blank: true,
+        },
+        required: false,
+        allow_null: true,
+    },
+    FieldSpec {
         name: "parent",
         shape: FieldShape::Pk(PkQueryset::IssuesVisible),
         required: false,
@@ -6272,6 +6281,12 @@ async fn run_issue_create_validate(
         Some(FieldValue::Text(executor)) => Some(Some(executor.as_str())),
         _ => None,
     };
+    let work_type: Option<Option<&str>> = match find_value(values, "work_type") {
+        None => None,
+        Some(FieldValue::Null) => Some(None),
+        Some(FieldValue::Text(work_type)) => Some(Some(work_type.as_str())),
+        _ => None,
+    };
     let description_stripped: Option<Option<&str>> =
         match find_value(values, "description_stripped") {
             None => None,
@@ -6301,6 +6316,7 @@ async fn run_issue_create_validate(
         }),
         assigned_pod,
         agent_executor,
+        work_type,
         description_html: text("description_html"),
         description_binary: None,
         assignee_ids: assignee_ids.as_deref(),
@@ -6510,6 +6526,7 @@ struct IssueSaveRow {
     created_via: Option<String>,
     assigned_pod_id: Option<Uuid>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
 }
 
 /// The fresh-row assembly: the row plus the raw m2m inputs.
@@ -6569,6 +6586,8 @@ fn assemble_new_issue(
         created_via: opt_text(values, "created_via"),
         assigned_pod_id: pod,
         agent_executor: opt_text(values, "agent_executor"),
+        // `validate()` normalized `""` to `None` and rejected unknown keys.
+        work_type: filtered.work_type.clone().flatten(),
     };
     Ok((
         row,
@@ -6605,14 +6624,14 @@ async fn default_pod_for_project(
     Ok(row.map(|row| row.0))
 }
 
-/// `Issue.objects.create(...)`: the 34-column INSERT in `COLUMNS` order.
+/// `Issue.objects.create(...)`: the 35-column INSERT in `COLUMNS` order.
 /// An `IntegrityError` is the 400 payload branch; anything else 500s.
 async fn insert_issue_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &IssueSaveRow,
 ) -> Result<(), Denial> {
     sqlx::query(
-        "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)",
+        "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor, work_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)",
     )
     .bind(row.id)
     .bind(row.created_at)
@@ -6648,6 +6667,7 @@ async fn insert_issue_row(
     .bind(row.created_via.as_deref())
     .bind(row.assigned_pod_id)
     .bind(row.agent_executor.as_deref())
+    .bind(row.work_type.as_deref())
     .execute(&mut **tx)
     .await
     .map_err(|error| {
@@ -7025,6 +7045,7 @@ async fn render_draft_to_issue_body(
         git_work_branch: row.git_work_branch.as_str(),
         created_via: row.created_via.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         point: row.point,
         deleted_at: deleted_at.as_deref(),
         created_at: created_at.as_str(),
@@ -7740,6 +7761,7 @@ mod tests {
         // `name` is required on the create shape.
         let filtered = ValidatedAttrs {
             description_html: None,
+            work_type: None,
             assignee_ids: None,
             label_ids: None,
         };
@@ -7770,6 +7792,7 @@ mod tests {
         // The sanitized html wins over the input.
         let filtered = ValidatedAttrs {
             description_html: Some("<p>clean</p>".to_owned()),
+            work_type: None,
             assignee_ids: None,
             label_ids: None,
         };

@@ -97,12 +97,12 @@ use crate::tasks_cleanup::versions::chunk_ranges;
 // ---------------------------------------------------------------------------
 
 /// `IssueCreateSerializer.to_representation` wire keys in output order
-/// (verified live on the pinned Django + DRF): the 39 readable fields in
+/// (verified live on the pinned Django + DRF): the 40 readable fields in
 /// `get_fields()` order, then the `to_representation` echo appends
 /// `assignee_ids` first and `label_ids` second (`:187-190`). The write-only
 /// pair is absent from `super().to_representation` — the echo keys sit at
 /// the END, not in declared position.
-pub const ISSUE_CREATE_FIELDS: [&str; 41] = [
+pub const ISSUE_CREATE_FIELDS: [&str; 42] = [
     "id",
     "state_id",
     "parent_id",
@@ -132,6 +132,7 @@ pub const ISSUE_CREATE_FIELDS: [&str; 41] = [
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -184,6 +185,7 @@ pub struct IssueCreateRow<'a> {
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
     pub project: &'a str,
@@ -233,6 +235,7 @@ pub struct IssueCreateView {
     pub git_work_branch: String,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub created_by: Option<String>,
     pub updated_by: Option<String>,
     pub project: String,
@@ -314,6 +317,7 @@ pub fn issue_create_to_representation(
         git_work_branch: row.git_work_branch.to_owned(),
         created_via: row.created_via.map(str::to_owned),
         agent_executor: row.agent_executor.map(str::to_owned),
+        work_type: row.work_type.map(str::to_owned),
         created_by: row.created_by.map(str::to_owned),
         updated_by: row.updated_by.map(str::to_owned),
         project: row.project.to_owned(),
@@ -587,6 +591,10 @@ pub struct ValidateAttrs<'a> {
     /// `attrs["agent_executor"]` (step 4): outer `None` = key absent,
     /// `Some(None)` = clear the override, `Some(Some)` = pinned value.
     pub agent_executor: Option<Option<&'a str>>,
+    /// `attrs["work_type"]` (step 4b, PDASHOSS01-234): outer `None` = key
+    /// absent, `Some(None)` = explicit null, `Some(Some)` = the string
+    /// (`""` normalizes to `None`).
+    pub work_type: Option<Option<&'a str>>,
     /// `attrs["description_html"]` (step 5; truthy inputs only).
     pub description_html: Option<&'a str>,
     /// `attrs["description_binary"]` base64 (step 6; dead through DRF).
@@ -707,6 +715,10 @@ pub struct ValidateProbes<'a> {
 pub struct ValidatedAttrs {
     /// Cleaned HTML when the input key was present and truthy.
     pub description_html: Option<String>,
+    /// Normalized `work_type` when the input key was present: `Some(None)`
+    /// for null / `""` (inherit the project default), `Some(Some(key))` for
+    /// a registered work type.
+    pub work_type: Option<Option<String>>,
     /// Surviving member ids when the input was present and non-empty.
     pub assignee_ids: Option<Vec<uuid::Uuid>>,
     /// Surviving label ids when the input was present and non-empty.
@@ -875,8 +887,25 @@ pub fn issue_create_validate(
         }
     }
 
+    // Step 4b. work_type (PDASHOSS01-234): key presence; falsy normalizes
+    // to the inherit state, a truthy key must be registered.
+    let work_type = match attrs.work_type {
+        None => None,
+        Some(None) | Some(Some("")) => Some(None),
+        Some(Some(key)) => {
+            if !crate::prompting::work_types::is_known(key) {
+                return Err(CreateValidateError::Field {
+                    field: "work_type",
+                    message: Cow::Owned(crate::prompting::work_types::unknown_work_type_message()),
+                });
+            }
+            Some(Some(key.to_owned()))
+        }
+    };
+
     let mut validated = ValidatedAttrs {
         description_html: None,
+        work_type,
         assignee_ids: None,
         label_ids: None,
     };
@@ -1255,6 +1284,7 @@ mod tests {
             target_date: None,
             assigned_pod: None,
             agent_executor: None,
+            work_type: None,
             description_html: None,
             description_binary: None,
             assignee_ids: None,
@@ -1473,14 +1503,46 @@ mod tests {
         }
     }
 
-    /// The 11-step chain (`validate_order`): every step armed to fail at
+    /// PDASHOSS01-234 step 4b: key absent passes through, null / `""`
+    /// normalize to `None` (inherit), a registered key survives.
+    #[test]
+    fn work_type_normalizes_on_create() {
+        let bank = ProbeBank::permissive();
+        let probes = bank.probes();
+        let cloud = cloud_settings(false);
+        let managed = managed_settings(false);
+        let policy = ExecutorPolicy {
+            cloud: &cloud,
+            managed: &managed,
+            viewer: None,
+        };
+        let ctx = ValidateContext {
+            project_id: Some(uid(1)),
+            allow_triage_state: false,
+        };
+        let mut attrs = base_attrs();
+        let run = |attrs: &ValidateAttrs<'_>| {
+            issue_create_validate(attrs, &ctx, None, &policy, &probes)
+                .expect("valid")
+                .work_type
+        };
+        assert_eq!(run(&attrs), None);
+        attrs.work_type = Some(None);
+        assert_eq!(run(&attrs), Some(None));
+        attrs.work_type = Some(Some(""));
+        assert_eq!(run(&attrs), Some(None));
+        attrs.work_type = Some(Some("software"));
+        assert_eq!(run(&attrs), Some(Some("software".to_owned())));
+    }
+
+    /// The 12-step chain (`validate_order`): every step armed to fail at
     /// once, then earlier failures lifted one by one — each step wins
     /// exactly when every step before it passes.
     #[test]
     fn validate_steps_run_in_fixture_order() {
         let golden = fixture();
         let order = golden["validate_order"].as_array().expect("order array");
-        assert_eq!(order.len(), 11, "eleven ordered steps");
+        assert_eq!(order.len(), 12, "twelve ordered steps");
 
         let instance_json = serde_json::json!({"a": 1});
         let attrs_json = serde_json::json!({"b": 2});
@@ -1539,6 +1601,7 @@ mod tests {
             deleted: false,
         }));
         attrs.agent_executor = Some(Some("bogus"));
+        attrs.work_type = Some(Some("bogus"));
         attrs.description_html = Some(&huge);
         attrs.description_binary = Some("!!!!");
         attrs.assignee_ids = Some(&assignees);
@@ -1582,8 +1645,19 @@ mod tests {
             serde_json::json!({ "agent_executor": EXECUTOR_UNKNOWN_MESSAGE }),
         );
 
-        // Step 5 wins once the executor key is absent.
+        // Step 4b wins once the executor key is absent.
         attrs.agent_executor = None;
+        let err = issue_create_validate(&attrs, &ctx, Some(&current), &policy, &probes)
+            .expect_err("work type wins");
+        assert_eq!(
+            err.wire_body().expect("wire"),
+            serde_json::json!({
+                "work_type": ["unknown work type; expected one of ['general', 'software']"]
+            }),
+        );
+
+        // Step 5 wins once the work type is registered.
+        attrs.work_type = Some(Some("general"));
         let err = issue_create_validate(&attrs, &ctx, Some(&current), &policy, &probes)
             .expect_err("html wins");
         assert_eq!(
@@ -1653,6 +1727,7 @@ mod tests {
             validated,
             ValidatedAttrs {
                 description_html: None,
+                work_type: Some(Some("general".to_owned())),
                 assignee_ids: None,
                 label_ids: Some(vec![uid(6)]),
             }
@@ -2448,6 +2523,7 @@ mod tests {
             validated,
             ValidatedAttrs {
                 description_html: None,
+                work_type: None,
                 assignee_ids: None,
                 label_ids: None,
             }
@@ -2475,8 +2551,8 @@ mod tests {
         let sent = serde_json::json!(["a", "b"]);
         assert_eq!(echo_initial_ids(Some(&sent)), sent);
 
-        // 41 wire keys with the echo pair appended last (:187-190).
-        assert_eq!(ISSUE_CREATE_FIELDS.len(), 41);
+        // 42 wire keys with the echo pair appended last (:187-190).
+        assert_eq!(ISSUE_CREATE_FIELDS.len(), 42);
         assert_eq!(ISSUE_CREATE_FIELDS[0], "id");
         assert_eq!(
             &ISSUE_CREATE_FIELDS[ISSUE_CREATE_FIELDS.len() - 2..],
@@ -2517,6 +2593,7 @@ mod tests {
             git_work_branch: "",
             created_via: None,
             agent_executor: Some("local_runner"),
+            work_type: Some("software"),
             created_by: Some("55555555-5555-5555-5555-555555555555"),
             updated_by: None,
             project: "33333333-3333-3333-3333-333333333333",

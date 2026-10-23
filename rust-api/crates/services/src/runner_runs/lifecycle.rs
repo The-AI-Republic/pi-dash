@@ -1944,7 +1944,7 @@ mod tests {
             select_runs(&reread),
             vec![
                 ("\"agent_run\"".to_owned(), 42),
-                ("\"issues\"".to_owned(), 34),
+                ("\"issues\"".to_owned(), 35),
             ]
         );
         assert!(
@@ -1960,7 +1960,7 @@ mod tests {
             select_runs(&drain),
             vec![
                 ("\"agent_run\"".to_owned(), 42),
-                ("\"issues\"".to_owned(), 34),
+                ("\"issues\"".to_owned(), 35),
                 ("\"projects\"".to_owned(), 47),
                 ("\"states\"".to_owned(), 18),
             ]
@@ -1980,7 +1980,7 @@ mod tests {
             select_runs(&failure),
             vec![
                 ("\"agent_run\"".to_owned(), 42),
-                ("\"issues\"".to_owned(), 34),
+                ("\"issues\"".to_owned(), 35),
                 ("\"projects\"".to_owned(), 47),
             ]
         );
