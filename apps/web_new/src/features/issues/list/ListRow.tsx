@@ -230,8 +230,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
     ...subIssuesQueryOptions(getAppClient(), props.workspaceSlug, props.projectId, issue.id),
     // Hiding the expander must also stop any in-flight child read, so the
     // display flag gates the query and the render together.
-    enabled:
-      showSubIssues && expanded && !atCap && canExpand && (selectionTree === undefined || treeChildren === undefined),
+    enabled: showSubIssues && expanded && !atCap && canExpand,
   });
   const children = treeChildren ?? query.data?.sub_issues ?? [];
   const toggleExpanded = (): void => {

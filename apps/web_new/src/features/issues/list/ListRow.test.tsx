@@ -260,7 +260,7 @@ describe("ListRow selection", () => {
     expect(screen.getByText("Child")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Cannot select OTHER-43" })).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "Select OTHER-43" })).not.toBeInTheDocument();
-    expect(queryMock.useQuery.mock.calls.at(-1)?.[0]).toMatchObject({ enabled: false });
+    expect(queryMock.useQuery.mock.calls.some(([options]) => options.enabled === true)).toBe(true);
   });
 
   it("reports an empty child list when the expanded payload omits sub-issues", () => {
