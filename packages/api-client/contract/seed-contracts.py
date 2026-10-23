@@ -951,6 +951,23 @@ def seed():
     )
     note("project-page", f"{project.identifier}/{page.name}", project_page_created)
 
+    # Pages area (NEWFRONT-833): one stored snapshot of the seeded page so the
+    # version list and the snapshot detail have a row to read in every run.
+    from pi_dash.db.models import PageVersion  # noqa: E402
+
+    _, page_version_created = PageVersion.objects.get_or_create(
+        workspace=workspace,
+        page=page,
+        defaults={
+            "owned_by": user,
+            "description_html": "<p>Contract page snapshot</p>",
+            "description_json": {"type": "doc", "content": [{"type": "paragraph"}]},
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    note("page-version", page.name, page_version_created)
+
     from pi_dash.db.models import Estimate, EstimatePoint  # noqa: E402
 
     estimate, estimate_created = Estimate.objects.get_or_create(
