@@ -973,8 +973,14 @@ async function desk005Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     await test.step("the runners rail lists the built-in contact beside cloud runners", async () => {
       await driver.desktopRuntimeOpenRunners(seed.workspaceSlug);
       await expect.poll(() => driver.desktopRuntimeRailSectionHeaders(), RUNTIME_POLL).toContain("BUILT-IN");
-      const links = await driver.desktopRuntimeRailChatLinks();
-      expect(links.map((link) => link.name).join("\n")).toContain(online.name);
+      // The rail headers can render before the runner list populates, so poll
+      // the links rather than reading them once.
+      await expect
+        .poll(
+          async () => (await driver.desktopRuntimeRailChatLinks()).map((link) => link.name).join("\n"),
+          RUNTIME_POLL
+        )
+        .toContain(online.name);
     });
 
     await test.step("the built-in chat opens its local-mode surface directly", async () => {
