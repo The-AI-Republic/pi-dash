@@ -625,14 +625,41 @@ describe("settings shell reads (NEWFRONT-586, PROF-009/010/026)", () => {
 
   it("opens a tab address with cookies and settles on the shell", async () => {
     const waitFor = vi.fn(async () => undefined);
+    const reload = vi.fn(async () => undefined);
     const { page, goto, addCookies } = settingsPage({
       getByTestId: () => locator({ waitFor }),
+      reload,
     });
     const driver = new WebNewDriver(page);
     await driver.settingsProfileOpen("security", [{ name: "s", value: "v", domain: "app.test", path: "/" }]);
     expect(addCookies).toHaveBeenCalledTimes(1);
     expect(goto).toHaveBeenCalledWith("/settings/profile/security", { waitUntil: "domcontentloaded" });
     expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 60_000 });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("reloads once when the shell misses its first paint, then settles", async () => {
+    const waitFor = vi.fn().mockRejectedValueOnce(new Error("Timeout 60000ms exceeded")).mockResolvedValue(undefined);
+    const reload = vi.fn(async () => undefined);
+    const { page } = settingsPage({ getByTestId: () => locator({ waitFor }), reload });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpen("security", []);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledTimes(2);
+    expect(waitFor).toHaveBeenNthCalledWith(1, { state: "visible", timeout: 60_000 });
+    expect(waitFor).toHaveBeenNthCalledWith(2, { state: "visible", timeout: 60_000 });
+  });
+
+  it("throws when the shell still misses after the reload", async () => {
+    const waitFor = vi.fn(async () => {
+      throw new Error("Timeout 60000ms exceeded");
+    });
+    const reload = vi.fn(async () => undefined);
+    const { page } = settingsPage({ getByTestId: () => locator({ waitFor }), reload });
+    const driver = new WebNewDriver(page);
+    await expect(driver.settingsProfileOpen("security", [])).rejects.toThrow("Timeout 60000ms exceeded");
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledTimes(2);
   });
 
   it("opens tab shortcuts and query variants at their addresses", async () => {

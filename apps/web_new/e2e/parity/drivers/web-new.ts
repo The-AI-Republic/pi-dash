@@ -25776,11 +25776,23 @@ export class WebNewDriver implements ParityDriver {
     await this.settingsProfileSettle();
   }
 
-  /** Settle the settings page on its shell (unknown ids redirect to the default tab). */
+  /**
+   * Settle the settings page on its shell (unknown ids redirect to the
+   * default tab). A first paint that never arrives is retried once with a
+   * reload, the same recovery the project-pages helper uses: the dev server
+   * serves ~900 unbundled modules per navigation, and one stalled module
+   * graph otherwise burns the whole first-paint budget. A slow but working
+   * paint still settles inside the unchanged first budget.
+   */
   private async settingsProfileSettle(): Promise<void> {
-    await this.page
-      .getByTestId("profile-settings-shell")
-      .waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+    const shell = this.page.getByTestId("profile-settings-shell");
+    try {
+      await shell.waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+      return;
+    } catch {
+      await this.page.reload().catch(() => undefined);
+    }
+    await shell.waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
 
   /** Link labels under one sidebar section heading (tabs or shortcuts). */
