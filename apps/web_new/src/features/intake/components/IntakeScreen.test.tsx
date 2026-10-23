@@ -227,7 +227,7 @@ describe("IntakeScreen gate (INT-002)", () => {
     installServer(server);
     renderScreen({ currentTab: "open" });
     expect(
-      await screen.findByRole("heading", { name: /^Intake is not enabled for the project\./ })
+      await screen.findByRole("heading", { name: /^Intake is paused for this project/ })
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Manage features" })).toBeEnabled();
     expect(server.listRequests).toEqual([]);

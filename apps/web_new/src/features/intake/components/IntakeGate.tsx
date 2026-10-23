@@ -24,7 +24,7 @@ export function IntakeGate({ canManageFeatures, onManageFeatures }: IntakeGatePr
       <EmptyState
         variant="detailed"
         art={{ category: "general", type: "disabled" }}
-        title={`${INTAKE_AREA_LABEL} is not enabled for the project.`}
+        title={`${INTAKE_AREA_LABEL} is paused for this project`}
         description="Requests sent to this project are not collected while intake is off. A project admin can turn it on from the project's feature settings."
         primaryAction={{
           label: "Manage features",

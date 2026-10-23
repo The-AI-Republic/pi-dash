@@ -11,7 +11,7 @@ import { IntakeGate } from "./IntakeGate.js";
 describe("IntakeGate (INT-002)", () => {
   it("explains that intake is off", () => {
     render(<IntakeGate canManageFeatures onManageFeatures={() => {}} />);
-    expect(screen.getByRole("heading", { name: /^Intake is not enabled for the project\./ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^Intake is paused for this project/ })).toBeInTheDocument();
   });
 
   it("enables the settings shortcut for project admins", () => {

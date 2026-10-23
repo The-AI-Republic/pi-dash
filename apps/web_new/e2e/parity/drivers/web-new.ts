@@ -28601,7 +28601,7 @@ export class WebNewDriver implements ParityDriver {
         () => "lost"
       );
     const gate = this.page
-      .getByRole("heading", { name: /^Intake is not enabled for the project\./ })
+      .getByRole("heading", { name: /^Intake is paused for this project/ })
       .waitFor({ timeout: 120_000 })
       .then(
         () => "gate",
@@ -28703,7 +28703,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async intakeShellFeatureGateVisible(): Promise<boolean> {
-    return this.isShown(this.page.getByRole("heading", { name: /^Intake is not enabled for the project\./ }));
+    return this.isShown(this.page.getByRole("heading", { name: /^Intake is paused for this project/ }));
   }
 
   async intakeShellFeatureGateActionEnabled(): Promise<boolean> {
