@@ -261,6 +261,19 @@ describe("CyclesListBody", () => {
     expect(screen.getByTestId("cycles-actions")).toBeInTheDocument();
   });
 
+  it("renders the chips slot between the toolbar and the hero", async () => {
+    renderBody({
+      hero: <div data-testid="cycles-hero">hero</div>,
+      chips: <div data-testid="cycles-chips">chips</div>,
+    });
+    await screen.findByTestId("cycles-list-body");
+    const chips = screen.getByTestId("cycles-chips");
+    const follows = (before: HTMLElement, after: HTMLElement): boolean =>
+      (before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    expect(follows(screen.getByTestId("cycles-search-toggle"), chips)).toBe(true);
+    expect(follows(chips, screen.getByTestId("cycles-hero"))).toBe(true);
+  });
+
   it("hides the star for guests", async () => {
     harness.roles = { [CYCLES_PROJECT_ID]: 5 };
     renderBody();

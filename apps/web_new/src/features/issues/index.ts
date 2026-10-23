@@ -286,6 +286,18 @@ export type { DateCalendarProps, DatePickerProps } from "./dropdowns/DatePicker.
 export { DateRangeCalendar, DateRangePicker } from "./dropdowns/DateRangePicker.js";
 export type { DateRangeCalendarProps, DateRangeMode, DateRangePickerProps } from "./dropdowns/DateRangePicker.js";
 export { useWeekStart } from "./dropdowns/weekStart.js";
+export { FilterSection } from "./filters/shared/FilterSection.js";
+export type { FilterSectionOption, FilterSectionProps } from "./filters/shared/FilterSection.js";
+export {
+  DATE_PRESETS,
+  customDateMode,
+  customEndEntry,
+  customRange,
+  customStartEntry,
+  hasCustomDate,
+  isDatePreset,
+} from "./filters/rich/legacyDimensions.js";
+export type { CustomDateMode, DatePreset } from "./filters/rich/legacyDimensions.js";
 export { ISSUE_DATES_FAILED_TITLE, useUpdateIssueDates, withIssueDates } from "./api/dates.js";
 export type { IssueDatesInput } from "./api/dates.js";
 export {

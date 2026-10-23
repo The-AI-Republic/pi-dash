@@ -28026,32 +28026,110 @@ export class WebNewDriver implements ParityDriver {
   async cyclesClickAway(): Promise<void> {
     return todo("cyclesClickAway");
   }
+
+  /** The list's Filters trigger (NEWFRONT-709, CYC-006-008). */
+  private cyclesFiltersTrigger(): Locator {
+    return this.page.getByTestId("cycles-filters-trigger");
+  }
+
+  /** The open filters panel; a closed popover unmounts it. */
+  private cyclesFiltersPanel(): Locator {
+    return this.page.getByTestId("cycles-filters-panel");
+  }
+
+  /** The applied-filters row; absent while no dimension applies. */
+  private cyclesChipRow(): Locator {
+    return this.page.getByTestId("cycles-filter-chips");
+  }
+
+  /** One applied dimension's chip group inside the row. */
+  private cyclesChipGroups(): Locator {
+    return this.cyclesChipRow().locator('[data-testid^="cycles-filter-chip-"]');
+  }
+
   async cyclesFiltersOpen(): Promise<void> {
-    return todo("cyclesFiltersOpen");
+    await this.cyclesFiltersTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.cyclesFiltersPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async cyclesFiltersClose(): Promise<void> {
-    return todo("cyclesFiltersClose");
+    // The toggle click resolves before the popover mounts its panel; a
+    // bare count-check can miss a slow mount, skip the Escape, and leave
+    // the panel open. Let any in-flight open land before deciding.
+    try {
+      await this.cyclesFiltersPanel().waitFor({ state: "attached", timeout: 2_000 });
+    } catch {
+      // Panel never opened; the count check below returns immediately.
+    }
+    if ((await this.cyclesFiltersPanel().count()) === 0) return;
+    await this.page.keyboard.press("Escape");
+    await this.cyclesFiltersPanel().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async cyclesFilterSections(): Promise<string[]> {
-    return todo("cyclesFilterSections");
+    const sections = this.cyclesFiltersPanel().locator("[data-section-title]");
+    const total = await sections.count();
+    const titles: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const title = await sections.nth(i).getAttribute("data-section-title");
+      if (title !== null && title !== "") titles.push(title);
+    }
+    return titles;
   }
+
   async cyclesFilterOptionNames(): Promise<string[]> {
-    return todo("cyclesFilterOptionNames");
+    const options = this.cyclesFiltersPanel().locator('button[role="checkbox"],button[role="radio"]');
+    const total = await options.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const name = await options.nth(i).getAttribute("aria-label");
+      if (name !== null && name !== "") names.push(name);
+    }
+    return names;
   }
-  async cyclesFilterPick(_section: string, _optionName: string): Promise<void> {
-    return todo("cyclesFilterPick");
+
+  async cyclesFilterPick(section: string, optionName: string): Promise<void> {
+    // The title carries the full heading ("Status of the cycle") while
+    // the specs pass its head ("Status"), so match by substring on the
+    // title attribute rather than the section body's text.
+    const block = this.cyclesFiltersPanel().locator(`[data-section-title*="${section}"]`);
+    await block.getByRole("button", { name: optionName }).click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async cyclesFilterChipTexts(): Promise<string[]> {
-    return todo("cyclesFilterChipTexts");
+    const row = this.cyclesChipRow();
+    if ((await row.count()) === 0 || !(await row.isVisible())) return [];
+    const chips = this.cyclesChipGroups();
+    const total = await chips.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (await chips.nth(i).innerText()).trim().replace(/\s+/g, " ");
+      if (text !== "") texts.push(text);
+    }
+    return texts;
   }
-  async cyclesFilterRemoveChip(_chipText: string): Promise<void> {
-    return todo("cyclesFilterRemoveChip");
+
+  async cyclesFilterRemoveChip(chipText: string): Promise<void> {
+    const chips = this.cyclesChipGroups();
+    const total = await chips.count();
+    for (let i = 0; i < total; i++) {
+      const text = (await chips.nth(i).innerText()).trim().replace(/\s+/g, " ");
+      if (text === chipText) {
+        await chips.nth(i).getByRole("button").last().click({ timeout: WebNewDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error(`[parity] live-cycles chip not found: ${chipText}`);
   }
+
   async cyclesFiltersClearAll(): Promise<void> {
-    return todo("cyclesFiltersClearAll");
+    await this.cyclesChipRow()
+      .getByRole("button", { name: /clear all/i })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async cyclesFiltersActive(): Promise<boolean> {
-    return todo("cyclesFiltersActive");
+    return (await this.page.getByTestId("cycles-filters-count").count()) > 0;
   }
 
   async activityBeginTrafficSpy(_options: { reload?: boolean } = {}): Promise<void> {
