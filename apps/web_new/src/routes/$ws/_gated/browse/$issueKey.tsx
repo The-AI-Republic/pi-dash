@@ -23,13 +23,12 @@ import {
   DetailSkeleton,
   IssueDetailRoot,
   IssuePropertiesSidebar,
-  IssueReTickAction,
-  IssueRunAIAction,
   SubIssuesWidget,
   issueDetailQueryOptions,
   issueKeys,
   liteIssueQueryOptions,
 } from "../../../../features/issues/index.js";
+import { IssueReTickAction, IssueRunAIAction } from "../../../../features/issues/detail/IssueAgentActions.js";
 import {
   AttachmentsWidget,
   type AttachmentsWidgetHandle,

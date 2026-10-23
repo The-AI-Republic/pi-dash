@@ -18,7 +18,7 @@ import { ROLE_MEMBER, useWorkspace } from "../../../core/session/index.js";
 import { CopyWorkItemLinkButton } from "../../../shared/shell/CopyWorkItemLinkButton.js";
 import { projectMembershipQueryOptions } from "../../auth/index.js";
 import {
-  IssueAgentActions,
+  IssueAgentActionsEntry,
   IssueDetailRoot,
   IssuePropertiesSidebar,
   TriageDetailRoot,
@@ -189,7 +189,7 @@ function IssuePreviewDetail(props: {
       issue={props.issue}
       editable={props.editable}
       agentActions={
-        <IssueAgentActions
+        <IssueAgentActionsEntry
           workspaceSlug={props.workspaceSlug}
           workspaceId={workspace?.id ?? null}
           projectId={props.projectId}

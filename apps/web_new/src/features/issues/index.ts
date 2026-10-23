@@ -197,12 +197,8 @@ export type { DescriptionHistoryProps, VersionAuthor } from "./detail/Descriptio
 export { IssueDescriptionField } from "./detail/IssueDescriptionField.js";
 export type { IssueDescriptionFieldProps, RestoredDescription } from "./detail/IssueDescriptionField.js";
 export { IssueDetailRoot } from "./detail/IssueDetailRoot.js";
-export { IssueAgentActions, IssueReTickAction, IssueRunAIAction, reTickOffered } from "./detail/IssueAgentActions.js";
-export type {
-  IssueAgentActionsProps,
-  IssueReTickActionProps,
-  IssueRunAIActionProps,
-} from "./detail/IssueAgentActions.js";
+export { IssueAgentActionsEntry } from "./detail/lazyAgentActions.js";
+export type { IssueAgentActionsEntryProps } from "./detail/lazyAgentActions.js";
 export {
   PARENT_BANNER_LABEL,
   ParentBanner,
