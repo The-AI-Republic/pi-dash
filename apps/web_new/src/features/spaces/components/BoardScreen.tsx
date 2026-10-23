@@ -5,7 +5,8 @@
 // the gate: while they load the navbar placeholder and an empty body show;
 // a 404 swaps to the anchor illustration; any other failure swaps to the
 // board-error illustration. Once settings resolve, issues load under the
-// real navbar and their own spinner.
+// real navbar and their own spinner. Every branch mounts the board's
+// document head (SPC-007) so the tags settle before content is announced.
 
 import { useQuery } from "@tanstack/react-query";
 import type { SpaceBoardSettings } from "@pidash/api-client";
@@ -17,6 +18,7 @@ import { classifySpaceFailure } from "../lib/errors.js";
 import { isValidAnchor, type SpaceBoardSearch } from "../lib/address.js";
 import { BoardIssues, BoardLoading, BoardNavbar } from "./BoardShell.js";
 import { SpaceAnchorNotFound, SpaceBoardError } from "./FailureSurfaces.js";
+import { SpaceBoardHead } from "./SpaceBoardHead.js";
 
 export interface BoardScreenProps {
   anchor: string;
@@ -24,24 +26,44 @@ export interface BoardScreenProps {
 }
 
 export function BoardScreen({ anchor, search }: BoardScreenProps): React.ReactElement {
-  if (!isValidAnchor(anchor)) return <SpaceAnchorNotFound />;
+  if (!isValidAnchor(anchor)) {
+    return (
+      <>
+        <SpaceBoardHead anchor={anchor} />
+        <SpaceAnchorNotFound />
+      </>
+    );
+  }
   return <ValidAnchorBoard anchor={anchor} search={search} />;
 }
 
 function ValidAnchorBoard({ anchor, search }: BoardScreenProps): React.ReactElement {
   const settings = useQuery(spaceSettingsQueryOptions(spaceRuntime.client, anchor));
   if (settings.isError) {
-    return classifySpaceFailure(settings.error) === "not-found" ? <SpaceAnchorNotFound /> : <SpaceBoardError />;
+    return (
+      <>
+        <SpaceBoardHead anchor={anchor} />
+        {classifySpaceFailure(settings.error) === "not-found" ? <SpaceAnchorNotFound /> : <SpaceBoardError />}
+      </>
+    );
   }
   if (settings.data === undefined) {
     return (
-      <div data-testid="space-board">
-        <BoardNavbar settings={undefined} anchor={anchor} search={search} />
-        <div data-testid="space-board-placeholder" className="min-h-[60vh]" />
-      </div>
+      <>
+        <SpaceBoardHead anchor={anchor} />
+        <div data-testid="space-board">
+          <BoardNavbar settings={undefined} anchor={anchor} search={search} />
+          <div data-testid="space-board-placeholder" className="min-h-[60vh]" />
+        </div>
+      </>
     );
   }
-  return <ResolvedBoard anchor={anchor} search={search} settings={settings.data} />;
+  return (
+    <>
+      <SpaceBoardHead anchor={anchor} />
+      <ResolvedBoard anchor={anchor} search={search} settings={settings.data} />
+    </>
+  );
 }
 
 function ResolvedBoard({

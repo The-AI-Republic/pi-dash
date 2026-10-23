@@ -14,10 +14,16 @@ import * as React from "react";
 import { spaceRuntime } from "../../features/spaces/api/client.js";
 import { SpaceCrashScreen } from "../../features/spaces/components/CrashScreen.js";
 import { SpaceBootGate } from "../../features/spaces/components/SpaceBootGate.js";
+import { SPACE_HEAD_ROBOTS, SPACE_HEAD_TITLE_FALLBACK } from "../../features/spaces/lib/boardHead.js";
+import { useDocumentHead } from "../../shared/shell/document.js";
 
 export const Route = createFileRoute("/spaces")({
   errorComponent: SpaceCrashScreen,
   component: function SpacesLayout() {
+    // Subtree crawler directive (SPC-008). A fallback claim: it beats the
+    // app root's indexable default while every space leaf's own claim —
+    // board tags, landing, failures — wins for its page.
+    useDocumentHead({ title: SPACE_HEAD_TITLE_FALLBACK, robots: SPACE_HEAD_ROBOTS, fallback: true });
     return (
       <QueryClientProvider client={spaceRuntime.queryClient}>
         <SpaceBootGate>

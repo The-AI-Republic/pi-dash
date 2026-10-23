@@ -12,6 +12,7 @@ describe("space query keys", () => {
     expect(spaceKeys.settings("a1")).toEqual(["spaces", "anchor", "a1", "settings"]);
     expect(spaceKeys.issues("a1")).toEqual(["spaces", "anchor", "a1", "issues"]);
     expect(spaceKeys.states("a1")).toEqual(["spaces", "anchor", "a1", "states"]);
+    expect(spaceKeys.meta("a1")).toEqual(["spaces", "anchor", "a1", "meta"]);
     expect(spaceKeys.legacy("acme", "p1")).toEqual(["spaces", "legacy", "acme", "p1"]);
     for (const key of [spaceKeys.all, spaceKeys.instance, spaceKeys.anchor("a1")]) {
       expect(key[0]).toBe("spaces");
