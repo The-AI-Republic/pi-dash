@@ -222,6 +222,25 @@ export interface LocalChatApi {
     event: { role: string; content: string }
   ): Promise<LocalChatEventRecord>;
   setThreadId(account: string, sessionId: string, engineThreadId: string): Promise<void>;
+  /**
+   * Replace a session's title. Rejects when the account's store holds no
+   * such session, so a stale row surfaces instead of silently vanishing.
+   */
+  renameSession(account: string, sessionId: string, title: string): Promise<void>;
+  /**
+   * Delete a session together with its messages. Idempotent: a session
+   * that is already gone resolves rather than failing, so a repeated
+   * click is harmless.
+   */
+  deleteSession(account: string, sessionId: string): Promise<void>;
+  /** Wipe every session and message this account keeps on the machine. */
+  clearHistory(account: string): Promise<void>;
+  /**
+   * Resolve the working copy a chat runs in for this account, workspace
+   * and project, creating it when absent. Deliberately separate from the
+   * managed-run tree.
+   */
+  workingDir(account: string, workspace: string, project: string): Promise<string>;
   warm(input: {
     workspaceSlug: string;
     sessionId: string;

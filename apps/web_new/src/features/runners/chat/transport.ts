@@ -90,6 +90,21 @@ export interface ChatTransport {
   createChatSession?(input: { workspace: string; runner: string }): Promise<ChatSession | null>;
   listChatMessages?(sessionId: string): Promise<ChatMessage[] | null>;
   warmChatSession?(sessionId: string): Promise<void>;
+  /**
+   * Replace a local conversation's title (DESK-009). Absent on the cloud
+   * path: the server names its own conversations.
+   */
+  renameChatSession?(sessionId: string, title: string): Promise<void>;
+  /** Remove a local conversation and its messages; idempotent. */
+  deleteChatSession?(sessionId: string): Promise<void>;
+  /** Wipe every conversation this account keeps on the machine. */
+  clearChatHistory?(): Promise<void>;
+  /**
+   * Resolve the working copy a local conversation runs in (DESK-009).
+   * Absent on the cloud path. The workspace is the id the sessions carry,
+   * which is what the machine resolved the directory from.
+   */
+  chatWorkingDir?(workspaceId: string, runnerId: string): Promise<string>;
   /** Whether this transport's store carries the conversation. */
   ownsChatSession?(sessionId: string): Promise<boolean>;
   /** Whether this contact is served by this transport rather than the server. */
@@ -245,6 +260,46 @@ export async function fetchChatMessages(client: ApiClient, sessionId: string): P
   if (!owned) return listChatMessages(client, sessionId);
   const local = await activeTransport.listChatMessages?.(sessionId);
   return local ?? listChatMessages(client, sessionId);
+}
+
+/**
+ * Rename one conversation. A store that does not carry it (a server queue
+ * conversation, or a plan that offers no rename) answers `false` so the
+ * caller can report that nothing changed rather than claim success.
+ */
+export async function renameChatSession(sessionId: string, title: string): Promise<boolean> {
+  if (activeTransport.renameChatSession === undefined) return false;
+  await activeTransport.renameChatSession(sessionId, title);
+  return true;
+}
+
+/**
+ * Delete one conversation and its messages. Idempotent by contract, so a
+ * double click or a stale row settles quietly.
+ */
+export async function deleteChatSession(sessionId: string): Promise<boolean> {
+  if (activeTransport.deleteChatSession === undefined) return false;
+  await activeTransport.deleteChatSession(sessionId);
+  return true;
+}
+
+/** Wipe the on-machine history for the signed-in account, when one exists. */
+export async function clearChatHistory(): Promise<boolean> {
+  if (activeTransport.clearChatHistory === undefined) return false;
+  await activeTransport.clearChatHistory();
+  return true;
+}
+
+/**
+ * The working copy a local chat runs in. `null` when the transport has no
+ * working copy of its own (cloud, or a server contact on the desktop), so
+ * the header keeps whatever the session row already carried.
+ */
+export async function fetchChatWorkingDir(workspaceId: string, runnerId: string): Promise<string | null> {
+  if (activeTransport.chatWorkingDir === undefined) return null;
+  if (activeTransport.ownsRunner !== undefined && !activeTransport.ownsRunner(runnerId)) return null;
+  const dir = await activeTransport.chatWorkingDir(workspaceId, runnerId);
+  return dir === "" ? null : dir;
 }
 
 /**

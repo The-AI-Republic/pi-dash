@@ -16,6 +16,7 @@ import {
   COMPOSER_LOADING,
   COMPOSER_OFFLINE,
   COMPOSER_REVOKED,
+  HISTORY_BUSY_REASON,
   composerBlockReason,
   isExplicitlyViewing,
   isRunnerBusy,
@@ -169,6 +170,13 @@ describe("history ordering and labels", () => {
     expect(sessionTitle({ last_message_at: null, created_at: "garbage" })).toBe("Chat");
   });
 
+  it("shows a stored conversation's own name instead of its activity stamp", () => {
+    expect(sessionTitle({ ...newest, local_title: "Release plan" })).toBe("Release plan");
+    // A stored-but-blank name falls back to the stamp like any server row.
+    expect(sessionTitle({ ...newest, local_title: "" })).toContain("Dec 10");
+    expect(sessionTitle({ ...newest, local_title: "   " })).toContain("Dec 10");
+  });
+
   it("subtitles relative age plus non-open status, or a plain untouched line", () => {
     expect(sessionSubtitle(session({ status: "open" }), NOW)).toBe("1 hour ago");
     expect(sessionSubtitle(session({ status: "failed" }), NOW)).toBe("1 hour ago · failed");
@@ -181,6 +189,12 @@ describe("history ordering and labels", () => {
     expect(entries.map((entry) => entry.active)).toEqual([false, true, false]);
     expect(entries[0]?.subtitle).toContain("closed");
     expect(entries.map((entry) => entry.id)).toEqual(["newest", "middle", "oldest"]);
+    expect(entries.every((entry) => entry.busyReason === null)).toBe(true);
+  });
+
+  it("explains why a streaming conversation's actions wait", () => {
+    const streaming = { ...middle, active_message_id: "m-1" };
+    expect(buildHistoryEntries([streaming], "middle", NOW)[0]?.busyReason).toBe(HISTORY_BUSY_REASON);
   });
 });
 

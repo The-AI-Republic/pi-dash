@@ -18,6 +18,10 @@ import {
   getChatTransport,
   openChatSession,
   prepareChatSession,
+  clearChatHistory,
+  deleteChatSession,
+  fetchChatWorkingDir,
+  renameChatSession,
   setChatTransport,
   subscribeChatTransport,
   type ChatTransport,
@@ -481,5 +485,54 @@ describe("prepareChatSession ownership", () => {
     await prepareChatSession(api, "local-session");
     expect(local.warmChatSession).toHaveBeenCalledWith("local-session");
     expect(calls).toEqual([]);
+  });
+});
+
+describe("on-machine history seams", () => {
+  const local = (extra: Partial<ChatTransport> = {}): ChatTransport =>
+    ({
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+      ...extra,
+    }) as unknown as ChatTransport;
+
+  it("answer false on a surface that keeps no history on this machine", async () => {
+    await expect(renameChatSession("s-1", "Planning")).resolves.toBe(false);
+    await expect(deleteChatSession("s-1")).resolves.toBe(false);
+    await expect(clearChatHistory()).resolves.toBe(false);
+    await expect(fetchChatWorkingDir("ws-id", "pidash-builtin")).resolves.toBeNull();
+  });
+
+  it("forward every history write and confirm that one happened", async () => {
+    const rename = vi.fn(async () => undefined);
+    const remove = vi.fn(async () => undefined);
+    const clear = vi.fn(async () => undefined);
+    setChatTransport(local({ renameChatSession: rename, deleteChatSession: remove, clearChatHistory: clear }));
+    await expect(renameChatSession("s-1", "Planning")).resolves.toBe(true);
+    await expect(deleteChatSession("s-1")).resolves.toBe(true);
+    await expect(clearChatHistory()).resolves.toBe(true);
+    expect(rename).toHaveBeenCalledWith("s-1", "Planning");
+    expect(remove).toHaveBeenCalledWith("s-1");
+    expect(clear).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the working copy only for a contact the transport serves", async () => {
+    const chatWorkingDir = vi.fn(async () => "/home/me/.pi/chat/acme/PROJ");
+    setChatTransport(local({ chatWorkingDir }));
+    await expect(fetchChatWorkingDir("ws-id", "pidash-builtin")).resolves.toBe("/home/me/.pi/chat/acme/PROJ");
+    await expect(fetchChatWorkingDir("ws-id", "r-1")).resolves.toBeNull();
+    expect(chatWorkingDir).toHaveBeenCalledTimes(1);
+    expect(chatWorkingDir).toHaveBeenCalledWith("ws-id", "pidash-builtin");
+  });
+
+  it("treats an empty working copy as unknown", async () => {
+    setChatTransport(local({ chatWorkingDir: vi.fn(async () => "") }));
+    await expect(fetchChatWorkingDir("ws-id", "pidash-builtin")).resolves.toBeNull();
+  });
+
+  it("reads the working copy from a whole-surface transport that names no contacts", async () => {
+    const chatWorkingDir = vi.fn(async () => "/repo");
+    setChatTransport({ subscribeChatEvents: vi.fn(() => () => undefined), chatWorkingDir } as unknown as ChatTransport);
+    await expect(fetchChatWorkingDir("ws-id", "any")).resolves.toBe("/repo");
   });
 });

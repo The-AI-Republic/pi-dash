@@ -24,16 +24,19 @@ import {
   composerBlockReason,
   isRunnerBusy,
   selectSession,
+  type ChatHistoryEntry,
 } from "./chatState.js";
 import { ChatComposer } from "./ChatComposer.js";
 import { ChatHeader } from "./ChatHeader.js";
 import { ChatHistory } from "./ChatHistory.js";
 import { ChatTranscript } from "./ChatTranscript.js";
-import { useChatMessages, useChatRunner, useChatSessions } from "./queries.js";
+import { useChatMessages, useChatRunner, useChatSessions, useChatWorkingDir } from "./queries.js";
 import { ChatApprovalMode } from "./ChatApprovalMode.js";
 import { ChatApprovalPrompt } from "./ChatApprovalPrompt.js";
+import { HistoryRemovalDialog, RenameChatDialog } from "./ChatHistoryManage.js";
+import { remainingSessions, selectionAfterDelete } from "./historyActions.js";
+import { supportsLocalHistory, useClearHistory, useDeleteChat, useRenameChat } from "./historyQueries.js";
 import {
-  approvalRemainingMs,
   pendingApprovalFromEvent,
   rememberApprovalMode,
   storedApprovalMode,
@@ -45,6 +48,9 @@ import { useChatActions } from "./useChatActions.js";
 import { useChatStream } from "./useChatStream.js";
 import { useNewChat } from "./useNewChat.js";
 import { useWarmUp } from "./useWarmUp.js";
+
+/** What a history removal will act on: one conversation, or the account's whole history. */
+type RemovalChoice = { scope: "single"; entry: ChatHistoryEntry } | { scope: "all" };
 
 /** Page title while the runner row is still unknown. */
 export const RUNNER_CHAT_PAGE_TITLE = "Runner chat";
@@ -154,7 +160,16 @@ export function RunnerChatPage({
   });
 
   const messages = useChatMessages(workspaceSlug, session?.id ?? null, area.allowed);
-  const summary = chatHeaderSummary(runner.data, session);
+  // A local chat's working copy is resolved by the machine, not carried on
+  // a server row; when the read answers, it is the directory the header
+  // shows (DESK-009).
+  const localHistory = supportsLocalHistory(runnerId);
+  const workingDir = useChatWorkingDir(workspaceSlug, area.workspaceId, runnerId, area.allowed && localHistory);
+  const headerSession = React.useMemo(
+    () => (session === null ? null : { ...session, cwd: workingDir.data || session.cwd }),
+    [session, workingDir.data]
+  );
+  const summary = chatHeaderSummary(runner.data, headerSession);
   const blockedReason = composerBlockReason(runner.data, session);
   const turnInFlight = isRunnerBusy(session);
   const entries = React.useMemo(
@@ -228,6 +243,60 @@ export function RunnerChatPage({
     [pendingApproval, session, transport]
   );
 
+  // On-machine history writes (DESK-009). A rename keeps the conversation
+  // on screen; a delete moves the selection to the most recent survivor and
+  // a clear-all leaves nothing selected. Both wait for the list re-read.
+  const renameChat = useRenameChat(workspaceSlug, runnerId);
+  const deleteChat = useDeleteChat(workspaceSlug, runnerId);
+  const clearHistory = useClearHistory(workspaceSlug, runnerId);
+  const [renameTarget, setRenameTarget] = React.useState<ChatHistoryEntry | null>(null);
+  const [removal, setRemoval] = React.useState<RemovalChoice | null>(null);
+
+  const startRename = React.useCallback((entry: ChatHistoryEntry) => setRenameTarget(entry), []);
+  const startDelete = React.useCallback((entry: ChatHistoryEntry) => setRemoval({ scope: "single", entry }), []);
+  const startClear = React.useCallback(() => setRemoval({ scope: "all" }), []);
+
+  const submitRename = React.useCallback(
+    (target: ChatHistoryEntry, title: string) => {
+      renameChat.mutate({ sessionId: target.id, title }, { onSuccess: () => setRenameTarget(null) });
+    },
+    [renameChat]
+  );
+
+  const confirmRemoval = React.useCallback(
+    (removal: RemovalChoice) => {
+      if (removal.scope === "all") {
+        clearHistory.mutate(undefined, {
+          onSuccess: () => {
+            setRemoval(null);
+            setPendingId(null);
+            setPrecreated(null);
+          },
+        });
+        return;
+      }
+      const remaining = remainingSessions(sessions.data);
+      deleteChat.mutate(
+        { sessionId: removal.entry.id },
+        {
+          onSuccess: () => {
+            setRemoval(null);
+            setPrecreated(null);
+            // The list in hand is the one deletion resolves against; a
+            // conversation that was not on screen keeps the current pick.
+            const next = selectionAfterDelete(remaining, removal.entry.id, session?.id ?? null);
+            if (next === null) setPendingId(null);
+            else select(next);
+          },
+        }
+      );
+    },
+    [clearHistory, deleteChat, select, session?.id, sessions.data]
+  );
+
+  const cancelRemoval = React.useCallback(() => setRemoval(null), []);
+  const cancelRename = React.useCallback(() => setRenameTarget(null), []);
+
   const refetchSessions = React.useCallback(() => {
     void sessions.refetch();
   }, [sessions]);
@@ -267,20 +336,6 @@ export function RunnerChatPage({
     if (request !== null) setPendingApproval(request);
   }, [approvalsSupported, approvalEvent]);
 
-  // The runner drops a request at its own deadline; stop offering buttons
-  // for it at the same moment rather than after a failed decision.
-  React.useEffect(() => {
-    if (pendingApproval === null) return;
-    const remaining = approvalRemainingMs(pendingApproval, Date.now());
-    if (remaining === null) return;
-    if (remaining <= 0) {
-      setPendingApproval(null);
-      return;
-    }
-    const timer = setTimeout(() => setPendingApproval(null), remaining);
-    return () => clearTimeout(timer);
-  }, [pendingApproval]);
-
   // Load the stored mode for the contact on screen, and hand it to the
   // session the page is about to warm (RUN-035).
   React.useEffect(() => {
@@ -313,7 +368,13 @@ export function RunnerChatPage({
 
   return (
     <section aria-label="Runner chat" data-testid="runner-chat" className="flex h-full min-h-0 w-full">
-      <ChatHistory entries={entries} onSelect={select} onNewChat={() => void newChat.start()} busy={newChat.busy} />
+      <ChatHistory
+        entries={entries}
+        onSelect={select}
+        onNewChat={() => void newChat.start()}
+        busy={newChat.busy}
+        {...(localHistory ? { onRename: startRename, onDelete: startDelete, onClear: startClear } : {})}
+      />
       <div className="flex min-w-0 flex-1 flex-col px-(--space-4) pb-(--space-4)">
         <ChatHeader
           summary={summary}
@@ -349,6 +410,7 @@ export function RunnerChatPage({
             </button>
           </div>
         )}
+        {/* An expired request stays mounted: the prompt renders the timed-out state itself (DESK-008). */}
         {approvalsSupported && pendingApproval !== null ? (
           <ChatApprovalPrompt
             request={pendingApproval}
@@ -385,6 +447,23 @@ export function RunnerChatPage({
           dictationAvailable={dictationAvailable}
         />
       </div>
+      {localHistory && renameTarget !== null ? (
+        <RenameChatDialog
+          target={{ id: renameTarget.id, title: renameTarget.title }}
+          onCancel={cancelRename}
+          onSubmit={(title) => submitRename(renameTarget, title)}
+          busy={renameChat.isPending}
+        />
+      ) : null}
+      {localHistory && removal !== null ? (
+        <HistoryRemovalDialog
+          choice={removal}
+          sessionCount={entries.length}
+          onCancel={cancelRemoval}
+          onConfirm={() => confirmRemoval(removal)}
+          busy={deleteChat.isPending || clearHistory.isPending}
+        />
+      ) : null}
     </section>
   );
 }

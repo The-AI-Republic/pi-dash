@@ -15,7 +15,7 @@ import { getAgentProfile } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
 import { platform } from "../../../core/platform/index.js";
 import { BUILTIN_CHAT_ID } from "./localTransport.js";
-import { unavailableReasonText } from "./approvalCopy.js";
+import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 
 /** The availability answer changes only with the server flag or account. */
 export const LOCAL_AGENT_POLL_INTERVAL_MS = 5 * 60_000;
@@ -37,7 +37,7 @@ export const LOCAL_CONTACT_LABEL = "Local";
 export function localContactAvailability(profile: { available: boolean; reason_code: string }): {
   unavailableReason: string | null;
 } {
-  return { unavailableReason: profile.available ? null : unavailableReasonText(profile.reason_code) };
+  return { unavailableReason: profile.available ? null : agentReasonMessage(profile.reason_code) };
 }
 
 /** True when this build can serve chat from the machine itself. */

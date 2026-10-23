@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Approval wording and projections (NEWFRONT-553, RUN-033-035): the mode
-// vocabulary and its storage key, the availability sentences, the
-// narrowest target a request names, and the request's life bound.
+// vocabulary and its storage key, the availability sentences, and the
+// narrowest target a request names.
 import { describe, expect, it } from "vitest";
 
 import {
@@ -13,14 +13,12 @@ import {
   APPROVAL_MODE_KEY_PREFIX,
   approvalKindOf,
   approvalModeKey,
-  approvalRemainingMs,
   approvalTarget,
   isApprovalMode,
   pendingApprovalFromEvent,
   readApprovalMode,
   rememberApprovalMode,
   storedApprovalMode,
-  unavailableReasonText,
   type PendingApproval,
 } from "./approvalCopy.js";
 
@@ -104,28 +102,6 @@ describe("storedApprovalMode and rememberApprovalMode", () => {
   });
 });
 
-describe("unavailableReasonText", () => {
-  it("translates every known refusal code into a sentence", () => {
-    for (const code of [
-      "managed_runner_disabled",
-      "byok_not_supported_on_desktop",
-      "llm_config_missing",
-      "desktop_not_connected",
-      "desktop_session_required",
-      "gateway_scopes_missing",
-      "gateway_session_revoked",
-      "gateway_unavailable",
-    ]) {
-      expect(unavailableReasonText(code)).not.toBe(code);
-      expect(unavailableReasonText(code)).not.toBe("");
-    }
-  });
-
-  it("surfaces an unknown code verbatim", () => {
-    expect(unavailableReasonText("something_new")).toBe("something_new");
-  });
-});
-
 describe("approvalKindOf", () => {
   it("maps the contract vocabulary and folds the rest into other", () => {
     expect(approvalKindOf("command_execution")).toBe("command_execution");
@@ -198,19 +174,5 @@ describe("pendingApprovalFromEvent", () => {
   it("reads an event without an id as no request", () => {
     expect(pendingApprovalFromEvent({ approval_kind: "command_execution" })).toBeNull();
     expect(pendingApprovalFromEvent({ local_approval_id: 7 })).toBeNull();
-  });
-});
-
-describe("approvalRemainingMs", () => {
-  const now = Date.parse("2026-10-19T10:00:00Z");
-
-  it("answers the time left until the deadline", () => {
-    expect(approvalRemainingMs(request({ expiresAt: "2026-10-19T10:00:30Z" }), now)).toBe(30_000);
-    expect(approvalRemainingMs(request({ expiresAt: "2026-10-19T09:59:00Z" }), now)).toBe(-60_000);
-  });
-
-  it("answers null without a readable deadline", () => {
-    expect(approvalRemainingMs(request(), now)).toBeNull();
-    expect(approvalRemainingMs(request({ expiresAt: "not a date" }), now)).toBeNull();
   });
 });

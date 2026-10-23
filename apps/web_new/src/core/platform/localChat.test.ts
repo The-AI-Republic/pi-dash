@@ -2,10 +2,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Desktop local chat bridge (NEWFRONT-553, RUN-033-036): every store, warm,
-// send, cancel, close and decide verb reaches its Rust command with the
-// daemon's argument names, and the event subscriptions filter nothing but
-// deliver each payload to its handler.
+// Desktop local chat bridge (NEWFRONT-553, RUN-033-036; history writes
+// NEWFRONT-589, DESK-009): every store, warm, send, cancel, close, decide,
+// rename, delete, clear and working-directory verb reaches its Rust command
+// with the daemon's argument names, and the event subscriptions filter
+// nothing but deliver each payload to its handler.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CHAT_ERROR_EVENT, CHAT_FRAME_EVENT, platform } from "./tauri.js";
@@ -61,6 +62,10 @@ describe("desktop local chat", () => {
     await chat?.listEvents("u1", "s-1");
     await chat?.appendEvent("u1", "s-1", { role: "user", content: "hi" });
     await chat?.setThreadId("u1", "s-1", "t-1");
+    await chat?.renameSession("u1", "s-1", "Planning");
+    await chat?.deleteSession("u1", "s-1");
+    await chat?.clearHistory("u1");
+    await chat?.workingDir("u1", "acme", "PROJ");
     expect(invoke.mock.calls).toEqual([
       ["chat_list_sessions", { account: "u1" }],
       ["chat_create_session", { account: "u1", session: { workspace: "ws-id", project: "r-1" } }],
@@ -68,6 +73,10 @@ describe("desktop local chat", () => {
       ["chat_list_events", { account: "u1", sessionId: "s-1" }],
       ["chat_append_event", { account: "u1", sessionId: "s-1", event: { role: "user", content: "hi" } }],
       ["chat_set_thread_id", { account: "u1", sessionId: "s-1", engineThreadId: "t-1" }],
+      ["chat_rename_session", { account: "u1", sessionId: "s-1", title: "Planning" }],
+      ["chat_delete_session", { account: "u1", sessionId: "s-1" }],
+      ["chat_clear_history", { account: "u1" }],
+      ["chat_working_dir", { account: "u1", workspace: "acme", project: "PROJ" }],
     ]);
   });
 

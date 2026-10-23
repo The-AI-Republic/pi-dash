@@ -12,8 +12,8 @@ import { describe, expect, it, vi } from "vitest";
 import { CHAT_HISTORY_EMPTY, CHAT_HISTORY_HEADING, CHAT_NEW_LABEL, ChatHistory } from "./ChatHistory.js";
 
 const entries = [
-  { id: "s-2", title: "Oct 18, 10:00 AM", subtitle: "1 hour ago", active: true },
-  { id: "s-1", title: "Oct 17, 09:00 AM", subtitle: "yesterday · closed", active: false },
+  { id: "s-2", title: "Oct 18, 10:00 AM", subtitle: "1 hour ago", active: true, busyReason: null },
+  { id: "s-1", title: "Oct 17, 09:00 AM", subtitle: "yesterday · closed", active: false, busyReason: null },
 ];
 
 describe("ChatHistory", () => {
