@@ -930,39 +930,47 @@ fn decode_body(body: &[u8]) -> (String, PageEncoding) {
 }
 
 /// Stripped `<title>` text (`soup.find("title").get_text().strip()`,
-/// `:144-145`), or `None` when there is no title tag. `get_text`
-/// concatenates descendant text (nested markup dropped) and decodes
-/// entities; both are mirrored here. `original` is the winning body
-/// decoder from [`decode_body`].
+/// `:144-145`), or `None` when there is no title tag. `<title>` is
+/// RCDATA (`html/parser.py:116`): nested markup is literal text while
+/// entities still decode, and the span ends only at `</title` followed
+/// by `[\t\n\r\f />]` (case-insensitive — the `interesting` pattern
+/// `set_cdata_mode` installs, `parser.py:196-199`). `original` is the
+/// winning body decoder from [`decode_body`].
 pub fn extract_title(html: &str, original: PageEncoding) -> Option<String> {
     let open = find_open_tag(html, "title")?;
     let end = tag_end(html, open)?;
-    let lower = html.to_ascii_lowercase();
-    let rest = &lower[end..];
-    let close = rest.find("</title").map(|i| end + i).unwrap_or(html.len());
+    let close = find_rcdata_close(html, end + 1);
     Some(
-        decode_entities(&strip_tags(&html[end + 1..close]), original)
+        decode_entities(&html[end + 1..close], original)
             .trim()
             .to_owned(),
     )
 }
 
-/// Drops `<…>` spans, mirroring `get_text()` concatenation.
-fn strip_tags(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(char) = chars.next() {
-        if char == '<' {
-            for inner in chars.by_ref() {
-                if inner == '>' {
-                    break;
-                }
+/// End of the `<title>` RCDATA span: the `<` of the first `</title`
+/// whose next byte is `[\t\n\r\f />]` (case-insensitive), or the end
+/// of the document when there is none. No closing `>` is required, a
+/// longer tag name (`</titlefoo>`) never closes, and a bare `</title`
+/// at EOF is literal text — all Django-probed. Byte scanning is safe:
+/// `to_ascii_lowercase` preserves length, so `lower` indices equal
+/// `html` indices, and every candidate starts at ASCII `<`, which is
+/// always a char boundary.
+fn find_rcdata_close(html: &str, from: usize) -> usize {
+    let lower = html.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"</title") {
+            let delimited = bytes.get(i + "</title".len()).is_some_and(|next| {
+                matches!(next, b'\t' | b'\n' | b'\r' | b'\x0c' | b' ' | b'/' | b'>')
+            });
+            if delimited {
+                return i;
             }
-        } else {
-            out.push(char);
         }
+        i += 1;
     }
-    out
+    html.len()
 }
 
 /// Entity-decoded text (`handle_data` after `handle_entityref` /
@@ -2169,13 +2177,78 @@ mod tests {
     }
 
     #[test]
-    fn title_get_text_strips_markup_and_decodes_entities() {
-        // `get_text()` concatenates descendant text and resolves entities.
+    fn title_rcdata_keeps_markup_and_decodes_entities() {
+        // `<title>` is RCDATA (`html/parser.py:116`): nested markup is
+        // literal text while entities still decode (PIDASHCONV-1410).
         let title = extract_title(
             "<html><head><title>A &amp; B <b>bold</b>&#33;</title></head></html>",
             PageEncoding::Rs(encoding_rs::UTF_8),
         );
-        assert_eq!(title, Some("A & B bold!".to_owned()));
+        assert_eq!(title, Some("A & B <b>bold</b>!".to_owned()));
+    }
+
+    // -- PIDASHCONV-1410: `<title>` is RCDATA, not markup --------------------
+    // Expected values below are Django-observed (bs4 4.12.3, CPython 3.12):
+    // `BeautifulSoup(content, "html.parser").find("title").get_text().strip()`.
+    // Same literals are pinned hermetically in
+    // `contract-tests/tasks_webhooks/test_link_crawl_rcdata.py`.
+
+    #[test]
+    fn crawl_title_keeps_nested_markup_and_comments_literally() {
+        for (body, expected) in [
+            (
+                b"<title>A &amp; B <b>bold</b>&#33;</title>".as_slice(),
+                "A & B <b>bold</b>!",
+            ),
+            (b"<title>a</titlefoo>b</title>".as_slice(), "a</titlefoo>b"),
+            (b"<title>a < b</title>".as_slice(), "a < b"),
+            (b"<title>a<!--x-->b</title>".as_slice(), "a<!--x-->b"),
+            (b"<title>a<title>b</title>".as_slice(), "a<title>b"),
+        ] {
+            assert_eq!(
+                crawl_title_of(body, HttpHeaders::new()),
+                Some(expected.to_owned()),
+                "body: {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+    }
+
+    #[test]
+    fn crawl_title_close_needs_rcdata_delimiter() {
+        // `</title` closes only before `[\t\n\r\f />]`
+        // (case-insensitive; no `>` required). Anything else — a longer
+        // tag name, `!`, NUL, a space after `/`, or EOF — is literal.
+        for (body, expected) in [
+            (b"<title>a</TITLE>b</title>".as_slice(), "a"),
+            (b"<title>a</title >b</title>".as_slice(), "a"),
+            (b"<title>a</title/>b".as_slice(), "a"),
+            (b"<title>a</title\t>b".as_slice(), "a"),
+            (b"<title>a</title\n>b".as_slice(), "a"),
+            (b"<title>a</title\r>b".as_slice(), "a"),
+            (b"<title>a</title\x0c>b".as_slice(), "a"),
+            (b"<title>a</title foo=baz>rest".as_slice(), "a"),
+            (b"<title>a</title b rest".as_slice(), "a"),
+            (b"<title>a</title!>b</title>".as_slice(), "a</title!>b"),
+            (
+                b"<title>a</title\x00>b</title>".as_slice(),
+                "a</title\x00>b",
+            ),
+            (b"<title>a</titlefoo>".as_slice(), "a</titlefoo>"),
+            (b"<title>a</title".as_slice(), "a</title"),
+            (b"<title>abc".as_slice(), "abc"),
+        ] {
+            assert_eq!(
+                crawl_title_of(body, HttpHeaders::new()),
+                Some(expected.to_owned()),
+                "body: {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+        assert_eq!(
+            crawl_title_of(b"<title>a</title>b</title>", HttpHeaders::new()),
+            Some("a".to_owned())
+        );
     }
 
     // -- PIDASHCONV-1280: HTML5 entities + charset-aware decode --------------
