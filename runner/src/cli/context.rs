@@ -229,9 +229,27 @@ async fn write_machine_context(
         .unwrap_or_default();
     upsert_workspace(&mut doc.workspaces, workspace);
     doc.generated_at = now_stamp();
-    fs::write(&path, render_machine_context(&doc))
+    write_replacing(&path, &render_machine_context(&doc))
         .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("writing {:?}: {e}", path)))?;
     Ok(path)
+}
+
+/// Write `body` to a sibling temp file and rename it over `path`. The machine
+/// file is shared by every runner on the machine and rewritten on each
+/// workspace resolution, so a plain truncate-then-write could let an agent (or
+/// a concurrent writer's read-modify-write) see a half-written document.
+fn write_replacing(path: &Path, body: &str) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "md.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&tmp, body)?;
+    fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
 }
 
 impl From<&ProjectRow> for ContextProject {
@@ -581,10 +599,7 @@ mod tests {
         assert_eq!(parsed.generated_at, "2026-09-12T20:38:38Z");
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].identifier, "WEB");
-        assert_eq!(
-            parsed.projects[0].repo_url,
-            "https://github.com/acme/WEB"
-        );
+        assert_eq!(parsed.projects[0].repo_url, "https://github.com/acme/WEB");
     }
 
     #[test]
@@ -729,6 +744,17 @@ mod tests {
 
         let exclude = fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
         assert_eq!(exclude.matches(".pidash/").count(), 1, "added exactly once");
+    }
+
+    #[test]
+    fn write_replacing_overwrites_and_leaves_no_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("context.md");
+        write_replacing(&path, "first").unwrap();
+        write_replacing(&path, "second").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+        let entries: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]
