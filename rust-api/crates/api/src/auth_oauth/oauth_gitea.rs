@@ -41,8 +41,8 @@
 //!   (despite the "Process workspace and project invitations" comment),
 //!   so `complete_login_or_signup` skips the callback.
 //! * `is_signup = bool(user)` is inverted as written (`base.py:297`): a
-//!   brand-new user reports `False`, so IDP sync also runs for new users
-//!   when `ENABLE_GITEA_SYNC` is set.
+//!   brand-new user reports `False`, so IDP sync runs for new users only,
+//!   never existing ones, when `ENABLE_GITEA_SYNC` is set.
 //! * New-user avatar assignments persist only via the later
 //!   `save_user_data` save (no save follows the avatar block itself).
 //!
@@ -2148,64 +2148,11 @@ pub async fn authenticate_user(
     let user_id;
     let password_field;
     if let Some(row) = existing {
+        // Existing users never sync: `check_sync_enabled() and not
+        // is_signup` (`base.py:345`) with the inverted flag runs for NEW
+        // users only (PB-1024).
         user_id = row.id;
         password_field = row.password.clone();
-        let sync_enabled = config_value(
-            pool,
-            secret_key,
-            "ENABLE_GITEA_SYNC",
-            env_default("ENABLE_GITEA_SYNC"),
-        )
-        .await
-        .map(|v| v.as_deref() == Some("1"))
-        .unwrap_or(false);
-        if sync_enabled && !is_signup {
-            let first = user_json
-                .get("user")
-                .and_then(|u| u.get("first_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let last = user_json
-                .get("user")
-                .and_then(|u| u.get("last_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            delete_old_avatar(
-                &client,
-                pool,
-                storage,
-                if inputs.is_secure { "https" } else { "http" },
-                &inputs.host,
-                user_id,
-                row.avatar_asset_id,
-                now,
-            )
-            .await;
-            let avatar_url = user_json
-                .get("user")
-                .and_then(|u| u.get("avatar"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let (avatar, asset) = match download_and_upload_avatar(
-                &client,
-                pool,
-                storage,
-                if inputs.is_secure { "https" } else { "http" },
-                &inputs.host,
-                avatar_url,
-                user_id,
-                file_size_max,
-                now,
-            )
-            .await
-            {
-                Some(asset_id) => (avatar_url.to_owned(), Some(asset_id)),
-                None => (avatar_url.to_owned(), None),
-            };
-            sync_user_data(pool, user_id, first, last, &email, &avatar, asset)
-                .await
-                .map_err(|_| AuthError::Server(Denial::ServerError))?;
-        }
     } else {
         check_signup(pool, secret_key, &email)
             .await
@@ -2257,7 +2204,7 @@ pub async fn authenticate_user(
             .unwrap_or("");
         // In-memory avatar assignment, persisted by `save_user_data`
         // below (`base.py:330-340` has no save of its own).
-        let (avatar, asset) = if avatar_url.is_empty() {
+        let (mut avatar, mut asset) = if avatar_url.is_empty() {
             (String::new(), None)
         } else {
             match download_and_upload_avatar(
@@ -2280,6 +2227,51 @@ pub async fn authenticate_user(
         create_profile(pool, user_id, now)
             .await
             .map_err(|_| AuthError::Server(Denial::ServerError))?;
+        // IDP sync (`base.py:345`): `check_sync_enabled() and not
+        // is_signup` — with the inverted flag this runs for NEW users
+        // only, never existing ones (PB-1024). Django order: after
+        // create + profile, before `save_user_data`.
+        let sync_enabled = config_value(
+            pool,
+            secret_key,
+            "ENABLE_GITEA_SYNC",
+            env_default("ENABLE_GITEA_SYNC"),
+        )
+        .await
+        .map(|v| v.as_deref() == Some("1"))
+        .unwrap_or(false);
+        if sync_enabled && !is_signup {
+            delete_old_avatar(
+                &client,
+                pool,
+                storage,
+                if inputs.is_secure { "https" } else { "http" },
+                &inputs.host,
+                user_id,
+                asset,
+                now,
+            )
+            .await;
+            (avatar, asset) = match download_and_upload_avatar(
+                &client,
+                pool,
+                storage,
+                if inputs.is_secure { "https" } else { "http" },
+                &inputs.host,
+                avatar_url,
+                user_id,
+                file_size_max,
+                now,
+            )
+            .await
+            {
+                Some(asset_id) => (avatar_url.to_owned(), Some(asset_id)),
+                None => (avatar_url.to_owned(), None),
+            };
+            sync_user_data(pool, user_id, first, last, &email, &avatar, asset)
+                .await
+                .map_err(|_| AuthError::Server(Denial::ServerError))?;
+        }
         let rotated = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
