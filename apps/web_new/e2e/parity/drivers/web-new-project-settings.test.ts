@@ -162,6 +162,9 @@ function pageDouble(options: PageOptions = {}) {
       if (options.writeRejects === true) throw new Error("write never came");
       return undefined;
     }),
+    on: vi.fn((_event: string, _handler: (socket: unknown) => void) => undefined),
+    off: vi.fn((_event: string, _handler: (socket: unknown) => void) => undefined),
+    evaluate: vi.fn(async () => "shell"),
     getByPlaceholder: vi.fn((placeholder: string) => (placeholder === "Project name" ? createInput : monthInput)),
     getByTestId: vi.fn((testId: string) => {
       if (testId === "project-settings-denied") return options.denied === true ? new FakeLocator() : absent();
@@ -430,6 +433,34 @@ describe("WebNewDriver automations", () => {
     const hiddenDriver = new WebNewDriver(hidden.page);
     await expect(hiddenDriver.projectAutomationsCloseStateText()).resolves.toBeNull();
     await expect(hiddenDriver.projectAutomationsCloseStateDisabled()).resolves.toBe(false);
+  });
+});
+
+describe("WebNewDriver settings shell sockets", () => {
+  function socketDouble(url: string) {
+    return { url: () => url };
+  }
+
+  it("ignores vite HMR sockets and counts app sockets", async () => {
+    const stub = pageDouble();
+    let visits = 0;
+    stub.pageObject.goto.mockImplementation(async () => {
+      const calls = stub.pageObject.on.mock.calls;
+      if (calls.length === 0 || calls[0] === undefined) throw new Error("websocket handler not registered");
+      const handler = calls[0][1] as (socket: unknown) => void;
+      visits += 1;
+      handler(socketDouble("ws://localhost:3016/?token=hmr"));
+      if (visits === 1) {
+        handler(socketDouble("ws://localhost:18006/ws/realtime/"));
+        handler(socketDouble("ws://localhost:18006/ws/live/?token=app"));
+      }
+    });
+    const count = await new WebNewDriver(stub.page).settingsShellCountSockets(["", "/members"], "acme", "p1");
+    // Two HMR sockets ignored; both app sockets counted even though one
+    // carries its own token query (only the root-path HMR shape filters).
+    expect(count).toBe(2);
+    expect(stub.pageObject.goto).toHaveBeenCalledTimes(2);
+    expect(stub.pageObject.off).toHaveBeenCalledTimes(1);
   });
 });
 
