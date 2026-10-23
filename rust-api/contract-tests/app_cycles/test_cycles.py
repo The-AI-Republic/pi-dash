@@ -358,6 +358,56 @@ def test_favorite_create_destroy(admin):
     assert r.json() == {"error": "The required object does not exist."}
 
 
+def test_favorite_create_coerces_int_and_bool_ids(admin):
+    # `CycleFavoriteViewSet.create` (`base.py:571-579`) writes
+    # `request.data["cycle"]` straight into `entity_identifier`, a
+    # `UUIDField`, so `UUIDField.to_python` (`input_form = "int"` for a
+    # Python int, and a JSON bool is one) coerces `5`/`true`/`false` to
+    # `UUID(int=n)`: 204 with a row, not a 400.
+    urls = cycle_urls(admin)
+    conn = admin["seed"].conn
+    cases = [
+        (5, "00000000-0000-0000-0000-000000000005"),
+        (True, "00000000-0000-0000-0000-000000000001"),
+        (False, "00000000-0000-0000-0000-000000000000"),
+    ]
+    try:
+        for raw, expected in cases:
+            r = admin["client"].post(urls["favorites"], json={"cycle": raw})
+            assert r.status_code == 204, (raw, r.status_code, r.text[:300])
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select entity_identifier from user_favorites"
+                    " where project_id = %s and user_id = %s"
+                    " and entity_type = 'cycle' and deleted_at is null",
+                    (admin["project"]["id"], admin["user"]["id"]),
+                )
+                rows = [str(row[0]) for row in cur.fetchall()]
+            assert expected in rows, (raw, rows)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "delete from user_favorites where project_id = %s"
+                    " and user_id = %s",
+                    (admin["project"]["id"], admin["user"]["id"]),
+                )
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(
+                "delete from user_favorites where project_id = %s and user_id = %s",
+                (admin["project"]["id"], admin["user"]["id"]),
+            )
+
+
+def test_favorite_create_rejects_invalid_ids(admin):
+    # The same `UUIDField.to_python` still rejects floats, negative and
+    # out-of-range ints (a `ValidationError` → 400 invalid detail).
+    urls = cycle_urls(admin)
+    for raw in (5.5, -1, 340282366920938463463374607431768211456):
+        r = admin["client"].post(urls["favorites"], json={"cycle": raw})
+        assert r.status_code == 400, (raw, r.status_code, r.text[:300])
+        assert r.json() == {"error": "Please provide valid detail"}, (raw, r.text[:300])
+
+
 def test_favorite_list_broken_upstream(admin):
     # PORTED BUG (app/views/cycle/base.py): CycleFavoriteViewSet defines no
     # list method, so GET falls through to the ModelViewSet default, which
@@ -448,6 +498,31 @@ def test_cycle_issue_create_requires_issues(admin):
     r = admin["client"].post(urls["cycle_issues"](admin["cycle"]["id"]), json={})
     assert r.status_code == 400, r.text[:500]
     assert r.json() == {"error": "Issues are required"}
+
+
+def test_cycle_issue_add_coerces_int_and_bool_ids(admin):
+    # `CycleIssueViewSet.create` (`issue.py:225-297`): `issue_id__in=issues`
+    # (`:239`) coerces an int/bool via `UUIDField.to_python` and misses, then
+    # `bulk_create` (`:244-257`) inserts `issue_id=UUID(int=n)`, which no
+    # `issues` row owns, so the FK violation becomes `IntegrityError` →
+    # 400 `{"error": "The payload is not valid"}`.
+    urls = cycle_urls(admin)
+    pk = admin["cycle"]["id"]
+    for raw in (5, True, False):
+        r = admin["client"].post(urls["cycle_issues"](pk), json={"issues": [raw]})
+        assert r.status_code == 400, (raw, r.status_code, r.text[:300])
+        assert r.json() == {"error": "The payload is not valid"}, (raw, r.text[:300])
+
+
+def test_cycle_issue_add_rejects_invalid_ids(admin):
+    # Floats, negative and out-of-range ints, and garbage strings still fail
+    # the `__in` UUID coercion → 400 invalid detail.
+    urls = cycle_urls(admin)
+    pk = admin["cycle"]["id"]
+    for raw in (5.5, -1, 340282366920938463463374607431768211456, "garbage"):
+        r = admin["client"].post(urls["cycle_issues"](pk), json={"issues": [raw]})
+        assert r.status_code == 400, (raw, r.status_code, r.text[:300])
+        assert r.json() == {"error": "Please provide valid detail"}, (raw, r.text[:300])
 
 
 def test_cycle_issue_detail_broken_upstream(admin):
