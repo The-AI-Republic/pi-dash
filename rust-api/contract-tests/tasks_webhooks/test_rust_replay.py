@@ -1412,3 +1412,89 @@ def test_rust_crawl_link_denies_wildcard_hosts(db_conn, broker_url, family):
             "favicon_url": None,
         }
 
+
+def test_rust_crawl_link_nulls_audit_columns(db_conn, broker_url):
+    """Crawl, Rust side: the save NULLs both audit columns (PIDASHCONV-1281).
+
+    Mirrors ``test_crawl_link_nulls_audit_columns``: Django's
+    worker-context full ``save()`` blanks ``created_by``/``updated_by``
+    (``BaseModel.save``, no crum user — the PB-2008/PB-2009 semantics),
+    so the Rust ``UPDATE`` must carry ``created_by_id = NULL,
+    updated_by_id = NULL`` alongside the metadata write.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaycrawlaudit")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    url = "http://127.0.0.1:9/rust-replay-audit-probe"
+    link = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "Audit probe",
+            "url": url,
+            "issue_id": str(issue["id"]),
+            "project_id": str(project["id"]),
+            "workspace_id": str(workspace["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
+            "metadata": {},
+        },
+    )
+    celery_id = rust_queue.publish(
+        CRAWL_LINK_TITLE,
+        args=[str(link["id"]), url],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{CRAWL_LINK_TITLE} executed")
+
+    def _crawled():
+        row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link["id"]))
+        return row if row and row["metadata"] != {} else None
+
+    crawled = wait_for(_crawled, what="issue_links metadata")
+    assert crawled["metadata"] == {
+        "title": None,
+        "favicon": DEFAULT_FAVICON_DATA_URI,
+        "url": url,
+        "favicon_url": None,
+    }
+    assert crawled["created_by_id"] is None
+    assert crawled["updated_by_id"] is None
+
+
+def test_rust_crawl_link_skips_soft_deleted_link(db_conn, broker_url):
+    """Crawl, Rust side: a soft-deleted link is not touched (PIDASHCONV-1281).
+
+    Mirrors ``test_crawl_link_skips_soft_deleted_link``: the Rust lookup
+    must scope ``deleted_at IS NULL`` like the ``SoftDeletionManager``,
+    so the job warns and settles without writing. Settlement deletes the
+    queue row only after the handler returns, so any (incorrect) write
+    would already be visible in the re-read row.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaycrawldead")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    url = "http://127.0.0.1:9/rust-replay-dead-probe"
+    link = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "Dead probe",
+            "url": url,
+            "issue_id": str(issue["id"]),
+            "project_id": str(project["id"]),
+            "workspace_id": str(workspace["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
+            "metadata": {},
+        },
+    )
+    _soft_delete(db_conn, "issue_links", link["id"])
+    before = snapshot(db_conn, ["issue_links"])["issue_links"][str(link["id"])]
+    celery_id = rust_queue.publish(
+        CRAWL_LINK_TITLE,
+        args=[str(link["id"]), url],
+    )
+    rust_queue.wait_for_settled(
+        celery_id, what=f"{CRAWL_LINK_TITLE} settled for a soft-deleted link"
+    )
+    after = snapshot(db_conn, ["issue_links"])["issue_links"][str(link["id"])]
+    assert after == before
+

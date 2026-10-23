@@ -978,6 +978,98 @@ def test_crawl_link_denies_wildcard_hosts(db_conn, broker_url, family):
         }
 
 
+def test_crawl_link_nulls_audit_columns(db_conn, broker_url):
+    """The crawl's full save() NULLs both audit columns (PIDASHCONV-1281).
+
+    ``crawl_work_item_link_title`` ends with a full ``issue_link.save()``
+    (``work_item_link_task.py:272-273``). In a worker there is no crum
+    user, so ``BaseModel.save`` (``db/models/base.py:21-31``) sets
+    ``created_by`` and ``updated_by`` to None and the save persists the
+    NULLs — the same worker semantics already ported as PB-2008/PB-2009.
+    Seed a link with both audit columns set; after the crawl both are
+    NULL.
+    """
+    from _harness.db import insert_row
+
+    chain = seed_helpers.issue_chain(db_conn, "contractcrawlaudit")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    url = "http://127.0.0.1:9/contract-audit-probe"
+    link = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "Audit probe",
+            "url": url,
+            "issue_id": str(issue["id"]),
+            "project_id": str(project["id"]),
+            "workspace_id": str(workspace["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
+            "metadata": {},
+        },
+    )
+    celery_wire.publish(
+        f"{M}.work_item_link_task.crawl_work_item_link_title",
+        args=[str(link["id"]), url],
+    )
+
+    def _crawled():
+        row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link["id"]))
+        return row if row and row["metadata"] != {} else None
+
+    crawled = wait_for(_crawled, what="issue_links metadata")
+    assert crawled["metadata"] == {
+        "title": None,
+        "favicon": DEFAULT_FAVICON_DATA_URI,
+        "url": url,
+        "favicon_url": None,
+    }
+    assert crawled["created_by_id"] is None
+    assert crawled["updated_by_id"] is None
+
+
+def test_crawl_link_skips_soft_deleted_link(db_conn, broker_url):
+    """Crawl, Django side: a soft-deleted link is not touched (PIDASHCONV-1281).
+
+    ``IssueLink.objects.get(id=id)`` goes through the inherited
+    ``SoftDeletionManager`` (``pi_dash/db/mixins.py:65``), so a stamped
+    row raises ``DoesNotExist``; the task logs "IssueLink not found…"
+    and returns before the save. The deleted row — metadata,
+    ``updated_at``, audit columns — stays identical.
+    """
+    from _harness.db import insert_row
+
+    chain = seed_helpers.issue_chain(db_conn, "contractcrawldead")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    url = "http://127.0.0.1:9/contract-dead-probe"
+    link = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "Dead probe",
+            "url": url,
+            "issue_id": str(issue["id"]),
+            "project_id": str(project["id"]),
+            "workspace_id": str(workspace["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
+            "metadata": {},
+        },
+    )
+    _soft_delete_row(db_conn, "issue_links", link["id"])
+    before = snapshot(db_conn, ["issue_links"])["issue_links"][str(link["id"])]
+    baseline = broker_probe.queue_depth()
+    celery_wire.publish(
+        f"{M}.work_item_link_task.crawl_work_item_link_title",
+        args=[str(link["id"]), url],
+    )
+    broker_probe.wait_for_queue_drain(
+        baseline=baseline, what="crawl consumed for a soft-deleted link"
+    )
+    after = snapshot(db_conn, ["issue_links"])["issue_links"][str(link["id"])]
+    assert after == before
+
+
 def _expected_payload(hook, probe_id):
     """The delivery envelope the send task signs and POSTs (PIDASHCONV-1105).
 
