@@ -3584,7 +3584,11 @@ pub async fn collection_list(
         limit: page.limit,
         offset: page.offset,
     };
-    let sql = queries::intake_issue_list_sql(&list_query);
+    // Unknown `order_by` is Django's `FieldError` path (`base.py:198`):
+    // the generic 500, with nothing rendered into SQL (PIDASHCONV-1426).
+    let Some(sql) = queries::intake_issue_list_sql(&list_query) else {
+        return Denial::ServerError.into_response();
+    };
     let mut statement = sqlx::query(&sql).bind(intake_id).bind(gate.project_id);
     statement = bind_owned(statement, &compiled.binds);
     if let Some(statuses) = &list_query.statuses {
