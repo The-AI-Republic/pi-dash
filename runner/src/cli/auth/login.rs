@@ -41,6 +41,12 @@ pub struct Args {
     #[arg(long)]
     pub no_browser: bool,
 
+    /// Re-enroll this host against a different cloud, overwriting the
+    /// existing `[daemon].cloud_url`. Without this, login refuses to
+    /// rebind a host that's already enrolled with another cloud.
+    #[arg(long)]
+    pub force: bool,
+
     /// Workspace slug to bind this CLI install to after login.
     #[arg(long, hide = true)]
     pub workspace: Option<String>,
@@ -163,7 +169,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     // local config and workspace binding. It is replaced below by a shared
     // dev-machine MachineToken, which is the credential used by both the CLI
     // and all runners hosted by this install.
-    runner_ops::write_cli_token(paths, &cloud_url, &token.access_token)
+    runner_ops::write_cli_token(paths, &cloud_url, &token.access_token, args.force)
         .context("writing temporary [cli].token to config.toml")?;
 
     println!();
@@ -195,7 +201,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         &host_label,
     )
     .await?;
-    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token)
+    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token, args.force)
         .context("writing dev-machine token to config.toml")?;
     if machine_token.workspace_slug != workspace_slug {
         runner_ops::write_cli_workspace(paths, &machine_token.workspace_slug)
@@ -513,6 +519,7 @@ mod tests {
             url: url.map(str::to_string),
             no_browser: true,
             workspace: None,
+            force: false,
             device_code_stdin: false,
         }
     }
@@ -550,7 +557,7 @@ mod tests {
         // Re-login on an enrolled self-hosted box must stay on that cloud.
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok").unwrap();
+        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok", false).unwrap();
         let (url, source) = resolve_cloud_url(&args_with_url(None), &paths).unwrap();
         assert_eq!(url, "https://self.example.com");
         assert_eq!(source, CloudUrlSource::Config);
@@ -572,7 +579,7 @@ mod tests {
     fn explicit_url_flag_wins_over_existing_config() {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok").unwrap();
+        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok", false).unwrap();
         let args = args_with_url(Some("https://other.example.com"));
         let (url, source) = resolve_cloud_url(&args, &paths).unwrap();
         assert_eq!(url, "https://other.example.com");
