@@ -3,7 +3,11 @@
 // See the LICENSE file for details.
 // Public API of the shared chart layer (Stack decision D15,
 // NEWFRONT-732). Features import chart wrappers and helpers only
-// from here.
+// from here. The wrappers reach the plotting library through
+// dynamic import() so it splits into its own lazy chunk; route
+// shells must not import this barrel (or the feature barrels that
+// re-export it) statically otherwise the feature lands in the
+// initial chain — shells import the pure lib helpers deep.
 export { AreaChart } from "./AreaChart.js";
 export type { AreaChartProps, AreaSeriesDef } from "./AreaChart.js";
 export { BarChart } from "./BarChart.js";
