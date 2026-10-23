@@ -1,29 +1,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Startup-gate decision (parity/specs/workspace-settings.md §34-35,
-// WSET-034/035). Pure so the gate and its tests share the branch order:
-// a failed read is maintenance; a settled read with setup unfinished is
-// the not-ready screen; otherwise the app renders. The gate never treats
-// a pending read as maintenance, and a response carrying data wins over
-// an error status — the spec requires both.
+// Startup-gate decision, shared with the public space subtree. The pure
+// function lives in `core/instance` so a feature can consume it without
+// reaching into another feature's module; this module keeps the
+// feature-local import path stable.
 
-import type { InstanceBootstrapState } from "@pidash/api-client";
-
-export type AppInstanceBranch = "loading" | "maintenance" | "not-ready" | "ready";
-
-export interface AppInstanceGateInput {
-  readonly isPending: boolean;
-  readonly isError: boolean;
-  readonly data: InstanceBootstrapState | undefined;
-}
-
-/** Exactly one startup branch for the single instance-info read. */
-export function decideAppInstanceGate(input: AppInstanceGateInput): AppInstanceBranch {
-  if (input.data !== undefined) {
-    return input.data.setupDone ? "ready" : "not-ready";
-  }
-  if (input.isError) return "maintenance";
-  if (input.isPending) return "loading";
-  return "maintenance";
-}
+export { decideAppInstanceGate } from "../../core/instance/status.js";
+export type { AppInstanceBranch, AppInstanceGateInput } from "../../core/instance/status.js";

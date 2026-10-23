@@ -9,7 +9,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
-import { InstanceAppGate, isAdminEntryPath } from "./InstanceAppGate.js";
+import { InstanceAppGate, isAdminEntryPath, isSpacesPath } from "./InstanceAppGate.js";
 import { instanceAppKeys } from "./queries.js";
 
 function envelope(setupDone: boolean): InstanceBootstrap {
@@ -87,6 +87,26 @@ describe("InstanceAppGate", () => {
     expect(isAdminEntryPath("/god-mode/workspace/create/")).toBe(true);
     expect(isAdminEntryPath("/acme/settings/members/")).toBe(false);
     expect(isAdminEntryPath("/god-modeish")).toBe(false);
+  });
+
+  it("recognises only the public boards subtree", () => {
+    expect(isSpacesPath("/spaces")).toBe(true);
+    expect(isSpacesPath("/spaces/")).toBe(true);
+    expect(isSpacesPath("/spaces/issues/anchor-1/")).toBe(true);
+    expect(isSpacesPath("/spaceship")).toBe(false);
+    expect(isSpacesPath("/acme/spaces/")).toBe(false);
+  });
+
+  it("lets the public boards subtree through without a workspace probe", () => {
+    globalThis.window.history.replaceState(null, "", "/spaces/issues/anchor-1/");
+    let calls = 0;
+    renderGate(() => {
+      calls += 1;
+      return Promise.resolve(response("https://api.test/api/instances/", envelope(true)));
+    });
+    expect(screen.getByText("workspace content")).toBeInTheDocument();
+    expect(screen.queryByTestId("instance-boot-loader")).not.toBeInTheDocument();
+    expect(calls).toBe(0);
   });
 
   it("shows a full-screen loader until the read settles", async () => {
