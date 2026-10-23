@@ -818,11 +818,12 @@ mod tests {
             compiled.values[0],
             FilterValue::Text("2026-10-12".to_string())
         );
-        // updated_at filters created_at (ported quirk).
+        // updated_at filters the updated column (PDASHOSS01-312).
         let compiled = compile_all(&[("updated_at", "2024-02-02")]);
         assert!(compiled
             .where_extra
-            .contains("created_at\" AT TIME ZONE UTC)::date::text LIKE"));
+            .contains("updated_at\" AT TIME ZONE UTC)::date::text LIKE"));
+        assert!(!compiled.where_extra.contains("created_at"));
         // No-semicolon target_date is a case-sensitive contains.
         let compiled = compile_all(&[("target_date", "2024-05-05")]);
         assert!(compiled
