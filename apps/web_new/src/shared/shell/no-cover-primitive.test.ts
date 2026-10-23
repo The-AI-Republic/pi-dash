@@ -8,7 +8,10 @@
 // This guard fails if any non-test rendering source introduces a cover
 // component or reads the server's cover fields. Out of scope: the API client
 // (its schemas model the server payloads, covers included), test fixtures,
-// and the parity reads in e2e/.
+// and the parity reads in e2e/. Shared fixture modules (testing.*,
+// *fixture*, testing/ and __fixtures__/ trees) count as test code: they
+// build full server payloads, so they must spell every required field,
+// covers included.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -23,7 +26,12 @@ function sourceFiles(root: URL): string[] {
     if (!entry.isFile()) continue;
     if (!/\.(ts|tsx)$/.test(entry.name)) continue;
     if (/\.(test|stories)\.tsx?$/.test(entry.name)) continue;
-    out.push(join(entry.parentPath, entry.name));
+    // Shared test-fixture modules are test code, not rendering sources.
+    if (/^testing\.tsx?$/.test(entry.name)) continue;
+    if (/fixture/i.test(entry.name)) continue;
+    const full = join(entry.parentPath, entry.name);
+    if (/\/(testing|__fixtures__)\//.test(full)) continue;
+    out.push(full);
   }
   return out;
 }
