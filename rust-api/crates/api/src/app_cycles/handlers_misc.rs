@@ -1311,6 +1311,20 @@ pub struct EstimateRow {
 /// when `avatar_asset` is set, else the raw `avatar` field, else NULL.
 const AVATAR_URL_CASE: &str = "CASE WHEN u.avatar_asset_id IS NOT NULL THEN CONCAT('/api/assets/v2/static/', u.avatar_asset_id, '/') WHEN u.avatar_asset_id IS NULL THEN u.avatar ELSE NULL END";
 
+/// `IssueManager.issue_objects` scope (`issue.py:95-104`) shared by the
+/// transfer snapshot queries — the project is not archived and the issue
+/// is not deleted / archived / draft or in a triage-group state. Split
+/// into a join half and a where half because SQL joins precede the WHERE
+/// clause; each query inserts its own distribution joins between them.
+/// The triage predicate is `IS DISTINCT FROM` so issues with no state
+/// survive, matching `.exclude(state__group="triage")` (Django emits
+/// `NOT (states.group = 'triage' AND states.group IS NOT NULL)`).
+const TRANSFER_SCOPE_JOIN: &str =
+    "JOIN projects p ON p.id = i.project_id AND p.archived_at IS NULL \
+     LEFT JOIN states s ON s.id = i.state_id";
+const TRANSFER_SCOPE_WHERE: &str = "i.deleted_at IS NULL AND i.archived_at IS NULL \
+     AND i.is_draft = FALSE AND s.\"group\" IS DISTINCT FROM 'triage'";
+
 /// Assignee issue distribution (`:286-329`): this cycle's live bridges,
 /// tenant-scoped, grouped by assignee (`order_by("display_name")`;
 /// unassigned issues form the NULL group via the LEFT JOIN, exactly
@@ -1329,9 +1343,10 @@ pub async fn assignee_distribution(
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN issue_assignees ia ON ia.issue_id = i.id
            LEFT JOIN users u ON u.id = ia.assignee_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY u.display_name, u.id, u.avatar_asset_id, u.avatar
            ORDER BY u.display_name"#
     ))
@@ -1365,7 +1380,7 @@ pub async fn label_distribution(
     cycle_id: &Uuid,
 ) -> Result<Vec<DistributionRow>, Denial> {
     let rows: Vec<LabelRowTuple> =
-        sqlx::query_as(
+        sqlx::query_as(&format!(
             r#"SELECT l.name, l.color, l.id,
               COUNT(i.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE),
               COUNT(i.id) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE),
@@ -1373,12 +1388,13 @@ pub async fn label_distribution(
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN issue_labels il ON il.issue_id = i.id
            LEFT JOIN labels l ON l.id = il.label_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY l.name, l.color, l.id
-           ORDER BY l.name"#,
-    )
+           ORDER BY l.name"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -1454,9 +1470,10 @@ async fn estimate_distribution(
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            {join}
            LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
            GROUP BY {group}
            ORDER BY {order}"#
         ))
@@ -1548,14 +1565,15 @@ pub async fn burndown_issues_value(
     end: Option<DateTime<Utc>>,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
-    let rows: Vec<(Option<NaiveDate>, i64)> = sqlx::query_as(
+    let rows: Vec<(Option<NaiveDate>, i64)> = sqlx::query_as(&format!(
         r#"SELECT (i.completed_at AT TIME ZONE $4)::date AS day, COUNT(i.id)
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
-           GROUP BY day ORDER BY day"#,
-    )
+           {TRANSFER_SCOPE_JOIN}
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
+           GROUP BY day ORDER BY day"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -1589,15 +1607,16 @@ pub async fn burndown_points_value(
     end: Option<DateTime<Utc>>,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
-    let total: Option<f64> = sqlx::query_scalar(
+    let total: Option<f64> = sqlx::query_scalar(&format!(
         r#"SELECT SUM(CAST(ep.value AS DOUBLE PRECISION))
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
-             AND ep.id IS NOT NULL"#,
-    )
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
+             AND ep.id IS NOT NULL"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
@@ -1605,16 +1624,17 @@ pub async fn burndown_points_value(
     .await
     .map_err(|_| Denial::ServerError)?
     .unwrap_or(None);
-    let rows: Vec<(Option<NaiveDate>, Option<f64>)> = sqlx::query_as(
+    let rows: Vec<(Option<NaiveDate>, Option<f64>)> = sqlx::query_as(&format!(
         r#"SELECT (i.completed_at AT TIME ZONE $4)::date AS day, SUM(CAST(ep.value AS DOUBLE PRECISION))
            FROM issues i
            JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $1 AND ci.deleted_at IS NULL
            JOIN workspaces w ON w.id = i.workspace_id
+           {TRANSFER_SCOPE_JOIN}
            LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id
-           WHERE w.slug = $2 AND i.project_id = $3 AND i.deleted_at IS NULL
+           WHERE w.slug = $2 AND i.project_id = $3 AND {TRANSFER_SCOPE_WHERE}
              AND ep.id IS NOT NULL
-           GROUP BY day ORDER BY day"#,
-    )
+           GROUP BY day ORDER BY day"#
+    ))
     .bind(cycle_id)
     .bind(slug)
     .bind(project_id)
