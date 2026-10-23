@@ -160,7 +160,9 @@ export function validateList(raw, listPath = LIST) {
   const reservedSeen = new Set();
   for (const name of reserved) {
     if (typeof name !== "string" || !RESERVED_ENTRY.test(name)) {
-      throw new Error(`${listPath}: reservedTopLevel entries are lowercase slugs without a slash, got ${JSON.stringify(name)}`);
+      throw new Error(
+        `${listPath}: reservedTopLevel entries are lowercase slugs without a slash, got ${JSON.stringify(name)}`
+      );
     }
     if (reservedSeen.has(name)) throw new Error(`${listPath}: duplicate reservedTopLevel entry: ${name}`);
     reservedSeen.add(name);
@@ -307,7 +309,7 @@ function parseArgs(argv) {
   return opts;
 }
 
-function main(argv) {
+export function main(argv) {
   const opts = parseArgs(argv);
   const { entries, reservedTopLevel } = loadEntries(opts.list);
   const ce = syncFile(opts.ce, CE_ANCHOR, "\t", buildCeLines(entries, reservedTopLevel), { check: opts.check });
