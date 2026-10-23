@@ -246,6 +246,20 @@ fn parse_generate_email(content_type: &str, body: &[u8], is_json: bool) -> Optio
     }
 }
 
+/// Media types with a DRF default parser on generate besides JSON:
+/// urlencoded (`FormParser`) and multipart (`MultiPartParser`). Used
+/// for the 415 branch; JSON is tested separately by the caller's
+/// `is_json` check.
+fn is_form_content_type(content_type: &str) -> bool {
+    if crate::auth_session::multipart::is_multipart(content_type) {
+        return true;
+    }
+    content_type.split(';').next().is_some_and(|mime| {
+        mime.trim()
+            .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+    })
+}
+
 /// `request.POST` as ordered pairs: multipart fields when the body is
 /// framed multipart, else the urlencoded parse for form posts
 /// (PIDASHCONV-1079). Any other content type leaves `POST` empty in
@@ -1653,6 +1667,13 @@ async fn generate(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let is_json = content_type.contains("json");
+    if !body.is_empty() && !is_json && !is_form_content_type(content_type) {
+        // DRF `_parse` (`request.py:325-355`): a non-empty body no
+        // parser handles is `UnsupportedMediaType`, echoed verbatim.
+        // Empty bodies parse to `{}` without a parser, so they keep
+        // the ported 500 quirk below (PIDASHCONV-1351).
+        return crate::auth_session::email::unsupported_media_type_response(content_type);
+    }
     let email = if is_json && !body.is_empty() {
         match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(value) => match value.as_object().and_then(|o| o.get("email")) {
@@ -2410,6 +2431,17 @@ mod tests {
             parse_generate_email("multipart/form-data; boundary=b", b"email=f%40x.com", false),
             Some("f@x.com".to_owned())
         );
+        // The 415 branch (PIDASHCONV-1351): only JSON-ish, urlencoded
+        // and multipart bodies parse; anything else with a non-empty
+        // body is `UnsupportedMediaType`.
+        assert!(is_form_content_type("application/x-www-form-urlencoded"));
+        assert!(is_form_content_type(
+            "application/x-www-form-urlencoded; charset=UTF-8"
+        ));
+        assert!(is_form_content_type("multipart/form-data; boundary=b"));
+        assert!(!is_form_content_type("text/plain;charset=UTF-8"));
+        assert!(!is_form_content_type("application/xml"));
+        assert!(!is_form_content_type(""));
     }
 
     #[test]
