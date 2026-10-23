@@ -1,10 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Today's-activity download (parity/specs/profile.md §3, PROF-007). Posts
-// the local day, shows a working label until the server's bytes arrive,
-// then saves them under a timestamped name. The caller only mounts this
-// for workspace admins and members, so guests never see the control.
+// Today's-activity download (parity/specs/profile.md §3, PROF-007; the
+// fetch/save/working state is exports-owned per specs/exports.md §0.4,
+// EXP-022). Posts the local day, shows a working label until the
+// server's bytes arrive, then saves them under a click-time name. The
+// caller only mounts this for workspace admins and members, so guests
+// never see the control.
 
 import { Button } from "@pidash/kit";
 import { Download } from "lucide-react";
@@ -30,13 +32,17 @@ export function ProfileActivityDownload({
   run,
 }: ProfileActivityDownloadProps): React.ReactElement {
   const [downloading, setDownloading] = React.useState(false);
+  const busyRef = React.useRef(false);
   const start = async (): Promise<void> => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setDownloading(true);
     try {
       await (run ?? (() => downloadProfileActivity(getAppClient(), workspaceSlug, userId)))();
     } catch (error) {
       notifyError(PROFILE_EXPORT_FAILED_TITLE, error instanceof Error ? error.message : "Try again in a moment.");
     } finally {
+      busyRef.current = false;
       setDownloading(false);
     }
   };

@@ -78,6 +78,29 @@ describe("downloadProfileActivity", () => {
     expect(target.revoked).toEqual(["blob:profile"]);
   });
 
+  it("stamps the click time before the export resolves and ignores the server name", async () => {
+    let release!: (value: { csv: string; contentType: string; status: number; filename: string }) => void;
+    vi.mocked(exportUserProfileActivity).mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      })
+    );
+    const target = sink();
+    let nowCalls = 0;
+    const realNow = target.now;
+    target.now = () => {
+      nowCalls += 1;
+      return realNow();
+    };
+    const pending = downloadProfileActivity({} as ApiClient, "acme", "u-1", target);
+    expect(nowCalls).toBe(1);
+    expect(exportUserProfileActivity).toHaveBeenCalledTimes(1);
+    release({ csv: "actor", contentType: "text/csv", status: 200, filename: "workspace-user-activity.csv" });
+    const exported = await pending;
+    expect(exported.filename).toBe("workspace-user-activity.csv");
+    expect(target.saved).toEqual([["blob:profile", "profile-activity-1700000000000.csv"]]);
+  });
+
   it("defaults a blank content type to text/csv and revokes even when saving throws", async () => {
     vi.mocked(exportUserProfileActivity).mockResolvedValue({
       csv: "actor",
