@@ -161,7 +161,11 @@ fn string_date_filter(
         "months" => (duration as i128).saturating_mul(30),
         _ => (duration as i128).saturating_mul(7),
     };
-    let delta = chrono::TimeDelta::days(days.clamp(0, i64::MAX as i128) as i64);
+    // `TimeDelta::days` panics above ~1.07e11 days; magnitudes that fit
+    // `u64` can still exceed that (Python `OverflowError` -> 500 there),
+    // so fall through to `DateOverflow` instead of panicking.
+    let days = days.clamp(0, i64::MAX as i128) as i64;
+    let delta = chrono::TimeDelta::try_days(days).ok_or(IssueFilterError::DateOverflow)?;
     let day = if offset == "fromnow" {
         today.checked_add_signed(delta)
     } else {
@@ -1202,6 +1206,22 @@ mod tests {
         )
         .unwrap();
         assert!(filter.is_empty());
+    }
+
+    #[test]
+    fn huge_relative_magnitudes_are_date_overflow_not_panic() {
+        // PIDASHCONV-1318: magnitudes that fit `u64` but exceed
+        // `TimeDelta`'s day bound (~1.07e11) must be `DateOverflow`, not a
+        // `TimeDelta::days` panic. 20000000000000 weeks = 1.4e14 days.
+        for query in [
+            "20000000000000_weeks;after;fromnow",
+            "20000000000000_weeks;before;past",
+            "20000000000000_months;after;fromnow",
+            "20000000000000_months;before;past",
+        ] {
+            let filter = issue_filters_get(&get_map(&[("start_date", query)]), "", today());
+            assert_eq!(filter, Err(IssueFilterError::DateOverflow), "{query}");
+        }
     }
 
     #[test]
