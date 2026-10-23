@@ -6,7 +6,8 @@
 //! A turn whose worker died stays `RUNNING` forever and wedges its thread
 //! (the message POST refuses new turns while `active_turn` is set), so the
 //! beat fails every stale turn: `RUNNING` rows with
-//! `started_at < now - (TURN_HARD_LIMIT + 60)` (`tasks.py:513`), one
+//! `started_at < now - (hard + 60)` where `hard` is the configured
+//! `ASSISTANT_TURN_HARD_LIMIT` (`tasks.py:524`; 390s at defaults), one
 //! `_load_context` + `_fail_turn("turn_timeout", …)` per row, skipping rows
 //! whose context no longer loads (`tasks.py:520-523`). Returns the failed
 //! count.
@@ -30,6 +31,7 @@ use super::run_turn::{
 };
 use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
+use pidash_db::assistant::event_queries::{publish_frame, serialize_event_json, EventParts};
 
 /// Celery task name (`tasks.py:511`, `@shared_task(name=...)`).
 pub const SWEEP_TASK: &str = "assistant.sweep_stale_turns";
@@ -40,18 +42,19 @@ pub const SWEEP_BEAT_NAME: &str = "assistant-sweep-stale-turns";
 /// Beat cadence, seconds (`celery.py:102`, `timedelta(seconds=30)`).
 pub const SWEEP_INTERVAL_SECS: u64 = 30;
 
-/// Staleness horizon, seconds: `TURN_HARD_LIMIT + 60` (`tasks.py:513`).
-/// Unlike the fixture's flat `390`, this derives from the limit const so the
-/// two cannot drift apart.
-pub const SWEEP_CUTOFF_SECS: i64 =
-    super::run_turn::TURN_HARD_LIMIT_SECS as i64 + super::run_turn::SWEEP_CUTOFF_SLACK_SECS;
-
 /// Timeout detail (`tasks.py:524`).
 pub const SWEEP_TIMEOUT_DETAIL: &str = "The assistant turn did not finish (worker lost).";
 
-/// Staleness cutoff (`tasks.py:513`): `now - (hard + 60)`.
-pub fn sweep_cutoff(now: &DateTime<Utc>) -> DateTime<Utc> {
-    *now - Duration::seconds(SWEEP_CUTOFF_SECS)
+/// Staleness cutoff (`tasks.py:524`): `now - (hard + 60)`.
+///
+/// `hard_limit_secs` is the configured `ASSISTANT_TURN_HARD_LIMIT`
+/// (`settings.assistant.turn_hard_limit`), not the
+/// [`TURN_HARD_LIMIT_SECS`][super::run_turn::TURN_HARD_LIMIT_SECS] default:
+/// Django reads the same setting at `tasks.py:46`, so a hard-coded 330 here
+/// would sweep healthy turns for any operator who raised the limit
+/// (PIDASHCONV-1248). 390s at defaults.
+pub fn sweep_cutoff(now: &DateTime<Utc>, hard_limit_secs: i64) -> DateTime<Utc> {
+    *now - Duration::seconds(hard_limit_secs + super::run_turn::SWEEP_CUTOFF_SLACK_SECS)
 }
 
 /// Stale-turn select (`tasks.py:514-518`): `RUNNING` ids with
@@ -114,12 +117,14 @@ pub trait SweepStore: Send + Sync {
 /// Fail every stale turn (`tasks.py:511-526`): per-row load, skip when the
 /// context is gone, else `_fail_turn("turn_timeout", …)`. A lost guard race
 /// (the turn went terminal concurrently) skips like a gone context.
-/// Returns the failed count.
+/// Returns the failed count. `hard_limit_secs` is the configured
+/// `ASSISTANT_TURN_HARD_LIMIT` (see [`sweep_cutoff`]).
 pub async fn drive_sweep<S: SweepStore>(
     store: &S,
     now: &DateTime<Utc>,
+    hard_limit_secs: i64,
 ) -> Result<(usize, Vec<(Uuid, StaleOutcome)>), SeamError> {
-    let cutoff = sweep_cutoff(now);
+    let cutoff = sweep_cutoff(now, hard_limit_secs);
     let ids = store.stale_turn_ids(cutoff).await?;
     let mut count = 0;
     let mut outcomes = Vec::with_capacity(ids.len());
@@ -144,15 +149,102 @@ pub async fn drive_sweep<S: SweepStore>(
 
 /// Live store: the two SQL shapes above plus the shared fail-turn write.
 /// Eligibility reuses [`context_eligible`] so a turn that went terminal
-/// between the select and the load is skipped, not failed.
+/// between the select and the load is skipped, not failed. The optional
+/// Redis client feeds the post-commit publish; `None` (no `REDIS_URL`)
+/// skips it like Django's `None` client.
 pub struct LiveSweepStore {
     pool: PgPool,
+    redis: Option<redis::Client>,
 }
 
 impl LiveSweepStore {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, redis: Option<redis::Client>) -> Self {
+        Self { pool, redis }
     }
+}
+
+/// The committed event row for the post-commit publish (`events.py:67-70`,
+/// `_publish_by_id` re-reads by id). `$1` binds the event id; the payload
+/// crosses as the column's `::text`.
+fn published_event_lookup_sql() -> String {
+    format!(
+        "SELECT \"id\", \"thread_id\", \"message_id\", \"seq\", \"kind\", \
+         \"payload\"::text, \"created_at\" FROM \"{}\" WHERE \"id\" = $1",
+        super::run_turn::TABLE_EVENT
+    )
+}
+
+/// `datetime.isoformat()` for an aware stamp (`events.py:49`): seconds plus
+/// six micro digits iff nonzero, suffixed `+00:00`. The same rendering the
+/// SSE replay uses for this column (this crate cannot name that helper).
+fn py_iso(moment: &DateTime<Utc>) -> String {
+    let base = moment.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let micros = moment.timestamp_subsec_micros();
+    if micros == 0 {
+        format!("{base}+00:00")
+    } else {
+        format!("{base}.{micros:06}+00:00")
+    }
+}
+
+/// PUBLISH one serialized event on its thread channel (`events.py:53-64`).
+/// A missing client is a no-op (`redis_instance()` returning `None`);
+/// every failure surfaces to the caller, which swallows it with a log line
+/// — the source's `except Exception: logger.exception(...)` never fails
+/// the sweep. Same shape as the runner sweeps' chat publish.
+async fn publish_event(
+    client: Option<&redis::Client>,
+    channel: &str,
+    payload: &str,
+) -> Result<(), redis::RedisError> {
+    let Some(client) = client else {
+        return Ok(());
+    };
+    use redis::AsyncCommands;
+    let mut connection = client.get_multiplexed_async_connection().await?;
+    let _: () = connection.publish(channel, payload).await?;
+    Ok(())
+}
+
+/// `_publish_by_id` (`events.py:67-70`): re-read the committed event row (a
+/// miss publishes nothing) and PUBLISH the serialized frame. A lookup
+/// database failure propagates — only the Redis half is swallowed.
+async fn publish_turn_failed(
+    pool: &PgPool,
+    redis: Option<&redis::Client>,
+    event_id: i64,
+) -> Result<(), SeamError> {
+    let row = sqlx::query_as::<_, (i64, Uuid, Option<Uuid>, i64, String, String, DateTime<Utc>)>(
+        &published_event_lookup_sql(),
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| SeamError(e.to_string()))?;
+    let Some((id, thread_id, message_id, seq, kind, payload_text, created_at)) = row else {
+        return Ok(());
+    };
+    let thread_str = thread_id.to_string();
+    let message_str = message_id.map(|id| id.to_string());
+    let created = py_iso(&created_at);
+    // The payload relays the column's `::text` verbatim: `jsonb` text uses
+    // the same `": "`/`", "` separators and short escapes as `json.dumps`,
+    // so for this ASCII payload these are the same bytes the SSE replay
+    // renders for the row (it re-renders the same text through `py_dumps`).
+    let body = serialize_event_json(&EventParts {
+        id,
+        thread_id: &thread_str,
+        message_id: message_str.as_deref(),
+        seq,
+        kind: &kind,
+        payload_json: &payload_text,
+        created_at: &created,
+    });
+    let (channel, body) = publish_frame(&thread_str, &body);
+    if let Err(error) = publish_event(redis, &channel, &body).await {
+        tracing::error!(%error, "publish turn_failed failed for thread {thread_str}");
+    }
+    Ok(())
 }
 
 impl SweepStore for LiveSweepStore {
@@ -272,13 +364,13 @@ impl SweepStore for LiveSweepStore {
             "error_code": code,
             "detail": detail,
         });
-        sqlx::query(&rt::turn_failed_event_insert())
+        let event_id: i64 = sqlx::query_scalar(&rt::turn_failed_event_insert())
             .bind(ctx.thread_id)
             .bind(ctx.turn_id)
             .bind(message_id)
             .bind(payload)
             .bind(now)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|e| SeamError(e.to_string()))?;
         sqlx::query(&rt::prune_turn_deltas_delete())
@@ -287,6 +379,9 @@ impl SweepStore for LiveSweepStore {
             .await
             .map_err(|e| SeamError(e.to_string()))?;
         tx.commit().await.map_err(|e| SeamError(e.to_string()))?;
+        // Post-commit publish (`events.append_event`'s `on_commit`): the
+        // event above reaches the thread channel like Django's.
+        publish_turn_failed(&self.pool, self.redis.as_ref(), event_id).await?;
         Ok(true)
     }
 }
@@ -295,9 +390,19 @@ impl SweepStore for LiveSweepStore {
 ///
 /// Unlike the turn task, the sweep keeps the default retry budget: a DB
 /// outage parks-or-retries through the worker's settlement (`tasks.py` sets
-/// no `max_retries` on the sweep, so Celery defaults apply).
-pub fn register_sweep_handler(registry: &mut Registry, pool: PgPool) {
-    let store = Arc::new(LiveSweepStore::new(pool));
+/// no `max_retries` on the sweep, so Celery defaults apply). The Redis
+/// client feeds the post-commit `turn_failed` publish; `None` (no
+/// `REDIS_URL`) skips it like Django's `None` client.
+/// `hard_limit_secs` is the configured `ASSISTANT_TURN_HARD_LIMIT`
+/// (`settings.assistant.turn_hard_limit`); every run sweeps against
+/// `now - (hard + 60)` like Django (`tasks.py:524`).
+pub fn register_sweep_handler(
+    registry: &mut Registry,
+    pool: PgPool,
+    redis: Option<redis::Client>,
+    hard_limit_secs: i64,
+) {
+    let store = Arc::new(LiveSweepStore::new(pool, redis));
     registry.register(
         SWEEP_TASK,
         Arc::new(move |_job: JobRow| {
@@ -305,7 +410,7 @@ pub fn register_sweep_handler(registry: &mut Registry, pool: PgPool) {
             let fut: Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> =
                 Box::pin(async move {
                     let now = Utc::now();
-                    drive_sweep(store.as_ref(), &now)
+                    drive_sweep(store.as_ref(), &now, hard_limit_secs)
                         .await
                         .map(|_| Verdict::Ack)
                         .map_err(|error| error.to_string())
@@ -369,11 +474,11 @@ mod tests {
     fn cutoff_and_select() {
         use chrono::TimeZone;
         let now = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        // Default limit (330): the fixture's flat 390s horizon.
         assert_eq!(
-            sweep_cutoff(&now),
+            sweep_cutoff(&now, super::super::run_turn::TURN_HARD_LIMIT_SECS as i64),
             Utc.with_ymd_and_hms(2026, 9, 29, 11, 53, 30).unwrap()
         );
-        assert_eq!(SWEEP_CUTOFF_SECS, 390);
         assert_eq!(SWEEP_TASK, "assistant.sweep_stale_turns");
         assert_eq!(SWEEP_BEAT_NAME, "assistant-sweep-stale-turns");
         assert_eq!(SWEEP_INTERVAL_SECS, 30);
@@ -393,6 +498,56 @@ mod tests {
         );
     }
 
+    /// PIDASHCONV-1248: the cutoff honors the configured
+    /// `ASSISTANT_TURN_HARD_LIMIT`, not the 330 default — a 400s-old turn is
+    /// stale under `now - 390s` but fresh under `now - 960s`.
+    #[test]
+    fn cutoff_honors_configured_hard_limit() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        assert_eq!(
+            sweep_cutoff(&now, 900),
+            Utc.with_ymd_and_hms(2026, 9, 29, 11, 44, 0).unwrap()
+        );
+    }
+
+    /// The configured limit flows through `drive_sweep` into the stale
+    /// select: the store sees `now - (900 + 60)`.
+    #[tokio::test]
+    async fn drive_sweep_passes_configured_cutoff_to_store() {
+        struct CaptureStore {
+            seen: Mutex<Option<DateTime<Utc>>>,
+        }
+        impl SweepStore for CaptureStore {
+            async fn stale_turn_ids(&self, c: DateTime<Utc>) -> Result<Vec<Uuid>, SeamError> {
+                *self.seen.lock().unwrap() = Some(c);
+                Ok(Vec::new())
+            }
+            async fn load_context(&self, _id: Uuid) -> Result<Option<TurnContext>, SeamError> {
+                Ok(None)
+            }
+            async fn fail_turn(
+                &self,
+                _c: &TurnContext,
+                _code: &str,
+                _detail: &str,
+            ) -> Result<bool, SeamError> {
+                Ok(true)
+            }
+        }
+        let store = CaptureStore {
+            seen: Mutex::new(None),
+        };
+        let now = Utc::now();
+        let (count, outcomes) = drive_sweep(&store, &now, 900).await.unwrap();
+        assert_eq!(count, 0);
+        assert!(outcomes.is_empty());
+        assert_eq!(
+            store.seen.lock().unwrap().unwrap(),
+            now - Duration::seconds(960)
+        );
+    }
+
     #[tokio::test]
     async fn sweep_fails_stale_skips_gone() {
         let live = Uuid::new_v4();
@@ -404,7 +559,13 @@ mod tests {
             win: true,
         };
         let now = Utc::now();
-        let (count, outcomes) = drive_sweep(&store, &now).await.unwrap();
+        let (count, outcomes) = drive_sweep(
+            &store,
+            &now,
+            super::super::run_turn::TURN_HARD_LIMIT_SECS as i64,
+        )
+        .await
+        .unwrap();
         assert_eq!(count, 1);
         assert_eq!(
             outcomes,
@@ -432,7 +593,13 @@ mod tests {
             win: false,
         };
         let now = Utc::now();
-        let (count, outcomes) = drive_sweep(&store, &now).await.unwrap();
+        let (count, outcomes) = drive_sweep(
+            &store,
+            &now,
+            super::super::run_turn::TURN_HARD_LIMIT_SECS as i64,
+        )
+        .await
+        .unwrap();
         assert_eq!(count, 0);
         assert_eq!(outcomes, vec![(raced, StaleOutcome::Skipped)]);
     }
@@ -451,5 +618,58 @@ mod tests {
             entry.cadence,
             crate::schedule::Cadence::IntervalSecs(SWEEP_INTERVAL_SECS)
         );
+    }
+
+    #[test]
+    fn publish_lookup_selects_event_row_by_id() {
+        let sql = published_event_lookup_sql();
+        assert!(sql.contains("assistant_event"), "event table: {sql}");
+        assert!(sql.contains("\"payload\"::text"), "payload text: {sql}");
+        assert!(sql.contains("WHERE \"id\" = $1"), "by-id lookup: {sql}");
+    }
+
+    #[test]
+    fn py_iso_renders_python_isoformat_bytes() {
+        use chrono::TimeZone;
+        let whole = Utc.with_ymd_and_hms(2026, 9, 29, 13, 50, 51).unwrap();
+        assert_eq!(py_iso(&whole), "2026-09-29T13:50:51+00:00");
+        let micros = whole + chrono::Duration::microseconds(378_615);
+        assert_eq!(py_iso(&micros), "2026-09-29T13:50:51.378615+00:00");
+        // Trailing-zero micros keep six digits (where chrono AutoSi would
+        // trim), like the SSE replay's `py_iso`.
+        let millis = whole + chrono::Duration::milliseconds(120);
+        assert_eq!(py_iso(&millis), "2026-09-29T13:50:51.120000+00:00");
+    }
+
+    #[test]
+    fn publish_frame_targets_thread_channel() {
+        // Representative committed row: the payload relays the column's
+        // `::text` verbatim (`jsonb` key order), like the SSE replay renders.
+        let parts = EventParts {
+            id: 7,
+            thread_id: "tid-1",
+            message_id: Some("mid-9"),
+            seq: 3,
+            kind: "turn_failed",
+            payload_json: "{\"Detail\": \"x\", \"turn_id\": \"t\", \"error_code\": \"c\"}",
+            created_at: "2026-09-29T13:50:51+00:00",
+        };
+        let (channel, body) = publish_frame(parts.thread_id, &serialize_event_json(&parts));
+        assert_eq!(channel, "assistant:thread:tid-1");
+        assert_eq!(
+            body,
+            "{\"id\": 7, \"thread\": \"tid-1\", \"message\": \"mid-9\", \"seq\": 3, \
+             \"kind\": \"turn_failed\", \"payload\": {\"Detail\": \"x\", \"turn_id\": \"t\", \
+             \"error_code\": \"c\"}, \"created_at\": \"2026-09-29T13:50:51+00:00\"}"
+        );
+    }
+
+    /// A missing Redis client is a no-op publish (`redis_instance()`
+    /// returning `None`): the sweep keeps working with no `REDIS_URL`.
+    #[tokio::test]
+    async fn publish_without_client_is_noop() {
+        publish_event(None, "assistant:thread:tid-1", "{}")
+            .await
+            .expect("None client publishes nothing, fails nothing");
     }
 }

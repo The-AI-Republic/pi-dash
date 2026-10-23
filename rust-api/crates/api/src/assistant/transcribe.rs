@@ -443,33 +443,31 @@ async fn resolve_provider(
             &pidash_services::assistant::ssrf::SystemResolver,
         );
     let encrypted = stt.api_key_encrypted.clone().unwrap_or_default();
-    let outcome = pidash_services::assistant::seams::resolve_stt_provider(
+    let mut provider = match pidash_services::assistant::seams::resolve_stt_provider(
         stt.has_api_key,
         &stt.base_url,
         &stt.model_name,
         blocked,
-        || {
-            super::decrypt_secret(&encrypted).map_err(|err| match err {
-                super::SecretError::Assistant(error) => error,
-                // An operational crypto failure is never an
-                // `AssistantError` in Python: it propagates out of the view
-                // to the generic 500. `Internal` is only the carrier here —
-                // the match below renders it as the 500 envelope.
-                super::SecretError::Transport(_) => {
-                    pidash_types::assistant::errors::AssistantError::Internal(
-                        "dictation credential unreadable".to_string(),
-                    )
-                }
-            })
-        },
-    );
-    match outcome {
-        Ok(provider) => Ok(provider),
-        Err(pidash_types::assistant::errors::AssistantError::Internal(_)) => {
-            Err(Denial::ServerError.into_response())
+        // The seam only reaches this closure after its presence and SSRF
+        // gates, which is exactly when Python calls `crypto.decrypt`. The
+        // real transport is async, so decrypt just below once the gates
+        // have passed and fill the provider in.
+        || Ok(String::new()),
+    ) {
+        Ok(provider) => provider,
+        Err(error) => return Err(super::assistant_error_response(&error)),
+    };
+    let config = super::common::crypto_config(state);
+    provider.api_key = match super::common::decrypt_api_key(&config, &encrypted).await {
+        Ok(api_key) => api_key,
+        Err(pidash_services::assistant::crypto::CryptoError::NotConfigured(error)) => {
+            return Err(super::assistant_error_response(&error));
         }
-        Err(error) => Err(super::assistant_error_response(&error)),
-    }
+        Err(pidash_services::assistant::crypto::CryptoError::Transport(_)) => {
+            return Err(Denial::ServerError.into_response());
+        }
+    };
+    Ok(provider)
 }
 
 #[cfg(test)]
@@ -670,5 +668,134 @@ mod tests {
         );
         assert_eq!(optional_text_field(&parts, "response_format"), None);
         assert_eq!(optional_text_field(&parts, "missing"), None);
+    }
+
+    /// Minimal AWS KMS JSON-API stub: `Encrypt` wraps the plaintext in a
+    /// recognisable prefix so `Decrypt` can round-trip it without state.
+    async fn spawn_kms_stub() -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        const PREFIX: &[u8] = b"kms-stub:";
+
+        fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+            head.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case(name).then_some(value.trim())
+            })
+        }
+
+        fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle)
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind kms stub");
+        let addr = listener.local_addr().expect("kms stub address");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut raw = Vec::new();
+                    let (head, body) = loop {
+                        let mut chunk = [0_u8; 4096];
+                        let read = match socket.read(&mut chunk).await {
+                            Ok(read) => read,
+                            Err(_) => return,
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        raw.extend_from_slice(&chunk[..read]);
+                        let Some(split) = find(&raw, b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&raw[..split]).to_string();
+                        let length = header(&head, "content-length")
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if raw.len() >= split + 4 + length {
+                            break (head, raw[split + 4..split + 4 + length].to_vec());
+                        }
+                    };
+                    use base64::Engine as _;
+                    let engine = base64::engine::general_purpose::STANDARD;
+                    let payload: serde_json::Value =
+                        serde_json::from_slice(&body).unwrap_or_default();
+                    let target = header(&head, "x-amz-target").unwrap_or_default();
+                    let response = if target.ends_with("Encrypt") {
+                        let plaintext = payload
+                            .get("Plaintext")
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| engine.decode(value).ok())
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "CiphertextBlob": engine.encode([PREFIX, plaintext.as_slice()].concat()),
+                        })
+                    } else {
+                        let ciphertext = payload
+                            .get("CiphertextBlob")
+                            .and_then(|value| value.as_str())
+                            .and_then(|value| engine.decode(value).ok())
+                            .unwrap_or_default();
+                        let plaintext =
+                            ciphertext.strip_prefix(PREFIX).unwrap_or_default().to_vec();
+                        serde_json::json!({"Plaintext": engine.encode(plaintext)})
+                    };
+                    let body = serde_json::to_vec(&response).expect("kms response json");
+                    let mut response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/x-amz-json-1.1\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
+                    response.extend_from_slice(&body);
+                    let _ = socket.write_all(&response).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kms_backend_decrypts_the_stored_stt_key() {
+        // `HttpKmsTransport::from_env` reads the standard AWS credential
+        // chain; the stub ignores SigV4, so any non-empty values work.
+        std::env::set_var("AWS_ACCESS_KEY_ID", "test-access-key");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "test-secret-key");
+        std::env::set_var("AWS_REGION", "us-east-1");
+        let endpoint = spawn_kms_stub().await;
+
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.assistant.crypto_backend = "aws-kms".to_string();
+        settings.assistant.kms_key_id = "test-key".to_string();
+        settings.assistant.kms_endpoint_url = endpoint;
+        let state = AppState::with_settings("test", settings);
+
+        // Create the ciphertext through the production transport, exactly as
+        // a `PUT stt-config` does (`stt_config.rs` uses this helper).
+        let encrypted = crate::assistant::common::encrypt_api_key(
+            &crate::assistant::common::crypto_config(&state),
+            "test-key-123",
+        )
+        .await
+        .expect("KMS encrypt");
+        let stt = SttRow {
+            base_url: String::new(),
+            model_name: "whisper-1".to_string(),
+            api_key_encrypted: Some(encrypted),
+            has_api_key: true,
+        };
+
+        let provider = resolve_provider(&state, &stt)
+            .await
+            .expect("transcribe must decrypt the stored key through KMS");
+        assert_eq!(provider.api_key, "test-key-123");
     }
 }

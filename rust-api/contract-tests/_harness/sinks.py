@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import socket
+import ssl
 import threading
+import time
 from email import message_from_bytes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
@@ -527,6 +531,82 @@ class WorkerWebhookSink:
         )
 
 
+class ChunkedKeepAliveSink:
+    """Webhook sink answering ``Transfer-Encoding: chunked`` and staying open.
+
+    Sends ``2\\r\\nok\\r\\n0\\r\\n\\r\\n`` and then holds the connection for
+    longer than the webhook client's 30 s read timeout. ``requests`` (the
+    Django oracle) returns at the terminal chunk; a client that instead
+    reads to EOF hangs and records a false failure.
+    """
+
+    def __init__(self, hold_seconds: float = 45.0):
+        self.hold_seconds = hold_seconds
+        self.deliveries = []
+        self._lock = threading.Lock()
+        self._server = None
+        self._thread = None
+
+    def start(self) -> None:
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                with outer._lock:
+                    outer.deliveries.append(
+                        {
+                            "path": self.path,
+                            "headers": dict(self.headers),
+                            "body": raw.decode("utf-8", "replace"),
+                        }
+                    )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                self.wfile.write(b"2\r\nok\r\n0\r\n\r\n")
+                self.wfile.flush()
+                time.sleep(outer.hold_seconds)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._thread.join(timeout=10)
+            self._server.server_close()
+            self._server = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self.deliveries = []
+
+    def snapshot(self) -> list:
+        with self._lock:
+            return list(self.deliveries)
+
+    def wait_for_count(self, n: int, what: str = "chunked webhook deliveries") -> list:
+        return wait_for_condition(
+            lambda: self.snapshot() if len(self.snapshot()) >= n else None,
+            what=what,
+        )
+
+
 @pytest.fixture(scope="session")
 def smtp_sink():
     sink = WorkerSmtpSink()
@@ -715,3 +795,262 @@ class HostileLengthSink:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+# --- PIDASHCONV-1271: forward-proxy stub for the proxy-env suites ---
+def make_test_ca(directory, *, sans):
+    """Mint a throwaway CA + server cert for :class:`ProxyStub` tunnels.
+
+    Returns ``(ca_pem, cert_pem, key_pem)`` as Paths under ``directory``.
+    ``sans`` are the DNS names the leaf cert is valid for (the CONNECT
+    targets the test drives). The client under test must trust the CA
+    (``requests`` via ``REQUESTS_CA_BUNDLE``); rustls-webpki clients
+    cannot, so they only ever reach the CONNECT record, never the
+    inner response.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    directory = Path(directory)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name(
+        [x509.NameAttribute(NameOID.COMMON_NAME, "pidash-contract-test-ca")]
+    )
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(hours=1))
+        .not_valid_after(now + datetime.timedelta(days=7))
+        .add_extension(
+            x509.BasicConstraints(ca=True, path_length=0), critical=True
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, sans[0])])
+        )
+        .issuer_name(ca_name)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(hours=1))
+        .not_valid_after(now + datetime.timedelta(days=7))
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None), critical=True
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(name) for name in sans]),
+            critical=False,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_pem = directory / "proxy-ca.pem"
+    cert_pem = directory / "proxy-leaf.pem"
+    key_pem = directory / "proxy-leaf.key"
+    ca_pem.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
+    cert_pem.write_bytes(leaf_cert.public_bytes(serialization.Encoding.PEM))
+    key_pem.write_bytes(
+        leaf_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    return ca_pem, cert_pem, key_pem
+
+
+class ProxyStub:
+    """Minimal forward proxy: plain absolute-URI hits plus CONNECT tunnels.
+
+    First use: PIDASHCONV-1271, proving ``register_instance``'s release
+    probe honors the proxy environment. Plain ``http`` targets arrive as
+    absolute-URI requests and are answered directly; ``https`` targets
+    arrive as ``CONNECT host:port``, get ``200 Connection established``,
+    then speak TLS inside the tunnel with the caller-supplied test cert
+    (``tls_cert``/``tls_key`` PEM paths; the client must trust its CA).
+    Every hit records ``{method, path, headers, body, tunneled}`` in
+    :attr:`requests` (``tunneled`` marks the inner request read from an
+    established tunnel). Every answer is 200 with the fixed ``body``.
+    """
+
+    def __init__(
+        self, *, body: bytes = b"", content_type: str = "application/json",
+        tls_cert=None, tls_key=None,
+    ):
+        self._body = body
+        self._content_type = content_type
+        self._tls_cert = tls_cert
+        self._tls_key = tls_key
+        self.requests: list[dict] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(16)
+        self._sock.settimeout(0.5)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._sock.getsockname()
+        return f"http://{host}:{port}"
+
+    def __enter__(self) -> "ProxyStub":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=10)
+        self._sock.close()
+
+    def _record(self, entry: dict) -> None:
+        with self._lock:
+            self.requests.append(entry)
+
+    def _response(self) -> bytes:
+        head = (
+            "HTTP/1.1 200 OK\r\n"
+            f"Content-Type: {self._content_type}\r\n"
+            f"Content-Length: {len(self._body)}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode()
+        return head + self._body
+
+    @staticmethod
+    def _read_request(rfile):
+        line = rfile.readline(65536).decode("latin-1").strip()
+        if not line:
+            return None, {}
+        headers = {}
+        while True:
+            raw = rfile.readline(65536).decode("latin-1")
+            if raw in ("", "\r\n", "\n"):
+                break
+            name, _, value = raw.partition(":")
+            headers[name.strip()] = value.strip()
+        return line, headers
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            worker = threading.Thread(
+                target=self._handle, args=(conn,), daemon=True
+            )
+            worker.start()
+
+    def _handle(self, conn: socket.socket) -> None:
+        try:
+            conn.settimeout(10)
+            line, headers = self._read_request(conn.makefile("rb"))
+            if line is None:
+                return
+            parts = line.split(" ", 2)
+            method = parts[0] if parts else ""
+            target = parts[1] if len(parts) > 1 else ""
+            if method.upper() == "CONNECT":
+                self._record(
+                    {
+                        "method": "CONNECT",
+                        "path": target,
+                        "headers": headers,
+                        "body": b"",
+                        "tunneled": False,
+                    }
+                )
+                conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                if self._tls_cert is None:
+                    return
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(str(self._tls_cert), str(self._tls_key))
+                try:
+                    tls = context.wrap_socket(conn, server_side=True)
+                except (ssl.SSLError, OSError):
+                    return
+                try:
+                    tls.settimeout(10)
+                    iline, iheaders = self._read_request(tls.makefile("rb"))
+                    if iline is None:
+                        return
+                    iparts = iline.split(" ", 2)
+                    self._record(
+                        {
+                            "method": iparts[0] if iparts else "",
+                            "path": iparts[1] if len(iparts) > 1 else "",
+                            "headers": iheaders,
+                            "body": b"",
+                            "tunneled": True,
+                        }
+                    )
+                    tls.sendall(self._response())
+                except (ssl.SSLError, OSError):
+                    pass
+                finally:
+                    try:
+                        tls.close()
+                    except OSError:
+                        pass
+                return
+            self._record(
+                {
+                    "method": method,
+                    "path": target,
+                    "headers": headers,
+                    "body": b"",
+                    "tunneled": False,
+                }
+            )
+            conn.sendall(self._response())
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass

@@ -12,16 +12,22 @@ token pair, and MCP servers.
 Conventions:
 
 - Every test seeds a fresh ``world`` (unique emails/slugs); nothing is torn
-  down, so the suite is re-runnable and parallel-safe.
+  down, so the suite is re-runnable. It is no longer parallel-safe: the
+  title wire-shape test binds a fixed recording-proxy port, so run the
+  suite serially (no ``pytest -n``).
 - ``PUBLIC_BASE`` is a literal public IP, not a hostname: the contract run
   enables the SSRF guard (cloud parity), under which unresolvable hostnames
   are rejected without any DNS lookup. Numeric IPs resolve without DNS, which
-  keeps the suite hermetic.
+  keeps the suite hermetic. The title wire-shape test is the exception: it
+  must use the public DeepSeek host to trigger the DeepSeek branch, so that
+  test needs live DNS for ``api.deepseek.com``.
 - Outbound-provider behaviour (title generation content, connection-test
   success, transcription text) cannot be pinned without network access, so
   those endpoints are covered through their deterministic gates and error
   shapes. The cases that need a live provider are the Rust proxy's job, not
-  this suite's.
+  this suite's. The title request wire shape is the exception: it is pinned
+  through a local recording proxy (see ``test_llm_config.py``), with
+  ``HTTP_PROXY`` set on the backends.
 """
 
 import sys

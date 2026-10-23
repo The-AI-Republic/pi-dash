@@ -21,6 +21,10 @@ Django imports), so the suite tracks seed edits instead of freezing them:
   the explicit create — ported as-is), activities, and label/cycle/module
   links
 - pages (both seed rows are PROJECT type) + ``ProjectPage`` links
+- the ``post_save`` pair (PIDASHCONV-1297): one ``{IDENT}_pod_1`` default
+  pod, every issue's ``assigned_pod_id`` set to it, a ticker row for
+  each ticking-state seed issue, and each such issue bounced
+  (Backlog + system comment) or dispatched (an agent run)
 """
 
 import json
@@ -261,6 +265,25 @@ def test_workspace_seed_before_after(db_conn, broker_url):
         == expected_modules
     )
 
+    # Link-row audit wipe (PIDASHCONV-1298): the `.objects.create(
+    # created_by_id=bot)` rows run `BaseModel.save` with no save kwarg and
+    # no crum user in the worker, so Django NULLs both audit columns
+    # (`db/models/base.py:31-33`). The explicit IssueSequence create is one
+    # of the two per-issue rows; the `Issue.save` auto-row is NULL-audit on
+    # both backends already, so asserting every project sequence row NULL
+    # pins the explicit row too.
+    link_rows = (
+        _project_rows(db_conn, "issue_labels", project["id"])
+        + _project_rows(db_conn, "cycle_issues", project["id"])
+        + _project_rows(db_conn, "module_issues", project["id"])
+        + _project_rows(db_conn, "issue_sequences", project["id"])
+    )
+    assert len(link_rows) == (
+        expected_labels + expected_cycles + expected_modules + 2 * len(seed_issues)
+    )
+    assert all(r["created_by_id"] is None for r in link_rows)
+    assert all(r["updated_by_id"] is None for r in link_rows)
+
     # Views: empty seed filters store an empty query; first view keeps its
     # seed sort.
     views = _project_rows(db_conn, "issue_views", project["id"])
@@ -287,3 +310,64 @@ def test_workspace_seed_before_after(db_conn, broker_url):
         )
         == expected_project_pages
     )
+
+    # Default pod + orchestration (PIDASHCONV-1297): the project-save
+    # post_save creates {IDENT}_pod_1, each issue-save resolves
+    # assigned_pod through it, and the post-save transition fires
+    # (ticker + dispatch or preflight bounce).
+    pods = _project_rows(db_conn, "pod", project["id"])
+    assert len(pods) == 1
+    pod = pods[0]
+    assert pod["name"] == f"{project['identifier']}_pod_1"
+    assert pod["is_default"] is True
+    assert pod["description"] == "Auto-created default pod. Add tier pods anytime."
+    assert pod["created_by_id"] is None
+    assert all(i["assigned_pod_id"] == pod["id"] for i in issues)
+
+    # Ticking seed issues: agent_phases.PHASES pins the literal
+    # (name, group) pairs, so the test names them (no Django import).
+    # Sequence ids are 1-based in seed-file order (pinned above).
+    ticking = {("In Progress", "started"), ("In Review", "review"), ("In Test", "test")}
+    ticking_seed_states = {
+        s["id"] for s in seed_states if (s["name"], s.get("group")) in ticking
+    }
+    by_sequence = {i["sequence_id"]: i for i in issues}
+    ticking_n = [
+        n
+        for n, row in enumerate(seed_issues, start=1)
+        if row["state_id"] in ticking_seed_states
+    ]
+    assert ticking_n, "seed data must carry at least one ticking-state issue"
+    for n in ticking_n:
+        issue = by_sequence[n]
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT * FROM "issue_agent_ticker" WHERE issue_id = %s::uuid',
+                (str(issue["id"]),),
+            )
+            ticker = cur.fetchone()
+        assert ticker is not None, f"issue {issue['id']} must own a ticker row"
+        runs = _count(
+            db_conn, "agent_run", "WHERE work_item_id = %s::uuid", (str(issue["id"]),)
+        )
+        if runs:
+            continue  # dispatched: the backend had an eligible runner
+        # Bounced: Backlog state + the no-eligible-runner system comment.
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT "group" FROM "states" WHERE id = %s::uuid',
+                (str(issue["state_id"]),),
+            )
+            group = cur.fetchone()["group"]
+        assert group == "backlog", f"issue {issue['id']} must bounce to Backlog"
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT speaker_type, comment_html FROM "issue_comments" WHERE issue_id = %s::uuid',
+                (str(issue["id"]),),
+            )
+            comments = cur.fetchall()
+        assert any(
+            c["speaker_type"] == "agent"
+            and "Agent run skipped" in (c["comment_html"] or "")
+            for c in comments
+        ), f"issue {issue['id']} must carry the bounce comment"

@@ -79,6 +79,7 @@ use axum::Router;
 use chrono::Utc;
 use sqlx::PgPool;
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -220,11 +221,19 @@ fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
 }
 
 /// `HttpResponseRedirect(url)`: 302 with a `Location` header and an
-/// empty body.
+/// empty body. Django percent-encodes the URL first (`iri_to_uri`,
+/// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
+/// characters the final `Location` answers 400 (`DisallowedRedirect`).
 fn redirect_response(location: String) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let too_long =
+        location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return Denial::ServerError.into_response();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -743,7 +752,11 @@ async fn app_callback(
     )
     .await
     {
-        Ok(path) => Ok(redirect_response(success_location(&base, &path, &allowed))),
+        Ok((path, csrf_cookie)) => {
+            let mut response = redirect_response(success_location(&base, &path, &allowed));
+            super::login::push_cookie(&mut response, csrf_cookie);
+            Ok(response)
+        }
         Err(CallbackOutcome::Provider(error)) => {
             let payload: Vec<(&str, serde_json::Value)> = error
                 .payload
@@ -952,8 +965,10 @@ fn invalid_email_sanitized(sanitized: &str) -> ProviderError {
 
 /// `sanitize_email` (`base.py:60-84`): falsy → `INVALID_EMAIL` (raw
 /// payload); else `str().lower().strip()` + Django `validate_email`
-/// → `INVALID_EMAIL` (sanitized payload).
+/// → `INVALID_EMAIL` (sanitized payload). Reuses the D-01 email kernel
+/// (verified against Django 4.2.30), like the Gitea twin.
 fn sanitize_email(raw: &serde_json::Value) -> Result<String, ProviderError> {
+    use crate::license::handlers_auth_forms::email_is_valid;
     if !pidash_services::auth_oauth::providers::json_truthy(raw) {
         return Err(invalid_email_raw(raw));
     }
@@ -969,203 +984,10 @@ fn sanitize_email(raw: &serde_json::Value) -> Result<String, ProviderError> {
     };
     let sanitized = sanitized.to_lowercase();
     let sanitized = sanitized.trim().to_owned();
-    if !validate_email_address(&sanitized) {
+    if !email_is_valid(&sanitized) {
         return Err(invalid_email_sanitized(&sanitized));
     }
     Ok(sanitized)
-}
-
-/// Django `EmailValidator` (`django.core.validators`, Django 6.0):
-/// 320-char cap, `@` split from the right, dot-atom/quoted-string
-/// user part, hostname + TLD domain part (no trailing dot), IP
-/// literal, `localhost` allowlist. Hand-rolled: the domain patterns
-/// use lookarounds (`(?!-)`, `(?<!-)`) the `regex` crate cannot
-/// express.
-fn validate_email_address(value: &str) -> bool {
-    // `len(value) > 320` counts characters, not bytes (Semantic trap).
-    if value.is_empty() || !value.contains('@') || value.chars().count() > 320 {
-        return false;
-    }
-    let (user_part, domain_part) = match value.rsplit_once('@') {
-        Some(pair) => pair,
-        None => return false,
-    };
-    if !valid_email_user_part(user_part) {
-        return false;
-    }
-    if domain_part == "localhost" {
-        return true;
-    }
-    valid_email_domain_part(domain_part)
-}
-
-/// `user_regex`, `re.IGNORECASE`: dot-atom or quoted-string, full
-/// match (`\Z`-anchored).
-fn valid_email_user_part(user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    if user.starts_with('"') && user.ends_with('"') && user.len() >= 2 {
-        return valid_quoted_string(&user[1..user.len() - 1]);
-    }
-    valid_dot_atom(user)
-}
-
-fn is_atom_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "-!#$%&'*+/=?^_`{}|~".contains(c)
-}
-
-/// dot-atom: `atom(.atom)*`, ASCII case-insensitive.
-fn valid_dot_atom(user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    for atom in user.split('.') {
-        if atom.is_empty() || !atom.chars().all(is_atom_char) {
-            return false;
-        }
-    }
-    true
-}
-
-/// quoted-string inner: `([\001-\010\013\014\016-\037!#-\[\]-\177] |
-/// \\[\001-\011\013\014\016-\177])*`.
-fn valid_quoted_char(c: char) -> bool {
-    ('\u{1}'..='\u{8}').contains(&c)
-        || c == '\u{b}'
-        || c == '\u{c}'
-        || ('\u{e}'..='\u{1f}').contains(&c)
-        || ('!'..='[').contains(&c)
-        || (']'..='\u{7f}').contains(&c)
-}
-
-fn valid_quoted_escape(c: char) -> bool {
-    ('\u{1}'..='\u{9}').contains(&c)
-        || c == '\u{b}'
-        || c == '\u{c}'
-        || ('\u{e}'..='\u{7f}').contains(&c)
-}
-
-fn valid_quoted_string(inner: &str) -> bool {
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some(escaped) if valid_quoted_escape(escaped) => continue,
-                _ => return false,
-            }
-        } else if valid_quoted_char(c) {
-            continue;
-        } else {
-            return false;
-        }
-    }
-    true
-}
-
-/// Unicode-letter range in the hostname patterns
-/// (`ul = "\u00a1-\uffff"`).
-fn is_hostname_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || ('\u{a1}'..='\u{10ffff}').contains(&c)
-}
-
-/// One domain label, 1-63 chars, no leading/trailing hyphen
-/// (`hostname_re` for the first label; `domain_re` interiors share
-/// the shape).
-fn valid_domain_label(label: &str) -> bool {
-    let count = label.chars().count();
-    if count == 0 || count > 63 {
-        return false;
-    }
-    let mut chars = label.chars();
-    let first = chars.next().unwrap_or('\0');
-    let last = label.chars().next_back().unwrap_or('\0');
-    if !is_hostname_char(first) || !is_hostname_char(last) {
-        return false;
-    }
-    if first == '-' || last == '-' {
-        return false;
-    }
-    label.chars().all(|c| is_hostname_char(c) || c == '-')
-}
-
-/// TLD label: `[a-z\ul-]{2,63}` (no digits) or `xn--[a-z0-9]{1,59}`,
-/// no leading/trailing hyphen (`tld_no_fqdn_re`, IGNORECASE — the
-/// `xn--` test lowercases first).
-fn valid_tld_label(label: &str) -> bool {
-    let lower = label.to_lowercase();
-    if let Some(rest) = lower.strip_prefix("xn--") {
-        let count = rest.chars().count();
-        return (1..=59).contains(&count) && rest.chars().all(|c| c.is_ascii_alphanumeric());
-    }
-    let count = label.chars().count();
-    if !(2..=63).contains(&count) {
-        return false;
-    }
-    let first = label.chars().next().unwrap_or('\0');
-    let last = label.chars().next_back().unwrap_or('\0');
-    if first == '-' || last == '-' {
-        return false;
-    }
-    label
-        .chars()
-        .all(|c| c.is_ascii_alphabetic() || ('\u{a1}'..='\u{10ffff}').contains(&c) || c == '-')
-}
-
-/// `domain_regex` + IP literal (`validate_domain_part`).
-fn valid_email_domain_part(domain: &str) -> bool {
-    if domain.is_empty() {
-        return false;
-    }
-    if let Some(inner) = domain
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        return valid_ipv46_literal(inner);
-    }
-    let labels: Vec<&str> = domain.split('.').collect();
-    if labels.len() < 2 {
-        return false;
-    }
-    let (tld, host) = labels.split_last().expect("at least two labels");
-    if !valid_tld_label(tld) {
-        // Case-insensitivity: the patterns compile with IGNORECASE;
-        // the char checks above are case-agnostic except ASCII
-        // alpha, which accepts both cases already.
-        return false;
-    }
-    if host.is_empty() {
-        return false;
-    }
-    if !valid_domain_label(host[0]) {
-        return false;
-    }
-    host[1..].iter().all(|label| valid_domain_label(label))
-}
-
-/// `validate_ipv46_address` for `[...]` literals: dotted quad (each
-/// octet `25[0-5]|2[0-4]\d|[0-1]?\d?\d`, leading zeros accepted) or
-/// an IPv6 address.
-fn valid_ipv46_literal(literal: &str) -> bool {
-    if valid_ipv4_literal(literal) {
-        return true;
-    }
-    literal.parse::<std::net::Ipv6Addr>().is_ok()
-}
-
-fn valid_ipv4_octet(octet: &str) -> bool {
-    if octet.is_empty() || octet.len() > 3 || !octet.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    match octet.parse::<u32>() {
-        Ok(v) => v <= 255,
-        Err(_) => false,
-    }
-}
-
-fn valid_ipv4_literal(literal: &str) -> bool {
-    let parts: Vec<&str> = literal.split('.').collect();
-    parts.len() == 4 && parts.iter().all(|part| valid_ipv4_octet(part))
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,8 +1052,9 @@ pub const SIGNUP_DISABLED_CODE: i32 = 5015;
 pub const SIGNUP_DISABLED_NAME: &str = "SIGNUP_DISABLED";
 
 /// `__check_signup` (`base.py:103-122`): with signups disabled
-/// (`ENABLE_SIGNUP == "0"`, legacy default `"1"`) a missing workspace
-/// invite raises `SIGNUP_DISABLED` (payload: the sanitized email). A
+/// (`ENABLE_SIGNUP == "0"`, legacy default `"1"`) a missing live workspace
+/// invite raises `SIGNUP_DISABLED` (payload: the sanitized email). The
+/// default manager excludes soft-deleted invites. A
 /// config-store or DB failure escapes (Django 500), it is not a
 /// provider error.
 async fn check_signup(pool: &PgPool, secret_key: &str, email: &str) -> Result<(), CallbackOutcome> {
@@ -1262,12 +1085,13 @@ async fn check_signup(pool: &PgPool, secret_key: &str, email: &str) -> Result<()
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(i32,)> =
-        sqlx::query_as(r#"SELECT 1 FROM "workspace_member_invites" WHERE email = $1 LIMIT 1"#)
-            .bind(email)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| CallbackOutcome::Server)?;
+    let invited: Option<(i32,)> = sqlx::query_as(
+        r#"SELECT 1 FROM "workspace_member_invites" WHERE email = $1 AND deleted_at IS NULL LIMIT 1"#,
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| CallbackOutcome::Server)?;
     if invited.is_none() {
         return Err(CallbackOutcome::Provider(ProviderError::with_payload(
             SIGNUP_DISABLED_CODE,
@@ -2024,57 +1848,13 @@ async fn bulk_insert_project_members(
 // Login + redirection
 // ---------------------------------------------------------------------------
 
-/// `user.get_session_auth_hash()`: the make side of
-/// `verify_session_hash` (`license/mod.rs`): HMAC-SHA256 over the
-/// password field, keyed by SHA256(salt + secret), hex-encoded.
-fn make_session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    let key = Sha256::digest(
-        [
-            crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
-            secret_key,
-        ]
-        .concat(),
-    );
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let bytes = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-/// `user_login` (`authentication/utils/login.py:13-28`) with
-/// `is_app=True`: Django `login()` keys plus the `device_info` dict.
-/// (Django also cycles the session key; the session layer exposes no
-/// cycle operation, so the keys land on the current session — the
-/// cookie behaviour is unchanged: a mutated session is persisted.)
-fn user_login(
-    handle: &SessionHandle,
-    user: &DbUser,
-    user_agent: Option<&str>,
-    ip: Option<&str>,
-    domain: &str,
-    secret_key: &[u8],
-) {
+/// `device_info` half of `user_login`
+/// (`authentication/utils/login.py:21-25`): the `login()` half (rotation,
+/// the auth trio, `last_login`, the CSRF cookie) runs first via
+/// [`super::login::login_session_keys`]; this writes only the
+/// `device_info` dict.
+fn user_login(handle: &SessionHandle, user_agent: Option<&str>, ip: Option<&str>, domain: &str) {
     let mut session = handle.lock();
-    session.set(
-        "_auth_user_id".to_owned(),
-        serde_json::Value::String(user.id.to_string()),
-    );
-    session.set(
-        "_auth_user_hash".to_owned(),
-        serde_json::Value::String(make_session_auth_hash(&user.password, secret_key)),
-    );
-    session.set(
-        "_auth_user_backend".to_owned(),
-        serde_json::Value::String(crate::license::MODEL_BACKEND.to_owned()),
-    );
     session.set(
         "device_info".to_owned(),
         crate::license::handlers_auth_forms::device_info(user_agent.unwrap_or(""), ip, domain),
@@ -2177,7 +1957,8 @@ fn name_or_empty(value: &serde_json::Value) -> String {
 /// → `user_login` → redirect path, `views/app/gitlab.py:92-104`):
 /// token exchange, user fetch, login-or-signup, account upsert,
 /// session login. Returns the redirect `path` (`next_path or
-/// get_redirection_path(user)`).
+/// get_redirection_path(user)`) plus the rotated `csrftoken` `Set-Cookie`
+/// value for the success redirect.
 #[allow(clippy::too_many_arguments)]
 async fn callback_success(
     state: &AppState,
@@ -2187,7 +1968,7 @@ async fn callback_success(
     handle: Option<SessionHandle>,
     peer: Option<std::net::SocketAddr>,
     is_space: bool,
-) -> Result<String, CallbackOutcome> {
+) -> Result<(String, String), CallbackOutcome> {
     let pool = pool_of(state)?;
     let settings = state.settings();
     let secret = settings.secret_key.clone();
@@ -2375,32 +2156,39 @@ async fn callback_success(
     // `create_update_account(user)` (B6: DB errors are swallowed).
     create_update_account(pool, &user.id, &user_data, &token_data, now).await;
 
-    // `user_login(request, user, is_app=True)` on the app path,
-    // `user_login(request, user, is_space=True)` on the space path
-    // (`utils/login.py:21-25` records the matching base as the
-    // `device_info` domain).
+    // `user_login(request, user, ...)` (`utils/login.py:13-28`): the
+    // shared `login()` half first (rotation, trio, `last_login`, CSRF
+    // cookie), then the `device_info` dict (`login.py:21-25` records the
+    // matching base as the domain).
     let handle = handle.ok_or(CallbackOutcome::Server)?;
     let domain = if is_space {
         space_base(settings)
     } else {
         app_base(settings)
     };
-    user_login(
+    let csrf_cookie = super::login::login_session_keys(
         &handle,
-        &user,
-        user_agent.as_deref(),
-        ip.as_deref(),
-        &domain,
+        pool,
+        user.id,
+        &user.password,
         secret.as_bytes(),
-    );
+        settings,
+        now,
+    )
+    .await
+    .map_err(|_| CallbackOutcome::Server)?;
+    user_login(&handle, user_agent.as_deref(), ip.as_deref(), &domain);
 
     // `path = next_path or get_redirection_path(user)`.
     if let Some(next) = session_next_path {
         if !next.is_empty() {
-            return Ok(next);
+            return Ok((next, csrf_cookie));
         }
     }
-    Ok(redirection_path(pool, user.id, &email, now).await?)
+    Ok((
+        redirection_path(pool, user.id, &email, now).await?,
+        csrf_cookie,
+    ))
 }
 
 /// `create_update_account` (`adapter/oauth.py:107-140`, gitlab
@@ -2489,6 +2277,16 @@ async fn create_update_account(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_response(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_response("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/auth_oauth")
@@ -2706,76 +2504,44 @@ mod tests {
         );
     }
 
-    // -- email validator (vectors verified against Django 6.0.5) -----------
+    // -- email validator (vectors verified against Django 4.2.30) -----------
+    // The verdicts below run through `sanitize_email`, so they pin the
+    // wiring to the shared kernel too. The kernel's own suite
+    // (`handlers_auth_forms`) pins the full 4.2.30 matrix (quoted
+    // strings, IP literals, IDN, 64-char labels, the 320-char cap).
 
     #[test]
     fn email_validator_matches_django() {
-        let valid = [
-            "a@b.com",
-            "A@B.COM",
-            "a.b+c@sub.example.co",
-            "x@localhost",
-            "\"a\\\"b\"@c.com",
-            "a@[1.2.3.4]",
-            "a@[::1]",
-            "x@[127.0.0.1]",
-            "a@xn--nxasmq6b.example",
-            "a@XN--NXASMQ6B.example",
-            "test@münchen.de",
-            "x@y.zz",
-        ];
+        // Django 4.2.30 allows digits in the TLD; the old Django-6
+        // port rejected every address here (PIDASHCONV-1360).
+        for address in ["dev@corp.k8s", "ops@host.lan2", "x@y.z1"] {
+            assert_eq!(
+                sanitize_email(&serde_json::Value::String(address.to_owned())).expect("valid"),
+                address,
+                "valid: {address}",
+            );
+        }
+        let valid = ["a@b.com", "x@localhost", "a.b+c@sub.example.co"];
         for address in valid {
-            assert!(validate_email_address(address), "valid: {address}");
+            sanitize_email(&serde_json::Value::String(address.to_owned())).expect("valid");
         }
         let invalid = [
-            "LOCALHOST@LOCALHOST",
+            "plainaddress",
             "a@b",
             "a@b.c",
-            "a@-b.com",
-            "a@b-.com",
             "a@b..com",
-            ".a@b.com",
-            "a.@b.com",
-            "a..b@c.com",
-            "\"a b\"@c.com",
-            "a b@c.com",
             "@c.com",
             "a@",
+            "a b@c.com",
             "a@[999.1.1.1]",
-            "a@[not-an-ip]",
-            "plainaddress",
-            "a@b@c.com",
             "user@tld",
-            "üñîçødé@example.com",
-            "x@y.z1",
             "x@1.2.3.4",
         ];
         for address in invalid {
-            assert!(!validate_email_address(address), "invalid: {address}");
+            let error = sanitize_email(&serde_json::Value::String(address.to_owned()))
+                .expect_err("invalid");
+            assert_eq!(error.code, INVALID_EMAIL_CODE, "invalid: {address}");
         }
-        // 64-char labels and the 320-char cap.
-        assert!(!validate_email_address(&format!(
-            "a@{}",
-            "b".repeat(64) + ".com"
-        )));
-        assert!(!validate_email_address(&format!("a@b.{}", "c".repeat(64))));
-        assert!(!validate_email_address(
-            "u@toolonglabeltoolonglabeltoolonglabeltoolonglabeltoolonglabeltoolonglabel.com"
-        ));
-    }
-
-    // -- session hash ------------------------------------------------------
-
-    #[test]
-    fn session_auth_hash_matches_django_salted_hmac() {
-        // Oracle: Django 6.0 `salted_hmac(...get_session_auth_hash,
-        // "pbkdf2_sha256$1200000$abc$def", secret="topsecret",
-        // algorithm="sha256")` (the default `algorithm="sha1"` is a
-        // trap — `get_session_auth_hash` passes sha256 explicitly).
-        assert_eq!(
-            make_session_auth_hash("pbkdf2_sha256$1200000$abc$def", b"topsecret"),
-            "9c9a3cd895ca244f0c1fc8a4d24cd83d65287bb3353f39d69ab926a0d240b079"
-        );
     }
 
     // -- misc pure helpers ---------------------------------------------------

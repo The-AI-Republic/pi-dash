@@ -295,7 +295,11 @@ pub(crate) async fn serve_web_bytes(
     let owned =
         edge.flags().is_rust(Prefix::Web) && matches!(*req.method(), Method::GET | Method::HEAD);
     if !owned {
-        return proxy_request(state, req).await;
+        // Through `proxy` (not `proxy_request` directly) so the answer
+        // carries `ProxiedUpstream` like every other proxied arm — the
+        // session layer stays transparent on marked responses
+        // (PIDASHCONV-1304).
+        return proxy(State(state.clone()), req).await;
     }
     let mut response = ([(header::CONTENT_TYPE, content_type)], body).into_response();
     if req.method() == Method::HEAD {
@@ -348,11 +352,19 @@ async fn proxy_request(state: &AppState, req: Request) -> Response {
 
     let mut forwarded = HeaderMap::new();
     for (name, value) in req.headers() {
-        if is_hop_by_hop(name) || *name == header::HOST {
+        if is_hop_by_hop(name) {
             continue;
         }
         forwarded.append(name, value.clone());
     }
+    // The client's Host is forwarded unchanged (Caddy parity): Django
+    // builds client-visible URLs and security checks from
+    // `request.get_host()` and never reads `X-Forwarded-Host` (no
+    // `USE_X_FORWARDED_HOST` under `apps/api/pi_dash/settings/`), so
+    // letting reqwest re-derive Host from the upstream URL breaks OAuth
+    // `redirect_uri`s, MinIO presigned URLs and the webhook self-host
+    // guard (PIDASHCONV-1303). Requests without a Host header (HTTP/1.0)
+    // still fall back to reqwest's URL-derived Host.
     // Present only when served with `into_make_service_with_connect_info`
     // (as `serve` does); absent in tests, where no forwarding headers apply.
     if let Some(peer) = req

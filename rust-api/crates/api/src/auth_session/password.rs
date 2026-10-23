@@ -64,8 +64,9 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde_json::Value;
 
-use pidash_services::auth_session::{password as pw, tasks as t};
+use pidash_services::auth_session::{password as pw, tasks as t, MAX_URL_REDIRECT_LENGTH};
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::state::AppState;
 
 /// Register the seven password/CSRF routes. Nothing else: sibling paths
@@ -148,10 +149,19 @@ fn json_400(pairs: &[(String, Value)]) -> Response {
     )
 }
 
+/// `HttpResponseRedirect(url)`: Django percent-encodes the URL first
+/// (`iri_to_uri`, `django/http/response.py:620`). Past
+/// `MAX_URL_REDIRECT_LENGTH` characters the final `Location` answers
+/// 400 (`DisallowedRedirect`).
 fn redirect_302(location: String) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -1400,17 +1410,30 @@ async fn forgot_password(
     if data_get_raises(&data) {
         return server_error();
     }
-    // Instance gate (`Instance.objects.first()`, `is_setup_done`): a
-    // missing row or an unset flag answers INSTANCE_NOT_CONFIGURED.
+    // Django gate order (`app/password_management.py:54-81`, space
+    // `:54-93`): instance, SMTP, `validate_email` — each short-circuits
+    // before the user lookup. The lookup runs last: a NUL byte in the
+    // email makes Postgres reject the bind param, which answered 500
+    // instead of Django's 400 INVALID_EMAIL (PIDASHCONV-1353).
     let instance_row = match pidash_db::license::queries::fetch_instance_first(&pool).await {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
     let instance_setup_done = instance_row.map(|row| row.is_setup_done).unwrap_or(false);
+    if !instance_setup_done {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::InstanceNotConfigured,
+        ));
+    }
     // SMTP gate (`EMAIL_HOST` truthiness).
     let Ok(smtp) = smtp_configured(&pool, &state.settings().secret_key).await else {
         return server_error();
     };
+    if !smtp {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::SmtpNotConfigured,
+        ));
+    }
     // `validate_email`: only `ValidationError` is caught
     // (`app/password_management.py:75-81`). Falsy values and truthy
     // lists/dicts take the `INVALID_EMAIL` branch (`"@" not in [...]`
@@ -1421,17 +1444,20 @@ async fn forgot_password(
         Field::Absent | Field::Opaque => String::new(),
         Field::Scalar => return server_error(),
     };
-    let email_valid = crate::license::handlers_auth_forms::email_is_valid(&email);
+    if !crate::license::handlers_auth_forms::email_is_valid(&email) {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::InvalidEmail,
+        ));
+    }
     let user = match forgot_user_by_email(&pool, &email).await {
         Ok(user) => user,
         Err(_) => return server_error(),
     };
-    let decision =
-        t::forgot_password_decision(instance_setup_done, smtp, email_valid, user.is_some());
-    if decision != t::ForgotPasswordDecision::Emit {
-        return json_400(&pw::forgot_password_error_pairs(decision));
-    }
-    let user = user.expect("decided Emit");
+    let Some(user) = user else {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::UserDoesNotExist,
+        ));
+    };
     let current_site = base_host_for(&state, !is_space, is_space);
     let now = now_unix();
     let (uidb64, token) = pw::make_password_token(
@@ -1848,6 +1874,16 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use tower::ServiceExt;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_302(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_302("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn state() -> AppState {
         // No pools: every handler answers 500 through `pool_of`, which

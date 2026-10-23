@@ -350,11 +350,16 @@ pub(crate) fn verify_session_hash(
     password_field: &str,
     secret_key: &[u8],
 ) -> bool {
+    let expected = make_session_auth_hash(password_field, secret_key);
+    constant_time_eq(expected.as_bytes(), session_hash.as_bytes())
+}
+
+/// The make side of [`verify_session_hash`] (`user.get_session_auth_hash()`).
+pub(crate) fn make_session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
     let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
     let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
     mac.update(password_field.as_bytes());
-    let expected = hex_encode(&mac.finalize().into_bytes());
-    constant_time_eq(expected.as_bytes(), session_hash.as_bytes())
+    hex_encode(&mac.finalize().into_bytes())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
