@@ -515,29 +515,45 @@ fn parse_loose_datetime_aware(value: &str) -> Option<bool> {
     })
 }
 
+/// Parse one paren-form `BYDAY` item (`TH(+1)`) the way `dateutil`'s
+/// `_handle_BYWEEKDAY` does: `w` is the text before the first `(`,
+/// `n` is `int` of the rest minus its last char (dropped unconditionally).
+/// Returns the uppercased weekday code and the ordinal, or `None` when
+/// `dateutil` would raise (the `int` fails or the code is unknown).
+///
+/// Shared by validation (`check_byday`) and expansion canonicalization so
+/// the two cannot drift: every item the validator accepts must rewrite to
+/// something the crate parses, and every item it rejects must stay a
+/// parse error.
+fn parse_paren_byday(wday: &str) -> Option<(String, i64)> {
+    // `splt = wday.split('(')`; `w = splt[0]`; `n = int(splt[1][:-1])`.
+    let mut parts = wday.split('(');
+    let w = parts.next().unwrap_or("");
+    let rest = parts.next()?;
+    let n_str: String = {
+        let mut chars: Vec<char> = rest.chars().collect();
+        chars.pop();
+        chars.into_iter().collect()
+    };
+    let n = parse_rrule_int(&n_str)?;
+    // Uppercase like validation does (`dateutil` uppercases the whole
+    // input before parsing), so raw-case expansion matches it.
+    let w = w.to_uppercase();
+    if !WEEKDAYS.contains(&w.as_str()) {
+        return None;
+    }
+    Some((w, n))
+}
+
 /// Check one `BYDAY`/`BYWEEKDAY` value the way `dateutil`'s
 /// `_handle_BYWEEKDAY` does: comma-separated items of either `+1MO` /
 /// `1MO` / `MO` form or `TH(+1)` paren form.
 fn check_byday(value: &str) -> bool {
     value.split(',').all(|wday| {
         if wday.contains('(') {
-            // `TH(+1)` form: `splt = wday.split('(')`; `w = splt[0]`;
-            // `n = int(splt[1][:-1])` (last char dropped unconditionally).
-            let mut parts = wday.split('(');
-            let w = parts.next().unwrap_or("");
-            let rest = match parts.next() {
-                Some(r) => r,
-                None => return false,
-            };
-            let n_str: String = {
-                let mut chars: Vec<char> = rest.chars().collect();
-                chars.pop();
-                chars.into_iter().collect()
-            };
-            if parse_rrule_int(&n_str).is_none() {
-                return false;
-            }
-            WEEKDAYS.contains(&w)
+            // `TH(+1)` form — shared parse with expansion canonicalization
+            // (the input is already uppercased, so the verdict is unchanged).
+            parse_paren_byday(wday).is_some()
         } else {
             // `+1MO` form: leading `[+-0-9]*` is the ordinal, the rest the code.
             let idx = wday
@@ -915,6 +931,72 @@ fn dtstart_line(dtstart: DateTime<Utc>) -> String {
     format!("DTSTART:{}", dtstart.format("%Y%m%dT%H%M%SZ"))
 }
 
+/// Rewrite one `BYDAY`/`BYWEEKDAY` value's paren-form items (`TH(+1)`)
+/// into the `[+-]N + weekday` spelling (`1TH`) the `rrule` crate parses.
+///
+/// `dateutil` accepts both spellings; the crate only understands `[+-]NNDD`
+/// and byte-slices the last two bytes, which panics on non-ASCII tails
+/// (`MO(1€`) and mis-parses ASCII paren items (`TH(+1)` reads weekday
+/// `"1)"`). Non-paren items pass through byte-identical. Returns `None`
+/// when an item fails the `dateutil` parse — including `n == 0`, which
+/// `dateutil`'s `weekday` rejects ("Can't create weekday with n==0") — so
+/// the caller maps it to the parse-error result, exactly as `dateutil`
+/// raising does on the Python side.
+fn canonicalize_byday_value(value: &str) -> Option<String> {
+    let mut items = Vec::new();
+    for item in value.split(',') {
+        if !item.contains('(') {
+            items.push(item.to_owned());
+            continue;
+        }
+        let (w, n) = parse_paren_byday(item)?;
+        if n == 0 {
+            return None;
+        }
+        items.push(format!("{n}{w}"));
+    }
+    Some(items.join(","))
+}
+
+/// Canonicalize one whitespace-separated rule token for the crate: rewrite
+/// paren-form `BYDAY`/`BYWEEKDAY` items in bare, `RRULE:` and `EXRULE:`
+/// lines; every other line passes through untouched. Returns `None` when a
+/// `BYDAY` value fails the `dateutil` parse (the crate input would be a
+/// parse error there too).
+fn canonicalize_token(token: &str) -> Option<String> {
+    let (head, value) = match token.split_once(':') {
+        Some((head, value)) => (Some(head), value),
+        None => (None, token),
+    };
+    let is_rule = match head {
+        None => true,
+        Some(head) => {
+            let prop = head.split(';').next().unwrap_or("");
+            prop.eq_ignore_ascii_case("RRULE") || prop.eq_ignore_ascii_case("EXRULE")
+        }
+    };
+    if !is_rule {
+        return Some(token.to_owned());
+    }
+    let mut pairs = Vec::new();
+    for pair in value.split(';') {
+        let Some((name, pair_value)) = pair.split_once('=') else {
+            pairs.push(pair.to_owned());
+            continue;
+        };
+        if name.eq_ignore_ascii_case("BYDAY") || name.eq_ignore_ascii_case("BYWEEKDAY") {
+            pairs.push(format!("{name}={}", canonicalize_byday_value(pair_value)?));
+        } else {
+            pairs.push(pair.to_owned());
+        }
+    }
+    let body = pairs.join(";");
+    match head {
+        Some(head) => Some(format!("{head}:{body}")),
+        None => Some(body),
+    }
+}
+
 /// Build the engine set for an RRULE bundle: the rule string plus the
 /// extra one-off `rdates` and the `exdates` to skip. Returns `None` on
 /// parse error, like Python returning `None` from the `except` path.
@@ -922,11 +1004,12 @@ fn dtstart_line(dtstart: DateTime<Utc>) -> String {
 /// The rule string is whitespace-normalized the way `dateutil` splits lines
 /// (so a stray space breaks a rule in both engines); its case is preserved
 /// (the engine parses names case-insensitively and `TZID`s are
-/// case-sensitive). An embedded `DTSTART` line wins over `dtstart`, as in
-/// `dateutil`; otherwise `dtstart` anchors the series. The set is only built
-/// with members when `rdates`/`exdates` are present — mirroring the
-/// `if rdates or exdates` branches — which keeps single-rule input on the
-/// plain-rule path in both engines.
+/// case-sensitive), except paren-form `BYDAY` items, which are rewritten to
+/// the crate's `[+-]N + weekday` spelling first. An embedded `DTSTART` line
+/// wins over `dtstart`, as in `dateutil`; otherwise `dtstart` anchors the
+/// series. The set is only built with members when `rdates`/`exdates` are
+/// present — mirroring the `if rdates or exdates` branches — which keeps
+/// single-rule input on the plain-rule path in both engines.
 fn expansion_set(
     dtstart: DateTime<Utc>,
     rrule_str: &str,
@@ -945,8 +1028,16 @@ fn expansion_set(
         src.push_str(&dtstart_line(dtstart));
         src.push('\n');
     }
-    src.push_str(&tokens.join("\n"));
-    let mut set: RRuleSet = src.parse().ok()?;
+    let mut rewritten = Vec::with_capacity(tokens.len());
+    for token in &tokens {
+        rewritten.push(canonicalize_token(token)?);
+    }
+    src.push_str(&rewritten.join("\n"));
+    // The crate's `BYDAY` parser byte-slices without an ASCII guard, so a
+    // hostile or half-validated rule could still panic inside the parse; a
+    // panic here must degrade to the parse-error result, never crash the
+    // caller (request handler, job, or occurrences view).
+    let mut set: RRuleSet = std::panic::catch_unwind(|| src.parse()).ok()?.ok()?;
     // `rruleset` assembly only when extras are present, like Python.
     if !rdates.is_empty() || !exdates.is_empty() {
         for rdate in rdates {
@@ -1418,6 +1509,111 @@ mod tests {
             utc(2026, 1, 2, 9, 0),
         );
         assert_golden(next.unwrap(), "2026-01-03T09:00:00+00:00");
+    }
+
+    // PIDASHCONV-1299: paren-form `BYDAY` with a non-ASCII tail
+    // (`MO(1€`) expands as `+1MO` (first Monday), like `dateutil` —
+    // the raw item used to panic the crate's byte-slicing parser.
+    #[test]
+    fn paren_byday_non_ascii_tail_expands_as_first_monday() {
+        let rule = "FREQ=MONTHLY;BYDAY=MO(1\u{20ac}";
+        assert!(validate_rrule_string(rule).is_ok());
+        let dtstart = utc(2026, 11, 1, 9, 0);
+        let next = next_fire_from_rrule(dtstart, rule, "UTC", &[], &[], utc(2026, 11, 1, 0, 0));
+        assert_golden(next.unwrap(), "2026-11-02T09:00:00+00:00");
+        let (out, has_more) = occurrences_between(
+            dtstart,
+            rule,
+            "UTC",
+            &[],
+            &[],
+            utc(2026, 11, 1, 0, 0),
+            utc(2026, 12, 31, 0, 0),
+            100,
+        );
+        assert!(!has_more);
+        assert_eq!(out.len(), 2);
+        assert_golden(out[0], "2026-11-02T09:00:00+00:00");
+        assert_golden(out[1], "2026-12-07T09:00:00+00:00");
+    }
+
+    // PIDASHCONV-1299: ASCII paren form (`TH(+1)`) expands as `+1TH`
+    // (first Thursday), like `dateutil` — the crate used to read weekday
+    // `"1)"` and fail, leaving `next_run_at` NULL.
+    #[test]
+    fn paren_byday_ascii_expands_as_first_thursday() {
+        let rule = "FREQ=MONTHLY;BYDAY=TH(+1)";
+        assert!(validate_rrule_string(rule).is_ok());
+        let dtstart = utc(2026, 11, 1, 9, 0);
+        let next = next_fire_from_rrule(dtstart, rule, "UTC", &[], &[], utc(2026, 11, 1, 0, 0));
+        assert_golden(next.unwrap(), "2026-11-05T09:00:00+00:00");
+        let (out, has_more) = occurrences_between(
+            dtstart,
+            rule,
+            "UTC",
+            &[],
+            &[],
+            utc(2026, 11, 1, 0, 0),
+            utc(2026, 12, 31, 0, 0),
+            100,
+        );
+        assert!(!has_more);
+        assert_eq!(out.len(), 2);
+        assert_golden(out[0], "2026-11-05T09:00:00+00:00");
+        assert_golden(out[1], "2026-12-03T09:00:00+00:00");
+    }
+
+    // PIDASHCONV-1299: a zero ordinal is a parse error in `dateutil`
+    // (`weekday` rejects `n == 0`), so expansion returns `None` — never a
+    // bare weekday, which the crate would expand as every-weekday.
+    #[test]
+    fn paren_byday_zero_ordinal_is_parse_error() {
+        let dtstart = utc(2026, 11, 1, 9, 0);
+        assert!(next_fire_from_rrule(
+            dtstart,
+            "FREQ=MONTHLY;BYDAY=MO(0)",
+            "UTC",
+            &[],
+            &[],
+            utc(2026, 11, 1, 0, 0)
+        )
+        .is_none());
+        let (out, has_more) = occurrences_between(
+            dtstart,
+            "FREQ=MONTHLY;BYDAY=MO(0)",
+            "UTC",
+            &[],
+            &[],
+            utc(2026, 11, 1, 0, 0),
+            utc(2026, 12, 31, 0, 0),
+            100,
+        );
+        assert!(out.is_empty() && !has_more);
+    }
+
+    // PIDASHCONV-1299: negative, multi-item, lowercase and `BYWEEKDAY`
+    // paren forms canonicalize the same way (values verified against
+    // live `dateutil` 2.8.2).
+    #[test]
+    fn paren_byday_negative_multi_lowercase_and_byweekday() {
+        let dtstart = utc(2026, 11, 1, 9, 0);
+        let now = utc(2026, 11, 1, 0, 0);
+        for (rule, expected) in [
+            ("FREQ=MONTHLY;BYDAY=MO(-1)", "2026-11-30T09:00:00+00:00"),
+            (
+                "FREQ=MONTHLY;BYDAY=MO(+1),TU(-2)",
+                "2026-11-02T09:00:00+00:00",
+            ),
+            ("freq=monthly;byday=th(+1)", "2026-11-05T09:00:00+00:00"),
+            ("FREQ=MONTHLY;BYWEEKDAY=WE(+2)", "2026-11-11T09:00:00+00:00"),
+            (
+                "RRULE:FREQ=MONTHLY;BYDAY=TH(+1)",
+                "2026-11-05T09:00:00+00:00",
+            ),
+        ] {
+            let next = next_fire_from_rrule(dtstart, rule, "UTC", &[], &[], now);
+            assert_golden(next.unwrap(), expected);
+        }
     }
 
     // `None` on parse error, never a panic — for both expansion entries.
