@@ -13,10 +13,7 @@ type GeneratedEntry = {
   catchAll: boolean;
   segments: ReadonlyArray<{ kind: string; name?: string; value?: string }>;
 };
-type GeneratedHandler =
-  | { kind: "catchAll" }
-  | { kind: "literal"; base: string }
-  | { kind: "matcher"; regex: RegExp };
+type GeneratedHandler = { kind: "catchAll" } | { kind: "literal"; base: string } | { kind: "matcher"; regex: RegExp };
 
 import {
   compileEntry,
@@ -195,7 +192,8 @@ describe("bundled list", () => {
       expect(isMigratedPath(path)).toBe(true);
     }
     expect(isMigratedPath("/api")).toBe(false);
-    expect(isMigratedPath("/god-mode")).toBe(false);
+    // /god-mode is a migrated literal since the admin area gate (NEWFRONT-521).
+    expect(isMigratedPath("/god-mode")).toBe(true);
     expect(isMigratedPath("/profile/me")).toBe(false);
     expect(isMigratedPath("/settings/acme")).toBe(false);
     expect(isMigratedPath("/spaces/acme")).toBe(false);
@@ -265,7 +263,10 @@ describe("parity with the Caddy generator", () => {
     });
     for (const path of paths) {
       const bare = path === "/" ? "/" : path.replace(/\/+$/, "");
-      const first = path.split("/").filter((segment) => segment !== "")[0]?.toLowerCase();
+      const first = path
+        .split("/")
+        .filter((segment) => segment !== "")[0]
+        ?.toLowerCase();
       const viaCaddy = compiled.some((route) => {
         if (route.kind === "catchAll") return true;
         if (route.kind === "literal") return bare === route.base || bare.startsWith(`${route.base}/`);
