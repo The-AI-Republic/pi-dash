@@ -329,10 +329,16 @@ describe("pages version and description contracts", () => {
     expect([...binary]).toEqual([1, 2, 3, 4]);
   });
 
-  it("falls back to the text bytes when the transport has no arrayBuffer", async () => {
-    const { client } = stubClient({ raw: () => ({ body: "hello", text: async () => "hello" }) });
-    const binary = await getPageDescriptionBinary(client, WS, PROJECT, PAGE);
-    expect(new TextDecoder().decode(binary)).toBe("hello");
+  it("rejects an unreadable body as a contract violation", async () => {
+    const { client } = stubClient({
+      raw: () => ({ body: "hello", status: 200, text: async () => "hello" }),
+    });
+    const error: unknown = await getPageDescriptionBinary(client, WS, PROJECT, PAGE).then(
+      () => null,
+      (rejected: unknown) => rejected
+    );
+    expect(error).toMatchObject({ code: "contract" });
+    expect(error instanceof Error ? error.message : "").toContain("no readable bytes");
   });
 
   it("patches all three body forms at once", async () => {

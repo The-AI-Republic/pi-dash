@@ -214,7 +214,7 @@ export async function searchEntityPreviews(
       count: query.count,
     },
   });
-  const envelope = z.record(z.string(), z.unknown()).parse(body);
+  const envelope = client.parse(z.record(z.string(), z.unknown()), body, `GET ${path}`);
   const sections: EntityPreviewSections = {};
   for (const kind of kinds) {
     const section = envelope[kind];

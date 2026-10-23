@@ -23,6 +23,7 @@ import {
   listPageVersions,
   listPages,
   lockPage,
+  movePageToProject,
   removePageFavorite,
   restorePage,
   setPageAccess,
@@ -243,6 +244,21 @@ describe.skipIf(!contractEnabled)("pages REST contract", () => {
     }
   });
 
+  it("records the community build's missing move route as a 404", async () => {
+    const client = await sharedSignedIn();
+    const projectId = await seededProjectId(client);
+    const created = await createPage(client, CONTRACT_WORKSPACE, projectId, { name: `${PROBE} move` });
+    try {
+      // Cloud editions serve POST .../move/; the community build has no
+      // route at all, so the live leg pins the 404 absence (PAGE-017).
+      await expect(
+        movePageToProject(client, CONTRACT_WORKSPACE, projectId, created.id, { new_project_id: projectId })
+      ).rejects.toMatchObject({ status: 404 });
+    } finally {
+      await removeProbe(client, projectId, created.id);
+    }
+  });
+
   it("duplicates a page into a detached copy", async () => {
     const client = await sharedSignedIn();
     const projectId = await seededProjectId(client);
@@ -331,7 +347,7 @@ describe.skipIf(!contractEnabled)("pages REST contract", () => {
     }
   });
 
-  it("refuses a create whose parent is not visible and records no nested read", async () => {
+  it("refuses a create with a parent the live serializer cannot resolve and records no nested read", async () => {
     const client = await sharedSignedIn();
     const projectId = await seededProjectId(client);
     const parent = await createPage(client, CONTRACT_WORKSPACE, projectId, { name: `${PROBE} parent` });

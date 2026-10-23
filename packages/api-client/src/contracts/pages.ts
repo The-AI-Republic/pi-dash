@@ -71,36 +71,6 @@ export const PageDetail = z.object({
 export type PageDetail = z.infer<typeof PageDetail>;
 
 /**
- * What `PATCH .../pages/{id}/` answers: the record fields, without the
- * collection-only favourites/labels/projects annotations.
- */
-export const PageRecordUpdate = z.object({
-  id: uuid(),
-  name: z.string(),
-  owned_by: uuid(),
-  access: z.number(),
-  color: z.string(),
-  parent: nullableUuid(),
-  parent_id: z.optional(nullableUuid()),
-  sub_pages_count: z.optional(z.number()),
-  is_locked: z.boolean(),
-  archived_at: nullableDate(),
-  workspace: uuid(),
-  created_at: dateTime(),
-  updated_at: dateTime(),
-  created_by: nullableUuid(),
-  updated_by: nullableUuid(),
-  view_props: z.record(z.string(), z.unknown()),
-  logo_props: PageMark,
-  description_html: z.string(),
-  is_favorite: z.optional(z.boolean()),
-  label_ids: z.optional(z.array(uuid())),
-  project_ids: z.optional(z.array(uuid())),
-  issue_ids: z.optional(z.array(nullableUuid())),
-});
-export type PageRecordUpdate = z.infer<typeof PageRecordUpdate>;
-
-/**
  * The record patch echo. Django omits the collection-only annotations on
  * this route, and the shell's older stubs answer a reduced echo, so the
  * shared contract requires only what every answer carries and validates
@@ -421,8 +391,9 @@ export async function getPageVersion(
 
 /**
  * Read the editor binary. The endpoint answers application/octet-stream and
- * an empty body when the page has no binary yet; the byte read prefers the
- * transport's arrayBuffer and falls back to the text bytes.
+ * an empty body when the page has no binary yet; a transport without
+ * arrayBuffer fails closed with a contract error rather than text bytes,
+ * which would mangle non-UTF-8 Yjs content.
  */
 export async function getPageDescriptionBinary(
   client: ApiClient,
@@ -430,11 +401,17 @@ export async function getPageDescriptionBinary(
   projectId: string,
   pageId: string
 ): Promise<Uint8Array> {
-  const response = await client.get(`${pagePath(slug, projectId, pageId)}description/`);
-  if (typeof response.arrayBuffer === "function") {
-    return new Uint8Array(await response.arrayBuffer());
+  const path = `${pagePath(slug, projectId, pageId)}description/`;
+  const response = await client.get(path);
+  if (typeof response.arrayBuffer !== "function") {
+    throw new ApiError({
+      status: response.status,
+      code: "contract",
+      message: `GET ${path} carried no readable bytes`,
+      body: null,
+    });
   }
-  return new TextEncoder().encode(await response.text());
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 /** Three-form description write; every form is optional. */

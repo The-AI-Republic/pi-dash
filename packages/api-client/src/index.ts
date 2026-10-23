@@ -991,7 +991,6 @@ export {
   PageDetail,
   PageDuplicateResult,
   PageMark,
-  PageRecordUpdate,
   PageRow,
   PageRows,
   PageUpdate,
