@@ -1,0 +1,44 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+import { describe, expect, it } from "vitest";
+
+import {
+  ALL_PROJECTS_LABEL,
+  DEFAULT_EXPORT_PROVIDER,
+  EXPORT_FAILED_MESSAGE,
+  EXPORT_FAILED_TITLE,
+  EXPORT_FORMAT_OPTIONS,
+  EXPORT_SUCCESS_TITLE,
+  exportRequestBody,
+  ExportsForm,
+  exportsKeys,
+  formatLabel,
+  parseExportForm,
+  selectExportProjectIds,
+  selectExportSuccessMessage,
+  selectPickedIdentifiers,
+  selectProjectTriggerLabel,
+  useCreateWorkspaceExport,
+} from "./index.js";
+
+describe("exports barrel", () => {
+  it("exposes the form, model, keys and write hook", () => {
+    expect(ExportsForm).toBeDefined();
+    expect(exportsKeys).toBeDefined();
+    expect(useCreateWorkspaceExport).toBeDefined();
+    expect(selectExportSuccessMessage).toBeDefined();
+    expect(EXPORT_SUCCESS_TITLE).toBe("Export successful");
+    expect(EXPORT_FAILED_TITLE).toBe("Error");
+    expect(EXPORT_FAILED_MESSAGE).toBe("Export was unsuccessful. Please try again.");
+    expect(EXPORT_FORMAT_OPTIONS).toHaveLength(3);
+    expect(DEFAULT_EXPORT_PROVIDER).toBe("csv");
+    expect(ALL_PROJECTS_LABEL).toBe("All projects");
+    expect(formatLabel).toBeDefined();
+    expect(parseExportForm).toBeDefined();
+    expect(exportRequestBody).toBeDefined();
+    expect(selectExportProjectIds).toBeDefined();
+    expect(selectPickedIdentifiers).toBeDefined();
+    expect(selectProjectTriggerLabel).toBeDefined();
+  });
+});
