@@ -727,11 +727,12 @@ describe("IntakeDetail mobile header (INT-030)", () => {
     const user = userEvent.setup();
     renderNarrow();
     expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
-    for (const [entry, dialog] of [
+    const cases = [
       ["Snooze", "Snooze request"],
       ["Mark as duplicate", "Mark as duplicate"],
       ["Decline", "Decline work item"],
-    ]) {
+    ] as Array<[string, string]>;
+    for (const [entry, dialog] of cases) {
       await user.click(screen.getByRole("button", { name: "Request actions" }));
       await user.click(await screen.findByRole("menuitem", { name: entry }));
       expect(screen.getByRole("dialog", { name: dialog })).toBeInTheDocument();
