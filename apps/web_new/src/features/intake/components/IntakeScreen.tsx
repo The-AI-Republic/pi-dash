@@ -18,24 +18,31 @@ import * as React from "react";
 import { useWorkspace } from "../../../core/session/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
+import { DetailSkeleton } from "../../issues/index.js";
 import { isProjectAdmin } from "../../projects/index.js";
 import { intakeKeys } from "../api/keys.js";
 import { intakeTotal, intakeRows, useIntakeList } from "../api/queries.js";
 import { selectIntakeEmptyState } from "../lib/emptyStates.js";
 import { neighborIntakeId } from "../lib/navigation.js";
 import { intakeFeatureSettingsHref } from "../lib/paths.js";
-import {
-  intakeSearchFor,
-  settleIntakeSearch,
-  withoutSelection,
-  type IntakeSearch,
-  type IntakeSearchWriteOptions,
-} from "../lib/search.js";
+import type { IntakeSearch, IntakeSearchWriteOptions } from "../lib/search.js";
+import { intakeSearchFor, settleIntakeSearch, withoutSelection } from "../lib/searchWrites.js";
 import type { IntakeTab } from "../lib/tabs.js";
 import { intakeDocumentTitle } from "../lib/title.js";
-import { IntakeDetail } from "./IntakeDetail.js";
 import { IntakeGate } from "./IntakeGate.js";
 import { IntakeShell } from "./IntakeShell.js";
+
+type IntakeDetailModule = typeof import("./IntakeDetail.js");
+
+// The detail rides its own chunk (NEWFRONT-870, perf budgets): the route
+// prefetches this screen at boot, and the detail's editor, sidebar and
+// attachment stack must not travel with it onto every page load. The
+// selection mounts it, so a first paint of the pane is the skeleton the
+// detail route shows while its own load resolves.
+const LazyIntakeDetail = React.lazy(async () => {
+  const module: IntakeDetailModule = await import("./IntakeDetail.js");
+  return { default: module.IntakeDetail };
+});
 
 export interface IntakeScreenProps {
   workspaceSlug: string;
@@ -178,16 +185,18 @@ export function IntakeScreen({
       onCreate={onCreate}
       detail={
         selectedId === undefined ? undefined : (
-          <IntakeDetail
-            workspaceSlug={workspaceSlug}
-            projectId={projectId}
-            issueId={selectedId}
-            projectIdentifier={project.data.identifier}
-            role={roles.data?.[projectId] ?? null}
-            onPrev={stepPrev}
-            onNext={stepNext}
-            onMissing={dropMissing}
-          />
+          <React.Suspense fallback={<DetailSkeleton />}>
+            <LazyIntakeDetail
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              issueId={selectedId}
+              projectIdentifier={project.data.identifier}
+              role={roles.data?.[projectId] ?? null}
+              onPrev={stepPrev}
+              onNext={stepNext}
+              onMissing={dropMissing}
+            />
+          </React.Suspense>
         )
       }
     />

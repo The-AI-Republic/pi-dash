@@ -10,7 +10,8 @@
 
 import * as React from "react";
 
-import { INTAKE_TAB_LABELS, INTAKE_TABS, siblingTab, shouldShowOpenBadge, type IntakeTab } from "../lib/tabs.js";
+import { INTAKE_TABS, type IntakeTab } from "../lib/tabs.js";
+import { INTAKE_TAB_LABELS, siblingTab, shouldShowOpenBadge } from "../lib/tabsModel.js";
 
 /** Id of the list panel the tabs control; the list pane renders it. */
 export const INTAKE_LIST_PANEL_ID = "intake-list-panel";

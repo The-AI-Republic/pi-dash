@@ -47,26 +47,24 @@ export { INTAKE_NAV_OVERLAY_SELECTOR, neighborIntakeId, suppressIntakeArrowKey }
 export type { IntakeStepDirection } from "./lib/navigation.js";
 export { isResolvedIntakeStatus, selectIntakeEditability } from "./lib/permissions.js";
 export type { IntakeEditability, IntakeStanding } from "./lib/permissions.js";
+export { parseIntakeSearch } from "./lib/search.js";
+export type { IntakeSearch, IntakeSearchWriteOptions } from "./lib/search.js";
 export {
   DEFAULT_INTAKE_SEARCH,
   intakeSearchAfterRemove,
   intakeSearchFor,
-  parseIntakeSearch,
   settleIntakeSearch,
   withoutSelection,
-} from "./lib/search.js";
-export type { IntakeSearch, IntakeSearchWriteOptions } from "./lib/search.js";
+} from "./lib/searchWrites.js";
+export { DEFAULT_INTAKE_TAB, INTAKE_TABS, parseIntakeTab } from "./lib/tabs.js";
+export type { IntakeTab } from "./lib/tabs.js";
 export {
-  DEFAULT_INTAKE_TAB,
   INTAKE_TAB_LABELS,
-  INTAKE_TABS,
   INTAKE_TAB_STATUSES,
-  parseIntakeTab,
   shouldShowOpenBadge,
   siblingTab,
   statusParamForTab,
   statusSetForTab,
   tabIndex,
-} from "./lib/tabs.js";
-export type { IntakeTab } from "./lib/tabs.js";
+} from "./lib/tabsModel.js";
 export { INTAKE_AREA_LABEL, intakeDocumentTitle } from "./lib/title.js";

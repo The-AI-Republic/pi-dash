@@ -21,7 +21,8 @@ import {
 import { getAppClient } from "../../../core/api/client.js";
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import { intakeKeys, INTAKE_DEFAULT_ORDER, type IntakeListFilters } from "./keys.js";
-import { statusSetForTab, type IntakeTab } from "../lib/tabs.js";
+import type { IntakeTab } from "../lib/tabs.js";
+import { statusSetForTab } from "../lib/tabsModel.js";
 
 /** Rows per page (INT-007). */
 export const INTAKE_PAGE_SIZE = 10;
