@@ -1995,18 +1995,12 @@ async fn collection_create(
     };
     // `Issue.save` backfills (`db/models/issue.py:305-360`): the project
     // default pod (or NULL), the next sequence, tag-stripped text, and
-    // triage sort order — all inside the advisory lock the save takes.
+    // triage sort order. Django takes the per-project advisory lock first
+    // and holds it across both MAX reads and both inserts inside one
+    // `transaction.atomic()` (`:313-343`); the transaction below mirrors
+    // that. The pod lookup stays outside: it is a stable read Django does
+    // not serialize either.
     let issue_id = Uuid::new_v4();
-    let sequence_id: i32 = match sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT MAX(sequence) FROM \"issue_sequences\" WHERE \"issue_sequences\".\"project_id\" = $1",
-    )
-    .bind(board.project_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(max) => max.map(|max| max + 1).unwrap_or(1) as i32,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
     let pod_id: Option<Uuid> = match sqlx::query_scalar(
         "SELECT id FROM \"pod\" WHERE \"pod\".\"deleted_at\" IS NULL AND \"pod\".\"project_id\" = $1 AND \"pod\".\"is_default\" = TRUE ORDER BY \"pod\".\"created_at\" ASC LIMIT 1",
     )
@@ -2015,17 +2009,6 @@ async fn collection_create(
     .await
     {
         Ok(pod) => pod,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let sort_order: f64 = match sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT MAX(sort_order) FROM \"issues\" WHERE \"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2",
-    )
-    .bind(board.project_id)
-    .bind(state_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(max) => max.map(|max| max + 10000.0).unwrap_or(65535.0),
         Err(_) => return Denial::ServerError.into_response(),
     };
     let description_json = issue_data
@@ -2045,13 +2028,45 @@ async fn collection_create(
     // `""`/`None`, else MLStripper-decoded text — an empty strip (e.g. the
     // `"<p></p>"` default) is stored as `""`, not collapsed to `None`.
     let description_stripped = sync_description_stripped(description_html.as_deref());
-    // The advisory lock serializes sequence assignment
-    // (`db/models/issue.py:336`); failure degrades to the plain path.
-    let lock_key = advisory_key(&board.project_id);
-    let _ = sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(lock_key)
-        .execute(pool)
-        .await;
+    // `Issue.save` (`db/models/issue.py:313-343`): the transaction-scoped
+    // advisory lock is taken first, then MAX(sequence) and MAX(sort_order)
+    // are read and the issue plus its sequence row are inserted — all on
+    // one transaction, so concurrent creates serialize per project. The
+    // lock must live on the transaction: taken on the pool it would drop
+    // as soon as its own autocommit statement ends (PIDASHCONV-1265).
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(advisory_key(&board.project_id))
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
+    let sequence_id: i32 = match sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(sequence) FROM \"issue_sequences\" WHERE \"issue_sequences\".\"project_id\" = $1",
+    )
+    .bind(board.project_id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(max) => max.map(|max| max + 1).unwrap_or(1) as i32,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let sort_order: f64 = match sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT MAX(sort_order) FROM \"issues\" WHERE \"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2",
+    )
+    .bind(board.project_id)
+    .bind(state_id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(max) => max.map(|max| max + 10000.0).unwrap_or(65535.0),
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let mut insert = sqlx::query(
         "INSERT INTO \"issues\" (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, NULL, $7, NULL, NULL, $8, $9, $10, $11, NULL, $12, 0, NULL, NULL, $13, $14, NULL, NULL, FALSE, NULL, NULL, NULL, '', '', NULL, $15, NULL)",
     )
@@ -2074,7 +2089,7 @@ async fn collection_create(
         .bind(sequence_id)
         .bind(sort_order)
         .bind(pod_id);
-    if let Err(error) = insert.execute(pool).await {
+    if let Err(error) = insert.execute(&mut *tx).await {
         return db_error(error);
     }
     if let Err(error) = sqlx::query(
@@ -2088,10 +2103,16 @@ async fn collection_create(
     .bind(board.workspace_id)
     .bind(issue_id)
     .bind(i64::from(sequence_id))
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     {
         return db_error(error);
+    }
+    // The activity enqueue and the bridge insert below run after the
+    // commit: Django's view is not atomic beyond `Issue.save`, so they
+    // stay outside this transaction (`views/intake.py:155-170`).
+    if tx.commit().await.is_err() {
+        return Denial::ServerError.into_response();
     }
     // `issue_activity.delay` (`:155-163`): `requested_data` is the full
     // `request.data` dump, `current_instance` is `None`.
