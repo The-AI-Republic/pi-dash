@@ -1165,7 +1165,29 @@ async fn complete_login_or_signup(
     let mut user_data_value =
         serde_json::to_value(&auth.user_data).map_err(|_| CallbackFailure::Server)?;
     coerce_provider_id(&mut user_data_value);
+    // The looked-up row's `created_at`/`metadata` ride into the update
+    // side (Django's `.save()` rewrites them unchanged); absent, the
+    // ported defaults apply (PIDASHCONV-1363, as `oauth_google.rs`).
+    let provider_id = account_queries::lookup_provider_id(&user_data_value).unwrap_or("");
+    let prior: Option<(chrono::DateTime<chrono::Utc>, Value)> = if provider_id.is_empty() {
+        None
+    } else {
+        sqlx::query_as(
+            "SELECT \"created_at\", \"metadata\" FROM \"accounts\" \
+             WHERE \"user_id\" = $1 AND \"provider\" = $2 AND \"provider_account_id\" = $3 LIMIT 1",
+        )
+        .bind(user_id)
+        .bind("github")
+        .bind(provider_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CallbackFailure::Server)?
+    };
     let mut conn = pool.acquire().await.map_err(|_| CallbackFailure::Server)?;
+    let existing = prior.map(|(created_at, metadata)| account_queries::ExistingAccount {
+        created_at,
+        metadata,
+    });
     account_queries::create_update_account(
         &mut conn,
         user_id,
@@ -1174,7 +1196,7 @@ async fn complete_login_or_signup(
         &tokens,
         now,
         Uuid::new_v4(),
-        None,
+        existing,
     )
     .await
     .map_err(|_| CallbackFailure::Server)?;
@@ -2568,5 +2590,96 @@ mod tests {
             invites.iter().all(|(_, deleted_at)| deleted_at.is_none()),
             "invites stay live"
         );
+    }
+
+    /// Returning user with an old linked account: the upsert keeps the
+    /// row's `created_at`/`metadata` and only rewrites the token fields
+    /// + `last_connected_at`/`updated_at` (PIDASHCONV-1363). Django's
+    /// shared `OauthAdapter.create_update_account` loads the row and
+    /// `.save()`s it back, so both columns survive every login; passing
+    /// `existing: None` into the kernel resets them to now/`{}`.
+    /// FAILS pre-fix (created_at reset to now, metadata to `{}`).
+    #[tokio::test]
+    async fn github_kernel_returning_login_preserves_account_history() {
+        use chrono::TimeZone;
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1363-{tag}@example.test");
+        let provider_id = format!("gh1363-{tag}");
+        let slug = format!("gh1363-{tag}");
+        let old_created = chrono::Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let old_metadata = serde_json::json!({"k": 1});
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{tag}"))
+        .bind(&email)
+        .bind(chrono::Utc::now())
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "accounts" ("id", "created_at", "updated_at", "user_id",
+                "provider_account_id", "provider", "access_token",
+                "access_token_expired_at", "refresh_token",
+                "refresh_token_expired_at", "last_connected_at", "id_token", "metadata")
+               VALUES ($1, $2, $2, $3, $4, 'github', 'old-access', NULL,
+                       'old-refresh', NULL, $2, '', $5)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(old_created)
+        .bind(user_id)
+        .bind(&provider_id)
+        .bind(&old_metadata)
+        .execute(&pool)
+        .await
+        .expect("seed account");
+
+        let mut auth = kernel_auth(&email);
+        auth.user_data.user.provider_id = Value::String(provider_id.clone());
+        let headers = kernel_headers();
+        let outcome = complete_login_or_signup(
+            &pool,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+        )
+        .await;
+
+        let row: Option<(chrono::DateTime<chrono::Utc>, Value, String)> = sqlx::query_as(
+            r#"SELECT "created_at", "metadata", "access_token" FROM "accounts"
+               WHERE "user_id" = $1 AND "provider" = 'github'
+                 AND "provider_account_id" = $2"#,
+        )
+        .bind(user_id)
+        .bind(&provider_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("read account");
+        cleanup_kernel_world(&pool, &email, &slug).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        let (created_at, metadata, access_token) = row.expect("account row survives");
+        assert_eq!(created_at, old_created, "created_at preserved");
+        assert_eq!(metadata, old_metadata, "metadata preserved");
+        assert_eq!(access_token, "kernel-access-token", "token fields update");
     }
 }

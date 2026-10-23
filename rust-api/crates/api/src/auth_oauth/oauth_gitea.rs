@@ -2394,10 +2394,37 @@ async fn finish_authenticated(
         refresh_token_expired_at: tokens.refresh_token_expired_at,
         id_token: to_opt_string(&tokens.id_token),
     };
+    // The looked-up row's `created_at`/`metadata` ride into the update
+    // side (Django's `.save()` rewrites them unchanged); absent, the
+    // ported defaults apply (PIDASHCONV-1363, as `oauth_google.rs`).
+    let provider_id =
+        pidash_db::auth_oauth::queries::account::lookup_provider_id(user_json).unwrap_or("");
+    let prior: Option<(chrono::DateTime<chrono::Utc>, serde_json::Value)> = if provider_id
+        .is_empty()
+    {
+        None
+    } else {
+        sqlx::query_as(
+                "SELECT \"created_at\", \"metadata\" FROM \"accounts\" \
+                 WHERE \"user_id\" = $1 AND \"provider\" = $2 AND \"provider_account_id\" = $3 LIMIT 1",
+            )
+            .bind(user_id)
+            .bind(PROVIDER)
+            .bind(provider_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| AuthError::Server(Denial::ServerError))?
+    };
     let mut conn = pool
         .acquire()
         .await
         .map_err(|_| AuthError::Server(Denial::ServerError))?;
+    let existing = prior.map(|(created_at, metadata)| {
+        pidash_db::auth_oauth::queries::account::ExistingAccount {
+            created_at,
+            metadata,
+        }
+    });
     pidash_db::auth_oauth::queries::account::create_update_account(
         &mut conn,
         user_id,
@@ -2406,7 +2433,7 @@ async fn finish_authenticated(
         &fields,
         now,
         uuid::Uuid::new_v4(),
-        None,
+        existing,
     )
     .await
     .map_err(|_| AuthError::Server(Denial::ServerError))?;
