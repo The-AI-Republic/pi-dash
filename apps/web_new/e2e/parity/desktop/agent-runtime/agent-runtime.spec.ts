@@ -196,7 +196,9 @@ test(
           // itself is pinned by ISS-192.
           const dispatch = await driver.issueRunAiDispatch();
           const attached = (await recentRuns(session)).filter((row) => row["work_item"] === issue.id);
-          if (dispatch.toast !== null && /agent run started/i.test(dispatch.toast)) {
+          const started = driver.target === "web_new" ? /run started/i : /agent run started/i;
+          const failed = driver.target === "web_new" ? /couldn't start the run/i : /failed to start agent run/i;
+          if (dispatch.toast !== null && started.test(dispatch.toast)) {
             expect(attached).toHaveLength(1);
           } else {
             // Failure toast only, with no row count: dispatch can answer
@@ -204,7 +206,7 @@ test(
             // cold stack — the row exists, the retry then answers 201),
             // so a count here would pin server internals, not the gate.
             // Cleanup below removes any such orphan.
-            expect(dispatch.toast).toMatch(/failed to start agent run/i);
+            expect(dispatch.toast).toMatch(failed);
           }
           expect(dispatch.requestUrls.some((url) => url.includes("/api/runners/runs/"))).toBe(true);
           expect(enrollmentTraffic(await driver.desktopRuntimeSpyUrls())).toEqual([]);

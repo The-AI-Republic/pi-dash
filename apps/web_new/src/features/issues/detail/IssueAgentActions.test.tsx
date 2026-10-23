@@ -29,7 +29,8 @@ vi.mock("../../runners/index.js", () => ({
   },
 }));
 
-const { IssueAgentActions, reTickOffered } = await import("./IssueAgentActions.js");
+const { IssueAgentActions, IssueReTickAction, IssueRunAIAction, reTickOffered } =
+  await import("./IssueAgentActions.js");
 const { issueKeys } = await import("../api/keys.js");
 
 const SLUG = "acme";
@@ -183,6 +184,50 @@ describe("IssueAgentActions", () => {
     expect(button).toBeDisabled();
     await user.click(button);
     expect(harness.triggerRun).not.toHaveBeenCalled();
+  });
+
+  it("keeps re-tick inert before the workspace id resolves", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <IssueAgentActions
+          workspaceSlug={SLUG}
+          workspaceId={null}
+          projectId={PROJECT}
+          issue={issueFixture({ agent_ticker: ticker(true) })}
+          disabled={false}
+        />
+      </QueryClientProvider>
+    );
+    const refill = screen.getByTestId("issue-re-tick");
+    expect(refill).toBeDisabled();
+    await user.click(refill);
+    expect(harness.reTick).not.toHaveBeenCalled();
+  });
+
+  it("renders each mount on its own with the workspace id ready", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const props = {
+      workspaceSlug: SLUG,
+      workspaceId: "ws-id",
+      projectId: PROJECT,
+      issue: issueFixture({ agent_ticker: ticker(true) }),
+      disabled: false,
+    };
+    render(
+      <QueryClientProvider client={queryClient}>
+        <IssueRunAIAction {...props} label="Manually Run AI" size="medium" />
+        <IssueReTickAction {...props} />
+      </QueryClientProvider>
+    );
+    const start = screen.getByTestId("issue-run-ai");
+    expect(start).toHaveTextContent("Manually Run AI");
+    await user.click(start);
+    await user.click(screen.getByTestId("issue-re-tick"));
+    expect(harness.triggerRun).toHaveBeenCalledTimes(1);
+    expect(harness.reTick).toHaveBeenCalledTimes(1);
   });
 
   it("does not dispatch from a read-only issue surface", async () => {

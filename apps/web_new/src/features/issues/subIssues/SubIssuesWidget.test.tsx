@@ -80,6 +80,7 @@ function renderWidget(
     canWrite?: boolean;
     extraSections?: React.ComponentProps<typeof SubIssuesWidget>["extraSections"];
     onAttach?: React.ComponentProps<typeof SubIssuesWidget>["onAttach"];
+    runAIAction?: React.ReactNode;
   } = {}
 ) {
   return render(
@@ -94,6 +95,7 @@ function renderWidget(
       createProjects={[]}
       extraSections={options.extraSections}
       onAttach={options.onAttach}
+      runAIAction={options.runAIAction}
     />
   );
 }
@@ -115,6 +117,28 @@ describe("SubIssuesWidget", () => {
       "Attach",
       "Manually Run AI",
     ]);
+  });
+
+  it("fills the Manually Run AI slot with the supplied mount", async () => {
+    const onRun = vi.fn();
+    renderWidget({
+      runAIAction: (
+        <button type="button" data-testid="issue-run-ai" onClick={onRun}>
+          Manually Run AI
+        </button>
+      ),
+    });
+    const mount = screen.getByTestId("issue-run-ai");
+    expect(mount).toBeEnabled();
+    expect(mount).toHaveTextContent("Manually Run AI");
+    await userEvent.setup().click(mount);
+    expect(onRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the default disabled Run AI entry when no mount is supplied", () => {
+    renderWidget();
+    expect(screen.getByRole("button", { name: "Manually Run AI" })).toBeDisabled();
+    expect(screen.queryByTestId("issue-run-ai")).not.toBeInTheDocument();
   });
 
   it("leaves only the sub-work-item entry live for a member", () => {

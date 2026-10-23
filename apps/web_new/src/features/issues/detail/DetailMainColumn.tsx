@@ -20,7 +20,6 @@ import { DESCRIPTION_SAVE_FAILED_TITLE, TITLE_SAVE_FAILED_TITLE, useUpdateIssue 
 import { IssueReactions } from "../reactions/IssueReactions.js";
 import { DescriptionHistory } from "./DescriptionHistory.js";
 import { IssueDescriptionField, type RestoredDescription } from "./IssueDescriptionField.js";
-import { IssueAgentActions } from "./IssueAgentActions.js";
 import { IssueTitleField } from "./IssueTitleField.js";
 import { SaveIndicator } from "./SaveIndicator.js";
 import { useSavePipeline } from "./savePipeline.js";
@@ -28,25 +27,25 @@ import { WaitingBanner } from "./waiting/WaitingBanner.js";
 
 export interface DetailMainColumnProps {
   workspaceSlug: string;
-  /** The resolved workspace id for agent dispatch. */
-  workspaceId?: string | null | undefined;
   projectId: string;
   issue: Issue;
   /** Project member/admin standing on a live project; guests read. Archived and synced rows still render read-only. */
   editable: boolean;
   /** Header row, left of the save indicator (identifier/type). */
   topSlot?: React.ReactNode;
+  /** Agent controls on surfaces without the widget action row (notification peek). */
+  agentActions?: React.ReactNode;
   /** Block under the description-meta row, above the sidebar break (the activity feed). */
   activity?: React.ReactNode;
 }
 
 export function DetailMainColumn({
   workspaceSlug,
-  workspaceId = null,
   projectId,
   issue,
   editable,
   topSlot,
+  agentActions,
   activity,
 }: DetailMainColumnProps): React.ReactElement {
   const pipeline = useSavePipeline();
@@ -87,13 +86,7 @@ export function DetailMainColumn({
         </div>
       </div>
       <WaitingBanner workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} disabled={readOnly} />
-      <IssueAgentActions
-        workspaceSlug={workspaceSlug}
-        workspaceId={workspaceId}
-        projectId={projectId}
-        issue={issue}
-        disabled={readOnly}
-      />
+      {agentActions === undefined ? null : <div className="min-w-0">{agentActions}</div>}
       <IssueTitleField
         value={issue.name}
         disabled={readOnly}

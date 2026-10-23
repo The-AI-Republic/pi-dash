@@ -42,7 +42,8 @@ test(
       });
       await test.step("dispatch fails gracefully and creates no run", async () => {
         await driver.clickWidgetAction("Manually Run AI");
-        await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toMatch(/failed to start agent run/i);
+        const failed = driver.target === "web_new" ? /couldn't start the run/i : /failed to start agent run/i;
+        await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toMatch(failed);
         const runs = await recentRuns(session);
         expect(runs.filter((row) => row["work_item"] === issue.id)).toHaveLength(0);
       });
@@ -89,7 +90,9 @@ test(
             },
             { timeout: 120_000 }
           )
-          .toMatch(/1::[\s\S]*failed to start agent run/i);
+          .toMatch(
+            driver.target === "web_new" ? /1::[\s\S]*couldn't start the run/i : /1::[\s\S]*failed to start agent run/i
+          );
         expect((await recentRuns(session)).filter((row) => row["work_item"] === issue.id)).toHaveLength(0);
       });
     } finally {

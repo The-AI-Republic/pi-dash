@@ -23,6 +23,8 @@ import {
   DetailSkeleton,
   IssueDetailRoot,
   IssuePropertiesSidebar,
+  IssueReTickAction,
+  IssueRunAIAction,
   SubIssuesWidget,
   issueDetailQueryOptions,
   issueKeys,
@@ -227,6 +229,17 @@ function BrowseIssueDetail({
         projectIdentifier={projectIdentifier(project, issueKey)}
         canWrite={editable}
         onAttach={() => attachmentsRef.current?.openPicker()}
+        runAIAction={
+          <IssueRunAIAction
+            workspaceSlug={workspaceSlug}
+            workspaceId={workspace?.id ?? null}
+            projectId={projectId}
+            issue={issue}
+            disabled={!writable}
+            label="Manually Run AI"
+            size="medium"
+          />
+        }
         onOpen={(row, identifier) =>
           void navigate({
             to: "/$ws/browse/$issueKey",
@@ -259,10 +272,18 @@ function BrowseIssueDetail({
       />
       <IssueDetailRoot
         workspaceSlug={workspaceSlug}
-        workspaceId={workspace?.id ?? null}
         projectId={projectId}
         issue={issue}
         editable={editable}
+        agentActions={
+          <IssueReTickAction
+            workspaceSlug={workspaceSlug}
+            workspaceId={workspace?.id ?? null}
+            projectId={projectId}
+            issue={issue}
+            disabled={!writable}
+          />
+        }
         topSlot={
           <div className="flex items-center gap-(--space-2)">
             <span className="text-meta font-medium text-(--text-muted)">{issueKey}</span>

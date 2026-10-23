@@ -21,8 +21,6 @@ import { useDetailUiStore } from "./store.js";
 
 export interface IssueDetailRootProps {
   workspaceSlug: string;
-  /** The resolved workspace id for agent dispatch. */
-  workspaceId?: string | null | undefined;
   projectId: string;
   issue: Issue;
   /** Project member/admin standing on a live project; guests read. Archived and synced rows still render read-only. */
@@ -31,6 +29,8 @@ export interface IssueDetailRootProps {
   sidebar?: React.ReactNode;
   /** Header row, left of the save indicator (identifier/type). */
   topSlot?: React.ReactNode;
+  /** Agent controls on surfaces without the widget action row (notification peek). */
+  agentActions?: React.ReactNode;
   /** Block under the description-meta row (the activity feed). */
   activity?: React.ReactNode;
   /** Render the parent banner above the title (default true). */
@@ -39,12 +39,12 @@ export interface IssueDetailRootProps {
 
 export function IssueDetailRoot({
   workspaceSlug,
-  workspaceId = null,
   projectId,
   issue,
   editable,
   sidebar,
   topSlot,
+  agentActions,
   activity,
   showParentBanner = true,
 }: IssueDetailRootProps): React.ReactElement {
@@ -72,11 +72,11 @@ export function IssueDetailRoot({
         ) : null}
         <DetailMainColumn
           workspaceSlug={workspaceSlug}
-          workspaceId={workspaceId}
           projectId={projectId}
           issue={issue}
           editable={editable}
           topSlot={topSlot}
+          agentActions={agentActions}
           activity={activity}
         />
       </div>
