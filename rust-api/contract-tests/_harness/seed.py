@@ -1123,7 +1123,7 @@ class Seeder:
                 archive_in, close_in, logo_props, timezone, repo_url, base_branch,
                 agent_default_interval_seconds, agent_default_max_ticks,
                 agent_review_default_interval_seconds, agent_test_default_interval_seconds,
-                agent_ticking_enabled, default_agent_executor,
+                agent_ticking_enabled, default_agent_executor, default_work_type,
                 created_at, updated_at)
                VALUES (%s,%s,'',2,%s,%s,
                        false,false,false,true,false,
@@ -1131,7 +1131,7 @@ class Seeder:
                        false,true,
                        0,0,'{}','UTC','','main',
                        10800,10,10800,10800,
-                       true,'local_runner',
+                       true,'local_runner','general',
                        now(),now())""",
             (
                 project_id,
@@ -1852,10 +1852,11 @@ class Seeder:
                 error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 refusal_category, trigger, executor_kind, dispatch_attempts,
                 cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
-                usage, created_at)
+                usage, work_type, created_at)
                VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','',
                        %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
-                       '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())""",
+                       '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}',
+                       'software', now())""",
             (run_id, status, workspace_id, work_item_id, pod_id, created_by_id),
         )
         self._put("agent_run", run_id)

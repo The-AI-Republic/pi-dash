@@ -820,6 +820,7 @@ struct DecodedIssue {
     git_work_branch: String,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_by: Option<String>,
     updated_by: Option<String>,
     project: String,
@@ -870,6 +871,7 @@ fn decode_issue(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedIssue, De
         git_work_branch: row_string(row, "git_work_branch")?,
         created_via: row_string_opt(row, "created_via")?,
         agent_executor: row_string_opt(row, "agent_executor")?,
+        work_type: row_string_opt(row, "work_type")?,
         created_by: row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string()),
         updated_by: row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string()),
         project: row_uuid(row, "project_id")?.to_string(),
@@ -888,7 +890,7 @@ fn decode_issue(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedIssue, De
 /// The `issues.*` columns every read path selects (F18-05 column order).
 /// `description_json` / `description_stripped` / `workpad` are unrendered
 /// and unread here, so they stay out of the select list.
-const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "issues"."updated_at", "issues"."deleted_at", "issues"."point", "issues"."name", "issues"."description_html", "issues"."description_binary", "issues"."priority", "issues"."complexity_score", "issues"."start_date", "issues"."target_date", "issues"."sequence_id", "issues"."sort_order", "issues"."completed_at", "issues"."archived_at", "issues"."is_draft", "issues"."external_source", "issues"."external_id", "issues"."git_work_branch", "issues"."created_via", "issues"."agent_executor", "issues"."created_by_id", "issues"."updated_by_id", "issues"."project_id", "issues"."workspace_id", "issues"."parent_id", "issues"."state_id", "issues"."estimate_point_id", "issues"."type_id", "issues"."assigned_pod_id""#;
+const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "issues"."updated_at", "issues"."deleted_at", "issues"."point", "issues"."name", "issues"."description_html", "issues"."description_binary", "issues"."priority", "issues"."complexity_score", "issues"."start_date", "issues"."target_date", "issues"."sequence_id", "issues"."sort_order", "issues"."completed_at", "issues"."archived_at", "issues"."is_draft", "issues"."external_source", "issues"."external_id", "issues"."git_work_branch", "issues"."created_via", "issues"."agent_executor", "issues"."work_type", "issues"."created_by_id", "issues"."updated_by_id", "issues"."project_id", "issues"."workspace_id", "issues"."parent_id", "issues"."state_id", "issues"."estimate_point_id", "issues"."type_id", "issues"."assigned_pod_id""#;
 
 /// The joined extras every read path selects: the URL parts and the state
 /// group (the completed-arm check on writes).
@@ -2037,6 +2039,7 @@ struct ParsedWrite {
     git_work_branch: Option<String>,
     created_via: Option<Option<String>>,
     agent_executor: Option<Option<String>>,
+    work_type: Option<Option<String>>,
     created_by: Option<Option<Uuid>>,
     parent: Option<Option<Uuid>>,
     state: Option<Option<Uuid>>,
@@ -2361,6 +2364,10 @@ async fn parse_issue_write(
         }
     };
 
+    // --- work_type (Char 32, allow_null+allow_blank; registry check in
+    // `validate`) ---
+    let work_type_shape = parse_optional_char(get("work_type"), Some(32));
+
     // --- created_by (PKRF User, allow_null) ---
     let created_by_shape = parse_optional_pk(get("created_by"), from_form);
 
@@ -2645,6 +2652,7 @@ async fn parse_issue_write(
     scalar_field!(branch_shape, "git_work_branch", parsed.git_work_branch);
     scalar_field!(via_shape, "created_via", parsed.created_via);
     scalar_field!(executor_shape, "agent_executor", parsed.agent_executor);
+    scalar_field!(work_type_shape, "work_type", parsed.work_type);
     // created_by
     match created_by_shape {
         FieldParse::Absent => {}
@@ -4756,6 +4764,7 @@ async fn render_decoded(
         git_work_branch: &decoded.git_work_branch,
         created_via: decoded.created_via.as_deref(),
         agent_executor: decoded.agent_executor.as_deref(),
+        work_type: decoded.work_type.as_deref(),
         created_by: decoded.created_by.as_deref(),
         updated_by: decoded.updated_by.as_deref(),
         project: &decoded.project,
@@ -5716,18 +5725,28 @@ async fn run_write_validate(
                 Some(roundtripped) => html = roundtripped,
                 None => return Err(fail(ValidateError::InvalidHtml)),
             }
-            // Sanitizer substitute (`:232-238`): only truthy HTML
-            // validates, and the clean output always substitutes.
+        }
+        parsed.description_html = Some(html);
+    }
+
+    // Work type (PDASHOSS01-234): `""` normalizes to the inherit state; a
+    // truthy key must be registered. Runs between the lxml round-trip and
+    // the sanitizer, like Django.
+    parsed.work_type = shape::normalize_work_type(parsed.work_type.take()).map_err(fail)?;
+
+    // Sanitizer substitute (`:232-238`): only truthy HTML validates, and the
+    // clean output always substitutes.
+    if !from_markdown {
+        if let Some(html) = parsed.description_html.as_mut() {
             if !html.is_empty() {
-                match crate::space::sanitize::sanitize_html(&html) {
-                    crate::space::sanitize::Sanitize::Clean(clean) => html = clean,
+                match crate::space::sanitize::sanitize_html(html) {
+                    crate::space::sanitize::Sanitize::Clean(clean) => *html = clean,
                     crate::space::sanitize::Sanitize::Invalid => {
                         return Err(fail(ValidateError::HtmlContentInvalid));
                     }
                 }
             }
         }
-        parsed.description_html = Some(html);
     }
 
     // Assignee / label allow-lists (`:246-259`): falsy inputs (absent or
@@ -6034,6 +6053,7 @@ async fn insert_issue_row(
     git_work_branch: &str,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_by_id: Option<Uuid>,
     project_id: &Uuid,
     workspace_id: &Uuid,
@@ -6044,7 +6064,7 @@ async fn insert_issue_row(
     assigned_pod_id: Option<Uuid>,
 ) -> Result<(), Denial> {
     sqlx::query(
-        r#"INSERT INTO "issues" ("id", "created_at", "updated_at", "deleted_at", "point", "name", "description_json", "description_html", "description_stripped", "description_binary", "priority", "complexity_score", "start_date", "target_date", "sequence_id", "sort_order", "completed_at", "archived_at", "is_draft", "external_source", "external_id", "git_work_branch", "workpad", "created_via", "agent_executor", "created_by_id", "updated_by_id", "project_id", "workspace_id", "parent_id", "state_id", "estimate_point_id", "type_id", "assigned_pod_id") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)"#,
+        r#"INSERT INTO "issues" ("id", "created_at", "updated_at", "deleted_at", "point", "name", "description_json", "description_html", "description_stripped", "description_binary", "priority", "complexity_score", "start_date", "target_date", "sequence_id", "sort_order", "completed_at", "archived_at", "is_draft", "external_source", "external_id", "git_work_branch", "workpad", "created_via", "agent_executor", "work_type", "created_by_id", "updated_by_id", "project_id", "workspace_id", "parent_id", "state_id", "estimate_point_id", "type_id", "assigned_pod_id") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)"#,
     )
     .bind(id)
     .bind(created_at)
@@ -6071,6 +6091,7 @@ async fn insert_issue_row(
     .bind(String::new())
     .bind(created_via)
     .bind(agent_executor)
+    .bind(work_type)
     .bind(created_by_id)
     .bind(None::<Uuid>)
     .bind(project_id)
@@ -6439,6 +6460,7 @@ async fn create_issue_inner(
         parsed.git_work_branch.as_deref().unwrap_or_default(),
         parsed.created_via.flatten(),
         parsed.agent_executor.flatten(),
+        parsed.work_type.clone().flatten(),
         // `BaseModel.save` overwrites any validated `created_by` with the
         // actor at insert; `updated_by` stays `None`.
         Some(pre.actor.id),
@@ -6827,6 +6849,36 @@ async fn patch_issue_inner(
         pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&current_rendered);
 
     let parsed_body = parse_write_body(headers, raw_body)?;
+
+    // The work-type lock (PDASHOSS01-234): runs right after the run
+    // resolution, before `current_instance` and normalization (both
+    // side-effect free, so checking after the body parse is the same
+    // order). Only an *explicit* run-id header locks — the headerless
+    // inference above still stamps `moved_by_run` but never locks a human.
+    let header_run_id_present = header_ref.map(str::trim).is_some_and(|h| !h.is_empty());
+    if moved_by_run.is_some() && header_run_id_present {
+        if let Some(raw) = parsed_body.value.get("work_type") {
+            // `request.data.get("work_type") or None` vs
+            // `issue.work_type or None`: falsy spells `None`, and only a
+            // string can equal the stored varchar.
+            let unchanged = if raw_truthy(raw) {
+                matches!(raw, Value::String(text)
+                    if current.work_type.as_deref().is_some_and(|stored| stored == text))
+            } else {
+                current.work_type.as_deref().is_none_or(str::is_empty)
+            };
+            let ticking = matches!(
+                current.state_group.as_deref(),
+                Some("started" | "review" | "test")
+            );
+            if !unchanged && ticking {
+                return Err(Denial::ForbiddenBody(
+                    shape::WORK_TYPE_LOCKED_BODY.to_owned(),
+                ));
+            }
+        }
+    }
+
     let norm_input = if parsed_body.from_form {
         form_dict_for_normalize(&parsed_body.value)
     } else {
@@ -6991,6 +7043,7 @@ async fn patch_issue_inner(
     set_col!("\"git_work_branch\"", parsed.git_work_branch.clone());
     set_col!("\"created_via\"", parsed.created_via.clone());
     set_col!("\"agent_executor\"", parsed.agent_executor.clone());
+    set_col!("\"work_type\"", parsed.work_type.clone());
     set_col!("\"created_by_id\"", parsed.created_by);
     set_col!("\"parent_id\"", parsed.parent);
     set_col!("\"estimate_point_id\"", parsed.estimate_point);

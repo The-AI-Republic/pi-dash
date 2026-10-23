@@ -7,7 +7,7 @@
     "Issue": {
       "db_table": "issues",
       "model_source": "apps/api/pi_dash/db/models/issue.py",
-      "column_count": 34,
+      "column_count": 35,
       "columns": [
         {
           "name": "created_at",
@@ -280,6 +280,14 @@
           "nullable": false,
           "default": null,
           "max_length": null
+        },
+        {
+          "name": "work_type",
+          "data_type": "character varying",
+          "udt": "varchar",
+          "nullable": true,
+          "default": null,
+          "max_length": 32
         }
       ],
       "model_fields_not_in_db": [],

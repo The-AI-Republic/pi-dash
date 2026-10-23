@@ -1376,6 +1376,7 @@ pub struct IssueDetail {
     pub git_work_branch: String,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub created_by: Option<uuid::Uuid>,
     pub updated_by: Option<uuid::Uuid>,
     pub project_id: uuid::Uuid,
@@ -1420,6 +1421,7 @@ impl IssueDetail {
             git_work_branch: row_string(row, "git_work_branch", site)?,
             created_via: row_string_opt(row, "created_via", site)?,
             agent_executor: row_string_opt(row, "agent_executor", site)?,
+            work_type: row_string_opt(row, "work_type", site)?,
             created_by: row_uuid_opt(row, "created_by_id", site)?,
             updated_by: row_uuid_opt(row, "updated_by_id", site)?,
             project_id: row_uuid(row, "project_id", site)?,
@@ -1537,6 +1539,7 @@ pub async fn render_issue(
         "agent_executor".to_owned(),
         render_string_opt(&detail.agent_executor),
     );
+    map.insert("work_type".to_owned(), render_string_opt(&detail.work_type));
     map.insert("created_by".to_owned(), render_uuid_opt(&detail.created_by));
     map.insert("updated_by".to_owned(), render_uuid_opt(&detail.updated_by));
     map.insert("project".to_owned(), render_uuid(&detail.project_id));

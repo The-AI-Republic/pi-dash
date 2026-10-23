@@ -113,6 +113,7 @@ pub struct IssueRow {
     pub assigned_pod_id: Option<Uuid>,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub complexity_score: i32,
 }
 
@@ -152,6 +153,7 @@ impl IssueRow {
             assigned_pod_id: row.try_get("assigned_pod_id")?,
             created_via: row.try_get("created_via")?,
             agent_executor: row.try_get("agent_executor")?,
+            work_type: row.try_get("work_type")?,
             complexity_score: row.try_get("complexity_score")?,
         })
     }
@@ -223,7 +225,7 @@ const ISSUE_COLS: &str = concat!(
     "i.description_stripped, i.completed_at, i.sort_order, i.point, i.archived_at, ",
     "i.is_draft, i.external_id, i.external_source, i.description_binary, ",
     "i.estimate_point_id, i.type_id, i.deleted_at, i.git_work_branch, ",
-    "i.assigned_pod_id, i.created_via, i.agent_executor, i.complexity_score"
+    "i.assigned_pod_id, i.created_via, i.agent_executor, i.complexity_score, i.work_type"
 );
 
 fn intake_issue_from(row: &sqlx::postgres::PgRow) -> Result<IntakeIssueRow, sqlx::Error> {
@@ -904,6 +906,7 @@ pub struct ValidatedIssue {
     pub type_id: Option<Option<Uuid>>,
     pub assigned_pod_id: Option<Option<Uuid>>,
     pub agent_executor: Option<Option<String>>,
+    pub work_type: Option<Option<String>>,
     pub git_work_branch: Option<String>,
     pub created_via: Option<Option<String>>,
     pub assignee_ids: Option<Vec<Uuid>>,
@@ -1136,6 +1139,13 @@ pub async fn validate_issue_fields(
             out.agent_executor =
                 validate_str_choice(errors, "agent_executor", value, AGENT_EXECUTORS, false)
                     .map(Some);
+        }
+    }
+    if let Some(value) = input.get("work_type") {
+        if value.is_null() {
+            out.work_type = Some(None);
+        } else {
+            out.work_type = validate_char(errors, "work_type", value, 32, true, false).map(Some);
         }
     }
     if let Some(value) = input.get("git_work_branch") {
@@ -1377,6 +1387,19 @@ pub async fn validate_issue_object(
 
     if let Some(executor) = validated.agent_executor.as_ref() {
         validate_executor(pool, project_id, issue, executor.clone(), errors, non_field).await?;
+    }
+
+    // Work type (PDASHOSS01-234): `""` normalizes to the inherit state
+    // (`None`); a truthy key must be registered.
+    // The `""` → `None` normalization lands at the save.
+    if let Some(Some(work_type)) = validated.work_type.as_ref() {
+        if !work_type.is_empty() && !pidash_services::prompting::work_types::is_known(work_type) {
+            push_error(
+                errors,
+                "work_type",
+                pidash_services::prompting::work_types::unknown_work_type_message(),
+            );
+        }
     }
 
     // HTML sanitize (`serializers/issue.py:326-332`): truthy values
@@ -1847,7 +1870,7 @@ pub async fn apply_issue_update(
              external_source = $15, external_id = $16, sequence_id = $17,
              state_id = $18, parent_id = $19, estimate_point_id = $20, type_id = $21,
              assigned_pod_id = $22, agent_executor = $23, git_work_branch = $24,
-             created_via = $25, updated_at = $26, updated_by_id = $27
+             created_via = $25, updated_at = $26, updated_by_id = $27, work_type = $28
            WHERE id = $1"#,
     )
     .bind(issue.id)
@@ -1931,6 +1954,13 @@ pub async fn apply_issue_update(
     )
     .bind(saved.updated_at)
     .bind(actor_id)
+    .bind(
+        validated
+            .work_type
+            .clone()
+            .map(|work_type| work_type.filter(|work_type| !work_type.is_empty()))
+            .unwrap_or_else(|| issue.work_type.clone()),
+    )
     .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
@@ -2800,6 +2830,7 @@ pub async fn render_issue_detail(
         "agent_executor".to_owned(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_owned(), opt_string(&issue.work_type));
     map.insert(
         "label_ids".to_owned(),
         label_ids
@@ -4750,6 +4781,7 @@ struct ValidatedCreate {
     git_work_branch: String,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     estimate_point_id: Option<Uuid>,
     type_id: Option<Uuid>,
     deleted_at: Option<DateTime<Utc>>,
@@ -5110,6 +5142,13 @@ async fn validate_issue_create(
             None
         }
     };
+    let work_type = match opt_limited_string(issue_data, "work_type", 32) {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("work_type".to_owned(), serde_json::json!([message]));
+            None
+        }
+    };
     let estimate_point_id =
         match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points").await {
             Ok(id) => id,
@@ -5154,6 +5193,17 @@ async fn validate_issue_create(
     // above is field-level; these are the `validate()` gates.
     if let Some(executor) = agent_executor.as_deref() {
         check_agent_executor(pool, settings, gate.user_id, executor).await?;
+    }
+    // Work type (PDASHOSS01-234): `""` normalizes to the inherit state; a
+    // truthy key must be registered.
+    let work_type = work_type.filter(|work_type| !work_type.is_empty());
+    if let Some(work_type) = work_type.as_deref() {
+        if !pidash_services::prompting::work_types::is_known(work_type) {
+            return Err(Denial::BadJson(serde_json::json!({
+                "work_type": [pidash_services::prompting::work_types::unknown_work_type_message()]
+            }))
+            .into_response());
+        }
     }
     let description_html = match description_html {
         Some(html) if !html.is_empty() => match crate::space::sanitize::sanitize_html(&html) {
@@ -5239,6 +5289,7 @@ async fn validate_issue_create(
         git_work_branch,
         created_via,
         agent_executor,
+        work_type,
         estimate_point_id,
         type_id,
         deleted_at,
@@ -5773,7 +5824,7 @@ async fn insert_issue(
         Some(html) => Some(crate::space::sanitize::strip_tags(html)),
     };
     if let Err(error) = sqlx::query(
-        "INSERT INTO \"issues\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"parent_id\", \"state_id\", \"point\", \"estimate_point_id\", \"name\", \"description_json\", \"description_html\", \"description_stripped\", \"description_binary\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"sort_order\", \"completed_at\", \"archived_at\", \"is_draft\", \"external_source\", \"external_id\", \"type_id\", \"git_work_branch\", \"workpad\", \"created_via\", \"assigned_pod_id\", \"agent_executor\") VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NULL, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, '', $29, $30, $31)",
+        "INSERT INTO \"issues\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"parent_id\", \"state_id\", \"point\", \"estimate_point_id\", \"name\", \"description_json\", \"description_html\", \"description_stripped\", \"description_binary\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"sort_order\", \"completed_at\", \"archived_at\", \"is_draft\", \"external_source\", \"external_id\", \"type_id\", \"git_work_branch\", \"workpad\", \"created_via\", \"assigned_pod_id\", \"agent_executor\", \"work_type\") VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NULL, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, '', $29, $30, $31, $32)",
     )
     .bind(issue_id)
     .bind(now)
@@ -5806,6 +5857,7 @@ async fn insert_issue(
     .bind(validated.created_via.clone())
     .bind(assigned_pod_id)
     .bind(validated.agent_executor.clone())
+    .bind(validated.work_type.clone())
     .execute(pool)
     .await
     {
@@ -5917,6 +5969,7 @@ struct CreatedRows {
     parent_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     created_by_id: Option<Uuid>,
@@ -5960,7 +6013,7 @@ async fn render_created_detail(
     // Untyped fetch (a 21-column tuple exceeds sqlx's `FromRow`
     // impls); single-table so names are unambiguous.
     let issue = sqlx::query(
-        "SELECT \"id\", \"name\", \"state_id\", \"sort_order\", \"estimate_point_id\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"project_id\", \"parent_id\", \"assigned_pod_id\", \"agent_executor\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"is_draft\", \"archived_at\", \"description_html\" FROM \"issues\" WHERE (\"id\" = $1)",
+        "SELECT \"id\", \"name\", \"state_id\", \"sort_order\", \"estimate_point_id\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"project_id\", \"parent_id\", \"assigned_pod_id\", \"agent_executor\", \"work_type\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"is_draft\", \"archived_at\", \"description_html\" FROM \"issues\" WHERE (\"id\" = $1)",
     )
     .bind(issue_id)
     .fetch_optional(pool)
@@ -6031,6 +6084,9 @@ async fn render_created_detail(
             .map_err(|_| Denial::ServerError.into_response())?,
         agent_executor: fetched
             .try_get::<Option<String>, _>("agent_executor")
+            .map_err(|_| Denial::ServerError.into_response())?,
+        work_type: fetched
+            .try_get::<Option<String>, _>("work_type")
             .map_err(|_| Denial::ServerError.into_response())?,
         created_at: fetched
             .try_get::<DateTime<Utc>, _>("created_at")
@@ -6136,6 +6192,7 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
         "agent_executor".to_owned(),
         opt_string(&rows.agent_executor),
     );
+    issue.insert("work_type".to_owned(), opt_string(&rows.work_type));
     issue.insert(
         "label_ids".to_owned(),
         serde_json::Value::Array(rows.label_ids.iter().map(uuid_string).collect()),

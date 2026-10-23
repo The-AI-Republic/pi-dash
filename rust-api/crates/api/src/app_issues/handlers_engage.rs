@@ -1897,7 +1897,7 @@ async fn fetch_issue_flat(
 /// positional offsets below assume).
 const PROJECT_COLS: usize = 46;
 const WORKSPACE_COLS: usize = 14;
-const ISSUE_COLS: usize = 34;
+const ISSUE_COLS: usize = 35;
 
 /// History statements select base + project + workspace + issue + user.
 /// Base widths: activities 20, comments 24.
@@ -1929,7 +1929,7 @@ const W_LOGO: usize = 7;
 const W_LOGO_ASSET_ID: usize = 8;
 const W_SLUG: usize = 10;
 
-/// Within-table offsets into `PREFETCH_ISSUE_COLUMNS` (34).
+/// Within-table offsets into `PREFETCH_ISSUE_COLUMNS` (35).
 const I_ID: usize = 5;
 const I_NAME: usize = 12;
 const I_DESCRIPTION_JSON: usize = 13;

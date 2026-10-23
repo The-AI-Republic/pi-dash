@@ -310,6 +310,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -373,6 +374,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -446,6 +448,19 @@ pub const POD_WRONG_PROJECT_BODY: &str = r#"{"assigned_pod":["pod is in a differ
 /// `validate()` pod-reassign guard (`:211-216`).
 pub const POD_REASSIGN_ACTIVE_RUN_BODY: &str =
     r#"{"assigned_pod":["cannot reassign pod while the issue has an active run"]}"#;
+/// `validate()` work-type registry check (PDASHOSS01-234): a truthy
+/// `work_type` that names no registered work type. Raised with a dict, so
+/// DRF list-wraps the message under the field key.
+pub static UNKNOWN_WORK_TYPE_BODY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    serde_json::json!({
+        "work_type": [crate::prompting::work_types::unknown_work_type_message()]
+    })
+    .to_string()
+});
+/// `IssueDetailAPIEndpoint.patch` work-type lock (PDASHOSS01-234): an
+/// agent-attributed PATCH (explicit run-id header) changing `work_type`
+/// while the issue sits in a ticking stage (started / review / test).
+pub const WORK_TYPE_LOCKED_BODY: &str = r#"{"error":"work_type is locked while the issue is being worked; only a human can change it"}"#;
 /// `normalize_description_input` non-string markdown (`:100-101`).
 pub const MARKDOWN_NON_STRING_BODY: &str = r#"{"description_markdown":["Must be a string."]}"#;
 
@@ -570,6 +585,8 @@ pub enum ValidateError {
     PodReassignActiveRun,
     /// lxml round-trip raised, or empty-string input (`:222-229`).
     InvalidHtml,
+    /// `work_type` is truthy but not a registered work type.
+    UnknownWorkType,
     /// `validate_html_content` rejected the round-tripped HTML (`:232-235`).
     HtmlContentInvalid,
     /// `validate_binary_data` rejected the blob (`:240-243`). Dead via this
@@ -596,6 +613,7 @@ impl ValidateError {
             ValidateError::PodWrongProject => POD_WRONG_PROJECT_BODY,
             ValidateError::PodReassignActiveRun => POD_REASSIGN_ACTIVE_RUN_BODY,
             ValidateError::InvalidHtml => INVALID_HTML_BODY,
+            ValidateError::UnknownWorkType => UNKNOWN_WORK_TYPE_BODY.as_str(),
             ValidateError::HtmlContentInvalid => HTML_CONTENT_INVALID_BODY,
             ValidateError::BinaryInvalid => BINARY_INVALID_BODY,
             ValidateError::StateWrongProject => STATE_WRONG_PROJECT_BODY,
@@ -666,6 +684,27 @@ pub fn check_description_html<'a>(
         }
     }
     Ok(HtmlOutcome::Replaced(effective))
+}
+
+/// Port of the `work_type` branch of `validate()` (PDASHOSS01-234):
+/// a present-but-falsy value (`""` / `None`) normalizes to `None` — the
+/// "inherit the project default" state — and a truthy value must name a
+/// registered work type. `None` (key absent) passes through untouched.
+pub fn normalize_work_type(
+    value: Option<Option<String>>,
+) -> Result<Option<Option<String>>, ValidateError> {
+    match value {
+        None => Ok(None),
+        Some(None) => Ok(Some(None)),
+        Some(Some(key)) if key.is_empty() => Ok(Some(None)),
+        Some(Some(key)) => {
+            if crate::prompting::work_types::is_known(&key) {
+                Ok(Some(Some(key)))
+            } else {
+                Err(ValidateError::UnknownWorkType)
+            }
+        }
+    }
 }
 
 /// Validated `assigned_pod` value: the pod's project (`runner/models.py`),
@@ -1193,6 +1232,7 @@ pub struct IssueRow<'a> {
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
     pub project: &'a str,
@@ -1387,6 +1427,7 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             "git_work_branch" => Value::String(row.git_work_branch.to_string()),
             "created_via" => opt_str(row.created_via),
             "agent_executor" => opt_str(row.agent_executor),
+            "work_type" => opt_str(row.work_type),
             "created_by" => opt_str(row.created_by),
             "updated_by" => opt_str(row.updated_by),
             "project" => Value::String(row.project.to_string()),
@@ -1635,7 +1676,7 @@ mod tests {
     fn field_names_match_fixture_in_order() {
         let fx = fixture();
         let expected = str_list(&fx["units"]["serializer_field_names"]["fields_in_order"]);
-        assert_eq!(FIELDS_IN_ORDER.len(), 36);
+        assert_eq!(FIELDS_IN_ORDER.len(), 37);
         assert_eq!(FIELDS_IN_ORDER, expected.as_slice());
         // Both spellings of the type FK are present (declared + auto).
         assert!(FIELDS_IN_ORDER.contains(&"type_id"));
@@ -1649,7 +1690,7 @@ mod tests {
             .filter(|name| !WRITE_ONLY_FIELDS.contains(name))
             .copied()
             .collect();
-        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 33);
+        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 34);
         assert_eq!(READABLE_FIELDS_IN_ORDER, derived.as_slice());
         assert_eq!(
             WRITE_ONLY_FIELDS,
@@ -2545,6 +2586,7 @@ mod tests {
             git_work_branch: "",
             created_via: None,
             agent_executor: None,
+            work_type: None,
             created_by: None,
             updated_by: None,
             project: PROJECT,
@@ -2620,7 +2662,7 @@ mod tests {
         );
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
         assert_eq!(keys, str_list(&goldens["single_keys_in_order"]));
-        assert_eq!(keys.len(), 37);
+        assert_eq!(keys.len(), 38);
         // `scalars` spot values.
         let scalars = &goldens["scalars"];
         assert_eq!(
@@ -3109,6 +3151,39 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&item).unwrap(),
             "{\"id\":\"a7509d00-345f-47fb-bee3-6bcf7d3339e2\",\"identifier\":\"CT00003-3\",\"name\":\"Renamed again\",\"state\":null,\"state_group\":null}"
+        );
+    }
+
+    /// PDASHOSS01-234: `work_type` normalization + registry check, and the
+    /// two wire bodies (list-wrapped field error, view-inline 403).
+    #[test]
+    fn work_type_validate_and_bodies() {
+        assert_eq!(normalize_work_type(None), Ok(None));
+        assert_eq!(normalize_work_type(Some(None)), Ok(Some(None)));
+        assert_eq!(
+            normalize_work_type(Some(Some(String::new()))),
+            Ok(Some(None))
+        );
+        assert_eq!(
+            normalize_work_type(Some(Some("general".to_owned()))),
+            Ok(Some(Some("general".to_owned())))
+        );
+        assert_eq!(
+            normalize_work_type(Some(Some("software".to_owned()))),
+            Ok(Some(Some("software".to_owned())))
+        );
+        assert_eq!(
+            normalize_work_type(Some(Some("bogus".to_owned()))),
+            Err(ValidateError::UnknownWorkType)
+        );
+        assert_eq!(
+            ValidateError::UnknownWorkType.body(),
+            r#"{"work_type":["unknown work type; expected one of ['general', 'software']"]}"#
+        );
+        assert_eq!(ValidateError::UnknownWorkType.status(), 400);
+        assert_eq!(
+            WORK_TYPE_LOCKED_BODY,
+            r#"{"error":"work_type is locked while the issue is being worked; only a human can change it"}"#
         );
     }
 }

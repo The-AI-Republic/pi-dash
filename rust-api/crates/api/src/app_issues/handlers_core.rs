@@ -2101,6 +2101,15 @@ const FIELD_TABLE: &[FieldSpec] = &[
         allow_null: true,
     },
     FieldSpec {
+        name: "work_type",
+        shape: FieldShape::Char {
+            max_length: Some(32),
+            allow_blank: true,
+            branch_regex: false,
+        },
+        allow_null: true,
+    },
+    FieldSpec {
         name: "parent",
         shape: FieldShape::UuidPk(PkQueryset::Issues),
         allow_null: true,
@@ -2933,6 +2942,12 @@ async fn run_validate(
         Some(Validated::Text(executor)) => Some(Some(executor.as_str())),
         _ => None,
     };
+    let work_type: Option<Option<&str>> = match validated.get("work_type") {
+        None => None,
+        Some(Validated::Null) => Some(None),
+        Some(Validated::Text(work_type)) => Some(Some(work_type.as_str())),
+        _ => None,
+    };
     let description_stripped: Option<Option<&str>> = match validated.get("description_stripped") {
         None => None,
         Some(Validated::Null) => Some(None),
@@ -2963,6 +2978,7 @@ async fn run_validate(
         }),
         assigned_pod,
         agent_executor,
+        work_type,
         description_html: text("description_html"),
         description_binary: None,
         assignee_ids: assignee_ids.as_deref(),
@@ -3494,9 +3510,10 @@ struct IssueSaveRow {
     created_via: Option<String>,
     assigned_pod_id: Option<Uuid>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
 }
 
-/// `Issue.objects.create(...)`: the 34-column INSERT in `COLUMNS` order.
+/// `Issue.objects.create(...)`: the 35-column INSERT in `COLUMNS` order.
 async fn insert_issue_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &IssueSaveRow,
@@ -3507,9 +3524,9 @@ async fn insert_issue_row(
          description_json, description_html, description_stripped, description_binary, priority, \
          complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, \
          archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, \
-         created_via, assigned_pod_id, agent_executor) \
+         created_via, assigned_pod_id, agent_executor, work_type) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
-         $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)",
+         $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)",
     )
     .bind(row.id)
     .bind(row.created_at)
@@ -3545,6 +3562,7 @@ async fn insert_issue_row(
     .bind(row.created_via.as_deref())
     .bind(row.assigned_pod_id)
     .bind(row.agent_executor.as_deref())
+    .bind(row.work_type.as_deref())
     .execute(&mut **tx)
     .await
     .map_err(|error| {
@@ -3558,7 +3576,7 @@ async fn insert_issue_row(
 }
 
 /// `instance.save()` on an update: Django writes every column (no
-/// `update_fields`), so the UPDATE sets all 33 non-pk columns.
+/// `update_fields`), so the UPDATE sets all 34 non-pk columns.
 async fn update_issue_row(pool: &sqlx::PgPool, row: &IssueSaveRow) -> Result<(), Denial> {
     sqlx::query(
         "UPDATE issues SET created_at = $1, updated_at = $2, created_by_id = $3, updated_by_id = $4, \
@@ -3569,7 +3587,7 @@ async fn update_issue_row(pool: &sqlx::PgPool, row: &IssueSaveRow) -> Result<(),
          sequence_id = $21, sort_order = $22, completed_at = $23, archived_at = $24, \
          is_draft = $25, external_source = $26, external_id = $27, type_id = $28, \
          git_work_branch = $29, workpad = $30, created_via = $31, assigned_pod_id = $32, \
-         agent_executor = $33 WHERE id = $34",
+         agent_executor = $33, work_type = $34 WHERE id = $35",
     )
     .bind(row.created_at)
     .bind(row.updated_at)
@@ -3604,6 +3622,7 @@ async fn update_issue_row(pool: &sqlx::PgPool, row: &IssueSaveRow) -> Result<(),
     .bind(row.created_via.as_deref())
     .bind(row.assigned_pod_id)
     .bind(row.agent_executor.as_deref())
+    .bind(row.work_type.as_deref())
     .bind(row.id)
     .execute(pool)
     .await
@@ -3895,7 +3914,7 @@ const ISSUE_OBJECTS_SCOPE: &str =
     "AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
      AND issue.archived_at IS NULL AND project.archived_at IS NULL AND issue.is_draft = FALSE";
 
-/// One looked-up issue: the 34 storable columns, the scalar annotations
+/// One looked-up issue: the 35 storable columns, the scalar annotations
 /// (each `None`/empty when its leg is absent), and the joined state pair
 /// for the ticker leg.
 struct CoreIssueRow {
@@ -3912,7 +3931,7 @@ struct CoreIssueRow {
     state_name: Option<String>,
 }
 
-/// Map the 34 storable columns off a `SELECT {ISSUE_COLUMNS}` row.
+/// Map the 35 storable columns off a `SELECT {ISSUE_COLUMNS}` row.
 fn save_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<IssueSaveRow, sqlx::Error> {
     Ok(IssueSaveRow {
         id: row.try_get("id")?,
@@ -3949,6 +3968,7 @@ fn save_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<IssueSaveRow, sqlx::E
         created_via: row.try_get("created_via")?,
         assigned_pod_id: row.try_get("assigned_pod_id")?,
         agent_executor: row.try_get("agent_executor")?,
+        work_type: row.try_get("work_type")?,
     })
 }
 
@@ -4516,6 +4536,7 @@ async fn render_detail_map(
         cycle_id: Some(cycle_id.as_deref()),
         assigned_pod_id: assigned_pod_id.as_deref(),
         agent_executor: save.agent_executor.as_deref(),
+        work_type: save.work_type.as_deref(),
         module_ids: Some(module_refs),
         label_ids: Some(label_refs),
         assignee_ids: Some(assignee_refs),
@@ -4806,6 +4827,11 @@ fn assemble_new_issue(
             _ => None,
         },
         agent_executor: v_text(validated, "agent_executor").map(str::to_owned),
+        // `validate()` normalized `""` to `None` (inherit the project
+        // default) and rejected unknown keys.
+        work_type: v_text(validated, "work_type")
+            .filter(|work_type| !work_type.is_empty())
+            .map(str::to_owned),
     };
     Ok((
         row,
@@ -4850,6 +4876,11 @@ fn apply_validated_to_existing(
     }
     if validated.contains_key("agent_executor") {
         row.agent_executor = v_text(validated, "agent_executor").map(str::to_owned);
+    }
+    if validated.contains_key("work_type") {
+        row.work_type = v_text(validated, "work_type")
+            .filter(|work_type| !work_type.is_empty())
+            .map(str::to_owned);
     }
     if let Some(priority) = v_text(validated, "priority") {
         row.priority = priority.to_owned();
@@ -5203,6 +5234,7 @@ async fn render_put_body(
         git_work_branch: row.git_work_branch.as_str(),
         created_via: row.created_via.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         point: row.point,
         deleted_at: deleted_at.as_deref(),
         created_at: created_at.as_str(),

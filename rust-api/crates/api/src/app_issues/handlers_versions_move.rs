@@ -1532,6 +1532,7 @@ fn map_source_row(
         git_work_branch: row.try_get("git_work_branch").map_err(fail)?,
         created_via: row.try_get("created_via").map_err(fail)?,
         agent_executor: row.try_get("agent_executor").map_err(fail)?,
+        work_type: row.try_get("work_type").map_err(fail)?,
         created_by_id: row.try_get("created_by_id").map_err(fail)?,
         updated_by_id: row.try_get("updated_by_id").map_err(fail)?,
     })
@@ -2785,6 +2786,7 @@ async fn render_moved_issue(
         cycle_id: None,
         assigned_pod_id: assigned_pod_id.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
+        work_type: issue.work_type.as_deref(),
         module_ids: None,
         label_ids: None,
         assignee_ids: None,

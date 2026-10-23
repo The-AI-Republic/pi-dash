@@ -391,6 +391,7 @@ pub mod issue {
         "created_via",
         "assigned_pod_id",
         "agent_executor",
+        "work_type",
     ];
     /// M2M entries in [`COLUMNS`] that are not physical columns.
     pub const M2M_ENTRIES: &[&str] = &["assignees", "labels"];
