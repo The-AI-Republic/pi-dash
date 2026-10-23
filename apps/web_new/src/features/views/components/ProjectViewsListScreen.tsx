@@ -1,11 +1,13 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project views list screen (parity/specs/views.md §3, VIEW-001/002).
-// Reads the project row for the feature gate, the saved-views collection
-// for the list, and the roster for owner chips; sets the tab title; and
-// composes the header with exactly one body state. No list fetch runs
-// while the gate shows.
+// Project views list screen (parity/specs/views.md §3-4, VIEW-001/002 and
+// VIEW-004-007). Reads the project row for the feature gate, the saved-views
+// collection for the list, and the roster for owner and creator chips; sets
+// the tab title; and composes the header with exactly one body state. The
+// name search, order and filters are visit-local state: the controls own
+// them here, nothing is persisted, and the fetched records are never
+// modified. No list fetch runs while the gate shows.
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -24,12 +26,23 @@ import {
   projectViewsFeatureHref,
   projectViewsTitle,
   resolveProjectViewsBody,
-  sortProjectViewsDefault,
 } from "../lib/projectViews.js";
+import {
+  DEFAULT_VIEW_SORT,
+  EMPTY_VIEW_LIST_FILTERS,
+  filterProjectViews,
+  sortProjectViews,
+  type ViewListFilters,
+  type ViewSort,
+} from "../lib/viewListControls.js";
+import { ProjectViewsAppliedFilters } from "./ProjectViewsAppliedFilters.js";
+import { ProjectViewsFilterMenu } from "./ProjectViewsFilterMenu.js";
 import { ProjectViewsGate } from "./ProjectViewsGate.js";
 import { ProjectViewsError } from "./ProjectViewsError.js";
 import { ProjectViewsListBody } from "./ProjectViewsListBody.js";
 import { ProjectViewsListHeader } from "./ProjectViewsListHeader.js";
+import { ProjectViewsSearch } from "./ProjectViewsSearch.js";
+import { ProjectViewsSortMenu } from "./ProjectViewsSortMenu.js";
 import { ProjectViewsSkeleton } from "./ProjectViewsSkeleton.js";
 
 export interface ProjectViewsListScreenProps {
@@ -59,6 +72,10 @@ export function ProjectViewsListScreen({
   const { workspace } = useWorkspace(workspaceSlug);
   const me = useMe();
   const [createOpen, setCreateOpen] = React.useState(false);
+  // Visit-local controls (VIEW-004-007): a reload starts from the defaults.
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const [sort, setSort] = React.useState<ViewSort>(DEFAULT_VIEW_SORT);
+  const [filters, setFilters] = React.useState<ViewListFilters>(EMPTY_VIEW_LIST_FILTERS);
   // Start the dialog's filter chunk while the list data loads, so opening
   // the dialog rarely flashes its loading note (mirrors NEWFRONT-619).
   React.useEffect(() => {
@@ -114,17 +131,17 @@ export function ProjectViewsListScreen({
   }
 
   const fetched = views.data ?? [];
-  const sorted = sortProjectViewsDefault(fetched);
+  const visible = sortProjectViews(filterProjectViews(fetched, filters, searchQuery, Date.now()), sort);
   const state = resolveProjectViewsBody({
     viewsPending: views.isPending,
     viewsError: views.isError,
     viewCount: fetched.length,
-    // NEWFRONT-720 owns the filtered set; until it lands everything fetched stays visible.
-    visibleCount: sorted.length,
+    visibleCount: visible.length,
   });
   // The header and the zero state share one opener (VIEW-003/009): the
   // explicit prop when a host overrides it, else the screen's own dialog.
   const openCreateView = onCreateView ?? (() => setCreateOpen(true));
+  const selfId = me.data?.id ?? null;
   return (
     <section
       aria-label={PROJECT_VIEWS_CRUMB}
@@ -135,10 +152,26 @@ export function ProjectViewsListScreen({
         workspaceName={workspace?.name ?? workspaceSlug}
         projectName={project.data.name}
         onCreateView={openCreateView}
+        searchControl={<ProjectViewsSearch query={searchQuery} onQueryChange={setSearchQuery} />}
+        sortControl={<ProjectViewsSortMenu sort={sort} onSortChange={setSort} />}
+        filterControl={
+          <ProjectViewsFilterMenu
+            filters={filters}
+            members={members.data}
+            selfId={selfId}
+            onFiltersChange={setFilters}
+          />
+        }
+      />
+      <ProjectViewsAppliedFilters
+        filters={filters}
+        members={members.data}
+        selfId={selfId}
+        onFiltersChange={setFilters}
       />
       <ProjectViewsListBody
         state={state}
-        views={sorted}
+        views={visible}
         members={members.data}
         workspaceSlug={workspaceSlug}
         projectId={projectId}
