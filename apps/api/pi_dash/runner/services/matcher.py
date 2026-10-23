@@ -387,11 +387,14 @@ def reconcile_unsatisfiable_pins(pod: Optional[Pod] = None) -> set:
                     pinned_runner__isnull=False,
                     created_at__lt=now - timedelta(seconds=bound_secs),
                 )
-                # Assignable: the pin will be served as soon as the runner
-                # picks work up — leave it.
+                # Assignable (``RunnerQuerySet.assignable``): the pin will be
+                # served as soon as the runner picks work up — leave it. A
+                # paused runner is not assignable; its pins are released here
+                # as well as by ``release_pins_on_offline_runners``.
                 .exclude(
                     pinned_runner__status=RunnerStatus.ONLINE,
                     pinned_runner__last_heartbeat_at__gte=alive_threshold,
+                    pinned_runner__paused_at__isnull=True,
                 )
                 # Legitimately working: an alive BUSY runner still serving a
                 # busy-status run frees itself on finalization — leave it.
@@ -405,7 +408,14 @@ def reconcile_unsatisfiable_pins(pod: Optional[Pod] = None) -> set:
                 stale_qs = stale_qs.filter(pod=pod)
             stale = list(stale_qs.values_list("id", "pinned_runner_id", "pod_id"))
             if stale:
-                AgentRun.objects.filter(id__in=[run_id for run_id, _, _ in stale]).update(pinned_runner=None)
+                stale_ids = [run_id for run_id, _, _ in stale]
+                AgentRun.objects.filter(id__in=stale_ids).update(pinned_runner=None)
+                # Same as the manual release-pin endpoint: whichever runner
+                # takes the run next has no session of the parent's to
+                # resume against, so drop the resume hint.
+                AgentRun.objects.filter(
+                    id__in=AgentRun.objects.filter(id__in=stale_ids).values("parent_run_id")
+                ).exclude(thread_id="").update(thread_id="")
         for run_id, runner_id, pod_id in stale:
             logger.info(
                 "reconcile_unsatisfiable_pins: auto-released pin run=%s runner=%s after %ss bound",

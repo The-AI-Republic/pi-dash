@@ -193,6 +193,34 @@ def test_pin_past_bound_to_offline_runner_released_and_assigned(db, create_user,
 
 
 @pytest.mark.unit
+def test_pin_auto_release_clears_parent_resume_hint(db, create_user, workspace, pod):
+    """Like the manual release-pin endpoint (and main's offline pin sweep),
+    the auto-release drops the parent's ``thread_id``: the runner that takes
+    the run next has no session of the parent's to resume against."""
+    dead = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.OFFLINE, heartbeat_age=STALE)
+    healthy = _make_runner(create_user, workspace, pod, "healthy", status=RunnerStatus.ONLINE)
+    parent = AgentRun.objects.create(
+        workspace=workspace,
+        owner=create_user,
+        created_by=create_user,
+        pod=pod,
+        runner=dead,
+        status=AgentRunStatus.COMPLETED,
+        prompt="first",
+        thread_id="thread-123",
+    )
+    run = _make_pinned_run(create_user, workspace, pod, dead, age=PAST_BOUND, parent_run=parent)
+
+    reconcile_unsatisfiable_pins_task()
+
+    run.refresh_from_db()
+    parent.refresh_from_db()
+    assert run.pinned_runner_id is None
+    assert run.runner_id == healthy.id
+    assert parent.thread_id == ""
+
+
+@pytest.mark.unit
 def test_pin_within_bound_kept(db, create_user, workspace, pod):
     dead = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.OFFLINE, heartbeat_age=STALE)
     _make_runner(create_user, workspace, pod, "healthy", status=RunnerStatus.ONLINE)
@@ -218,6 +246,21 @@ def test_pin_to_assignable_runner_kept_past_bound(db, create_user, workspace, po
     run.refresh_from_db()
     assert run.pinned_runner_id == mine.id
     assert run.status == AgentRunStatus.QUEUED
+
+
+@pytest.mark.unit
+def test_pin_to_paused_runner_released_past_bound(db, create_user, workspace, pod):
+    """A paused runner keeps heartbeating ONLINE but takes no work, so it is
+    not assignable (``RunnerQuerySet.assignable``) and its pin is cleared."""
+    paused = _make_runner(create_user, workspace, pod, "paused", status=RunnerStatus.ONLINE, paused_at=timezone.now())
+    healthy = _make_runner(create_user, workspace, pod, "healthy", status=RunnerStatus.ONLINE)
+    run = _make_pinned_run(create_user, workspace, pod, paused, age=PAST_BOUND)
+
+    reconcile_unsatisfiable_pins_task()
+
+    run.refresh_from_db()
+    assert run.pinned_runner_id is None
+    assert run.runner_id == healthy.id
 
 
 @pytest.mark.unit
