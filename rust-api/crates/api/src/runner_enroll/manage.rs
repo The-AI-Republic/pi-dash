@@ -96,6 +96,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use http_body_util::BodyExt as _;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -640,6 +641,7 @@ struct LiveStateOwned {
 async fn fetch_live_state(
     pool: &PgPool,
     runner_id: Uuid,
+    tz: &Tz,
 ) -> Result<Option<LiveStateOwned>, Response> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT "runner_id", "observed_run_id", "last_event_at", "last_event_kind",
@@ -664,7 +666,7 @@ async fn fetch_live_state(
         observed_run_id: observed.map(|id| id.to_string()),
         last_event_at: last_event_at
             .as_ref()
-            .map(crate::serializer::render_datetime),
+            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
         last_event_kind: row.try_get(3).map_err(|_| server_error())?,
         last_event_summary: row.try_get(4).map_err(|_| server_error())?,
         agent_pid: agent_pid.map(i64::from),
@@ -673,7 +675,7 @@ async fn fetch_live_state(
         usage: row.try_get(8).map_err(|_| server_error())?,
         llm_model: row.try_get(9).map_err(|_| server_error())?,
         turn_count: turn_count.map(i64::from),
-        updated_at: crate::serializer::render_datetime(&updated_at),
+        updated_at: crate::serializer::render_datetime_in(&updated_at, tz),
     }))
 }
 
@@ -1005,6 +1007,7 @@ fn runner_render(
     pod_identifier: String,
     dev_machine_detail: Option<DevMachineMiniOwned>,
     live_state: Option<LiveStateOwned>,
+    tz: &Tz,
 ) -> RunnerRender {
     RunnerRender {
         id: runner.id.to_string(),
@@ -1021,7 +1024,7 @@ fn runner_render(
         last_heartbeat_at: runner
             .last_heartbeat_at
             .as_ref()
-            .map(crate::serializer::render_datetime),
+            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
         owner: runner.owner_id.to_string(),
         dev_machine: runner.dev_machine_id.map(|id| id.to_string()),
         dev_machine_detail,
@@ -1038,14 +1041,14 @@ fn runner_render(
         enrolled_at: runner
             .enrolled_at
             .as_ref()
-            .map(crate::serializer::render_datetime),
+            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
         revoked_at: runner
             .revoked_at
             .as_ref()
-            .map(crate::serializer::render_datetime),
+            .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
         revoked_reason: runner.revoked_reason.clone(),
-        created_at: crate::serializer::render_datetime(&runner.created_at),
-        updated_at: crate::serializer::render_datetime(&runner.updated_at),
+        created_at: crate::serializer::render_datetime_in(&runner.created_at, tz),
+        updated_at: crate::serializer::render_datetime_in(&runner.updated_at, tz),
     }
 }
 
@@ -1057,20 +1060,33 @@ async fn render_runner_parts(
     pod: &PodOwned,
     pod_identifier: String,
     dev_machine_detail: Option<DevMachineMiniOwned>,
+    tz: &Tz,
 ) -> Result<String, Response> {
-    let live_state = fetch_live_state(pool, runner.id).await?;
-    runner_render(runner, pod, pod_identifier, dev_machine_detail, live_state).to_json()
+    let live_state = fetch_live_state(pool, runner.id, tz).await?;
+    runner_render(
+        runner,
+        pod,
+        pod_identifier,
+        dev_machine_detail,
+        live_state,
+        tz,
+    )
+    .to_json()
 }
 
 /// Serialize one R1/R2 join row: the runner + dev-machine + pod blocks
 /// decode positionally; `projects.identifier` reads by name (the only
 /// `identifier` column across the four tables).
-async fn render_runner_row(pool: &PgPool, row: &sqlx::postgres::PgRow) -> Result<String, Response> {
+async fn render_runner_row(
+    pool: &PgPool,
+    row: &sqlx::postgres::PgRow,
+    tz: &Tz,
+) -> Result<String, Response> {
     let runner = decode_runner(row, 0)?;
     let dev_machine_detail = decode_machine_mini(row, RUNNER_BLOCK_COLS)?;
     let pod = decode_pod(row, RUNNER_BLOCK_COLS + MACHINE_BLOCK_COLS)?;
     let identifier: String = row.try_get("identifier").map_err(|_| server_error())?;
-    render_runner_parts(pool, &runner, &pod, identifier, dev_machine_detail).await
+    render_runner_parts(pool, &runner, &pod, identifier, dev_machine_detail, tz).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1175,32 +1191,90 @@ pub async fn runners_list(
         Ok(workspace_id) => workspace_id,
         Err(response) => return response,
     };
-    let role = match workspace_role(&pool, workspace_id, user_id).await {
-        Ok(role) => role,
-        Err(response) => return response,
+    let filters = DirectoryFilters {
+        project: query_param(&params, "project"),
+        pod: query_param(&params, "pod"),
+        include_bundled: manage_reads::include_bundled(
+            crate::license::query_last(&params, "include_bundled").as_deref(),
+        ),
     };
+    // The web panel renders UTC (plain DRF `APIView`, no
+    // `TimezoneMixin`); Django's `ValidationError` on a garbage filter is
+    // unhandled here, so it 500s.
+    match project_runners_body(&pool, user_id, workspace_id, &filters, &chrono_tz::UTC).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(DirectoryError::Forbidden) => forbidden(),
+        Err(DirectoryError::InvalidFilter | DirectoryError::Server) => server_error(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared runner directory (`runner/services/runner_directory.py`)
+// ---------------------------------------------------------------------------
+
+/// Raw `?project=` / `?pod=` / `include_bundled` inputs of one
+/// [`project_runners_body`] read (`project_runners_queryset` kwargs). The
+/// filters stay unparsed: Django validates them at queryset evaluation,
+/// after the membership gate.
+pub(crate) struct DirectoryFilters {
+    /// `project_id=` — `None` or empty disables the filter.
+    pub project: Option<String>,
+    /// `pod_id=` — `None` or empty disables the filter.
+    pub pod: Option<String>,
+    /// [`manage_reads::include_bundled`] of the raw query value.
+    pub include_bundled: bool,
+}
+
+/// Why a [`project_runners_body`] read failed. Each surface maps these
+/// onto its own bodies, like each Django view catches (or does not
+/// catch) the helper's exceptions.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DirectoryError {
+    /// Caller is not a workspace member (`PermissionDenied`).
+    Forbidden,
+    /// A filter value is not a UUID (Django's `ValidationError`).
+    InvalidFilter,
+    /// Database or decode failure.
+    Server,
+}
+
+/// `project_runners_queryset` + `RunnerSerializer(many=True)`
+/// (`runner/services/runner_directory.py`): the one "which runners can
+/// this user see" read shared by the web AI Workers panel
+/// ([`runners_list`]) and the token-auth CLI list
+/// ([`crate::v1_cli_auth::project_runners`]), so the two cannot drift.
+///
+/// Membership gate first (`is_workspace_member`), then the filters
+/// parse, then R1 (owner+private visibility, `?pod=`, bundled
+/// exclusion, `?project=`, `-updated_at`). Returns the rendered JSON
+/// array with datetimes in `tz`.
+pub(crate) async fn project_runners_body(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    filters: &DirectoryFilters,
+    tz: &Tz,
+) -> Result<String, DirectoryError> {
+    let role = workspace_role(pool, workspace_id, user_id)
+        .await
+        .map_err(|_| DirectoryError::Server)?;
     if !membership::is_workspace_member(role) {
-        return forbidden();
+        return Err(DirectoryError::Forbidden);
     }
     // Filter UUIDs parse at queryset evaluation — after the member
     // gate, so a non-member with a garbage filter still answers 403.
-    let mut pod_id = None;
-    if let Some(raw) = query_param(&params, "pod") {
-        match parse_uuid(&raw) {
-            Ok(id) => pod_id = Some(id),
-            Err(response) => return response,
+    let parse = |raw: &Option<String>| -> Result<Option<Uuid>, DirectoryError> {
+        match raw.as_deref().filter(|raw| !raw.is_empty()) {
+            None => Ok(None),
+            Some(raw) => raw
+                .parse::<Uuid>()
+                .map(Some)
+                .map_err(|_| DirectoryError::InvalidFilter),
         }
-    }
-    let mut project_id = None;
-    if let Some(raw) = query_param(&params, "project") {
-        match parse_uuid(&raw) {
-            Ok(id) => project_id = Some(id),
-            Err(response) => return response,
-        }
-    }
-    let exclude_bundled = !manage_reads::include_bundled(
-        crate::license::query_last(&params, "include_bundled").as_deref(),
-    );
+    };
+    let pod_id = parse(&filters.pod)?;
+    let project_id = parse(&filters.project)?;
+    let exclude_bundled = !filters.include_bundled;
     let sql =
         manage_reads::runner_list_sql(pod_id.is_some(), exclude_bundled, project_id.is_some());
     let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
@@ -1217,18 +1291,19 @@ pub async fn runners_list(
     if let Some(project) = project_id {
         query = query.bind(project);
     }
-    let rows: Vec<sqlx::postgres::PgRow> = match query.fetch_all(&pool).await {
-        Ok(rows) => rows,
-        Err(_) => return server_error(),
-    };
+    let rows: Vec<sqlx::postgres::PgRow> = query
+        .fetch_all(pool)
+        .await
+        .map_err(|_| DirectoryError::Server)?;
     let mut bodies = Vec::with_capacity(rows.len());
     for row in &rows {
-        match render_runner_row(&pool, row).await {
-            Ok(body) => bodies.push(body),
-            Err(response) => return response,
-        }
+        bodies.push(
+            render_runner_row(pool, row, tz)
+                .await
+                .map_err(|_| DirectoryError::Server)?,
+        );
     }
-    json_response(StatusCode::OK, format!("[{}]", bodies.join(",")))
+    Ok(format!("[{}]", bodies.join(",")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,7 +1385,7 @@ pub async fn runner_detail(
         Ok(hit) => hit,
         Err(response) => return response,
     };
-    match render_runner_row(&pool, &hit.row).await {
+    match render_runner_row(&pool, &hit.row, &chrono_tz::UTC).await {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(response) => response,
     }
@@ -1512,7 +1587,16 @@ pub async fn runner_patch(
             (pod, identifier, mini)
         }
     };
-    match render_runner_parts(&pool, &runner, &pod, pod_identifier, dev_machine_detail).await {
+    match render_runner_parts(
+        &pool,
+        &runner,
+        &pod,
+        pod_identifier,
+        dev_machine_detail,
+        &chrono_tz::UTC,
+    )
+    .await
+    {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(response) => response,
     }
@@ -2653,12 +2737,75 @@ mod tests {
             turn_count: Some(3),
             updated_at: "2026-10-02T01:02:03Z".to_owned(),
         };
-        let body = runner_render(&runner, &fixed_pod(), "WEB".to_owned(), None, Some(live))
-            .to_json()
-            .unwrap();
+        let body = runner_render(
+            &runner,
+            &fixed_pod(),
+            "WEB".to_owned(),
+            None,
+            Some(live),
+            &chrono_tz::UTC,
+        )
+        .to_json()
+        .unwrap();
         assert_eq!(
             body,
             r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","provisioning":"manual","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
+    }
+
+    /// The v1 CLI list renders the request zone (`TimezoneMixin`): the
+    /// same buffer, every runner datetime shifted with its offset kept;
+    /// `+00:00` still rewrites to `Z`.
+    #[test]
+    fn runner_render_uses_request_timezone() {
+        let mut runner = RunnerOwned {
+            id: Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap(),
+            owner_id: Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap(),
+            workspace_id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+            dev_machine_id: None,
+            pod_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+            name: "r1".to_owned(),
+            host_label: "h".to_owned(),
+            provisioning: "manual".to_owned(),
+            visibility: 0,
+            enrolled_at: None,
+            capabilities: serde_json::json!([]),
+            status: "online".to_owned(),
+            os: String::new(),
+            arch: String::new(),
+            runner_version: String::new(),
+            dev_metadata: serde_json::json!({}),
+            protocol_version: 4,
+            last_heartbeat_at: Some(moment("2026-10-02T01:02:03+00:00")),
+            created_at: moment("2026-10-01T12:34:56.789012+00:00"),
+            updated_at: moment("2026-10-02T01:02:03+00:00"),
+            revoked_at: None,
+            revoked_reason: String::new(),
+        };
+        let kolkata: Tz = "Asia/Kolkata".parse().unwrap();
+        let render = runner_render(
+            &runner,
+            &fixed_pod(),
+            "WEB".to_owned(),
+            None,
+            None,
+            &kolkata,
+        );
+        assert_eq!(
+            render.last_heartbeat_at.as_deref(),
+            Some("2026-10-02T06:32:03+05:30")
+        );
+        assert_eq!(render.created_at, "2026-10-01T18:04:56.789012+05:30");
+        assert_eq!(render.updated_at, "2026-10-02T06:32:03+05:30");
+        runner.last_heartbeat_at = None;
+        let utc = runner_render(
+            &runner,
+            &fixed_pod(),
+            "WEB".to_owned(),
+            None,
+            None,
+            &chrono_tz::UTC,
+        );
+        assert_eq!(utc.created_at, "2026-10-01T12:34:56.789012Z");
     }
 }
