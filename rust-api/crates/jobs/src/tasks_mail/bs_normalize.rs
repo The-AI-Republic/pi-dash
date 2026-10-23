@@ -272,10 +272,12 @@ struct Parser<'a> {
     pre_depth: usize,
     mentions: Vec<NormalizedMention>,
     /// Invalid-charref arming (probed CPython quirk): the first `&#`
-    /// that fails numeric parsing arms this; the next `&#` that is not
-    /// a `;`-terminated valid decimal/hex ref detonates (remainder raw
-    /// to EOF). Global to the input — tags and valid refs never reset
-    /// it. Attributes never consult it (`html.unescape` is stateless).
+    /// that fails the `charref` match (non-digit tail, or digits with
+    /// a hex-letter terminator) arms this; the next match failure
+    /// detonates (remainder raw to EOF). A regex match always decodes
+    /// and never consults this. Global to the input — tags and valid
+    /// refs never reset it. Attributes never consult it
+    /// (`html.unescape` is stateless).
     charref_armed: bool,
 }
 
@@ -401,8 +403,13 @@ impl<'a> Parser<'a> {
             k += 1;
         }
         if k >= len {
-            // No terminator at EOF: literal (probed).
-            self.pending.push('&');
+            // No terminator at EOF: `&` + one letter drops the `&`
+            // (the `incomplete`-at-EOF rule — probed: `<p>a&x` →
+            // `<p>ax</p>`); longer tails stay literal (probed: `&ab`,
+            // `&x-`). The attribute path never does this.
+            if k > self.pos + 2 {
+                self.pending.push('&');
+            }
             self.pos += 1;
             return EntityFlow::Normal;
         }
@@ -426,8 +433,10 @@ impl<'a> Parser<'a> {
     /// One text-path `&#...` at `self.pos` (probed shape table):
     /// - `x`/`X` + hex digits: decoded whatever terminates it (a hex
     ///   ref never arms, never detonates, never breaks).
-    /// - digits: `;`-terminated decodes (armed or not); otherwise
-    ///   detonates when armed, decodes when not, literal at EOF.
+    /// - digits: `;`-terminated decodes; a hex-letter terminator
+    ///   defeats the `charref` regex, so it takes the invalid-ref
+    ///   path; any other terminator is a regex match and always
+    ///   decodes, armed or not (arming only governs invalid refs).
     /// - anything else: the classic break when no `;` follows
     ///   anywhere (remainder raw to EOF); otherwise arms when fresh,
     ///   detonates when armed, then literal `&`.
@@ -476,10 +485,15 @@ impl<'a> Parser<'a> {
                 self.pos = k + 1;
                 return EntityFlow::Normal;
             }
-            if self.charref_armed {
-                self.raw_rest();
-                return EntityFlow::Break;
+            // A hex-letter terminator defeats the `charref` regex
+            // (`[^0-9a-fA-F]` required after digits), so this is an
+            // invalid ref: arm/break/detonate (probed: `&#65b;c`
+            // stays literal, while `&#65g;` decodes).
+            if k < len && matches!(self.bytes[k], b'a'..=b'f' | b'A'..=b'F') {
+                return self.hash_break();
             }
+            // Any other terminator is a regex match, which always
+            // decodes — arming only governs invalid refs (probed).
             if k >= len {
                 self.pending.push('&');
                 self.pos += 1;
@@ -492,9 +506,11 @@ impl<'a> Parser<'a> {
         self.hash_break()
     }
 
-    /// `&#` not followed by digits: the classic break when no `;`
-    /// appears anywhere later (remainder raw to EOF); otherwise arm
-    /// when fresh, detonate when armed, then literal `&` (probed).
+    /// `&#` that fails the `charref` match (not followed by digits,
+    /// or digits with a hex-letter terminator): the classic break
+    /// when no `;` appears anywhere later (remainder raw to EOF);
+    /// otherwise arm when fresh, detonate when armed, then literal
+    /// `&` (probed).
     fn hash_break(&mut self) -> EntityFlow {
         if !self.bytes[self.pos + 1..].contains(&b';') {
             self.raw_rest();
@@ -741,10 +757,11 @@ impl<'a> Parser<'a> {
     fn parse_open_tag(&mut self) {
         let len = self.bytes.len();
         let mut j = self.pos + 2;
+        // `tagfind_tolerant` group 1: NUL is a name char (probed).
         while j < len
             && !matches!(
                 self.bytes[j],
-                b'\t' | b'\n' | 0x0c | b'\r' | b' ' | b'/' | b'>' | 0
+                b'\t' | b'\n' | 0x0c | b'\r' | b' ' | b'/' | b'>'
             )
         {
             j += 1;
@@ -868,35 +885,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse an end tag at `self.pos` (`</` + letter). Junk after the
-    /// name is ignored quote-aware to `>` (or EOF, which also completes
-    /// it — probed). Closes stack elements through the match; unmatched
-    /// names are dropped.
+    /// Parse an end tag at `self.pos` (`</` + letter). The name is
+    /// `tagfind_tolerant` group 1 (`=`, `<`, quotes and NUL included —
+    /// probed: `</p=foo>`, `</p<x>`, `</p"x">` never match the stack,
+    /// so they are dropped); junk after it scans attrfind-shaped to
+    /// `>` (a scan that never reaches `>` swallows to EOF, where the
+    /// auto-close is byte-identical — so normal tags complete either
+    /// way). Closes stack elements through the match; unmatched names
+    /// are dropped.
     fn parse_end_tag(&mut self) {
-        let len = self.bytes.len();
-        // Endtag names exclude `=` (probed: `</p=foo>` closes `p`) but
-        // include `<` and quotes (probed: `</p<x>`, `</p"x">` dropped).
         let mut j = self.pos + 3;
-        while j < len
-            && !is_html_ws(self.bytes[j])
-            && !matches!(self.bytes[j], b'=' | b'/' | b'>' | 0)
-        {
+        let len = self.bytes.len();
+        while j < len && !is_html_ws(self.bytes[j]) && !matches!(self.bytes[j], b'/' | b'>') {
             j += 1;
         }
         let name = self.slice(self.pos + 2, j).to_lowercase();
-        // Junk to `>` (quote-aware — probed) or EOF.
-        let mut k = j;
-        while k < len && self.bytes[k] != b'>' {
-            let q = self.bytes[k];
-            if q == b'"' || q == b'\'' {
-                k += 1;
-                while k < len && self.bytes[k] != q {
-                    k += 1;
-                }
-            }
-            k += 1;
-        }
-        self.pos = (k + 1).min(len);
+        self.pos = scan_endtag_junk(self.bytes, j).unwrap_or(len);
         // Pop through the match, emitting each close (probed
         // misnesting: `</b>` in `<b><i>` emits `</i></b>`).
         if let Some(idx) = self.stack.iter().rposition(|e| e.name == name) {
@@ -990,17 +994,32 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `<!--...-->`: ends at the first `-->`. With none later,
-    /// `<!-->`/`<!--->` close abruptly (empty); otherwise the content
-    /// runs to EOF (probed).
+    /// `<!--...-->`: ends at the first `-->` or `--!>`
+    /// (`commentclose = --!?>` — probed), whichever comes first. With
+    /// neither later, `<!-->`/`<!--->` close abruptly (empty);
+    /// otherwise the content runs to EOF (probed).
     fn parse_comment(&mut self) {
         let len = self.bytes.len();
         let body = self.pos + 4;
-        if let Some(end) = find_bytes(&self.bytes[body..], b"-->") {
+        let tail = &self.bytes[body..];
+        // `(content_end, closer_len)`: `-->` is 3 bytes, `--!>` is 4.
+        let end = match (find_bytes(tail, b"-->"), find_bytes(tail, b"--!>")) {
+            (Some(a), Some(b)) => {
+                if a <= b {
+                    Some((a, 3))
+                } else {
+                    Some((b, 4))
+                }
+            }
+            (Some(a), None) => Some((a, 3)),
+            (None, Some(b)) => Some((b, 4)),
+            (None, None) => None,
+        };
+        if let Some((end, closer)) = end {
             self.out.push_str("<!--");
             self.emit_opaque(self.slice(body, body + end));
             self.out.push_str("-->");
-            self.pos = body + end + 3;
+            self.pos = body + end + closer;
             return;
         }
         let rest = &self.rest()[4..];
@@ -1120,42 +1139,32 @@ impl<'a> Parser<'a> {
         self.parse_rcdata(name);
     }
 
-    /// RAWTEXT verbatim content to the matching close (`</name` +
-    /// ignored junk + `>`, required even at EOF — probed).
+    /// RAWTEXT content to the matching close (`</name` + ignored
+    /// junk + `>`). A junk scan that never reaches `>` drops the
+    /// would-be close: content ends before `</`, the element
+    /// auto-closes (probed).
     fn parse_rawtext(&mut self, name: &str) {
         let len = self.bytes.len();
         let content_start = self.pos;
         let mut k = content_start;
         let mut found: Option<(usize, usize)> = None;
+        let mut dropped_at: Option<usize> = None;
         while k < len {
             if self.bytes[k] == b'<'
                 && k + 1 < len
                 && self.bytes[k + 1] == b'/'
                 && match_close_name(&self.bytes[k + 2..], name)
             {
-                // Junk (quote-aware) to `>`; EOF never completes here.
-                let mut j = k + 2 + name.len();
-                let mut ok = false;
-                while j < len {
-                    if self.bytes[j] == b'>' {
-                        ok = true;
-                        j += 1;
-                        break;
+                match scan_endtag_junk(self.bytes, k + 2 + name.len()) {
+                    Some(after) => {
+                        found = Some((k, after));
                     }
-                    let q = self.bytes[j];
-                    if q == b'"' || q == b'\'' {
-                        j += 1;
-                        while j < len && self.bytes[j] != q {
-                            j += 1;
-                        }
+                    // The failed scan swallows everything after it
+                    // (probed), so no later close can rescue it.
+                    None => {
+                        dropped_at = Some(k);
                     }
-                    j += 1;
                 }
-                if ok {
-                    found = Some((k, j));
-                    break;
-                }
-                // EOF in junk: the would-be close is content.
                 break;
             }
             k += 1;
@@ -1167,7 +1176,8 @@ impl<'a> Parser<'a> {
                 self.pop_raw();
             }
             None => {
-                self.emit_rawtext(self.slice(content_start, len), is_verbatim_raw(name));
+                let end = dropped_at.unwrap_or(len);
+                self.emit_rawtext(self.slice(content_start, end), is_verbatim_raw(name));
                 self.pos = len;
                 self.pop_raw();
             }
@@ -1207,33 +1217,22 @@ impl<'a> Parser<'a> {
                 && self.bytes[self.pos + 1] == b'/'
                 && match_close_name(&self.bytes[self.pos + 2..], name)
             {
-                let mut j = self.pos + 2 + name.len();
-                let mut ok = false;
-                while j < len {
-                    if self.bytes[j] == b'>' {
-                        ok = true;
-                        j += 1;
-                        break;
+                match scan_endtag_junk(self.bytes, self.pos + 2 + name.len()) {
+                    Some(after) => {
+                        self.flush_text();
+                        self.pos = after;
+                        self.pop_raw();
+                        return;
                     }
-                    let q = self.bytes[j];
-                    if q == b'"' || q == b'\'' {
-                        j += 1;
-                        while j < len && self.bytes[j] != q {
-                            j += 1;
-                        }
+                    // The would-be close drops: content ends before
+                    // `</`, the element auto-closes (probed).
+                    None => {
+                        self.flush_text();
+                        self.pos = len;
+                        self.pop_raw();
+                        return;
                     }
-                    j += 1;
                 }
-                if ok {
-                    self.flush_text();
-                    self.pos = j;
-                    self.pop_raw();
-                    return;
-                }
-                // EOF in junk: the `<` is content.
-                self.pending.push('<');
-                self.pos += 1;
-                continue;
             }
             if self.bytes[self.pos] == b'<' {
                 // Tags-as-text (probed).
@@ -1269,19 +1268,101 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// `</` + `name` + delimiter (whitespace, `/`, `>` — probed) at the
-/// start of `s`, case-insensitive.
+/// `</` + `name` + delimiter (whitespace, `/`, `>` — probed) at
+/// the start of `s`, case-insensitive. EOF is NOT a delimiter: the
+/// `interesting` lookahead needs a char, so `</name` at EOF stays
+/// content (probed: `<script>x</script` keeps it verbatim).
 fn match_close_name(s: &[u8], name: &str) -> bool {
     let nb = name.as_bytes();
-    if s.len() < nb.len() || !s[..nb.len()].eq_ignore_ascii_case(nb) {
+    if s.len() <= nb.len() || !s[..nb.len()].eq_ignore_ascii_case(nb) {
         return false;
     }
     // `plaintext` never matches (it never closes) — handled by caller.
-    s.len() == nb.len()
-        || matches!(
-            s[nb.len()],
-            b'\t' | b'\n' | 0x0c | b'\r' | b' ' | b'/' | b'>'
-        )
+    matches!(
+        s[nb.len()],
+        b'\t' | b'\n' | 0x0c | b'\r' | b' ' | b'/' | b'>'
+    )
+}
+
+/// Scan end-tag junk from `k` (`locatetagend` past the tag name):
+/// whitespace and `/` separators, then `attrfind_tolerant` items —
+/// an attrname, an optional `=value` (quoted values scan unbounded
+/// for the matching quote) — repeating to `>`. Returns the byte past
+/// `>`, or `None` when the scan stops without one.
+///
+/// Bare quotes never protect `>` (probed: `</p "a>b">` closes at the
+/// inner `>`); only `name="..."` values do (probed: `</p a=">">`
+/// closes at the outer). An unterminated quoted value voids just the
+/// value group (CPython rewinds past the attrname), so the next
+/// attrname needs attrfind's lookbehind — a quote, whitespace or `/`
+/// (probed rewind pair: `</p a="y>` swallows, `</p a ="y>` closes at
+/// the inner `>`).
+fn scan_endtag_junk(bytes: &[u8], mut k: usize) -> Option<usize> {
+    let len = bytes.len();
+    // Junk always starts at whitespace, `/`, `>` or EOF (where the
+    // name scan stopped), so the first iteration finishes or skips a
+    // separator; this seed value is never consulted.
+    let mut prev = bytes[k.saturating_sub(1)];
+    loop {
+        while k < len && (is_html_ws(bytes[k]) || bytes[k] == b'/') {
+            prev = bytes[k];
+            k += 1;
+        }
+        if k >= len {
+            return None;
+        }
+        if bytes[k] == b'>' {
+            return Some(k + 1);
+        }
+        if !(prev == b'"' || prev == b'\'' || is_html_ws(prev) || prev == b'/') {
+            return None;
+        }
+        // Attrname: `[^ws/>]` + `[^ws/=>]*` (`=`, `<`, quotes and NUL
+        // all allowed first — probed).
+        prev = bytes[k];
+        k += 1;
+        while k < len && !is_html_ws(bytes[k]) && !matches!(bytes[k], b'/' | b'=' | b'>') {
+            prev = bytes[k];
+            k += 1;
+        }
+        let after_name = k;
+        let prev_after_name = prev;
+        // The value group (`=value`) is optional as a whole: only
+        // advance past the pre-`=` gap when `=` is actually there.
+        let mut v = k;
+        while v < len && is_html_ws(bytes[v]) {
+            v += 1;
+        }
+        if v >= len || bytes[v] != b'=' {
+            continue;
+        }
+        v += 1;
+        while v < len && is_html_ws(bytes[v]) {
+            v += 1;
+        }
+        if v < len && (bytes[v] == b'"' || bytes[v] == b'\'') {
+            let q = bytes[v];
+            let mut w = v + 1;
+            while w < len && bytes[w] != q {
+                w += 1;
+            }
+            if w >= len {
+                // Unterminated quote: the value group matches empty,
+                // back after the attrname.
+                k = after_name;
+                prev = prev_after_name;
+                continue;
+            }
+            prev = q;
+            k = w + 1;
+        } else {
+            // Bare value (possibly empty): to whitespace, `>` or EOF.
+            while v < len && bytes[v] != b'>' && !is_html_ws(bytes[v]) {
+                v += 1;
+            }
+            k = v;
+        }
+    }
 }
 
 /// Find a byte needle in a haystack.
@@ -1367,6 +1448,99 @@ mod tests {
         // Positive control: the real tag still matches.
         let n = normalize_bs("<mention-component entity_identifier=\"u1\">x</mention-component>");
         assert_eq!(n.mentions.len(), 1);
+    }
+
+    #[test]
+    fn decimal_ref_with_hex_letter_terminator_stays_literal() {
+        // The `charref` regex needs `[^0-9a-fA-F]` after digits.
+        assert_eq!(norm("<p>&#65b;c</p>"), "<p>&amp;#65b;c</p>");
+        assert_eq!(norm("<p>&#65B;c</p>"), "<p>&amp;#65B;c</p>");
+        assert_eq!(norm("<p>&#65b</p>"), "<p>&amp;#65b&lt;/p&gt;</p>");
+        // Other-letter terminators still decode.
+        assert_eq!(norm("<p>&#65g;z</p>"), "<p>Ag;z</p>");
+        assert_eq!(norm("<p>&#65x;z</p>"), "<p>Ax;z</p>");
+    }
+
+    #[test]
+    fn decodable_refs_decode_even_when_armed() {
+        assert_eq!(norm("<p>a&#x; b &#65 c;d</p>"), "<p>a&amp;#x; b A c;d</p>");
+        assert_eq!(norm("<p>&#x; &#x41;</p>"), "<p>&amp;#x; A</p>");
+        // …but a hex-letter terminator detonates when armed.
+        assert_eq!(
+            norm("<p>&#x; &#66b;c</p>"),
+            "<p>&amp;#x; &amp;#66b;c&lt;/p&gt;</p>"
+        );
+    }
+
+    #[test]
+    fn endtag_junk_is_attrfind_shaped_not_quote_aware() {
+        // Bare quotes never protect `>`: close at the inner one.
+        assert_eq!(norm("<p>x</p \"a>b\">tail"), "<p>x</p>b\"&gt;tail");
+        assert_eq!(
+            norm("<script>x</script \"a>b\">tail"),
+            "<script>x</script>b\"&gt;tail"
+        );
+        assert_eq!(
+            norm("<title>x</title \"a>b\">tail"),
+            "<title>x</title>b\"&gt;tail"
+        );
+        // Only `name="..."` values protect `>`: close at the outer.
+        assert_eq!(norm("<p>x</p a=\">\">tail"), "<p>x</p>tail");
+        // Unterminated quoted value: rewind, then the lookbehind decides.
+        assert_eq!(norm("<p>x</p a=\"y>TAIL"), "<p>x</p>");
+        assert_eq!(norm("<p>x</p a =\"y>TAIL"), "<p>x</p>TAIL");
+        // `=` and `/` start junk attrs.
+        assert_eq!(norm("<p>x</p =>tail"), "<p>x</p>tail");
+        assert_eq!(norm("<p>x</p/x>tail"), "<p>x</p>tail");
+    }
+
+    #[test]
+    fn raw_close_with_junk_at_eof_drops() {
+        assert_eq!(norm("<script>x</script <b"), "<script>x</script>");
+        assert_eq!(norm("<style>x</style <b"), "<style>x</style>");
+        assert_eq!(norm("<title>x</title <b"), "<title>x</title>");
+        assert_eq!(norm("<textarea>x</textarea <b"), "<textarea>x</textarea>");
+        assert_eq!(norm("<iframe>x</iframe <b"), "<iframe>x</iframe>");
+        // …but `</name` at EOF (no delimiter) stays content.
+        assert_eq!(norm("<script>x</script"), "<script>x</script</script>");
+        assert_eq!(norm("<title>x</title"), "<title>x&lt;/title</title>");
+        // A later complete close still wins mid-input.
+        assert_eq!(
+            norm("<script>x</script <b>y</script>TAIL"),
+            "<script>x</script>yTAIL"
+        );
+    }
+
+    #[test]
+    fn single_letter_entity_at_eof_drops_ampersand() {
+        assert_eq!(norm("<p>a&x"), "<p>ax</p>");
+        assert_eq!(norm("<title>a&x"), "<title>ax</title>");
+        assert_eq!(norm("<p>a&ab"), "<p>a&amp;ab</p>");
+        assert_eq!(norm("<p>a&x-"), "<p>a&amp;x-</p>");
+        assert_eq!(norm("<p>a&"), "<p>a&amp;</p>");
+        assert_eq!(norm("<p>a&#"), "<p>a&amp;#</p>");
+    }
+
+    #[test]
+    fn nul_is_a_tag_name_char() {
+        assert_eq!(norm("<p\x00>x</p>"), "<p\x00>x</p\x00>");
+        assert_eq!(norm("<p>x</p\x00>tail"), "<p>xtail</p>");
+        assert_eq!(norm("<p\x00>x</p\x00>tail"), "<p\x00>x</p\x00>tail");
+    }
+
+    #[test]
+    fn dash_bang_gt_closes_comments() {
+        assert_eq!(norm("<!--x--!>"), "<!--x-->");
+        assert_eq!(norm("<!--a--!>b-->"), "<!--a-->b--&gt;");
+        assert_eq!(norm("<!--a--!>TAIL"), "<!--a-->TAIL");
+        assert_eq!(norm("<!--x-->TAIL"), "<!--x-->TAIL");
+    }
+
+    #[test]
+    fn equals_in_endtag_names_drops() {
+        assert_eq!(norm("<p>x</p=foo>tail"), "<p>xtail</p>");
+        assert_eq!(norm("<p>x</p=foo>"), "<p>x</p>");
+        assert_eq!(norm("<p>x</p=>tail"), "<p>xtail</p>");
     }
 
     #[test]

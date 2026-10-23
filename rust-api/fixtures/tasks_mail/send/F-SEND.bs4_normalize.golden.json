@@ -1,6 +1,6 @@
 {
   "_fixture": "F-SEND",
-  "_method": "executed: .venv-1248 python .scratch1287-gen_bs4.py (bs4 bs4 4.12.3, CPython 3.12.3); cases = probe rounds 1-13 + full html5 table sweep (text + attr contexts, semicolon + nosemi) + numeric sweep; mail slice identical on origin/main and rust-dev at gen time",
+  "_method": "executed: .venv-1248 python .scratch1287-gen_bs4.py (bs4 bs4 4.12.3, CPython 3.12.3); cases = probe rounds 1-13 + full html5 table sweep (text + attr contexts, semicolon + nosemi) + numeric sweep; mail slice identical on origin/main and rust-dev at gen time; fixrun1287: +50 review-class cases recorded live (bs4 4.12.3, CPython 3.12.3)",
   "_ported_from": "c494eddb2c652f47a6ed67617990d71637e0ff1a",
   "_sources": [
     "apps/api/pi_dash/bgtasks/email_notification_task.py:130-140"
@@ -58051,6 +58051,256 @@
       "name": "num::attr-nosemi::#X110000",
       "in": "<p title=\"&#X110000 \">x</p>",
       "out": "<p title=\"\ufffd \">x</p>"
+    },
+    {
+      "name": "fixrun1287::d1.basic",
+      "in": "<p>&#65b;c</p>",
+      "out": "<p>&amp;#65b;c</p>"
+    },
+    {
+      "name": "fixrun1287::d1.aprefix",
+      "in": "<p>a&#65b;c</p>",
+      "out": "<p>a&amp;#65b;c</p>"
+    },
+    {
+      "name": "fixrun1287::d1.nosemi",
+      "in": "<p>&#65b</p>",
+      "out": "<p>&amp;#65b&lt;/p&gt;</p>"
+    },
+    {
+      "name": "fixrun1287::d1.upper",
+      "in": "<p>&#65B;c</p>",
+      "out": "<p>&amp;#65B;c</p>"
+    },
+    {
+      "name": "fixrun1287::d1.allhex",
+      "in": "<p>&#65a;&#65c;&#65d;&#65e;&#65f;&#65A;&#65C;&#65D;&#65E;&#65F;</p>",
+      "out": "<p>&amp;#65a;&amp;#65c;&amp;#65d;&amp;#65e;&amp;#65f;&amp;#65A;&amp;#65C;&amp;#65D;&amp;#65E;&amp;#65F;&lt;/p&gt;</p>"
+    },
+    {
+      "name": "fixrun1287::d1.g",
+      "in": "<p>&#65g;z</p>",
+      "out": "<p>Ag;z</p>"
+    },
+    {
+      "name": "fixrun1287::d1.x",
+      "in": "<p>&#65x;z</p>",
+      "out": "<p>Ax;z</p>"
+    },
+    {
+      "name": "fixrun1287::d1.bigx",
+      "in": "<p>&#65X;z</p>",
+      "out": "<p>AX;z</p>"
+    },
+    {
+      "name": "fixrun1287::d1.space",
+      "in": "<p>&#65 ;z</p>",
+      "out": "<p>A ;z</p>"
+    },
+    {
+      "name": "fixrun1287::d1.lt",
+      "in": "<p>&#65<z</p>",
+      "out": "<p>A<z< p=\"\"></z<></p>"
+    },
+    {
+      "name": "fixrun1287::d1.amp",
+      "in": "<p>&#65&z</p>",
+      "out": "<p>A&amp;z</p>"
+    },
+    {
+      "name": "fixrun1287::d1.semi",
+      "in": "<p>&#65;;z</p>",
+      "out": "<p>A;z</p>"
+    },
+    {
+      "name": "fixrun1287::d2.review",
+      "in": "<p>a&#x; b &#65 c;d</p>",
+      "out": "<p>a&amp;#x; b A c;d</p>"
+    },
+    {
+      "name": "fixrun1287::d2.semiarmed",
+      "in": "<p>&#x; &#65;</p>",
+      "out": "<p>&amp;#x; A</p>"
+    },
+    {
+      "name": "fixrun1287::d2.hexarmed",
+      "in": "<p>&#x; &#x41;</p>",
+      "out": "<p>&amp;#x; A</p>"
+    },
+    {
+      "name": "fixrun1287::d2.armedhexletter",
+      "in": "<p>&#x; &#66b;c</p>",
+      "out": "<p>&amp;#x; &amp;#66b;c&lt;/p&gt;</p>"
+    },
+    {
+      "name": "fixrun1287::d3.review",
+      "in": "<p>x</p \"a>b\">tail",
+      "out": "<p>x</p>b\"&gt;tail"
+    },
+    {
+      "name": "fixrun1287::d3.quotedvalue",
+      "in": "<p>x</p a=\">\">tail",
+      "out": "<p>x</p>tail"
+    },
+    {
+      "name": "fixrun1287::d3.squote",
+      "in": "<p>x</p 'a>b'>tail",
+      "out": "<p>x</p>b'&gt;tail"
+    },
+    {
+      "name": "fixrun1287::d3.raw",
+      "in": "<script>x</script \"a>b\">tail",
+      "out": "<script>x</script>b\"&gt;tail"
+    },
+    {
+      "name": "fixrun1287::d3.rcdata",
+      "in": "<title>x</title \"a>b\">tail",
+      "out": "<title>x</title>b\"&gt;tail"
+    },
+    {
+      "name": "fixrun1287::d3.rewind_nospace",
+      "in": "<p>x</p a=\"y>TAIL",
+      "out": "<p>x</p>"
+    },
+    {
+      "name": "fixrun1287::d3.rewind_space",
+      "in": "<p>x</p a =\"y>TAIL",
+      "out": "<p>x</p>TAIL"
+    },
+    {
+      "name": "fixrun1287::d3.eqjunk",
+      "in": "<p>x</p =>tail",
+      "out": "<p>x</p>tail"
+    },
+    {
+      "name": "fixrun1287::d3.slashjunk",
+      "in": "<p>x</p/x>tail",
+      "out": "<p>x</p>tail"
+    },
+    {
+      "name": "fixrun1287::d4.script",
+      "in": "<script>x</script <b",
+      "out": "<script>x</script>"
+    },
+    {
+      "name": "fixrun1287::d4.style",
+      "in": "<style>x</style <b",
+      "out": "<style>x</style>"
+    },
+    {
+      "name": "fixrun1287::d4.title",
+      "in": "<title>x</title <b",
+      "out": "<title>x</title>"
+    },
+    {
+      "name": "fixrun1287::d4.textarea",
+      "in": "<textarea>x</textarea <b",
+      "out": "<textarea>x</textarea>"
+    },
+    {
+      "name": "fixrun1287::d4.iframe",
+      "in": "<iframe>x</iframe <b",
+      "out": "<iframe>x</iframe>"
+    },
+    {
+      "name": "fixrun1287::d4.eofname",
+      "in": "<script>x</script",
+      "out": "<script>x</script</script>"
+    },
+    {
+      "name": "fixrun1287::d4.eofnametitle",
+      "in": "<title>x</title",
+      "out": "<title>x&lt;/title</title>"
+    },
+    {
+      "name": "fixrun1287::d4.eofws",
+      "in": "<script>x</script ",
+      "out": "<script>x</script>"
+    },
+    {
+      "name": "fixrun1287::d4.laterclose",
+      "in": "<script>x</script <b>y</script>TAIL",
+      "out": "<script>x</script>yTAIL"
+    },
+    {
+      "name": "fixrun1287::d5.review",
+      "in": "<p>a&x",
+      "out": "<p>ax</p>"
+    },
+    {
+      "name": "fixrun1287::d5.long",
+      "in": "<p>a&ab",
+      "out": "<p>a&amp;ab</p>"
+    },
+    {
+      "name": "fixrun1287::d5.dash",
+      "in": "<p>a&x-",
+      "out": "<p>a&amp;x-</p>"
+    },
+    {
+      "name": "fixrun1287::d5.baramp",
+      "in": "<p>a&",
+      "out": "<p>a&amp;</p>"
+    },
+    {
+      "name": "fixrun1287::d5.rcdata",
+      "in": "<title>a&x",
+      "out": "<title>ax</title>"
+    },
+    {
+      "name": "fixrun1287::d5.hash",
+      "in": "<p>a&#",
+      "out": "<p>a&amp;#</p>"
+    },
+    {
+      "name": "fixrun1287::d6.open",
+      "in": "<p\u0000>x</p>",
+      "out": "<p\u0000>x</p\u0000>"
+    },
+    {
+      "name": "fixrun1287::d6.end",
+      "in": "<p>x</p\u0000>tail",
+      "out": "<p>xtail</p>"
+    },
+    {
+      "name": "fixrun1287::d6.both",
+      "in": "<p\u0000>x</p\u0000>tail",
+      "out": "<p\u0000>x</p\u0000>tail"
+    },
+    {
+      "name": "fixrun1287::d7.review",
+      "in": "<!--x--!>",
+      "out": "<!--x-->"
+    },
+    {
+      "name": "fixrun1287::d7.both",
+      "in": "<!--a--!>b-->",
+      "out": "<!--a-->b--&gt;"
+    },
+    {
+      "name": "fixrun1287::d7.dashbang",
+      "in": "<!--a--!>TAIL",
+      "out": "<!--a-->TAIL"
+    },
+    {
+      "name": "fixrun1287::d7.plain",
+      "in": "<!--x-->TAIL",
+      "out": "<!--x-->TAIL"
+    },
+    {
+      "name": "fixrun1287::d8.review",
+      "in": "<p>x</p=foo>tail",
+      "out": "<p>xtail</p>"
+    },
+    {
+      "name": "fixrun1287::d8.tailless",
+      "in": "<p>x</p=foo>",
+      "out": "<p>x</p>"
+    },
+    {
+      "name": "fixrun1287::d8.eqonly",
+      "in": "<p>x</p=>tail",
+      "out": "<p>xtail</p>"
     }
   ]
 }
