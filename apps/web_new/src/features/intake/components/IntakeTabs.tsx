@@ -55,7 +55,7 @@ export function IntakeTabs({ activeTab, openTotal, onSelect }: IntakeTabsProps):
             onKeyDown={move(tab)}
             className={
               selected
-                ? "text-body rounded-(--radius-control) bg-(--bg-subtle) px-(--space-2) py-(--space-1) font-medium text-(--text)"
+                ? "text-body rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) font-medium text-(--text)"
                 : "text-body rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:text-(--text)"
             }
           >

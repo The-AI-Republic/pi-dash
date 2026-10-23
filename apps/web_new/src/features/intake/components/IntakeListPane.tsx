@@ -119,8 +119,8 @@ function IntakeListBody({
               onClick={() => onSelectRow(row.issue.id)}
               className={
                 selected
-                  ? "flex w-full flex-col gap-(--space-1) border-b border-(--border) bg-(--bg-subtle) px-(--space-4) py-(--space-2) text-left"
-                  : "flex w-full flex-col gap-(--space-1) border-b border-(--border) px-(--space-4) py-(--space-2) text-left hover:bg-(--bg-subtle)"
+                  ? "flex w-full flex-col gap-(--space-1) border-b border-(--border) bg-(--subtle) px-(--space-4) py-(--space-2) text-left"
+                  : "flex w-full flex-col gap-(--space-1) border-b border-(--border) px-(--space-4) py-(--space-2) text-left hover:bg-(--subtle)"
               }
             >
               <h3 data-testid="intake-row-title" className="text-body truncate text-(--text)">
