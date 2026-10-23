@@ -391,7 +391,8 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // (`oss_worker::execute_seams::LiveExecuteSeams`), including the run
     // task's model runtime (PIDASHCONV-866 — no forward override). The
     // register call also owns `managed_runner.expire_waiting_runs`
-    // (never published in OSS; the table follows the registry).
+    // (beat-published every `MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS`;
+    // Django registers it too since PDASHOSS01-224).
     let invoke = model_runtime::invoke::InvokeCtx {
         tools: model_runtime::tools_exec::ToolCtx {
             pool: ctx.pools.primary().clone(),
