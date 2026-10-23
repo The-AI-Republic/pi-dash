@@ -26933,125 +26933,319 @@ export class WebNewDriver implements ParityDriver {
     return "none";
   }
 
-  // --- Project settings workflow states (NEWFRONT-392, PSET-028–035).
-  // --- Throwing stubs per the shared driver contract; the new app
-  // --- implements them later.
-  async settingsStatesOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("settingsStatesOpen");
+  // --- Project settings workflow states (NEWFRONT-392, PSET-028–035; new-app
+  // --- surface NEWFRONT-606). Selectors follow the slice testids
+  // --- (state-group-*, state-row*, state-form-*, states-*).
+  private statesGroupCard(group: string): Locator {
+    return this.page.locator(`section[data-testid="state-group-card"][data-group="${group}"]`);
+  }
+
+  private statesRowByName(name: string): Locator {
+    const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return this.page.locator(`[data-testid="state-row"][data-state-name="${escaped}"]`);
+  }
+
+  private statesForm(): Locator {
+    return this.page.getByTestId("state-form");
+  }
+
+  async settingsStatesOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/states`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the first group card (editors and members) or either
+    // denial view (outsiders see the project join restriction, not the
+    // not-authorized card); callers assert which one they got.
+    const settle = (target: { waitFor: (options: { timeout: number }) => Promise<void> }): Promise<boolean> =>
+      target.waitFor({ timeout: 60_000 }).then(
+        () => true,
+        () => false
+      );
+    const settled = await Promise.race([
+      settle(this.page.locator('section[data-testid="state-group-card"]').first()),
+      settle(this.page.getByRole("heading", { name: /not authorized/i }).first()),
+      settle(this.page.getByRole("heading", { name: /don.t have access/i }).first()),
+    ]);
+    if (!settled) throw new Error("[parity] states settings settled on neither the list nor the denial view.");
   }
   async settingsStatesGroupNames(): Promise<string[]> {
-    return todo("settingsStatesGroupNames");
+    const cards = this.page.locator('section[data-testid="state-group-card"]');
+    const total = await cards.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const group = await cards.nth(i).getAttribute("data-group");
+      if (group !== null && group !== "") names.push(group);
+    }
+    return names;
   }
-  async settingsStatesGroupExpanded(_group: string): Promise<boolean> {
-    return todo("settingsStatesGroupExpanded");
+  async settingsStatesGroupExpanded(group: string): Promise<boolean> {
+    return (await this.statesGroupCard(group).getByTestId("state-group-body").count()) > 0;
   }
-  async settingsStatesToggleGroup(_group: string): Promise<void> {
-    return todo("settingsStatesToggleGroup");
+  async settingsStatesToggleGroup(group: string): Promise<void> {
+    const before = await this.settingsStatesGroupExpanded(group);
+    await this.statesGroupCard(group).getByTestId("state-group-toggle").click({ timeout: 30_000 });
+    await expect.poll(() => this.settingsStatesGroupExpanded(group), { timeout: 15_000 }).toBe(!before);
   }
-  async settingsStatesStateNames(_group: string): Promise<string[]> {
-    return todo("settingsStatesStateNames");
+  async settingsStatesStateNames(group: string): Promise<string[]> {
+    const heads = this.statesGroupCard(group).locator("h4");
+    const total = await heads.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await heads
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
   }
-  async settingsStatesAddEnabled(_group: string): Promise<boolean> {
-    return todo("settingsStatesAddEnabled");
+  async settingsStatesAddEnabled(group: string): Promise<boolean> {
+    const button = this.statesGroupCard(group).getByTestId("state-group-add");
+    if ((await button.count()) === 0) return false;
+    return button.first().isEnabled();
   }
-  async settingsStatesOpenCreate(_group: string): Promise<void> {
-    return todo("settingsStatesOpenCreate");
+  async settingsStatesOpenCreate(group: string): Promise<void> {
+    await this.statesGroupCard(group).getByTestId("state-group-add").first().click({ timeout: 30_000 });
+    await this.page.getByTestId("state-form-name").waitFor({ timeout: 30_000 });
   }
   async settingsStatesFormVisible(): Promise<boolean> {
-    return todo("settingsStatesFormVisible");
+    return (await this.page.getByTestId("state-form-name").count()) > 0;
   }
-  async settingsStatesFillName(_name: string): Promise<void> {
-    return todo("settingsStatesFillName");
+  async settingsStatesFillName(name: string): Promise<void> {
+    await this.page.getByTestId("state-form-name").fill(name, { timeout: 30_000 });
   }
-  async settingsStatesFillDescription(_text: string): Promise<void> {
-    return todo("settingsStatesFillDescription");
+  async settingsStatesFillDescription(text: string): Promise<void> {
+    await this.page.getByTestId("state-form-description").fill(text, { timeout: 30_000 });
   }
   async settingsStatesNameValue(): Promise<string> {
-    return todo("settingsStatesNameValue");
+    return (
+      (await this.page
+        .getByTestId("state-form-name")
+        .inputValue()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
   async settingsStatesDescriptionValue(): Promise<string> {
-    return todo("settingsStatesDescriptionValue");
+    return (
+      (await this.page
+        .getByTestId("state-form-description")
+        .inputValue()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
   async settingsStatesFormError(): Promise<string> {
-    return todo("settingsStatesFormError");
+    const err = this.statesForm().getByRole("alert").first();
+    if ((await err.count()) === 0) return "";
+    return ((await err.innerText().catch(() => "")) ?? "").trim();
   }
   async settingsStatesSubmitCreate(): Promise<void> {
-    return todo("settingsStatesSubmitCreate");
+    await this.statesForm().getByRole("button", { name: "Create state", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByTestId("state-form-name").waitFor({ state: "detached", timeout: 30_000 });
   }
   async settingsStatesSubmitUpdate(): Promise<void> {
-    return todo("settingsStatesSubmitUpdate");
+    await this.statesForm().getByRole("button", { name: "Save changes", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByTestId("state-form-name").waitFor({ state: "detached", timeout: 30_000 });
   }
   async settingsStatesCancelForm(): Promise<void> {
-    return todo("settingsStatesCancelForm");
+    await this.statesForm().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByTestId("state-form-name").waitFor({ state: "detached", timeout: 15_000 });
   }
   async settingsStatesAttemptSubmit(): Promise<void> {
-    return todo("settingsStatesAttemptSubmit");
+    const form = this.statesForm();
+    const create = form.getByRole("button", { name: "Create state", exact: true });
+    if ((await create.count()) > 0) {
+      await create.first().click({ timeout: 30_000 });
+      return;
+    }
+    await form.getByRole("button", { name: "Save changes", exact: true }).first().click({ timeout: 30_000 });
   }
   async settingsStatesDotColor(): Promise<string> {
-    return todo("settingsStatesDotColor");
+    const dot = this.statesForm().getByTestId("state-form-swatch").first();
+    await dot.waitFor({ timeout: 30_000 });
+    return ((await dot.evaluate((el) => getComputedStyle(el).backgroundColor).catch(() => "")) ?? "").trim();
   }
   async settingsStatesOpenColorPicker(): Promise<void> {
-    return todo("settingsStatesOpenColorPicker");
+    await this.statesForm().getByTestId("state-form-swatch").first().click({ timeout: 30_000 });
+    await this.page.getByRole("group", { name: "Pick a color" }).waitFor({ timeout: 30_000 });
   }
-  async settingsStatesPickColor(_hex: string): Promise<void> {
-    return todo("settingsStatesPickColor");
+  async settingsStatesPickColor(hex: string): Promise<void> {
+    const palette = this.page.getByRole("group", { name: "Pick a color" });
+    await palette.waitFor({ timeout: 30_000 });
+    // The palette carries a fixed spread, not the oracle's twitter colors;
+    // scenarios pass a palette member on this driver (NEWFRONT-606).
+    const swatches = palette.getByTestId("state-swatch");
+    const total = await swatches.count();
+    const want = hex.toLowerCase();
+    for (let i = 0; i < total; i++) {
+      const color = ((await swatches.nth(i).getAttribute("data-color")) ?? "").toLowerCase();
+      if (color === want) {
+        await swatches.nth(i).click({ timeout: 15_000 });
+        return;
+      }
+    }
+    throw new Error(`[parity] state palette offers no swatch matching "${hex}".`);
   }
-  async settingsStatesOpenEdit(_name: string): Promise<void> {
-    return todo("settingsStatesOpenEdit");
+  async settingsStatesOpenEdit(name: string): Promise<void> {
+    const row = this.statesRowByName(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    await row
+      .getByRole("button", { name: `Edit ${name}`, exact: true })
+      .first()
+      .click({ timeout: 30_000 });
+    await this.page.getByTestId("state-form-name").waitFor({ timeout: 30_000 });
   }
-  async settingsStatesGripVisible(_name: string): Promise<boolean> {
-    return todo("settingsStatesGripVisible");
+  async settingsStatesGripVisible(name: string): Promise<boolean> {
+    const row = this.statesRowByName(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    const grip = row.getByTestId("state-row-grip").first();
+    if ((await grip.count()) === 0) return false;
+    return grip.isVisible().catch(() => false);
   }
-  async settingsStatesDragAbove(_source: string, _target: string): Promise<void> {
-    return todo("settingsStatesDragAbove");
+  private async dragStatesRow(source: string, target: string, edge: "above" | "below"): Promise<void> {
+    const row = this.statesRowByName(source);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    // Cross-group drops miss while the target sits at the viewport edge
+    // (edge auto-scroll moves it mid-gesture), so center it first.
+    const targetRow = this.statesRowByName(target);
+    await targetRow.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    const box = await targetRow.boundingBox();
+    // Aim just inside the target's top (above) or bottom (below) edge so
+    // the row's half-based edge detector settles on that side.
+    const targetPosition =
+      box === null
+        ? undefined
+        : edge === "above"
+          ? { x: box.width / 2, y: 6 }
+          : { x: box.width / 2, y: box.height - 6 };
+    await row.getByTestId("state-row-grip").dragTo(targetRow, { targetPosition });
   }
-  async settingsStatesDragBelow(_source: string, _target: string): Promise<void> {
-    return todo("settingsStatesDragBelow");
+  async settingsStatesDragAbove(source: string, target: string): Promise<void> {
+    await this.dragStatesRow(source, target, "above");
   }
-  async settingsStatesDeleteDisabled(_name: string): Promise<boolean> {
-    return todo("settingsStatesDeleteDisabled");
+  async settingsStatesDragBelow(source: string, target: string): Promise<void> {
+    await this.dragStatesRow(source, target, "below");
   }
-  async settingsStatesDelete(_name: string): Promise<void> {
-    return todo("settingsStatesDelete");
+  private statesDeleteButton(name: string): Locator {
+    // The delete control's label carries the blocked reason as a suffix
+    // when it cannot fire; match the name prefix either way.
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return this.statesRowByName(name).getByRole("button", { name: new RegExp(`^Delete ${escaped}`) });
+  }
+  async settingsStatesDeleteDisabled(name: string): Promise<boolean> {
+    const row = this.statesRowByName(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    return this.statesDeleteButton(name).first().isDisabled();
+  }
+  async settingsStatesDelete(name: string): Promise<void> {
+    const row = this.statesRowByName(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    await this.statesDeleteButton(name).first().click({ timeout: 30_000 });
+    await this.page.getByTestId("state-delete-message").waitFor({ timeout: 30_000 });
   }
   async settingsStatesDeleteModalText(): Promise<string> {
-    return todo("settingsStatesDeleteModalText");
+    const message = this.page.getByTestId("state-delete-message");
+    if ((await message.count()) === 0) return "";
+    return (
+      (await message
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
   async settingsStatesDeleteConfirm(): Promise<void> {
-    return todo("settingsStatesDeleteConfirm");
+    const message = this.page.getByTestId("state-delete-message");
+    await message.waitFor({ timeout: 30_000 });
+    await this.page.getByRole("button", { name: "Delete state", exact: true }).first().click({ timeout: 30_000 });
+    await message.waitFor({ state: "detached", timeout: 30_000 });
   }
   async settingsStatesDeleteCancel(): Promise<void> {
-    return todo("settingsStatesDeleteCancel");
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).first().click({ timeout: 30_000 });
+    await this.page.getByTestId("state-delete-message").waitFor({ state: "detached", timeout: 15_000 });
   }
   async settingsStatesAttemptDeleteConfirm(): Promise<void> {
-    return todo("settingsStatesAttemptDeleteConfirm");
+    const message = this.page.getByTestId("state-delete-message");
+    await message.waitFor({ timeout: 30_000 });
+    await this.page.getByRole("button", { name: "Delete state", exact: true }).first().click({ timeout: 30_000 });
   }
-  async settingsStatesMarkDefault(_name: string): Promise<void> {
-    return todo("settingsStatesMarkDefault");
+  async settingsStatesMarkDefault(name: string): Promise<void> {
+    const row = this.statesRowByName(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    await row.getByTestId("state-promote").first().click({ timeout: 30_000 });
   }
-  async settingsStatesIsDefault(_name: string): Promise<boolean> {
-    return todo("settingsStatesIsDefault");
+  async settingsStatesIsDefault(name: string): Promise<boolean> {
+    const row = this.statesRowByName(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    return (await row.getByTestId("state-default-marker").count()) > 0;
   }
   async settingsStatesMemberToggleVisible(): Promise<boolean> {
-    return todo("settingsStatesMemberToggleVisible");
+    return (await this.page.getByTestId("state-member-editing").count()) > 0;
   }
   async settingsStatesMemberToggleOn(): Promise<boolean> {
-    return todo("settingsStatesMemberToggleOn");
+    const toggle = this.page.getByTestId("state-member-editing-switch").first();
+    await toggle.waitFor({ timeout: 30_000 });
+    return (await toggle.getAttribute("aria-checked")) === "true";
   }
-  async settingsStatesSetMemberToggle(_on: boolean): Promise<void> {
-    return todo("settingsStatesSetMemberToggle");
+  async settingsStatesSetMemberToggle(on: boolean): Promise<void> {
+    const toggle = this.page.getByTestId("state-member-editing-switch").first();
+    await toggle.waitFor({ timeout: 30_000 });
+    const current = (await toggle.getAttribute("aria-checked")) === "true";
+    if (current !== on) await toggle.click({ timeout: 30_000 });
   }
   async settingsStatesAccessDenied(): Promise<boolean> {
-    return todo("settingsStatesAccessDenied");
+    // Either the settings not-authorized card or the project-level join
+    // restriction counts as denied; outsiders land on the latter.
+    const notAuthorized = await this.page
+      .getByRole("heading", { name: /not authorized/i })
+      .first()
+      .count();
+    if (notAuthorized > 0) return true;
+    return (
+      (await this.page
+        .getByRole("heading", { name: /don.t have access/i })
+        .first()
+        .count()) > 0
+    );
   }
   async settingsStatesSkeletonVisible(): Promise<boolean> {
-    return todo("settingsStatesSkeletonVisible");
+    const bones = this.page.getByTestId("states-skeleton").locator(":scope > *");
+    if ((await bones.count()) < 4) return false;
+    return bones.first().isVisible();
   }
-  async settingsStatesDelayLoad(_ms: number): Promise<void> {
-    return todo("settingsStatesDelayLoad");
+  async settingsStatesDelayLoad(ms: number): Promise<void> {
+    // Hold the states-list answers (project and workspace alike, since
+    // either one lets the store render) so the loading state stays up
+    // long enough to observe; writes pass through untouched.
+    const hold = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue();
+    };
+    await this.page.route("**/api/workspaces/*/projects/*/states/", hold);
   }
-  async settingsStatesEmptyNote(_group: string): Promise<string> {
-    return todo("settingsStatesEmptyNote");
+  async settingsStatesEmptyNote(group: string): Promise<string> {
+    const note = this.statesGroupCard(group).getByTestId("state-group-empty");
+    if ((await note.count()) === 0) return "";
+    return (
+      (await note
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   // --- Project settings labels gaps (NEWFRONT-392, PSET-036–042). ---
@@ -35929,98 +36123,280 @@ export class WebNewDriver implements ParityDriver {
       .toBe(0);
   }
 
-  // --- Project settings General tab (NEWFRONT-389, PSET-005–012). Throwing
-  // --- stubs per the shared driver contract; the new app implements them later.
-  async settingsGeneralOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("settingsGeneralOpen");
+  // --- Project settings General tab (NEWFRONT-389, PSET-005–012; new-app
+  // --- surface NEWFRONT-606). Selectors follow the slice testids
+  // --- (general-*, project-settings-general*).
+  private generalSettingsForm() {
+    return this.page.locator('form[data-testid="project-settings-general"]');
+  }
+
+  private generalSettingsFieldId(field: SettingsGeneralField): string {
+    switch (field) {
+      case "name":
+        return "name";
+      case "description":
+        return "description";
+      case "identifier":
+        return "identifier";
+      case "repoUrl":
+        return "repoUrl";
+      case "baseBranch":
+        return "baseBranch";
+      case "budget":
+        return "agent_default_max_ticks";
+    }
+  }
+
+  async settingsGeneralOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the form itself; the skeleton precedes it while the
+    // details fetch resolves, and the wait below rides that out.
+    await this.page.locator("#name").first().waitFor({ state: "visible", timeout: 60_000 });
   }
   async settingsGeneralFormVisible(): Promise<boolean> {
-    return todo("settingsGeneralFormVisible");
+    return (await this.generalSettingsForm().count()) > 0 && (await this.page.locator("#name").count()) > 0;
   }
   async settingsGeneralSkeletonVisible(): Promise<boolean> {
-    return todo("settingsGeneralSkeletonVisible");
+    // No waiting here: pollers sample this on a tight loop, and a blocking
+    // wait would stride right past the loading window.
+    return (await this.page.locator('[data-testid="project-settings-general-skeleton"]').count()) > 0;
   }
   async settingsGeneralDangerVisible(): Promise<boolean> {
-    return todo("settingsGeneralDangerVisible");
+    return (await this.page.locator('[data-testid="general-danger-zone"]').count()) > 0;
   }
   async settingsGeneralFormDimmed(): Promise<boolean> {
-    return todo("settingsGeneralFormDimmed");
+    const form = this.generalSettingsForm().first();
+    if ((await form.count()) === 0) return false;
+    const cls = await form.getAttribute("class");
+    return (cls ?? "").includes("opacity-60");
   }
-  async settingsGeneralFieldValue(_field: SettingsGeneralField): Promise<string> {
-    return todo("settingsGeneralFieldValue");
+  async settingsGeneralFieldValue(field: SettingsGeneralField): Promise<string> {
+    const input = this.page.locator(`#${this.generalSettingsFieldId(field)}`).first();
+    await input.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return await input.inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
-  async settingsGeneralFieldDisabled(_field: SettingsGeneralField): Promise<boolean> {
-    return todo("settingsGeneralFieldDisabled");
+  async settingsGeneralFieldDisabled(field: SettingsGeneralField): Promise<boolean> {
+    const input = this.page.locator(`#${this.generalSettingsFieldId(field)}`).first();
+    await input.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    return await input.isDisabled();
   }
-  async settingsGeneralFieldError(_field: SettingsGeneralField): Promise<string> {
-    return todo("settingsGeneralFieldError");
+  async settingsGeneralFieldError(field: SettingsGeneralField): Promise<string> {
+    // Kit fields render errors as #{fieldId}-error alerts; description
+    // carries no error slot, so the probe reads empty there.
+    const error = this.page.locator(`#${this.generalSettingsFieldId(field)}-error`).first();
+    if ((await error.count()) === 0) return "";
+    return ((await error.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
-  async settingsGeneralFill(_field: SettingsGeneralField, _value: string): Promise<void> {
-    return todo("settingsGeneralFill");
+  async settingsGeneralFill(field: SettingsGeneralField, value: string): Promise<void> {
+    const input = this.page.locator(`#${this.generalSettingsFieldId(field)}`).first();
+    await input.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await input.fill(value, { timeout: WebNewDriver.WAIT_MS });
   }
   async settingsGeneralCoverVisible(): Promise<boolean> {
-    return todo("settingsGeneralCoverVisible");
+    // Target per main#523: the banner carries only the emblem mark and the
+    // headline — no cover image and no Change-cover control. The mark image
+    // (an uploaded emblem) is excluded: it is the PSET-007 emblem, not a cover.
+    const banner = this.page.locator('[data-testid="general-banner"]').first();
+    if ((await banner.count()) === 0) return false;
+    if ((await banner.getByRole("button", { name: /cover/i }).count()) > 0) return true;
+    return (await banner.locator('img:not([data-testid="project-mark-image"])').count()) > 0;
   }
   async settingsGeneralHeaderText(): Promise<string> {
-    return todo("settingsGeneralHeaderText");
+    const banner = this.page.locator('[data-testid="general-banner"]').first();
+    await banner.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await banner.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
   async settingsGeneralNetworkText(): Promise<string> {
-    return todo("settingsGeneralNetworkText");
+    const network = this.page.getByTestId("general-network").first();
+    await network.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await network.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
   async settingsGeneralTimezoneText(): Promise<string> {
-    return todo("settingsGeneralTimezoneText");
+    const timezone = this.page.getByTestId("general-timezone").first();
+    await timezone.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await timezone.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
   async settingsGeneralCreatedText(): Promise<string> {
-    return todo("settingsGeneralCreatedText");
+    const created = this.page.getByTestId("general-created").first();
+    await created.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await created.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
+  /** Executor kinds to the labels the target picker shows (mirrors EXECUTOR_OPTIONS). */
+  private static readonly generalExecutorLabels: Record<string, string> = {
+    local_runner: "Local runner",
+    cloud_agent: "Cloud agent",
+    managed_runner: "Desktop agent",
+  };
+
+  private generalExecutorListbox() {
+    return this.page.getByRole("listbox", { name: "Default execution target" });
+  }
+
   async settingsGeneralExecutorValue(): Promise<string> {
-    return todo("settingsGeneralExecutorValue");
+    // The trigger reads the label; the contract wants the kind.
+    const shown = this.page.getByTestId("general-executor").first();
+    await shown.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const label = ((await shown.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    const entries = Object.entries(WebNewDriver.generalExecutorLabels);
+    return entries.find(([, shown2]) => shown2 === label)?.[0] ?? label;
   }
-  async settingsGeneralExecutorOptionDisabled(_value: string): Promise<boolean> {
-    return todo("settingsGeneralExecutorOptionDisabled");
+  async settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean> {
+    const label = WebNewDriver.generalExecutorLabels[value] ?? value;
+    await this.page.getByTestId("general-executor-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    const option = this.generalExecutorListbox().getByRole("option", { name: label });
+    await option.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const disabled = await option.isDisabled();
+    await this.page.keyboard.press("Escape");
+    await this.generalExecutorListbox().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    return disabled;
   }
-  async settingsGeneralSetExecutor(_value: string): Promise<void> {
-    return todo("settingsGeneralSetExecutor");
+  async settingsGeneralSetExecutor(value: string): Promise<void> {
+    const label = WebNewDriver.generalExecutorLabels[value] ?? value;
+    await this.page.getByTestId("general-executor-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.generalExecutorListbox().getByRole("option", { name: label }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.generalExecutorListbox().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsGeneralTickingOn(): Promise<boolean> {
-    return todo("settingsGeneralTickingOn");
+    const toggle = this.page.getByTestId("general-ticking");
+    await toggle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await toggle.getAttribute("aria-checked")) === "true";
   }
-  async settingsGeneralSetTicking(_on: boolean): Promise<void> {
-    return todo("settingsGeneralSetTicking");
+  async settingsGeneralSetTicking(on: boolean): Promise<void> {
+    if ((await this.settingsGeneralTickingOn()) === on) return;
+    await this.page.getByTestId("general-ticking").click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.settingsGeneralTickingOn(), { timeout: WebNewDriver.WAIT_MS }).toBe(on);
   }
   async settingsGeneralBudgetValue(): Promise<string> {
-    return todo("settingsGeneralBudgetValue");
+    const input = this.page.locator("#agent_default_max_ticks").first();
+    await input.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return await input.inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
-  async settingsGeneralSetBudget(_value: string): Promise<void> {
-    return todo("settingsGeneralSetBudget");
+  async settingsGeneralSetBudget(value: string): Promise<void> {
+    // Typed keystrokes, not fill: React number inputs can desync from a
+    // programmatic fill (the DOM shows the digits while the form holds the
+    // old value), which would silently validate and save the wrong budget.
+    const input = this.page.locator("#agent_default_max_ticks").first();
+    await input.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await input.click({ timeout: WebNewDriver.WAIT_MS });
+    await input.press("ControlOrMeta+a", { timeout: WebNewDriver.WAIT_MS });
+    if (value === "") {
+      await input.press("Backspace", { timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await input.pressSequentially(value, { timeout: WebNewDriver.WAIT_MS });
+    }
   }
-  async settingsGeneralSetNoCap(_on: boolean): Promise<void> {
-    return todo("settingsGeneralSetNoCap");
+  async settingsGeneralSetNoCap(on: boolean): Promise<void> {
+    const box = this.page.getByTestId("general-nocap");
+    await box.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    await box.setChecked(on, { timeout: WebNewDriver.WAIT_MS });
   }
   async settingsGeneralCadenceText(): Promise<string> {
-    return todo("settingsGeneralCadenceText");
+    const cadence = this.page.getByTestId("general-cadence").first();
+    await cadence.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await cadence.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
-  async settingsGeneralSetCadence(_label: string): Promise<void> {
-    return todo("settingsGeneralSetCadence");
+  async settingsGeneralSetCadence(label: string): Promise<void> {
+    await this.page.getByTestId("general-cadence-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    const listbox = this.page.getByRole("listbox", { name: "Run cadence" });
+    await listbox.getByRole("option", { name: label }).click({ timeout: WebNewDriver.WAIT_MS });
+    await listbox.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsGeneralSave(): Promise<void> {
-    return todo("settingsGeneralSave");
+    const submit = this.generalSettingsForm().getByRole("button", { name: /^(Update project|Updating)$/ });
+    await submit.click({ timeout: WebNewDriver.WAIT_MS });
+    // A save that starts flips the button to its loading label; a save
+    // blocked by client-side validation never does. Either way this
+    // resolves once the button is back at rest (or never left it).
+    await this.generalSettingsForm()
+      .getByRole("button", { name: "Updating" })
+      .waitFor({ state: "hidden", timeout: 30_000 })
+      .catch(() => {});
+    await this.page.waitForTimeout(500);
   }
   async settingsGeneralBindState(): Promise<"bound" | "bind"> {
-    return todo("settingsGeneralBindState");
+    const bound = this.page.getByTestId("general-repo-bound");
+    if ((await bound.count()) > 0 && (await bound.first().isDisabled())) return "bound";
+    return "bind";
   }
   async settingsGeneralBind(): Promise<void> {
-    return todo("settingsGeneralBind");
+    // The click either fires no request (empty input toasts client-side) or
+    // exactly one bind POST. The response and the toast race: toasts
+    // auto-dismiss, so each poll iteration checks the response first and
+    // the toast second, and whichever shows first settles the click.
+    let response: { status(): number } | null = null;
+    void this.page
+      .waitForResponse((seen) => seen.url().includes("/repository/bind/") && seen.request().method() === "POST", {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .then(
+        (seen) => {
+          response = seen;
+        },
+        () => {
+          response = null;
+        }
+      );
+    await this.page.getByTestId("general-repo-bind").click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(
+        async () => {
+          if (response !== null) return "response";
+          return (await this.rulesLastToast()) === null ? "waiting" : "toast";
+        },
+        { timeout: 30_000 }
+      )
+      .not.toBe("waiting");
+    if (response === null) {
+      // No request fired: the client-side refusal already toasted.
+      return;
+    }
+    if (response.status() === 401) {
+      // The provider-credential 401 trips the global session interceptor:
+      // full reload to / and back onto the tab via next_path (NEWFRONT-395,
+      // reproduced from the oracle). The load event belongs to the / hop;
+      // the form wait below rides the client-side hop back.
+      await this.page.waitForEvent("load", { timeout: 30_000 }).catch(() => {});
+      await this.page.locator("#name").first().waitFor({ state: "visible", timeout: 60_000 });
+      return;
+    }
+    // Settles on the bound pill (success) or a toast (refusal); the spec
+    // asserts which one it got.
+    await expect
+      .poll(
+        async () => {
+          if ((await this.settingsGeneralBindState()) === "bound") return "bound";
+          return (await this.rulesLastToast()) === null ? "waiting" : "toast";
+        },
+        { timeout: 30_000 }
+      )
+      .not.toBe("waiting");
   }
   async settingsGeneralEmblemOpen(): Promise<void> {
-    return todo("settingsGeneralEmblemOpen");
+    await this.page.getByTestId("general-emblem-open").click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.settingsGeneralEmblemPickerVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
   async settingsGeneralEmblemPickerVisible(): Promise<boolean> {
-    return todo("settingsGeneralEmblemPickerVisible");
+    return (await this.page.getByTestId("general-emblem-picker").count()) > 0;
   }
-  async settingsGeneralEmblemPick(_char: string): Promise<void> {
-    return todo("settingsGeneralEmblemPick");
+  async settingsGeneralEmblemPick(char: string): Promise<void> {
+    const dialog = this.page.getByTestId("general-emblem-picker");
+    // The picker opens on the draft's own kind; emblems need the Emoji tab.
+    await dialog.getByTestId("general-emblem-tab-emoji").click({ timeout: WebNewDriver.WAIT_MS });
+    // Typing the glyph itself narrows the alphabet onto it, or surfaces
+    // the typed-extra entry when the catalogue lacks it.
+    await dialog.getByLabel("Search").fill(char, { timeout: WebNewDriver.WAIT_MS });
+    const choice = dialog.getByRole("button", { name: char, exact: true });
+    if ((await choice.count()) > 0) {
+      await choice.first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await dialog.getByTestId("general-emblem-typed").click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
+  // Cover picker actions (NEWFRONT-606): the new app renders no cover
+  // control at all (target per main#523), so these stay throwing stubs —
+  // the target branches never call them, and any other caller fails loud.
   async settingsGeneralCoverOpen(): Promise<void> {
     return todo("settingsGeneralCoverOpen");
   }
@@ -36037,19 +36413,44 @@ export class WebNewDriver implements ParityDriver {
     return todo("settingsGeneralCoverUpload");
   }
   async settingsGeneralOpenDelete(): Promise<void> {
-    return todo("settingsGeneralOpenDelete");
+    await this.page
+      .locator('[data-testid="general-danger-zone"]')
+      .getByRole("button", { name: "Delete", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("dialog", { name: "Delete project" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
-  async settingsGeneralFillDeleteName(_text: string): Promise<void> {
-    return todo("settingsGeneralFillDeleteName");
+  async settingsGeneralFillDeleteName(text: string): Promise<void> {
+    // Scoped to the dialog: the general form behind it carries an input
+    // with the same placeholder.
+    await this.page
+      .getByRole("dialog", { name: "Delete project" })
+      .getByPlaceholder("Project name")
+      .fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
   async settingsGeneralConfirmModalText(): Promise<string> {
-    return todo("settingsGeneralConfirmModalText");
+    // Heading plus body in one read; "" while the dialog is closed so
+    // pollers can wait on its content. No waiting here: pollers sample
+    // this on a tight loop.
+    const modal = this.page.getByRole("dialog").first();
+    if ((await modal.count()) === 0) return "";
+    return ((await modal.innerText()) ?? "").trim();
   }
+  // The details-carrying project fetches only (single, bulk, bare list):
+  // sub-resource reads such as membership stay live so the auth wrapper
+  // keeps passing children through and the tab itself shows its loader.
+  private static readonly generalSettingsProjectsRoute = /\/api\/workspaces\/[^/]+\/projects(\/[^/]*\/?)?(\?|$)/;
+
   async settingsGeneralStallDetails(): Promise<void> {
-    return todo("settingsGeneralStallDetails");
+    // Abort the details-carrying fetches so the tab cannot leave its
+    // skeleton (membership and other sub-resources stay live, so the auth
+    // wrapper still renders the tab). Loading-state scenarios only;
+    // always pair with the release below.
+    await this.page.route(WebNewDriver.generalSettingsProjectsRoute, (route) => route.abort());
   }
   async settingsGeneralReleaseStall(): Promise<void> {
-    return todo("settingsGeneralReleaseStall");
+    await this.page.unroute(WebNewDriver.generalSettingsProjectsRoute);
   }
   async settingsGeneralStallCoverUpload(): Promise<void> {
     return todo("settingsGeneralStallCoverUpload");
