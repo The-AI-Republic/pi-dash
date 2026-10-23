@@ -1535,3 +1535,43 @@ def test_soft_delete_entry_models_ack(
         assert _column_is_null(
             db_conn, "agent_run", extra["agent_run_id"], "scheduler_binding_id"
         ), "SET_NULL broken: agent_run still points at the stamped binding"
+
+
+def test_sync_description_version_large_workspace(db_conn, broker_url):
+    """Backfill over >4369 live issues in one workspace (PIDASHCONV-1294).
+
+    Django source: `pi_dash/bgtasks/issue_description_version_sync.py:40-120`.
+    The sync writes one multi-row INSERT per workspace group at the
+    default batch_size; with 4,400 live issues the Rust port exceeded
+    sqlx's u16 bind-param cap and wrote nothing. `batch_size` is omitted
+    so both backends use their default (5000); `offset` starts at the
+    pre-seed total so the window covers exactly the new rows.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.bulk_issues(db_conn, f"1294desc-{tag}", 4400)
+    wid = chain["workspace"]["id"]
+    celery_wire.publish(
+        f"{M}.issue_description_version_sync.sync_issue_description_version",
+        kwargs={"offset": chain["pre_total"], "countdown": 300},
+    )
+
+    def _done():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM issue_description_versions"
+                " WHERE workspace_id = %s::uuid",
+                (str(wid),),
+            )
+            n = cur.fetchone()["n"]
+            return n if n == 4400 else None
+
+    wait_for(_done, what="4400 description versions written")
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM ("
+            " SELECT issue_id FROM issue_description_versions"
+            " WHERE workspace_id = %s::uuid GROUP BY issue_id HAVING COUNT(*) = 1"
+            ") one",
+            (str(wid),),
+        )
+        assert cur.fetchone()["n"] == 4400

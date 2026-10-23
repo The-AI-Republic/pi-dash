@@ -2212,3 +2212,40 @@ def test_rust_soft_delete_entry_models_ack(
         assert _column_is_null(
             db_conn, "agent_run", extra["agent_run_id"], "scheduler_binding_id"
         ), "SET_NULL parity broken: agent_run still points at the stamped binding"
+
+
+def test_rust_sync_description_version_large_workspace(db_conn, broker_url):
+    """Rust replay of `test_sync_description_version_large_workspace`.
+
+    Same seeds and assertions through `rust_queue`: 4,400 live issues in
+    one workspace, sync at the default batch_size, exactly one
+    `issue_description_versions` row per seeded issue (PIDASHCONV-1294).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.bulk_issues(db_conn, f"1294rdesc-{tag}", 4400)
+    wid = chain["workspace"]["id"]
+    rust_queue.publish(
+        f"{M}.issue_description_version_sync.sync_issue_description_version",
+        kwargs={"offset": chain["pre_total"], "countdown": 300},
+    )
+
+    def _done():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM issue_description_versions"
+                " WHERE workspace_id = %s::uuid",
+                (str(wid),),
+            )
+            n = cur.fetchone()["n"]
+            return n if n == 4400 else None
+
+    wait_for(_done, what="4400 description versions written")
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM ("
+            " SELECT issue_id FROM issue_description_versions"
+            " WHERE workspace_id = %s::uuid GROUP BY issue_id HAVING COUNT(*) = 1"
+            ") one",
+            (str(wid),),
+        )
+        assert cur.fetchone()["n"] == 4400
