@@ -315,6 +315,9 @@
     "get",
     "patch"
   ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/runners/": [
+    "get"
+  ],
   "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": [
     "get"
   ],
