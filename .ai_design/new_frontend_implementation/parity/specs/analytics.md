@@ -500,6 +500,16 @@ All four analytics exports — workspace chart table, workspace state-breakdown
 table, dialog chart table, dialog assignee table — use the same builder and
 the file name `{workspaceSlug}-analytics.csv`.
 
+Ownership of that builder (corrected at the exports split's review,
+2026-10-20): the one module is `apps/web_new/src/shared/export/csv.ts`.
+NEWFRONT-735 owns its table chrome and the first cut of the serializer,
+including the dash fallback exercised by ANL-016. NEWFRONT-769 is blocked by
+735, adopts that file, and owns the export rules exercised through the two
+oracle tables (insight and chart drill-down, where
+`analyticsExportButtonCount() === 2`). Neither creates a second module. A rule
+735 shipped differently is changed by 769 in that shared file in one change.
+The exports area spec (`exports.md` §0.2) records the same boundary.
+
 The file is UTF-8 with a byte-order mark, CRLF record separators, comma field
 separators, and a header row. Quote text fields when they contain a comma,
 quote, CRLF or leading/trailing whitespace; escape embedded quotes by doubling.
@@ -806,8 +816,8 @@ must not alter the production request or response shape.
   (Blob, object URL, anchor, revoke) by extracting or calling a shared helper;
   do not duplicate the anchor plumbing. The builder must be injectable for unit
   tests and must implement BOM, CRLF, quoting, dash fallback and the zero-row
-  no-download rule. NEWFRONT-769 can later extend this builder; it must not
-  replace it with a second implementation.
+  no-download rule. NEWFRONT-769 owns the later export-rule changes in this
+  same file; it must not replace it with a second implementation.
 - Skeleton rows use kit `Skeleton`. Empty guidance uses kit `EmptyState`
   section variant.
 
