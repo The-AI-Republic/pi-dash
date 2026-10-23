@@ -174,26 +174,6 @@ pub fn resolve_workspace_logo_url<'a>(
     }
 }
 
-/// Port of `Project.cover_image_url` (`db/models/project.py:176-184`):
-/// same precedence as [`resolve_workspace_logo_url`] over
-/// `cover_image_asset` / `cover_image` (`TextField(null=True)`).
-///
-/// Expected canonical home is L1 (PIDASHCONV-563, `ProjectLiteSerializer`);
-/// defined here so the nested project renders without re-deriving it.
-pub fn resolve_project_cover_image_url<'a>(
-    cover_image_asset_attached: bool,
-    cover_image_asset_url: Option<&'a str>,
-    cover_image: Option<&'a str>,
-) -> Option<&'a str> {
-    if cover_image_asset_attached {
-        return cover_image_asset_url;
-    }
-    match cover_image {
-        Some(url) if !url.is_empty() => Some(url),
-        _ => None,
-    }
-}
-
 /// A `Workspace` row for lite rendering (`workspace.py:79-83`): `name` /
 /// `slug` are non-null (`db/models/workspace.py:122,134`); `logo_url` is
 /// the resolved [`resolve_workspace_logo_url`] value.
@@ -1057,17 +1037,6 @@ mod tests {
         );
         assert_eq!(
             resolve_workspace_logo_url(true, None, Some("https://logo")),
-            None,
-            "attached asset with no URL does not fall through"
-        );
-        assert_eq!(resolve_project_cover_image_url(false, None, None), None);
-        assert_eq!(resolve_project_cover_image_url(false, None, Some("")), None);
-        assert_eq!(
-            resolve_project_cover_image_url(false, None, Some("https://cover")),
-            Some("https://cover")
-        );
-        assert_eq!(
-            resolve_project_cover_image_url(true, None, Some("https://cover")),
             None,
             "attached asset with no URL does not fall through"
         );

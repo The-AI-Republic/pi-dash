@@ -1657,7 +1657,6 @@ def test_rust_workspace_seed_before_after(db_conn, broker_url):
     assert project["identifier"] == expected_identifier
     assert project["description"] == seed_projects[0]["description"]
     assert project["network"] == seed_projects[0]["network"]
-    assert project["cover_image"] == seed_projects[0]["cover_image"]
     assert project["logo_props"] == seed_projects[0]["logo_props"]
     assert project["is_default"] is True
     assert project["timezone"] == workspace["timezone"]
@@ -1968,7 +1967,6 @@ def test_rust_dummy_data_before_after(db_conn, broker_url):
     assert project["identifier"] != ""
     assert project["project_lead_id"] is None
     assert project["default_state_id"] is None
-    assert project["cover_image"] is None
     assert project["logo_props"] == {}
     assert project["estimate_id"] is None
     assert project["is_default"] is True
