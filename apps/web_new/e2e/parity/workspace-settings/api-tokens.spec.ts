@@ -117,8 +117,11 @@ test(
         await driver.wsSettingsApiTokenOpenTokens(sessionBrowserCookies(member.session));
         expect(await driver.wsSettingsApiTokenAddVisible()).toBe(true);
         expect(await driver.wsSettingsApiTokenEmptyVisible()).toBe(false);
-        const rows = await driver.wsSettingsApiTokenRows();
-        expect(rows.map((row) => row.label).sort()).toEqual([first, second].sort());
+        // The list paints after hydration; a single read can land between
+        // the empty shell and the rows, so wait for the labels to land.
+        await expect
+          .poll(async () => (await driver.wsSettingsApiTokenRows()).map((row) => row.label).sort(), { timeout: 30_000 })
+          .toEqual([first, second].sort());
         expect(await driver.wsSettingsApiTokenPageText()).toContain(first);
       });
     } finally {

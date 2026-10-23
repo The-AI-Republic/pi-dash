@@ -298,6 +298,10 @@ test(
       await test.step("two rows with distinct roles send and appear as pending", async () => {
         const emailA = uniqueEmail("nf411-inv-a");
         const emailB = uniqueEmail("nf411-inv-b");
+        // The shared scratch workspace can carry other runs' pending
+        // invitations, so the group is asserted relative to what shows
+        // before this submit.
+        const invitesBefore = new Set(await driver.wsSettingsInvitesVisibleEmails());
         await driver.wsSettingsInviteFillRow(0, emailA);
         await driver.wsSettingsInviteSetRowRole(0, "Guest");
         await driver.wsSettingsInviteAddRow();
@@ -307,8 +311,13 @@ test(
         expect(await driver.wsSettingsInviteVisible()).toBe(false);
         await expect.poll(() => toastMessage(driver), { timeout: 30_000 }).toContain("Invitations sent");
         expect(await driver.wsSettingsInvitesGroupVisible()).toBe(true);
-        expect(await driver.wsSettingsInvitesCount()).toBe(2);
-        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(new Set([emailA, emailB]));
+        await expect
+          .poll(() => driver.wsSettingsInvitesVisibleEmails(), { timeout: 30_000 })
+          .toEqual(expect.arrayContaining([emailA, emailB]));
+        expect(await driver.wsSettingsInvitesCount()).toBe(invitesBefore.size + 2);
+        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(
+          new Set([...invitesBefore, emailA, emailB])
+        );
         expect(await driver.wsSettingsInviteRole(emailA)).toBe("Guest");
         expect(await driver.wsSettingsInviteRole(emailB)).toBe("Admin");
         const server = await serverWorkspaceInvitations(seed.workspaceSlug, session);
@@ -363,14 +372,30 @@ test(
     );
     const idA = seeded.find((row) => row.email === emailA)?.id ?? "";
     const idB = seeded.find((row) => row.email === emailB)?.id ?? "";
+    // Other runs can leave pending invitations in the shared workspace,
+    // so this scenario asserts its own rows against what the group shows
+    // before its setup invites land. The UI baseline is taken first: the
+    // list endpoint also returns withdrawn rows, so a server-side count
+    // would overstate the group.
+    let invitesBefore = new Set<string>();
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await adminOpen(driver, seed.workspaceSlug);
+      // The setup invites are already listed here, so the baseline is
+      // whatever preceded them.
+      invitesBefore = new Set(
+        (await driver.wsSettingsInvitesVisibleEmails()).filter((email) => email !== emailA && email !== emailB)
+      );
 
       await test.step("group lists pending invitations with roles", async () => {
         await expect.poll(() => driver.wsSettingsInvitesGroupVisible(), { timeout: 30_000 }).toBe(true);
-        expect(await driver.wsSettingsInvitesCount()).toBe(2);
-        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(new Set([emailA, emailB]));
+        await expect
+          .poll(() => driver.wsSettingsInvitesVisibleEmails(), { timeout: 30_000 })
+          .toEqual(expect.arrayContaining([emailA, emailB]));
+        expect(await driver.wsSettingsInvitesCount()).toBe(invitesBefore.size + 2);
+        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(
+          new Set([...invitesBefore, emailA, emailB])
+        );
         expect(await driver.wsSettingsInviteRole(emailA)).toBe("Member");
         expect(await driver.wsSettingsInviteRole(emailB)).toBe("Guest");
       });
@@ -382,7 +407,9 @@ test(
         expect(await driver.wsSettingsInvitesVisibleEmails()).toEqual([]);
         await driver.wsSettingsInvitesToggleGroup();
         expect(await driver.wsSettingsInvitesExpanded()).toBe(true);
-        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(new Set([emailA, emailB]));
+        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(
+          new Set([...invitesBefore, emailA, emailB])
+        );
       });
 
       await test.step("search matches pending invitations by email", async () => {
@@ -390,7 +417,9 @@ test(
         expect(await driver.wsSettingsInvitesVisibleEmails()).toEqual([emailA]);
         expect(await driver.wsSettingsMembersVisibleEmails()).toEqual([]);
         await driver.wsSettingsMembersSearch("");
-        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(new Set([emailA, emailB]));
+        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(
+          new Set([...invitesBefore, emailA, emailB])
+        );
       });
 
       await test.step("invitation roles change and persist", async () => {
