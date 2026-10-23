@@ -365,13 +365,15 @@ The dialog asks for (CYC-014, CYC-015):
   as a toast;
 - a description, optional, plain text and long enough for the project's
   normal description needs;
-- a start date and an end date, both optional. **One date alone is
-  accepted**: the reference form and the backend both allow a cycle with
-  only a start or only an end (the form's overlap check simply does not
-  run unless both are present, and the payload sends the other as
-  null). Do not add a both-or-none rule. The past is not selectable for
-  the start date (today is allowed); the end date cannot precede the
-  start date. The dialog heading is **"Create cycle"** (edit uses
+- a start date and an end date, both optional. On **create** the range
+  is both-or-neither: the create endpoint refuses a single date (400),
+  so the dialog refuses a one-sided range inline, before any request,
+  with the input intact. A single date alone is accepted only on
+  **edit** (§7), where PATCH allows it and stored one-sided cycles must
+  stay editable. The overlap check never runs unless both dates are
+  present. The past is not selectable for the start date (today is
+  allowed); the end date cannot precede the start date. The dialog
+  heading is **"Create cycle"** (edit uses
   **"Update cycle"**), and the footer's confirm control is the button
   **"Create cycle"** on create / **"Update cycle"** on edit, next to a
   **"Cancel"** button; the oracle waits for those headings and button
@@ -1475,7 +1477,7 @@ or wrongly. Slices must build exactly these:
 | CYC-004, CYC-005                   | The live search box opens **unfocused** (no deferred focus "fix"); the archived box opens focused. The expanded input's placeholder is exactly `Search`. §3, §9.                                                                                                                                                                                                                                                                                     |
 | CYC-006, CYC-007, CYC-008          | Filter labels are fixed: `Status of the cycle` with `In progress` / `Yet to start` / `Completed` / `Draft`; both date sections use `1 week from now` … `2 months from now` plus `Custom`; chips row has a `clear all` action. §4.                                                                                                                                                                                                                    |
 | CYC-009, CYC-010, CYC-011, CYC-013 | Empty-state labels are fixed: `No matching cycles` + `Remove the filters to see all cycles` / `Remove the search criteria to see all cycles`; `Manage features`; `Set your first cycle`; `View other cycles`; archived zero is `No archived cycles yet`. §5, §9.                                                                                                                                                                                     |
-| CYC-014, CYC-015, CYC-016          | Create dialog: header button `Add cycle`; heading and submit `Create cycle`; placeholders `Title`/`Description`/`Start date`/`End date`; a **one-sided** date range is valid (no both-or-none rule); overlap toast is `Error!` + "you already have a cycle" + draft guidance. §6.                                                                                                                                                                    |
+| CYC-014, CYC-015, CYC-016          | Create dialog: header button `Add cycle`; heading and submit `Create cycle`; placeholders `Title`/`Description`/`Start date`/`End date`; create refuses a **one-sided** range inline (the endpoint demands both-or-neither) while edit accepts one; overlap toast is `Error!` + "you already have a cycle" + draft guidance. §6, §7.                                                                                                                 |
 | CYC-017                            | Edit dialog heading and submit are `Update cycle`; success toast `Cycle updated successfully.`; untouched dates send no date check. §7.                                                                                                                                                                                                                                                                                                              |
 | CYC-022                            | Delete dialog heading is `Delete cycle`; success `Cycle deleted successfully.`; a 403 shows the permission toast (`You don't have permission to perform this action.`), never `Failed to delete cycle`. §8.                                                                                                                                                                                                                                          |
 | CYC-024, CYC-025, CYC-026          | Archive: hint `Only completed cycles can be archived`, dialog `Archive cycle {name}`, toast title `Archive success` + `Your archives can be found in project archives.`, and a return to the live list. Restore: direct action, `Cycle restored` + `The cycle has been restored.`, failure `Cycle restore failed`. §9.                                                                                                                               |

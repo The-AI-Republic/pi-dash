@@ -47,6 +47,7 @@ import {
   CyclesListHeader,
   CyclesListScreen,
   needsCycleDateCheck,
+  validateCycleRange,
   validateCycleTitle,
   CyclesListSkeleton,
   CyclesLoadError,
@@ -174,6 +175,7 @@ describe("cycles barrel", () => {
     expect(cycleDaysComplete).toBeDefined();
     expect(cycleDaysUnchanged).toBeDefined();
     expect(needsCycleDateCheck).toBeDefined();
+    expect(validateCycleRange).toBeDefined();
     expect(cycleOverlapMessage).toBeDefined();
     expect(cycleFailureMessage).toBeDefined();
   });

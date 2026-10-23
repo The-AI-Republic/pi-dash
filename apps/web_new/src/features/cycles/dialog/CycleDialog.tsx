@@ -9,11 +9,12 @@
 // never moves project). Opening resets the form. Create success closes,
 // toasts, remembers the all-cycles tab and refreshes the shared cycle
 // reads; an overlap refusal toasts the draft workaround and keeps the
-// dialog open; any other failure shows inline with the input intact.
+// dialog open; a one-sided create range is refused inline before any
+// request; any other failure shows inline with the input intact.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { checkCycleDates, createCycle, updateCycle, type CycleRow } from "@pidash/api-client";
-import { Button, Dialog, Input, Textarea } from "@pidash/kit";
+import { checkCycleDates, createCycle, updateCycle, type CycleRow, type ProjectDetails } from "@pidash/api-client";
+import { Button, Dialog, Input, Spinner, Textarea } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -30,6 +31,7 @@ import {
   cycleFormDays,
   cycleOverlapMessage,
   needsCycleDateCheck,
+  validateCycleRange,
 } from "./cycleRange.js";
 import { validateCycleTitle } from "./cycleTitle.js";
 
@@ -105,19 +107,44 @@ type SaveCycleFormProps =
   | (SaveCycleFormBase & { mode: "create"; cycle?: undefined })
   | (SaveCycleFormBase & { mode: "update"; cycle: CycleRow });
 
+/**
+ * The shared workspace details read. The update form mounts only after
+ * it resolves; create mounts at once and reads it reactively, so the
+ * value starts undefined there and after a failed read, degrading to
+ * system time per cycleDates.
+ */
+type SaveCycleFormBodyProps = SaveCycleFormProps & { projectDetails: ProjectDetails[] | undefined };
+
 function SaveCycleForm(props: SaveCycleFormProps): React.ReactElement {
-  const { onOpenChange, workspaceSlug, projectId, currentProject, onSubmittingChange } = props;
+  // The update prefill reads stored instants in the project timezone,
+  // so the update form waits for this read: mounting on the unresolved
+  // zone would lock the browser zone into the prefill (spec §7). Create
+  // starts blank and reads the zone reactively, so it mounts at once.
+  const details = useQuery(projectDetailsQueryOptions(getAppClient(), props.workspaceSlug));
+  if (props.mode === "update" && details.isPending) {
+    return (
+      <div className="flex justify-center py-(--space-6)">
+        <Spinner label="Loading project details" />
+      </div>
+    );
+  }
+  return <SaveCycleFormBody {...props} projectDetails={details.data} />;
+}
+
+function SaveCycleFormBody(props: SaveCycleFormBodyProps): React.ReactElement {
+  const { onOpenChange, workspaceSlug, projectId, currentProject, onSubmittingChange, projectDetails } = props;
   const queryClient = useQueryClient();
   const [targetProjectId, setTargetProjectId] = React.useState(projectId);
   // The retargeted project (create) or the cycle's own (update): its
   // feature flag and timezone, from the shared workspace details read.
   const effectiveTarget = props.mode === "create" ? targetProjectId : projectId;
-  const details = useQuery(projectDetailsQueryOptions(getAppClient(), workspaceSlug));
-  const targetDetails = details.data?.find((row) => row.id === effectiveTarget);
+  const targetDetails = projectDetails?.find((row) => row.id === effectiveTarget);
   const roles = useProjectRoles(workspaceSlug);
   const timeZone = targetDetails?.timezone;
   // The form remounts on every open (the chrome keys it by session),
-  // so these initializers run once per visit, never across visits.
+  // so these initializers run once per visit, never across visits. The
+  // outer form resolves the details first, so update's prefill sees the
+  // project zone at mount; only a failed read falls back to system time.
   // The mode union narrows the record: update always carries one.
   const initial = React.useMemo(
     // Per-visit by design: the chrome remounts this form on every open.
@@ -129,6 +156,7 @@ function SaveCycleForm(props: SaveCycleFormProps): React.ReactElement {
   const [titleError, setTitleError] = React.useState<string | null>(null);
   const [description, setDescription] = React.useState(initial.description);
   const [range, setRange] = React.useState<RangeValue>(initial.range);
+  const [rangeError, setRangeError] = React.useState<string | null>(null);
   const [targetError, setTargetError] = React.useState<string | null>(null);
   const [formError, setFormError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
@@ -136,7 +164,10 @@ function SaveCycleForm(props: SaveCycleFormProps): React.ReactElement {
   const copy = DIALOG_COPY[props.mode];
 
   // The title takes focus on every open. The ref is null while the
-  // dialog is closed (the portal unmounts), so the call is guarded.
+  // dialog is closed (the portal unmounts), so the call is guarded. The
+  // dialog itself takes no initial focus (initialFocus={false}): its
+  // open-time pass would otherwise reclaim the container after this
+  // gated form mounts.
   React.useEffect(() => {
     titleRef.current?.focus();
   }, []);
@@ -217,6 +248,11 @@ function SaveCycleForm(props: SaveCycleFormProps): React.ReactElement {
       titleRef.current!.focus();
       return;
     }
+    const rangeViolation = validateCycleRange(range, props.mode);
+    if (rangeViolation !== null) {
+      setRangeError(rangeViolation);
+      return;
+    }
     if (props.mode === "create" && targetDetails?.cycle_view === false) {
       setTargetError("Cycles are turned off for this project.");
       return;
@@ -295,12 +331,20 @@ function SaveCycleForm(props: SaveCycleFormProps): React.ReactElement {
             mode="split"
             label="Start date End date"
             value={range}
-            onChange={setRange}
+            onChange={(next) => {
+              setRange(next);
+              if (rangeError !== null) setRangeError(validateCycleRange(next, props.mode));
+            }}
             min={projectToday(timeZone)}
             clearable
             disabled={submitting}
             testId="cycle-date-range"
           />
+          {rangeError === null ? null : (
+            <p role="alert" className="text-meta text-(--danger)">
+              {rangeError}
+            </p>
+          )}
         </div>
         {formError === null ? null : (
           <p role="alert" data-testid="cycle-dialog-error" className="text-meta text-(--danger)">
@@ -361,6 +405,7 @@ function SaveCycleDialog(props: SaveCycleDialogProps): React.ReactElement {
         onOpenChange(next);
       }}
       closeButton={false}
+      initialFocus={false}
     >
       {props.mode === "update" ? (
         <SaveCycleForm key={session} {...shared} mode="update" cycle={props.cycle} />

@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 
 import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
-import { calendarDayLabel, localTodayISO } from "../helpers/calendar-dates.js";
+import { calendarDayLabel, isoDayOffset, localTodayISO, zonedTodayISO } from "../helpers/calendar-dates.js";
 import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
   AdminAbsenceFacts,
@@ -15025,20 +15025,41 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
     const calendar = this.page.getByTestId("cycle-date-range-calendar");
     await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
+    // The dialog disables past days against the project's today, so both
+    // boundary days derive from the project timezone, not the runner's.
+    const timeZone = await this.cyclesDialogProjectTimezone();
+    const today = zonedTodayISO(timeZone);
+    const yesterdayDisabled = await this.cycleRangeDayDisabled(calendar, isoDayOffset(today, -1));
+    const todayEnabled = !(await this.cycleRangeDayDisabled(calendar, today));
+    await this.page.keyboard.press("Escape");
+    return yesterdayDisabled && todayEnabled;
+  }
+
+  /** Whether one ISO day cell is disabled, navigating the month grid to it. */
+  private async cycleRangeDayDisabled(calendar: Locator, iso: string): Promise<boolean> {
+    const target = new Date(`${iso}T12:00:00`);
     await calendar
       .getByLabel("Month", { exact: true })
-      .selectOption({ label: yesterday.toLocaleString("en-US", { month: "long" }) });
-    await calendar.getByLabel("Year", { exact: true }).selectOption({ label: String(yesterday.getFullYear()) });
-    const iso = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, "0")}-${String(
-      yesterday.getDate()
-    ).padStart(2, "0")}`;
+      .selectOption({ label: target.toLocaleString("en-US", { month: "long" }) });
+    await calendar.getByLabel("Year", { exact: true }).selectOption({ label: String(target.getFullYear()) });
     const cell = calendar.locator(`button[data-day="${iso}"]`);
     await cell.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const disabled = await cell.isDisabled();
-    await this.page.keyboard.press("Escape");
-    return disabled;
+    return cell.isDisabled();
+  }
+
+  /** The open dialog's project timezone from the workspace details read. */
+  private async cyclesDialogProjectTimezone(): Promise<string | null> {
+    const match = this.page.url().match(/\/([^/]+)\/projects\/([^/]+)\/cycles/);
+    const slug = match?.[1];
+    const projectId = match?.[2];
+    if (slug === undefined || projectId === undefined) {
+      throw new Error("[parity] the past-day probe needs a project cycles page.");
+    }
+    const response = await this.page.request.get(`/api/workspaces/${slug}/projects/details/`);
+    if (!response.ok()) throw new Error(`[parity] projects/details read failed with HTTP ${response.status()}.`);
+    const rows = (await response.json()) as Array<Record<string, unknown>>;
+    const zone = rows.find((row) => row["id"] === projectId)?.["timezone"];
+    return typeof zone === "string" && zone.length > 0 ? zone : null;
   }
 
   async cyclesCreatePickProject(projectName: string): Promise<void> {

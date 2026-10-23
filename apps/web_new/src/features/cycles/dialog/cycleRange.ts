@@ -79,6 +79,21 @@ export function needsCycleDateCheck(
 }
 
 /**
+ * Inline error for a one-sided create range, or null when the range
+ * submits. The create endpoint refuses a single date (400), so the
+ * dialog stops it before any request. Edits always pass: PATCH accepts
+ * one date alone, and stored one-sided cycles must stay editable
+ * (spec §6, §7).
+ */
+export function validateCycleRange(range: RangeValue, mode: "create" | "update"): string | null {
+  if (mode !== "create") return null;
+  const days = cycleFormDays(range);
+  const oneSided = (days.start_date === null) !== (days.end_date === null);
+  if (!oneSided) return null;
+  return "Set both a start and an end date, or leave both empty.";
+}
+
+/**
  * Overlap refusal message (spec §6, wording from the spec, not the old
  * app). Names the pinned phrase and the draft workaround: the new range
  * can stay undated, or the conflicting draft can drop its dates.
@@ -94,23 +109,30 @@ export function cycleOverlapMessage(mode: "create" | "update"): string {
   );
 }
 
-/** Server detail when the body carries one; null otherwise. */
-function serverDetail(error: unknown): string | null {
+/**
+ * Server message when the body carries one; null otherwise. The cycle
+ * views answer refusals as `{"error": ...}` while other failures use
+ * `detail`, so both keys read, `detail` first.
+ */
+function serverMessage(error: unknown): string | null {
   const body = (error as { body?: unknown }).body ?? null;
   if (typeof body === "object" && body !== null && !Array.isArray(body)) {
-    const detail = (body as Record<string, unknown>)["detail"];
-    if (typeof detail === "string" && detail.length > 0) return detail;
+    const record = body as Record<string, unknown>;
+    for (const key of ["detail", "error"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.length > 0) return value;
+    }
   }
   return null;
 }
 
 /**
  * Inline dialog error for a failed write (spec §6: shown in the dialog,
- * never a silent close). Prefers the server's detail; the fixed copy
+ * never a silent close). Prefers the server's message; the fixed copy
  * otherwise, phrased per mode.
  */
 export function cycleFailureMessage(error: unknown, mode: "create" | "update"): string {
-  const detail = serverDetail(error);
+  const detail = serverMessage(error);
   if (detail !== null) return detail;
   return mode === "create"
     ? "Nothing was created — check the details and try again."

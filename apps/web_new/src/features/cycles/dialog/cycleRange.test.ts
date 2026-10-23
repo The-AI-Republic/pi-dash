@@ -11,6 +11,7 @@ import {
   cycleFormDays,
   cycleOverlapMessage,
   needsCycleDateCheck,
+  validateCycleRange,
 } from "./cycleRange.js";
 
 describe("cycleFormDays", () => {
@@ -115,9 +116,34 @@ describe("cycleOverlapMessage", () => {
   });
 });
 
+describe("validateCycleRange", () => {
+  it("refuses a one-sided create range naming both ends", () => {
+    expect(validateCycleRange({ start: "2026-11-01", end: null }, "create")).toContain("both");
+    expect(validateCycleRange({ start: null, end: "2026-11-30" }, "create")).toContain("both");
+    expect(validateCycleRange({ start: "2026-11-01", end: "" }, "create")).toContain("both");
+  });
+
+  it("accepts undated and two-sided creates and every edit range", () => {
+    expect(validateCycleRange({ start: null, end: null }, "create")).toBe(null);
+    expect(validateCycleRange({ start: "2026-11-01", end: "2026-11-30" }, "create")).toBe(null);
+    expect(validateCycleRange({ start: "2026-11-01", end: null }, "update")).toBe(null);
+    expect(validateCycleRange({ start: null, end: null }, "update")).toBe(null);
+  });
+});
+
 describe("cycleFailureMessage", () => {
   it("prefers the server detail", () => {
     expect(cycleFailureMessage({ body: { detail: "Name taken." } }, "create")).toBe("Name taken.");
+  });
+
+  it("reads the server error key when no detail is present", () => {
+    expect(cycleFailureMessage({ body: { error: "Both start date and end date are required." } }, "create")).toBe(
+      "Both start date and end date are required."
+    );
+    expect(cycleFailureMessage({ body: { detail: "Name taken.", error: "Other." } }, "create")).toBe("Name taken.");
+    expect(cycleFailureMessage({ body: { error: "" } }, "update")).toBe(
+      "Nothing was changed — check the details and try again."
+    );
   });
 
   it("falls back to the fixed copy per mode", () => {

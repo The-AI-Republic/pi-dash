@@ -53,6 +53,7 @@ export {
   cycleFormDays,
   cycleOverlapMessage,
   needsCycleDateCheck,
+  validateCycleRange,
   type CyclePayloadDays,
   type CycleStoredDays,
 } from "./dialog/cycleRange.js";

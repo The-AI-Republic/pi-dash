@@ -36,9 +36,12 @@ export interface DialogProps {
   bodyClassName?: string | undefined;
   /**
    * Control to focus when the dialog opens. Without it Base UI focuses the
-   * first tabbable element, which is the header close button.
+   * first tabbable element, which is the header close button. Pass `false`
+   * to take over focusing entirely: Base UI moves no focus and the caller
+   * focuses its own control (for dialogs whose first control mounts after
+   * data resolves, where the open-time pass would reclaim the container).
    */
-  initialFocus?: React.RefObject<HTMLElement | null> | undefined;
+  initialFocus?: React.RefObject<HTMLElement | null> | false | undefined;
   children: React.ReactNode;
 }
 

@@ -40,6 +40,7 @@ interface Call {
 interface Harness {
   roles: Record<string, number>;
   cycleViewB: boolean;
+  detailsTimezone: string;
   dateCheckStatus: boolean;
   dateCheckCalls: Call[];
   createCalls: Call[];
@@ -48,6 +49,7 @@ interface Harness {
   createBody: unknown;
   patchStatus: number;
   gateDateCheck: (() => void) | null;
+  gateDetails: (() => void) | null;
 }
 
 let harness: Harness;
@@ -56,6 +58,7 @@ function resetHarness(): Harness {
   return {
     roles: { [CYCLES_PROJECT_ID]: 15, [PROJECT_B_ID]: 15 },
     cycleViewB: true,
+    detailsTimezone: "UTC",
     dateCheckStatus: true,
     dateCheckCalls: [],
     createCalls: [],
@@ -64,6 +67,7 @@ function resetHarness(): Harness {
     createBody: null,
     patchStatus: 200,
     gateDateCheck: null,
+    gateDetails: null,
   };
 }
 
@@ -124,13 +128,14 @@ beforeEach(() => {
       };
     }
     if (url.endsWith("/api/workspaces/acme/projects/details/")) {
+      if (harness.gateDetails !== null) await new Promise<void>((release) => (harness.gateDetails = release));
       return {
         status: 200,
         url,
         headers: { get: () => null },
         text: async () =>
           JSON.stringify([
-            makeProjectDetails(),
+            makeProjectDetails({ timezone: harness.detailsTimezone }),
             makeProjectDetails({
               id: PROJECT_B_ID,
               name: "Project B",
@@ -293,7 +298,8 @@ describe("CreateCycleDialog form", () => {
 
   it("focuses the title on open", async () => {
     renderCreate();
-    expect(await screen.findByPlaceholderText("Title")).toHaveFocus();
+    await screen.findByPlaceholderText("Title");
+    await waitFor(() => expect(screen.getByPlaceholderText("Title")).toHaveFocus());
   });
 
   it("mounts closed without focusing anything", () => {
@@ -423,22 +429,33 @@ describe("CreateCycleDialog submit", () => {
     }
   });
 
-  it("saves a one-sided range without a date check", async () => {
+  it("refuses a one-sided range inline without any request and clears the error once completed", async () => {
     const user = userEvent.setup();
-    renderCreate();
+    const { onOpenChange } = renderCreate();
     const calendar = await openCalendar();
-    const start = shiftDay(projectToday("UTC"), 5);
-    await pickIsoDay(calendar, start);
+    const today = projectToday("UTC");
+    await pickIsoDay(calendar, shiftDay(today, 5));
     await user.type(screen.getByPlaceholderText("Title"), "One-sided");
     await user.click(screen.getByRole("button", { name: "Create cycle" }));
-    await waitFor(() => expect(notify.notifySuccess).toHaveBeenCalled());
+    // The create endpoint refuses a single date, so the dialog stops the
+    // submit before any request, with the input intact.
+    expect(await screen.findByRole("alert")).toHaveTextContent("both");
+    expect(screen.getByRole("heading", { name: "Create cycle" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Title")).toHaveValue("One-sided");
     expect(harness.dateCheckCalls).toHaveLength(0);
-    expect(harness.createCalls[0]?.body).toEqual({
-      name: "One-sided",
-      description: "",
-      start_date: start,
-      end_date: null,
-    });
+    expect(harness.createCalls).toHaveLength(0);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    // Completing the range clears the inline error; the create proceeds.
+    if (screen.queryByTestId("cycle-date-range-calendar") === null) {
+      await user.click(screen.getByTestId("cycle-date-range-trigger"));
+    }
+    const reopened = await screen.findByTestId("cycle-date-range-calendar");
+    await pickIsoDay(reopened, shiftDay(today, 10));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create cycle" }));
+    await waitFor(() => expect(notify.notifySuccess).toHaveBeenCalled());
+    expect(harness.dateCheckCalls).toHaveLength(1);
+    expect(harness.createCalls).toHaveLength(1);
   });
 
   it("checks a two-sided range once per submit, without a cycle id", async () => {
@@ -587,10 +604,13 @@ describe("UpdateCycleDialog", () => {
     const record = datedRecord();
     renderUpdate(record);
     expect(await screen.findByRole("heading", { name: "Update cycle" })).toBeInTheDocument();
+    await screen.findByPlaceholderText("Title");
     expect(screen.getByPlaceholderText("Title")).toHaveValue("Cycle 7");
     expect(screen.getByPlaceholderText("Description")).toHaveValue("Seeded description");
     expect(screen.queryByTestId("cycle-project-field")).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Title")).toHaveFocus();
+    // The gated form mounts asynchronously, so the title focus lands after
+    // the input appears.
+    await waitFor(() => expect(screen.getByPlaceholderText("Title")).toHaveFocus());
     const trigger = screen.getByTestId("cycle-date-range-trigger");
     await userEvent.setup().click(trigger);
     const calendar = await screen.findByTestId("cycle-date-range-calendar");
@@ -607,6 +627,7 @@ describe("UpdateCycleDialog", () => {
     const user = userEvent.setup();
     const { onOpenChange } = renderUpdate(datedRecord());
     await screen.findByRole("heading", { name: "Update cycle" });
+    await screen.findByPlaceholderText("Title");
     await user.clear(screen.getByPlaceholderText("Title"));
     await user.type(screen.getByPlaceholderText("Title"), "Renamed");
     await user.click(screen.getByRole("button", { name: "Update cycle" }));
@@ -622,6 +643,7 @@ describe("UpdateCycleDialog", () => {
     const record = datedRecord();
     renderUpdate(record);
     await screen.findByRole("heading", { name: "Update cycle" });
+    await screen.findByPlaceholderText("Title");
     await user.click(screen.getByTestId("cycle-date-range-trigger"));
     const calendar = await screen.findByTestId("cycle-date-range-calendar");
     const moved = shiftDay(projectToday("UTC"), 12);
@@ -641,6 +663,7 @@ describe("UpdateCycleDialog", () => {
     const user = userEvent.setup();
     renderUpdate(datedRecord());
     await screen.findByRole("heading", { name: "Update cycle" });
+    await screen.findByPlaceholderText("Title");
     await user.click(screen.getByRole("button", { name: "Clear Start date End date" }));
     await user.click(screen.getByRole("button", { name: "Update cycle" }));
     await waitFor(() => expect(notify.notifySuccess).toHaveBeenCalled());
@@ -653,6 +676,7 @@ describe("UpdateCycleDialog", () => {
     harness.dateCheckStatus = false;
     const { onOpenChange } = renderUpdate(datedRecord());
     await screen.findByRole("heading", { name: "Update cycle" });
+    await screen.findByPlaceholderText("Title");
     await user.click(screen.getByTestId("cycle-date-range-trigger"));
     const calendar = await screen.findByTestId("cycle-date-range-calendar");
     await pickIsoDay(calendar, shiftDay(projectToday("UTC"), 12));
@@ -669,6 +693,7 @@ describe("UpdateCycleDialog", () => {
     const user = userEvent.setup();
     renderUpdate(makeCycleRow({ description: undefined, start_date: null, end_date: null }));
     await screen.findByRole("heading", { name: "Update cycle" });
+    await screen.findByPlaceholderText("Title");
     expect(screen.getByPlaceholderText("Description")).toHaveValue("");
     expect(screen.getByTestId("cycle-date-range-trigger")).toHaveTextContent("Start date");
     await user.click(screen.getByRole("button", { name: "Update cycle" }));
@@ -677,11 +702,59 @@ describe("UpdateCycleDialog", () => {
     expect(harness.patchCalls).toHaveLength(1);
   });
 
+  it("saves a one-sided record without a date check", async () => {
+    const user = userEvent.setup();
+    const start = shiftDay(projectToday("UTC"), 5);
+    renderUpdate(makeCycleRow({ start_date: `${start}T12:00:00Z`, end_date: null }));
+    await screen.findByRole("heading", { name: "Update cycle" });
+    await screen.findByPlaceholderText("Title");
+    await user.click(screen.getByRole("button", { name: "Update cycle" }));
+    await waitFor(() => expect(notify.notifySuccess).toHaveBeenCalled());
+    expect(harness.dateCheckCalls).toHaveLength(0);
+    expect(harness.patchCalls).toHaveLength(1);
+    expect(harness.patchCalls[0]?.body).toMatchObject({ start_date: start, end_date: null });
+  });
+
+  it("prefills update dates in the project timezone even when details resolve late", async () => {
+    const user = userEvent.setup();
+    harness.detailsTimezone = "Pacific/Auckland";
+    harness.gateDetails = () => undefined;
+    renderUpdate(makeCycleRow({ start_date: "2026-10-15T12:00:00Z", end_date: "2026-10-20T12:00:00Z" }));
+    // The form waits for the details read instead of prefilling in the
+    // browser zone.
+    expect(await screen.findByRole("status")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Title")).not.toBeInTheDocument();
+    const release = harness.gateDetails;
+    expect(release).not.toBeNull();
+    release?.();
+    await screen.findByPlaceholderText("Title");
+    // The gated form mounts asynchronously, so the title focus lands after
+    // the input appears.
+    await waitFor(() => expect(screen.getByPlaceholderText("Title")).toHaveFocus());
+    await user.click(screen.getByTestId("cycle-date-range-trigger"));
+    const calendar = await screen.findByTestId("cycle-date-range-calendar");
+    const pressed = [...calendar.querySelectorAll('button[aria-pressed="true"]')].map((cell) =>
+      cell.getAttribute("data-day")
+    );
+    // Auckland (NZDT, UTC+13 in October) reads the noon-UTC instants a
+    // calendar day later than UTC does.
+    expect(pressed).toHaveLength(2);
+    expect(pressed).toContain("2026-10-16");
+    expect(pressed).toContain("2026-10-21");
+    // The prefill matches the record, so saving fires no date check and
+    // patches the project-zone days.
+    await user.click(screen.getByRole("button", { name: "Update cycle" }));
+    await waitFor(() => expect(notify.notifySuccess).toHaveBeenCalled());
+    expect(harness.dateCheckCalls).toHaveLength(0);
+    expect(harness.patchCalls[0]?.body).toMatchObject({ start_date: "2026-10-16", end_date: "2026-10-21" });
+  });
+
   it("requires a title and shows update failures inline", async () => {
     const user = userEvent.setup();
     harness.patchStatus = 500;
     renderUpdate(datedRecord());
     await screen.findByRole("heading", { name: "Update cycle" });
+    await screen.findByPlaceholderText("Title");
     await user.clear(screen.getByPlaceholderText("Title"));
     await user.click(screen.getByRole("button", { name: "Update cycle" }));
     expect(screen.getByRole("alert")).toHaveTextContent("Title is required");
