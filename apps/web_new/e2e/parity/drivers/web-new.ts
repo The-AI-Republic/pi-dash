@@ -25321,22 +25321,28 @@ export class WebNewDriver implements ParityDriver {
   async settingsProfileToolServerRows(): Promise<
     { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[]
   > {
-    const items = this.page.getByTestId("tool-server-row");
-    const total = await items.count();
-    const rows: { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[] = [];
-    for (let index = 0; index < total; index += 1) {
-      const row = items.nth(index);
-      const name = ((await row.getAttribute("data-server-name")) ?? "").trim();
-      const prefix = row.locator("code");
-      rows.push({
-        name,
-        url: ((await row.getByTestId("tool-server-url").innerText()) ?? "").trim(),
-        disabled: (await row.getByRole("button", { name: `Enable ${name}`, exact: true }).count()) > 0,
-        locked: (await row.getByRole("img", { name: "Credentials saved" }).count()) > 0,
-        prefix: (await prefix.count()) === 0 ? null : ((await prefix.first().innerText()) ?? "").trim() || null,
-      });
-    }
-    return rows;
+    // One DOM snapshot per read: a remove drops a row as the list re-renders,
+    // so counting rows and then reading each by index can wait forever on a
+    // row that no longer exists. Reading every field in the same evaluateAll
+    // pass (like the oracle's list read) is always internally consistent.
+    return this.page.getByTestId("tool-server-row").evaluateAll((items) =>
+      items.map((item) => {
+        const name = (item.getAttribute("data-server-name") ?? "").trim();
+        const url = item.querySelector('[data-testid="tool-server-url"]');
+        const code = item.querySelector("code");
+        const disabled = [...item.querySelectorAll("button")].some(
+          (button) => button.getAttribute("aria-label") === `Enable ${name}`
+        );
+        const locked = item.querySelector('[role="img"][aria-label="Credentials saved"]') !== null;
+        return {
+          name,
+          url: (url?.textContent ?? "").trim(),
+          disabled,
+          locked,
+          prefix: (code?.textContent ?? "").trim() || null,
+        };
+      })
+    );
   }
   async settingsProfileToolServerAddDisabled(): Promise<boolean> {
     return this.page

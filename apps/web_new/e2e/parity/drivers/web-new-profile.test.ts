@@ -1617,35 +1617,22 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
       },
       { name: "probe-mcp-b", url: "https://mcp-b.example.com/mcp", disabled: true, locked: true, prefix: null },
     ];
+    const element = (row: (typeof rows)[number]) =>
+      ({
+        getAttribute: (name: string) => (name === "data-server-name" ? row.name : null),
+        querySelector: (selector: string) => {
+          if (selector === '[data-testid="tool-server-url"]') return { textContent: row.url };
+          if (selector === "code") return row.prefix === null ? null : { textContent: row.prefix };
+          if (selector === '[role="img"][aria-label="Credentials saved"]') return row.locked ? {} : null;
+          return null;
+        },
+        querySelectorAll: (selector: string) =>
+          selector === "button" && row.disabled ? [{ getAttribute: () => `Enable ${row.name}` }] : [],
+      }) as unknown as Element;
     const page = pageOf({
       getByTestId: (id: string) => {
         if (id !== "tool-server-row") return locator({ isDisabled: async () => true });
-        return locator({
-          count: async () => rows.length,
-          nth: (index: number) => {
-            const row = rows[index]!;
-            return locator({
-              getAttribute: async () => row.name,
-              getByTestId: () => locator({ innerText: async () => row.url }),
-              getByRole: (_role: string, options?: Record<string, unknown>) =>
-                locator({
-                  count: async () =>
-                    (options?.["name"] as string) === `Enable ${row.name}`
-                      ? row.disabled
-                        ? 1
-                        : 0
-                      : row.locked
-                        ? 1
-                        : 0,
-                }),
-              locator: () =>
-                locator({
-                  count: async () => (row.prefix === null ? 0 : 1),
-                  first: () => locator({ innerText: async () => row.prefix ?? "" }),
-                }),
-            });
-          },
-        });
+        return locator({ evaluateAll: async (fn) => fn(rows.map(element) as never[]) });
       },
     });
     const driver = new WebNewDriver(page);
