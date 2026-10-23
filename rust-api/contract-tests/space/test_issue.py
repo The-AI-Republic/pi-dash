@@ -121,6 +121,24 @@ def test_comment_create_shape(user_client, world):
     assert body["access"] == "EXTERNAL"
 
 
+def test_comment_create_on_soft_deleted_issue_returns_201(user_client, world, db):
+    # PIDASHCONV-1260: the create has no issue lookup and the serializer
+    # reads issue/project/workspace through the unfiltered _base_manager
+    # (views/issue.py:257-294), so a comment posted after the issue was
+    # soft-deleted is still a 201 with issue_detail, plus the activity and
+    # the public-member row — never a 500 with committed orphan rows.
+    db.execute("UPDATE issues SET deleted_at = now() WHERE id = %s", (world["issue"]["id"],))
+    response = user_client.post(_comments_url(world), json={"comment_html": "<p>late note</p>"})
+    assert response.status_code == 201
+    body = response.json()
+    assert body["issue_detail"]["id"] == world["issue"]["id"]
+    member = db.fetchone(
+        "SELECT id FROM project_public_members WHERE project_id = %s AND member_id = %s",
+        (world["project"]["id"], world["owner"]["id"]),
+    )
+    assert member is not None
+
+
 def test_comment_retrieve_patch_delete_owned(user_client, world):
     comment_id = world["comment"]["id"]
     got = user_client.get(_comments_url(world, comment_id))
