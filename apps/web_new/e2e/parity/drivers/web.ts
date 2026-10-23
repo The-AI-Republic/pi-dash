@@ -59501,4 +59501,41 @@ export class WebDriver implements ParityDriver {
       return false;
     }
   }
+
+  // --- Project settings AI Workers (PSET-064, NEWFRONT-606). The old app
+  // --- has no such tab: new-app-first surface, unreachable on this
+  // --- driver (the spec skips the oracle legs), so every method throws.
+  private aiWorkersMissing(): never {
+    throw new Error("[parity] the old app has no AI Workers tab (new-app-first PSET-064).");
+  }
+  async aiWorkersOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersRuleValue(): Promise<string> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersRuleOptions(): Promise<string[]> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersSetRule(_label: string): Promise<void> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersDescription(): Promise<string> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersSave(): Promise<void> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersSaveVisible(): Promise<boolean> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersFormDimmed(): Promise<boolean> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersRuleDisabled(): Promise<boolean> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersSkeletonVisible(): Promise<boolean> {
+    this.aiWorkersMissing();
+  }
 }

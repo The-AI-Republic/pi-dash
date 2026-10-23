@@ -39799,4 +39799,100 @@ export class WebNewDriver implements ParityDriver {
   async issueReactionControlVisible(): Promise<boolean> {
     return todo("issueReactionControlVisible");
   }
+
+  // --- Project settings AI Workers (PSET-064, NEWFRONT-387/606). The
+  // --- lost-runner rule form; new-app-first, so no oracle mirror exists.
+  private aiWorkersForm(): Locator {
+    return this.page.getByRole("form", { name: "AI Workers settings" });
+  }
+
+  private aiWorkersRuleTrigger(): Locator {
+    return this.aiWorkersForm().locator("section").getByRole("button").first();
+  }
+
+  async aiWorkersOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/ai-workers`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the rule form or either denial view; callers assert
+    // which one they got.
+    const settle = (target: { waitFor: (options: { timeout: number }) => Promise<void> }): Promise<boolean> =>
+      target.waitFor({ timeout: 60_000 }).then(
+        () => true,
+        () => false
+      );
+    const settled = await Promise.race([
+      settle(this.aiWorkersForm()),
+      settle(this.page.getByRole("heading", { name: /not authorized/i }).first()),
+      settle(this.page.getByRole("heading", { name: /don.t have access/i }).first()),
+    ]);
+    if (!settled) throw new Error("[parity] AI Workers settled on neither the form nor the denial view.");
+  }
+  async aiWorkersRuleValue(): Promise<string> {
+    const trigger = this.aiWorkersRuleTrigger();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await trigger.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+  }
+  async aiWorkersRuleOptions(): Promise<string[]> {
+    await this.aiWorkersRuleTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    const listbox = this.page.getByRole("listbox", { name: "Lost-runner rule" });
+    await listbox.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const options = listbox.getByRole("option");
+    const total = await options.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const label = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (label !== "") labels.push(label);
+    }
+    await this.page.keyboard.press("Escape");
+    await listbox.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    return labels;
+  }
+  async aiWorkersSetRule(label: string): Promise<void> {
+    await this.aiWorkersRuleTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    const listbox = this.page.getByRole("listbox", { name: "Lost-runner rule" });
+    await listbox.getByRole("option", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await listbox.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+  async aiWorkersDescription(): Promise<string> {
+    const caption = this.aiWorkersForm().locator("section").locator("p").first();
+    await caption.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await caption.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+  }
+  async aiWorkersSave(): Promise<void> {
+    const submit = this.aiWorkersForm().getByRole("button", { name: /^(Save changes|Saving)$/ });
+    await submit.click({ timeout: WebNewDriver.WAIT_MS });
+    // A save that starts flips the button to its loading label; a save
+    // blocked client-side never does. Either way this resolves once the
+    // button is back at rest (or never left it).
+    await this.aiWorkersForm()
+      .getByRole("button", { name: "Saving" })
+      .waitFor({ state: "hidden", timeout: 30_000 })
+      .catch(() => {});
+    await this.page.waitForTimeout(500);
+  }
+  async aiWorkersSaveVisible(): Promise<boolean> {
+    return (
+      (await this.aiWorkersForm()
+        .getByRole("button", { name: /^(Save changes|Saving)$/ })
+        .count()) > 0
+    );
+  }
+  async aiWorkersFormDimmed(): Promise<boolean> {
+    const form = this.aiWorkersForm();
+    if ((await form.count()) === 0) return false;
+    return ((await form.first().getAttribute("class")) ?? "").includes("opacity-60");
+  }
+  async aiWorkersRuleDisabled(): Promise<boolean> {
+    const trigger = this.aiWorkersRuleTrigger();
+    await trigger.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    return trigger.isDisabled();
+  }
+  async aiWorkersSkeletonVisible(): Promise<boolean> {
+    return (await this.page.getByTestId("project-settings-ai-workers-skeleton").count()) > 0;
+  }
 }

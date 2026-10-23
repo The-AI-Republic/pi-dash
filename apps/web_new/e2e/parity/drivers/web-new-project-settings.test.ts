@@ -1944,7 +1944,7 @@ describe("WebNewDriver publish dialog", () => {
     const stub = generalSettingsPageDouble({
       locator: (selector) => (selector === "#main-sidebar" ? new GeneralFakeLocator() : row),
       testId: (testId) => (testId === "project-row-menu" ? menu : generalAbsent()),
-      role: (role) => entry,
+      role: () => entry,
     });
     await new WebNewDriver(stub.page).openPublishProjectModal("acme", "p1", "Forge");
     expect(stub.pageObject.goto).toHaveBeenCalledWith("/acme/projects/p1/issues");
@@ -2099,5 +2099,108 @@ describe("WebNewDriver publish dialog", () => {
     };
     await writeHold(boardPost);
     expect(boardPost.continue).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WebNewDriver AI Workers tab", () => {
+  const FAIL_BACK = "Fall back to the pod";
+  const FAIL_TO_BACKLOG = "Fail the run and move the issue to Backlog";
+
+  function workersFormDouble(overrides: { trigger?: GeneralFakeLocator; caption?: string; dimmed?: boolean } = {}) {
+    const trigger = overrides.trigger ?? new GeneralFakeLocator({ text: FAIL_TO_BACKLOG });
+    const section = new GeneralFakeLocator(
+      {},
+      {
+        role: () => trigger,
+        locator: () => new GeneralFakeLocator({ text: overrides.caption ?? "" }),
+      }
+    );
+    return new GeneralFakeLocator(
+      { attr: { class: overrides.dimmed === true ? "flex opacity-60" : "flex" } },
+      {
+        locator: () => section,
+        role: () => trigger,
+        testId: () => new GeneralFakeLocator(),
+      }
+    );
+  }
+
+  it("opens the tab address", async () => {
+    const stub = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator(),
+      role: () => new GeneralFakeLocator(),
+    });
+    await new WebNewDriver(stub.page).aiWorkersOpen("acme", "p1");
+    expect(stub.pageObject.goto).toHaveBeenCalledWith("/acme/settings/projects/p1/ai-workers");
+  });
+
+  it("reads the rule, its options, and the explainer", async () => {
+    const trigger = new GeneralFakeLocator({ text: ` ${FAIL_TO_BACKLOG} ` });
+    const form = workersFormDouble({ trigger, caption: "Queued runs fail." });
+    const options = new GeneralFakeLocator({
+      items: [new GeneralFakeLocator({ text: FAIL_TO_BACKLOG }), new GeneralFakeLocator({ text: FAIL_BACK })],
+    });
+    const listbox = new GeneralFakeLocator({}, { role: () => options });
+    const stub = generalSettingsPageDouble({
+      role: (role) => {
+        if (role === "form") return form;
+        if (role === "listbox") return listbox;
+        return generalAbsent();
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.aiWorkersRuleValue()).resolves.toBe(FAIL_TO_BACKLOG);
+    await expect(driver.aiWorkersRuleOptions()).resolves.toEqual([FAIL_TO_BACKLOG, FAIL_BACK]);
+    await expect(driver.aiWorkersDescription()).resolves.toBe("Queued runs fail.");
+    expect(stub.calls.pressed).toEqual(["Escape"]);
+  });
+
+  it("picks a rule by label", async () => {
+    const option = new GeneralFakeLocator();
+    const listbox = new GeneralFakeLocator({}, { role: () => option });
+    const trigger = new GeneralFakeLocator();
+    const form = workersFormDouble({ trigger });
+    const stub = generalSettingsPageDouble({
+      role: (role) => {
+        if (role === "form") return form;
+        if (role === "listbox") return listbox;
+        return generalAbsent();
+      },
+    });
+    await new WebNewDriver(stub.page).aiWorkersSetRule(FAIL_BACK);
+    expect(trigger.click).toHaveBeenCalledTimes(1);
+    expect(option.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves and reports the save control", async () => {
+    const submit = new GeneralFakeLocator();
+    const section = new GeneralFakeLocator({}, { role: () => new GeneralFakeLocator() });
+    const form = new GeneralFakeLocator({}, { locator: () => section, role: () => submit });
+    const stub = generalSettingsPageDouble({
+      role: (role) => (role === "form" ? form : generalAbsent()),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.aiWorkersSave();
+    expect(submit.click).toHaveBeenCalledTimes(1);
+    expect(stub.pageObject.waitForTimeout).toHaveBeenCalledWith(500);
+    await expect(driver.aiWorkersSaveVisible()).resolves.toBe(true);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).aiWorkersSaveVisible()).resolves.toBe(false);
+  });
+
+  it("reads dimming, disablement and the skeleton", async () => {
+    const dimmed = generalSettingsPageDouble({ role: () => workersFormDouble({ dimmed: true }) });
+    await expect(new WebNewDriver(dimmed.page).aiWorkersFormDimmed()).resolves.toBe(true);
+    const bright = generalSettingsPageDouble({ role: () => workersFormDouble() });
+    await expect(new WebNewDriver(bright.page).aiWorkersFormDimmed()).resolves.toBe(false);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).aiWorkersFormDimmed()).resolves.toBe(false);
+
+    const locked = generalSettingsPageDouble({
+      role: () => workersFormDouble({ trigger: new GeneralFakeLocator({ disabled: true }) }),
+    });
+    await expect(new WebNewDriver(locked.page).aiWorkersRuleDisabled()).resolves.toBe(true);
+
+    const loading = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator() });
+    await expect(new WebNewDriver(loading.page).aiWorkersSkeletonVisible()).resolves.toBe(true);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).aiWorkersSkeletonVisible()).resolves.toBe(false);
   });
 });

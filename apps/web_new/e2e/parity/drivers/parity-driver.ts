@@ -9267,6 +9267,29 @@ export interface SpaceBoardStability {
   worklogSidebarTotal(): Promise<string | null>;
   /** Sidebar worklog entry texts in display order. */
   worklogSidebarEntryTexts(): Promise<string[]>;
+
+  // --- Project settings AI Workers (PSET-064, NEWFRONT-387/606). New-app
+  // --- first: the old app has no such tab, so the web driver throws.
+  /** Open the lost-runner rule tab; settles on the form or a denial view. */
+  aiWorkersOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Current rule label on the picker trigger. */
+  aiWorkersRuleValue(): Promise<string>;
+  /** Rule option labels in display order. */
+  aiWorkersRuleOptions(): Promise<string[]>;
+  /** Pick a rule by its label. */
+  aiWorkersSetRule(label: string): Promise<void>;
+  /** Explainer caption under the picker. */
+  aiWorkersDescription(): Promise<string>;
+  /** Save the form and settle. */
+  aiWorkersSave(): Promise<void>;
+  /** Save control presence (admin-only). */
+  aiWorkersSaveVisible(): Promise<boolean>;
+  /** Whether the form reads dimmed (member read-only). */
+  aiWorkersFormDimmed(): Promise<boolean>;
+  /** Whether the rule picker is disabled. */
+  aiWorkersRuleDisabled(): Promise<boolean>;
+  /** Whether the loading skeleton shows. */
+  aiWorkersSkeletonVisible(): Promise<boolean>;
 }
 
 /** One Apps catalog card (NEWFRONT-439, CLOUD-028). */
