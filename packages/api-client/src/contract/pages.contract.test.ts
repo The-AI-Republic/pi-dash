@@ -217,7 +217,9 @@ describe.skipIf(!contractEnabled)("pages REST contract", () => {
       });
 
       const stamp = await archivePage(client, CONTRACT_WORKSPACE, projectId, created.id);
-      expect(stamp.archived_at).toContain("2026-");
+      // Year-agnostic: the stamp is the server clock (naive datetime), so pin
+      // the shape, not the year.
+      expect(stamp.archived_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
       // The collection keeps shelved rows and stamps `archived_at`; the
       // pages tab partitions on that stamp rather than on absence.
       const rows = await listPages(client, CONTRACT_WORKSPACE, projectId);
