@@ -110,8 +110,11 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
           onKeyDown={(event) => {
             // Mirror the editing surface: the editor-level guard runs
             // first, and a swallowed key reaches the form prevented,
-            // exactly as ProseMirror delivers it (CMT-011).
-            if (handleKeyDown?.(event.nativeEvent) === true) event.preventDefault();
+            // exactly as ProseMirror delivers it (CMT-011). The real
+            // surface inserts nothing on Ctrl/Cmd+Enter; a raw textarea
+            // would newline instead, so the fake swallows that default.
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) event.preventDefault();
+            else if (handleKeyDown?.(event.nativeEvent) === true) event.preventDefault();
           }}
         />
       </div>
@@ -249,7 +252,7 @@ describe("CommentEditForm", () => {
     expect(onSave).toHaveBeenCalledWith(expect.stringContaining("now"));
   });
 
-  it("saves on Enter and leaves modifier-plus-Enter for a line break", async () => {
+  it("saves on Enter and newlines on Shift+Enter (CMT-011)", async () => {
     stubTransport();
     const user = userEvent.setup();
     const { onSave } = renderForm();
@@ -261,6 +264,31 @@ describe("CommentEditForm", () => {
     expect(onSave).not.toHaveBeenCalled();
     await user.keyboard("{Enter}");
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  });
+
+  it("leaves Ctrl+Enter and Cmd+Enter inert (CMT-011)", async () => {
+    stubTransport();
+    const user = userEvent.setup();
+    const { onSave } = renderForm();
+    const editable = await surface("Stored words");
+    caretToEnd(editable);
+    await user.keyboard(" one");
+    await waitFor(() => expect(editable.value).toMatch(/one/));
+    const draft = editable.value;
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+    expect(onSave).not.toHaveBeenCalled();
+    expect(editable.value).toBe(draft);
+    // The real surface delivers these Enters un-prevented (its guard
+    // returns false for them); firing from the fake's wrapper div
+    // reproduces that delivery, since the newline swallow sits on the
+    // textarea itself. The guard must ignore them on its own.
+    const wrapper = editable.parentElement!;
+    fireEvent.keyDown(wrapper, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(wrapper, { key: "Enter", metaKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onSave).not.toHaveBeenCalled();
+    expect(editable.value).toBe(draft);
   });
 
   it("blocks an empty save", async () => {
@@ -292,7 +320,6 @@ describe("CommentEditForm", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).toBeDisabled());
     expect(onSave).not.toHaveBeenCalled();
   });
-
 
   it("leaves the Enter that commits an IME composition to the input (CMT-011)", async () => {
     stubTransport();

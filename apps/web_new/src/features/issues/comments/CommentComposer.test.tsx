@@ -99,8 +99,11 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
           onKeyDown={(event) => {
             // Mirror the editing surface: the editor-level guard runs
             // first, and a swallowed key reaches the form prevented,
-            // exactly as ProseMirror delivers it (CMT-011).
-            if (handleKeyDown?.(event.nativeEvent) === true) event.preventDefault();
+            // exactly as ProseMirror delivers it (CMT-011). The real
+            // surface inserts nothing on Ctrl/Cmd+Enter; a raw textarea
+            // would newline instead, so the fake swallows that default.
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) event.preventDefault();
+            else if (handleKeyDown?.(event.nativeEvent) === true) event.preventDefault();
           }}
         />
       </div>
@@ -180,7 +183,7 @@ describe("CommentComposer", () => {
     );
   });
 
-  it("inserts a line break on modifier and shift plus Enter", async () => {
+  it("newlines on Shift+Enter and leaves Ctrl/Cmd+Enter inert (CMT-011)", async () => {
     const user = userEvent.setup();
     const { onCreate } = renderComposer();
     const box = await editor();
@@ -188,9 +191,22 @@ describe("CommentComposer", () => {
     await user.keyboard("one");
     await user.keyboard("{Shift>}{Enter}{/Shift}");
     await user.keyboard("{Control>}{Enter}{/Control}");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
     await user.keyboard("two");
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(onCreate).not.toHaveBeenCalled();
+    // Shift added the newline; Ctrl and Cmd added nothing.
+    expect(box).toHaveValue("one\ntwo");
+    // The real surface delivers these Enters un-prevented (its guard
+    // returns false for them); firing from the fake's wrapper div
+    // reproduces that delivery, since the newline swallow sits on the
+    // textarea itself. The guard must ignore them on its own.
+    const wrapper = box.parentElement!;
+    fireEvent.keyDown(wrapper, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(wrapper, { key: "Enter", metaKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(box).toHaveValue("one\ntwo");
   });
 
   it("leaves the Enter that commits an IME composition to the input", async () => {
