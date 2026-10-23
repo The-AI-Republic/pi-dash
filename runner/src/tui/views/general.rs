@@ -932,6 +932,7 @@ pub async fn submit_register(
             log_level: "info".to_string(),
             log_retention_days: 14,
             agent_observability_v1: false,
+            agent_watchdog: Default::default(),
             auto_update: true,
         },
         runners: vec![new_runner_block],

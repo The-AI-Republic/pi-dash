@@ -16,8 +16,8 @@ from pi_dash.prompting.renderer import validate_syntax
 def test_registry_loaded_with_expected_sections():
     # 24 local sections (13 ported + relationships + 2 review + 2 test
     # + 3 scheduler + task-lifecycle + repo-context + workpad-context)
-    # plus 14 locked Cloud Agent sections.
-    assert len(registry.REGISTRY) == 38
+    # plus 15 locked Cloud Agent sections.
+    assert len(registry.REGISTRY) == 39
     for key in (
         "intro",
         "relationships",

@@ -84,6 +84,16 @@ app.conf.beat_schedule = {
         "task": "runner.mark_offline_runners",
         "schedule": crontab(minute="*/1"),
     },
+    # Recover runs stranded on a runner that stopped heartbeating; without
+    # these a stranded run blocks its issue indefinitely.
+    "runner-release-pins-on-offline-runners": {
+        "task": "runner.release_pins_on_offline_runners",
+        "schedule": crontab(minute="*/1"),
+    },
+    "runner-fail-runs-on-offline-runners": {
+        "task": "runner.fail_runs_on_offline_runners",
+        "schedule": crontab(minute="*/1"),
+    },
     # Unsatisfiable-pin recovery — releases wedged-busy pinned runners and
     # auto-clears pins held past RUNNER_PIN_AUTO_RELEASE_SECS, then drains
     # the affected pods. Time-driven by nature (a pin to a dead runner
