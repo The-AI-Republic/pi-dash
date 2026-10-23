@@ -62,6 +62,7 @@ use pidash_db::issue_filters::{
 };
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
+use pidash_services::app_issues::serializers_create::HAS_ACTIVE_RUN_SQL;
 
 use crate::app_issues::resolve_gate;
 use crate::middleware::SessionHandle;
@@ -1299,18 +1300,14 @@ pub async fn is_synced_safe(pool: &PgPool, issue: &IssueRow) -> bool {
 }
 
 /// Whether the issue has a non-terminal agent run
-/// (`Issue.has_active_run`, `db/models/issue.py:232-250`).
+/// (`Issue.has_active_run`, `db/models/issue.py:232-250`). Shares the
+/// canonical `agent_run` existence check with the app-issues create path.
 pub async fn has_active_run(pool: &PgPool, issue_id: &Uuid) -> Result<bool, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM agent_runs WHERE work_item_id = $1 AND status IN
-           ('queued', 'assigned', 'waiting_for_worktree', 'running',
-            'cancel_requested', 'awaiting_approval', 'awaiting_reauth',
-            'paused_awaiting_input') LIMIT 1"#,
-    )
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(i32,)> = sqlx::query_as(HAS_ACTIVE_RUN_SQL)
+        .bind(issue_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -2516,7 +2513,7 @@ struct AgentRunRow {
     id: Uuid,
     status: String,
     executor_kind: Option<String>,
-    queue_position: Option<i32>,
+    queue_position: Option<i16>,
     runner_id: Option<Uuid>,
     runner_name: Option<String>,
     created_at: Option<DateTime<Utc>>,
@@ -2545,8 +2542,7 @@ pub async fn render_agent_status(
                   ru.name,
                   r.created_at, r.assigned_at, r.started_at, r.ended_at,
                   r.done_payload, r.error, r.error_code, r.llm_model,
-                  (r.usage->>'input_tokens')::bigint, (r.usage->>'output_tokens')::bigint,
-                  (r.usage->>'total_tokens')::bigint
+                  r.input_tokens, r.output_tokens, r.total_tokens
            FROM agent_run r LEFT JOIN runner ru ON ru.id = r.runner_id
            WHERE r.work_item_id = $1 ORDER BY r.created_at DESC"#,
     )
