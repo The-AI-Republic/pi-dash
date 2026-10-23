@@ -693,6 +693,14 @@ export class WebNewDriver implements ParityDriver {
     for (;;) {
       const list = this.page.locator('section[aria-label="Issue list"], section[aria-label="Issues"]');
       if ((await list.count()) > 0 && (await list.first().isVisible())) return;
+      // The chosen layout persists across visits, so a settled page is not
+      // always the list: the calendar, board and gantt leaves render in
+      // place of the rows. The layout switcher only mounts with the page's
+      // data, so its presence marks any of those settled twins.
+      // Only one variant is visible at a given width (CSS picks it), so
+      // presence rather than visibility is the settled signal.
+      const switcher = this.page.getByTestId(/^layout-switcher-(segmented|dropdown)$/);
+      if ((await switcher.count()) > 0) return;
       if ((await this.authEmailField().count()) > 0) return;
       if ((await this.page.getByRole("heading", { name: "Workspace not found" }).count()) > 0) return;
       if (Date.now() > deadline) return;
