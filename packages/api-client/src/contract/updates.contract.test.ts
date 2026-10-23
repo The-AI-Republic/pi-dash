@@ -19,7 +19,7 @@ import {
   updateIssue,
 } from "../contracts/issue-actions.js";
 import { listCycles, updateCycle } from "../contracts/cycles.js";
-import { listModules, updateModule } from "../contracts/modules.js";
+import { MODULE_STATUSES, listModules, updateModule } from "../contracts/modules.js";
 import {
   addPageFavorite,
   archivePage,
@@ -263,7 +263,7 @@ describe.skipIf(!contractEnabled)("thin contextual field contracts", () => {
     });
     expect(updated.id).toBe(moduleId);
     const restored = await updateModule(client, CONTRACT_WORKSPACE, projectId, moduleId, {
-      status: typeof original.status === "string" ? original.status : "planned",
+      status: MODULE_STATUSES.find((status) => status === original.status) ?? "planned",
       member_ids: Array.isArray(original.member_ids) ? (original.member_ids as string[]) : [],
     });
     expect(restored.id).toBe(moduleId);

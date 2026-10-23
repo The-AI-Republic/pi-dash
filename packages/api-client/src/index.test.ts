@@ -8,6 +8,16 @@ import {
   ProjectIdentifierMatch,
   updateProject,
   updateProjectSettings,
+  listModules,
+  getModule,
+  createModule,
+  replaceModule,
+  archiveModule,
+  listArchivedModules,
+  removeIssueFromModule,
+  ModuleRow,
+  ModuleDetail,
+  ModuleWriteEcho,
 } from "./index.js";
 import type { ProjectUpdateInput } from "./index.js";
 import {
@@ -38,6 +48,18 @@ import {
   PersonalApiToken as ModulePersonalApiToken,
 } from "./contracts/api-tokens.js";
 import { getGithubIntegration as moduleGetGithubIntegration } from "./contracts/integrations.js";
+import {
+  archiveModule as moduleArchiveModule,
+  createModule as moduleCreateModule,
+  getModule as moduleGetModule,
+  listArchivedModules as moduleListArchivedModules,
+  listModules as moduleListModules,
+  ModuleDetail as ModuleDetailSchema,
+  ModuleRow as ModuleRowSchema,
+  ModuleWriteEcho as ModuleWriteEchoSchema,
+  removeIssueFromModule as moduleRemoveIssueFromModule,
+  replaceModule as moduleReplaceModule,
+} from "./contracts/modules.js";
 import {
   createWorkspaceWebhook as moduleCreateWorkspaceWebhook,
   listWorkspaceWebhooks as moduleListWorkspaceWebhooks,
@@ -74,5 +96,18 @@ describe("@pidash/api-client entry", () => {
   it("re-exports the cloud session middleware", () => {
     expect(entryRefresh).toBe(moduleRefresh);
     expect(entryPaywall).toBe(modulePaywall);
+  });
+
+  it("re-exports the module contracts", () => {
+    expect(listModules).toBe(moduleListModules);
+    expect(getModule).toBe(moduleGetModule);
+    expect(createModule).toBe(moduleCreateModule);
+    expect(replaceModule).toBe(moduleReplaceModule);
+    expect(archiveModule).toBe(moduleArchiveModule);
+    expect(listArchivedModules).toBe(moduleListArchivedModules);
+    expect(removeIssueFromModule).toBe(moduleRemoveIssueFromModule);
+    expect(ModuleRow).toBe(ModuleRowSchema);
+    expect(ModuleDetail).toBe(ModuleDetailSchema);
+    expect(ModuleWriteEcho).toBe(ModuleWriteEchoSchema);
   });
 });
