@@ -226,11 +226,15 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     crate::license::tasks::register(registry, ctx.pools.primary().clone());
     // D-06 stale-turn sweep (PIDASHCONV-831; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The live
-    // store fails RUNNING turns older than 390s, like the beat in Django.
-    // `assistant.run_turn` stays Python-owned: `register_turn_handler`
-    // needs a live `TurnSeam` and none exists (only test fakes) — never
-    // register it here until the seam lands.
-    crate::assistant::register_sweep_handler(registry, ctx.pools.primary().clone());
+    // store fails RUNNING turns older than the configured hard limit + 60s
+    // (390s at defaults), like the beat in Django (PIDASHCONV-1248).
+    // `assistant.run_turn` is registered by `worker()` (`main.rs`) with
+    // the live `TurnSeam` (PIDASHCONV-863) — never register it here too.
+    crate::assistant::register_sweep_handler(
+        registry,
+        ctx.pools.primary().clone(),
+        ctx.settings.assistant.turn_hard_limit,
+    );
     // Loop scan + fire (PIDASHCONV-838; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The
     // beat entry fires the scanner every minute and the scanner fans

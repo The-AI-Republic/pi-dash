@@ -6,7 +6,8 @@
 //! A turn whose worker died stays `RUNNING` forever and wedges its thread
 //! (the message POST refuses new turns while `active_turn` is set), so the
 //! beat fails every stale turn: `RUNNING` rows with
-//! `started_at < now - (TURN_HARD_LIMIT + 60)` (`tasks.py:513`), one
+//! `started_at < now - (hard + 60)` where `hard` is the configured
+//! `ASSISTANT_TURN_HARD_LIMIT` (`tasks.py:524`; 390s at defaults), one
 //! `_load_context` + `_fail_turn("turn_timeout", …)` per row, skipping rows
 //! whose context no longer loads (`tasks.py:520-523`). Returns the failed
 //! count.
@@ -40,18 +41,19 @@ pub const SWEEP_BEAT_NAME: &str = "assistant-sweep-stale-turns";
 /// Beat cadence, seconds (`celery.py:102`, `timedelta(seconds=30)`).
 pub const SWEEP_INTERVAL_SECS: u64 = 30;
 
-/// Staleness horizon, seconds: `TURN_HARD_LIMIT + 60` (`tasks.py:513`).
-/// Unlike the fixture's flat `390`, this derives from the limit const so the
-/// two cannot drift apart.
-pub const SWEEP_CUTOFF_SECS: i64 =
-    super::run_turn::TURN_HARD_LIMIT_SECS as i64 + super::run_turn::SWEEP_CUTOFF_SLACK_SECS;
-
 /// Timeout detail (`tasks.py:524`).
 pub const SWEEP_TIMEOUT_DETAIL: &str = "The assistant turn did not finish (worker lost).";
 
-/// Staleness cutoff (`tasks.py:513`): `now - (hard + 60)`.
-pub fn sweep_cutoff(now: &DateTime<Utc>) -> DateTime<Utc> {
-    *now - Duration::seconds(SWEEP_CUTOFF_SECS)
+/// Staleness cutoff (`tasks.py:524`): `now - (hard + 60)`.
+///
+/// `hard_limit_secs` is the configured `ASSISTANT_TURN_HARD_LIMIT`
+/// (`settings.assistant.turn_hard_limit`), not the
+/// [`TURN_HARD_LIMIT_SECS`][super::run_turn::TURN_HARD_LIMIT_SECS] default:
+/// Django reads the same setting at `tasks.py:46`, so a hard-coded 330 here
+/// would sweep healthy turns for any operator who raised the limit
+/// (PIDASHCONV-1248). 390s at defaults.
+pub fn sweep_cutoff(now: &DateTime<Utc>, hard_limit_secs: i64) -> DateTime<Utc> {
+    *now - Duration::seconds(hard_limit_secs + super::run_turn::SWEEP_CUTOFF_SLACK_SECS)
 }
 
 /// Stale-turn select (`tasks.py:514-518`): `RUNNING` ids with
@@ -114,12 +116,14 @@ pub trait SweepStore: Send + Sync {
 /// Fail every stale turn (`tasks.py:511-526`): per-row load, skip when the
 /// context is gone, else `_fail_turn("turn_timeout", …)`. A lost guard race
 /// (the turn went terminal concurrently) skips like a gone context.
-/// Returns the failed count.
+/// Returns the failed count. `hard_limit_secs` is the configured
+/// `ASSISTANT_TURN_HARD_LIMIT` (see [`sweep_cutoff`]).
 pub async fn drive_sweep<S: SweepStore>(
     store: &S,
     now: &DateTime<Utc>,
+    hard_limit_secs: i64,
 ) -> Result<(usize, Vec<(Uuid, StaleOutcome)>), SeamError> {
-    let cutoff = sweep_cutoff(now);
+    let cutoff = sweep_cutoff(now, hard_limit_secs);
     let ids = store.stale_turn_ids(cutoff).await?;
     let mut count = 0;
     let mut outcomes = Vec::with_capacity(ids.len());
@@ -296,7 +300,10 @@ impl SweepStore for LiveSweepStore {
 /// Unlike the turn task, the sweep keeps the default retry budget: a DB
 /// outage parks-or-retries through the worker's settlement (`tasks.py` sets
 /// no `max_retries` on the sweep, so Celery defaults apply).
-pub fn register_sweep_handler(registry: &mut Registry, pool: PgPool) {
+/// `hard_limit_secs` is the configured `ASSISTANT_TURN_HARD_LIMIT`
+/// (`settings.assistant.turn_hard_limit`); every run sweeps against
+/// `now - (hard + 60)` like Django (`tasks.py:524`).
+pub fn register_sweep_handler(registry: &mut Registry, pool: PgPool, hard_limit_secs: i64) {
     let store = Arc::new(LiveSweepStore::new(pool));
     registry.register(
         SWEEP_TASK,
@@ -305,7 +312,7 @@ pub fn register_sweep_handler(registry: &mut Registry, pool: PgPool) {
             let fut: Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> =
                 Box::pin(async move {
                     let now = Utc::now();
-                    drive_sweep(store.as_ref(), &now)
+                    drive_sweep(store.as_ref(), &now, hard_limit_secs)
                         .await
                         .map(|_| Verdict::Ack)
                         .map_err(|error| error.to_string())
@@ -369,11 +376,11 @@ mod tests {
     fn cutoff_and_select() {
         use chrono::TimeZone;
         let now = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        // Default limit (330): the fixture's flat 390s horizon.
         assert_eq!(
-            sweep_cutoff(&now),
+            sweep_cutoff(&now, super::super::run_turn::TURN_HARD_LIMIT_SECS as i64),
             Utc.with_ymd_and_hms(2026, 9, 29, 11, 53, 30).unwrap()
         );
-        assert_eq!(SWEEP_CUTOFF_SECS, 390);
         assert_eq!(SWEEP_TASK, "assistant.sweep_stale_turns");
         assert_eq!(SWEEP_BEAT_NAME, "assistant-sweep-stale-turns");
         assert_eq!(SWEEP_INTERVAL_SECS, 30);
@@ -393,6 +400,56 @@ mod tests {
         );
     }
 
+    /// PIDASHCONV-1248: the cutoff honors the configured
+    /// `ASSISTANT_TURN_HARD_LIMIT`, not the 330 default — a 400s-old turn is
+    /// stale under `now - 390s` but fresh under `now - 960s`.
+    #[test]
+    fn cutoff_honors_configured_hard_limit() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        assert_eq!(
+            sweep_cutoff(&now, 900),
+            Utc.with_ymd_and_hms(2026, 9, 29, 11, 44, 0).unwrap()
+        );
+    }
+
+    /// The configured limit flows through `drive_sweep` into the stale
+    /// select: the store sees `now - (900 + 60)`.
+    #[tokio::test]
+    async fn drive_sweep_passes_configured_cutoff_to_store() {
+        struct CaptureStore {
+            seen: Mutex<Option<DateTime<Utc>>>,
+        }
+        impl SweepStore for CaptureStore {
+            async fn stale_turn_ids(&self, c: DateTime<Utc>) -> Result<Vec<Uuid>, SeamError> {
+                *self.seen.lock().unwrap() = Some(c);
+                Ok(Vec::new())
+            }
+            async fn load_context(&self, _id: Uuid) -> Result<Option<TurnContext>, SeamError> {
+                Ok(None)
+            }
+            async fn fail_turn(
+                &self,
+                _c: &TurnContext,
+                _code: &str,
+                _detail: &str,
+            ) -> Result<bool, SeamError> {
+                Ok(true)
+            }
+        }
+        let store = CaptureStore {
+            seen: Mutex::new(None),
+        };
+        let now = Utc::now();
+        let (count, outcomes) = drive_sweep(&store, &now, 900).await.unwrap();
+        assert_eq!(count, 0);
+        assert!(outcomes.is_empty());
+        assert_eq!(
+            store.seen.lock().unwrap().unwrap(),
+            now - Duration::seconds(960)
+        );
+    }
+
     #[tokio::test]
     async fn sweep_fails_stale_skips_gone() {
         let live = Uuid::new_v4();
@@ -404,7 +461,13 @@ mod tests {
             win: true,
         };
         let now = Utc::now();
-        let (count, outcomes) = drive_sweep(&store, &now).await.unwrap();
+        let (count, outcomes) = drive_sweep(
+            &store,
+            &now,
+            super::super::run_turn::TURN_HARD_LIMIT_SECS as i64,
+        )
+        .await
+        .unwrap();
         assert_eq!(count, 1);
         assert_eq!(
             outcomes,
@@ -432,7 +495,13 @@ mod tests {
             win: false,
         };
         let now = Utc::now();
-        let (count, outcomes) = drive_sweep(&store, &now).await.unwrap();
+        let (count, outcomes) = drive_sweep(
+            &store,
+            &now,
+            super::super::run_turn::TURN_HARD_LIMIT_SECS as i64,
+        )
+        .await
+        .unwrap();
         assert_eq!(count, 0);
         assert_eq!(outcomes, vec![(raced, StaleOutcome::Skipped)]);
     }

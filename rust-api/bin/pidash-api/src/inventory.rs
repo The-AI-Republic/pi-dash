@@ -1774,7 +1774,15 @@ mod tests {
             pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
         );
         pidash_jobs::license::tasks::register(&mut registry, pool.clone());
-        pidash_jobs::assistant::register_sweep_handler(&mut registry, pool.clone());
+        pidash_jobs::assistant::register_sweep_handler(
+            &mut registry,
+            pool.clone(),
+            // The same configured limit `worker()` passes (test defaults:
+            // 330, like Django's unset default).
+            pidash_db::config::Settings::test_defaults()
+                .assistant
+                .turn_hard_limit,
+        );
         pidash_jobs::loop_scan::register_scanner(&mut registry, pool.clone());
         pidash_jobs::loop_fire::register_fire(&mut registry, pool.clone());
         pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pool.clone());

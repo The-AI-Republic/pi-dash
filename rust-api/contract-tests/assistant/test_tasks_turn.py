@@ -570,6 +570,45 @@ def test_sweep_ignores_fresh_and_terminal(db_conn, broker_url):
     assert _turn_row(db_conn, done_turn)["status"] == "completed"
 
 
+def _iso_age(age_secs: int) -> str:
+    """UTC ISO instant ``age_secs`` in the past (a turn's ``started_at``)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age_secs))
+
+
+def test_sweep_honors_configured_hard_limit(db_conn, broker_url):
+    """The sweep cuts at ASSISTANT_TURN_HARD_LIMIT + 60 (PIDASHCONV-1248).
+
+    The worker under test boots with ASSISTANT_TURN_HARD_LIMIT=900 (see the
+    worker-plane job env): a turn younger than the 960s cutoff survives the
+    sweep while a turn older than it fails with ``turn_timeout``. The ages
+    derive from the configured value, so the same test pins the default 390s
+    horizon when the override is absent.
+    """
+    limit = int(os.environ.get("ASSISTANT_TURN_HARD_LIMIT", "330"))
+    cutoff = limit + 60
+    user, workspace, _client = _seed_member(db_conn, "hardlimit")
+    _young_thread, young_turn, _m1 = _seed_turn_trio(
+        db_conn, user, workspace, status="running", started_at=_iso_age(cutoff - 30)
+    )
+    _old_thread, old_turn, _m2 = _seed_turn_trio(
+        db_conn, user, workspace, status="running", started_at=_iso_age(cutoff + 30)
+    )
+
+    celery_wire.publish(SWEEP, broker_url=broker_url)
+    row = wait_for(
+        lambda: _turn_row(db_conn, old_turn) if _turn_row(db_conn, old_turn)["status"] == "failed" else None,
+        what="over-cutoff turn swept",
+    )
+    assert row["error_code"] == "turn_timeout"
+    assert row["error_detail"] == "The assistant turn did not finish (worker lost)."
+    # Settle: the sweep may still be running when the old row flips.
+    time.sleep(2)
+    assert _turn_row(db_conn, young_turn)["status"] == "running", (
+        f"a turn younger than the configured {cutoff}s cutoff must survive the sweep"
+    )
+    assert [e for e in _turn_events(db_conn, young_turn) if e["kind"] == "turn_failed"] == []
+
+
 def test_complete_turn_streams_and_prunes(db_conn, broker_url):
     """Stub provider: deltas stream, the turn completes, deltas are pruned."""
     stub = _StubProvider()
