@@ -79,7 +79,13 @@ export function ProjectSettingsRestriction({
         heading={RESTRICTION_JOIN_TITLE}
         body={RESTRICTION_JOIN_BODY}
         action={
-          <Button variant="primary" loading={joining} disabled={joining} onClick={onJoin}>
+          <Button
+            variant="primary"
+            loading={joining}
+            disabled={joining}
+            onClick={onJoin}
+            data-testid="project-settings-join"
+          >
             {joining ? "Joining…" : "Join project"}
           </Button>
         }

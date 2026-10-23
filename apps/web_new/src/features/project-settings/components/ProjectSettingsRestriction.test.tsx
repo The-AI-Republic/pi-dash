@@ -27,6 +27,7 @@ describe("ProjectSettingsRestriction", () => {
     expect(screen.getByRole("heading", { name: RESTRICTION_JOIN_TITLE })).toBeInTheDocument();
     expect(screen.getByText(RESTRICTION_JOIN_BODY)).toBeInTheDocument();
     expect(screen.getByTestId("project-settings-restriction")).toHaveAttribute("data-restriction", "join");
+    expect(screen.getByTestId("project-settings-join")).toHaveTextContent("Join project");
     fireEvent.click(screen.getByRole("button", { name: "Join project" }));
     expect(onJoin).toHaveBeenCalledTimes(1);
   });
@@ -47,6 +48,7 @@ describe("ProjectSettingsRestriction", () => {
     expect(screen.getByRole("heading", { name: RESTRICTION_NO_ACCESS_TITLE })).toBeInTheDocument();
     expect(screen.getByText(RESTRICTION_NO_ACCESS_BODY)).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("project-settings-join")).not.toBeInTheDocument();
   });
 
   it("reports an unknown project without a join action", () => {
