@@ -8,14 +8,23 @@ import {
   CYCLE_GROUP_HEADINGS,
   CYCLE_LINK_COPIED_TITLE,
   CYCLE_LINK_COPY_FAILED_TITLE,
+  CYCLE_LIST_TAB_KEY,
   CYCLE_MEMBER_DATES_LABEL,
   CYCLE_OPEN_NEW_TAB_FAILED_TITLE,
+  CYCLE_OVERLAP_TITLE,
+  CYCLE_TITLE_MAX_LENGTH,
   CYCLES_CRUMB,
   copyCycleLink,
+  CreateCycleDialog,
+  UpdateCycleDialog,
   cycleCoversToday,
+  cycleDaysComplete,
+  cycleDaysUnchanged,
   cycleDetailKeys,
   cycleDetailPath,
   cycleDetailQueryOptions,
+  cycleFailureMessage,
+  cycleFormDays,
   CycleDateSpan,
   CycleDetailGate,
   CycleGoneAway,
@@ -23,6 +32,7 @@ import {
   CycleMemberDates,
   CycleMemberDatesFrame,
   cycleKeys,
+  cycleOverlapMessage,
   cycleProgressCounts,
   cycleProgressPercent,
   CyclePeekPanel,
@@ -34,7 +44,10 @@ import {
   CyclesListBody,
   cyclesListHref,
   cyclesListQueryOptions,
+  CyclesListHeader,
   CyclesListScreen,
+  needsCycleDateCheck,
+  validateCycleTitle,
   CyclesListSkeleton,
   CyclesLoadError,
   CyclesNoMatch,
@@ -147,5 +160,21 @@ describe("cycles barrel", () => {
     expect(CyclesListBody).toBeDefined();
     expect(CyclesNoMatch).toBeDefined();
     expect(CyclesSearchBox).toBeDefined();
+  });
+
+  it("re-exports the save dialog, its header and its validation", () => {
+    expect(CreateCycleDialog).toBeDefined();
+    expect(UpdateCycleDialog).toBeDefined();
+    expect(CYCLE_LIST_TAB_KEY).toBe("cycle_tab");
+    expect(CyclesListHeader).toBeDefined();
+    expect(CYCLE_TITLE_MAX_LENGTH).toBe(255);
+    expect(validateCycleTitle).toBeDefined();
+    expect(CYCLE_OVERLAP_TITLE).toBe("Error!");
+    expect(cycleFormDays).toBeDefined();
+    expect(cycleDaysComplete).toBeDefined();
+    expect(cycleDaysUnchanged).toBeDefined();
+    expect(needsCycleDateCheck).toBeDefined();
+    expect(cycleOverlapMessage).toBeDefined();
+    expect(cycleFailureMessage).toBeDefined();
   });
 });

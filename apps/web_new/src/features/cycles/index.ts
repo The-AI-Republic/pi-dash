@@ -30,12 +30,33 @@ export { CycleProgressRing, type CycleProgressRingProps } from "./components/Cyc
 export { CycleRow, type CycleRowProps } from "./components/CycleRow.js";
 export { CyclesFeatureGate, type CyclesFeatureGateProps } from "./components/CyclesFeatureGate.js";
 export { CyclesListBody, type CyclesListBodyProps } from "./components/CyclesListBody.js";
+export { CyclesListHeader, type CyclesListHeaderProps } from "./components/CyclesListHeader.js";
 export { CyclesListScreen, type CyclesListScreenProps } from "./components/CyclesListScreen.js";
 export { CyclesListSkeleton } from "./components/CyclesListSkeleton.js";
 export { CyclesLoadError, type CyclesLoadErrorProps } from "./components/CyclesLoadError.js";
 export { CyclesNoMatch, type CyclesNoMatchProps, type CyclesNoMatchVariant } from "./components/CyclesNoMatch.js";
 export { CyclesSearchBox, type CyclesSearchBoxProps } from "./components/CyclesSearchBox.js";
 export { CyclesZeroState, type CyclesZeroStateProps } from "./components/CyclesZeroState.js";
+export {
+  CYCLE_LIST_TAB_KEY,
+  CreateCycleDialog,
+  UpdateCycleDialog,
+  type CreateCycleDialogProps,
+  type CycleProjectRef,
+  type UpdateCycleDialogProps,
+} from "./dialog/CycleDialog.js";
+export {
+  CYCLE_OVERLAP_TITLE,
+  cycleDaysComplete,
+  cycleDaysUnchanged,
+  cycleFailureMessage,
+  cycleFormDays,
+  cycleOverlapMessage,
+  needsCycleDateCheck,
+  type CyclePayloadDays,
+  type CycleStoredDays,
+} from "./dialog/cycleRange.js";
+export { CYCLE_TITLE_MAX_LENGTH, validateCycleTitle } from "./dialog/cycleTitle.js";
 export {
   cycleCoversToday,
   cycleSpanModel,
