@@ -7,8 +7,8 @@
 // span, and the extras for the row's state — the work-item count on
 // draft and upcoming rows, the creator avatar on the active row,
 // creator plus assignees elsewhere. The favorite star is a marker here;
-// slice H turns it into the toggle. The row menu trigger lands with
-// slice E beside the quick-look eye.
+// slice H turns it into the toggle. The row menu trigger (slice E)
+// sits beside the quick-look eye.
 
 import { Link } from "@tanstack/react-router";
 import { Avatar, Badge, IconButton } from "@pidash/kit";
@@ -20,8 +20,10 @@ import { groupOfCycle, lifecycleLabel, lifecycleTone } from "../lib/cycleGroups.
 import { UNKNOWN_CYCLE_MEMBER, type CycleMemberEntry } from "../lib/cycleMembers.js";
 import { cycleDetailPath } from "../lib/cycleScreen.js";
 import { cycleProgressPercent } from "../lib/cycleProgress.js";
+import type { CycleProjectRef } from "../dialog/CycleDialog.js";
 import { CycleDateSpan } from "./CycleDateSpan.js";
 import { CycleProgressRing } from "./CycleProgressRing.js";
+import { CycleRowMenu } from "./CycleRowMenu.js";
 
 export interface CycleRowProps {
   workspaceSlug: string;
@@ -38,6 +40,10 @@ export interface CycleRowProps {
   showFavoriteMarker: boolean;
   /** Open (or toggle shut) this row's quick look. */
   onPeek: (cycleId: string) => void;
+  /** Members and admins mutate; guests keep the menu's link actions only. */
+  canMutate: boolean;
+  /** The project in the address: the row menu's edit dialog label. */
+  currentProject: CycleProjectRef;
 }
 
 function memberAvatar(entry: CycleMemberEntry, key: string): React.ReactElement {
@@ -53,6 +59,8 @@ export function CycleRow({
   directory,
   showFavoriteMarker,
   onPeek,
+  canMutate,
+  currentProject,
 }: CycleRowProps): React.ReactElement {
   const group = groupOfCycle(cycle.status);
   const isCurrent = group === null;
@@ -127,6 +135,13 @@ export function CycleRow({
       >
         <Eye size={16} strokeWidth={1.5} aria-hidden="true" />
       </IconButton>
+      <CycleRowMenu
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        cycle={cycle}
+        canMutate={canMutate}
+        currentProject={currentProject}
+      />
     </div>
   );
 }
