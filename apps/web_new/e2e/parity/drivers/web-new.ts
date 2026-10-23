@@ -39076,17 +39076,28 @@ export class WebNewDriver implements ParityDriver {
       )
       .not.toBe("waiting");
   }
+  private generalEmblemDialog(): Locator {
+    // Kit dialogs carry no testid (the prop does not forward), so the
+    // picker scopes off its "Change emblem" heading instead.
+    return this.page.getByRole("dialog").filter({ hasText: "Change emblem" });
+  }
   async settingsGeneralEmblemOpen(): Promise<void> {
     await this.page.getByTestId("general-emblem-open").click({ timeout: WebNewDriver.WAIT_MS });
     await expect.poll(() => this.settingsGeneralEmblemPickerVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
   async settingsGeneralEmblemPickerVisible(): Promise<boolean> {
-    return (await this.page.getByTestId("general-emblem-picker").count()) > 0;
+    return (await this.page.getByRole("heading", { name: "Change emblem", exact: true }).count()) > 0;
   }
   async settingsGeneralEmblemPick(char: string): Promise<void> {
-    const dialog = this.page.getByTestId("general-emblem-picker");
+    const dialog = this.generalEmblemDialog();
     // The picker opens on the draft's own kind; emblems need the Emoji tab.
-    await dialog.getByTestId("general-emblem-tab-emoji").click({ timeout: WebNewDriver.WAIT_MS });
+    // Skip the click when it is already selected: a second click is a
+    // no-op, and the tab row sits above the viewport fold when the dialog
+    // content overflows (flex centering clips the top).
+    const emojiTab = dialog.getByTestId("general-emblem-tab-emoji");
+    if ((await emojiTab.getAttribute("aria-selected")) !== "true") {
+      await emojiTab.click({ timeout: WebNewDriver.WAIT_MS });
+    }
     // Typing the glyph itself narrows the alphabet onto it, or surfaces
     // the typed-extra entry when the catalogue lacks it.
     await dialog.getByLabel("Search").fill(char, { timeout: WebNewDriver.WAIT_MS });
