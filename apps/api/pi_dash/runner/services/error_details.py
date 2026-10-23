@@ -69,3 +69,22 @@ def split_folded_updates(values: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     popped = {flat: values.pop(flat) for flat in list(FOLDED_KEYS) if flat in values}
     return popped or None
+
+
+def merge_error_details_expression(**fields: Any):
+    """SQL-side counterpart of :func:`merge_error_details` for bulk ``update()``.
+
+    For writers that update a queryset rather than one locked row, so there
+    is no Python copy of ``error_details`` to merge into. Only non-empty
+    values are applied (``error_details || '{...}'``); other keys survive.
+    """
+    from django.db.models import F, Func, JSONField, Value
+
+    patch = {FOLDED_KEYS[flat]: value for flat, value in fields.items() if value}
+    return Func(
+        F("error_details"),
+        Value(patch, output_field=JSONField()),
+        template="(%(expressions)s)",
+        arg_joiner=" || ",
+        output_field=JSONField(),
+    )

@@ -28,7 +28,7 @@ from pi_dash.runner.models import (
 )
 from pi_dash.runner.serializers import AgentRunSerializer
 from pi_dash.runner.services import tokens
-from pi_dash.runner.services.error_details import merge_error_details
+from pi_dash.runner.services.error_details import merge_error_details, merge_error_details_expression
 
 _MIGRATION = importlib.import_module("pi_dash.runner.migrations.0032_agent_run_error_details")
 
@@ -127,6 +127,18 @@ def test_merge_drops_a_key_rather_than_storing_an_empty_string():
     assert merge_error_details(bag, error="") == {"code": "boom"}
     # An unnamed key is left alone.
     assert merge_error_details(bag, error="x")["code"] == "boom"
+
+
+@pytest.mark.unit
+def test_bulk_update_merges_into_the_bag_in_sql(db, create_user, workspace, pod):
+    # The offline sweep stamps a code on a queryset, with no locked row to
+    # merge in Python; the SQL merge must keep the keys already there.
+    run = AgentRun.objects.create(
+        workspace=workspace, created_by=create_user, pod=pod, error_details={"message": "user cancelled"}
+    )
+    AgentRun.objects.filter(pk=run.pk).update(error_details=merge_error_details_expression(error_code="runner_offline"))
+    run.refresh_from_db()
+    assert run.error_details == {"message": "user cancelled", "code": "runner_offline"}
 
 
 # ---------------------------------------------------------------------------
