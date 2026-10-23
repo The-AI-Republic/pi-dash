@@ -16,7 +16,6 @@ import * as React from "react";
 
 import { loadIntakeRouteChunk, resolvedIntakeRouteChunk } from "../../../../../../features/intake/route/lazy.js";
 import {
-  intakeSearchFor,
   parseIntakeSearch,
   type IntakeSearch,
   type IntakeSearchWriteOptions,
@@ -41,9 +40,12 @@ function IntakeRoute(): React.ReactElement {
   const openCreate = React.useCallback(() => {
     setCreateOpen(true);
   }, []);
+  // The address is built inline: the writers live in searchWrites.ts on
+  // the screen's chunk (NEWFRONT-870), and this eager route module must
+  // not pin them back onto the first paint's closure.
   const showCreated = React.useCallback(
     (issueId: string) => {
-      write(intakeSearchFor("open", issueId));
+      write({ currentTab: "open", inboxIssueId: issueId });
     },
     [write]
   );
