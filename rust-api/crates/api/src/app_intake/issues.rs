@@ -63,15 +63,24 @@ use pidash_db::issue_filters::{
 use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
+use pidash_services::app_issues::serializers_create::managed_unavailable_detail;
 use pidash_services::app_issues::serializers_create::HAS_ACTIVE_RUN_SQL;
 use pidash_services::app_issues::serializers_detail::{
     agent_status_to_representation, agent_ticker_to_representation, serialize_iso_datetime,
     AgentLiveStateRow, AgentRunDetailRow, AgentTickerView, ACTIVE_AGENT_RUN_SQL,
     AGENT_RUN_COUNT_SQL, LATEST_AGENT_RUN_SQL,
 };
+use pidash_services::dispatch::admission::{managed_runner_availability, LlmProfile};
+use pidash_services::dispatch::policy::{
+    cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
+};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
+use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::orchestration::StateRef;
 
+use crate::app_issues::handlers_core::{
+    assistant_has_api_key, enrolled_runner, online_runner, paused_runner,
+};
 use crate::app_issues::resolve_gate;
 use crate::middleware::SessionHandle;
 
@@ -1326,7 +1335,10 @@ pub async fn has_active_run(pool: &PgPool, issue_id: &Uuid) -> Result<bool, Deni
 #[allow(clippy::too_many_arguments)]
 pub async fn validate_issue_object(
     pool: &PgPool,
+    settings: &pidash_db::config::Settings,
     project_id: &Uuid,
+    workspace_id: &Uuid,
+    viewer_id: &Uuid,
     issue: &IssueRow,
     validated: &ValidatedIssue,
     input: &serde_json::Map<String, serde_json::Value>,
@@ -1381,7 +1393,18 @@ pub async fn validate_issue_object(
     }
 
     if let Some(executor) = validated.agent_executor.as_ref() {
-        validate_executor(pool, project_id, issue, executor.clone(), errors, non_field).await?;
+        validate_executor(
+            pool,
+            settings,
+            project_id,
+            workspace_id,
+            viewer_id,
+            issue,
+            executor.clone(),
+            errors,
+            non_field,
+        )
+        .await?;
     }
 
     // HTML sanitize (`serializers/issue.py:326-332`): truthy values
@@ -1534,37 +1557,128 @@ async fn validate_pod(
     Ok(())
 }
 
-/// Executor checks (`serializers/issue.py:264-312`).
+/// Executor checks (`serializers/issue.py:275-321`): the
+/// settings-backed cloud/managed gates with Django's messages
+/// (mirroring `app_issues` step 4), and the mid-flight rule for
+/// explicit null too (`:314-321` sits outside
+/// `if executor is not None`).
+#[allow(clippy::too_many_arguments)]
 async fn validate_executor(
     pool: &PgPool,
+    settings: &pidash_db::config::Settings,
     project_id: &Uuid,
+    workspace_id: &Uuid,
+    viewer_id: &Uuid,
     issue: &IssueRow,
     executor: Option<String>,
     errors: &mut FieldErrors,
     _non_field: &mut Vec<String>,
 ) -> Result<(), Denial> {
-    let Some(executor) = executor else {
-        return Ok(());
-    };
-    if executor == "cloud_agent" && !cloud_agent_configured(pool).await {
-        push_error(
-            errors,
-            "agent_executor",
-            "Pi Dash Cloud Agent is not available on this instance".to_owned(),
-        );
+    if let Some(executor) = executor.as_deref() {
+        // Field level (`AGENT_EXECUTORS`) already rejected unknown
+        // values with the `ChoiceField` message, so only the three
+        // kinds arrive (`:280-281` is unreachable past the field).
+        match AgentExecutorKind::from_value(executor) {
+            Some(AgentExecutorKind::CloudAgent)
+                if !cloud_agent_is_configured(&settings.cloud_agent) =>
+            {
+                push_error(
+                    errors,
+                    "agent_executor",
+                    "Pi Dash Cloud Agent is not available on this instance".to_owned(),
+                );
+            }
+            Some(AgentExecutorKind::ManagedRunner) => {
+                // `self.instance.project` (`:295`): always resolved on
+                // update — the tenant project is the issue's project.
+                let mut llm_profile = LlmProfile {
+                    available: false,
+                    reason_code: ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned(),
+                };
+                let mut enrolled_exists = false;
+                let mut online_exists = false;
+                let mut paused_exists = false;
+                // `managed_runner_availability` gates in fixed order;
+                // each probe runs only when reached (mirrors
+                // `app_issues::handlers_core`).
+                let mut viewer: Option<UserFlags> = None;
+                if managed_runner_is_enabled(&settings.managed_runner) {
+                    let flags: Option<(bool, bool)> =
+                        sqlx::query_as(r#"SELECT is_active, is_bot FROM users WHERE id = $1"#)
+                            .bind(viewer_id)
+                            .fetch_optional(pool)
+                            .await
+                            .map_err(|_| Denial::ServerError)?;
+                    viewer = flags.map(|(is_active, is_bot)| UserFlags { is_active, is_bot });
+                    if viewer.is_some_and(|flags| flags.is_active && !flags.is_bot) {
+                        // `managed_llm_profile` seam: CE has no usable
+                        // desktop profile; a BYOK key reads as
+                        // BYOK-unsupported, else LLM-config-missing
+                        // (same transcription as `app_issues`).
+                        let keyed = assistant_has_api_key(pool, viewer_id)
+                            .await
+                            .map_err(|_| Denial::ServerError)?;
+                        llm_profile = LlmProfile {
+                            available: false,
+                            reason_code: if keyed {
+                                ManagedRunnerReason::BYOK_UNSUPPORTED.to_owned()
+                            } else {
+                                ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned()
+                            },
+                        };
+                        if llm_profile.available {
+                            enrolled_exists =
+                                enrolled_runner(pool, viewer_id, project_id, workspace_id)
+                                    .await
+                                    .map_err(|_| Denial::ServerError)?;
+                            if enrolled_exists {
+                                online_exists =
+                                    online_runner(pool, viewer_id, project_id, workspace_id)
+                                        .await
+                                        .map_err(|_| Denial::ServerError)?;
+                                // `09738d222`: the paused
+                                // tiebreaker runs only when
+                                // nothing is online (mirrors
+                                // `app_issues::handlers_core`).
+                                if !online_exists {
+                                    paused_exists =
+                                        paused_runner(pool, viewer_id, project_id, workspace_id)
+                                            .await
+                                            .map_err(|_| Denial::ServerError)?;
+                                }
+                            }
+                        }
+                    }
+                }
+                let verdict = managed_runner_availability(
+                    &settings.managed_runner,
+                    viewer.as_ref(),
+                    || llm_profile.clone(),
+                    enrolled_exists,
+                    online_exists,
+                    paused_exists,
+                );
+                // `NO_RUNNER_FOR_PROJECT` accepts the pin (the desktop
+                // enrolls on open and resolves the race, `:304-307`).
+                if !verdict.available
+                    && verdict.reason_code != ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
+                {
+                    push_error(
+                        errors,
+                        "agent_executor",
+                        managed_unavailable_detail(&verdict.reason_code).into_owned(),
+                    );
+                }
+            }
+            _ => {}
+        }
     }
-    if executor == "managed_runner" && !managed_runner_available(pool, project_id).await {
-        // The desktop-enrollment race carve-out
-        // (`NO_RUNNER_FOR_PROJECT` accepts): without an enrolled
-        // runner the pin still lands.
-        push_error(
-            errors,
-            "agent_executor",
-            "Pi Dash desktop runner is not available for this project".to_owned(),
-        );
-    }
-    let current = issue.agent_executor.clone();
-    if Some(executor.as_str()) != current.as_deref() && has_active_run(pool, &issue.id).await? {
+    // The mid-flight rule runs for explicit null too (`None` clears
+    // the override); `None == None` is unchanged, like Django's
+    // `str(None) == str(None)`.
+    if executor.as_deref() != issue.agent_executor.as_deref()
+        && has_active_run(pool, &issue.id).await?
+    {
         push_error(
             errors,
             "agent_executor",
@@ -1572,45 +1686,6 @@ async fn validate_executor(
         );
     }
     Ok(())
-}
-
-/// `cloud_agent_is_configured` (`core/agent_execution.py:34`): the
-/// operator kill switch. Reads the live Django settings rows; absent
-/// rows read as unconfigured.
-async fn cloud_agent_configured(pool: &PgPool) -> bool {
-    sqlx::query_scalar::<_, Option<String>>(
-        r#"SELECT value FROM django_settings WHERE key = 'CLOUD_AGENT_ENABLED'"#,
-    )
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .flatten()
-    .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes"))
-}
-
-/// `managed_runner_availability` (`managed_runner/policy.py`): accept
-/// when the instance kill switch is on or a runner is enrolled for the
-/// project (the `NO_RUNNER_FOR_PROJECT` carve-out accepts either way in
-/// practice — enrollment self-heals on open).
-async fn managed_runner_available(pool: &PgPool, project_id: &Uuid) -> bool {
-    let kill: Option<(bool,)> =
-        sqlx::query_as(r#"SELECT enabled FROM managed_runner_config WHERE id = 1 LIMIT 1"#)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-    if kill.is_some_and(|row| row.0) {
-        return true;
-    }
-    let enrolled: Option<(Uuid,)> =
-        sqlx::query_as(r#"SELECT runner_id FROM runner_projects WHERE project_id = $1 LIMIT 1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-    // Unenrolled projects accept the pin (the client resolves the race);
-    // only an explicitly disabled instance rejects.
-    enrolled.is_some() || kill.is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -2980,7 +3055,10 @@ pub async fn partial_update(
         let mut non_field: Vec<String> = Vec::new();
         let object = match validate_issue_object(
             pool,
+            state.settings(),
             &tenant.project_id,
+            &tenant.workspace_id,
+            &actor.id,
             &stored_issue,
             &validated,
             &narrowed,
