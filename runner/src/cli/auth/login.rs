@@ -209,6 +209,15 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     }
     println!("  Workspace: {}", machine_token.workspace_slug);
 
+    // Best-effort: write the machine-level ~/.pidash/context.md now that the
+    // dev-machine token and workspace binding are persisted. A failure here is
+    // a note, not a login failure — the file can be refreshed later with
+    // `pidash context refresh`.
+    match crate::cli::context::write_machine_context_for_paths(paths).await {
+        Ok(path) => println!("  Machine context: {}", path.display()),
+        Err(err) => println!("  (Machine context was not written: {err})"),
+    }
+
     Ok(LoginOutcome { cloud_url })
 }
 
@@ -511,6 +520,7 @@ mod tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
         }
     }
 
