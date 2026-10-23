@@ -20,6 +20,7 @@ import { DESCRIPTION_SAVE_FAILED_TITLE, TITLE_SAVE_FAILED_TITLE, useUpdateIssue 
 import { IssueReactions } from "../reactions/IssueReactions.js";
 import { DescriptionHistory } from "./DescriptionHistory.js";
 import { IssueDescriptionField, type RestoredDescription } from "./IssueDescriptionField.js";
+import { IssueAgentActions } from "./IssueAgentActions.js";
 import { IssueTitleField } from "./IssueTitleField.js";
 import { SaveIndicator } from "./SaveIndicator.js";
 import { useSavePipeline } from "./savePipeline.js";
@@ -27,6 +28,8 @@ import { WaitingBanner } from "./waiting/WaitingBanner.js";
 
 export interface DetailMainColumnProps {
   workspaceSlug: string;
+  /** The resolved workspace id for agent dispatch. */
+  workspaceId?: string | null | undefined;
   projectId: string;
   issue: Issue;
   /** Project member/admin standing on a live project; guests read. Archived and synced rows still render read-only. */
@@ -39,6 +42,7 @@ export interface DetailMainColumnProps {
 
 export function DetailMainColumn({
   workspaceSlug,
+  workspaceId = null,
   projectId,
   issue,
   editable,
@@ -83,6 +87,13 @@ export function DetailMainColumn({
         </div>
       </div>
       <WaitingBanner workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} disabled={readOnly} />
+      <IssueAgentActions
+        workspaceSlug={workspaceSlug}
+        workspaceId={workspaceId}
+        projectId={projectId}
+        issue={issue}
+        disabled={readOnly}
+      />
       <IssueTitleField
         value={issue.name}
         disabled={readOnly}

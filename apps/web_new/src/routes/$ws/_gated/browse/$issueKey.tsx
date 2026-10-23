@@ -16,7 +16,7 @@ import { createFileRoute, Link, Navigate, redirect, useNavigate } from "@tanstac
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
-import { useMe } from "../../../../core/session/index.js";
+import { useMe, useWorkspace } from "../../../../core/session/index.js";
 import {
   CommentThread,
   DetailMissingState,
@@ -141,6 +141,7 @@ function BrowseIssueDetail({
   const context = Route.useRouteContext();
   const navigate = useNavigate();
   const me = useMe();
+  const { workspace } = useWorkspace(workspaceSlug);
   const { data: issue } = useSuspenseQuery(
     issueDetailQueryOptions(context.apiClient, workspaceSlug, projectId, issueId)
   );
@@ -258,6 +259,7 @@ function BrowseIssueDetail({
       />
       <IssueDetailRoot
         workspaceSlug={workspaceSlug}
+        workspaceId={workspace?.id ?? null}
         projectId={projectId}
         issue={issue}
         editable={editable}

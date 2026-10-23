@@ -21,6 +21,8 @@ import { useDetailUiStore } from "./store.js";
 
 export interface IssueDetailRootProps {
   workspaceSlug: string;
+  /** The resolved workspace id for agent dispatch. */
+  workspaceId?: string | null | undefined;
   projectId: string;
   issue: Issue;
   /** Project member/admin standing on a live project; guests read. Archived and synced rows still render read-only. */
@@ -37,6 +39,7 @@ export interface IssueDetailRootProps {
 
 export function IssueDetailRoot({
   workspaceSlug,
+  workspaceId = null,
   projectId,
   issue,
   editable,
@@ -69,6 +72,7 @@ export function IssueDetailRoot({
         ) : null}
         <DetailMainColumn
           workspaceSlug={workspaceSlug}
+          workspaceId={workspaceId}
           projectId={projectId}
           issue={issue}
           editable={editable}
