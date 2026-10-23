@@ -223,6 +223,7 @@ export function CommentCard({
               label={`Comment by ${name}`}
               className="pl-(--space-8)"
               resolveAsset={resolveAsset}
+              workspaceSlug={workspaceSlug}
             />
           )}
           {/* Folded cards and archived issues hide the whole cluster (ISS-203). */}

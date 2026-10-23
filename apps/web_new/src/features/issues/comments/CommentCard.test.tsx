@@ -158,6 +158,16 @@ describe("CommentCard", () => {
     expect(screen.getByText("AI Agent")).toBeInTheDocument();
   });
 
+  it("links a stored mention to the mentioned member's profile (CMT-020)", () => {
+    renderCard({
+      comment: comment({
+        comment_html: `<p>please review <mention-component id="${BOB}" entity_identifier="${BOB}" entity_name="user_mention" data-name="Bob B"></mention-component></p>`,
+      }),
+    });
+    const link = screen.getByRole("link", { name: "@Bob B" });
+    expect(link.getAttribute("href")).toBe(`/acme/profile/${BOB}`);
+  });
+
   it("marks an edited comment in the age line", () => {
     renderCard({ comment: comment({ edited_at: "2026-10-17T10:00:00Z" }) });
     const age = screen.getByRole("button", { name: /Commented .*, edited/ });

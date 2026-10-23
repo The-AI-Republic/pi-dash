@@ -17,13 +17,24 @@ export interface RichTextViewProps {
   className?: string | undefined;
   /** Resolve a stored image asset id to its served source (ISS-127). */
   resolveAsset?: ((src: string) => string) | undefined;
+  /** Workspace slug: person mentions link to the member profile (CMT-020). */
+  workspaceSlug?: string | undefined;
 }
 
-export function RichTextView({ html, label, className, resolveAsset }: RichTextViewProps): React.ReactElement {
+export function RichTextView({
+  html,
+  label,
+  className,
+  resolveAsset,
+  workspaceSlug,
+}: RichTextViewProps): React.ReactElement {
   // Stored bodies carry editor nodes (mentions, image components) that
   // have no paintable markup of their own; the renderable form turns
   // each into a chip or an image before it reaches the frame (ISS-127).
-  const clean = React.useMemo(() => renderableHtml(html, resolveAsset), [html, resolveAsset]);
+  const clean = React.useMemo(
+    () => renderableHtml(html, resolveAsset, workspaceSlug),
+    [html, resolveAsset, workspaceSlug]
+  );
   const classes = className === undefined ? "rich-text-content" : `rich-text-content ${className}`;
   return <div aria-label={label} role="region" className={classes} dangerouslySetInnerHTML={{ __html: clean }} />;
 }
