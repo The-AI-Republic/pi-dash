@@ -1,5 +1,5 @@
 {
-  "_trace": "apps/api/pi_dash/utils/openapi/parameters.py:17-607 (38 constants), responses.py:17-490 (39 constants + create_paginated_response :358-405), examples.py:16-966 (OpenApiExample constants :16-754, SAMPLE_* + SCHEMA_EXAMPLES :756-919, get_sample_for_schema :921-938, PAGE_* :940-966), decorators.py:17-342 (_merge_schema_options :17-30, 21 *_docs factories :33-342), __init__.py:17-367 (re-export surface)",
+  "_trace": "apps/api/pi_dash/utils/openapi/parameters.py:17-610 (38 constants), responses.py:17-490 (39 constants + create_paginated_response :358-405), examples.py:16-966 (OpenApiExample constants :16-754, SAMPLE_* + SCHEMA_EXAMPLES :756-919, get_sample_for_schema :921-938, PAGE_* :940-966), decorators.py:17-342 (_merge_schema_options :17-30, 21 *_docs factories :33-342), __init__.py:17-367 (re-export surface)",
   "_method": "AST parse for exact definition line spans + runtime introspection of the live objects with Django configured (pi_dash.settings.test, no DB); decorator defaults captured by running each factory with extend_schema patched in-module; merge/get_sample/ paginated helpers executed over the vectors below",
   "_type_resolver": "drf_spectacular.plumbing.build_basic_type",
   "_non_json_values": [],
@@ -168,7 +168,7 @@
       ]
     },
     "CYCLE_VIEW_PARAMETER": {
-      "lines": "442-456",
+      "lines": "445-459",
       "class": "OpenApiParameter",
       "name": "cycle_view",
       "description": "Filter cycles by status",
@@ -232,7 +232,7 @@
       ]
     },
     "ESTIMATE_ID_PARAMETER": {
-      "lines": "570-576",
+      "lines": "573-579",
       "class": "OpenApiParameter",
       "name": "estimate_id",
       "description": "Estimate ID",
@@ -248,7 +248,7 @@
       "examples": []
     },
     "EXPAND_PARAMETER": {
-      "lines": "479-497",
+      "lines": "482-500",
       "class": "OpenApiParameter",
       "name": "expand",
       "description": "Comma-separated list of related fields to expand in response",
@@ -280,7 +280,7 @@
       ]
     },
     "EXTERNAL_ID_PARAMETER": {
-      "lines": "287-300",
+      "lines": "290-303",
       "class": "OpenApiParameter",
       "name": "external_id",
       "description": "External system identifier for filtering or lookup",
@@ -304,7 +304,7 @@
       ]
     },
     "EXTERNAL_SOURCE_PARAMETER": {
-      "lines": "302-320",
+      "lines": "305-323",
       "class": "OpenApiParameter",
       "name": "external_source",
       "description": "External system source name for filtering or lookup",
@@ -336,7 +336,7 @@
       ]
     },
     "FIELDS_PARAMETER": {
-      "lines": "459-477",
+      "lines": "462-480",
       "class": "OpenApiParameter",
       "name": "fields",
       "description": "Comma-separated list of fields to include in response",
@@ -368,7 +368,7 @@
       ]
     },
     "INCLUDE_ARCHIVED_PARAMETER": {
-      "lines": "594-607",
+      "lines": "597-610",
       "class": "OpenApiParameter",
       "name": "include_archived",
       "description": "Include archived records in the results. Excluded by default.",
@@ -466,7 +466,7 @@
       ]
     },
     "LIMIT_PARAMETER": {
-      "lines": "394-404",
+      "lines": "397-407",
       "class": "OpenApiParameter",
       "name": "limit",
       "description": "Maximum number of results to return",
@@ -573,7 +573,7 @@
       ]
     },
     "ORDER_BY_PARAMETER": {
-      "lines": "323-351",
+      "lines": "326-354",
       "class": "OpenApiParameter",
       "name": "order_by",
       "description": "Field to order results by. Prefix with '-' for descending order",
@@ -621,7 +621,7 @@
       ]
     },
     "PAGE_ID_PARAMETER": {
-      "lines": "579-592",
+      "lines": "582-595",
       "class": "OpenApiParameter",
       "name": "page_id",
       "description": "Page ID",
@@ -646,10 +646,10 @@
       ]
     },
     "PER_PAGE_PARAMETER": {
-      "lines": "274-284",
+      "lines": "274-287",
       "class": "OpenApiParameter",
       "name": "per_page",
-      "description": "Number of results per page (default: 20, max: 100)",
+      "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
       "required": false,
       "type_enum": "INT",
       "type_resolved": {
@@ -661,14 +661,14 @@
       "examples": [
         {
           "name": "Default",
-          "value": 20,
+          "value": 1000,
           "summary": null,
           "description": null,
           "request_only": false,
           "response_only": false
         },
         {
-          "name": "Maximum",
+          "name": "Smaller page",
           "value": 100,
           "summary": null,
           "description": null,
@@ -727,7 +727,7 @@
       ]
     },
     "PROJECT_ID_QUERY_PARAMETER": {
-      "lines": "426-439",
+      "lines": "429-442",
       "class": "OpenApiParameter",
       "name": "project_id",
       "description": "Project ID for filtering results within a specific project",
@@ -777,7 +777,7 @@
       ]
     },
     "SEARCH_PARAMETER": {
-      "lines": "354-372",
+      "lines": "357-375",
       "class": "OpenApiParameter",
       "name": "search",
       "description": "Search query to filter results by name, description, or identifier",
@@ -809,7 +809,7 @@
       ]
     },
     "SEARCH_PARAMETER_REQUIRED": {
-      "lines": "374-392",
+      "lines": "377-395",
       "class": "OpenApiParameter",
       "name": "search",
       "description": "Search query to filter results by name, description, or identifier",
@@ -866,7 +866,7 @@
       ]
     },
     "WORKSPACE_SEARCH_PARAMETER": {
-      "lines": "406-424",
+      "lines": "409-427",
       "class": "OpenApiParameter",
       "name": "workspace_search",
       "description": "Whether to search across entire workspace or within specific project",
@@ -922,7 +922,7 @@
       ]
     },
     "WORK_ITEM_ASSIGNEES_FILTER_PARAMETER": {
-      "lines": "562-568",
+      "lines": "565-571",
       "class": "OpenApiParameter",
       "name": "assignees",
       "description": "Filter by assignee. Comma-separated user UUIDs.",
@@ -937,7 +937,7 @@
       "examples": []
     },
     "WORK_ITEM_LABELS_FILTER_PARAMETER": {
-      "lines": "544-551",
+      "lines": "547-554",
       "class": "OpenApiParameter",
       "name": "labels",
       "description": "Filter by label. Comma-separated label UUIDs and/or label names (case-insensitive).",
@@ -961,7 +961,7 @@
       ]
     },
     "WORK_ITEM_PARENT_FILTER_PARAMETER": {
-      "lines": "529-542",
+      "lines": "532-545",
       "class": "OpenApiParameter",
       "name": "parent",
       "description": "Filter by parent work item. Comma-separated parent UUIDs and/or identifiers (e.g. PROJ-123). Pass `null` to return only top-level work items.",
@@ -993,7 +993,7 @@
       ]
     },
     "WORK_ITEM_PRIORITY_FILTER_PARAMETER": {
-      "lines": "553-560",
+      "lines": "556-563",
       "class": "OpenApiParameter",
       "name": "priority",
       "description": "Filter by priority. Comma-separated values from: urgent, high, medium, low, none.",
@@ -1017,7 +1017,7 @@
       ]
     },
     "WORK_ITEM_STATE_FILTER_PARAMETER": {
-      "lines": "501-515",
+      "lines": "504-518",
       "class": "OpenApiParameter",
       "name": "state",
       "description": "Filter by state. Comma-separated state UUIDs and/or state names (case-insensitive exact match within the project). An unknown name returns 400 listing the valid state names.",
@@ -1049,7 +1049,7 @@
       ]
     },
     "WORK_ITEM_STATE_GROUP_FILTER_PARAMETER": {
-      "lines": "517-527",
+      "lines": "520-530",
       "class": "OpenApiParameter",
       "name": "state_group",
       "description": "Filter by state group. Comma-separated values from: backlog, unstarted, started, review, test, completed, cancelled.",
