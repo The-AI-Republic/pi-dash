@@ -94,9 +94,17 @@ pidash issue patch {{ ident }} --remove-label needs-design         # detach one
 
 - `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | review | test | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
 
+#### Schedulers (read-only)
+
+Schedulers are the workspace's recurring agent jobs — a prompt plus a cadence, installed onto a project, firing agent runs on a timer (this may include the run you are in). Use these commands to *audit* scheduled automation: what is installed, whether it is enabled, when it fires next, and what its recent runs actually did. There is no write access — creating, editing, enabling/disabling, or triggering a scheduler is a human action in the web app.
+
+- `pidash scheduler list [--project <PROJ-or-UUID>]` — with `--project`, the schedulers installed on that project, each with its install's cadence (`dtstart`/`rrule`/`tzid`), `enabled`, `next_run_at`, and last-run summary (`last_run`, `last_run_status`, `last_error`); without, every scheduler definition in the workspace (bindings shown only for projects you can access). Returns the usual paginated envelope.
+- `pidash scheduler get <scheduler-uuid> [--project <PROJ-or-UUID>]` — one scheduler's full definition: `prompt`, `description`, `source` (`builtin`/`manifest`), `is_enabled`, and its install on the project (cadence, `outcome_mode` — what its runs do with findings, `pod`, `extra_context`, `last_error`). 404 when the scheduler is not installed on that project.
+- `pidash scheduler runs <scheduler-uuid> [--limit <N>] [--project <PROJ-or-UUID>]` — recent agent runs the scheduler fired on that project, newest first: `status`, `trigger`, `created_at`/`started_at`/`ended_at`, `error_code`, and `issues` — the work items the run wrote comments to, so you can trace what a scheduled run touched. Default 30, max 100.
+
 {% if run.kind != "scheduler" %}#### Run outcome
 
-- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"]` — report this run's outcome to the ticking clock. Call it once, as your **last** `pidash` command, after any state move. See "Ending the run" for what each outcome means. Without it the clock guesses.
+- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--stop-ticking] [--note "<one line>"]` — report this run's outcome. Call it once, as your **last** `pidash` command, after any state move. The outcome is informational: `done` means "this run's turn is done", and `waiting_on_external` (waiting on an external process — automated checks, the deliverable being accepted — or a dependency issue) applies in **every** stage. No outcome stops the issue's ticking clock, and a run that reports nothing keeps ticking too. `--stop-ticking` is the only run-side signal that stops it — send it when the issue is finished or parked on a human, never while an external-process or dependency wait remains. See "Ending the run" for what each outcome means and exactly when to stop the clock.
 
 {% endif %}#### Debugging
 
@@ -129,20 +137,24 @@ pidash issue patch {{ issue.identifier }} --state "Blocked"
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Review"
-pidash run yield --outcome done
+pidash run yield --outcome done   # turn done — the issue moved on; review runs still belong on it, so no --stop-ticking
 ```
-{% elif run.kind == "review" %}End a review pass (workpad `### Path to done` already written) — **approved** moves the issue on to In Test; **changes needed** sends it back to In Progress with the open items listed; the runner never moves it to `completed`/Done (see "Review cycle" and "Available states"):
+{% elif run.kind == "review" %}End a review pass (workpad `### Path to done` already written) — **approved** moves the issue on to In Test; **changes needed** sends it back to In Progress with the open items listed; the runner never moves it to `completed`/Done. Staying In Review keeps or stops the clock depending on what the wait is for (see "Review cycle" Step 3 and "Available states"):
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Test"      # approved
 pidash issue patch {{ issue.identifier }} --state "In Progress"  # changes needed
-pidash run yield --outcome done
+pidash run yield --outcome done                                  # after either move: your turn is done
+pidash run yield --outcome waiting_on_external                   # staying: waiting on an external process — keep ticking
+pidash run yield --outcome waiting_on_human --stop-ticking       # staying: waiting on a human reviewer
 ```
-{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test for a human to close; **defects** send it back to In Progress with the open items listed (see "Test cycle" and "Available states"):
+{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test and stops the clock so a human takes it from there (unless the project explicitly lets agents accept and close — then accept the deliverable and move it to Done instead); **defects** send it back to In Progress with the open items listed (see "Test cycle" Step 3 and "Available states"):
 
 ```sh
-pidash issue patch {{ issue.identifier }} --state "In Progress"  # defects only
-pidash run yield --outcome done
+pidash run yield --outcome done --stop-ticking                   # pass — leave In Test; a human takes it from here
+pidash issue patch {{ issue.identifier }} --state "In Progress"  # defects
+pidash run yield --outcome done                                  # after the move: your turn is done
+pidash run yield --outcome waiting_on_external                   # nothing changed — an external process or a dependency still pending
 ```
 {% endif %}{% else %}File a finding as a new issue under this project:
 

@@ -142,6 +142,7 @@ _MANAGED_REFUSAL_DETAIL = {
         "Pi Dash AI and the Cloud Agent keep using your own key."
     ),
     "no_managed_runner_for_project": "This project has no Pi Dash Agent on your desktop yet.",
+    "managed_runner_paused": "Your Pi Dash Agent for this project is paused. Resume it to run here.",
 }
 
 

@@ -11,6 +11,7 @@ import { useOutsideClickDetector } from "@pi-dash/hooks";
 import { PreferencesIcon } from "@pi-dash/propel/icons";
 import { ScrollArea } from "@pi-dash/propel/scrollarea";
 // components
+import { DesktopAboutButton } from "@/components/desktop-about-button";
 import { DesktopUpdateButton } from "@/components/desktop-update-button";
 import { CustomizeNavigationDialog } from "@/components/navigation/customize-navigation-dialog";
 // hooks
@@ -112,6 +113,8 @@ export const SidebarWrapper = observer(function SidebarWrapper(props: TSidebarWr
             </div>
             {/* Desktop only: a corner button while an app update is waiting. */}
             <DesktopUpdateButton />
+            {/* Desktop only: opens the About dialog with the bundled licences. */}
+            <DesktopAboutButton />
           </div>
         )}
       </div>

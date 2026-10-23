@@ -17,3 +17,5 @@ Surfaces and fix rules per kind (steps 3–5 of the review cycle):
 - **CODE**: existing reviewer comments live on the {{ repo.code_review_term }} — read them there{% if repo.provider == "github" %} (use the `gh` CLI){% endif %}, and comment your validated findings there too. Fixing is permitted: edit, commit, push to the {{ repo.code_review_term }} branch, and resolve the corresponding comment thread.
 - **DESIGN**: comment inline on the doc, or post a structured comment on the pidash issue if the doc has no comment surface. Fixing is permitted: edit the doc and resolve / strike the inline comment.
 - **DESIGN_THEN_CODE**: design comments first, then {{ repo.code_review_term }} comments; both fix rules above apply.
+
+For software, "waiting on an external process" in the review outcome means waiting on CI checks or on a merge or update of the {{ repo.code_review_term }}: leave the issue In Review and yield `waiting_on_external`.

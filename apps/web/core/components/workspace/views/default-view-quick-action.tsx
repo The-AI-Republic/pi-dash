@@ -14,7 +14,8 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { TStaticViewTypes } from "@pi-dash/types";
 import type { TContextMenuItem } from "@pi-dash/ui";
 import { CustomMenu } from "@pi-dash/ui";
-import { copyUrlToClipboard, cn } from "@pi-dash/utils";
+import { cn } from "@pi-dash/utils";
+import { copyShareUrl } from "@/utils/share-url";
 // helpers
 type Props = {
   workspaceSlug: string;
@@ -31,7 +32,7 @@ export const DefaultWorkspaceViewQuickActions = observer(function DefaultWorkspa
 
   const viewLink = `${workspaceSlug}/workspace-views/${view.key}`;
   const handleCopyText = () =>
-    copyUrlToClipboard(viewLink).then(() => {
+    copyShareUrl(viewLink).then(() => {
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: "Link Copied!",
