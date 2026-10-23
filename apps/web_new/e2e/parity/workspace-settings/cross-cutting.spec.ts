@@ -544,6 +544,11 @@ test(
       const serverBefore = (await serverWorkspaceMembers(world.workspaceSlug, world.owner.cookie)).map(
         (m) => m.membershipId
       );
+      // The roster replaces its loader once the read lands; this
+      // section was opened behind the surface check, not the roster one.
+      await expect
+        .poll(() => driver.wsSettingsMembersListText().then((rows) => rows.length), { timeout: 60_000 })
+        .toBeGreaterThanOrEqual(2);
       const before = await driver.wsSettingsMembersListText();
       expect(before.length).toBeGreaterThanOrEqual(2);
       await driver.wsSettingsDragFirstMemberRowToSecond();

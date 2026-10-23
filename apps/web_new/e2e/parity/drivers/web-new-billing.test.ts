@@ -97,6 +97,21 @@ describe("billing driver", () => {
     expect(seen).toContain('[data-testid="workspace-settings-billing"]');
   });
 
+  it("falls back to the page document when Playwright passes no argument", () => {
+    const settle = vi.fn();
+    vi.stubGlobal("document", { querySelector: settle });
+    try {
+      settle.mockReturnValue({});
+      expect(billingPageSettled(null)).toBe(true);
+      expect(billingPageSettled(undefined)).toBe(true);
+      expect(settle).toHaveBeenCalledWith('[data-testid="workspace-settings-billing"]');
+      settle.mockReturnValue(null);
+      expect(billingPageSettled(null)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("reads the denial view from its own surface", async () => {
     const notAuthorized = locator({ count: async () => 1, isVisible: async () => true });
     const page = pageOf({ locator: vi.fn(() => notAuthorized) });

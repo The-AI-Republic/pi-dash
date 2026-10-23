@@ -265,11 +265,16 @@ import type {
   CommentActivityTraffic,
 } from "./parity-driver";
 
-/** Whether the billing address settled on its page or the denial view. */
-export function billingPageSettled(root: { querySelector: (selector: string) => unknown }): boolean {
+/**
+ * Whether the billing address settled on its page or the denial view.
+ * Playwright passes the function argument as null and serializes it into
+ * the page, so it must fall back to the page document itself.
+ */
+export function billingPageSettled(root?: { querySelector: (selector: string) => unknown } | null): boolean {
+  const scope = root ?? document;
   return (
-    root.querySelector('[data-testid="workspace-settings-billing"]') !== null ||
-    root.querySelector('[data-testid="workspace-settings-not-authorized"]') !== null
+    scope.querySelector('[data-testid="workspace-settings-billing"]') !== null ||
+    scope.querySelector('[data-testid="workspace-settings-not-authorized"]') !== null
   );
 }
 
@@ -25182,14 +25187,20 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async wsSettingsOutletText(): Promise<string> {
-    return (
-      (await this.page
-        .getByTestId("workspace-settings-shell")
-        .innerText()
-        .catch(() => "")) ?? ""
-    )
-      .replace(/\s+/g, " ")
-      .trim();
+    // Workspace sections live inside the settings shell; the token page
+    // sits in the profile shell instead. Read whichever frame renders the
+    // section, falling back to the page's own main region.
+    for (const selector of [
+      '[data-testid="workspace-settings-shell"]',
+      '[data-testid="profile-settings-shell"]',
+      "main",
+    ]) {
+      const frame = this.page.locator(selector).first();
+      if ((await frame.count()) === 0) continue;
+      const text = (await frame.innerText().catch(() => "")) ?? "";
+      return text.replace(/\s+/g, " ").trim();
+    }
+    return "";
   }
 
   async wsSettingsCurrentPath(): Promise<string> {
@@ -25331,7 +25342,11 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsDialogButtons(): Promise<string[]> {
     const dialog = this.wsSettingsDialog();
     if ((await dialog.count()) === 0) return [];
-    return (await dialog.getByRole("button").allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
+    // Icon-only controls (the header close) carry no text of their own, so
+    // leave them out: the oracle lists the text buttons it can read.
+    return (await dialog.getByRole("button").allInnerTexts())
+      .map((text) => text.replace(/\s+/g, " ").trim())
+      .filter((text) => text !== "");
   }
 
   async wsSettingsPressEscape(): Promise<void> {
@@ -25427,10 +25442,23 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsWatchSockets(): Promise<void> {
     this.wsSettingsSocketsSeen = 0;
     if (this.wsSettingsSocketHandler !== null) return;
-    this.wsSettingsSocketHandler = () => {
+    // The dev server's own hot-reload socket is not app traffic (§38
+    // counts sockets the settings pages open themselves).
+    this.wsSettingsSocketHandler = (socket: { url: () => string }) => {
+      if (WebNewDriver.isDevServerSocket(socket.url())) return;
       this.wsSettingsSocketsSeen += 1;
     };
-    this.page.on("websocket", this.wsSettingsSocketHandler);
+    this.page.on("websocket", this.wsSettingsSocketHandler as () => void);
+  }
+
+  /** Vite's hot-reload channel: the dev origin root carrying a token. */
+  private static isDevServerSocket(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      return parsed.pathname === "/" && parsed.searchParams.has("token");
+    } catch {
+      return false;
+    }
   }
 
   async wsSettingsSocketCount(): Promise<number> {
@@ -26620,7 +26648,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private webhookRowSwitch(url: string): Locator {
-    return this.webhookRowLink(url).first().getByRole("switch");
+    // The switch is a sibling of the row's link (inside the row), not a
+    // descendant of it, so read it from the row that holds the link.
+    return this.page
+      .locator("li")
+      .filter({ has: this.page.locator('a[href*="/settings/webhooks/"]').filter({ hasText: url }) })
+      .first()
+      .getByRole("switch");
   }
 
   async wsSettingsWebhooksRowActiveOn(url: string): Promise<boolean> {
@@ -33931,17 +33965,6 @@ export class WebNewDriver implements ParityDriver {
     await scope.getByRole("button", { name: `Delete ${label}`, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByRole("button", { name: "Delete", exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async wsSettingsApiTokenDeleteDialogText(label: string): Promise<string> {
-    await this.wsSettingsApiTokenOpenDeleteDialog(label);
-    return (
-      (await this.wsSettingsApiTokenDialog()
-        .innerText()
-        .catch(() => "")) ?? ""
-    )
-      .trim()
-      .replace(/\s+/g, " ");
-  }
-
   async wsSettingsApiTokenDeleteDialogText(label: string): Promise<string> {
     await this.wsSettingsApiTokenOpenDeleteDialog(label);
     return (

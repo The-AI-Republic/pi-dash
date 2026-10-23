@@ -70,6 +70,7 @@ function chain(overrides: LocatorStub = {}): LocatorStub {
 function stubPage(overrides: Record<string, unknown> = {}): Page {
   const page = {
     goto: vi.fn(async () => undefined),
+    route: vi.fn(async () => undefined),
     waitForLoadState: vi.fn(async () => undefined),
     waitForFunction: vi.fn(async () => undefined),
     waitForTimeout: vi.fn(async () => undefined),
@@ -939,9 +940,11 @@ describe("exports entry and instance startup driver (NEWFRONT-548, WSET-033–03
   });
 
   it("opens a section by address and reads the shared settings surface", async () => {
+    const frame = element({ count: async () => 1, innerText: async () => "  a  b " });
     const page = stubPage({
-      getByTestId: (id: string) =>
-        element({ count: async () => (id === "workspace-settings-sidebar" ? 1 : 0), innerText: async () => "  a  b " }),
+      getByTestId: (id: string) => element({ count: async () => (id === "workspace-settings-sidebar" ? 1 : 0) }),
+      locator: (selector: string) =>
+        selector === '[data-testid="workspace-settings-shell"]' ? frame : element({ count: async () => 0 }),
     });
     const driver = new WebNewDriver(page);
     await driver.wsSettingsOpenSection("acme", "members", []);
@@ -1190,5 +1193,77 @@ describe("signOutViaCommandPalette from a settings page", () => {
     await driver.signOutViaCommandPalette();
     expect(spies.goto).not.toHaveBeenCalled();
     expect(spies.paletteClick).not.toHaveBeenCalled();
+  });
+});
+
+describe("settings frame and traffic readers (NEWFRONT-550, WSET-037–039)", () => {
+  it("reads the outlet from the profile shell when no workspace shell renders", async () => {
+    const profile = element({ count: async () => 1, innerText: async () => " Add personal access token " });
+    const workspace = element({ count: async () => 0 });
+    const page = stubPage({
+      locator: (selector: string) =>
+        selector === '[data-testid="workspace-settings-shell"]'
+          ? workspace
+          : selector === '[data-testid="profile-settings-shell"]'
+            ? profile
+            : element({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsOutletText()).resolves.toBe("Add personal access token");
+  });
+
+  it("prefers the workspace shell and falls back to the page main region", async () => {
+    const shell = element({ count: async () => 1, innerText: async () => " Members " });
+    const page = stubPage({
+      locator: (selector: string) =>
+        selector.includes("workspace-settings") ? shell : element({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsOutletText()).resolves.toBe("Members");
+
+    const bare = element({ count: async () => 1, innerText: async () => " Loading " });
+    const barePage = stubPage({
+      locator: (selector: string) => (selector.startsWith("[data-testid=") ? element({ count: async () => 0 }) : bare),
+    });
+    const bareDriver = new WebNewDriver(barePage);
+    await expect(bareDriver.wsSettingsOutletText()).resolves.toBe("Loading");
+
+    const emptyPage = stubPage({ locator: () => element({ count: async () => 0 }) });
+    await expect(new WebNewDriver(emptyPage).wsSettingsOutletText()).resolves.toBe("");
+  });
+
+  it("lists only the dialog's text buttons", async () => {
+    const dialog = element({ allInnerTexts: async () => ["", "  Cancel ", "Delete"] });
+    const page = stubPage({ getByRole: () => dialog });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsDialogButtons()).resolves.toEqual(["Cancel", "Delete"]);
+
+    const absent = stubPage({ getByRole: () => element({ count: async () => 0 }) });
+    await expect(new WebNewDriver(absent).wsSettingsDialogButtons()).resolves.toEqual([]);
+  });
+
+  it("counts app sockets but never the dev server's hot-reload channel", async () => {
+    const handlers: ((socket: { url: () => string }) => void)[] = [];
+    const page = stubPage({
+      on: vi.fn((event: string, handler: (socket: { url: () => string }) => void) => {
+        if (event === "websocket") handlers.push(handler);
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    handlers.length = 0;
+    await driver.wsSettingsWatchSockets();
+    expect(handlers).toHaveLength(1);
+    handlers[0]?.({ url: () => "ws://localhost:3010/?token=abc" });
+    await expect(driver.wsSettingsSocketCount()).resolves.toBe(0);
+    // Anything that is not the hot-reload channel is app traffic, even
+    // when its address cannot be parsed.
+    handlers[0]?.({ url: () => "not a url" });
+    await expect(driver.wsSettingsSocketCount()).resolves.toBe(1);
+    handlers[0]?.({ url: () => "ws://localhost:3010/api/notifications/" });
+    await expect(driver.wsSettingsSocketCount()).resolves.toBe(2);
+    // Re-arming resets the count without installing a second listener.
+    await driver.wsSettingsWatchSockets();
+    await expect(driver.wsSettingsSocketCount()).resolves.toBe(0);
+    expect(handlers).toHaveLength(1);
   });
 });
