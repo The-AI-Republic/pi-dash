@@ -209,12 +209,48 @@ describe("InstallsList", () => {
     await waitFor(() => expect(screen.getByRole("switch")).not.toHaveAttribute("aria-disabled"));
   });
 
+  it("gates each row's switch on its own write", async () => {
+    const pending: Array<(value: SchedulerBinding) => void> = [];
+    contracts.updateSchedulerBinding.mockImplementation(
+      () =>
+        new Promise<SchedulerBinding>((resolve) => {
+          pending.push(resolve);
+        })
+    );
+    const { user } = setup({
+      role: ROLE_ADMIN,
+      projectRole: 20,
+      bindings: [binding(), binding({ id: "b2", scheduler_slug: "daily-triage", scheduler_name: "Daily triage" })],
+    });
+    await screen.findByText("Daily triage");
+    const rowA = screen.getByText("Weekly review").closest("tr");
+    const rowB = screen.getByText("Daily triage").closest("tr");
+    if (rowA === null || rowB === null) throw new Error("rows missing");
+    const switchA = within(rowA).getByRole("switch", { name: "Disable scheduler" });
+    const switchB = within(rowB).getByRole("switch", { name: "Disable scheduler" });
+    await user.click(switchA);
+    await user.click(switchB);
+    expect(switchA).toHaveAttribute("aria-disabled", "true");
+    expect(switchB).toHaveAttribute("aria-disabled", "true");
+    await user.click(within(rowA).getByRole("switch"));
+    expect(contracts.updateSchedulerBinding).toHaveBeenCalledTimes(2);
+    pending.forEach((settle) => settle(binding({ enabled: false })));
+    await waitFor(() =>
+      expect(
+        within(screen.getByText("Weekly review").closest("tr") as HTMLElement).getByRole("switch")
+      ).not.toHaveAttribute("aria-disabled")
+    );
+    expect(
+      within(screen.getByText("Daily triage").closest("tr") as HTMLElement).getByRole("switch")
+    ).not.toHaveAttribute("aria-disabled");
+  });
+
   it("reports a refused flip", async () => {
     contracts.updateSchedulerBinding.mockRejectedValue(new Error("Admins only"));
     const { user } = setup({ role: ROLE_ADMIN, projectRole: 20 });
     await screen.findByText("Weekly review");
     await user.click(screen.getByRole("switch", { name: "Disable scheduler" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Could not update the install", "Admins only"));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Something went wrong", "Admins only"));
   });
 
   it.each([ROLE_MEMBER, ROLE_GUEST])("reads only for workspace role %s", async (role) => {

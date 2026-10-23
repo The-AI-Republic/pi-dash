@@ -2,6 +2,9 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+// The shared schedule editor (AGT-006/010/065): every field wires to the
+// draft, the recurrence builder drives the rule, and the plain-language
+// sentence stays live beneath it.
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
@@ -42,6 +45,28 @@ describe("ScheduleFields", () => {
     expect(screen.getByRole("switch")).toHaveAccessibleName("Disable this install");
   });
 
+  it("changes the rule through the builder and keeps the sentence live", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    expect(screen.getByText("every day.")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Repeat unit"), "week");
+    expect(screen.getByText("every week on Monday.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Repeat interval"), { target: { value: "3" } });
+    expect(screen.getByText("every 3 weeks on Monday.")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Repeat unit"), "none");
+    expect(screen.getByText("Fires once at the start time.")).toBeInTheDocument();
+  });
+
+  it("reports an unreadable rule verbatim in the sentence", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    await user.selectOptions(screen.getByLabelText("Repeat unit"), "none");
+    await user.click(screen.getByRole("button", { name: "Advanced: rule text" }));
+    await user.clear(screen.getByLabelText("Recurrence (RRULE)"));
+    await user.type(screen.getByLabelText("Recurrence (RRULE)"), "FREQ=NOPE");
+    expect(screen.getByText("FREQ=NOPE.")).toBeInTheDocument();
+  });
+
   it("reports edits for every field and mirrors errors", async () => {
     const user = userEvent.setup();
     const change = vi.fn();
@@ -57,8 +82,6 @@ describe("ScheduleFields", () => {
     expect(change).toHaveBeenCalledWith("startsAt", "");
     await user.selectOptions(screen.getByLabelText("Time zone"), "America/New_York");
     expect(change).toHaveBeenCalledWith("timeZone", "America/New_York");
-    await user.type(screen.getByLabelText("Recurrence (RRULE)"), "X");
-    expect(change).toHaveBeenCalledWith("rrule", "FREQ=DAILYX");
     fireEvent.change(screen.getByLabelText("Project context (optional)"), { target: { value: "Notes" } });
     expect(change).toHaveBeenCalledWith("projectContext", "Notes");
     await user.click(screen.getByRole("switch"));
@@ -74,7 +97,7 @@ describe("ScheduleFields", () => {
     );
     expect(screen.getByLabelText("Starts at")).toBeDisabled();
     expect(screen.getByLabelText("Time zone")).toBeDisabled();
-    expect(screen.getByLabelText("Recurrence (RRULE)")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Advanced: rule text" })).toBeDisabled();
     expect(screen.getByLabelText("Project context (optional)")).toBeDisabled();
     expect(screen.getByRole("switch")).toHaveAttribute("aria-disabled", "true");
     fireEvent.change(screen.getByLabelText("Time zone"), { target: { value: "" } });

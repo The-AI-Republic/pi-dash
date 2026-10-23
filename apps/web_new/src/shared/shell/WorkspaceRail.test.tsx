@@ -4,14 +4,13 @@
 // See the LICENSE file for details.
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { LayoutGrid } from "lucide-react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { MENU_PORTAL_ID } from "./document.js";
 import { useRailState } from "./railState.js";
 import { isDockItemActive, isSettingsEntryActive, WorkspaceRail } from "./WorkspaceRail.js";
 
-const DOCK = [{ id: "projects", label: "Projects", to: "/acme/", icon: <LayoutGrid aria-hidden="true" /> }];
+const DOCK = [{ id: "projects", label: "Projects", to: "/acme/" }];
 
 function renderRail(currentPath = "/acme/projects/p1/issues"): void {
   render(<WorkspaceRail workspaceSlug="acme" currentPath={currentPath} dockItems={DOCK} />);

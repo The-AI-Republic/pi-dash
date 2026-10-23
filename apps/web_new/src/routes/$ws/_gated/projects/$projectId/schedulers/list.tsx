@@ -1,10 +1,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project schedulers, list tab (parity/specs/agents.md §2, AGT-007).
-// Thin composition: the schedulers feature owns the list, its admin gate
-// and the install dialog. A row opens the install detail route that
-// NEWFRONT-590 lands; the address is stable from here on.
+// Project schedulers, list tab (parity/specs/agents.md §2–§3, AGT-007,
+// AGT-010, AGT-012). Thin composition: the schedulers feature owns the
+// list, its admin gate, the install dialog and the edit/uninstall
+// dialogs. A row opens the install detail route; the management cells
+// open their dialog without navigating.
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
@@ -12,7 +13,13 @@ import * as React from "react";
 import { usePermissions } from "../../../../../../core/session/index.js";
 import { useProjectRoles, useWorkspaceMembership } from "../../../../../../features/auth/index.js";
 import { isProjectAdmin } from "../../../../../../features/projects/index.js";
-import { InstallsList, InstallDialog, useSchedulerBindings } from "../../../../../../features/schedulers/index.js";
+import {
+  EditInstallDialog,
+  InstallsList,
+  InstallDialog,
+  UninstallInstallDialog,
+  useSchedulerBindings,
+} from "../../../../../../features/schedulers/index.js";
 import type { SchedulerBinding } from "@pidash/api-client";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/schedulers/list")({
@@ -27,6 +34,8 @@ function ProjectSchedulersListComponent(): React.ReactElement {
   const membership = useWorkspaceMembership(ws);
   const bindings = useSchedulerBindings(ws, projectId);
   const [creating, setCreating] = React.useState(false);
+  const [editing, setEditing] = React.useState<SchedulerBinding | null>(null);
+  const [uninstalling, setUninstalling] = React.useState<SchedulerBinding | null>(null);
 
   // Management needs both standing reads to succeed and the project role
   // to be admin; a failed read refuses rather than enabling controls.
@@ -45,6 +54,8 @@ function ProjectSchedulersListComponent(): React.ReactElement {
         projectId={projectId}
         onOpenInstall={openInstall}
         onCreate={() => setCreating(true)}
+        onEditInstall={setEditing}
+        onUninstallInstall={setUninstalling}
       />
       <InstallDialog
         workspaceSlug={ws}
@@ -57,6 +68,21 @@ function ProjectSchedulersListComponent(): React.ReactElement {
         onInstalled={() => {
           void bindings.refetch();
         }}
+      />
+      <EditInstallDialog
+        workspaceSlug={ws}
+        projectId={projectId}
+        binding={editing}
+        onClose={() => setEditing(null)}
+        onSaved={() => {
+          void bindings.refetch();
+        }}
+      />
+      <UninstallInstallDialog
+        workspaceSlug={ws}
+        projectId={projectId}
+        binding={uninstalling}
+        onClose={() => setUninstalling(null)}
       />
     </>
   );

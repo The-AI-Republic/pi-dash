@@ -27,6 +27,26 @@ export { SchedulerDefinitionDialog } from "./SchedulerDefinitionDialog.js";
 export type { SchedulerDefinitionDialogProps } from "./SchedulerDefinitionDialog.js";
 export { SchedulerDeleteDialog } from "./SchedulerDeleteDialog.js";
 export type { SchedulerDeleteDialogProps } from "./SchedulerDeleteDialog.js";
+
+// Project installs (AGT-006–012).
+export {
+  bindingKeys,
+  bindingsQueryOptions,
+  invalidateInstalls,
+  schedulerBindingFailure,
+  schedulerCatalogKey,
+  useInstallSchedulerBinding,
+  useSchedulerBindings,
+  useToggleSchedulerBinding,
+  useUninstallSchedulerBinding,
+  useUpdateSchedulerBinding,
+} from "./installData.js";
+export type {
+  InstallBindingRequest,
+  ToggleBindingRequest,
+  UninstallBindingRequest,
+  UpdateBindingRequest,
+} from "./installData.js";
 export {
   DEFAULT_TZID,
   browserTimeZone,
@@ -42,15 +62,30 @@ export {
 } from "./schedule.js";
 export type { ScheduleErrors, SchedulePayload, ScheduleValue } from "./schedule.js";
 export {
-  bindingKeys,
-  bindingsQueryOptions,
-  invalidateInstalls,
-  schedulerCatalogKey,
-  useInstallSchedulerBinding,
-  useSchedulerBindings,
-  useToggleSchedulerBinding,
-} from "./installData.js";
-export type { InstallBindingRequest, ToggleBindingRequest } from "./installData.js";
+  DEFAULT_AFTER_COUNT,
+  defaultRecurrence,
+  parseRecurrence,
+  serializeRecurrence,
+  withMonthlyMode,
+  withUnit,
+  withWeekdayToggled,
+} from "./recurrence.js";
+export type { ParsedRecurrence, RecurrenceState, RepeatUnit } from "./recurrence.js";
+export { RecurrenceBuilder } from "./RecurrenceBuilder.js";
+export type { RecurrenceBuilderProps } from "./RecurrenceBuilder.js";
+export { ScheduleFields, scheduleFieldIds, useScheduleDraft } from "./ScheduleFields.js";
+export type { ScheduleFieldsProps } from "./ScheduleFields.js";
+export { DEFAULT_OUTCOME_MODE, OUTCOME_OPTIONS, OutcomeModeField, outcomeHelp } from "./OutcomeModeField.js";
+export type { OutcomeMode, OutcomeModeFieldProps } from "./OutcomeModeField.js";
+export {
+  DEFAULT_POD_VALUE,
+  PodField,
+  podKeys,
+  podLabel,
+  projectPodsQueryOptions,
+  selectedPodValue,
+} from "./PodField.js";
+export type { PodFieldProps } from "./PodField.js";
 export {
   bulkFailureTitle,
   bulkSelectionSummary,
@@ -63,8 +98,6 @@ export {
   toggleBulkTarget,
 } from "./installResults.js";
 export type { BulkSelection, InstallOutcome, InstallPartition } from "./installResults.js";
-export { ScheduleFields, scheduleFieldIds, useScheduleDraft } from "./ScheduleFields.js";
-export type { ScheduleFieldsProps } from "./ScheduleFields.js";
 export { InstallsList, formatRunTimestamp, scheduleText } from "./InstallsList.js";
 export type { InstallsListProps } from "./InstallsList.js";
 export {
@@ -78,3 +111,7 @@ export {
 export type { InstallDialogProps, InstallMode } from "./InstallDialog.js";
 export { BulkInstallDialog, joinedProjects } from "./BulkInstallDialog.js";
 export type { BulkInstallDialogProps } from "./BulkInstallDialog.js";
+export { EditInstallDialog, installDraftFromBinding, installUpdatePayload } from "./EditInstallDialog.js";
+export type { EditInstallDialogProps, InstallDraft } from "./EditInstallDialog.js";
+export { UninstallInstallDialog, uninstallConsequence } from "./UninstallInstallDialog.js";
+export type { UninstallInstallDialogProps } from "./UninstallInstallDialog.js";

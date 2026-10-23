@@ -1,14 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Schedule editor shared by the install dialogs (parity/specs/agents.md
-// §2, AGT-006/008/009). Plain fields: start, zone, rule, context and the
-// enabled flag, with the rule's plain-language sentence beneath it. The
-// recurrence builder of NEWFRONT-587 wraps this same value shape.
+// Schedule editor shared by the install, edit and bulk dialogs
+// (parity/specs/agents.md §2–§3, AGT-006/008/009/010/065). Start, zone,
+// the recurrence builder, project context and the enabled flag, with the
+// rule's plain-language sentence beneath the builder and kept live as the
+// rule changes.
 
 import { Input, Switch, Textarea } from "@pidash/kit";
 import * as React from "react";
 
+import { RecurrenceBuilder } from "./RecurrenceBuilder.js";
 import {
   DEFAULT_TZID,
   describeRrule,
@@ -86,22 +88,15 @@ export function ScheduleFields({
       </div>
 
       <div className="flex flex-col gap-(--space-2)">
-        <label htmlFor={ids.rrule} className="text-body font-medium text-(--text)">
-          Recurrence (RRULE)
-        </label>
-        <textarea
-          id={ids.rrule}
+        <RecurrenceBuilder
+          idPrefix={idPrefix}
           value={value.rrule}
-          rows={2}
+          startsAt={value.startsAt}
           disabled={disabled}
-          spellCheck={false}
-          placeholder="FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=9"
-          className="text-body font-mono min-h-14 w-full resize-y rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) py-(--space-3) text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-          onChange={(event) => onChange("rrule", event.target.value)}
+          onChange={(next) => onChange("rrule", next)}
         />
         <p className="text-meta text-(--text-muted)">
-          RFC 5545 rule, for example <code>FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR</code>. Leave it blank to fire only once at
-          the start. <span className="text-(--text)">{sentence}.</span>
+          <span className="text-(--text)">{sentence}.</span> Leave the rule empty to fire only once at the start.
         </p>
       </div>
 
