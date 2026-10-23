@@ -38,6 +38,7 @@ use crate::dispatch::agent_run::{AgentRun, READ_COLUMNS};
 use crate::dispatch::status::AgentRunStatus;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{parse, DoneSignal};
+use pidash_types::runner_runs::classify_failure;
 
 /// The 7 statuses that occupy the single-active-run slot
 /// (`service.py:89-99`, fixture order).
@@ -169,8 +170,10 @@ where
 
 /// State [`ingest_into_run`] re-reads: Python holds the run instance
 /// in memory (`done_signal.py:141`), so it issues only the `UPDATE`;
-/// the stateless port re-reads the two columns the decision needs.
-pub const INGEST_SELECT_SQL: &str = "SELECT status, ended_at FROM agent_run WHERE id = $1";
+/// the stateless port re-reads the three columns the decision needs
+/// (`failure_reason` since PDASHOSS01-183).
+pub const INGEST_SELECT_SQL: &str =
+    "SELECT status, ended_at, failure_reason FROM agent_run WHERE id = $1";
 
 /// The single ingest `UPDATE` (`done_signal.py:162+180`). `SET` order
 /// follows Django's `_meta` field order per the fixture
@@ -179,14 +182,24 @@ pub const INGEST_SELECT_SQL: &str = "SELECT status, ended_at FROM agent_run WHER
 pub const INGEST_UPDATE_SQL: &str =
     "UPDATE agent_run SET status = $1, done_payload = $2, error = $3, ended_at = $4 WHERE id = $5";
 
+/// The parse-error `UPDATE` (`done_signal.py`, PDASHOSS01-183): the same
+/// columns plus `failure_reason` (its `update_fields` gained the column),
+/// in `_meta` order — `failure_reason` sits after `error`. `$1..$5` the
+/// new values, `$6` the run id.
+pub const INGEST_FAILED_UPDATE_SQL: &str = "UPDATE agent_run SET status = $1, done_payload = $2, \
+     error = $3, failure_reason = $4, ended_at = $5 WHERE id = $6";
+
 /// The pure half of [`ingest_into_run`]: the parsed signal (if any)
-/// plus the four columns the `UPDATE` writes.
+/// plus the columns the `UPDATE` writes. `failure_reason` is `Some`
+/// exactly on the parse-error path (written by
+/// [`INGEST_FAILED_UPDATE_SQL`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngestPlan {
     pub signal: Option<DoneSignal>,
     pub status: AgentRunStatus,
     pub done_payload: Option<Value>,
     pub error: String,
+    pub failure_reason: Option<String>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -195,7 +208,10 @@ pub struct IngestPlan {
 ///
 /// * Parse error: `error` records `done-signal parse error: {exc}`,
 ///   `done_payload` is cleared, `ended_at` is stamped, and the status
-///   becomes `FAILED` unless the run is already terminal (kept).
+///   becomes `FAILED` unless the run is already terminal (kept). This
+///   writer bypasses `finalize_agent_run`, so a `FAILED` row without a
+///   stored reason is classified here (`classify(run.error)`); any other
+///   row writes its current reason back unchanged.
 /// * `completed`/`blocked`/`noop`: payload stored, `error` cleared,
 ///   `ended_at` stamped; `noop` lands the run in `COMPLETED`.
 /// * `paused`: non-terminal — `ended_at` keeps its previous value
@@ -204,22 +220,32 @@ pub struct IngestPlan {
 pub fn plan_ingest(
     current_status: AgentRunStatus,
     current_ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    current_failure_reason: &str,
     text: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> IngestPlan {
     let signal = match parse(text) {
         Err(err) => {
+            let status = if is_terminal_status(current_status) {
+                current_status
+            } else {
+                AgentRunStatus::Failed
+            };
+            let error = format!("done-signal parse error: {err}");
+            let failure_reason =
+                if status == AgentRunStatus::Failed && current_failure_reason.is_empty() {
+                    classify_failure(&error, "", "").value().to_owned()
+                } else {
+                    current_failure_reason.to_owned()
+                };
             return IngestPlan {
                 signal: None,
-                status: if is_terminal_status(current_status) {
-                    current_status
-                } else {
-                    AgentRunStatus::Failed
-                },
+                status,
                 done_payload: None,
-                error: format!("done-signal parse error: {err}"),
+                error,
+                failure_reason: Some(failure_reason),
                 ended_at: Some(now),
-            }
+            };
         }
         Ok(signal) => signal,
     };
@@ -237,6 +263,7 @@ pub fn plan_ingest(
         status,
         done_payload: Some(signal.payload.clone()),
         error: String::new(),
+        failure_reason: None,
         ended_at,
         signal: Some(signal),
     }
@@ -270,15 +297,31 @@ pub async fn ingest_into_run(
     let current =
         AgentRunStatus::from_value(&status).ok_or_else(|| decode_error("status", &status))?;
     let ended_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("ended_at")?;
-    let plan = plan_ingest(current, ended_at, text, now);
-    sqlx::query(INGEST_UPDATE_SQL)
-        .bind(plan.status.value())
-        .bind(&plan.done_payload)
-        .bind(&plan.error)
-        .bind(plan.ended_at)
-        .bind(run_id)
-        .execute(&mut *conn)
-        .await?;
+    let failure_reason: String = row.try_get("failure_reason")?;
+    let plan = plan_ingest(current, ended_at, &failure_reason, text, now);
+    match &plan.failure_reason {
+        Some(reason) => {
+            sqlx::query(INGEST_FAILED_UPDATE_SQL)
+                .bind(plan.status.value())
+                .bind(&plan.done_payload)
+                .bind(&plan.error)
+                .bind(reason)
+                .bind(plan.ended_at)
+                .bind(run_id)
+                .execute(&mut *conn)
+                .await?;
+        }
+        None => {
+            sqlx::query(INGEST_UPDATE_SQL)
+                .bind(plan.status.value())
+                .bind(&plan.done_payload)
+                .bind(&plan.error)
+                .bind(plan.ended_at)
+                .bind(run_id)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
     Ok(plan.signal)
 }
 
@@ -423,12 +466,41 @@ mod tests {
         let plan = plan_ingest(
             AgentRunStatus::Running,
             Some(prior),
+            "",
             "x\n```pi-dash-done\n{\"status\": \"paused\", \"autonomy\": {\"question_for_human\": \"q?\"}}\n```\n",
             now,
         );
         assert_eq!(plan.status, AgentRunStatus::PausedAwaitingInput);
         assert_eq!(plan.ended_at, Some(prior));
         assert_eq!(plan.error, "");
+    }
+
+    /// The parse-error path keeps the canonical-reason invariant
+    /// (`done_signal.py`, PDASHOSS01-183): a run it fails is classified;
+    /// a run that already carries a reason, or stays terminal, writes its
+    /// reason back unchanged; the success path never writes it.
+    #[test]
+    fn plan_ingest_failure_reason_rule() {
+        let now = fixture_time(&serde_json::json!("2026-10-03T12:00:00+00:00")).expect("T0");
+        let failed = plan_ingest(AgentRunStatus::Running, None, "", "no fence", now);
+        assert_eq!(failed.status, AgentRunStatus::Failed);
+        assert_eq!(
+            failed.failure_reason.as_deref(),
+            Some("agent_error.empty_or_unparseable_output")
+        );
+        let kept = plan_ingest(AgentRunStatus::Running, None, "timeout", "no fence", now);
+        assert_eq!(kept.failure_reason.as_deref(), Some("timeout"));
+        let terminal = plan_ingest(AgentRunStatus::Completed, None, "", "no fence", now);
+        assert_eq!(terminal.status, AgentRunStatus::Completed);
+        assert_eq!(terminal.failure_reason.as_deref(), Some(""));
+        let ok = plan_ingest(
+            AgentRunStatus::Running,
+            None,
+            "",
+            "x\n```pi-dash-done\n{\"status\": \"completed\"}\n```\n",
+            now,
+        );
+        assert_eq!(ok.failure_reason, None);
     }
 
     fn ingest_cases() -> Value {
@@ -457,6 +529,7 @@ mod tests {
             let plan = plan_ingest(
                 before_status,
                 fixture_time(&case["before"]["ended_at"]),
+                "",
                 case["input_text"].as_str().expect("input_text"),
                 now,
             );
@@ -523,8 +596,8 @@ mod tests {
         cancel_reason TEXT NOT NULL, error_code TEXT NOT NULL, tool_plan JSONB NOT NULL,
         prompt TEXT NOT NULL, trigger TEXT NOT NULL, lease_expires_at TIMESTAMPTZ,
         started_at TIMESTAMPTZ, llm_model TEXT NOT NULL, usage JSONB NOT NULL,
-        done_payload JSONB, error TEXT NOT NULL, ended_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL)";
+        done_payload JSONB, error TEXT NOT NULL, failure_reason TEXT NOT NULL DEFAULT '',
+        ended_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL)";
 
     async fn live_tx(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
         let mut tx = pool.begin().await.expect("begin scratch tx");
@@ -824,6 +897,13 @@ mod tests {
         );
         assert_eq!(ended_at, Some(now));
         assert_eq!(payload, None);
+        let reason: String =
+            sqlx::query_scalar("SELECT failure_reason FROM agent_run WHERE id = $1")
+                .bind(failing)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back reason");
+        assert_eq!(reason, "agent_error.empty_or_unparseable_output");
 
         // Parse-error on a terminal row: status kept, error recorded.
         let kept = seed_run(&mut tx, 4033, live_uuid(3303), "completed", live_time(33)).await;

@@ -101,6 +101,10 @@ use pidash_types::orchestration::{
     template_name_for, RunOutcomeRef, StateRef, TickerDecision, TickerEvent, TickerEventKind,
     OUTCOME_WAITING_ON_HUMAN,
 };
+use pidash_types::runner_runs::{
+    classify_failure, policy_for, repeated_failure_limit_for, AgentRunTrigger, FailurePolicy,
+    FREE_RETRY_BACKOFF_SECONDS, FREE_RETRY_MAX_ATTEMPTS,
+};
 
 use crate::prompting::recipes::{kind_for, WORK_KIND_CODING};
 
@@ -232,8 +236,12 @@ pub struct ClockIssue<'a> {
     pub policy: ProjectClockPolicy,
 }
 
-/// The run half `_on_run_ended` reads: status, kind, and done payload.
-/// Handlers re-read the run row (L1 events carry only its id).
+/// The run half `_on_run_ended` reads: status, kind, done payload, and
+/// — for the failure policy (PDASHOSS01-183) — the stored reason, error,
+/// resume handle and the failure streak. Handlers re-read the run row
+/// (L1 events carry only its id) and resolve `failure_streak` via
+/// `consecutive_failure_streak` over [`failure_reason_value`] (the same
+/// reason the policy routes on); it is read only for a `FAILED` run.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RunEndedRef<'a> {
     /// The run's resting status.
@@ -242,7 +250,33 @@ pub struct RunEndedRef<'a> {
     pub phase_kind: &'a str,
     /// The run's `done_payload` (`None` when never yielded).
     pub done_payload: Option<&'a Value>,
+    /// The stored `failure_reason` (`""` on non-failed / legacy rows).
+    pub failure_reason: &'a str,
+    /// The stored `error` (classified on the fly for legacy rows).
+    pub error: &'a str,
+    /// The run's `thread_id` resume handle (`""` when unset).
+    pub thread_id: &'a str,
+    /// `consecutive_failure_streak(issue, failure_reason_value(…))`.
+    pub failure_streak: u32,
 }
+
+/// The reason `_apply_failure_policy` routes on (PDASHOSS01-183): the
+/// stored value (stripped), else `classify(run.error)` for legacy rows
+/// that predate the column. Handlers count the streak over this value.
+pub fn failure_reason_value(stored: &str, error: &str) -> String {
+    let stored =
+        stored.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c));
+    if stored.is_empty() {
+        classify_failure(error, "", "").value().to_string()
+    } else {
+        stored.to_string()
+    }
+}
+
+/// The fresh-session lever's write (`AgentRun.objects.filter(pk=run.pk)
+/// .update(thread_id="")`, PDASHOSS01-183). `$1` is the run id.
+pub const CLEAR_RUN_THREAD_SQL: &str =
+    "UPDATE \"agent_run\" SET \"thread_id\" = '' WHERE \"agent_run\".\"id\" = $1";
 
 // ---------------------------------------------------------------------------
 // Pure clock primitives
@@ -448,6 +482,12 @@ pub enum ClockWrite {
 pub struct ClockOutcome {
     pub decision: TickerDecision,
     pub write: ClockWrite,
+    /// The failure policy's fresh-session lever (PDASHOSS01-183): the
+    /// handler clears the ended run's `thread_id`
+    /// ([`CLEAR_RUN_THREAD_SQL`]) in the same transaction so the next
+    /// continuation builds a fresh-session Assign instead of resuming the
+    /// session that will fail again.
+    pub clear_run_thread_id: bool,
 }
 
 /// A guard outcome: nothing mutated, nothing to write.
@@ -459,6 +499,7 @@ fn untouched(ticker: Option<Uuid>, reason: &str) -> ClockOutcome {
             ..TickerDecision::default()
         },
         write: ClockWrite::None,
+        clear_run_thread_id: false,
     }
 }
 
@@ -522,6 +563,7 @@ pub fn on_enter_or_move(
     ClockOutcome {
         decision,
         write: ClockWrite::Update,
+        clear_run_thread_id: false,
     }
 }
 
@@ -540,6 +582,119 @@ pub fn on_left_bucket(ticker: Option<&mut IssueAgentTicker>) -> ClockOutcome {
             ..TickerDecision::default()
         },
         write: ClockWrite::Update,
+        clear_run_thread_id: false,
+    }
+}
+
+/// A guard outcome that still carries the fresh-session lever.
+fn untouched_with_thread(
+    ticker: Option<Uuid>,
+    reason: &str,
+    clear_run_thread_id: bool,
+) -> ClockOutcome {
+    ClockOutcome {
+        clear_run_thread_id,
+        ..untouched(ticker, reason)
+    }
+}
+
+/// What `_apply_failure_policy` answered: a decision (return it), or
+/// `None` in Python — fall through to the normal keep-ticking path,
+/// possibly after clearing the run's resume handle.
+enum FailurePolicyStep {
+    Decided(ClockOutcome),
+    FallThrough { clear_thread: bool },
+}
+
+/// `_apply_failure_policy` (`scheduling.py`, PDASHOSS01-183): the
+/// per-reason ticker policy for a run that FAILED without yielding.
+///
+/// * Backstop first, regardless of policy: `failure_streak >=
+///   repeated_failure_limit_for(reason)` stops an armed clock with
+///   `REPEATED_FAILURE` (a disarmed one — a prior `cap_hit` — survives).
+/// * `NEEDS_HUMAN`: stop an armed clock with `FAILURE_NEEDS_HUMAN`.
+/// * `RETRY_FREE`: within `FREE_RETRY_MAX_ATTEMPTS`, on an armed and
+///   allowed clock, queue a free `tick` entry `FREE_RETRY_BACKOFF_SECONDS`
+///   out — `fire_tick` skips `used` on free claims; otherwise fall through.
+/// * `FRESH_SESSION`: clear the run's `thread_id` (when set) and fall
+///   through.
+/// * Everything else — the fail-safe default — falls through.
+fn apply_failure_policy(
+    ticker: &mut IssueAgentTicker,
+    issue: &ClockIssue<'_>,
+    run: &RunEndedRef<'_>,
+    now: DateTime<Utc>,
+) -> FailurePolicyStep {
+    let ticker_id = ticker.id;
+    let reason = failure_reason_value(run.failure_reason, run.error);
+    let policy = policy_for(&reason);
+    let streak = run.failure_streak;
+    let stop = |ticker: &mut IssueAgentTicker, disarm: TickerDisarmReason, label: &str| {
+        if ticker.enabled {
+            // Only stop an armed clock — a prior `cap_hit` must survive so
+            // the deferred auto-pause still fires.
+            stop_clock(ticker, disarm.as_str());
+            ClockOutcome {
+                decision: TickerDecision {
+                    ticker: Some(ticker_id),
+                    reason: format!("failed:{reason}:{label}-stopped"),
+                    ..TickerDecision::default()
+                },
+                write: ClockWrite::Update,
+                clear_run_thread_id: false,
+            }
+        } else {
+            untouched(
+                Some(ticker_id),
+                &format!("failed:{reason}:{label}-already-stopped"),
+            )
+        }
+    };
+    if streak >= repeated_failure_limit_for(&reason) {
+        return FailurePolicyStep::Decided(stop(
+            ticker,
+            TickerDisarmReason::RepeatedFailure,
+            "repeated-failure",
+        ));
+    }
+    match policy {
+        FailurePolicy::NeedsHuman => FailurePolicyStep::Decided(stop(
+            ticker,
+            TickerDisarmReason::FailureNeedsHuman,
+            "needs-human",
+        )),
+        FailurePolicy::RetryFree => {
+            if streak <= FREE_RETRY_MAX_ATTEMPTS
+                && ticker.enabled
+                && clock_allowed(ticker, &issue.policy)
+            {
+                // A free entry does not spend the pool and the scanner
+                // admits pending rows regardless of cap. `TICK` trigger so
+                // the retry is created as a machine run, not as a person.
+                queue_entry(ticker, now, true, None, AgentRunTrigger::Tick.value());
+                ticker.next_run_at =
+                    Some(now + chrono::Duration::seconds(FREE_RETRY_BACKOFF_SECONDS));
+                return FailurePolicyStep::Decided(ClockOutcome {
+                    decision: TickerDecision {
+                        ticker: Some(ticker_id),
+                        queued: true,
+                        reason: format!("failed:{reason}:free-retry-{streak}"),
+                        ..TickerDecision::default()
+                    },
+                    write: ClockWrite::Update,
+                    clear_run_thread_id: false,
+                });
+            }
+            FailurePolicyStep::FallThrough {
+                clear_thread: false,
+            }
+        }
+        FailurePolicy::FreshSession => FailurePolicyStep::FallThrough {
+            clear_thread: !run.thread_id.is_empty(),
+        },
+        FailurePolicy::RetryNormal => FailurePolicyStep::FallThrough {
+            clear_thread: false,
+        },
     }
 }
 
@@ -578,10 +733,14 @@ pub fn on_run_ended(
         })
         .map(str::to_string)
     });
+    let failed_without_yield = outcome.is_none() && run.status == AgentRunStatus::Failed;
     let outcome = outcome.unwrap_or_else(|| {
         // No yield. The outcome is informational either way; keep ticking
         // so the next tick retries — whether the run completed silently,
-        // paused on a question, failed, was cancelled, or was refused.
+        // paused on a question, was cancelled, or was refused. A *failed*
+        // run goes through the per-reason failure policy below first: a
+        // failure a retry cannot fix must stop the clock instead of
+        // repeating identically until the pool is spent (PDASHOSS01-183).
         if run.status == AgentRunStatus::PausedAwaitingInput {
             OUTCOME_WAITING_ON_HUMAN.to_string()
         } else {
@@ -597,6 +756,14 @@ pub fn on_run_ended(
         // Something (a human, a queued hand-off) already owes the next run
         // on this clock; the finished run's opinion does not override it.
         return untouched(Some(ticker_id), &format!("{outcome}:pending-entry-kept"));
+    }
+    let mut clear_run_thread_id = false;
+    if failed_without_yield {
+        match apply_failure_policy(ticker, issue, run, now) {
+            FailurePolicyStep::Decided(outcome) => return outcome,
+            FailurePolicyStep::FallThrough { clear_thread } => clear_run_thread_id = clear_thread,
+        }
+        // No policy override: fall through to the normal keep-ticking path.
     }
     // `payload.get("stop_ticking") is True`: a strict boolean-true test —
     // a missing key, `false`, `1`, or `"yes"` all keep ticking.
@@ -617,9 +784,14 @@ pub fn on_run_ended(
                     ..TickerDecision::default()
                 },
                 write: ClockWrite::Update,
+                clear_run_thread_id,
             };
         }
-        return untouched(Some(ticker_id), &format!("{outcome}:already-stopped"));
+        return untouched_with_thread(
+            Some(ticker_id),
+            &format!("{outcome}:already-stopped"),
+            clear_run_thread_id,
+        );
     }
     // No stop signal: keep ticking, whatever the outcome said. `fire_tick`
     // already re-timed the clock at claim for tick-started runs; make sure a
@@ -640,9 +812,14 @@ pub fn on_run_ended(
                 ..TickerDecision::default()
             },
             write: ClockWrite::Update,
+            clear_run_thread_id,
         };
     }
-    untouched(Some(ticker_id), &format!("{outcome}:keep-ticking"))
+    untouched_with_thread(
+        Some(ticker_id),
+        &format!("{outcome}:keep-ticking"),
+        clear_run_thread_id,
+    )
 }
 
 /// `_on_human_run_requested` (`scheduling.py:521-534`): Run AI / Comment & Run —
@@ -675,6 +852,7 @@ pub fn on_human_run_requested(
     ClockOutcome {
         decision,
         write: ClockWrite::Update,
+        clear_run_thread_id: false,
     }
 }
 
@@ -699,6 +877,37 @@ pub fn on_retick(
     }
     let pool = pool_size(&issue.policy);
     if !ticker.cap_reached(pool) {
+        let failure_stopped = !ticker.enabled
+            && ticker
+                .disarm_reason
+                .parse::<TickerDisarmReason>()
+                .is_ok_and(TickerDisarmReason::is_failure_stop);
+        if failure_stopped {
+            // The clock was stopped by the failure policy (needs-human /
+            // repeated failure) with budget left in the pool. Re-tick is
+            // the advertised "I fixed it, run again" lever, so re-arm and
+            // fire — without granting: there is budget to spend.
+            // `granted` only signals the caller that the press took effect
+            // and a run should dispatch (PDASHOSS01-183).
+            let mut decision = TickerDecision {
+                ticker: Some(ticker_id),
+                granted: true,
+                reason: "rearmed-after-failure".to_string(),
+                ..TickerDecision::default()
+            };
+            if event.want_run && has_active_run {
+                queue_entry(ticker, now, true, event.actor, &event.trigger);
+                decision.queued = true;
+            } else {
+                retime_clock(ticker, issue, now, jitter_secs);
+                decision.dispatch_now = event.want_run;
+            }
+            return ClockOutcome {
+                decision,
+                write: ClockWrite::Update,
+                clear_run_thread_id: false,
+            };
+        }
         return untouched(Some(ticker_id), "budget_not_exhausted");
     }
     if pool == INFINITE_MAX_TICKS {
@@ -723,6 +932,7 @@ pub fn on_retick(
         return ClockOutcome {
             decision,
             write: ClockWrite::Update,
+            clear_run_thread_id: false,
         };
     }
     if event.want_run && has_active_run {
@@ -735,6 +945,7 @@ pub fn on_retick(
     ClockOutcome {
         decision,
         write: ClockWrite::Update,
+        clear_run_thread_id: false,
     }
 }
 
@@ -1987,33 +2198,57 @@ mod tests {
             status: AgentRunStatus::Completed,
             phase_kind: "review",
             done_payload: None,
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let completed_coding = RunEndedRef {
             status: AgentRunStatus::Completed,
             phase_kind: "coding-task",
             done_payload: None,
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let completed_test = RunEndedRef {
             status: AgentRunStatus::Completed,
             phase_kind: "test",
             done_payload: None,
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let stop_flag = serde_json::json!({"stop_ticking": true});
         let stop_review = RunEndedRef {
             status: AgentRunStatus::Completed,
             phase_kind: "review",
             done_payload: Some(&stop_flag),
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let stop_coding = RunEndedRef {
             status: AgentRunStatus::Completed,
             phase_kind: "coding-task",
             done_payload: Some(&stop_flag),
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let false_flag = serde_json::json!({"stop_ticking": false});
         let no_stop_coding = RunEndedRef {
             status: AgentRunStatus::Completed,
             phase_kind: "coding-task",
             done_payload: Some(&false_flag),
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         // R1 × 5: outcomes are informational — every outcome without the
         // flag keeps ticking (`3869a226`).
@@ -2144,6 +2379,10 @@ mod tests {
             status: AgentRunStatus::PausedAwaitingInput,
             phase_kind: "",
             done_payload: None,
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         replay_run_ended(
             "R4c_no_yield_paused_awaiting",
@@ -2158,6 +2397,10 @@ mod tests {
             status: AgentRunStatus::Failed,
             phase_kind: "",
             done_payload: None,
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         replay_run_ended(
             "R4d_no_yield_failed",
@@ -2231,6 +2474,10 @@ mod tests {
             status: AgentRunStatus::Completed,
             phase_kind: "review",
             done_payload: Some(&payload),
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let issue = clock_issue(Some(in_review()), fx5_policy());
         let mut row = new_ticker_row(TICKER_ID, ISSUE_ID, now(), None);
@@ -2269,6 +2516,10 @@ mod tests {
             status: AgentRunStatus::Failed,
             phase_kind: "review",
             done_payload: Some(&payload),
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let issue = clock_issue(Some(in_review()), fx5_policy());
         let mut row = new_ticker_row(TICKER_ID, ISSUE_ID, now(), None);
@@ -2294,6 +2545,265 @@ mod tests {
         assert_eq!(row.next_run_at, Some(now()), "stopping keeps next_run_at");
     }
 
+    // -- per-reason failure policy (PDASHOSS01-183) ------------------------
+    //
+    // Mirrors `test_reconcile.py`'s failure-policy cases; the streak is the
+    // handler-resolved `consecutive_failure_streak` (the run itself counts).
+
+    fn armed_row(used: i32) -> IssueAgentTicker {
+        let mut row = new_ticker_row(TICKER_ID, ISSUE_ID, now(), None);
+        row.enabled = true;
+        row.used = used;
+        row.next_run_at = Some(now());
+        row
+    }
+
+    fn failed_run<'a>(
+        reason: &'a str,
+        error: &'a str,
+        thread_id: &'a str,
+        streak: u32,
+    ) -> RunEndedRef<'a> {
+        RunEndedRef {
+            status: AgentRunStatus::Failed,
+            phase_kind: "coding-task",
+            done_payload: None,
+            failure_reason: reason,
+            error,
+            thread_id,
+            failure_streak: streak,
+        }
+    }
+
+    fn run_ended_with(
+        row: IssueAgentTicker,
+        run: &RunEndedRef<'_>,
+    ) -> (ClockOutcome, IssueAgentTicker) {
+        let issue = clock_issue(Some(in_progress()), fx5_policy());
+        let mut slot = Some(row);
+        let event = TickerEvent::run_ended(Some(RUN_ID), None);
+        let outcome = reconcile(
+            &mut slot,
+            &issue,
+            &event,
+            Some(run),
+            false,
+            now(),
+            JITTER,
+            None,
+        )
+        .expect("run_ended reconciles");
+        (outcome, slot.expect("row survives"))
+    }
+
+    #[test]
+    fn needs_human_failure_stops_the_clock_without_spending_ticks() {
+        let run = failed_run(
+            "agent_error.provider_auth_or_access",
+            "401 authentication_failed",
+            "",
+            1,
+        );
+        let (outcome, row) = run_ended_with(armed_row(2), &run);
+        assert_eq!(
+            outcome.decision.reason,
+            "failed:agent_error.provider_auth_or_access:needs-human-stopped"
+        );
+        assert_eq!(outcome.write, ClockWrite::Update);
+        assert!(!row.enabled);
+        assert_eq!(row.disarm_reason, "failure_needs_human");
+        assert_eq!(row.used, 2, "nothing spent by the stop");
+        assert!(!outcome.clear_run_thread_id);
+    }
+
+    #[test]
+    fn needs_human_failure_does_not_overwrite_a_prior_cap_hit() {
+        let mut row = armed_row(10);
+        row.enabled = false;
+        row.disarm_reason = "cap_hit".to_string();
+        let run = failed_run("agent_error.provider_auth_or_access", "", "", 1);
+        let (outcome, row) = run_ended_with(row, &run);
+        assert!(outcome
+            .decision
+            .reason
+            .ends_with(":needs-human-already-stopped"));
+        assert_eq!(outcome.write, ClockWrite::None);
+        assert_eq!(row.disarm_reason, "cap_hit");
+    }
+
+    #[test]
+    fn retick_rearms_a_failure_stop_without_granting() {
+        for reason in ["failure_needs_human", "repeated_failure"] {
+            let issue = clock_issue(Some(in_progress()), fx5_policy());
+            let mut row = armed_row(2);
+            row.enabled = false;
+            row.disarm_reason = reason.to_string();
+            let mut slot = Some(row);
+            let outcome = reconcile(
+                &mut slot,
+                &issue,
+                &TickerEvent::retick(true, None),
+                None,
+                false,
+                now(),
+                JITTER,
+                None,
+            )
+            .expect("retick reconciles");
+            assert_eq!(outcome.decision.reason, "rearmed-after-failure", "{reason}");
+            assert!(outcome.decision.granted);
+            assert!(outcome.decision.dispatch_now);
+            let row = slot.expect("row");
+            assert_eq!(row.granted, 0, "no fresh pool");
+            assert!(row.enabled);
+            assert_eq!(row.disarm_reason, "");
+        }
+        // Any other stop with budget left is still a no-op.
+        let issue = clock_issue(Some(in_progress()), fx5_policy());
+        let mut row = armed_row(2);
+        row.enabled = false;
+        row.disarm_reason = "stop_signal".to_string();
+        let mut slot = Some(row);
+        let outcome = reconcile(
+            &mut slot,
+            &issue,
+            &TickerEvent::retick(true, None),
+            None,
+            false,
+            now(),
+            JITTER,
+            None,
+        )
+        .expect("retick reconciles");
+        assert_eq!(outcome.decision.reason, "budget_not_exhausted");
+    }
+
+    #[test]
+    fn transient_network_failure_free_retries_on_a_short_backoff() {
+        let run = failed_run(
+            "agent_error.provider_network",
+            "connection reset by peer",
+            "",
+            1,
+        );
+        let (outcome, row) = run_ended_with(armed_row(3), &run);
+        assert_eq!(
+            outcome.decision.reason,
+            "failed:agent_error.provider_network:free-retry-1"
+        );
+        assert!(outcome.decision.queued);
+        assert!(row.pending_entry);
+        assert!(row.pending_entry_free, "fire_tick will not spend the pool");
+        assert_eq!(row.pending_entry_trigger, "tick");
+        assert_eq!(row.pending_entry_actor_id, None);
+        assert_eq!(row.used, 3);
+        assert_eq!(
+            row.next_run_at,
+            Some(now() + chrono::Duration::seconds(FREE_RETRY_BACKOFF_SECONDS))
+        );
+    }
+
+    #[test]
+    fn free_retries_are_capped_then_the_backstop_stops_the_clock() {
+        // Streak 3 is the last free retry; the 4th same-reason failure hits
+        // the backstop (`max(3, FREE_RETRY_MAX_ATTEMPTS + 1)`).
+        let run = failed_run("agent_error.provider_network", "", "", 3);
+        let (outcome, _) = run_ended_with(armed_row(3), &run);
+        assert_eq!(
+            outcome.decision.reason,
+            "failed:agent_error.provider_network:free-retry-3"
+        );
+        let run = failed_run("agent_error.provider_network", "", "", 4);
+        let (outcome, row) = run_ended_with(armed_row(3), &run);
+        assert_eq!(
+            outcome.decision.reason,
+            "failed:agent_error.provider_network:repeated-failure-stopped"
+        );
+        assert!(!row.enabled);
+        assert_eq!(row.disarm_reason, "repeated_failure");
+    }
+
+    #[test]
+    fn free_retry_on_a_switched_off_clock_falls_through() {
+        let mut row = armed_row(3);
+        row.user_disabled = true;
+        let run = failed_run("agent_error.provider_network", "", "", 1);
+        let (outcome, row) = run_ended_with(row, &run);
+        assert_eq!(outcome.decision.reason, "progressed:keep-ticking");
+        assert!(!row.pending_entry);
+    }
+
+    #[test]
+    fn repeated_same_reason_failures_stop_the_clock_regardless_of_policy() {
+        let run = failed_run("agent_error.process_failure", "", "", 3);
+        let (outcome, row) = run_ended_with(armed_row(3), &run);
+        assert_eq!(
+            outcome.decision.reason,
+            "failed:agent_error.process_failure:repeated-failure-stopped"
+        );
+        assert_eq!(row.disarm_reason, "repeated_failure");
+        // A shorter streak (a success in between) keeps the normal clock.
+        let run = failed_run("agent_error.process_failure", "", "", 1);
+        let (outcome, row) = run_ended_with(armed_row(3), &run);
+        assert_eq!(outcome.decision.reason, "progressed:keep-ticking");
+        assert!(row.enabled);
+    }
+
+    #[test]
+    fn context_overflow_clears_the_thread_for_a_fresh_session() {
+        let run = failed_run(
+            "agent_error.context_overflow",
+            "prompt is too long: 213462 tokens > 200000 maximum",
+            "thread-abc",
+            1,
+        );
+        let (outcome, row) = run_ended_with(armed_row(3), &run);
+        assert_eq!(outcome.decision.reason, "progressed:keep-ticking");
+        assert!(outcome.clear_run_thread_id);
+        assert!(row.enabled);
+        // No resume handle: nothing to clear.
+        let run = failed_run("agent_error.context_overflow", "", "", 1);
+        let (outcome, _) = run_ended_with(armed_row(3), &run);
+        assert!(!outcome.clear_run_thread_id);
+    }
+
+    #[test]
+    fn unclassified_failure_keeps_todays_behaviour() {
+        let run = failed_run("agent_error.unknown", "", "", 1);
+        let (outcome, row) = run_ended_with(armed_row(3), &run);
+        assert_eq!(outcome.decision.reason, "progressed:keep-ticking");
+        assert!(row.enabled);
+    }
+
+    #[test]
+    fn legacy_row_without_a_reason_classifies_its_error() {
+        // A pre-taxonomy row: `classify(run.error)` routes it.
+        let run = failed_run("", "Invalid API key · Please run /login", "", 0);
+        let (outcome, _) = run_ended_with(armed_row(3), &run);
+        assert_eq!(
+            outcome.decision.reason,
+            "failed:agent_error.provider_auth_or_access:needs-human-stopped"
+        );
+        assert_eq!(
+            failure_reason_value("  timeout  ", "ignored"),
+            "timeout",
+            "stored value wins, stripped"
+        );
+    }
+
+    #[test]
+    fn failed_run_that_already_yielded_keeps_its_outcome() {
+        let payload = serde_json::json!({"status": "waiting_on_human", "yielded_at": "x"});
+        let run = RunEndedRef {
+            done_payload: Some(&payload),
+            ..failed_run("agent_error.provider_network", "", "", 1)
+        };
+        let (outcome, row) = run_ended_with(armed_row(3), &run);
+        assert_eq!(outcome.decision.reason, "waiting_on_human:keep-ticking");
+        assert!(row.enabled);
+        assert_eq!(row.disarm_reason, "");
+    }
+
     #[test]
     fn run_ended_stop_ticking_must_be_boolean_true() {
         // Beyond the fixtures: `payload.get("stop_ticking") is True` is
@@ -2308,6 +2818,10 @@ mod tests {
                 status: AgentRunStatus::Completed,
                 phase_kind: "review",
                 done_payload: Some(&payload),
+                failure_reason: "",
+                error: "",
+                thread_id: "",
+                failure_streak: 0,
             };
             let issue = clock_issue(Some(in_review()), fx5_policy());
             let mut row = new_ticker_row(TICKER_ID, ISSUE_ID, now(), None);
@@ -2660,6 +3174,10 @@ mod tests {
             status: AgentRunStatus::Completed,
             phase_kind: "review",
             done_payload: Some(&stop_payload),
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let review_issue = clock_issue(Some(in_review()), fx5_policy());
         let mut slot = Some(ticker_from(&case["before"]));
@@ -2711,6 +3229,10 @@ mod tests {
             status: AgentRunStatus::Completed,
             phase_kind: "coding-task",
             done_payload: Some(&completed_payload),
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let mut slot = Some(ticker_from(&case["before"]));
         let (stopped, outcome) = maybe_disarm_on_terminal_signal(
@@ -2737,6 +3259,10 @@ mod tests {
             status: AgentRunStatus::Completed,
             phase_kind: "coding-task",
             done_payload: None,
+            failure_reason: "",
+            error: "",
+            thread_id: "",
+            failure_streak: 0,
         };
         let mut slot = Some(ticker_from(&case["before"]));
         let (stopped, outcome) = maybe_disarm_on_terminal_signal(

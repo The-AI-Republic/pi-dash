@@ -89,6 +89,7 @@
 //!   (entities verbatim). Both are computed, exactly as saved.
 
 pub mod chat;
+pub mod failure_effects;
 pub mod finalization;
 pub mod guards;
 pub mod lifecycle;
@@ -104,6 +105,12 @@ pub use finalization::{
     terminal_event_payload, update_capacity_marker_sql, update_hooks_marker_sql, CapacityPlan,
     EffectsSql, FinalizeError, FinalizeValues, HooksPlan, TerminalEffectsInputs,
     TerminalEffectsOutcome, TerminalEffectsPlan, TerminalEventPlan,
+};
+pub use lifecycle::{
+    clock_stopped_data, clock_stopped_message_html, clock_stopped_notification_insert_sql,
+    clock_stopped_receivers, failure_comment_gate, failure_comment_streak_reason,
+    ClockStoppedIssue, FailureCommentGate, FailureCommentPlan, ReceiverCandidate,
+    RenderedFailureComment, CLOCK_STOPPED_ENTITY_NAME, CLOCK_STOPPED_SENDER,
 };
 pub use lifecycle::{
     comment_dedupe_exists_sql, comment_description_link_sql, comment_insert_sql,

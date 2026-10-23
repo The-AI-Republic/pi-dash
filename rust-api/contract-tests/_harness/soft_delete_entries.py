@@ -201,6 +201,7 @@ def seed_scheduler_binding(conn, tag: str):
             "created_by_id": str(owner["id"]),
             "llm_model": "",
             "refusal_category": "",
+            "failure_reason": "",
             "trigger": "manual",
             "executor_kind": "local_runner",
             "dispatch_attempts": 0,

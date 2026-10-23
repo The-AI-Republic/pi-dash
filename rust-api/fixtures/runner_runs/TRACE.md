@@ -45,6 +45,12 @@ no-auth 500).
   :1482, approvals_pending :1493, usage :1497, llm_model :1498, updated_at
   :1500, token properties :1517-1527; write path is D-14).
 
+- PDASHOSS01-183 (`AgentRun.failure_reason`, runner migrations
+  0032/0033): FX-RUN-02's `AgentRun.fields` gained the `failure_reason`
+  entry after `refusal_category` (CharField, `varchar(64)`, `db_index=True`,
+  default `""`, no choices) — the `_meta` shape of the new field, same keys
+  as the recorded `error_code` entry.
+
 ## Guards
 
 - `fx-run-04-guards.golden.json` — FX-RUN-04 — `runner/services/permissions.py:
@@ -94,6 +100,10 @@ no-auth 500).
   approvals.py:58) — recorded as the raised `NotSupportedError`; the 404/409/
   flip/fan-out branches are unreachable live.
 
+- PDASHOSS01-183: the `metrics.body` golden gained the
+  `pi_dash_runs_failed_by_reason` family (`_labeled_gauge`), header-only for
+  the recorded rows (no FAILED run carries a stored reason).
+
 ## Handlers — daemon (+ web chat + SSE)
 
 - `fx-run-09-handlers-daemon.golden.json` — FX-RUN-09 — `runner/views/
@@ -105,3 +115,19 @@ no-auth 500).
 - Ported bug: daemon chat `_resolve` dereferences `auth_runner.id` with no
   None guard (chat.py:522) — unauthenticated daemon chat POSTs raise
   `AttributeError` (live 500), recorded from a live call.
+
+## Failure taxonomy (PDASHOSS01-183)
+
+- `fx-run-10-failure.golden.json` — FX-RUN-10 — `runner/failure.py`
+  (RunFailureReason / FailurePolicy / policy_for / is_agent_side /
+  repeated_failure_limit_for / classify, constants);
+  `runner/diagnostics.py` `classify_run_error(error, failure_reason=…)`
+  (`_REASON_DISPLAY`, `_diagnostic_from_reason`);
+  `runner/services/run_lifecycle.py` `_post_failure_comment` body (prefix
+  gate, per-reason gate, render, notify decision) and
+  `_notify_clock_stopped` `message_html`. Recorded by running the real
+  Python on the PDASHOSS01-183 Python branch (pytest probe, Django test
+  settings): the classifier over every `test_failure_classify.py` table
+  vector plus edge cases × runner reasons × error codes; the comment body
+  with its I/O mocked and the streak injected (0/2/3/4) for every reason ×
+  five details.

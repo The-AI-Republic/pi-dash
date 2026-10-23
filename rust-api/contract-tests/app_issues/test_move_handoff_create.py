@@ -66,7 +66,7 @@ def _seed_handoff_world(cur, seed):
          "", "", 0),
     )
     cur.execute(
-        "INSERT INTO agent_run (%s) VALUES (%s)" % (
+        "INSERT INTO agent_run (failure_reason, %s) VALUES ('', %s)" % (
             RUN_COLUMNS, ",".join(["%s"] * 23)),
         (parent, "queued", "contract parent prompt", "{}", "{}",
          "contract-thread", "", ws, hx, src_pod, admin, "contract-model",

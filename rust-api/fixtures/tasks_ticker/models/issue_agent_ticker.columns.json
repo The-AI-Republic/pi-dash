@@ -163,6 +163,14 @@
         [
           "user_disabled",
           "User Disabled"
+        ],
+        [
+          "failure_needs_human",
+          "Failure Needs Human"
+        ],
+        [
+          "repeated_failure",
+          "Repeated Failure"
         ]
       ]
     },

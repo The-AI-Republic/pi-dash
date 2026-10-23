@@ -1845,12 +1845,12 @@ class Seeder:
         run_id = _uid()
         self.db.execute(
             """INSERT INTO agent_run
-               (id, status, prompt, run_config, required_capabilities, thread_id,
+               (failure_reason, id, status, prompt, run_config, required_capabilities, thread_id,
                 error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 refusal_category, trigger, executor_kind, dispatch_attempts,
                 cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
                 usage, created_at)
-               VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','',
+               VALUES ('', %s,%s,'contract prompt','{}','{}','contract-thread','',
                        %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
                        '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())""",
             (run_id, status, workspace_id, work_item_id, pod_id, created_by_id),
@@ -1983,13 +1983,13 @@ class Seeder:
         run_id = _uid()
         self.db.execute(
             """INSERT INTO agent_run
-               (id, workspace_id, owner_id, created_by_id, pod_id, runner_id,
+               (failure_reason, id, workspace_id, owner_id, created_by_id, pod_id, runner_id,
                 status, prompt, trigger, executor_kind, run_config,
                 required_capabilities, thread_id, agent_metadata, tool_plan,
                 usage, dispatch_attempts, error, refusal_category, llm_model,
                 cancel_reason, error_code, phase_kind,
                 created_at)
-               VALUES (%s,%s,%s,%s,%s,%s,
+               VALUES ('', %s,%s,%s,%s,%s,%s,
                        %s,'','direct','local_runner','{}',
                        '[]','{}','{}','{}',
                        '{}',0,'','','',

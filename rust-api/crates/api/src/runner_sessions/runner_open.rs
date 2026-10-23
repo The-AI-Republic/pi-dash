@@ -188,9 +188,11 @@ const CHAT_RELEASE_DETAIL: &str =
 const CLAIM_MIN_IDLE_MS: i64 = 0;
 /// The reaper's finalize `SET` order (`status`, `ended_at`,
 /// `queue_position`, the two markers, then `error`, `error_code` in
-/// updates order): pinned so a kernel drift fails loudly instead of
-/// mis-binding (the `runs.rs` `CANCEL_FINALIZE_COLUMNS` precedent).
-const REAP_FINALIZE_COLUMNS: [&str; 7] = [
+/// updates order, then the `failure_reason` safety net appended by
+/// `finalize_agent_run` — PDASHOSS01-183): pinned so a kernel drift fails
+/// loudly instead of mis-binding (the `runs.rs` `CANCEL_FINALIZE_COLUMNS`
+/// precedent).
+const REAP_FINALIZE_COLUMNS: [&str; 8] = [
     "status",
     "ended_at",
     "queue_position",
@@ -198,6 +200,7 @@ const REAP_FINALIZE_COLUMNS: [&str; 7] = [
     "terminal_capacity_released_at",
     "error",
     "error_code",
+    "failure_reason",
 ];
 /// The hello `SET` order with a capabilities change (model
 /// field-definition order, `capabilities` first).
@@ -1165,6 +1168,7 @@ async fn execute_reap_finalize(
     };
     let error = set_text(&values.clauses, 5)?;
     let error_code = set_text(&values.clauses, 6)?;
+    let failure_reason = set_text(&values.clauses, 7)?;
     sqlx::query(&finalization::finalize_update_sql(&values))
         .bind(AgentRunStatus::Failed.value())
         .bind(Utc::now())
@@ -1173,6 +1177,7 @@ async fn execute_reap_finalize(
         .bind(None::<DateTime<Utc>>)
         .bind(error)
         .bind(error_code)
+        .bind(failure_reason)
         .bind(run_id)
         .execute(&mut **tx)
         .await

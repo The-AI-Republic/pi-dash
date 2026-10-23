@@ -10,7 +10,7 @@
 //!   `clean`/`save` workspace denorm + autofill, `default_for_project_id`
 //!   (`:173-176`), constraints/indexes. Pod *views* are D-13's; the
 //!   model lives here per the epic and D-13's split reuses this module.
-//! * [`agent_run`] — `AgentRun` (`models.py:872-1161`): all 41
+//! * [`agent_run`] — `AgentRun` (`models.py:872-1161`): all 42
 //!   columns/defaults/constraints/indexes, `save` pod-resolution order
 //!   + owner→created_by mirror (`:1104-1134`), token pseudo-fields as
 //!     `(usage->>key)::bigint` reads (`fields.py:56-58`).

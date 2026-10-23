@@ -2382,7 +2382,14 @@ fn render_ticker(ticker: &TickerRow, timezone: chrono_tz::Tz) -> serde_json::Val
     };
     let cap_reached = !infinite && ticker.used >= cap;
     // `can_re_tick`: a ticking state (registered name in its group) or
-    // the Paused parking state, with an exhausted pool.
+    // the Paused parking state, with an exhausted pool — or a clock the
+    // failure policy stopped (needs-human / repeated failure,
+    // PDASHOSS01-183), which Re-tick re-arms without granting.
+    let failure_stopped = !ticker.enabled
+        && matches!(
+            ticker.disarm_reason.as_str(),
+            "failure_needs_human" | "repeated_failure"
+        );
     let ticking = matches!(
         (ticker.state_group.as_deref(), ticker.state_name.as_deref()),
         (Some("started"), Some("In Progress"))
@@ -2404,102 +2411,18 @@ fn render_ticker(ticker: &TickerRow, timezone: chrono_tz::Tz) -> serde_json::Val
         "last_tick_at": ticker.last_tick_at.map(|dt| render_datetime_in(&dt, &timezone)),
         "disarm_reason": ticker.disarm_reason,
         "pending_entry": ticker.pending_entry,
-        "can_re_tick": ticking && cap_reached,
+        "can_re_tick": ticking && (cap_reached || failure_stopped),
     })
 }
 
-/// `classify_run_error` (`runner/diagnostics.py:173-244`).
-fn classify_run_error(error: &str) -> Option<serde_json::Value> {
-    let detail = error.trim();
-    if detail.is_empty() {
-        return None;
-    }
-    let lowered = detail.to_lowercase();
-    let summary = detail
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .to_string();
-    // The enriched-auth label (`AI agent: <label> auth ...`).
-    let mut agent_label = String::new();
-    for line in detail.lines() {
-        let line = line.trim();
-        if !line.to_lowercase().starts_with("ai agent:") {
-            continue;
-        }
-        let body = line.split_once(':').map(|pair| pair.1).unwrap_or("").trim();
-        if let Some(idx) = body.to_lowercase().find(" auth ") {
-            if idx > 0 {
-                agent_label = body[..idx].trim().to_string();
-            }
-        }
-    }
-    let action_agent = if agent_label.is_empty() {
-        "the agent CLI".to_string()
-    } else {
-        agent_label.clone()
-    };
-    if lowered.contains("invalid authentication credentials")
-        || lowered.contains("authentication_failed")
-        || lowered.contains("failed to authenticate")
-    {
-        return Some(serde_json::json!({
-            "source": "agent",
-            "source_label": if agent_label.is_empty() { "Agent CLI".to_string() } else { agent_label },
-            "kind": "agent_authentication",
-            "summary": summary,
-            "action": format!("Re-authenticate {action_agent} on the runner machine, then restart the Pi Dash runner."),
-        }));
-    }
-    if lowered.contains("selected model")
-        && (lowered.contains("may not exist") || lowered.contains("may not have access"))
-    {
-        return Some(serde_json::json!({
-            "source": "agent",
-            "source_label": "Agent CLI",
-            "kind": "agent_model_access",
-            "summary": summary,
-            "action": "Choose a model the agent account can access, then retry the run.",
-        }));
-    }
-    if lowered.contains("runner_not_found") || lowered.contains("run_not_owned_by_runner") {
-        return Some(serde_json::json!({
-            "source": "pidash_cloud",
-            "source_label": "Pi Dash cloud",
-            "kind": "runner_registration",
-            "summary": summary,
-            "action": "Remove or re-add the stale local runner registration.",
-        }));
-    }
-    if lowered.contains("daemon shutdown requested")
-        || lowered.contains("runner revoked")
-        || lowered.contains("session_evicted")
-    {
-        return Some(serde_json::json!({
-            "source": "pidash_runner",
-            "source_label": "Pi Dash runner",
-            "kind": "runner_lifecycle",
-            "summary": summary,
-            "action": "Check runner service status and restart the runner if it should still accept work.",
-        }));
-    }
-    if lowered.contains("agent stalled") || lowered.contains("without new agent events") {
-        return Some(serde_json::json!({
-            "source": "agent",
-            "source_label": "Agent CLI",
-            "kind": "agent_stalled",
-            "summary": summary,
-            "action": "Inspect the runner machine for a stuck agent process or long-running tool call.",
-        }));
-    }
-    Some(serde_json::json!({
-        "source": "unknown",
-        "source_label": "Unknown",
-        "kind": "unknown",
-        "summary": summary,
-        "action": "",
-    }))
+/// `classify_run_error(run.error, failure_reason=run.failure_reason)`
+/// (`runner/diagnostics.py`): the shared D-15 classifier — a stored
+/// canonical reason routes first (PDASHOSS01-183), the text rules are the
+/// fallback.
+fn classify_run_error(error: Option<&str>, failure_reason: Option<&str>) -> serde_json::Value {
+    pidash_types::runner_runs::classify_run_error_for_reason(error, failure_reason)
+        .map(|diagnostic| serde_json::to_value(diagnostic).unwrap_or(serde_json::Value::Null))
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn opt_dt_string(value: &Option<DateTime<Utc>>, timezone: chrono_tz::Tz) -> serde_json::Value {
@@ -2524,6 +2447,7 @@ struct AgentRunRow {
     done_payload: Option<serde_json::Value>,
     error: Option<String>,
     error_code: Option<String>,
+    failure_reason: Option<String>,
     llm_model: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -2542,7 +2466,7 @@ pub async fn render_agent_status(
         r#"SELECT r.id, r.status, r.executor_kind, r.queue_position, r.runner_id,
                   ru.name,
                   r.created_at, r.assigned_at, r.started_at, r.ended_at,
-                  r.done_payload, r.error, r.error_code, r.llm_model,
+                  r.done_payload, r.error, r.error_code, r.failure_reason, r.llm_model,
                   (r.usage->>'input_tokens')::bigint, (r.usage->>'output_tokens')::bigint,
                   (r.usage->>'total_tokens')::bigint
            FROM agent_run r LEFT JOIN runner ru ON ru.id = r.runner_id
@@ -2568,6 +2492,7 @@ pub async fn render_agent_status(
             done_payload: row.try_get("done_payload")?,
             error: row.try_get("error")?,
             error_code: row.try_get("error_code")?,
+            failure_reason: row.try_get("failure_reason")?,
             llm_model: row.try_get("llm_model")?,
             input_tokens: row.try_get("input_tokens")?,
             output_tokens: row.try_get("output_tokens")?,
@@ -2671,7 +2596,8 @@ async fn render_agent_run(
         "done_payload": run.done_payload.clone(),
         "error": run.error,
         "error_code": run.error_code,
-        "error_diagnostic": run.error.as_deref().and_then(classify_run_error),
+        "failure_reason": run.failure_reason,
+        "error_diagnostic": classify_run_error(run.error.as_deref(), run.failure_reason.as_deref()),
         "llm_model": run.llm_model,
         "input_tokens": run.input_tokens,
         "output_tokens": run.output_tokens,

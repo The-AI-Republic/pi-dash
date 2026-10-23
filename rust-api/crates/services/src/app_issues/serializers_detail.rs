@@ -86,9 +86,11 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use pidash_db::tasks_ticker::IssueAgentTicker;
+use pidash_db::tasks_ticker::{IssueAgentTicker, TickerDisarmReason};
 use pidash_types::orchestration::{is_ticking_state, StateRef};
-use pidash_types::runner_runs::{classify_run_error, flat_token_fields, RunErrorDiagnostic};
+use pidash_types::runner_runs::{
+    classify_run_error_for_reason, flat_token_fields, RunErrorDiagnostic,
+};
 
 use super::serializers_links::{user_lite_to_representation, UserLiteRow, UserLiteView};
 use super::serializers_refs::{
@@ -333,8 +335,9 @@ pub struct AgentTickerView<'a> {
 /// `ticker` is the issue's `agent_ticker` row (`None` at the call boundary
 /// renders `None`, `:1275-1281`); `policy` carries the project pool +
 /// cadence columns; `state` is the issue's current state for
-/// `can_re_tick` (`(is_ticking_state or is_paused_state) and cap_reached`,
-/// `:1296`) and the stage interval. Pool math, predicates and interval all
+/// `can_re_tick` (`(is_ticking_state or is_paused_state) and
+/// (cap_reached or failure_stopped)`, `:1296`, PDASHOSS01-183) and the
+/// stage interval. Pool math, predicates and interval all
 /// run through the merged D-10/D-12 ports.
 pub fn agent_ticker_to_representation<'a>(
     ticker: &'a IssueAgentTicker,
@@ -342,8 +345,16 @@ pub fn agent_ticker_to_representation<'a>(
     state: Option<&StateRef<'_>>,
 ) -> AgentTickerView<'a> {
     let pool = pool_size(policy);
-    let can_re_tick =
-        (is_ticking_state(state) || is_paused_state(state)) && ticker.cap_reached(pool);
+    // Besides a spent pool, the failure policy's stops (needs-human /
+    // repeated failure, PDASHOSS01-183) also honour Re-tick — it re-arms
+    // the clock without granting, mirroring `_on_retick`.
+    let failure_stopped = !ticker.enabled
+        && ticker
+            .disarm_reason
+            .parse::<TickerDisarmReason>()
+            .is_ok_and(TickerDisarmReason::is_failure_stop);
+    let can_re_tick = (is_ticking_state(state) || is_paused_state(state))
+        && (ticker.cap_reached(pool) || failure_stopped);
     AgentTickerView {
         enabled: ticker.enabled,
         user_disabled: ticker.user_disabled,
@@ -443,8 +454,8 @@ pub fn agent_live_state_to_representation<'a>(
 }
 
 /// `_serialize_agent_run` wire keys (`issue.py:1352-1371`), in dict order:
-/// 19.
-pub const AGENT_RUN_FIELDS: [&str; 19] = [
+/// 20 (`failure_reason` since PDASHOSS01-183).
+pub const AGENT_RUN_FIELDS: [&str; 20] = [
     "id",
     "status",
     "executor_kind",
@@ -458,6 +469,7 @@ pub const AGENT_RUN_FIELDS: [&str; 19] = [
     "done_payload",
     "error",
     "error_code",
+    "failure_reason",
     "error_diagnostic",
     "llm_model",
     "input_tokens",
@@ -490,6 +502,7 @@ pub struct AgentRunDetailRow<'a> {
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub llm_model: &'a str,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -498,7 +511,8 @@ pub struct AgentRunDetailRow<'a> {
 }
 
 /// `_serialize_agent_run` output (`issue.py:1339-1371`), in dict order.
-/// `error_diagnostic` is the merged `classify_run_error` verdict.
+/// `error_diagnostic` is the merged `classify_run_error(error,
+/// failure_reason=…)` verdict (PDASHOSS01-183).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentRunView<'a> {
     pub id: &'a str,
@@ -514,6 +528,7 @@ pub struct AgentRunView<'a> {
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub error_diagnostic: Option<RunErrorDiagnostic>,
     pub llm_model: &'a str,
     pub input_tokens: Option<i64>,
@@ -560,7 +575,8 @@ pub fn agent_run_to_representation<'a>(
         done_payload: run.done_payload,
         error: run.error,
         error_code: run.error_code,
-        error_diagnostic: classify_run_error(Some(run.error)),
+        failure_reason: run.failure_reason,
+        error_diagnostic: classify_run_error_for_reason(Some(run.error), Some(run.failure_reason)),
         llm_model: run.llm_model,
         input_tokens: run.input_tokens,
         output_tokens: run.output_tokens,
@@ -1083,12 +1099,12 @@ pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
 /// the 16 `agent_run` columns the serializer reads, the joined
 /// `runner.name`, and the 11 `runner_live_state` columns (Django would
 /// select whole rows; this is the serializer-read subset, same rows).
-pub const LATEST_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.queue_position, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, agent_run.error, agent_run.error_code, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model, runner_live_state.turn_count, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 ORDER BY agent_run.created_at DESC LIMIT 1";
+pub const LATEST_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.queue_position, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, agent_run.error, agent_run.error_code, agent_run.failure_reason, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model, runner_live_state.turn_count, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 ORDER BY agent_run.created_at DESC LIMIT 1";
 
 /// The active run (`issue.py:1386-1402`): the newest run in one of the
 /// [`ACTIVE_RUN_STATUSES`]. Same projection and joins as
 /// [`LATEST_AGENT_RUN_SQL`]; the `IN` list carries the verbatim values.
-pub const ACTIVE_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.queue_position, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, agent_run.error, agent_run.error_code, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model, runner_live_state.turn_count, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 AND agent_run.status IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input') ORDER BY agent_run.created_at DESC LIMIT 1";
+pub const ACTIVE_AGENT_RUN_SQL: &str = "SELECT agent_run.id, agent_run.status, agent_run.executor_kind, agent_run.queue_position, agent_run.runner_id, agent_run.created_at, agent_run.assigned_at, agent_run.started_at, agent_run.ended_at, agent_run.done_payload, agent_run.error, agent_run.error_code, agent_run.failure_reason, agent_run.llm_model, agent_run.input_tokens, agent_run.output_tokens, agent_run.total_tokens, runner.name, runner_live_state.observed_run_id, runner_live_state.last_event_at, runner_live_state.last_event_kind, runner_live_state.last_event_summary, runner_live_state.agent_pid, runner_live_state.agent_subprocess_alive, runner_live_state.approvals_pending, runner_live_state.usage, runner_live_state.llm_model, runner_live_state.turn_count, runner_live_state.updated_at FROM agent_run LEFT JOIN runner ON runner.id = agent_run.runner_id LEFT JOIN runner_live_state ON runner_live_state.runner_id = runner.id WHERE agent_run.work_item_id = $1 AND agent_run.status IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input') ORDER BY agent_run.created_at DESC LIMIT 1";
 
 /// `runs.count()` (`issue.py:1412`): every run for the issue, all statuses,
 /// no join. `$1` is the issue id.
@@ -1099,6 +1115,7 @@ mod tests {
     use super::*;
     use pidash_db::dispatch::AgentRunStatus;
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker as TickerRowCheck;
+    use pidash_types::runner_runs::classify_run_error;
 
     fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
         let rendered = serde_json::to_string(value).expect("serializes");
@@ -1252,6 +1269,7 @@ mod tests {
             done_payload: None,
             error: "",
             error_code: "",
+            failure_reason: "",
             llm_model: "m",
             input_tokens: Some(100),
             output_tokens: Some(20),
@@ -1484,7 +1502,7 @@ mod tests {
              \"assigned_at\":\"2026-10-03T10:00:01+00:00\",\
              \"started_at\":\"2026-10-03T10:00:02+00:00\",\"ended_at\":null,\
              \"done_payload\":{\"signal\":\"done\"},\"error\":\"boom\\nsecond line\",\
-             \"error_code\":\"E1\",\"error_diagnostic\":{\"source\":\"unknown\",\
+             \"error_code\":\"E1\",\"failure_reason\":\"\",\"error_diagnostic\":{\"source\":\"unknown\",\
              \"source_label\":\"Unknown\",\"kind\":\"unknown\",\"summary\":\"boom\",\
              \"action\":\"\"},\"llm_model\":\"m\",\"input_tokens\":100,\
              \"output_tokens\":20,\"total_tokens\":120,\

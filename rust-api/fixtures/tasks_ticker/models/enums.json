@@ -29,6 +29,14 @@
     {
       "value": "user_disabled",
       "label": "User Disabled"
+    },
+    {
+      "value": "failure_needs_human",
+      "label": "Failure Needs Human"
+    },
+    {
+      "value": "repeated_failure",
+      "label": "Repeated Failure"
     }
   ],
   "scheduler_source": [

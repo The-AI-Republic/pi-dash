@@ -98,6 +98,7 @@ def _seed_run(
             "created_by_id": created_by_id,
             "llm_model": "seed-model",
             "refusal_category": "",
+            "failure_reason": "",
             "trigger": "scheduler",
             "executor_kind": "local_runner",
             "dispatch_attempts": 0,

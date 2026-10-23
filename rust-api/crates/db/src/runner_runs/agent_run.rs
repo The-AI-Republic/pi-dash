@@ -3,7 +3,7 @@
 //! Agent run model (D-15, stage 5).
 //!
 //! Ports `AgentRun` (`apps/api/pi_dash/runner/models.py:872-1161`):
-//! all 41 columns/defaults/constraints/indexes (`Meta`,
+//! all 42 columns/defaults/constraints/indexes (`Meta`,
 //! `:1037-1102`), the `save` pod-resolution order + owner→created_by
 //! mirror (`:1104-1134`), and the token pseudo-fields as
 //! `(usage->>key)::bigint` reads (`:1024-1026`,
@@ -74,6 +74,7 @@ pub const COLUMNS: &[&str] = &[
     "done_payload",
     "error",
     "refusal_category",
+    "failure_reason",
     "llm_model",
     "usage",
     "input_tokens",
@@ -103,6 +104,10 @@ pub const THREAD_ID_MAX_LENGTH: usize = 128;
 /// `refusal_category` bound (`models.py:1009-1014`,
 /// `max_length=32`).
 pub const REFUSAL_CATEGORY_MAX_LENGTH: usize = 32;
+/// `failure_reason` bound (`models.py`, PDASHOSS01-183, `max_length=64`,
+/// `db_index=True`). The canonical taxonomy lives in
+/// `pidash_types::runner_runs::failure`; not declared as `choices`.
+pub const FAILURE_REASON_MAX_LENGTH: usize = 64;
 /// `llm_model` bound (`models.py:1015`, `max_length=128`).
 pub const LLM_MODEL_MAX_LENGTH: usize = 128;
 
@@ -124,7 +129,8 @@ pub const DEFAULT_TRIGGER: AgentRunTrigger = AgentRunTrigger::Direct;
 /// `error_code` (`models.py:962`), `prompt` (`models.py:966`),
 /// `phase_kind` (`models.py:989`), `thread_id` (`models.py:992`),
 /// `error` (`models.py:1005`), `refusal_category`
-/// (`models.py:1009-1014`) and `llm_model` (`models.py:1015`).
+/// (`models.py:1009-1014`), `failure_reason` (PDASHOSS01-183) and
+/// `llm_model` (`models.py:1015`).
 pub const EMPTY_TEXT: &str = "";
 
 /// Fresh `tool_plan` default (`models.py:963`, `default=dict`).
@@ -373,6 +379,9 @@ pub struct AgentRun {
     pub done_payload: Option<serde_json::Value>,
     pub error: String,
     pub refusal_category: String,
+    /// Canonical failure taxonomy value; non-empty exactly when
+    /// `status == FAILED` (PDASHOSS01-183).
+    pub failure_reason: String,
     pub llm_model: String,
     pub usage: serde_json::Value,
     pub input_tokens: Option<i64>,
@@ -398,7 +407,7 @@ mod tests {
     #[test]
     fn columns_match_fixture_in_order() {
         assert_eq!(ts::owned(COLUMNS), ts::columns(&run_fixture()));
-        assert_eq!(COLUMNS.len(), 41);
+        assert_eq!(COLUMNS.len(), 42);
     }
 
     #[test]
@@ -597,6 +606,7 @@ mod tests {
             "thread_id",
             "error",
             "refusal_category",
+            "failure_reason",
             "llm_model",
         ] {
             assert_eq!(
@@ -614,6 +624,7 @@ mod tests {
             ("phase_kind", PHASE_KIND_MAX_LENGTH),
             ("thread_id", THREAD_ID_MAX_LENGTH),
             ("refusal_category", REFUSAL_CATEGORY_MAX_LENGTH),
+            ("failure_reason", FAILURE_REASON_MAX_LENGTH),
             ("llm_model", LLM_MODEL_MAX_LENGTH),
         ] {
             assert_eq!(
