@@ -187,8 +187,11 @@ function RoleCell({ row, controls }: { row: MemberRosterRow; controls: MemberRow
       options={controls.roleOptions(row).map((option) => ({ id: String(option.role), label: option.label }))}
       value={String(current)}
       onSelect={(id) => {
-        const role = Number(id);
-        if (role !== current) pick(row, role);
+        // Every pick reaches the server, even a no-op one: the server
+        // governs by the real project role and its refusal toast is the
+        // proof (PSET-023 pins a workspace admin's other-row no-op
+        // write failing with a permission error).
+        pick(row, Number(id));
       }}
       listLabel={`${row.fullName}'s role`}
       searchEnabled={false}

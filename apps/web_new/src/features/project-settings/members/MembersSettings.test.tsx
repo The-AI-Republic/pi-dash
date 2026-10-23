@@ -509,6 +509,19 @@ describe("MembersSettings writes (PSET-022–026)", () => {
     expect(writeMocks.role.mutate).toHaveBeenCalledWith({ memberId: "m-grace", role: 20 });
   });
 
+  it("sends even a no-op role pick so the server's refusal can toast", async () => {
+    // PSET-023 pins a workspace admin's other-row write failing with a
+    // permission error even when the picked role equals the current one,
+    // so every pick reaches the server.
+    happyPath();
+    const user = userEvent.setup();
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    await user.click(within(graceRow).getByRole("button", { name: "Change Grace Hopper's role" }));
+    await user.click(await screen.findByRole("option", { name: "Member" }));
+    expect(writeMocks.role.mutate).toHaveBeenCalledWith({ memberId: "m-grace", role: 15 });
+  });
+
   it("shows the picked role at once and puts the old word back when the write rolls back", async () => {
     happyPath();
     const user = userEvent.setup();
