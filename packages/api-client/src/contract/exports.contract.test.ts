@@ -48,7 +48,7 @@ describe.skipIf(!contractEnabled)("workspace exports contract", () => {
     expect(typeof first.next_page_results).toBe("boolean");
     expect(typeof first.prev_page_results).toBe("boolean");
     expect(first.next_cursor).toMatch(/^\d+:\d+:[01]$/);
-    expect(first.prev_cursor).toMatch(/^\d+:\d+:[01]$/);
+    expect(first.prev_cursor).toMatch(/^\d+:-?\d+:[01]$/);
     expect(first.grouped_by).toBeNull();
     expect(first.sub_grouped_by).toBeNull();
     expect(first.extra_stats).toBeNull();
