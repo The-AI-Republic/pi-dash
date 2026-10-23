@@ -397,6 +397,10 @@ export function EstimateCreateDialog({
                           onKeyDown={(event) => {
                             if (event.key === "Escape") {
                               event.preventDefault();
+                              // Base UI listens for Escape on the document;
+                              // keep the editor's dismiss from reaching the
+                              // dialog and discarding the whole draft.
+                              event.stopPropagation();
                               closeEditor(index);
                             }
                           }}

@@ -157,4 +157,20 @@ describe("Dialog", () => {
     sync();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+
+  it("ignores Escape and the backdrop while non-dismissable", async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    render(
+      <Dialog title="Saving" open onOpenChange={onOpenChange} nonDismissable>
+        <p>Working</p>
+      </Dialog>
+    );
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Saving" })).toBeInTheDocument();
+    await user.click(document.querySelector("[data-base-ui-backdrop]") ?? document.body);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Saving" })).toBeInTheDocument();
+  });
 });

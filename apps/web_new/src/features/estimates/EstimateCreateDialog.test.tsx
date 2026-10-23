@@ -108,7 +108,7 @@ function dialog(): HTMLElement {
   return screen.getByRole("dialog");
 }
 
-function renderClosableDialog(onOpenChange = vi.fn()): void {
+function renderClosableDialog(onOpenChange = vi.fn()): { onOpenChange: ReturnType<typeof vi.fn> } {
   function Harness(): React.ReactElement {
     const [open, setOpen] = React.useState(true);
     return (
@@ -133,6 +133,7 @@ function renderClosableDialog(onOpenChange = vi.fn()): void {
       <Harness />
     </QueryClientProvider>
   );
+  return { onOpenChange };
 }
 
 function values(): string[] {
@@ -427,6 +428,22 @@ describe("EstimateCreateDialog value arrangement", () => {
     expect(values()).toEqual(["1", "20"]);
   });
 
+  it("keeps the dialog open when Escape cancels an inline edit", async () => {
+    const user = userEvent.setup();
+    stubApi();
+    renderClosableDialog();
+    await pickStarter(user, "Custom");
+    await user.click(within(dialog()).getByRole("button", { name: "Edit value 1" }));
+    const input = within(dialog()).getByRole("textbox", { name: "Value 1" });
+    await user.clear(input);
+    await user.type(input, "99");
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(within(dialog()).getByText("Step 2 of 2")).toBeInTheDocument();
+    expect(within(dialog()).queryByRole("textbox", { name: "Value 1" })).not.toBeInTheDocument();
+    expect(values()).toEqual(["1", "2"]);
+  });
+
   it("cancels an empty added row instead of leaving a blank value", async () => {
     const user = userEvent.setup();
     stubApi();
@@ -658,5 +675,20 @@ describe("EstimateCreateDialog submit", () => {
     expect(within(dialog()).queryByRole("textbox", { name: "Value 1" })).not.toBeInTheDocument();
     api.release();
     await waitFor(() => expect(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL })).toBeEnabled());
+  });
+
+  it("ignores Escape while a create is pending", async () => {
+    const user = userEvent.setup();
+    const api = stubApi({ hold: true, status: 500 });
+    const { onOpenChange } = renderClosableDialog();
+    await pickStarter(user, "Custom");
+    await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(values()).toEqual(["1", "2"]);
+    api.release();
+    await waitFor(() => expect(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL })).toBeEnabled());
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 });
