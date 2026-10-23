@@ -1803,6 +1803,7 @@ mod tests {
         pidash_jobs::assistant::register_sweep_handler(
             &mut registry,
             pool.clone(),
+            None,
             // The same configured limit `worker()` passes (test defaults:
             // 330, like Django's unset default).
             pidash_db::config::Settings::test_defaults()

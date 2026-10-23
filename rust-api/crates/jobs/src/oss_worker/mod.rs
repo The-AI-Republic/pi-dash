@@ -228,6 +228,24 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // the Rust worker owns it — otherwise the task is lost at
     // switchover (parity gap W-license).
     crate::license::tasks::register(registry, ctx.pools.primary().clone());
+    // The shared Redis client (the `LivePorts::new` shape — `None` when
+    // `REDIS_URL` is unset or unparsable): the sweep's post-commit publish
+    // and, below, the runner seams. Built once, cloned per consumer.
+    let redis = match ctx
+        .settings
+        .redis
+        .url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .map(redis::Client::open)
+    {
+        None => None,
+        Some(Ok(client)) => Some(client),
+        Some(Err(error)) => {
+            tracing::warn!(%error, "redis: REDIS_URL unparsable; continuing without cache");
+            None
+        }
+    };
     // D-06 stale-turn sweep (PIDASHCONV-831; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The live
     // store fails RUNNING turns older than the configured hard limit + 60s
@@ -237,6 +255,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     crate::assistant::register_sweep_handler(
         registry,
         ctx.pools.primary().clone(),
+        redis.clone(),
         ctx.settings.assistant.turn_hard_limit,
     );
     // Loop scan + fire (PIDASHCONV-838; kept in sync with
@@ -343,21 +362,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // all thirteen — otherwise the runs are lost at switchover
     // (parity gap W-runner, plus the four dormant names the
     // registers also own).
-    let redis = match ctx
-        .settings
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .map(redis::Client::open)
-    {
-        None => None,
-        Some(Ok(client)) => Some(client),
-        Some(Err(error)) => {
-            tracing::warn!(%error, "redis: REDIS_URL unparsable; continuing without cache");
-            None
-        }
-    };
     let runner_seams = std::sync::Arc::new(runner_seams::RunnerSeams::new(
         ctx.pools.primary().clone(),
         redis,

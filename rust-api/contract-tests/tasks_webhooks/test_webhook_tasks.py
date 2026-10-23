@@ -739,6 +739,207 @@ def test_recent_visited_writes_row(db_conn, broker_url):
     assert touched["updated_at"] == created["updated_at"]
 
 
+#: PIDASHCONV-1277: same-emoji reaction seeds with explicit stamps, so the
+#: newest-first expectation is deterministic on both backends. Django's
+#: ``.first()`` applies ``Meta.ordering = ("-created_at",)`` (IssueReaction
+#: and CommentReaction, ``db/models/issue.py:747,774``); a ``LIMIT 1``
+#: without ``ORDER BY`` returns whichever row the plan hits first (the
+#: seeds below arrange for the older one; see ``_seed_reaction_pair``).
+_REACTION_OLD_TS = "2026-01-01T00:00:00+00:00"
+_REACTION_NEW_TS = "2026-06-01T00:00:00+00:00"
+_REACTION_EMOJI = "\U0001f44d"  # thumbs up, the issue's example
+_REACTION_EPOCH = 1780000000
+
+
+def _ordered_uuid_pair():
+    """Two ascending uuids (PIDASHCONV-1277): random per run, ordered always."""
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    return (first, second) if first < second else (second, first)
+
+
+def _seed_reaction_pair(db_conn, tag):
+    """One project, two issues (ascending ids), and a reactor user (PIDASHCONV-1277).
+
+    Ascending ids make the pre-fix failure deterministic: the unordered
+    ``LIMIT 1`` returns the older row under every plan (seqscan heap
+    order, pkey id order, partial-unique ``(issue_id,...)`` /
+    ``(comment_id,...)`` key order). The fixed ``ORDER BY created_at
+    DESC`` — and Django's ``-created_at`` ordering — are unaffected by ids.
+    """
+    from _harness.db import insert_row
+
+    chain = seed_helpers.issue_chain(db_conn, tag)
+    issue_x_id, issue_y_id = _ordered_uuid_pair()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET id = %s WHERE id = %s",
+            (issue_x_id, str(chain["issue"]["id"])),
+        )
+    db_conn.commit()
+    chain["issue"]["id"] = issue_x_id
+    issue2 = insert_row(
+        db_conn,
+        "issues",
+        {
+            "id": issue_y_id,
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "state_id": str(chain["state"]["id"]),
+            "name": "contract issue two",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 2,
+            "is_draft": False,
+            "sort_order": 65534,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    chain["issue2"] = issue2
+    chain["reactor"] = seed_helpers.user(db_conn, f"{tag}-reactor")
+    return chain
+
+
+def _seed_reaction_comment(db_conn, chain, issue, comment_id):
+    """Comment seed with varchar[]-safe array literals (PIDASHCONV-1277).
+
+    ``seed.issue_comment`` passes ``attachments``/``labels`` as ``[]``,
+    which psycopg sends as json against varchar[] columns; ``'{}'``
+    matches the app_issues raw-SQL seeds.
+    """
+    from _harness.db import insert_row
+
+    return insert_row(
+        db_conn,
+        "issue_comments",
+        {
+            "id": comment_id,
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(chain["reactor"]["id"]),
+            "access": "EXTERNAL",
+            "attachments": "{}",
+            "comment_html": "<p>hi</p>",
+            "comment_json": {},
+            "comment_stripped": "hi",
+            "labels": "{}",
+            "speaker_label": "",
+            "speaker_type": "human",
+        },
+    )
+
+
+def test_issue_activity_comment_reaction_picks_newest(db_conn, broker_url):
+    """comment_reaction created: the activity names the NEWEST match (PIDASHCONV-1277).
+
+    The same actor reacts with the same emoji on comment A (issue X,
+    older) then comment B (issue Y, newer). The builder resolves "the"
+    reaction by (reaction, project, actor) and records the activity on
+    the matched reaction's comment issue, so the row must carry issue Y
+    and the newer reaction id.
+    """
+    from _harness.db import insert_row
+
+    chain = _seed_reaction_pair(db_conn, "r1277comment")
+    ws, project, reactor = chain["workspace"], chain["project"], chain["reactor"]
+    comment_a_id, comment_b_id = _ordered_uuid_pair()
+    comment_a = _seed_reaction_comment(db_conn, chain, chain["issue"], comment_a_id)
+    comment_b = _seed_reaction_comment(db_conn, chain, chain["issue2"], comment_b_id)
+    base = {
+        "workspace_id": str(ws["id"]),
+        "project_id": str(project["id"]),
+        "actor_id": str(reactor["id"]),
+        "reaction": _REACTION_EMOJI,
+    }
+    old_id, new_id = _ordered_uuid_pair()
+    insert_row(db_conn, "comment_reactions", {
+        "id": old_id,
+        **base, "comment_id": str(comment_a["id"]), "created_at": _REACTION_OLD_TS,
+    })
+    newer = insert_row(db_conn, "comment_reactions", {
+        "id": new_id,
+        **base, "comment_id": str(comment_b["id"]), "created_at": _REACTION_NEW_TS,
+    })
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "comment_reaction.activity.created",
+            "requested_data": json.dumps({"reaction": _REACTION_EMOJI}),
+            "current_instance": None,
+            "issue_id": None,
+            "actor_id": str(reactor["id"]),
+            "project_id": str(project["id"]),
+            "epoch": _REACTION_EPOCH,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="comment-reaction issue_activities row",
+    )
+    assert row["issue_id"] == str(chain["issue2"]["id"])
+    assert row["new_identifier"] == str(newer["id"])
+    assert row["verb"] == "created"
+    assert row["field"] == "reaction"
+    assert row["new_value"] == _REACTION_EMOJI
+    assert row["comment"] == "added the reaction"
+
+
+def test_issue_activity_issue_reaction_picks_newest(db_conn, broker_url):
+    """issue_reaction created: new_identifier is the NEWEST match (PIDASHCONV-1277).
+
+    Same shape as the comment case, through
+    ``create_issue_reaction_activity``: same actor, same emoji, two
+    issues, older seeded first. The activity row must name the newer
+    reaction id.
+    """
+    from _harness.db import insert_row
+
+    chain = _seed_reaction_pair(db_conn, "r1277issue")
+    ws, project, reactor = chain["workspace"], chain["project"], chain["reactor"]
+    base = {
+        "workspace_id": str(ws["id"]),
+        "project_id": str(project["id"]),
+        "actor_id": str(reactor["id"]),
+        "reaction": _REACTION_EMOJI,
+    }
+    old_id, new_id = _ordered_uuid_pair()
+    insert_row(db_conn, "issue_reactions", {
+        "id": old_id,
+        **base, "issue_id": str(chain["issue"]["id"]), "created_at": _REACTION_OLD_TS,
+    })
+    newer = insert_row(db_conn, "issue_reactions", {
+        "id": new_id,
+        **base, "issue_id": str(chain["issue2"]["id"]), "created_at": _REACTION_NEW_TS,
+    })
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue_reaction.activity.created",
+            "requested_data": json.dumps({"reaction": _REACTION_EMOJI}),
+            "current_instance": None,
+            "issue_id": str(chain["issue2"]["id"]),
+            "actor_id": str(reactor["id"]),
+            "project_id": str(project["id"]),
+            "epoch": _REACTION_EPOCH,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="issue-reaction issue_activities row",
+    )
+    assert row["issue_id"] == str(chain["issue2"]["id"])
+    assert row["new_identifier"] == str(newer["id"])
+    assert row["verb"] == "created"
+    assert row["field"] == "reaction"
+    assert row["new_value"] == _REACTION_EMOJI
+    assert row["comment"] == "added the reaction"
+
+
 def _seed_page(db_conn, workspace_id, owner_id):
     from _harness.db import insert_row
 
