@@ -80,7 +80,7 @@ export function IntakeShell({
           onCreate={onCreate}
         />
         <div data-testid="intake-content-pane" className="min-h-0 min-w-0 flex-1">
-          <IntakePlaceholder />
+          {selectedId === undefined ? <IntakePlaceholder /> : null}
         </div>
       </div>
     </section>

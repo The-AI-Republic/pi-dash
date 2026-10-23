@@ -121,7 +121,9 @@ export function IntakeScreen({
     );
   }
 
-  const firstPagePending = list.isPending || (list.isLoading && pages === undefined);
+  // Only a first load shows the skeleton: a background re-read (tab
+  // switch invalidation, retry) keeps the rows it already has on screen.
+  const firstPagePending = list.isPending;
   const emptyKind = selectIntakeEmptyState({
     tab,
     rowCount: rows.length,

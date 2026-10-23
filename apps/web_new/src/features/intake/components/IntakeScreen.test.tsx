@@ -8,7 +8,7 @@
 // and the empty state for each situation.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { TransportResponse } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -143,11 +143,13 @@ function installServer(server: Server): void {
   }) as never);
 }
 
-function renderScreen(search: IntakeSearch, onSearchChange = vi.fn()) {
+type SearchWriter = (next: IntakeSearch) => void;
+
+function renderScreen(search: IntakeSearch, onSearchChange: SearchWriter = vi.fn()) {
   return renderScreenWithRerender(search, onSearchChange).onSearchChange;
 }
 
-function renderScreenWithRerender(search: IntakeSearch, onSearchChange = vi.fn()) {
+function renderScreenWithRerender(search: IntakeSearch, onSearchChange: SearchWriter = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const tree = (next: IntakeSearch) => (
     <QueryClientProvider client={client}>
@@ -178,11 +180,19 @@ describe("IntakeScreen shell (INT-001/INT-003)", () => {
   it("renders the two-pane shell under the trail with the pick placeholder", async () => {
     server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
     installServer(server);
-    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    renderScreen({ currentTab: "open" });
     expect(await screen.findByTestId("intake-shell")).toBeInTheDocument();
     expect(screen.getByRole("tabpanel")).toBeInTheDocument();
     expect(screen.getByTestId("intake-placeholder")).toBeInTheDocument();
     expect(screen.getByTestId("intake-breadcrumb")).toHaveTextContent("Intake");
+  });
+
+  it("replaces the pick placeholder once a request is selected", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Alpha");
+    expect(screen.queryByTestId("intake-placeholder")).toBeNull();
   });
 
   it("names the document after the project plus Intake", async () => {
@@ -251,6 +261,42 @@ describe("IntakeScreen gate (INT-002)", () => {
     renderScreen({ currentTab: "open" });
     expect(await screen.findByRole("button", { name: "Manage features" })).toBeDisabled();
   });
+
+  it("keeps the shortcut disabled when the roles read names no stand for the project", async () => {
+    createAppClient("https://api.test", (async (url: string) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
+      if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/`) return jsonResponse(url, 200, projectRow(false));
+      if (path.endsWith("/project-roles/")) return jsonResponse(url, 200, {});
+      if (path.endsWith("/api/users/me/workspaces/")) {
+        return jsonResponse(url, 200, [
+          { id: WS_ID, name: "Acme", slug: "acme", logo_url: null, total_members: 2, role: 20 },
+        ]);
+      }
+      return jsonResponse(url, 404, { error: "missing" });
+    }) as never);
+    renderScreen({ currentTab: "open" });
+    expect(await screen.findByRole("button", { name: "Manage features" })).toBeDisabled();
+  });
+
+  it("falls back to the slug in the trail while the workspace name is unknown", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    createAppClient("https://api.test", (async (url: string) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
+      if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/`) return jsonResponse(url, 200, projectRow(true));
+      if (path.endsWith("/project-roles/")) return jsonResponse(url, 200, { [PROJECT_ID]: 20 });
+      if (path.endsWith("/api/users/me/workspaces/")) return jsonResponse(url, 200, []);
+      if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/intake-issues/`) {
+        return jsonResponse(url, 200, listResponse(server.pending));
+      }
+      return jsonResponse(url, 404, { error: "missing" });
+    }) as never);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Alpha");
+    expect(screen.getByTestId("intake-breadcrumb")).toHaveTextContent("acme");
+  });
 });
 
 describe("IntakeScreen tabs and reads (INT-004/INT-012)", () => {
@@ -265,6 +311,15 @@ describe("IntakeScreen tabs and reads (INT-004/INT-012)", () => {
     expect(screen.getByTestId("intake-open-count")).toHaveTextContent("2");
     expect(server.listRequests).toHaveLength(1);
     expect(new URLSearchParams(server.listRequests[0] ?? "").get("status")).toBe("-2");
+  });
+
+  it("leaves the address alone when the active tab is clicked again", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    const onSearchChange = renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Alpha");
+    screen.getByRole("tab", { name: /Open/ }).click();
+    expect(onSearchChange).not.toHaveBeenCalled();
   });
 
   it("writes the tab switch to the address and drops the selection", async () => {
@@ -318,6 +373,18 @@ describe("IntakeScreen selection (INT-005)", () => {
     const onSearchChange = renderScreen({ currentTab: "open" });
     await screen.findByText("Alpha");
     await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open", inboxIssueId: ISSUE_1 }));
+  });
+
+  it("writes the picked row into the address under the active tab", async () => {
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    const onSearchChange = renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Alpha");
+    fireEvent.click(screen.getByText("Beta"));
+    expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open", inboxIssueId: ISSUE_2 });
   });
 
   it("keeps an id the list contains without rewriting", async () => {

@@ -28585,11 +28585,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private intakeShellEmptyHeading(): Locator {
-    return this.page
-      .getByTestId("intake-list-pane")
-      .getByRole("heading", {
-        name: /No matching results\.|No requests waiting for triage\.|Nothing has been resolved yet\./,
-      });
+    return this.page.getByTestId("intake-list-pane").getByRole("heading", {
+      name: /No matching results\.|No requests waiting for triage\.|Nothing has been resolved yet\./,
+    });
   }
 
   /** Settle once the shell, the gate, or a load failure committed. */
@@ -28603,7 +28601,7 @@ export class WebNewDriver implements ParityDriver {
         () => "lost"
       );
     const gate = this.page
-      .getByRole("heading", { name: "Intake is not enabled for the project." })
+      .getByRole("heading", { name: /^Intake is not enabled for the project\./ })
       .waitFor({ timeout: 120_000 })
       .then(
         () => "gate",
@@ -28703,7 +28701,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async intakeShellFeatureGateVisible(): Promise<boolean> {
-    return this.isShown(this.page.getByRole("heading", { name: "Intake is not enabled for the project." }));
+    return this.isShown(this.page.getByRole("heading", { name: /^Intake is not enabled for the project\./ }));
   }
 
   async intakeShellFeatureGateActionEnabled(): Promise<boolean> {

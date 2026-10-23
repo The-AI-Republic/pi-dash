@@ -46,8 +46,9 @@ describe("IntakeShell (INT-001)", () => {
     expect(screen.getByTestId("intake-breadcrumb").querySelector('a[href="/acme/projects/p-1/intake"]')).not.toBeNull();
   });
 
-  it("keeps the placeholder with no selection and with an empty tab", () => {
+  it("drops the pick placeholder once a request is selected", () => {
     render(<IntakeShell {...BASE} selectedId="i-9" />);
-    expect(screen.getByTestId("intake-placeholder")).toBeInTheDocument();
+    expect(screen.getByTestId("intake-content-pane")).toBeInTheDocument();
+    expect(screen.queryByTestId("intake-placeholder")).toBeNull();
   });
 });

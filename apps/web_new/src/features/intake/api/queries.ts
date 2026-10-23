@@ -15,6 +15,7 @@ import {
   type ApiClient,
   type IntakeIssueListResponse,
   type IntakeIssueRow,
+  type IntakeStatus,
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -48,7 +49,7 @@ export interface IntakeListRead {
 }
 
 /** The tab's status set followed by any widening the filter panel adds. */
-export function listStatuses(tab: IntakeTab, filters: IntakeListFilters | undefined): readonly number[] {
+export function listStatuses(tab: IntakeTab, filters: IntakeListFilters | undefined): readonly IntakeStatus[] {
   return filters?.statuses ?? statusSetForTab(tab);
 }
 
@@ -73,14 +74,14 @@ export function intakeListQueryOptions(
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       listIntakeIssues(client, workspaceSlug, projectId, {
         statuses: [...key.filters.statuses],
-        priorities: key.filters.priorities === undefined ? undefined : [...key.filters.priorities],
-        assignees: key.filters.assignees === undefined ? undefined : [...key.filters.assignees],
-        createdBy: key.filters.createdBy === undefined ? undefined : [...key.filters.createdBy],
-        labels: key.filters.labels === undefined ? undefined : [...key.filters.labels],
-        createdAt: key.filters.createdAt,
-        updatedAt: key.filters.updatedAt,
+        ...(key.filters.priorities === undefined ? {} : { priorities: [...key.filters.priorities] }),
+        ...(key.filters.assignees === undefined ? {} : { assignees: [...key.filters.assignees] }),
+        ...(key.filters.createdBy === undefined ? {} : { createdBy: [...key.filters.createdBy] }),
+        ...(key.filters.labels === undefined ? {} : { labels: [...key.filters.labels] }),
+        ...(key.filters.createdAt === undefined ? {} : { createdAt: key.filters.createdAt }),
+        ...(key.filters.updatedAt === undefined ? {} : { updatedAt: key.filters.updatedAt }),
         orderBy: key.orderBy,
-        cursor: pageParam,
+        ...(pageParam === undefined ? {} : { cursor: pageParam }),
         perPage: INTAKE_PAGE_SIZE,
       }),
     initialPageParam: undefined as string | undefined,

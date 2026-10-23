@@ -7,19 +7,21 @@
 // mounts the intake-owned screen with the parsed state.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createClient, type TransportResponse } from "@pidash/api-client";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
+const navigate = vi.fn();
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   Link: ({ to, children }: { to: string; children?: React.ReactNode }) => <a href={to}>{children}</a>,
-  useNavigate: () => vi.fn(),
+  useNavigate: () => navigate,
 }));
 
 import { createAppClient } from "../../../../../../core/api/client.js";
 import { Route } from "./index.js";
+import { Route as InboxRoute } from "../inbox.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 
@@ -185,5 +187,68 @@ describe("intake route component", () => {
     );
     await waitFor(() => expect(screen.getByTestId("intake-shell")).toBeInTheDocument());
     expect(await screen.findByTestId("intake-empty-open")).toBeInTheDocument();
+  });
+
+  it("asks the router to replace the address with the screen's settled state", async () => {
+    navigate.mockReset();
+    vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme", projectId: PROJECT_ID });
+    vi.spyOn(Route, "useSearch").mockReturnValue({ currentTab: "open" } as never);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("missing component");
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    createAppClient("https://api.test", (async (url: string) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
+      if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/`) return jsonResponse(url, 200, project(true));
+      if (path.endsWith("/project-roles/")) return jsonResponse(url, 200, { [PROJECT_ID]: 20 });
+      if (path.endsWith("/api/users/me/workspaces/")) {
+        return jsonResponse(url, 200, [
+          {
+            id: "123e4567-e89b-12d3-a456-426614174000",
+            name: "Acme",
+            slug: "acme",
+            logo_url: null,
+            total_members: 1,
+            role: 20,
+          },
+        ]);
+      }
+      return jsonResponse(url, 200, {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 0,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: 0,
+        total_results: 0,
+        results: [],
+      });
+    }) as never);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Component />
+      </QueryClientProvider>
+    );
+    await screen.findByTestId("intake-shell");
+    fireEvent.click(screen.getByRole("tab", { name: /Closed/ }));
+    expect(navigate).toHaveBeenCalledWith({ to: ".", search: { currentTab: "closed" }, replace: true });
+  });
+});
+
+describe("retired project inbox route (INT-001)", () => {
+  it("redirects the old address onto the canonical intake screen", () => {
+    const beforeLoad = InboxRoute.options.beforeLoad as unknown as (args: {
+      params: { ws: string; projectId: string };
+    }) => void;
+    expect(() => beforeLoad({ params: { ws: "acme", projectId: PROJECT_ID } })).toThrow();
+    try {
+      beforeLoad({ params: { ws: "acme", projectId: PROJECT_ID } });
+    } catch (thrown) {
+      expect(thrown).toMatchObject({
+        options: { href: `/acme/projects/${PROJECT_ID}/intake`, statusCode: 307 },
+      });
+    }
   });
 });

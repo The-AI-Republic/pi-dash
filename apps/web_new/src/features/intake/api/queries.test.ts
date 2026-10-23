@@ -118,6 +118,43 @@ describe("intake list options (INT-012/INT-031)", () => {
     expect(options.staleTime).toBe(30_000);
   });
 
+  it("forwards every supplied filter and leaves the absent ones off the wire", async () => {
+    const { client, urls } = fakeClient(page([], 0, undefined));
+    const options = intakeListQueryOptions(client, WS, PROJECT, {
+      tab: "open",
+      filters: {
+        statuses: [-2, 0],
+        priorities: ["high"],
+        assignees: ["u-1"],
+        createdBy: ["u-2"],
+        labels: ["l-1"],
+        createdAt: "2026-10-01;after",
+        updatedAt: "2026-10-02;before",
+      },
+    });
+    const queryFn = options.queryFn as unknown as (ctx: { pageParam: string | undefined }) => Promise<unknown>;
+    await queryFn({ pageParam: undefined });
+    const url = new URL(urls[0] ?? "", "http://api.invalid");
+    expect(url.searchParams.get("status")).toBe("-2,0");
+    expect(url.searchParams.get("priority")).toBe("high");
+    expect(url.searchParams.get("assignees")).toBe("u-1");
+    expect(url.searchParams.get("created_by")).toBe("u-2");
+    expect(url.searchParams.get("labels")).toBe("l-1");
+    expect(url.searchParams.get("created_at")).toBe("2026-10-01;after");
+    expect(url.searchParams.get("updated_at")).toBe("2026-10-02;before");
+    expect(url.searchParams.has("cursor")).toBe(false);
+
+    const bare = fakeClient(page([], 0, undefined));
+    const bareOptions = intakeListQueryOptions(bare.client, WS, PROJECT, { tab: "open" });
+    await (bareOptions.queryFn as unknown as (ctx: { pageParam: string | undefined }) => Promise<unknown>)({
+      pageParam: undefined,
+    });
+    const bareUrl = new URL(bare.urls[0] ?? "", "http://api.invalid");
+    for (const absent of ["priority", "assignees", "created_by", "labels", "created_at", "updated_at"]) {
+      expect(bareUrl.searchParams.has(absent)).toBe(false);
+    }
+  });
+
   it("sends the tab status set, the order, the cursor and the page size", async () => {
     const { client, urls } = fakeClient(page([row("i-1", "Alpha")], 1, undefined));
     const options = intakeListQueryOptions(client, WS, PROJECT, { tab: "closed" });
@@ -138,6 +175,17 @@ describe("intake list options (INT-012/INT-031)", () => {
     expect(getNext(page([], 1, "next-1"))).toBe("next-1");
     expect(getNext(page([], 1, undefined))).toBeUndefined();
     expect(getNext({ ...page([], 1, "next-1"), next_cursor: "" })).toBeUndefined();
+  });
+});
+
+describe("detail keys (INT-031)", () => {
+  it("nest a request's key under the workspace scope and the project's detail root", () => {
+    const details = intakeKeys.details(WS, PROJECT);
+    const detail = intakeKeys.detail(WS, PROJECT, "issue-1");
+    expect(details.slice(0, 2)).toEqual(["ws", WS]);
+    expect(detail.slice(0, details.length)).toEqual(details);
+    expect(detail.at(-1)).toBe("issue-1");
+    expect(intakeKeys.all(WS)).toContain("intake");
   });
 });
 
