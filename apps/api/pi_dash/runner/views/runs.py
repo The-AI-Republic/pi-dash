@@ -720,15 +720,11 @@ class AgentRunReleasePinEndpoint(APIView):
                     {"error": "run not pinned"},
                     status=status.HTTP_409_CONFLICT,
                 )
-            locked.pinned_runner = None
-            # Also clear parent's stale thread_id so the upcoming dispatch
-            # builds an Assign without a resume hint — the new runner has
-            # no session to resume against. The handoff comment carries
-            # the human-readable state.
-            if locked.parent_run is not None and locked.parent_run.thread_id:
-                locked.parent_run.thread_id = ""
-                locked.parent_run.save(update_fields=["thread_id"])
-            locked.save(update_fields=["pinned_runner"])
+            # One shared definition of "release the pin" (pin cleared plus
+            # the parent's stale resume handle dropped), so this hatch, its
+            # CLI-facing twin and the automatic over-budget release in
+            # ``next_assignable_for_runner`` cannot drift apart.
+            matcher.clear_run_pin(locked)
             run = locked
 
         if run.pod_id is not None:

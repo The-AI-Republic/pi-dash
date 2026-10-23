@@ -88,6 +88,12 @@ class Pod(models.Model):
         related_name="pods_created",
     )
     is_default = models.BooleanField(default=False)
+    # How long a QUEUED run pinned to a busy runner in this pod may wait
+    # before the matcher releases the pin to an idle runner (PDASHOSS01-272).
+    # NULL means "use the instance default", ``RUNNER_PIN_WAIT_BUDGET_SECS``;
+    # 0 means "never auto-release" — honour the pin however long it takes.
+    # Read through :meth:`effective_pin_wait_budget_secs`, never directly.
+    pin_wait_budget_secs = models.PositiveIntegerField(null=True, blank=True)
     deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -157,6 +163,18 @@ class Pod(models.Model):
 
                 raise ValidationError({"workspace": ("pod.workspace must match pod.project.workspace")})
         super().save(*args, **kwargs)
+
+    def effective_pin_wait_budget_secs(self) -> int:
+        """Seconds a pin in this pod survives while its runner stays busy.
+
+        Falls back to the instance-wide ``RUNNER_PIN_WAIT_BUDGET_SECS`` when
+        the pod carries no override. A return of ``0`` disables auto-release.
+        """
+        if self.pin_wait_budget_secs is not None:
+            return int(self.pin_wait_budget_secs)
+        from django.conf import settings
+
+        return int(getattr(settings, "RUNNER_PIN_WAIT_BUDGET_SECS", 600))
 
     @classmethod
     def default_for_project(cls, project) -> "Pod | None":

@@ -48,6 +48,9 @@ class PodSerializer(serializers.ModelSerializer):
             "name",
             "description",
             "is_default",
+            # Per-pod pin wait budget (PDASHOSS01-272). NULL = inherit the
+            # instance default; 0 = never auto-release a pin.
+            "pin_wait_budget_secs",
             "workspace",
             "project",
             "project_identifier",
