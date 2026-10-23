@@ -4,7 +4,8 @@
 // Self-test for the coexistence generator (run: pnpm --filter web_new
 // test:coexistence). Exercises entry validation, matcher rendering for
 // literal and workspace-scoped entries, the reserved-path exclusion, and the
-// insert/replace/check cycle on throwaway Caddyfile copies.
+// insert/replace/check cycle on throwaway Caddyfile copies, and the CLI
+// entry point.
 import { strict as assert } from "node:assert";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +18,7 @@ import {
   entryRegex,
   isWorkspaceScoped,
   loadEntries,
+  main,
   parseEntry,
   reservedTopLevelOf,
   syncFile,
@@ -237,5 +239,45 @@ describe("syncFile", () => {
   it("refuses a half-present marker block", () => {
     const { ce } = scratch({ ce: ["# END MIGRATED ROUTES", CE_ANCHOR, ""].join("\n") });
     assert.throws(() => syncFile(ce, CE_ANCHOR, "\t", buildCeLines([])), /half-present/);
+  });
+});
+
+describe("main", () => {
+  function runMain(argv) {
+    const lines = [];
+    const stdout = console.log;
+    console.log = (text) => lines.push(text);
+    try {
+      main(argv);
+    } finally {
+      console.log = stdout;
+    }
+    return lines.join("\n");
+  }
+
+  function project() {
+    const list = listFile({ entries: ["/sign-in", "/{ws}"], reservedTopLevel: ["api"] });
+    const { ce, aio } = scratch({ ce: ceFixture, aio: aioFixture });
+    return { argv: ["--list", list, "--caddy-ce", ce, "--caddy-aio", aio], ce, aio };
+  }
+
+  it("generates both files and reports the per-file outcome", () => {
+    const { argv, ce, aio } = project();
+    assert.match(runMain(argv), /Coexistence routes: CE updated, AIO updated \(2 migrated route\(s\)\)\./);
+    assert.match(readFileSync(ce, "utf8"), /@web_new_\d/);
+    assert.match(readFileSync(aio, "utf8"), /handle @web_new_\d+ \{/);
+    assert.match(runMain(argv), /Coexistence routes: CE unchanged, AIO unchanged/);
+  });
+
+  it("passes check mode on fresh output and throws on drift", () => {
+    const { argv, ce } = project();
+    runMain(argv);
+    assert.match(runMain([...argv, "--check"]), /Coexistence check passed \(2 migrated route\(s\)\)\./);
+    writeFileSync(ce, readFileSync(ce, "utf8").replace("web_new:3000", "web_new:3001"));
+    assert.throws(() => runMain([...argv, "--check"]), /stale/);
+  });
+
+  it("rejects an unknown argument", () => {
+    assert.throws(() => runMain(["--bogus"]), /unknown argument/);
   });
 });
