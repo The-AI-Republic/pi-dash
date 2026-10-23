@@ -967,6 +967,43 @@ describe("settings preferences (NEWFRONT-586, PROF-016..018)", () => {
     return { request: () => ({ method: () => method }), url: () => url };
   }
 
+  function preferencesPage(waitFor: ReturnType<typeof vi.fn>, reload = vi.fn(async () => undefined)): Page {
+    return pageOf({
+      goto: async () => undefined,
+      waitForLoadState: async () => undefined,
+      getByTestId: () => locator({ waitFor }),
+      reload,
+    });
+  }
+
+  it("opens preferences and settles on the tab without reloading when it paints", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const reload = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(preferencesPage(waitFor, reload));
+    await driver.settingsProfileOpenPreferences();
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 60_000 });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("reloads once when the preferences tab misses its first paint, then settles", async () => {
+    const waitFor = vi.fn().mockRejectedValueOnce(new Error("Timeout 60000ms exceeded")).mockResolvedValue(undefined);
+    const reload = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(preferencesPage(waitFor, reload));
+    await driver.settingsProfileOpenPreferences();
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws when preferences still miss after the reload", async () => {
+    const waitFor = vi.fn(async () => {
+      throw new Error("Timeout 60000ms exceeded");
+    });
+    const reload = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(preferencesPage(waitFor, reload));
+    await expect(driver.settingsProfileOpenPreferences()).rejects.toThrow("Timeout 60000ms exceeded");
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
   it("maps the theme trigger label to its value and nulls unknowns", async () => {
     const driver = new WebNewDriver(
       pageOf({ getByRole: () => locator({ textContent: async () => "Dark high contrast" }) })

@@ -25785,14 +25785,24 @@ export class WebNewDriver implements ParityDriver {
    * paint still settles inside the unchanged first budget.
    */
   private async settingsProfileSettle(): Promise<void> {
-    const shell = this.page.getByTestId("profile-settings-shell");
+    await this.settleFirstPaint(this.page.getByTestId("profile-settings-shell"));
+  }
+
+  /**
+   * Wait for a settings surface to paint, reloading once when it misses the
+   * whole first-paint budget. The settings pages share the dev server's
+   * unbundled module graph (~900 requests per navigation); one stalled
+   * request otherwise spends the entire budget with no recovery. A slow but
+   * working paint still settles inside the unchanged first budget.
+   */
+  private async settleFirstPaint(surface: Locator): Promise<void> {
     try {
-      await shell.waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+      await surface.waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
       return;
     } catch {
       await this.page.reload().catch(() => undefined);
     }
-    await shell.waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+    await surface.waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
 
   /** Link labels under one sidebar section heading (tabs or shortcuts). */
@@ -31706,9 +31716,7 @@ export class WebNewDriver implements ParityDriver {
   async settingsProfileOpenPreferences(): Promise<void> {
     await this.page.goto("/settings/profile/preferences", { timeout: 60_000 });
     await this.page.waitForLoadState("domcontentloaded");
-    await this.page
-      .getByTestId("preferences-settings")
-      .waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+    await this.settleFirstPaint(this.page.getByTestId("preferences-settings"));
   }
   async settingsProfileOpenActivity(): Promise<void> {
     const feedWait = this.page
@@ -31809,9 +31817,7 @@ export class WebNewDriver implements ParityDriver {
     // colors; the preview detaching marks the reload, then the tab paints
     // again with the designer showing the saved values.
     await this.page.getByTestId("custom-theme-preview").waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
-    await this.page
-      .getByTestId("preferences-settings")
-      .waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+    await this.settleFirstPaint(this.page.getByTestId("preferences-settings"));
   }
   async settingsProfileFailProfileSaves(status: number): Promise<void> {
     await this.page.route("**/api/users/me/profile/", async (route) => {
