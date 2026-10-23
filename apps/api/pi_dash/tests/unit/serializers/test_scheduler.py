@@ -20,7 +20,7 @@ from pi_dash.app.serializers.scheduler import (
     SchedulerBindingSerializer,
     SchedulerSerializer,
 )
-from pi_dash.db.models import Project, Scheduler, SchedulerBinding
+from pi_dash.db.models import Project, Scheduler, SchedulerBinding, Workspace
 from pi_dash.runner.models import Pod
 
 
@@ -413,3 +413,89 @@ def test_create_pod_validated_against_context_project_not_request_body(
     )
     assert not s.is_valid()
     assert "pod" in s.errors
+
+
+# ---------------------------------------------------------------------------
+# Slug uniqueness (Scheduler) — mirrors the conditional DB constraint
+# ``scheduler_unique_workspace_slug_when_active`` so a duplicate comes back
+# as {"slug": [...]} instead of an IntegrityError-shaped generic 400
+# (PDASHOSS01-221 test-pass defect).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_create_duplicate_slug_rejected(scheduler, workspace):
+    s = SchedulerSerializer(
+        data={"slug": "test-scheduler", "name": "Dupe", "prompt": "x"},
+        context={"workspace": workspace},
+    )
+    assert not s.is_valid()
+    assert "slug" in s.errors
+
+
+@pytest.mark.unit
+def test_create_slug_of_soft_deleted_scheduler_accepted(scheduler, workspace):
+    scheduler.delete()  # soft-delete — constraint only guards active rows
+    s = SchedulerSerializer(
+        data={"slug": "test-scheduler", "name": "Reborn", "prompt": "x"},
+        context={"workspace": workspace},
+    )
+    assert s.is_valid(), s.errors
+
+
+@pytest.mark.unit
+def test_create_same_slug_in_other_workspace_accepted(scheduler, create_user):
+    with impersonate(create_user):
+        other_ws = Workspace.objects.create(
+            name="Second WS", owner=create_user, slug="second-ws"
+        )
+    s = SchedulerSerializer(
+        data={"slug": "test-scheduler", "name": "Elsewhere", "prompt": "x"},
+        context={"workspace": other_ws},
+    )
+    assert s.is_valid(), s.errors
+
+
+@pytest.mark.unit
+def test_create_duplicate_slug_without_workspace_context_skips_check(scheduler):
+    # Without a workspace in context (or an instance) there is nothing to
+    # check against; the DB constraint remains the backstop.
+    s = SchedulerSerializer(
+        data={"slug": "test-scheduler", "name": "Dupe", "prompt": "x"},
+    )
+    assert s.is_valid(), s.errors
+
+
+@pytest.mark.unit
+def test_patch_keeping_own_slug_accepted(scheduler):
+    s = SchedulerSerializer(
+        scheduler,
+        data={"slug": "test-scheduler", "name": "Renamed"},
+        partial=True,
+    )
+    assert s.is_valid(), s.errors
+
+
+@pytest.mark.unit
+def test_patch_to_another_active_slug_rejected(scheduler, other_scheduler):
+    s = SchedulerSerializer(
+        scheduler,
+        data={"slug": "test-other-scheduler"},
+        partial=True,
+    )
+    assert not s.is_valid()
+    assert "slug" in s.errors
+
+
+@pytest.mark.unit
+def test_post_duplicate_slug_returns_slug_field_error(session_client, scheduler, workspace):
+    """The wire shape the web modal maps inline: 400 {"slug": [...]},
+    not the IntegrityError-shaped {"error": "The payload is not valid"}."""
+    resp = session_client.post(
+        f"/api/workspaces/{workspace.slug}/schedulers/",
+        {"slug": "test-scheduler", "name": "Dupe", "prompt": "x"},
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert "slug" in resp.data
+    assert Scheduler.objects.filter(workspace=workspace, slug="test-scheduler").count() == 1

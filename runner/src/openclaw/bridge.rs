@@ -39,18 +39,13 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::agent::{
-    AgentProcessHandle, BridgeEvent, ExitSnapshot, RunPayload, STDERR_RING_LINES, StderrBuffer,
-    StderrRing, StderrSnapshot,
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitSnapshot, RunPayload,
+    STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
 use crate::openclaw::process::OpenClawProcess;
 use crate::openclaw::schema::AcpMessage;
 use crate::util::shell::login_shell_command;
-
-/// How long to wait for `acpx` to emit its first ACP frame carrying a
-/// `sessionId` before giving up on run setup. Generous: acpx has to perform
-/// the ACP handshake and OpenClaw may take several seconds to spin a session.
-const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Bridge {
     binary: String,
@@ -190,7 +185,7 @@ impl Bridge {
     /// `next_events` re-emits it. Mirrors cursor-agent's `wait_for_init`.
     async fn wait_for_session(&mut self, run_id: Uuid) -> Result<String> {
         let proc = self.proc.as_mut().context("acpx process not spawned")?;
-        let deadline = tokio::time::Instant::now() + SESSION_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + ENGINE_STARTUP_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let recv = tokio::time::timeout(remaining, proc.inbound.recv())

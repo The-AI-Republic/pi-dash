@@ -45,6 +45,8 @@ function makeRunner(id: string, podId: string): IRunner {
     enrolled_at: null,
     revoked_at: null,
     revoked_reason: "",
+    paused_at: null,
+    paused_by: null,
     created_at: "",
     updated_at: "",
   };
