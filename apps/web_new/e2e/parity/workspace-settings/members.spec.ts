@@ -42,6 +42,7 @@ import {
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
+import { openWorkspacePage, provisionMember as provisionEditionMember, seededSession } from "./edition-session";
 
 /** Numeric workspace roles as the server stores them. */
 const ROLE = { ADMIN: 20, MEMBER: 15, GUEST: 5 } as const;
@@ -143,6 +144,16 @@ async function adminOpen(driver: ParityDriver, workspaceSlug: string): Promise<v
   await expect.poll(() => driver.wsSettingsMembersAddVisible(), { timeout: 30_000 }).toBe(true);
 }
 
+/**
+ * Suspended rows form the tail of the roster: once the first suspended
+ * row appears, no active row may follow it.
+ */
+function expectSuspendedRowsLast(order: string[], suspended: Set<string>): void {
+  const firstSuspended = order.findIndex((email) => suspended.has(email));
+  if (firstSuspended === -1) return;
+  expect(order.slice(firstSuspended).every((email) => suspended.has(email))).toBe(true);
+}
+
 test(
   specTitle(["WSET-008"], "roster counts, searches, filters by role, and sorts suspended rows last"),
   { tag: specTags(["WSET-008"]) },
@@ -195,29 +206,41 @@ test(
       });
 
       await test.step("removed members persist as suspended rows sorted last", async () => {
+        // Other specs in this shared scratch workspace leave their own
+        // suspended members behind, so the roster is not empty here.
+        // Assert relatively: the removed member joins the suspended set
+        // and every suspended row sits after every active row.
+        const suspendedBefore = new Set(await driver.wsSettingsMembersSuspendedEmails());
+        expect(suspendedBefore.has(memberExtra.email)).toBe(false);
         await driver.wsSettingsMemberOpenRemove(memberExtra.email);
         expect(await driver.wsSettingsRemoveDialogTitle()).toBe(`Remove ${memberExtra.displayName}?`);
         await driver.wsSettingsRemoveDialogCancel();
         expect(await driver.wsSettingsRemoveDialogVisible()).toBe(false);
-        expect(await driver.wsSettingsMembersSuspendedEmails()).toEqual([]);
+        expect(new Set(await driver.wsSettingsMembersSuspendedEmails())).toEqual(suspendedBefore);
         await driver.wsSettingsMemberOpenRemove(memberExtra.email);
         await driver.wsSettingsRemoveDialogConfirm();
         expect(await driver.wsSettingsRemoveDialogVisible()).toBe(false);
-        expect(await driver.wsSettingsMembersSuspendedEmails()).toEqual([memberExtra.email]);
+        expect(new Set(await driver.wsSettingsMembersSuspendedEmails())).toEqual(
+          new Set([...suspendedBefore, memberExtra.email])
+        );
         const order = await driver.wsSettingsMembersVisibleEmails();
-        expect(order[order.length - 1]).toBe(memberExtra.email);
+        expectSuspendedRowsLast(order, new Set([...suspendedBefore, memberExtra.email]));
         // Removal deactivates server-side; the row is not deleted.
         const server = await serverWorkspaceMembersFull(seed.workspaceSlug, session);
         expect(server.find((row) => row.email === memberExtra.email)?.isActive).toBe(false);
         await driver.wsSettingsMembersOpenFilters();
         await driver.wsSettingsMembersToggleFilter("Suspended");
-        expect(await driver.wsSettingsMembersVisibleEmails()).toEqual([memberExtra.email]);
+        expect(new Set(await driver.wsSettingsMembersVisibleEmails())).toEqual(
+          new Set([...suspendedBefore, memberExtra.email])
+        );
         await driver.wsSettingsMembersToggleFilter("Suspended");
         await driver.wsSettingsMembersCloseFilters();
         await driver.wsSettingsMembersOpen(seed.workspaceSlug);
-        expect(await driver.wsSettingsMembersSuspendedEmails()).toEqual([memberExtra.email]);
+        expect(new Set(await driver.wsSettingsMembersSuspendedEmails())).toEqual(
+          new Set([...suspendedBefore, memberExtra.email])
+        );
         const reloaded = await driver.wsSettingsMembersVisibleEmails();
-        expect(reloaded[reloaded.length - 1]).toBe(memberExtra.email);
+        expectSuspendedRowsLast(reloaded, new Set([...suspendedBefore, memberExtra.email]));
       });
     } finally {
       await serverHardDeleteWorkspaceMember(guestExtra.membershipId);
@@ -729,22 +752,32 @@ test(
   specTitle(["WSET-015"], "no billing upsell entry renders in this checkout for any role"),
   { tag: specTags(["WSET-015"]) },
   async ({ driver, seed }) => {
-    const session = await signInSession(seed.email, seed.password);
-    const member = requireMember(seed);
+    // Cloud-tagged row: the OSS build and the cloud build both render no
+    // upsell affordance in the members header (the cloud overlay's billing
+    // action component is empty), so the same absence is asserted on both.
+    const session = await seededSession(seed, seed.email);
+    const member = await provisionEditionMember(seed, session, "wset015-member", ROLE.MEMBER);
     const server = await serverWorkspaceMembersFull(seed.workspaceSlug, session);
     expect(server.some((row) => row.email === seed.email && row.role === ROLE.ADMIN)).toBe(true);
 
     await test.step("admins see no billing entry in the members header", async () => {
-      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/members`, {
+        email: seed.email,
+        session,
+        password: seed.password,
+      });
       await adminOpen(driver, seed.workspaceSlug);
       expect(await driver.wsSettingsMembersBillingVisible()).toBe(false);
     });
 
     await test.step("members see no billing entry either", async () => {
-      await switchUser(driver, member.email, member.password, seed.workspaceSlug);
+      await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/members`, member);
       await driver.wsSettingsMembersOpen(seed.workspaceSlug);
       expect(await driver.wsSettingsMembersAddVisible()).toBe(false);
       expect(await driver.wsSettingsMembersBillingVisible()).toBe(false);
     });
+
+    // The member row belongs to the shared scratch stack; the roster
+    // assertions here never depend on the roster being empty.
   }
 );

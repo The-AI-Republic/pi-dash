@@ -25,35 +25,21 @@
 // no mount point; only the user-menu community entry still opens the
 // upgrade dialog (bug NEWFRONT-423, intended removed).
 import { test, expect } from "../fixtures";
-import {
-  serverCleanupWorkspaceMember,
-  serverCompleteOnboarding,
-  serverProvisionWorkspaceMember,
-  serverSetTourCompleted,
-  serverWorkspaceMembers,
-  signInSession,
-} from "../helpers/api";
+import { serverCleanupWorkspaceMember, serverWorkspaceMembers } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
-import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
+import type { ParitySeedFacts } from "../drivers/parity-driver";
+import {
+  isCloudEdition,
+  markTourCompleted,
+  openWorkspacePage,
+  provisionMember as provisionEditionMember,
+  seededSession,
+  type EditionUser,
+} from "./edition-session";
 
-/** Provision a non-admin workspace member with onboarding completed, for UI sign-in. */
-async function provisionMember(
-  seed: ParitySeedFacts,
-  ownerSession: string,
-  prefix: string
-): Promise<{ userId: string; session: string; email: string; password: string }> {
-  const member = await serverProvisionWorkspaceMember(seed.workspaceSlug, prefix, ownerSession);
-  await serverCompleteOnboarding(member.session);
-  return member;
-}
-
-/**
- * Switch the signed-in UI user. Sign-in is a no-op while a session
- * lives, so the current user signs out first.
- */
-async function switchUser(driver: ParityDriver, email: string, password: string, workspaceSlug: string): Promise<void> {
-  await driver.signOutViaCommandPalette();
-  await driver.rulesEnsureSignedIn(email, password, workspaceSlug);
+/** The seeded workspace owner, entered in this edition's way. */
+async function ownerUser(seed: ParitySeedFacts): Promise<EditionUser> {
+  return { email: seed.email, session: await seededSession(seed, seed.email), password: seed.password };
 }
 
 /** Workspace membership id for cleanup, resolved by provisioned user id. */
@@ -68,8 +54,9 @@ test(
   specTitle(["WSET-029"], "billing page shows community summary, plan comparison and frequency switch"),
   { tag: specTags(["WSET-029"]) },
   async ({ driver, seed }) => {
-    const ownerSession = await signInSession(seed.email, seed.password);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+    const owner = await ownerUser(seed);
+    const ownerSession = owner.session;
+    await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/billing`, owner);
 
     await test.step("admin sees the community summary and three plan cards", async () => {
       await driver.wsSettingsBillingOpen(seed.workspaceSlug);
@@ -115,9 +102,9 @@ test(
     });
 
     await test.step("non-admin member gets the not-authorized view", async () => {
-      const member = await provisionMember(seed, ownerSession, "wset029-member");
+      const member = await provisionEditionMember(seed, ownerSession, "wset029-member", 15);
       try {
-        await switchUser(driver, member.email, member.password, seed.workspaceSlug);
+        await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/billing`, member);
         await driver.wsSettingsBillingOpen(seed.workspaceSlug);
         expect(await driver.wsSettingsBillingNotAuthorized()).toBe(true);
       } finally {
@@ -135,7 +122,7 @@ test(
   specTitle(["WSET-030"], "plan actions open external pricing and sales pages"),
   { tag: specTags(["WSET-030"]) },
   async ({ driver, seed }) => {
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+    await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/billing`, await ownerUser(seed));
     await driver.wsSettingsBillingOpen(seed.workspaceSlug);
 
     await test.step("Pro action opens the per-frequency pricing page", async () => {
@@ -188,7 +175,7 @@ test(
   specTitle(["WSET-031"], "no upgrade dialog opens at former trigger points"),
   { tag: specTags(["WSET-031"]) },
   async ({ driver, seed }) => {
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+    await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/billing`, await ownerUser(seed));
 
     await test.step("billing page shows no upgrade dialog", async () => {
       await driver.wsSettingsBillingOpen(seed.workspaceSlug);
@@ -224,8 +211,9 @@ test(
     // the intended target (§31): no community entry, so no dialog.
     // The first-run tour overlay would cover the home sidebar, so the
     // seeded tour flag is completed first (home-spec precedent).
-    await serverSetTourCompleted(await signInSession(seed.email, seed.password), true);
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+    const owner = await ownerUser(seed);
+    await markTourCompleted(owner.session);
+    await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/billing`, owner);
     await driver.wsSettingsBillingOpen(seed.workspaceSlug);
     expect(await driver.wsSettingsUpgradeModalVisible()).toBe(false);
     await driver.wsSettingsUserMenuOpenCommunity(seed.workspaceSlug);
@@ -247,7 +235,11 @@ test(
   specTitle(["WSET-032"], "OSS shows the community plan with no portal, trial or checkout controls"),
   { tag: specTags(["WSET-032"]) },
   async ({ driver, seed }) => {
-    await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+    // OSS-tagged row (§32): the absence it pins describes the community
+    // build. A cloud build carries its own billing surface (CLOUD rows),
+    // so this scenario is not part of the cloud leg.
+    test.skip(isCloudEdition(), "WSET-032 is an OSS-only row");
+    await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/billing`, await ownerUser(seed));
     await driver.wsSettingsBillingOpen(seed.workspaceSlug);
 
     await test.step("community summary renders without subscription controls", async () => {
