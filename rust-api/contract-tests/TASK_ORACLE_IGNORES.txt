@@ -48,6 +48,13 @@ orchestration/test_ticker_tasks.py
 # (Process note on PIDASHCONV-1.)
 runner/test_offline_runner_recovery.py
 runner/test_offline_runner_sweeps.py
+# PDASHOSS01-233: the unsatisfiable-pin reconcile + BUSY-but-dead sweep
+# oracle. Same stage-8 shape as the offline-runner files above: the matrix's
+# frozen Django worker predates Python PR #541, so the Django run cannot pass
+# until main (with #541) merges into rust-dev. Passes locally against
+# #541-Django + Rust (see the issue's Rust PR). At the merge: move it to the
+# worker-plane oracle pytest selection (it needs a worker).
+runner/test_unsatisfiable_pins.py
 # PIDASHCONV-1137: the Rust replay of the sweep half of the assistant turn
 # oracle (assistant/test_tasks_turn.py). It seeds rust_job_queue rows and waits
 # for `pidash-api worker` to settle them, so the HTTP matrix cannot run it on

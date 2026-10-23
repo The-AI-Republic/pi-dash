@@ -22,7 +22,8 @@ Counts (2026-10-17, `pi_dash.settings.test`):
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
   9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
 - Jobs: 77 tasks — 77 OWNED, 0 PROXIED, 0 MISSING;
-  beat 28/28 OWNED (same task, same cadence on both sides).
+  beat 29/29 OWNED (28 same task + cadence on both sides, 1 rust-ahead
+  drift entry).
 
 ## Routes
 
@@ -248,14 +249,22 @@ inventory table), so they no longer appear as PROXIED rows:
 
 ## Beat
 
-28/28 entries OWNED: same task, same cadence on both sides (the four
-settings-backed intervals match Django's `pi_dash.settings.test`
-values: 10/30/300/30s). No rust-ahead drift rows remain:
+29/29 entries OWNED: 28 with the same task and cadence on both sides
+(the four settings-backed intervals match Django's
+`pi_dash.settings.test` values: 10/30/300/30s), plus 1 rust-ahead drift
+entry whose task + cadence match the pinned truth in
+`RUST_AHEAD_BEAT_ENTRIES` (`job_inventory.py`):
+
+- `runner-reconcile-unsatisfiable-pins` (PDASHOSS01-233, Python PR
+  #541): the checkout's frozen Django predates it. The check reports
+  `ahead-map-stale` once Django gains the entry (the next main merge)
+  — delete the map row then.
+
 PIDASHCONV-1063's two offline-runner sweeps
 (`runner-release-pins-on-offline-runners`,
 `runner-fail-runs-on-offline-runners`) exist natively on both sides
 since the PIDASHCONV-1055 main→rust-dev merge (2d029396);
-PIDASHCONV-1087 deleted the `RUST_AHEAD_BEAT_ENTRIES` rows.
+PIDASHCONV-1087 deleted their `RUST_AHEAD_BEAT_ENTRIES` rows.
 
 Any other beat drift fails the check structurally — there is no
 "expected beat miss" list.

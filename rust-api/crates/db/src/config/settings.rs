@@ -188,6 +188,7 @@ pub struct RunnerSettings {
     pub offline_threshold_secs: i64,
     pub offline_pin_release_secs: i64,
     pub offline_run_fail_secs: i64,
+    pub pin_auto_release_secs: i64,
     pub offline_stream_ttl_secs: i64,
     pub offline_stream_maxlen: i64,
     pub stream_min_retention_secs: i64,
@@ -1071,6 +1072,8 @@ impl Settings {
                     .req_int("RUNNER_OFFLINE_PIN_RELEASE_SECS", ConfigValue::from(300))?,
                 offline_run_fail_secs: ctx
                     .req_int("RUNNER_OFFLINE_RUN_FAIL_SECS", ConfigValue::from(3600))?,
+                pin_auto_release_secs: ctx
+                    .req_int("RUNNER_PIN_AUTO_RELEASE_SECS", ConfigValue::from(600))?,
                 offline_stream_ttl_secs: ctx
                     .req_int("OFFLINE_STREAM_TTL_SECS", ConfigValue::from(86400))?,
                 offline_stream_maxlen: ctx
@@ -1309,6 +1312,7 @@ impl Settings {
             "RUNNER_OFFLINE_THRESHOLD_SECS",
             "RUNNER_OFFLINE_PIN_RELEASE_SECS",
             "RUNNER_OFFLINE_RUN_FAIL_SECS",
+            "RUNNER_PIN_AUTO_RELEASE_SECS",
             "OFFLINE_STREAM_TTL_SECS",
             "OFFLINE_STREAM_MAXLEN",
             "RUNNER_STREAM_MIN_RETENTION_SECS",
