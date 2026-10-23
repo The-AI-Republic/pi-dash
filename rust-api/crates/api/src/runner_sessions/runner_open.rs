@@ -879,18 +879,17 @@ async fn drain_for_runner(pool: &PgPool, state: &AppState, runner_id: Uuid) -> R
         .try_get("visibility")
         .map_err(|error| error.to_string())?;
     // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
-        tx.commit().await.map_err(|error| error.to_string())?;
-        return Ok(());
-    };
-    let run = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
+    let run = pidash_services::runner_sessions::claim_next_assignable(
+        &mut tx,
+        pod_id,
+        runner_id,
+        owner_id,
+        &provisioning,
+        i32::from(visibility),
+        state.settings().runner.pin_wait_budget_secs,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let Some(run) = run else {
         tx.commit().await.map_err(|error| error.to_string())?;
         return Ok(());
@@ -976,18 +975,17 @@ async fn drain_pod(pool: &PgPool, state: &AppState, pod_id: Uuid) -> Result<(), 
         let visibility: i16 = runner
             .try_get("visibility")
             .map_err(|error| error.to_string())?;
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| error.to_string())?;
+        let run = pidash_services::runner_sessions::claim_next_assignable(
+            &mut tx,
+            pod_id,
+            runner_id,
+            owner_id,
+            &provisioning,
+            i32::from(visibility),
+            state.settings().runner.pin_wait_budget_secs,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         let Some(run) = run else {
             continue;
         };

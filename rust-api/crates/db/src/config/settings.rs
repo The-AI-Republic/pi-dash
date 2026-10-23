@@ -198,6 +198,11 @@ pub struct RunnerSettings {
     pub min_runner_version: Option<String>,
     pub agent_stall_threshold_secs: i64,
     pub agent_observability_stale_secs: i64,
+    /// `RUNNER_PIN_WAIT_BUDGET_SECS` (`common.py`, PDASHOSS01-272): how
+    /// long a QUEUED run pinned to a busy runner may wait before the
+    /// matcher releases the pin to an idle runner. `Pod.pin_wait_budget_secs`
+    /// overrides it per pod; `0` disables auto-release.
+    pub pin_wait_budget_secs: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1092,6 +1097,8 @@ impl Settings {
                     "RUNNER_AGENT_OBSERVABILITY_STALE_SECS",
                     ConfigValue::from(90),
                 )?,
+                pin_wait_budget_secs: ctx
+                    .req_int("RUNNER_PIN_WAIT_BUDGET_SECS", ConfigValue::from(600))?,
             },
             managed_runner: ManagedRunnerSettings {
                 enabled: ctx.flag_tri("MANAGED_RUNNER_ENABLED", "false")?,
@@ -1320,6 +1327,7 @@ impl Settings {
             "MIN_RUNNER_VERSION",
             "RUNNER_AGENT_STALL_THRESHOLD_SECS",
             "RUNNER_AGENT_OBSERVABILITY_STALE_SECS",
+            "RUNNER_PIN_WAIT_BUDGET_SECS",
             "MANAGED_RUNNER_ENABLED",
             "MANAGED_RUNNER_MAX_PER_USER_PROJECT",
             "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",

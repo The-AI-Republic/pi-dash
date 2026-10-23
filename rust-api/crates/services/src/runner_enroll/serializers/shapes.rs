@@ -72,11 +72,14 @@ use serde_json::Value;
 // ---------------------------------------------------------------------------
 
 /// `PodSerializer.Meta.fields` (`serializers.py:46-58`), wire order.
-pub const POD_WIRE_FIELDS: [&str; 11] = [
+pub const POD_WIRE_FIELDS: [&str; 12] = [
     "id",
     "name",
     "description",
     "is_default",
+    // PDASHOSS01-272: NULL inherits the instance default, 0 never
+    // auto-releases a pin.
+    "pin_wait_budget_secs",
     "workspace",
     "project",
     "project_identifier",
@@ -184,6 +187,7 @@ pub struct PodRow<'a> {
     pub name: &'a str,
     pub description: &'a str,
     pub is_default: bool,
+    pub pin_wait_budget_secs: Option<i64>,
     pub workspace: &'a str,
     pub project: &'a str,
     pub project_identifier: &'a str,
@@ -200,6 +204,7 @@ pub struct PodView<'a> {
     pub name: &'a str,
     pub description: &'a str,
     pub is_default: bool,
+    pub pin_wait_budget_secs: Option<i64>,
     pub workspace: &'a str,
     pub project: &'a str,
     pub project_identifier: &'a str,
@@ -216,6 +221,7 @@ pub fn pod_to_representation<'a>(row: &'a PodRow<'a>) -> PodView<'a> {
         name: row.name,
         description: row.description,
         is_default: row.is_default,
+        pin_wait_budget_secs: row.pin_wait_budget_secs,
         workspace: row.workspace,
         project: row.project,
         project_identifier: row.project_identifier,
@@ -1156,6 +1162,7 @@ mod tests {
             name: "default",
             description: "",
             is_default: true,
+            pin_wait_budget_secs: None,
             workspace: "22222222-2222-4222-8222-222222222222",
             project: "33333333-3333-4333-8333-333333333333",
             project_identifier: "PDASHOSS01",
@@ -1171,7 +1178,7 @@ mod tests {
             body.to_string(),
             concat!(
                 "{\"id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"default\",",
-                "\"description\":\"\",\"is_default\":true,",
+                "\"description\":\"\",\"is_default\":true,\"pin_wait_budget_secs\":null,",
                 "\"workspace\":\"22222222-2222-4222-8222-222222222222\",",
                 "\"project\":\"33333333-3333-4333-8333-333333333333\",",
                 "\"project_identifier\":\"PDASHOSS01\",\"created_by\":null,\"runner_count\":3,",

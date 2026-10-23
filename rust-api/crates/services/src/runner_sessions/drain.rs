@@ -232,6 +232,25 @@ pub fn is_desktop_provisioning(provisioning: &str) -> bool {
 /// [`runs_usable_by_runner_predicate`](crate::runner_runs::guards::runs_usable_by_runner_predicate)
 /// (D-15 owns the filter; this module only calls it).
 pub fn next_for_runner_sql(provisioning: &str, visibility: i32) -> Option<String> {
+    next_for_runner_select(provisioning, visibility, false)
+}
+
+/// [`next_for_runner_sql`] widened with the over-budget releasable
+/// pins (`next_for_runner(runner, releasable_run_ids=…)`,
+/// PDASHOSS01-272): the pin scope gains `OR "agent_run"."id" =
+/// ANY($4)`, `$4` being the `uuid[]` from
+/// [`releasable_overbudget_pin_ids_sql`]. Those runs sit in rank tier
+/// 1 next to the unpinned pod queue (their pin is another runner's),
+/// so they compete on `created_at` instead of trailing the pod queue.
+///
+/// Python only widens the filter when the id list is non-empty, so an
+/// executor with no candidates runs the plain [`next_for_runner_sql`];
+/// the two texts select the same rows whenever `$4` is empty.
+pub fn next_for_runner_with_releasable_sql(provisioning: &str, visibility: i32) -> Option<String> {
+    next_for_runner_select(provisioning, visibility, true)
+}
+
+fn next_for_runner_select(provisioning: &str, visibility: i32, releasable: bool) -> Option<String> {
     if visibility != VISIBILITY_PRIVATE {
         return None;
     }
@@ -261,10 +280,109 @@ pub fn next_for_runner_sql(provisioning: &str, visibility: i32) -> Option<String
             AgentExecutorKind::LocalRunner.value()
         )
     };
+    let pin_scope = if releasable {
+        "(\"agent_run\".\"pinned_runner_id\" = $2 OR \"agent_run\".\"pinned_runner_id\" IS NULL OR \"agent_run\".\"id\" = ANY($4))"
+    } else {
+        "(\"agent_run\".\"pinned_runner_id\" = $2 OR \"agent_run\".\"pinned_runner_id\" IS NULL)"
+    };
     Some(format!(
-        "SELECT {select} FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = $1 AND \"agent_run\".\"status\" = 'queued' AND (\"agent_run\".\"pinned_runner_id\" = $2 OR \"agent_run\".\"pinned_runner_id\" IS NULL) AND {usability} AND {split}) ORDER BY {rank} ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+        "SELECT {select} FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pod_id\" = $1 AND \"agent_run\".\"status\" = 'queued' AND {pin_scope} AND {usability} AND {split}) ORDER BY {rank} ASC, \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
         rank = NEXT_FOR_RUNNER_RANK_POSITION,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Pin wait budget (`matcher.py` `releasable_overbudget_pin_ids` /
+// `next_assignable_for_runner` / `clear_run_pin`, PDASHOSS01-272)
+// ---------------------------------------------------------------------------
+
+/// `Pod.pin_wait_budget_secs` for one pod (`$1` pod id). `NULL`
+/// inherits the instance default — see [`effective_pin_wait_budget_secs`].
+pub const POD_PIN_WAIT_BUDGET_SQL: &str =
+    "SELECT \"pod\".\"pin_wait_budget_secs\" FROM \"pod\" WHERE \"pod\".\"id\" = $1";
+
+/// `Pod.effective_pin_wait_budget_secs()`: the pod override when set,
+/// else the instance-wide `RUNNER_PIN_WAIT_BUDGET_SECS`. `0` disables
+/// auto-release.
+pub fn effective_pin_wait_budget_secs(pod_override: Option<i64>, instance_default: i64) -> i64 {
+    pod_override.unwrap_or(instance_default)
+}
+
+/// `releasable_overbudget_pin_ids(runner)`: ids of QUEUED runs in the
+/// pod whose pin `runner` may take over, oldest first.
+///
+/// A follow-up run is pinned to the runner that served the issue's
+/// previous run. When that runner is healthy but hours into a long
+/// run, the queued follow-up waited the whole run out while the rest
+/// of the pod idled. Once the run has waited past the pod's pin wait
+/// budget, these ids are fed to
+/// [`next_for_runner_with_releasable_sql`], so the pin is only ever
+/// broken when this specific idle runner is about to take the run.
+///
+/// `None` (the executor runs no query and treats the list as empty)
+/// for a desktop-bundled runner — it serves only work pinned to it —
+/// and for a non-private runner (the `qs.none()` usability arm).
+/// The executor also skips the query when the budget is `<= 0`.
+///
+/// Bindings: `$1` pod id, `$2` runner id, `$3` runner-owner id
+/// (usability predicate), `$4` the cutoff `now - budget` (the wait
+/// is measured from `created_at`: every requeue path also drops the
+/// pin), `$5` the [`alive_threshold`](super::guards::alive_threshold).
+///
+/// The last `NOT (…)` term keeps a pin whose own runner is online,
+/// heartbeat-fresh and idle — that runner takes the run on this very
+/// drain pass, so the pin is honoured, budget or no budget. The
+/// `IS NOT NULL` guard is Django's `exclude()` NULL handling: a runner
+/// that never heartbeated is not assignable, so its pin is releasable.
+///
+/// Rows come back unlocked: the query LEFT JOINs the nullable
+/// `pinned_runner` FK and Postgres refuses `FOR UPDATE` over the
+/// nullable side of an outer join. The lock is taken by
+/// [`next_for_runner_with_releasable_sql`].
+///
+/// Not yet ported: Django additionally treats an operator-paused
+/// pinned runner (`runner.paused_at`, on `main` but not yet on
+/// `rust-dev`) as not taking its own run. The paused-runner port adds
+/// `"pinned"."paused_at" IS NULL` inside the last `NOT (…)`.
+pub fn releasable_overbudget_pin_ids_sql(provisioning: &str, visibility: i32) -> Option<String> {
+    if is_desktop_provisioning(provisioning) {
+        return None;
+    }
+    let usability = runs_usable_by_runner_predicate(visibility, "$3", "agent_run")?;
+    Some(format!(
+        "SELECT \"agent_run\".\"id\" FROM \"agent_run\" LEFT OUTER JOIN \"runner\" \"pinned\" ON (\"agent_run\".\"pinned_runner_id\" = \"pinned\".\"id\") WHERE (\"agent_run\".\"pod_id\" = $1 AND \"agent_run\".\"status\" = 'queued' AND \"agent_run\".\"executor_kind\" = '{local}' AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \"agent_run\".\"created_at\" < $4 AND NOT (\"agent_run\".\"pinned_runner_id\" = $2) AND NOT (\"pinned\".\"status\" = 'online' AND \"pinned\".\"last_heartbeat_at\" IS NOT NULL AND \"pinned\".\"last_heartbeat_at\" >= $5 AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"agent_run\".\"pinned_runner_id\")) LIMIT 1))) AND {usability}) ORDER BY \"agent_run\".\"created_at\" ASC",
+        local = AgentExecutorKind::LocalRunner.value(),
+    ))
+}
+
+/// `clear_run_pin` parent half: drop the parent's stale resume handle
+/// (`thread_id = ""`) so the upcoming Assign carries no resume hint the
+/// new runner cannot honour. Python saves the parent first, and only
+/// when its `thread_id` is non-empty — hence the `<> ''` guard. `$1`
+/// is the parent run id. The run half is the shared
+/// [`clear_pin_sql`](super::offline_recovery::clear_pin_sql).
+pub const CLEAR_PARENT_THREAD_ID_SQL: &str = "UPDATE \"agent_run\" SET \"thread_id\" = '' WHERE \"agent_run\".\"id\" = $1 AND \"agent_run\".\"thread_id\" <> ''";
+
+/// `next_assignable_for_runner`: a claimed run pinned to a runner
+/// other than the claimant can only have come from the releasable
+/// list, so it is the over-budget takeover and its pin must be
+/// cleared. Pinned to the claimant is the personal queue and keeps
+/// its pin.
+pub fn is_overbudget_takeover(pinned_runner_id: Option<Uuid>, runner_id: Uuid) -> bool {
+    pinned_runner_id.is_some_and(|pinned| pinned != runner_id)
+}
+
+/// `next_assignable_for_runner` info line on a released pin.
+pub fn released_pin_log(
+    run_id: &Uuid,
+    previous_runner_id: &Uuid,
+    runner_id: &Uuid,
+    budget_secs: i64,
+    waited_secs: i64,
+) -> String {
+    format!(
+        "next_assignable_for_runner: released pin run={run_id} from runner={previous_runner_id} to runner={runner_id} after {budget_secs}s budget (waited {waited_secs}s)"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +787,94 @@ mod tests {
                 "annotation arm rides the D-15 predicate: {alias}"
             );
         }
+    }
+
+    // -- pin wait budget (PDASHOSS01-272) -----------------------------------
+
+    #[test]
+    fn widened_next_for_runner_only_adds_the_releasable_ids() {
+        let plain = next_for_runner_sql(RUNNER_PROVISIONING_MANUAL, VISIBILITY_PRIVATE).unwrap();
+        let widened =
+            next_for_runner_with_releasable_sql(RUNNER_PROVISIONING_MANUAL, VISIBILITY_PRIVATE)
+                .unwrap();
+        assert_eq!(
+            widened.replace(" OR \"agent_run\".\"id\" = ANY($4)", ""),
+            plain,
+            "the widened text is the plain one plus the id term"
+        );
+        // Released pins join rank tier 1: the CASE still ranks only
+        // runs pinned to this runner first.
+        assert!(
+            widened.contains("CASE WHEN \"agent_run\".\"pinned_runner_id\" = $2 THEN 0 ELSE 1 END")
+        );
+        assert!(widened.ends_with("FOR UPDATE SKIP LOCKED"));
+        assert_eq!(
+            next_for_runner_with_releasable_sql(RUNNER_PROVISIONING_MANUAL, 99),
+            None
+        );
+    }
+
+    #[test]
+    fn releasable_ids_skip_desktop_and_non_private_runners() {
+        assert_eq!(
+            releasable_overbudget_pin_ids_sql(
+                RUNNER_PROVISIONING_DESKTOP_BUNDLED,
+                VISIBILITY_PRIVATE
+            ),
+            None
+        );
+        assert_eq!(
+            releasable_overbudget_pin_ids_sql(RUNNER_PROVISIONING_MANUAL, 99),
+            None
+        );
+    }
+
+    #[test]
+    fn releasable_ids_sql_is_unlocked_local_only_and_fifo() {
+        let sql = releasable_overbudget_pin_ids_sql(RUNNER_PROVISIONING_MANUAL, VISIBILITY_PRIVATE)
+            .unwrap();
+        // Unlocked: Postgres refuses FOR UPDATE over the LEFT JOIN.
+        assert!(!sql.contains("FOR UPDATE"), "{sql}");
+        assert!(
+            sql.contains("LEFT OUTER JOIN \"runner\" \"pinned\""),
+            "{sql}"
+        );
+        for term in [
+            "\"agent_run\".\"pod_id\" = $1",
+            "\"agent_run\".\"status\" = 'queued'",
+            // Managed runs are never released: unpinned they are unservable.
+            "\"agent_run\".\"executor_kind\" = 'local_runner'",
+            "\"agent_run\".\"pinned_runner_id\" IS NOT NULL",
+            "\"agent_run\".\"created_at\" < $4",
+            "NOT (\"agent_run\".\"pinned_runner_id\" = $2)",
+            "\"pinned\".\"last_heartbeat_at\" IS NOT NULL AND \"pinned\".\"last_heartbeat_at\" >= $5",
+            "U1.\"runner_id\" = (\"agent_run\".\"pinned_runner_id\")",
+            "\"agent_run\".\"created_by_id\" = $3",
+        ] {
+            assert!(sql.contains(term), "missing {term}: {sql}");
+        }
+        assert!(
+            sql.ends_with("ORDER BY \"agent_run\".\"created_at\" ASC"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn pin_budget_resolution_and_takeover() {
+        assert_eq!(effective_pin_wait_budget_secs(None, 600), 600);
+        assert_eq!(effective_pin_wait_budget_secs(Some(30), 600), 30);
+        assert_eq!(effective_pin_wait_budget_secs(Some(0), 600), 0);
+        let me = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        assert!(is_overbudget_takeover(Some(other), me));
+        assert!(!is_overbudget_takeover(Some(me), me));
+        assert!(!is_overbudget_takeover(None, me));
+        assert_eq!(
+            released_pin_log(&me, &other, &me, 600, 3601),
+            format!(
+                "next_assignable_for_runner: released pin run={me} from runner={other} to runner={me} after 600s budget (waited 3601s)"
+            )
+        );
     }
 
     // -- drain_pod ----------------------------------------------------------
