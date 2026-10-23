@@ -5,8 +5,10 @@
 
 export { ExportsForm } from "./components/ExportsForm.js";
 export type { ExportsFormProps } from "./components/ExportsForm.js";
+export { ExportsGuide } from "./components/ExportsGuide.js";
 export { ExportsHistory } from "./components/ExportsHistory.js";
 export type { ExportsHistoryProps } from "./components/ExportsHistory.js";
+export { registerExportsGuide } from "./register.js";
 export { exportsKeys } from "./api/keys.js";
 export {
   EXPORT_FAILED_MESSAGE,

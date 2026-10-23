@@ -16,10 +16,13 @@ import * as React from "react";
 import type { RouteComponent } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { Transport } from "@pidash/api-client";
 import {
   ExportsSettingsPage,
+  getWorkspaceExportsGuide,
   getWorkspaceSettingsPage,
   registerWorkspaceSettingsPage,
+  resetWorkspaceExportsGuide,
   resetWorkspaceSettingsPages,
   type WorkspaceSettingsPageProps,
   type WorkspaceSettingsSectionKey,
@@ -58,6 +61,86 @@ const SECTIONS: Array<[WorkspaceSettingsSectionKey, string, RouteComponent]> = [
   ["members", "members", MembersRoute.options.component as RouteComponent],
 ];
 
+const EXPORTS_USER_ID = "11111111-1111-4111-8111-111111111111";
+
+function exportsProjectRow(id: string, name: string, identifier: string) {
+  return {
+    id,
+    name,
+    identifier,
+    member_role: 15,
+    archived_at: null,
+    workspace: "44444444-4444-4444-8444-444444444444",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function exportsHistoryPage() {
+  const stamped = new Date(Date.now() - 3_600_000).toISOString();
+  return {
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: 1,
+    next_cursor: "10:1:0",
+    prev_cursor: "10:-1:1",
+    next_page_results: false,
+    prev_page_results: false,
+    count: 1,
+    total_pages: 1,
+    total_results: 1,
+    extra_stats: null,
+    results: [
+      {
+        id: "12345678-1234-4234-8234-000000000001",
+        created_at: stamped,
+        updated_at: stamped,
+        project: ["12345678-1234-4234-8234-000000000901"],
+        provider: "csv",
+        status: "completed",
+        url: "https://files.test/export-1.csv",
+        initiated_by: EXPORTS_USER_ID,
+        initiated_by_detail: {
+          id: EXPORTS_USER_ID,
+          first_name: "Ana",
+          last_name: "Siva",
+          avatar: "",
+          avatar_url: null,
+          display_name: "Ana Siva",
+          is_bot: false,
+        },
+        token: "token",
+        created_by: null,
+        updated_by: null,
+      },
+    ],
+  };
+}
+
+function exportsAnswer(url: string, body: unknown) {
+  return {
+    status: 200,
+    url,
+    headers: { get: () => "application/json" },
+    text: async () => JSON.stringify(body),
+  };
+}
+
+/** Settings frame reads plus the project and history reads the guide makes. */
+function exportsTransport(role: number): Transport {
+  const frame = settingsTransport({ role });
+  return async (url, init) => {
+    if (url.endsWith("/projects/")) {
+      return exportsAnswer(url, [
+        exportsProjectRow("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "Exp Alpha", "EA"),
+        exportsProjectRow("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "Exp Beta", "EB"),
+      ]);
+    }
+    if (url.includes("/export-issues")) return exportsAnswer(url, exportsHistoryPage());
+    return frame(url, init);
+  };
+}
+
 // The roster chunk registers its body when the route loads it; the test
 // import does the same, and every test starts from that registration.
 beforeEach(() => {
@@ -67,6 +150,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   resetWorkspaceSettingsPages();
+  resetWorkspaceExportsGuide();
   resetRouteHarness();
   document.title = "";
 });
@@ -234,12 +318,17 @@ describe("workspace settings section routes", () => {
     expect(getWorkspaceSettingsPage("exports")).toBe(ExportsSettingsPage);
   });
 
-  it("mounts the exports entry with its explanation and guide slot", async () => {
+  // Exports (NEWFRONT-768): the route lazy-loads the guide chunk, so the
+  // frame's seam fills with the real form + history for admitted roles.
+  // Nothing here registers the guide by hand: if the route stops loading
+  // the chunk, the pending slot stays and this fails.
+  it("loads the exports guide through the route for a member", async () => {
+    expect(getWorkspaceExportsGuide()).toBeNull();
     renderSettingsRoute({
       layoutComponent: LayoutComponent,
       component: ExportsRoute.options.component as RouteComponent,
       leafPath: "exports",
-      transport: settingsTransport({ role: 20 }),
+      transport: exportsTransport(15),
     });
     expect(await screen.findByTestId("workspace-exports-settings")).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "Exports" })).toBeInTheDocument();
@@ -248,7 +337,25 @@ describe("workspace settings section routes", () => {
         "Export your project data in various formats and access your export history with download links."
       )
     ).toBeInTheDocument();
-    expect(screen.getByTestId("workspace-exports-guide-pending")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 3, name: "Exporting project" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 3, name: "Previous exports" })).toBeInTheDocument();
+    expect(await screen.findByText("Ana Siva")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-exports-guide-pending")).not.toBeInTheDocument();
+    expect(getWorkspaceExportsGuide()).not.toBeNull();
+  });
+
+  it("denies a guest on the exports address without leaving it", async () => {
+    const view = renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: ExportsRoute.options.component as RouteComponent,
+      leafPath: "exports",
+      transport: settingsTransport({ role: 5 }),
+    });
+    expect(await screen.findByTestId("workspace-settings-not-authorized")).toBeInTheDocument();
+    expect(view.router.state.location.pathname).toBe("/acme/settings/exports/");
+    expect(screen.queryByRole("heading", { level: 3, name: "Exporting project" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 3, name: "Previous exports" })).not.toBeInTheDocument();
   });
 
   it("mounts the webhook detail page for its id", async () => {
