@@ -543,6 +543,24 @@ fn shape_datetime(value: Option<&Value>, timezone: &Tz) -> String {
     }
 }
 
+/// Render one `row_to_json` datetime in UTC with a trailing `Z`, matching
+/// DRF's `JSONEncoder` fallback for a raw `datetime` (no `DateTimeField`
+/// zone conversion). `ViewIssueListSerializer.to_representation` returns the
+/// model's raw datetimes, so the actor zone must not be applied here.
+fn shape_datetime_utc(value: Option<&Value>) -> String {
+    let text = match value {
+        Some(Value::String(text)) => text,
+        _ => return "null".to_owned(),
+    };
+    match chrono::DateTime::parse_from_rfc3339(text) {
+        Ok(aware) => {
+            let rendered = crate::serializer::render_datetime(&aware);
+            serde_json::to_string(&rendered).unwrap_or("null".to_owned())
+        }
+        Err(_) => serde_json::to_string(value.unwrap_or(&Value::Null)).unwrap_or("null".to_owned()),
+    }
+}
+
 /// Render one `row_to_json` date: `null` stays `null`, otherwise the
 /// ISO text passes through quoted (DRF `DateField`).
 fn shape_date(value: Option<&Value>) -> String {
@@ -2945,14 +2963,14 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
 }
 
 /// Shape one view-issues row in `ViewIssueListSerializer` source order
-/// (`app/serializers/view.py:28-55`): datetimes re-render in the request
-/// zone, `sort_order` through Python-float formatting, `estimate_point`
+/// (`app/serializers/view.py:28-55`): the four datetimes render as raw UTC
+/// `...Z` (DRF `JSONEncoder`, not a `DateTimeField`), `sort_order` through
+/// Python-float formatting, `estimate_point`
 /// / `created_by` / `updated_by` from their `*_id` columns, `state__group`
 /// None-guarded, and the three id arrays from the prefetch maps.
 #[allow(clippy::too_many_arguments)]
 fn shape_view_issue(
     row: &Map<String, Value>,
-    timezone: &Tz,
     assignees: &[String],
     labels: &[String],
     modules: &[String],
@@ -2974,7 +2992,7 @@ fn shape_view_issue(
     let _ = write!(
         out,
         ",\"completed_at\":{}",
-        shape_datetime(row.get("completed_at"), timezone)
+        shape_datetime_utc(row.get("completed_at"))
     );
     let _ = write!(out, ",\"estimate_point\":{}", str_of("estimate_point"));
     let _ = write!(out, ",\"priority\":{}", str_of("priority"));
@@ -2994,12 +3012,12 @@ fn shape_view_issue(
     let _ = write!(
         out,
         ",\"created_at\":{}",
-        shape_datetime(row.get("created_at"), timezone)
+        shape_datetime_utc(row.get("created_at"))
     );
     let _ = write!(
         out,
         ",\"updated_at\":{}",
-        shape_datetime(row.get("updated_at"), timezone)
+        shape_datetime_utc(row.get("updated_at"))
     );
     let _ = write!(out, ",\"created_by\":{}", str_of("created_by"));
     let _ = write!(out, ",\"updated_by\":{}", str_of("updated_by"));
@@ -3012,7 +3030,7 @@ fn shape_view_issue(
     let _ = write!(
         out,
         ",\"archived_at\":{}",
-        shape_datetime(row.get("archived_at"), timezone)
+        shape_datetime_utc(row.get("archived_at"))
     );
     let _ = write!(out, ",\"state__group\":{}", str_of("state__group"));
     let _ = write!(
@@ -3053,7 +3071,6 @@ async fn view_issues_list(
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
-    let timezone = resolved.timezone;
     let member = membership(&pool, &slug, None, &user_id).await?;
     permissions::view_issues_list_gate(&member).map_err(gate_denial)?;
 
@@ -3251,7 +3268,6 @@ async fn view_issues_list(
             .unwrap_or_default();
         shaped.push(shape_view_issue(
             row,
-            &timezone,
             assignee_map.get(id).unwrap_or(&empty),
             label_map.get(id).unwrap_or(&empty),
             module_map.get(id).unwrap_or(&empty),
