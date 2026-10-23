@@ -2852,7 +2852,11 @@ export class WebNewDriver implements ParityDriver {
     return todo("openReadOnlyIssueDetail");
   }
   async issueDetailTitle(): Promise<string | null> {
-    return todo("issueDetailTitle");
+    // Editable detail carries the title field; anything else is not a
+    // settled detail view.
+    const field = this.page.getByLabel("Title").first();
+    if ((await field.count()) === 0) return null;
+    return field.inputValue().catch(() => null);
   }
   async issueDetailIdentifier(): Promise<string | null> {
     return todo("issueDetailIdentifier");
@@ -2885,7 +2889,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("pickPriority");
   }
   async copyIssueLink(): Promise<void> {
-    return todo("copyIssueLink");
+    // Detail header's shared copy control (DESK-019): copies the hosted
+    // work-item address on desktop, the page origin on web.
+    const control = this.page.getByRole("button", { name: "Copy work item link", exact: true });
+    await control.first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async lastToast(): Promise<string | null> {
     const toasts = this.webhookToasts();
@@ -3269,21 +3276,38 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async downloadWidgetRowFile(widget: string, rowName: string): Promise<{ fileName: string; bytes: Buffer }> {
-    // The row is a new-tab link to the served asset; the tab downloads the
-    // bytes instead of rendering them, so capture both halves.
+    // The row is a new-tab link to the served asset. When the tab
+    // downloads the bytes, capture the download; when it renders them
+    // (the served view answers inline), pull the bytes over the
+    // authenticated session instead. Either way the tab closes again.
+    const link = this.widgetRow(widget, rowName).locator('a[target="_blank"]').first();
+    const href = await link.getAttribute("href");
     const popupWait = this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }).catch(() => null);
-    const [download] = await Promise.all([
-      this.page.waitForEvent("download", { timeout: 60_000 }),
-      this.widgetRow(widget, rowName).locator('a[target="_blank"]').first().click({ timeout: WebNewDriver.WAIT_MS }),
-    ]);
+    const downloadWait = this.page.waitForEvent("download", { timeout: 30_000 }).catch(() => null);
+    await link.click({ timeout: WebNewDriver.WAIT_MS });
     const popup = await popupWait;
-    if (popup === null) throw new Error(`[parity] row ${JSON.stringify(rowName)} downloaded without opening a tab.`);
-    await popup.close().catch(() => undefined);
-    const stream = await download.createReadStream();
-    if (stream === null) throw new Error(`[parity] download of ${JSON.stringify(rowName)} produced no bytes.`);
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
-    return { fileName: download.suggestedFilename(), bytes: Buffer.concat(chunks) };
+    const download = await downloadWait;
+    if (download !== null) {
+      if (popup === null) throw new Error(`[parity] row ${JSON.stringify(rowName)} downloaded without opening a tab.`);
+      await popup.close().catch(() => undefined);
+      const stream = await download.createReadStream();
+      if (stream === null) throw new Error(`[parity] download of ${JSON.stringify(rowName)} produced no bytes.`);
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+      return { fileName: download.suggestedFilename(), bytes: Buffer.concat(chunks) };
+    }
+    if (popup !== null) await popup.close().catch(() => undefined);
+    if (href === null || href === "") {
+      throw new Error(`[parity] row ${JSON.stringify(rowName)} has no served address to read back.`);
+    }
+    const response = await this.page.request.get(href);
+    if (!response.ok()) {
+      throw new Error(`[parity] row ${JSON.stringify(rowName)} served HTTP ${response.status()}.`);
+    }
+    const disposition = response.headers()["content-disposition"] ?? "";
+    const match = /filename\*?=(?:UTF-8''|")?([^";]+)"?/i.exec(disposition);
+    const fileName = match?.[1] !== undefined && match[1] !== "" ? decodeURIComponent(match[1].trim()) : rowName;
+    return { fileName, bytes: Buffer.from(await response.body()) };
   }
 
   private async openAppDialog(): Promise<Locator | null> {
@@ -31461,31 +31485,105 @@ export class WebNewDriver implements ParityDriver {
     });
   }
   async deskShellBeginTrafficWatch(): Promise<void> {
-    return todo("deskShellBeginTrafficWatch");
+    this.deskTrafficWatchBegin("shell");
   }
   async deskShellTrafficUrls(): Promise<string[]> {
-    return todo("deskShellTrafficUrls");
+    return this.deskTrafficWatchUrls("shell");
   }
   async deskShellEndTrafficWatch(): Promise<void> {
-    return todo("deskShellEndTrafficWatch");
+    this.deskTrafficWatchEnd("shell");
   }
   async deskShellAbortSemantics(): Promise<{ aborted: string; timedOut: string; unroutable: string }> {
-    return todo("deskShellAbortSemantics");
+    // Browser-equivalence probe: the desktop transport must surface the
+    // same names a browser fetch would (the native mapping behind it is
+    // unit-covered; the mock shell stands in for Rust IPC here).
+    return this.page.evaluate(async () => {
+      const nameOf = async (run: () => Promise<Response>): Promise<string> => {
+        try {
+          await run();
+          return "fulfilled";
+        } catch (error) {
+          return error instanceof Error ? error.name : `non-error:${typeof error}`;
+        }
+      };
+      const target = `${window.location.origin}/api/auth/get-csrf-token/`;
+      const aborted = await nameOf(() => {
+        const controller = new AbortController();
+        controller.abort();
+        return fetch(target, { signal: controller.signal });
+      });
+      const timedOut = await nameOf(() => fetch(target, { signal: AbortSignal.timeout(1) }));
+      const unroutable = await nameOf(() => fetch("https://parity-unroutable.invalid/api/"));
+      return { aborted, timedOut, unroutable };
+    });
   }
   async deskShellZoomMenuVisible(): Promise<boolean> {
-    return todo("deskShellZoomMenuVisible");
+    // The desktop View menu is OS-level (main.rs); its entries must never
+    // appear under a page menu role.
+    const entries = this.page.getByRole("menuitem", { name: /^(Zoom In|Zoom Out|Actual Size)$/ });
+    if ((await entries.count()) === 0) return false;
+    return entries
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
   async deskShellDeviceAuthHeading(): Promise<string | null> {
-    return todo("deskShellDeviceAuthHeading");
+    const heading = this.page.getByRole("heading", { name: /CLI login approved|Approve a CLI login/ }).first();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.innerText().catch(() => null)) ?? "").trim();
+    return text === "" ? null : text;
   }
   async deskShellDeviceApproveEnabled(): Promise<boolean> {
-    return todo("deskShellDeviceApproveEnabled");
+    const submit = this.page.getByRole("button", { name: "Approve", exact: true }).first();
+    await submit.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return submit.isEnabled().catch(() => false);
   }
-  async deskShellDeviceSubmitCode(_code: string): Promise<void> {
-    return todo("deskShellDeviceSubmitCode");
+  async deskShellDeviceSubmitCode(code: string): Promise<void> {
+    const input = this.page.getByPlaceholder("XXXX-YYYY").first();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await input.fill(code);
+    const submit = this.page.getByRole("button", { name: "Approve", exact: true }).first();
+    await submit.click({ timeout: WebNewDriver.WAIT_MS });
+    // Either the approval lands or the card reports the server's error;
+    // wait for one of the two so the scenario never reads a mid-flight
+    // form.
+    await expect
+      .poll(
+        async () => {
+          const text = await this.page
+            .locator("body")
+            .innerText()
+            .catch(() => "");
+          return /CLI login approved|not recognized|already been used|has expired|has been denied|must be 8 characters|Couldn't|Could not/i.test(
+            text
+          );
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true);
   }
   async deskShellCloseReopenPath(): Promise<string> {
-    return todo("deskShellCloseReopenPath");
+    // The harness page closes like a browser tab (tray parking is
+    // native-only): reopening is a fresh load carrying the same cookie
+    // session. The driver's page is closed by this call; only API checks
+    // may follow it in the scenario.
+    const context = this.page.context();
+    await this.page.close();
+    const fresh = await context.newPage();
+    await fresh.goto("/");
+    await fresh.waitForLoadState("domcontentloaded");
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      let path = "/";
+      try {
+        path = new URL(fresh.url()).pathname;
+      } catch {
+        path = "/";
+      }
+      if (path !== "/") return path;
+      if (Date.now() >= deadline) return path;
+      await fresh.waitForTimeout(500);
+    }
   }
 
   // --- Space engagement: votes, reactions, comments (NEWFRONT-451, SPC-047–057).
