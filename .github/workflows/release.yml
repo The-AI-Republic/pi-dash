@@ -404,11 +404,19 @@ jobs:
       # so a plain upload would mean that even a tag-pinned wrapper
       # (…/releases/download/pidash-v0.1.0/install.sh) would silently
       # fetch the latest binary. sed the actual tag in before upload
-      # so pinning works as documented.
+      # so pinning works as documented — including install.ps1's MSI
+      # fallback link, which must name the same release's MSI. The grep
+      # fails the step if any pidash-* asset URL is still on `latest`, so
+      # a wrapper edit that stops matching can't silently break pinning.
       - name: Upload install wrappers
         run: |
           sed -i "s|/releases/latest/download/pidash-installer.sh|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.sh|" runner/install.sh
           sed -i "s|/releases/latest/download/pidash-installer.ps1|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.ps1|" runner/install.ps1
+          sed -i "s|/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi|/releases/download/${{ needs.plan.outputs.tag }}/pidash-x86_64-pc-windows-msvc.msi|" runner/install.ps1
+          if grep -n "releases/latest/download/pidash-" runner/install.sh runner/install.ps1; then
+            echo "::error::install wrapper still references a 'latest' pidash-* asset (lines above); update the sed rewrites"
+            exit 1
+          fi
           gh release upload "${{ needs.plan.outputs.tag }}" runner/install.sh runner/install.ps1 --clobber
 
   publish-runner-version-advisory:

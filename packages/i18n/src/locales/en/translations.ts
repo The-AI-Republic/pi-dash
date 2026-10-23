@@ -24,6 +24,8 @@ export default {
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {Work item} other {Work items}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# member} other{# members}}",
   "{count} run is done": "{count} run is done",
+  "{count} run(s) already on this runner will still finish.":
+    "{count} run(s) already on this runner will still finish.",
   "{count} runner(s)": "{count} runner(s)",
   "{count} runs are done": "{count} runs are done",
   "{count}d": "{count}d",
@@ -147,6 +149,7 @@ export default {
   "AI agent is starting on this issue": "AI agent is starting on this issue",
   "AI agent is waiting for approval": "AI agent is waiting for approval",
   "AI agent is waiting for input": "AI agent is waiting for input",
+  "AI agent has gone quiet": "AI agent has gone quiet",
   "AI agent is working on this issue": "AI agent is working on this issue",
   "AI agent needs re-auth": "AI agent needs re-auth",
   "AI agent run completed": "AI agent run completed",
@@ -656,8 +659,10 @@ export default {
   "Failed to load pods": "Failed to load pods",
   "Failed to load runner": "Failed to load runner",
   "Failed to move favorite": "Failed to move favorite",
+  "Failed to pause runner": "Failed to pause runner",
   "Failed to record decision": "Failed to record decision",
   "Failed to reorder favorite": "Failed to reorder favorite",
+  "Failed to resume runner": "Failed to resume runner",
   "Failed to revoke runner": "Failed to revoke runner",
   "Failed to sign out. Please try again.": "Failed to sign out. Please try again.",
   "Failed to start agent run": "Failed to start agent run",
@@ -1164,7 +1169,10 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Paste an issue id and click Preview to render the template against a real issue.",
   "Paste the code sent to your email": "Paste the code sent to your email",
+  Pause: "Pause",
   Paused: "Paused",
+  "Paused: this runner stays connected but takes no new work. Any in-flight run finishes.":
+    "Paused: this runner stays connected but takes no new work. Any in-flight run finishes.",
   "paused awaiting input": "paused awaiting input",
   "Payload URL": "Payload URL",
   Pending: "Pending",
@@ -1314,6 +1322,7 @@ export default {
   "Resend in {seconds} seconds": "Resend in {seconds} seconds",
   Restore: "Restore",
   "Restore success": "Restore success",
+  Resume: "Resume",
   Retry: "Retry",
   "Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron.":
     "Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron.",
@@ -1338,6 +1347,7 @@ export default {
   "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.":
     "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
   "Run this on the machine that will host the runner:": "Run this on the machine that will host the runner:",
+  "Runner paused": "Runner paused",
   "Runner {name}": "Runner {name}",
   "Runner detail": "Runner detail",
   "Runner ID": "Runner ID",
@@ -1676,6 +1686,7 @@ export default {
   "Un-assign from me": "Un-assign from me",
   Unassigned: "Unassigned",
   "Unfold comment": "Unfold comment",
+  Unhealthy: "Unhealthy",
   Uninstall: "Uninstall",
   "Uninstall scheduler?": "Uninstall scheduler?",
   "Unique code": "Unique code",
