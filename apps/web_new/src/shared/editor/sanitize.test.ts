@@ -129,6 +129,37 @@ describe("renderableHtml", () => {
     expect(renderableHtml('<p><mention-component id="u-9"></mention-component></p>')).toContain("@u-9");
   });
 
+  it("links a person mention to the member profile when the workspace is known (CMT-020)", () => {
+    const html = renderableHtml(
+      '<p>hi <mention-component id="u-1" entity_identifier="u-1" entity_name="user_mention" data-name="Ada"></mention-component></p>',
+      undefined,
+      "acme"
+    );
+    expect(html).toContain('<a href="/acme/profile/u-1" data-mention-id="u-1" class="mention-chip">@Ada</a>');
+    expect(html).not.toContain("mention-component");
+  });
+
+  it("keeps other entity kinds as plain chips even with a workspace (CMT-020)", () => {
+    const html = renderableHtml(
+      '<p>see <mention-component id="w-3" entity_identifier="w-3" entity_name="work_item" data-name="Login"></mention-component></p>',
+      undefined,
+      "acme"
+    );
+    expect(html).toContain('class="mention-chip"');
+    expect(html).toContain("@Login");
+    expect(html).not.toContain("<a");
+  });
+
+  it("keeps a plain chip when the workspace slug is empty (CMT-020)", () => {
+    const html = renderableHtml(
+      '<p>hi <mention-component id="u-1" entity_identifier="u-1" entity_name="user_mention" data-name="Ada"></mention-component></p>',
+      undefined,
+      ""
+    );
+    expect(html).toContain('class="mention-chip"');
+    expect(html).not.toContain("<a");
+  });
+
   it("drops a mention with no identity rather than leaving a gap", () => {
     expect(renderableHtml("<p>a<mention-component></mention-component>b</p>")).toBe("<p>ab</p>");
   });

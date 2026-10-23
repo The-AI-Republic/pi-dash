@@ -50,6 +50,22 @@ describe("RichTextView", () => {
     expect(region.querySelector('[data-mention-id="u-1"]')).not.toBeNull();
   });
 
+  it("links a stored mention to the member profile when the workspace is known (CMT-020)", () => {
+    render(
+      <RichTextView
+        html={
+          '<p>hi <mention-component id="u-1" entity_identifier="u-1" entity_name="user_mention" data-name="Ada"></mention-component> there</p>'
+        }
+        label="Description"
+        workspaceSlug="acme"
+      />
+    );
+    const link = screen.getByRole("link", { name: "@Ada" });
+    expect(link.getAttribute("href")).toBe("/acme/profile/u-1");
+    expect(link).toHaveClass("mention-chip");
+    expect(link.getAttribute("data-mention-id")).toBe("u-1");
+  });
+
   it("shows a stored image component as an image (ISS-127)", () => {
     render(
       <RichTextView html='<image-component src="https://cdn.test/a.png" alt="shot"></image-component>' label="Body" />

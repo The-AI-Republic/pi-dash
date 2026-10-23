@@ -11,7 +11,7 @@
 
 import DOMPurify from "dompurify";
 
-import { MENTION_CONTENT_TAGS } from "./mention.js";
+import { MENTION_CONTENT_TAGS, MENTION_ENTITY } from "./mention.js";
 
 /** Editor node elements stored bodies carry beside ordinary HTML. */
 export const STORED_CONTENT_TAGS = ["mention-component", "image-component", "label", "input"] as const;
@@ -114,10 +114,17 @@ export function mentionDisplayName(mention: StoredMention): string {
  * wraps each mention in a chip naming the person and rewrites an image
  * component as an `<img>`; everything else passes through the sanitizer.
  * The stored body itself is never changed — only this view is.
+ * With a workspace slug, a person mention becomes a link to the
+ * member's profile (CMT-020); other entity kinds stay plain chips.
  */
-export function renderableHtml(dirty: string, resolveAsset?: ((src: string) => string) | undefined): string {
+export function renderableHtml(
+  dirty: string,
+  resolveAsset?: ((src: string) => string) | undefined,
+  workspaceSlug?: string | undefined
+): string {
   const clean = sanitizeHtml(dirty);
   if (typeof globalThis.DOMParser === "undefined") return clean;
+  const slug = workspaceSlug ?? "";
   const document = new DOMParser().parseFromString(clean, "text/html");
   for (const element of Array.from(document.body.querySelectorAll("mention-component"))) {
     const mention = storedMentionOf(element);
@@ -125,7 +132,13 @@ export function renderableHtml(dirty: string, resolveAsset?: ((src: string) => s
       element.remove();
       continue;
     }
-    const chip = document.createElement("span");
+    // The href is always an app-relative profile path built from the
+    // caller's slug and the stored member id, so it can never become a
+    // script URL; attribute serialization escapes the id itself.
+    const href =
+      slug !== "" && mention.entityName === MENTION_ENTITY ? `/${slug}/profile/${mention.entityIdentifier}` : null;
+    const chip = document.createElement(href === null ? "span" : "a");
+    if (href !== null) chip.setAttribute("href", href);
     chip.setAttribute("data-mention-id", mention.id);
     chip.setAttribute("class", "mention-chip");
     chip.textContent = `@${mentionDisplayName(mention)}`;

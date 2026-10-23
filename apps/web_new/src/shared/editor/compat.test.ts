@@ -136,4 +136,34 @@ describe("comment editor extensions", () => {
       editor.destroy();
     }
   });
+
+  it("drops the mention node from the serialized body once it is removed (CMT-021)", async () => {
+    const { Editor } = await import("@tiptap/core");
+    const extensions = (await loadCommentExtensions()) as unknown as AnyExtension[];
+    const editor = new Editor({
+      extensions,
+      content:
+        '<p>draft note <mention-component id="u-1" entity_identifier="u-1" entity_name="user_mention" data-name="Ada"></mention-component></p>',
+    });
+    try {
+      expect(editor.getHTML()).toContain("mention-component");
+      // Locate the parsed mention atom and delete it, as the edit
+      // form's draft does once the user removes the chip; the save
+      // then stores a body with no mention left for the server to keep.
+      let range: { from: number; to: number } | null = null;
+      editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === "mention") range = { from: pos, to: pos + node.nodeSize };
+        return range === null;
+      });
+      expect(range).not.toBeNull();
+      if (range === null) throw new Error("expected a parsed mention node");
+      editor.chain().focus().deleteRange(range).run();
+      const serialized = editor.getHTML();
+      expect(serialized).not.toContain("mention-component");
+      expect(serialized).not.toContain('entity_identifier="u-1"');
+      expect(textOf(serialized)).toContain("draft note");
+    } finally {
+      editor.destroy();
+    }
+  });
 });
