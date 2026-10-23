@@ -2140,6 +2140,8 @@ type LiveStateRow = (
     Option<i64>,
     Option<String>,
     Option<i32>,
+    Option<String>,
+    Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
 );
 
@@ -2627,7 +2629,8 @@ async fn render_agent_run(
                 r#"SELECT observed_run_id, last_event_at, last_event_kind, last_event_summary,
                           agent_pid, agent_subprocess_alive, approvals_pending,
                           (usage->>'input_tokens')::bigint, (usage->>'output_tokens')::bigint,
-                          (usage->>'total_tokens')::bigint, llm_model, turn_count, updated_at
+                          (usage->>'total_tokens')::bigint, llm_model, turn_count,
+                          agent_health, agent_last_activity_at, updated_at
                    FROM runner_live_state WHERE runner_id = $1"#,
             )
             .bind(runner_id)
@@ -2651,7 +2654,9 @@ async fn render_agent_run(
                         "total_tokens": state.9,
                         "llm_model": state.10,
                         "turn_count": state.11,
-                        "updated_at": state.12.map(|dt| render_datetime_in(&dt, &timezone)),
+                        "agent_health": state.12,
+                        "agent_last_activity_at": state.13.map(|dt| render_datetime_in(&dt, &timezone)),
+                        "updated_at": state.14.map(|dt| render_datetime_in(&dt, &timezone)),
                     });
                 }
             }
