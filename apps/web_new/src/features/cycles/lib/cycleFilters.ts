@@ -77,13 +77,14 @@ const CUSTOM_ENTRY = /^(\d{4}-\d{2}-\d{2});(after|before)$/;
 export function parseCycleDateEntry(entry: string): CycleDateEntry {
   const preset = PRESET_ENTRY.exec(entry);
   if (preset !== null) {
-    const amount = Number(preset[1]);
-    const unit = preset[2] ?? "";
+    // Both groups are mandatory, so they always participate in a match.
+    const amount = Number(preset[1]!);
+    const unit = preset[2]!;
     return { kind: "preset", days: unit.startsWith("month") ? amount * 30 : amount * 7 };
   }
   const custom = CUSTOM_ENTRY.exec(entry);
   if (custom !== null && (custom[2] === "after" || custom[2] === "before")) {
-    return { kind: "custom", day: custom[1] ?? "", direction: custom[2] };
+    return { kind: "custom", day: custom[1]!, direction: custom[2] };
   }
   return { kind: "unknown" };
 }

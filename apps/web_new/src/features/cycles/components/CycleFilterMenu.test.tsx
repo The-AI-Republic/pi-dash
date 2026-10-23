@@ -264,6 +264,14 @@ describe("CycleFilterMenu", () => {
     expect(stored().startDate).toEqual(["2026-11-01;after", "2026-11-20;before"]);
   });
 
+  it("converts the stored day when switching back to After", () => {
+    useCycleFilterStore.getState().setDateValues(CYCLES_PROJECT_ID, "startDate", ["2026-11-01;before"]);
+    renderMenu();
+    openMenu();
+    fireEvent.click(within(section("cycle-filter-start-date")).getByRole("radio", { name: "After" }));
+    expect(stored().startDate).toEqual(["2026-11-01;after"]);
+  });
+
   it("changes shape without storing when no day applies", () => {
     renderMenu();
     openMenu();
