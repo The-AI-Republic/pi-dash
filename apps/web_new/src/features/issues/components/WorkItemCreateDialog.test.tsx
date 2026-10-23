@@ -1683,6 +1683,26 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     expect(screen.queryByText("Estimate")).not.toBeInTheDocument();
   });
 
+  it("names the stored estimate in an edit before the popup opens", async () => {
+    // EST-017: the dialog preloads the active system when the row already
+    // holds a point, so the closed trigger names it (never "None") without
+    // opening the picker.
+    const { props } = editProps({ estimate_point: PARENT_ID });
+    setup(
+      {
+        estimateSystem: true,
+        projects: {
+          [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { estimate: STATE_ID }),
+        },
+        issueDetail: detailRow("<p>stored words</p>", { estimate_point: PARENT_ID }),
+      },
+      props
+    );
+    await waitFor(() => expect(screen.getByText("Estimate")).toBeInTheDocument());
+    const estimateSlot = within(screen.getByText("Estimate").parentElement as HTMLElement);
+    await waitFor(() => expect(estimateSlot.getByRole("button", { name: "3" })).toBeInTheDocument());
+  });
+
   it("keeps the Atlas target when the picker cannot offer a guest row", async () => {
     const user = userEvent.setup();
     const h = setup();

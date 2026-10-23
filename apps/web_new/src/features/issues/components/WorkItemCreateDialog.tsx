@@ -1066,7 +1066,8 @@ export function WorkItemCreateDialog({
   const showModules = detail?.module_view === true && !hasContext;
   // The estimate field follows the project link (EST-018), never the
   // systems list: a project with systems but no link shows no field.
-  // The picker inside reads lazily on open.
+  // The picker inside reads lazily on open, preloading only when a
+  // stored point needs its name (EST-017), as the sidebar row does.
   const showEstimate = detail?.estimate != null;
 
   return (
@@ -1310,6 +1311,7 @@ export function WorkItemCreateDialog({
                   onChange={(estimatePoint) => patch({ estimatePoint })}
                   disabled={busy}
                   tabIndex={MODAL_TAB_ORDER.estimate}
+                  preload={form.estimatePoint != null}
                 />
               </FieldSlot>
             ) : null}

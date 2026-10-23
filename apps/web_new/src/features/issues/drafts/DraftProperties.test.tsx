@@ -42,7 +42,6 @@ vi.mock("../../../shared/pickers/index.js", () => {
 
 vi.mock("../../../shared/pickers/reference.js", () => ({
   usePickerStates: vi.fn(),
-  usePickerEstimates: vi.fn(),
 }));
 
 vi.mock("../dropdowns/DatePicker.js", () => ({
@@ -61,10 +60,9 @@ vi.mock("../labels/LabelPicker.js", () => ({
 
 vi.mock("../dropdowns/weekStart.js", () => ({ useWeekStart: () => 0 }));
 
-import { usePickerEstimates, usePickerStates } from "../../../shared/pickers/reference.js";
+import { usePickerStates } from "../../../shared/pickers/reference.js";
 
 const states = vi.mocked(usePickerStates);
-const estimates = vi.mocked(usePickerEstimates);
 
 function draft(overrides: Partial<DraftIssue> = {}): DraftIssue {
   return {
@@ -143,7 +141,6 @@ describe("stateGroupOf", () => {
 describe("DraftProperties", () => {
   it("renders the always-on strip and writes each pick as its own field", () => {
     states.mockReturnValue({ data: [{ id: STATE, group: "started" }] } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
     const { onWrite, calls } = renderStrip();
     const state = calls.find((call) => call.name === "state")!;
@@ -168,7 +165,6 @@ describe("DraftProperties", () => {
 
   it("passes an unknown priority through as none", () => {
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
     const { calls } = renderStrip(draft({ priority: "bogus" as never }));
     expect(calls.find((call) => call.name === "priority")?.["value"]).toBe("none");
@@ -176,7 +172,6 @@ describe("DraftProperties", () => {
 
   it("adds module, cycle and estimate pickers only when the project enables them", () => {
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [{ id: ESTIMATE }] } as never);
     stubClient();
     const off = renderStrip();
     expect(off.calls.some((call) => call.name === "module")).toBe(false);
@@ -199,17 +194,22 @@ describe("DraftProperties", () => {
     expect(on.onWrite).toHaveBeenCalledWith({ estimate_point: "point-2" });
   });
 
-  it("hides the estimate picker without a project point scale or points", () => {
+  it("shows the estimate picker from the project link alone", () => {
+    // EST-018: gating reads the project row, never the systems list — the
+    // control mounts as soon as the link is set, even before any points
+    // resolve. The picker itself renders the empty-system row.
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
-    const { calls } = renderStrip(draft({ estimate_point: null }), project({ estimate: ESTIMATE }));
-    expect(calls.some((call) => call.name === "estimate")).toBe(false);
+    const { calls } = renderStrip(draft({ estimate_point: ESTIMATE }), project({ estimate: ESTIMATE }));
+    const estimate = calls.find((call) => call.name === "estimate");
+    expect(estimate).toBeDefined();
+    expect(estimate?.["value"]).toBe(ESTIMATE);
+    // A stored point preloads the list that names it on first paint.
+    expect(estimate?.["preload"]).toBe(true);
   });
 
   it("hides the estimate picker for a project without a point scale", () => {
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [{ id: ESTIMATE }] } as never);
     stubClient();
     const { calls } = renderStrip(draft({ estimate_point: ESTIMATE }), project({ estimate: null }));
     expect(calls.some((call) => call.name === "estimate")).toBe(false);
@@ -217,7 +217,6 @@ describe("DraftProperties", () => {
 
   it("shows a numeric estimate point as its string value", () => {
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [{ id: ESTIMATE }] } as never);
     stubClient();
     const { calls } = renderStrip(draft({ estimate_point: 3 }), project({ estimate: ESTIMATE }));
     expect(calls.find((call) => call.name === "estimate")?.["value"]).toBe("3");
@@ -225,23 +224,14 @@ describe("DraftProperties", () => {
 
   it("reads a null estimate point as no value", () => {
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [{ id: ESTIMATE }] } as never);
     stubClient();
     const { calls } = renderStrip(draft({ estimate_point: null }), project({ estimate: ESTIMATE }));
     expect(calls.find((call) => call.name === "estimate")?.["value"]).toBeNull();
-  });
-
-  it("holds the estimate picker back while its point list is still pending", () => {
-    states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({} as never);
-    stubClient();
-    const { calls } = renderStrip(draft({ estimate_point: ESTIMATE }), project({ estimate: ESTIMATE }));
-    expect(calls.some((call) => call.name === "estimate")).toBe(false);
+    expect(calls.find((call) => call.name === "estimate")?.["preload"]).toBe(false);
   });
 
   it("reads a row that carries no estimate column as no value", () => {
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [{ id: ESTIMATE }] } as never);
     stubClient();
     const row = draft();
     delete (row as { estimate_point?: unknown }).estimate_point;
@@ -251,7 +241,6 @@ describe("DraftProperties", () => {
 
   it("keeps every picker locked for a guest and for a project-less draft", () => {
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
     const guest = renderStrip(draft(), project(), false);
     expect(guest.calls.every((call) => call["disabled"] === true)).toBe(true);
@@ -267,7 +256,6 @@ describe("DraftProperties", () => {
         { id: DEFAULT_STATE, group: "unstarted" },
       ],
     } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
     const { calls } = renderStrip(draft({ state_id: null }), project({ default_state: DEFAULT_STATE }));
     expect(calls.find((call) => call.name === "state")?.["value"]).toBe(DEFAULT_STATE);
@@ -275,7 +263,6 @@ describe("DraftProperties", () => {
 
   it("keeps the overdue tone off an unset draft state even with a default", () => {
     states.mockReturnValue({ data: [{ id: DEFAULT_STATE, group: "unstarted" }] } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
     const { container } = renderStrip(
       draft({ state_id: null, target_date: "2000-01-01" }),
@@ -286,7 +273,6 @@ describe("DraftProperties", () => {
 
   it("flags an overdue due day in the danger colour", () => {
     states.mockReturnValue({ data: [{ id: STATE, group: "started" }] } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
     const { container } = renderStrip(draft({ target_date: "2000-01-01" }));
     expect(container.querySelector(".text-\\(--danger\\)")).not.toBeNull();
@@ -294,7 +280,6 @@ describe("DraftProperties", () => {
 
   it("does not flag a completed draft's passed due day", () => {
     states.mockReturnValue({ data: [{ id: STATE, group: "completed" }] } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
     const { container } = renderStrip(draft({ target_date: "2000-01-01" }));
     expect(container.querySelector(".text-\\(--danger\\)")).toBeNull();
@@ -302,7 +287,6 @@ describe("DraftProperties", () => {
 
   it("stops clicks and double-clicks from reaching the block's edit handler", () => {
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
     const { getByTestId } = renderStrip();
     const strip = getByTestId("draft-properties");
@@ -320,7 +304,6 @@ describe("DraftProperties", () => {
 
   it("appends the caller's class", () => {
     states.mockReturnValue({ data: [] } as never);
-    estimates.mockReturnValue({ data: [] } as never);
     stubClient();
     pickers.calls = [];
     const queryClient = new QueryClient();

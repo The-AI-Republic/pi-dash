@@ -24,7 +24,7 @@ import {
   StatePicker,
   type PriorityLevel,
 } from "../../../shared/pickers/index.js";
-import { usePickerEstimates, usePickerStates } from "../../../shared/pickers/reference.js";
+import { usePickerStates } from "../../../shared/pickers/reference.js";
 import {
   asPriority,
   assigneePatch,
@@ -73,7 +73,6 @@ export function DraftProperties({
   const today = todayIsoDay();
   const projectId = draft.project_id ?? "";
   const states = usePickerStates(workspaceSlug, projectId, projectId !== "");
-  const estimates = usePickerEstimates(workspaceSlug, projectId, projectId !== "" && project?.estimate != null);
   // The picker reads the project default while the draft holds no state
   // (the old block does), but the overdue tone follows only the state the
   // draft actually stores — an unset state reads plain.
@@ -165,12 +164,13 @@ export function DraftProperties({
           onChange={(cycleId) => onWrite(cyclePatch(cycleId))}
         />
       ) : null}
-      {project?.estimate != null && (estimates.data?.length ?? 0) > 0 ? (
+      {project?.estimate != null ? (
         <EstimatePicker
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           value={draft.estimate_point === undefined ? null : String(draft.estimate_point ?? "") || null}
           disabled={disabled}
+          preload={draft.estimate_point !== undefined && draft.estimate_point !== null}
           onChange={(estimatePoint) => onWrite(estimatePatch(estimatePoint))}
         />
       ) : null}
