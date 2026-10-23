@@ -56,6 +56,8 @@ export { UpgradePill } from "./components/UpgradePill";
 export type { UpgradePillProps, UpgradePillSize } from "./components/UpgradePill";
 export { VirtualList } from "./components/VirtualList";
 export type { VirtualListProps } from "./components/VirtualList";
+export { CHART_CATEGORICAL_DARK, CHART_CATEGORICAL_LIGHT, chartSchemeColors } from "./charts";
+export type { ChartScheme, ChartSchemeColors } from "./charts";
 export { cn } from "./lib/cn";
 export { markdownText, parseInline, parseMarkdown, safeHref } from "./lib/markdown";
 export type { MarkdownBlock, MarkdownListItem, MarkdownSpan } from "./lib/markdown";

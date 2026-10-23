@@ -19637,12 +19637,17 @@ export class WebNewDriver implements ParityDriver {
 
   /**
    * Single route hook serving the analytics read stall gates. Slice A
-   * gates the totals reads; later slices extend this hook with their
-   * own stall sets (charts, project-stats), never a second hook.
+   * gates the totals reads and slice B the charts and project-stats
+   * reads; later slices extend this hook with their own stall sets,
+   * never a second hook.
    */
   private analyticsReadHookInstalled = false;
   private analyticsTotalsStalled = new Set<string>();
   private analyticsTotalsGates: Array<() => void> = [];
+  private analyticsChartsStalled = new Set<string>();
+  private analyticsChartsGates: Array<() => void> = [];
+  private analyticsStatsStalled = false;
+  private analyticsStatsGates: Array<() => void> = [];
 
   private async analyticsReadHook(): Promise<void> {
     if (this.analyticsReadHookInstalled) return;
@@ -19654,9 +19659,20 @@ export class WebNewDriver implements ParityDriver {
           const url = new URL(request.url());
           const totalsPath =
             url.pathname.endsWith("/advance-analytics/") || url.pathname.endsWith("/advance-analytics");
+          const chartsPath =
+            url.pathname.endsWith("/advance-analytics-charts/") || url.pathname.endsWith("/advance-analytics-charts");
+          const statsPath = url.pathname.endsWith("/project-stats/") || url.pathname.endsWith("/project-stats");
           if (totalsPath && this.analyticsTotalsStalled.has(url.searchParams.get("tab") ?? "")) {
             await new Promise<void>((resolve) => {
               this.analyticsTotalsGates.push(resolve);
+            });
+          } else if (chartsPath && this.analyticsChartsStalled.has(url.searchParams.get("type") ?? "")) {
+            await new Promise<void>((resolve) => {
+              this.analyticsChartsGates.push(resolve);
+            });
+          } else if (statsPath && this.analyticsStatsStalled) {
+            await new Promise<void>((resolve) => {
+              this.analyticsStatsGates.push(resolve);
             });
           }
         } catch {
@@ -19677,35 +19693,144 @@ export class WebNewDriver implements ParityDriver {
     this.analyticsTotalsGates = [];
     gates.forEach((release) => release());
   }
-  async analyticsChartsStall(_chart: "projects" | "work-items"): Promise<void> {
-    return todo("analyticsChartsStall");
+  async analyticsChartsStall(chart: "projects" | "work-items"): Promise<void> {
+    this.analyticsChartsStalled.add(chart);
+    await this.analyticsReadHook();
   }
   async analyticsChartsRelease(): Promise<void> {
-    return todo("analyticsChartsRelease");
+    this.analyticsChartsStalled.clear();
+    const gates = this.analyticsChartsGates;
+    this.analyticsChartsGates = [];
+    gates.forEach((release) => release());
   }
   async analyticsProjectStatsStall(): Promise<void> {
-    return todo("analyticsProjectStatsStall");
+    this.analyticsStatsStalled = true;
+    await this.analyticsReadHook();
   }
   async analyticsProjectStatsRelease(): Promise<void> {
-    return todo("analyticsProjectStatsRelease");
+    this.analyticsStatsStalled = false;
+    const gates = this.analyticsStatsGates;
+    this.analyticsStatsGates = [];
+    gates.forEach((release) => release());
   }
+
+  /**
+   * Wait until the radar section settles: the fetch skeleton is gone
+   * and the section shows its plot, its guidance panel, or its
+   * failure chrome (headers with no plot). The svg check covers the
+   * lazy chart chunk landing after the fetch resolves.
+   */
+  private async analyticsAwaitRadar(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const section = document.querySelector('[data-testid="analytics-radar"]');
+          if (!section || section.querySelector('[data-testid="analytics-radar-skeleton"]')) return false;
+          if (section.querySelector("svg") || section.querySelector('[data-testid="analytics-section-guidance"]')) {
+            return true;
+          }
+          return (
+            section.querySelector('[data-testid="analytics-radar-scope"]') !== null &&
+            section.querySelector('[data-testid="chart-radar"]') === null
+          );
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics radar section never settled.");
+      });
+  }
+
   async analyticsRadarSummary(): Promise<AnalyticsRadarRow[]> {
-    return todo("analyticsRadarSummary");
+    await this.analyticsAwaitRadar();
+    return this.page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="analytics-radar-row"]')].map((row) => ({
+        dimension: (row.querySelector('[data-testid="analytics-radar-dimension"]')?.textContent ?? "").trim(),
+        count: (row.querySelector('[data-testid="analytics-radar-count"]')?.textContent ?? "").trim(),
+      }))
+    );
   }
   async analyticsRadarFacts(): Promise<AnalyticsRadarFacts> {
-    return todo("analyticsRadarFacts");
+    await this.analyticsAwaitRadar();
+    return this.page.evaluate(() => {
+      const section = document.querySelector('[data-testid="analytics-radar"]');
+      const plot = section?.querySelector('[data-testid="chart-radar"]') ?? null;
+      if (!plot || !plot.querySelector("svg")) return { dimensions: [], plotted: false };
+      const dimensions = [...plot.querySelectorAll('[data-testid="chart-radar-tick"]')]
+        .map((tick) => (tick.textContent ?? "").trim())
+        .filter((label) => label !== "");
+      return { dimensions, plotted: true };
+    });
   }
   async analyticsRadarLoading(): Promise<boolean> {
-    return todo("analyticsRadarLoading");
+    return this.page.evaluate(
+      () => document.querySelector('[data-testid="analytics-radar"] [data-testid="analytics-radar-skeleton"]') !== null
+    );
   }
+
+  /** Wait until the active-projects list settles: placeholders gone. */
+  private async analyticsAwaitActiveProjects(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const section = document.querySelector('[data-testid="analytics-active"]');
+          if (!section) return false;
+          return section.querySelector('[data-testid="analytics-active-placeholder"]') === null;
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics active-projects list never settled.");
+      });
+  }
+
   async analyticsActiveProjects(): Promise<AnalyticsActiveProject[]> {
-    return todo("analyticsActiveProjects");
+    await this.analyticsAwaitActiveProjects();
+    return this.page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="analytics-active-row"]')].map((row) => {
+        const nameEl = row.querySelector('[data-testid="analytics-active-name"]') as HTMLElement | null;
+        const badge = row.querySelector('[data-testid="analytics-active-badge"]');
+        const tone = badge?.getAttribute("data-tone");
+        return {
+          name: (nameEl?.textContent ?? "").trim(),
+          badge: (badge?.textContent ?? "").trim(),
+          tone: tone === "success" || tone === "danger" ? tone : "unknown",
+          truncated: nameEl !== null && nameEl.scrollWidth > nameEl.clientWidth + 1,
+        };
+      })
+    );
   }
   async analyticsActiveProjectsLoading(): Promise<boolean> {
-    return todo("analyticsActiveProjectsLoading");
+    return this.page.evaluate(
+      () =>
+        document.querySelector('[data-testid="analytics-active"] [data-testid="analytics-active-placeholder"]') !== null
+    );
   }
-  async analyticsActiveProjectTooltip(_name: string): Promise<string | null> {
-    return todo("analyticsActiveProjectTooltip");
+  async analyticsActiveProjectTooltip(name: string): Promise<string | null> {
+    const rows = this.page.locator('[data-testid="analytics-active-row"]');
+    const count = await rows.count();
+    for (let index = 0; index < count; index += 1) {
+      const label = rows.nth(index).locator('[data-testid="analytics-active-name"]');
+      if ((await label.innerText()).trim() !== name) continue;
+      await label.hover({ timeout: WebNewDriver.WAIT_MS });
+      await this.page
+        .waitForFunction(
+          (target) =>
+            [...document.querySelectorAll('[role="tooltip"]')].some(
+              (node) => ((node.textContent ?? "") as string).trim() === target
+            ),
+          name,
+          { timeout: 10_000 }
+        )
+        .catch(() => undefined);
+      return this.page.evaluate((target) => {
+        const tip = [...document.querySelectorAll('[role="tooltip"]')].find(
+          (node) => ((node.textContent ?? "") as string).trim() === target
+        );
+        return tip ? ((tip.textContent ?? "") as string).trim() || null : null;
+      }, name);
+    }
+    return null;
   }
   async analyticsCreatedResolvedFacts(): Promise<AnalyticsCreatedResolvedFacts> {
     return todo("analyticsCreatedResolvedFacts");
@@ -19713,8 +19838,23 @@ export class WebNewDriver implements ParityDriver {
   async analyticsCreatedResolvedLoading(): Promise<boolean> {
     return todo("analyticsCreatedResolvedLoading");
   }
-  async analyticsSectionGuidance(_title: string): Promise<string | null> {
-    return todo("analyticsSectionGuidance");
+  async analyticsSectionGuidance(title: string): Promise<string | null> {
+    // Section testids by driver title. Slice B owns the overview pair;
+    // slice C extends this map with the created-vs-resolved section,
+    // never a second guidance reader.
+    const sections: Record<string, string> = {
+      "Project Insights": "analytics-radar",
+      "Active Projects": "analytics-active",
+    };
+    const testid = sections[title];
+    if (testid === undefined) return null;
+    return this.page.evaluate((sectionId) => {
+      const section = document.querySelector(`[data-testid="${sectionId}"]`);
+      if (!section || section.querySelector("svg")) return null;
+      const panel = section.querySelector('[data-testid="analytics-section-guidance"]');
+      if (!panel) return null;
+      return ((panel.textContent ?? "") as string).trim() || null;
+    }, testid);
   }
   async analyticsDialogHeadlineCards(): Promise<AnalyticsHeadlineCard[]> {
     return todo("analyticsDialogHeadlineCards");

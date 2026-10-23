@@ -39,7 +39,12 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 const { contractMocks, sessionMocks } = vi.hoisted(() => ({
-  contractMocks: { getAnalyticsTotals: vi.fn(), listProjects: vi.fn() },
+  contractMocks: {
+    getAnalyticsTotals: vi.fn(),
+    listProjects: vi.fn(),
+    getAnalyticsChart: vi.fn(),
+    getProjectStats: vi.fn(),
+  },
   sessionMocks: { canEdit: true, workspaceName: "Acme Corp" as string | null },
 }));
 
@@ -47,6 +52,10 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();
   return { ...original, ...contractMocks };
 });
+
+vi.mock("../../../shared/charts/index.js", () => ({
+  RadarChart: () => <div data-testid="mock-chart-radar" />,
+}));
 
 vi.mock("../../../core/session/hooks.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../core/session/hooks.js")>();
@@ -120,13 +129,19 @@ function renderScreen(
   );
 }
 
-function mockReads(options: { projects?: unknown; totals?: unknown; projectsFails?: boolean } = {}): void {
+function mockReads(
+  options: { projects?: unknown; totals?: unknown; projectsFails?: boolean; charts?: unknown; stats?: unknown } = {}
+): void {
   contractMocks.listProjects.mockImplementation(() =>
     options.projectsFails
       ? Promise.reject(new Error("projects read failed"))
       : Promise.resolve(options.projects ?? PROJECTS)
   );
   contractMocks.getAnalyticsTotals.mockResolvedValue(options.totals ?? { total_users: { count: 3 } });
+  if (options.charts === undefined) contractMocks.getAnalyticsChart.mockReturnValue(new Promise<never>(() => {}));
+  else contractMocks.getAnalyticsChart.mockResolvedValue(options.charts);
+  if (options.stats === undefined) contractMocks.getProjectStats.mockReturnValue(new Promise<never>(() => {}));
+  else contractMocks.getProjectStats.mockResolvedValue(options.stats);
 }
 
 beforeEach(() => {
@@ -268,5 +283,40 @@ describe("AnalyticsScreen", () => {
     renderScreen();
     await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(2));
     expect(document.title).toBe("acme - Analytics");
+  });
+
+  it("mounts the radar and active-projects sections on the overview tab", async () => {
+    mockReads({
+      charts: [
+        { key: "work_items", name: "Work Items", count: 2 },
+        { key: "cycles", name: "Cycles", count: 0 },
+      ],
+      stats: [{ id: ALPHA, total_issues: 2, completed_issues: 2 }],
+    });
+    renderScreen({ projectIds: [ALPHA] });
+    await screen.findByTestId("mock-chart-radar");
+    expect(screen.getByTestId("analytics-radar")).toBeInTheDocument();
+    expect(screen.getAllByTestId("analytics-radar-row")).toHaveLength(2);
+    expect(screen.getByTestId("analytics-radar-scope")).toHaveTextContent("Alpha");
+    expect(screen.getByTestId("analytics-active")).toBeInTheDocument();
+    expect(await screen.findAllByTestId("analytics-active-row")).toHaveLength(1);
+    expect(contractMocks.getAnalyticsChart).toHaveBeenCalledWith(expect.anything(), "acme", {
+      type: "projects",
+      projectIds: [ALPHA],
+    });
+    expect(contractMocks.getProjectStats).toHaveBeenCalledWith(expect.anything(), "acme", {
+      projectIds: [ALPHA],
+      fields: ["total_issues", "completed_issues"],
+    });
+  });
+
+  it("omits the overview sections on the work-items tab", async () => {
+    mockReads();
+    renderScreen({ tabId: "work-items" });
+    await waitFor(() => expect(screen.getAllByTestId("analytics-headline-card")).toHaveLength(5));
+    expect(screen.queryByTestId("analytics-radar")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("analytics-active")).not.toBeInTheDocument();
+    expect(contractMocks.getAnalyticsChart).not.toHaveBeenCalled();
+    expect(contractMocks.getProjectStats).not.toHaveBeenCalled();
   });
 });

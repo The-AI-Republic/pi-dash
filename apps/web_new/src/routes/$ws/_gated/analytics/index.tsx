@@ -8,7 +8,7 @@
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { defaultAnalyticsTabHref } from "../../../../features/analytics/index.js";
+import { defaultAnalyticsTabHref } from "../../../../features/analytics/lib/tabs.js";
 
 export const Route = createFileRoute("/$ws/_gated/analytics/")({
   beforeLoad: ({ location, params }) => {
