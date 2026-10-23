@@ -173,14 +173,24 @@ describe("cloud apps sidebar", () => {
 
   it("opens the catalog from the sidebar link", async () => {
     const clicked = vi.fn(async () => undefined);
-    const waited: string[] = [];
+    const headingWaited = vi.fn(async () => undefined);
+    const headingQueries: unknown[] = [];
     const page = pageOf({
-      locator: () => locator({ click: clicked }),
-      waitForURL: vi.fn(async (pattern: string) => void waited.push(pattern)),
+      locator: (selector: string) =>
+        selector === "main"
+          ? locator({
+              getByRole: (...args: unknown[]) => {
+                headingQueries.push(args);
+                return locator({ waitFor: headingWaited });
+              },
+            })
+          : locator({ click: clicked }),
     });
     await new WebNewDriver(page).cloudAppsOpenFromSidebar();
     expect(clicked).toHaveBeenCalledTimes(1);
-    expect(waited).toEqual(["**/apps*"]);
+    // SPA navigation never fires load: the driver settles on the Apps heading.
+    expect(headingQueries).toEqual([["heading", { name: "Apps" }]]);
+    expect(headingWaited).toHaveBeenCalledTimes(1);
   });
 
   it("proves the quick-create control opens the shared dialog", async () => {

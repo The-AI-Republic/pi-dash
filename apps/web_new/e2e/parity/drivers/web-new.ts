@@ -1802,7 +1802,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalPrimaryButtonLabel(): Promise<string> {
-    const submit = this.createDialog().locator('form button[type="submit"]').first();
+    // Same footer placement as submitCreateModal (NEWFRONT-662): the
+    // type="submit" Save button renders outside the <form> it submits
+    // via the form attribute, so no form ancestor is required.
+    const submit = this.createDialog().locator('button[type="submit"]').first();
     return ((await submit.textContent()) ?? "").trim();
   }
 
