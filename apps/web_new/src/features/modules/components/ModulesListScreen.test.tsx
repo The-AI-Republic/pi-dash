@@ -193,6 +193,23 @@ describe("ModulesListScreen", () => {
     expect(readProjectLayout(MODULES_PROJECT_ID)).toBe("timeline");
   });
 
+  it("disables the gate shortcut when the role map names no role", async () => {
+    harness.project = makeProjectRow({ module_view: false });
+    harness.roles = {};
+    renderScreen();
+    expect(await screen.findByTestId("modules-feature-gate")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Manage features" })).toBeDisabled();
+  });
+
+  it("shows an empty list rather than a skeleton when the list read fails", async () => {
+    harness.modulesStatus = 500;
+    renderScreen();
+    const list = await screen.findByTestId("modules-list");
+    expect(list).toHaveAttribute("data-layout", "list");
+    expect(within(list).queryAllByTestId("modules-row")).toHaveLength(0);
+    expect(screen.queryByTestId("modules-list-skeleton")).not.toBeInTheDocument();
+  });
+
   it("falls back to the crumb as the title before the project arrives", async () => {
     harness.projectDelayMs = 50;
     renderScreen();

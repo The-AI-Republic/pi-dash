@@ -100,8 +100,8 @@ export function compareModuleNames(left: string, right: string): number {
   const rightParts = right.toLowerCase().match(chunk) ?? [];
   const length = Math.min(leftParts.length, rightParts.length);
   for (let index = 0; index < length; index += 1) {
-    const leftPart = leftParts[index] ?? "";
-    const rightPart = rightParts[index] ?? "";
+    const leftPart = leftParts[index]!;
+    const rightPart = rightParts[index]!;
     const leftDigits = /^\d/.test(leftPart);
     const rightDigits = /^\d/.test(rightPart);
     if (leftDigits && rightDigits) {

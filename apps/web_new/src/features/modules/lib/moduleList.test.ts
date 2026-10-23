@@ -90,6 +90,11 @@ describe("compareModuleNames", () => {
     expect(compareModuleNames("Beta", "Alpha")).toBeGreaterThan(0);
   });
 
+  it("orders a name that is a run-prefix of the other first", () => {
+    expect(compareModuleNames("Alpha 1", "Alpha 1 Beta")).toBeLessThan(0);
+    expect(compareModuleNames("Alpha 1 Beta", "Alpha 1")).toBeGreaterThan(0);
+  });
+
   it("treats a missing match as an empty run", () => {
     // Both sides of the chunk regex always match here; empty inputs still
     // compare without throwing.

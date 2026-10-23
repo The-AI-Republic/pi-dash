@@ -120,4 +120,11 @@ describe("userZoneDiffers", () => {
     } as typeof Intl.DateTimeFormat.prototype.resolvedOptions;
     expect(userZoneDiffers("Asia/Tokyo")).toBe(false);
   });
+
+  it("reads no browser zone when the engine cannot name one", () => {
+    Intl.DateTimeFormat.prototype.resolvedOptions = function resolved(): Intl.ResolvedDateTimeFormatOptions {
+      throw new Error("no zone");
+    } as typeof Intl.DateTimeFormat.prototype.resolvedOptions;
+    expect(userZoneDiffers("Asia/Tokyo")).toBe(false);
+  });
 });

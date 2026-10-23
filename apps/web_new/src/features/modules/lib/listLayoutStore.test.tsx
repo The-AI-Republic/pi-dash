@@ -75,6 +75,25 @@ describe("readLayoutRecord", () => {
   });
 });
 
+describe("default storage", () => {
+  it("reads empty when the browser refuses the storage itself", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get: () => {
+        throw new Error("storage disabled");
+      },
+    });
+    try {
+      expect(readLayoutRecord()).toEqual({});
+      expect(readProjectLayout("p1")).toBe("list");
+      expect(() => writeProjectLayout("p1", "board")).not.toThrow();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
+    }
+  });
+});
+
 describe("readProjectLayout", () => {
   it("returns the project's choice, else the default", () => {
     const storage = memoryStorage({ [MODULES_LIST_PREFS_STORAGE_KEY]: JSON.stringify({ p1: "timeline" }) });
