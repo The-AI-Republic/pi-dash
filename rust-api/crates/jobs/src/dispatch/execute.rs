@@ -3627,10 +3627,10 @@ mod tests {
             sqlx::query(
                 "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, status, \
                  executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
-                 error_code, tool_plan, prompt, trigger, phase_kind, run_config, \
+                 error_code, tool_plan, prompt, trigger, phase_kind, work_type, run_config, \
                  required_capabilities, thread_id, agent_metadata, lease_expires_at, \
                  started_at, error, refusal_category, llm_model, usage, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, 0, $7, '', '', $8, $9, 'direct', '', '{}', \
+                 VALUES ($1, $2, $3, $4, $5, $6, 0, $7, '', '', $8, $9, 'direct', '', '', '{}', \
                  '[]', '', '{}', $10, $11, '', '', '', '{}', $12)",
             )
             .bind(id)

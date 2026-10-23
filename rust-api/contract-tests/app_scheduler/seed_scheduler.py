@@ -106,10 +106,10 @@ def create_agent_run(
             refusal_category, trigger, executor_kind, dispatch_attempts,
             cancel_reason, error_code, tool_plan, phase_kind,
             agent_metadata, usage, started_at, scheduler_binding_id,
-            runner_id)
+            runner_id, work_type)
         VALUES (%s,%s,'Seeded run','{}','{}','seed-thread','',%s,%s,%s,%s,
             'seed-model','','scheduler','local_runner',0,'','','{}','',
-            '{}','{"input":1,"output":1,"total":2}',%s,%s,%s)""",
+            '{}','{"input":1,"output":1,"total":2}',%s,%s,%s,'')""",
         (
             rid, status, now, workspace_id, pod_id, created_by_id,
             started_at, binding_id, runner_id,

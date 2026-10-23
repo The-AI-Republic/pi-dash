@@ -143,7 +143,7 @@ def create_agent_run(
             trigger, prompt_manifest, executor_kind, dispatch_attempts,
             cancel_requested_at, cancel_reason, error_code, tool_plan,
             terminal_hooks_applied_at, terminal_capacity_released_at,
-            phase_kind, agent_metadata, usage)
+            phase_kind, agent_metadata, usage, work_type)
            VALUES (%s,%s,%s,'{}','[]','',
                    %s,
                    NULL,'',%s,NULL,
@@ -152,7 +152,7 @@ def create_agent_run(
                    NULL,'direct',NULL,%s,0,
                    %s,
                    %s,'',%s,
-                   NULL,NULL,'','{}','{}')""",
+                   NULL,NULL,'','{}','{}','')""",
         (
             run_id, status, prompt,
             now + timedelta(seconds=lease_in_seconds) if lease_in_seconds is not None else None,

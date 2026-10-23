@@ -1143,7 +1143,7 @@ mod tests {
     #[test]
     fn review_kind_splits_external_wait_from_human_wait() {
         let body = composed_text(recipes::KIND_REVIEW);
-        assert!(body.contains("**waiting on CI or the PR**"));
+        assert!(body.contains("**waiting on an external process**"));
         assert!(body.contains("**keep the clock ticking**"));
         assert!(body.contains("`waiting_on_human --stop-ticking`"));
         assert!(body.contains("`done --stop-ticking`"));
@@ -1154,9 +1154,9 @@ mod tests {
     fn test_kind_pass_stops_clock_explicitly_or_moves_on() {
         let body = composed_text(recipes::KIND_TEST);
         assert!(body.contains("`done --stop-ticking`"));
-        assert!(body.contains("explicitly lets agents merge and close"));
+        assert!(body.contains("explicitly lets agents accept and close"));
         assert!(!body.contains("--state \"Done\""));
-        assert!(body.contains("**nothing changed, waiting on CI or a dependency**"));
+        assert!(body.contains("**nothing changed, waiting on an external process**"));
         assert!(body.contains("**nothing changed, waiting on a human**"));
         assert!(body.contains("`waiting_on_external`"));
     }

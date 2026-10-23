@@ -2847,6 +2847,24 @@ mod tests {
     }
 
     #[test]
+    fn work_type_for_issue_follows_the_resolution_chain() {
+        let mut issue = issue_view();
+        let mut project = project_view();
+        assert_eq!(work_type_for_issue(&issue, &project), "software");
+        project.default_work_type = "general".to_owned();
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+        issue.work_type = Some("software".to_owned());
+        assert_eq!(work_type_for_issue(&issue, &project), "software");
+        // An unknown stored key falls through to the project default.
+        issue.work_type = Some("retired".to_owned());
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+        // Blank project default with no override: the `general` net.
+        issue.work_type = None;
+        project.default_work_type = String::new();
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+    }
+
+    #[test]
     fn handoff_marker_helpers() {
         let config = json!({"_project_move_handoff": {"target_project_id": "p"}});
         assert!(handoff_marker(&config).is_some());
@@ -2934,7 +2952,7 @@ mod tests {
             "FX6 C1",
             "In Progress (group: started)",
             "https://example.com/fx6.git",
-            "coding-task",
+            "Software delivery workflow (work type: software)",
         ] {
             assert!(turn.text.contains(marker), "missing {marker}");
         }
@@ -3057,6 +3075,9 @@ mod tests {
             row.phase_kind,
             case["after"]["phase_kind"].as_str().unwrap()
         );
+        // The effective work type is stamped alongside the kind
+        // (PDASHOSS01-234): no issue override → the project default.
+        assert_eq!(row.work_type, "software");
         assert_eq!(row.trigger, AgentRunTrigger::StateTransition.value());
         assert_eq!(row.executor_kind, AgentExecutorKind::LocalRunner);
         assert_eq!(row.tool_plan, json!({}));
@@ -3132,7 +3153,9 @@ mod tests {
         assert_eq!(inserted[0].phase_kind, "review");
         let created = outcome.created_run.unwrap();
         let manifest = &seam.saved_prompts.borrow()[&created].1;
-        assert_eq!(manifest.as_array().unwrap().len(), 10);
+        // The review recipe for `software`: 9 core sections plus the
+        // `software.context` and `software.review` slots.
+        assert_eq!(manifest.as_array().unwrap().len(), 11);
     }
 
     #[tokio::test]
@@ -3880,9 +3903,12 @@ mod tests {
         for column in ["input_tokens", "output_tokens", "total_tokens"] {
             assert!(!RUN_INSERT_SQL.contains(column), "generated {column}");
         }
-        // `$1..$14` in NewAgentRun order.
+        // `$1..$14` in NewAgentRun order, then `$15` the `work_type`
+        // stamp (PDASHOSS01-234), and nothing past it.
         assert!(RUN_INSERT_SQL.contains("$14"));
-        assert!(!RUN_INSERT_SQL.contains("$15"));
+        assert!(RUN_INSERT_SQL.contains("phase_kind, work_type, run_config"));
+        assert!(RUN_INSERT_SQL.contains("$12, $15, $13"));
+        assert!(!RUN_INSERT_SQL.contains("$16"));
         assert!(PROMPT_UPDATE_SQL.contains("prompt_manifest"));
         assert!(FINALIZE_UPDATE_SQL.contains("queue_position = NULL"));
     }
