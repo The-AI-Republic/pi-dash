@@ -186,30 +186,32 @@ describe("signOutViaCommandPalette", () => {
     expect(optionClick).toHaveBeenCalledTimes(3);
   });
 
-  it("drops the session when the entry bounces to onboarding, which has no sign-out", async () => {
-    // A user with no workspace lands on onboarding, whose account menu
-    // carries only the switch-account entry (PSET-003, NEWFRONT-606).
-    const clearCookies = vi.fn(async () => undefined);
-    const goto = vi.fn(async () => undefined);
-    const page = {
-      goto,
-      url: () => "https://parity.test/onboarding/",
-      context: () => ({ clearCookies }),
-      getByPlaceholder: () => element({ isVisible: async () => false }),
-      getByRole: (role: string) =>
-        role === "progressbar" ? element({ count: async () => 1 }) : element({ count: async () => 0 }),
-      keyboard: { press: async () => undefined },
-    } as unknown as Page;
-    const driver = new WebNewDriver(page);
-    vi.spyOn(driver as unknown as { waitForSignedOut: () => Promise<void> }, "waitForSignedOut").mockImplementation(
-      async () => undefined
-    );
+  it.each(["https://parity.test/create-workspace", "https://parity.test/onboarding/"])(
+    "drops the session when the entry bounces to a menuless landing (%s)",
+    async (landingUrl) => {
+      // A user with no workspace lands on workspace creation or
+      // onboarding, whose chrome carries no sign-out entry (PSET-003).
+      const clearCookies = vi.fn(async () => undefined);
+      const goto = vi.fn(async () => undefined);
+      const page = {
+        goto,
+        url: () => landingUrl,
+        context: () => ({ clearCookies }),
+        getByPlaceholder: () => element({ isVisible: async () => false }),
+        getByRole: () => element({ count: async () => 0 }),
+        keyboard: { press: async () => undefined },
+      } as unknown as Page;
+      const driver = new WebNewDriver(page);
+      vi.spyOn(driver as unknown as { waitForSignedOut: () => Promise<void> }, "waitForSignedOut").mockImplementation(
+        async () => undefined
+      );
 
-    await driver.signOutViaCommandPalette();
+      await driver.signOutViaCommandPalette();
 
-    expect(clearCookies).toHaveBeenCalledTimes(1);
-    expect(goto).toHaveBeenCalledWith("/", { waitUntil: "domcontentloaded", timeout: 60_000 });
-  });
+      expect(clearCookies).toHaveBeenCalledTimes(1);
+      expect(goto).toHaveBeenCalledWith("/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+    }
+  );
 
   it("takes the session-drop path when onboarding paints late mid-loop", async () => {
     // The bounce can outlast the first probe; a late paint still drops

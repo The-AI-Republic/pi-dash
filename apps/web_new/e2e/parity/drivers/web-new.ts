@@ -5056,6 +5056,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   /**
+  /**
    * The palette belongs to the workspace shell. Settings pages render
    * their own frame and replace that chrome, so a sign-out driven from one
    * of them first lands on the workspace home; anywhere else it signs out
@@ -5073,8 +5074,15 @@ export class WebNewDriver implements ParityDriver {
       .catch(() => undefined);
   }
 
-  /** The onboarding shell, whose account menu carries no sign-out entry. */
-  private async onOnboarding(): Promise<boolean> {
+  /**
+   * A signed-in landing whose chrome carries no sign-out entry: the
+   * standalone workspace-creation page or the onboarding flow. The path
+   * names both; the progress strip covers an onboarding paint the
+   * address has not caught up with yet.
+   */
+  private async onMenulessLanding(): Promise<boolean> {
+    const pathname = new URL(this.page.url()).pathname;
+    if (pathname === "/create-workspace" || pathname.startsWith("/onboarding")) return true;
     return (await this.page.getByRole("progressbar", { name: "Onboarding progress" }).count()) > 0;
   }
 
@@ -5091,10 +5099,11 @@ export class WebNewDriver implements ParityDriver {
     if (!(await this.isSignedOut().catch(() => false))) {
       await this.openEntry();
     }
-    // A user with no workspace lands on onboarding, whose account menu
-    // carries only the switch-account entry; drop the session there
-    // instead of hunting a shell menu that never paints (PSET-003).
-    if (await this.onOnboarding().catch(() => false)) {
+    // A user with no workspace lands on workspace creation or
+    // onboarding, whose chrome carries no sign-out entry; drop the
+    // session there instead of hunting a shell menu that never paints
+    // (PSET-003).
+    if (await this.onMenulessLanding().catch(() => false)) {
       await this.resetToEntry();
       return;
     }
@@ -5117,10 +5126,10 @@ export class WebNewDriver implements ParityDriver {
       } catch {
         await this.page.keyboard.press("Escape").catch(() => {});
         if (await this.isSignedOut().catch(() => false)) return;
-        // The bounce to onboarding can outlast the entry check above; a
-        // late paint still takes the session-drop path, not another menu
-        // attempt against a page that has no shell menu.
-        if (await this.onOnboarding().catch(() => false)) {
+        // The bounce to a menuless landing can outlast the entry check
+        // above; a late paint still takes the session-drop path, not
+        // another menu attempt against a page that has no shell menu.
+        if (await this.onMenulessLanding().catch(() => false)) {
           await this.resetToEntry();
           return;
         }
