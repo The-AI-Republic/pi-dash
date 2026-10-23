@@ -296,6 +296,30 @@ describe("selectWorkItemContext", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it("lists the estimate page values in key order, not wire order", () => {
+    const { pages } = selectWorkItemContext(
+      input({
+        pickers: {
+          ...input().pickers,
+          estimates: [
+            {
+              id: "e1",
+              name: "Points",
+              type: "points",
+              last_used: true,
+              points: [
+                { id: "p2", key: 2, value: "3" },
+                { id: "p1", key: 1, value: "1" },
+              ],
+            } as never,
+          ],
+        },
+      })
+    );
+    const estimate = pages.find((page) => page.placeholder === "Change estimate")!;
+    expect(estimate.usePageState("").options.map((option) => option.title)).toEqual(["No estimate", "1", "3"]);
+  });
+
   it("offers only the clear row when no estimate system is active", () => {
     const updateFields = vi.fn();
     const close = vi.fn();

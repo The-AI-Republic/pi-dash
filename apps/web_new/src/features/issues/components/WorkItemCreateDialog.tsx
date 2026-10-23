@@ -26,7 +26,6 @@ import { edition } from "../../../core/edition/index.js";
 import {
   CyclePicker,
   toProjectOption,
-  usePickerEstimates,
   EstimatePicker,
   MemberPicker,
   ModulePicker,
@@ -518,7 +517,6 @@ export function WorkItemCreateDialog({
 
   const projectConfig = usePickerProject(workspaceSlug, form.projectId ?? "", form.projectId !== null);
   const detail = projectConfig.data;
-  const estimates = usePickerEstimates(workspaceSlug, form.projectId ?? "", form.projectId !== null && open);
   const duplicates = useDuplicateMatches({
     workspaceSlug,
     projectId: form.projectId ?? "",
@@ -1066,6 +1064,11 @@ export function WorkItemCreateDialog({
   const hasContext = !editing && (context?.cycleId != null || context?.moduleId != null);
   const showCycle = detail?.cycle_view === true && !hasContext;
   const showModules = detail?.module_view === true && !hasContext;
+  // The estimate field follows the project link (EST-018), never the
+  // systems list: a project with systems but no link shows no field.
+  // The picker inside reads lazily on open, preloading only when a
+  // stored point needs its name (EST-017), as the sidebar row does.
+  const showEstimate = detail?.estimate != null;
 
   return (
     <>
@@ -1299,7 +1302,7 @@ export function WorkItemCreateDialog({
                 />
               </FieldSlot>
             ) : null}
-            {estimates.data !== undefined && estimates.data.length > 0 ? (
+            {showEstimate ? (
               <FieldSlot label="Estimate">
                 <EstimatePicker
                   workspaceSlug={workspaceSlug}
@@ -1308,6 +1311,7 @@ export function WorkItemCreateDialog({
                   onChange={(estimatePoint) => patch({ estimatePoint })}
                   disabled={busy}
                   tabIndex={MODAL_TAB_ORDER.estimate}
+                  preload={form.estimatePoint != null}
                 />
               </FieldSlot>
             ) : null}

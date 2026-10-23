@@ -5,7 +5,11 @@
 // Single-select over the active system's points with search; a
 // No-estimate row clears the point. TIME-system points render as
 // hours and minutes. Without an active system the list holds one
-// non-interactive empty row. Reads resolve lazily on open.
+// non-interactive empty row. Reads resolve lazily on open. Search
+// matches the displayed labels (EST-017): a deliberate divergence
+// from the old picker, which indexed the raw stored value (bug
+// NEWFRONT-820) — the palette page filters rendered text too, so
+// both surfaces agree.
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import { Hash } from "lucide-react";
 import * as React from "react";

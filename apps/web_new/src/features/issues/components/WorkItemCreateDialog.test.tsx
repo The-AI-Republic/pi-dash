@@ -1093,7 +1093,11 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     const h = setup({
       estimateSystem: true,
       projects: {
-        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }),
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
+          cycle_view: true,
+          module_view: true,
+          estimate: STATE_ID,
+        }),
         [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
       },
     });
@@ -1134,7 +1138,11 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     const h = setup({
       estimateSystem: true,
       projects: {
-        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }),
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
+          cycle_view: true,
+          module_view: true,
+          estimate: STATE_ID,
+        }),
         [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
       },
     });
@@ -1666,6 +1674,33 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     expect(screen.queryByText("Cycle")).not.toBeInTheDocument();
     expect(screen.queryByText("Modules")).not.toBeInTheDocument();
     expect(screen.queryByText("Estimate")).not.toBeInTheDocument();
+  });
+
+  it("hides the estimate field without a project link, even when systems exist", async () => {
+    // EST-018: gating reads the project link, not the systems list.
+    setup({ estimateSystem: true });
+    await waitFor(() => expect(screen.getByText("Atlas")).toBeInTheDocument());
+    expect(screen.queryByText("Estimate")).not.toBeInTheDocument();
+  });
+
+  it("names the stored estimate in an edit before the popup opens", async () => {
+    // EST-017: the dialog preloads the active system when the row already
+    // holds a point, so the closed trigger names it (never "None") without
+    // opening the picker.
+    const { props } = editProps({ estimate_point: PARENT_ID });
+    setup(
+      {
+        estimateSystem: true,
+        projects: {
+          [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { estimate: STATE_ID }),
+        },
+        issueDetail: detailRow("<p>stored words</p>", { estimate_point: PARENT_ID }),
+      },
+      props
+    );
+    await waitFor(() => expect(screen.getByText("Estimate")).toBeInTheDocument());
+    const estimateSlot = within(screen.getByText("Estimate").parentElement as HTMLElement);
+    await waitFor(() => expect(estimateSlot.getByRole("button", { name: "3" })).toBeInTheDocument());
   });
 
   it("keeps the Atlas target when the picker cannot offer a guest row", async () => {

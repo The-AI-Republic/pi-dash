@@ -309,6 +309,15 @@ describe("SidebarPropertiesB rows", () => {
     expect(screen.getByRole("group", { name: "Start date" })).toBeInTheDocument();
   });
 
+  it("flips the estimate row with the project link alone (EST-018)", () => {
+    const { client, queryClient } = harness();
+    renderRows(client, queryClient, { project: projectFixture({ estimate: null }) });
+    expect(screen.queryByRole("group", { name: "Estimate" })).not.toBeInTheDocument();
+    cleanup();
+    renderRows(client, queryClient, { project: projectFixture({ estimate: ESTIMATE }) });
+    expect(screen.getByRole("group", { name: "Estimate" })).toBeInTheDocument();
+  });
+
   it("patches the start date with the picked day and bounds the calendar by the due date", async () => {
     const { client, queryClient, writes } = harness();
     renderRows(client, queryClient, { issue: issueFixture({ target_date: "2026-10-20" }) });

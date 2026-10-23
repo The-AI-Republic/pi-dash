@@ -34,6 +34,15 @@ const TIME_SYSTEM: Estimate = {
   ],
 };
 
+const SHUFFLED_SYSTEM: Estimate = {
+  ...POINTS_SYSTEM,
+  id: "723e4567-e89b-12d3-a456-426614174006",
+  points: [
+    { id: "823e4567-e89b-12d3-a456-426614174007", key: 2, value: "10", description: "" },
+    { id: "923e4567-e89b-12d3-a456-426614174008", key: 1, value: "2", description: "" },
+  ],
+};
+
 describe("selectEstimateOptions", () => {
   it("leads with the clear row, then the points raw", () => {
     expect(selectEstimateOptions(POINTS_SYSTEM)).toEqual([
@@ -46,6 +55,10 @@ describe("selectEstimateOptions", () => {
 
   it("renders TIME points as hours and minutes", () => {
     expect(selectEstimateOptions(TIME_SYSTEM).map((option) => option.label)).toEqual(["No estimate", "30m", "1h 30m"]);
+  });
+
+  it("orders values by key, not by wire order", () => {
+    expect(selectEstimateOptions(SHUFFLED_SYSTEM).map((option) => option.label)).toEqual(["No estimate", "2", "10"]);
   });
 
   it("renders a single disabled row without an active system", () => {
