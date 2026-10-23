@@ -20,6 +20,8 @@ export interface IntakeStatePickerProps {
   value: string | null;
   onChange: (id: string) => void;
   disabled?: boolean;
+  /** Read states up front so a set selection names itself before the popup opens. */
+  preload?: boolean;
   /** Button variant of the default trigger. */
   variant?: ButtonVariant;
   /** Default trigger shows the glyph without the name. */
@@ -47,6 +49,7 @@ export function IntakeStatePicker({
   value,
   onChange,
   disabled = false,
+  preload = false,
   variant = "secondary",
   iconOnly = false,
   trigger,
@@ -62,7 +65,8 @@ export function IntakeStatePicker({
     onOpenChange?.(next);
   }
 
-  const states = usePickerIntakeStates(workspaceSlug, projectId, open && !disabled);
+  const readsAllowed = open || preload;
+  const states = usePickerIntakeStates(workspaceSlug, projectId, readsAllowed);
   const options = React.useMemo(() => selectStateOptions(states.data ?? []), [states.data]);
   const loading = open && !disabled && states.isPending;
   const errorText = states.isError ? "Couldn't load intake states." : undefined;

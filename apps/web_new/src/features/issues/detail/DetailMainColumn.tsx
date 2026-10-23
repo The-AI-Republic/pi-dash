@@ -25,6 +25,16 @@ import { SaveIndicator } from "./SaveIndicator.js";
 import { useSavePipeline } from "./savePipeline.js";
 import { WaitingBanner } from "./waiting/WaitingBanner.js";
 
+/**
+ * Save overrides for surfaces whose fields persist somewhere other than
+ * the work-item PATCH (intake routes both fields through its own
+ * update). Each settles when its write settles.
+ */
+export interface DetailFieldWrites {
+  saveTitle: (name: string) => Promise<unknown>;
+  saveDescription: (html: string) => Promise<unknown>;
+}
+
 export interface DetailMainColumnProps {
   workspaceSlug: string;
   projectId: string;
@@ -37,6 +47,8 @@ export interface DetailMainColumnProps {
   agentActions?: React.ReactNode;
   /** Block under the description-meta row, above the sidebar break (the activity feed). */
   activity?: React.ReactNode;
+  /** Title/description saves; the work-item PATCH when absent. */
+  fieldWrites?: DetailFieldWrites | undefined;
 }
 
 export function DetailMainColumn({
@@ -47,6 +59,7 @@ export function DetailMainColumn({
   topSlot,
   agentActions,
   activity,
+  fieldWrites,
 }: DetailMainColumnProps): React.ReactElement {
   const pipeline = useSavePipeline();
   const titleUpdate = useUpdateIssue({
@@ -61,6 +74,12 @@ export function DetailMainColumn({
     issueId: issue.id,
     failureTitle: DESCRIPTION_SAVE_FAILED_TITLE,
   });
+  const saveTitle = (name: string): Promise<unknown> =>
+    fieldWrites === undefined ? titleUpdate.mutateAsync({ name }) : fieldWrites.saveTitle(name);
+  const saveDescription = (html: string): Promise<unknown> =>
+    fieldWrites === undefined
+      ? descriptionUpdate.mutateAsync({ description_html: html })
+      : fieldWrites.saveDescription(html);
   const [restored, setRestored] = React.useState<RestoredDescription | null>(null);
   const tokenRef = React.useRef(0);
 
@@ -87,17 +106,12 @@ export function DetailMainColumn({
       </div>
       <WaitingBanner workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} disabled={readOnly} />
       {agentActions === undefined ? null : <div className="min-w-0">{agentActions}</div>}
-      <IssueTitleField
-        value={issue.name}
-        disabled={readOnly}
-        pipeline={pipeline}
-        onSave={(name: string) => titleUpdate.mutateAsync({ name })}
-      />
+      <IssueTitleField value={issue.name} disabled={readOnly} pipeline={pipeline} onSave={saveTitle} />
       <IssueDescriptionField
         value={issue.description_html}
         disabled={readOnly}
         pipeline={pipeline}
-        onSave={(html: string) => descriptionUpdate.mutateAsync({ description_html: html })}
+        onSave={saveDescription}
         restored={restored}
         resolveAsset={resolveAsset}
       />
@@ -118,7 +132,7 @@ export function DetailMainColumn({
               tokenRef.current += 1;
               setRestored({ html, token: tokenRef.current });
               pipeline.markSaving();
-              void descriptionUpdate.mutateAsync({ description_html: html }).then(
+              void saveDescription(html).then(
                 () => pipeline.markSaved(),
                 () => {
                   setRestored(null);

@@ -441,6 +441,50 @@ test(
 );
 
 test(
+  specTitle(["INT-024"], "a guest copies and opens a resolved request they could not copy while open"),
+  { tag: specTags(["INT-024"]) },
+  async ({ driver, seed }) => {
+    // Own test (own browser context): re-signing in over an active
+    // session is a silent no-op, so each actor gets a fresh context.
+    const tag = `NF258 gcopy ${Date.now()}`;
+    const session = await signInSessionRetry(seed.email, seed.password);
+    const guestCreds = requireGuest(seed);
+    const identifier = parityProjectIdentifier("N258");
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      identifier,
+      {
+        inboxView: true,
+      },
+      session
+    );
+    await serverPatchProject(seed.workspaceSlug, projectId, session, { guest_view_all_features: true });
+    const guestId = await seedGuestUserId(seed, session);
+    await serverAddProjectMembers(seed.workspaceSlug, projectId, [{ memberId: guestId, role: 5 }], session);
+    const name = `${tag} resolved request`;
+    const resolved = await serverCreateInboxIssue(seed.workspaceSlug, projectId, name, session);
+    await serverIntakeDetailSetStatus(seed.workspaceSlug, projectId, resolved.issueId, 1, session);
+    const linkPattern = workItemLinkPattern(seed, identifier);
+    try {
+      await driver.rulesEnsureSignedIn(guestCreds.email, guestCreds.password, seed.workspaceSlug);
+      await openClosedItem(driver, seed, projectId, resolved.issueId, name);
+      await expect.poll(() => driver.intakeDetailOpenWorkItemVisible(), { timeout: 30_000 }).toBe(true);
+      await driver.intakeDetailCopyLink();
+      let toast: { title: string; message: string } | null = null;
+      await expect.poll(async () => (toast = await driver.rulesLastToast()), { timeout: 15_000 }).not.toBeNull();
+      expect(`${toast?.title ?? ""} ${toast?.message ?? ""}`.toLowerCase()).toContain("copied");
+      const resolvedLink = await driver.rulesReadClipboard();
+      expect(resolvedLink).toMatch(linkPattern);
+      await driver.intakeDetailOpenWorkItem();
+      expect(await driver.intakeDetailCurrentUrl()).toBe(resolvedLink);
+    } finally {
+      await dropProject(seed, projectId, [resolved.issueId], session);
+    }
+  }
+);
+
+test(
   specTitle(["INT-026"], "an admin edits everything while the server refuses member writes on others"),
   { tag: specTags(["INT-026"]) },
   async ({ driver, seed }) => {

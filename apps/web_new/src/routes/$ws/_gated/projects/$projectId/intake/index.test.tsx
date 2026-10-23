@@ -197,7 +197,7 @@ describe("intake route component", () => {
     expect(await screen.findByTestId("intake-empty-open")).toBeInTheDocument();
   });
 
-  it("asks the router to replace the address with the screen's settled state", async () => {
+  it("asks the router to push user moves onto the address", async () => {
     navigate.mockReset();
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme", projectId: PROJECT_ID });
     vi.spyOn(Route, "useSearch").mockReturnValue({ currentTab: "open" } as never);
@@ -241,7 +241,55 @@ describe("intake route component", () => {
     );
     await screen.findByTestId("intake-shell");
     fireEvent.click(screen.getByRole("tab", { name: /Closed/ }));
-    expect(navigate).toHaveBeenCalledWith({ to: ".", search: { currentTab: "closed" }, replace: true });
+    expect(navigate).toHaveBeenCalledWith({ to: ".", search: { currentTab: "closed" }, replace: false });
+  });
+
+  it("asks the router to replace the address with the screen's settle correction", async () => {
+    navigate.mockReset();
+    vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme", projectId: PROJECT_ID });
+    vi.spyOn(Route, "useSearch").mockReturnValue({ currentTab: "open", inboxIssueId: "stale-id" } as never);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("missing component");
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    createAppClient("https://api.test", (async (url: string) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
+      if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/`) return jsonResponse(url, 200, project(true));
+      if (path.endsWith("/project-roles/")) return jsonResponse(url, 200, { [PROJECT_ID]: 20 });
+      if (path.endsWith("/api/users/me/workspaces/")) {
+        return jsonResponse(url, 200, [
+          {
+            id: "123e4567-e89b-12d3-a456-426614174000",
+            name: "Acme",
+            slug: "acme",
+            logo_url: null,
+            total_members: 1,
+            role: 20,
+          },
+        ]);
+      }
+      return jsonResponse(url, 200, {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 0,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: 0,
+        total_results: 0,
+        results: [],
+      });
+    }) as never);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Component />
+      </QueryClientProvider>
+    );
+    await screen.findByTestId("intake-shell");
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith({ to: ".", search: { currentTab: "open" }, replace: true })
+    );
   });
 });
 

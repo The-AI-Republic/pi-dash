@@ -52,9 +52,10 @@ describe("IntakeShell (INT-001)", () => {
     expect(trail.querySelectorAll("a").length).toBe(1);
   });
 
-  it("drops the pick placeholder once a request is selected", () => {
-    render(<IntakeShell {...BASE} selectedId="i-9" />);
+  it("renders the supplied detail instead of the pick placeholder", () => {
+    render(<IntakeShell {...BASE} selectedId="i-9" detail={<p>request detail</p>} />);
     expect(screen.getByTestId("intake-content-pane")).toBeInTheDocument();
+    expect(screen.getByText("request detail")).toBeInTheDocument();
     expect(screen.queryByTestId("intake-placeholder")).toBeNull();
   });
 });

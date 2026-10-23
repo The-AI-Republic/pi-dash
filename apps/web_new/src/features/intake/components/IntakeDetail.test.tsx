@@ -1,0 +1,472 @@
+// @vitest-environment jsdom
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Request detail pane (INT-019/024/026–029): the composed surfaces,
+// title save and version restore through the intake update, the
+// permission wiring, arrow navigation with its guard, and the
+// missing/error states.
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { IntakeIssueDetail, IntakeIssueDetailItem, TransportInit } from "@pidash/api-client";
+import * as React from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  Link: ({ to, children, ...rest }: { to: string; children?: React.ReactNode }) => (
+    <a href={to} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { setSessionClient } from "../../../core/session/queries.js";
+import { IntakeDetail } from "./IntakeDetail.js";
+
+const SLUG = "acme";
+const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
+const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
+const ADA = "323e4567-e89b-12d3-a456-426614174002";
+const ME = "023e4567-e89b-12d3-a456-426614174009";
+const TRIAGE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const LABEL = "b23e4567-e89b-12d3-a456-42661417400a";
+const V1 = "c23e4567-e89b-12d3-a456-42661417400c";
+
+const ME_PAYLOAD = {
+  id: ME,
+  email: "me@example.com",
+  username: "me",
+  first_name: "Me",
+  last_name: "M",
+  display_name: "Me M",
+  avatar: "",
+  avatar_url: null,
+  cover_image: null,
+  cover_image_url: null,
+  date_joined: "2026-01-01T00:00:00.000Z",
+  user_timezone: "UTC",
+  is_active: true,
+  is_bot: false,
+  is_email_verified: true,
+  is_password_autoset: false,
+  last_login_medium: "password",
+  last_login_time: null,
+};
+
+function stateRow(id: string, name: string, group: string) {
+  return {
+    id,
+    project_id: PROJECT,
+    workspace_id: "b23e4567-e89b-12d3-a456-42661417400e",
+    name,
+    color: "#5e6ad2",
+    group,
+    default: false,
+    description: "",
+    sequence: 1,
+  };
+}
+
+const DIRECTORY = [
+  {
+    id: "b23e4567-e89b-12d3-a456-42661417400b",
+    member: {
+      id: ADA,
+      first_name: "Ada",
+      last_name: "L",
+      avatar: "",
+      avatar_url: null,
+      display_name: "Ada L",
+      is_bot: false,
+    },
+    role: 15,
+    is_active: true,
+  },
+];
+
+const PROJECT_MEMBERS = [
+  {
+    id: "d23e4567-e89b-12d3-a456-42661417400d",
+    role: 15,
+    member: ADA,
+    project: PROJECT,
+    original_role: 15,
+    created_at: "2024-01-02T03:04:05Z",
+  },
+];
+
+const LABELS = [
+  {
+    id: LABEL,
+    project_id: PROJECT,
+    workspace_id: "b23e4567-e89b-12d3-a456-42661417400e",
+    name: "Bug",
+    color: "#ff0000",
+    parent: null,
+    sort_order: 1,
+  },
+];
+
+const ATTACHMENT = {
+  id: "e23e4567-e89b-12d3-a456-42661417400e",
+  attributes: { name: "spec.png" },
+  asset: "https://cdn.test/spec.png",
+  asset_url: null,
+  user: null,
+  workspace: null,
+  draft_issue: null,
+  project: PROJECT,
+  issue: ISSUE,
+  comment: null,
+  page: null,
+  entity_type: "issue",
+  entity_identifier: ISSUE,
+  is_deleted: false,
+  is_archived: false,
+  external_id: null,
+  external_source: null,
+  size: 68,
+  is_uploaded: true,
+  storage_metadata: null,
+  created_at: "2026-10-01T00:00:00Z",
+  updated_at: "2026-10-01T00:00:00Z",
+  created_by: null,
+  updated_by: null,
+  deleted_at: null,
+};
+
+function detailItem(overrides: Partial<IntakeIssueDetailItem> = {}): IntakeIssueDetailItem {
+  return {
+    id: ISSUE,
+    name: "A request",
+    state_id: TRIAGE,
+    sort_order: 1,
+    completed_at: null,
+    priority: "none",
+    sequence_id: 7,
+    project_id: PROJECT,
+    parent_id: null,
+    label_ids: [],
+    assignee_ids: [],
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-02T00:00:00Z",
+    created_by: null,
+    updated_by: null,
+    is_draft: false,
+    archived_at: null,
+    complexity_score: 0,
+    agent_executor: null,
+    is_synced: false,
+    description_html: "<p>Current words</p>",
+    agent_ticker: null,
+    agent_status: null,
+    relations_summary: { blocked_by: [], blocking: [] },
+    has_open_blockers: false,
+    ...overrides,
+  };
+}
+
+function detailPayload(status = -2, overrides: Partial<IntakeIssueDetailItem> = {}): IntakeIssueDetail {
+  return {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-000000000001",
+    status,
+    duplicate_to: null,
+    snoozed_till: null,
+    duplicate_issue_detail: null,
+    source: null,
+    issue: detailItem(overrides),
+  };
+}
+
+interface DetailServer {
+  detailStatus: number;
+  detail: IntakeIssueDetail;
+  writes: Array<{ url: string; body: unknown }>;
+}
+
+function versionsEnvelope(hourAgo: string) {
+  return {
+    prev_cursor: "",
+    cursor: "",
+    next_cursor: null,
+    prev_page_results: false,
+    next_page_results: false,
+    page_count: 1,
+    total_results: 1,
+    total_pages: 1,
+    results: [
+      {
+        id: V1,
+        workspace: "423e4567-e89b-12d3-a456-426614174003",
+        project: PROJECT,
+        issue: ISSUE,
+        last_saved_at: hourAgo,
+        owned_by: ADA,
+        created_at: hourAgo,
+        updated_at: hourAgo,
+        created_by: ADA,
+        updated_by: ADA,
+      },
+    ],
+  };
+}
+
+function versionDetail(hourAgo: string) {
+  return {
+    id: V1,
+    workspace: "423e4567-e89b-12d3-a456-426614174003",
+    project: PROJECT,
+    issue: ISSUE,
+    last_saved_at: hourAgo,
+    owned_by: ADA,
+    created_at: hourAgo,
+    updated_at: hourAgo,
+    created_by: ADA,
+    updated_by: ADA,
+    description_binary: null,
+    description_html: "<p>version one</p>",
+    description_stripped: "version one",
+    description_json: {},
+  };
+}
+
+function harness(server: DetailServer, options: { meStatus?: number } = {}) {
+  const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+  const conversation = async (url: string, init: TransportInit) => {
+    const ok = (body: unknown) => ({
+      status: 200,
+      url,
+      headers: { get: () => null },
+      text: async () => JSON.stringify(body),
+    });
+    if (url.endsWith("/auth/get-csrf-token/")) return ok({ csrf_token: "cs" });
+    if (url.includes(`/intake-issues/${ISSUE}/`) && init.method === "GET") {
+      if (server.detailStatus >= 400) {
+        return { status: server.detailStatus, url, headers: { get: () => null }, text: async () => "{}" };
+      }
+      return ok(server.detail);
+    }
+    if (url.includes(`/intake-issues/${ISSUE}/`) && init.method === "PATCH") {
+      const body = JSON.parse(init.body ?? "{}") as { issue?: Record<string, unknown> };
+      server.writes.push({ url, body });
+      const echo = detailPayload(server.detail.status, {
+        ...server.detail.issue,
+        ...((body.issue ?? {}) as Partial<IntakeIssueDetailItem>),
+      });
+      return ok(echo);
+    }
+    if (url.includes(`/description-versions/${V1}/`)) return ok(versionDetail(hourAgo));
+    if (url.includes("description-versions")) return ok(versionsEnvelope(hourAgo));
+    if (url.endsWith(`/projects/${PROJECT}/intake-state/`)) return ok(stateRow(TRIAGE, "Triage", "triage"));
+    if (url.endsWith(`/projects/${PROJECT}/states/`)) return ok([stateRow(TRIAGE, "Triage", "triage")]);
+    if (url.includes(`/projects/${PROJECT}/members/`)) return ok(PROJECT_MEMBERS);
+    if (url.endsWith(`/workspaces/${SLUG}/members/`)) return ok(DIRECTORY);
+    if (url.endsWith(`/projects/${PROJECT}/issue-labels/`)) return ok(LABELS);
+    if (url.includes("/reactions/")) return ok([]);
+    if (url.includes("/attachments/")) return ok([ATTACHMENT]);
+    if (url.endsWith("/api/users/me/")) {
+      const status = options.meStatus ?? 200;
+      if (status >= 400) {
+        return { status, url, headers: { get: () => null }, text: async () => "{}" };
+      }
+      return ok(ME_PAYLOAD);
+    }
+    return { status: 404, url, headers: { get: () => null }, text: async () => "{}" };
+  };
+  const client = createAppClient("https://api.test", conversation as never);
+  setSessionClient(client);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  if (options.meStatus === undefined) queryClient.setQueryData(["session", "me"], ME_PAYLOAD);
+  queryClient.setQueryData(["session", "profile"], { start_of_the_week: 0 });
+  return { client, queryClient };
+}
+
+function renderDetail(queryClient: QueryClient, props: Partial<React.ComponentProps<typeof IntakeDetail>> = {}) {
+  const onPrev = vi.fn();
+  const onNext = vi.fn();
+  const onMissing = vi.fn();
+  render(
+    <QueryClientProvider client={queryClient}>
+      <IntakeDetail
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issueId={ISSUE}
+        projectIdentifier="APO"
+        role={20}
+        onPrev={onPrev}
+        onNext={onNext}
+        onMissing={onMissing}
+        {...props}
+      />
+    </QueryClientProvider>
+  );
+  return { onPrev, onNext, onMissing };
+}
+
+afterEach(() => {
+  resetAppClient();
+  vi.clearAllMocks();
+});
+
+beforeEach(() => {
+  createAppClient("https://api.test");
+});
+
+describe("IntakeDetail content (INT-019/024)", () => {
+  it("composes the header, fields, reactions, attachments and properties", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    expect(screen.getByText("APO-7")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("A request");
+    expect(screen.getByRole("region", { name: "Description" })).toHaveTextContent("Current words");
+    expect(screen.getByRole("region", { name: "Reactions on this work item" })).toBeInTheDocument();
+    expect(await screen.findByText("spec.png")).toBeInTheDocument();
+    expect(screen.getByTestId("intake-properties")).toBeInTheDocument();
+    expect(screen.getByTestId("intake-detail-menu")).toBeInTheDocument();
+  });
+
+  it("saves a title edit through the intake update", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+    const box = await screen.findByRole("textbox", { name: "Title" });
+    fireEvent.change(box, { target: { value: "Renamed" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(server.writes).toHaveLength(1));
+    expect(server.writes[0]!.body).toEqual({ issue: { name: "Renamed" } });
+  });
+
+  it("restores a description version through the intake update", async () => {
+    const user = userEvent.setup();
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+    await user.click(await screen.findByRole("button", { name: /Edited by/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Ada L 1 hour ago" }));
+    const dialog = await screen.findByRole("dialog", { name: "Description history" });
+    await within(dialog).findByText("version one");
+    await user.click(within(dialog).getByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(server.writes).toHaveLength(1));
+    expect(server.writes[0]!.body).toEqual({ issue: { description_html: "<p>version one</p>" } });
+    await waitFor(() => expect(screen.getByRole("region", { name: "Description" })).toHaveTextContent("version one"));
+  });
+});
+
+describe("IntakeDetail permissions (INT-026)", () => {
+  it("reads another member's request read-only with no versions line", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(-2, { created_by: ADA }), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient, { role: 15 });
+    expect(await screen.findByRole("heading", { name: "A request" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Edited by/ })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Priority" })).getByRole("button")).toBeDisabled();
+    expect(screen.queryByTestId("label-picker-trigger")).not.toBeInTheDocument();
+  });
+
+  it("lets a guest creator edit the content with versions while properties stay read-only", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(-2, { created_by: ME }), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient, { role: 5 });
+    expect(await screen.findByRole("textbox", { name: "Title" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Edited by/ })).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Priority" })).getByRole("button")).toBeDisabled();
+    expect(screen.queryByTestId("intake-detail-menu")).not.toBeInTheDocument();
+  });
+
+  it("treats an unknown viewer as a non-creator while the session read fails", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(-2, { created_by: ME }), writes: [] };
+    const { queryClient } = harness(server, { meStatus: 500 });
+    renderDetail(queryClient, { role: 15 });
+    expect(await screen.findByRole("heading", { name: "A request" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+  });
+
+  it("reads a resolved request read-only with direct copy and open controls", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(1, { created_by: ME }), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+    expect(await screen.findByRole("heading", { name: "A request" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Edited by/ })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("intake-detail-menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy work item link" })).toBeInTheDocument();
+    expect(screen.getByTestId("intake-detail-open-work-item")).toHaveAttribute("href", "/acme/browse/APO-7/");
+  });
+});
+
+describe("IntakeDetail navigation (INT-027)", () => {
+  it("steps on bare arrows and ignores other keys, repeats and modifiers", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    const { onPrev, onNext } = renderDetail(queryClient);
+    await screen.findByTestId("intake-detail");
+
+    fireEvent.keyDown(document.body, { key: "ArrowDown" });
+    fireEvent.keyDown(document.body, { key: "ArrowUp" });
+    expect(onNext).toHaveBeenCalledTimes(1);
+    expect(onPrev).toHaveBeenCalledTimes(1);
+
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    fireEvent.keyDown(document.body, { key: "ArrowDown", repeat: true });
+    fireEvent.keyDown(document.body, { key: "ArrowDown", ctrlKey: true });
+    fireEvent.keyDown(document.body, { key: "ArrowDown", metaKey: true });
+    fireEvent.keyDown(document.body, { key: "ArrowDown", altKey: true });
+    fireEvent.keyDown(document.body, { key: "ArrowDown", shiftKey: true });
+    expect(onNext).toHaveBeenCalledTimes(1);
+    expect(onPrev).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays quiet while typing in the title", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    const { onPrev, onNext } = renderDetail(queryClient);
+    const box = await screen.findByRole("textbox", { name: "Title" });
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(onNext).not.toHaveBeenCalled();
+    expect(onPrev).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet while a dialog is open", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    const { onNext } = renderDetail(queryClient);
+    await screen.findByTestId("intake-detail");
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    document.body.appendChild(dialog);
+    try {
+      fireEvent.keyDown(document.body, { key: "ArrowDown" });
+      expect(onNext).not.toHaveBeenCalled();
+    } finally {
+      dialog.remove();
+    }
+  });
+});
+
+describe("IntakeDetail missing and error states (INT-028)", () => {
+  it("reports a stale id as missing", async () => {
+    const server: DetailServer = { detailStatus: 404, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    const { onMissing } = renderDetail(queryClient);
+    await waitFor(() => expect(onMissing).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("intake-detail")).not.toBeInTheDocument();
+  });
+
+  it("offers a retry when the read fails", async () => {
+    const server: DetailServer = { detailStatus: 500, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+    expect(await screen.findByTestId("intake-detail-error")).toBeInTheDocument();
+    server.detailStatus = 200;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByTestId("intake-detail")).toBeInTheDocument();
+  });
+});

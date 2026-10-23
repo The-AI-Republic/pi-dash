@@ -293,6 +293,32 @@ describe("DetailMainColumn", () => {
     expect(meta?.compareDocumentPosition(activity) ?? 0).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
+  it("routes field saves through the override when one is set", async () => {
+    const saveTitle = vi.fn(async (_name: string) => undefined);
+    const saveDescription = vi.fn(async (_html: string) => undefined);
+    const { patches } = renderColumn({ fieldWrites: { saveTitle, saveDescription } });
+    const box = screen.getByRole("textbox", { name: TITLE_LABEL });
+    fireEvent.change(box, { target: { value: "Renamed" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(saveTitle).toHaveBeenCalledWith("Renamed"));
+    expect(patches).toHaveLength(0);
+  });
+
+  it("routes a restore through the override when one is set", async () => {
+    const user = userEvent.setup();
+    const saveTitle = vi.fn(async (_name: string) => undefined);
+    const saveDescription = vi.fn(async (_html: string) => undefined);
+    renderColumn({ fieldWrites: { saveTitle, saveDescription } });
+    await user.click(await screen.findByRole("button", { name: /Edited by/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Ada L 1 hour ago" }));
+    const dialog = await screen.findByRole("dialog", { name: "Description history" });
+    await within(dialog).findByText("version one");
+    await user.click(within(dialog).getByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(saveDescription).toHaveBeenCalledWith("<p>version one</p>"));
+    expect(saveTitle).not.toHaveBeenCalled();
+    await waitFor(() => expect(descriptionView()).toHaveTextContent("version one"));
+  });
+
   it("keeps the reaction row on the meta row for a guest with no history line", () => {
     renderColumn({ editable: false, activity: <p>activity slot</p> });
     const reactions = screen.getByRole("region", { name: ISSUE_REACTIONS_LABEL });

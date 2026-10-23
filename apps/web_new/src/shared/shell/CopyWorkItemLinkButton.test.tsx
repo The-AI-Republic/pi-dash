@@ -18,7 +18,11 @@ vi.mock("../../core/platform/index.js", () => ({
   platform: { shareableUrl: (path: string) => platformHarness.shareableUrl(path) },
 }));
 
-import { COPY_WORK_ITEM_LINK_LABEL, CopyWorkItemLinkButton } from "./CopyWorkItemLinkButton.js";
+import {
+  COPY_WORK_ITEM_LINK_LABEL,
+  CopyWorkItemLinkButton,
+  copyWorkItemLinkAddress,
+} from "./CopyWorkItemLinkButton.js";
 import { getToastManager } from "./toaster.js";
 
 beforeEach(() => {
@@ -71,5 +75,33 @@ describe("CopyWorkItemLinkButton", () => {
     expect(await screen.findByText("Couldn't copy the work item link.")).toBeInTheDocument();
     expect(screen.getByText("A hosted web origin is required to create a shareable link.")).toBeInTheDocument();
     expect(writeText).not.toHaveBeenCalled();
+  });
+});
+
+describe("copyWorkItemLinkAddress", () => {
+  it("copies the same address the button copies and reports it", async () => {
+    const writeText = vi.fn(async () => undefined);
+    stubClipboard(writeText);
+    render(
+      <>
+        <ToastHost manager={getToastManager()} />
+      </>
+    );
+    await expect(copyWorkItemLinkAddress("acme", "ACME-12")).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledWith("https://app.example.test/acme/browse/ACME-12/");
+    expect(await screen.findByText("Copied the work item link.")).toBeInTheDocument();
+  });
+
+  it("reports a denied clipboard instead of throwing", async () => {
+    stubClipboard(async () => {
+      throw new Error("denied");
+    });
+    render(
+      <>
+        <ToastHost manager={getToastManager()} />
+      </>
+    );
+    await expect(copyWorkItemLinkAddress("acme", "ACME-12")).resolves.toBe(false);
+    expect(await screen.findByText("Couldn't copy the work item link.")).toBeInTheDocument();
   });
 });

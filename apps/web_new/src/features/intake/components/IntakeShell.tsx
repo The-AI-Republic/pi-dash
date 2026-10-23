@@ -3,10 +3,9 @@
 // See the LICENSE file for details.
 // Intake two-pane frame (parity/specs/intake.md INT-001). The trail and
 // header sit above a body split into the list pane and the content pane.
-// With no request selected the content pane shows the pick placeholder;
-// the detail itself is slice D, so any other selection keeps the
-// placeholder until that slice lands. The frame owns layout only; the
-// screen owns reads and the address.
+// The screen supplies the request detail for the content pane; with no
+// selection it shows the pick placeholder. The frame owns layout only;
+// the screen owns reads and the address.
 
 import * as React from "react";
 
@@ -33,6 +32,8 @@ export interface IntakeShellProps {
   onSelectRow: (issueId: string) => void;
   onRetry: () => void;
   onCreate?: (() => void) | undefined;
+  /** Request detail for the content pane; the placeholder when absent. */
+  detail?: React.ReactNode | undefined;
 }
 
 export function IntakeShell({
@@ -51,6 +52,7 @@ export function IntakeShell({
   onSelectRow,
   onRetry,
   onCreate,
+  detail,
 }: IntakeShellProps): React.ReactElement {
   return (
     <section
@@ -80,7 +82,7 @@ export function IntakeShell({
           onCreate={onCreate}
         />
         <div data-testid="intake-content-pane" className="min-h-0 min-w-0 flex-1">
-          {selectedId === undefined ? <IntakePlaceholder /> : null}
+          {detail ?? <IntakePlaceholder />}
         </div>
       </div>
     </section>
