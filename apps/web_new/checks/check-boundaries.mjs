@@ -37,6 +37,7 @@ const heavyPrefixes = [
   "recharts",
   "yjs",
   "jspdf",
+  "@react-pdf/",
   "@atlaskit/pragmatic-drag-and-drop",
   "emoji-mart",
   "@emoji-mart/",

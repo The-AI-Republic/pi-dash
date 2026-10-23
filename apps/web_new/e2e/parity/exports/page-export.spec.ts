@@ -34,9 +34,9 @@
 // Content-bearing exports re-roll the load until the marker lands (bug
 // NEWFRONT-360: the shared editor reference can lose its load race and
 // export empty content).
-import { inflateSync } from "node:zlib";
+import { pdfFacts } from "./pdfFacts";
 import { test, expect } from "../fixtures";
-import type { PageExportFile, ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
+import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 import {
   browserSessionCookies,
   createIssue,
@@ -134,98 +134,6 @@ function captureApiPaths(driver: ParityDriver): { stop: () => string[] } {
       return [...new Set(seen)].sort();
     },
   };
-}
-
-/** Facts introspected from a downloaded document's bytes (identity-H CMaps decoded per font). */
-interface PdfFacts {
-  mediaBoxes: string[];
-  baseFonts: string[];
-  imageCount: number;
-  text: string;
-}
-
-function pdfFacts(file: PageExportFile): PdfFacts {
-  const bytes = Buffer.from(file.content, "latin1");
-  const latin = file.content;
-  const mediaBoxes = [...latin.matchAll(/\/MediaBox\s*\[([\d.\s]+)\]/g)].map((m) =>
-    (m[1] ?? "").trim().replace(/\s+/g, " ")
-  );
-  const baseFonts = [...new Set([...latin.matchAll(/\/BaseFont\s*\/([^\s/\]()<>]+)/g)].map((m) => m[1] ?? ""))];
-  const imageCount = latin.match(/\/Subtype\s*\/Image/g)?.length ?? 0;
-
-  const objects = new Map<string, string>();
-  const objectAt = new Map<string, number>();
-  for (const m of latin.matchAll(/(\d+) 0 obj([\s\S]*?)endobj/g)) {
-    objects.set(m[1] ?? "", m[2] ?? "");
-    objectAt.set(m[1] ?? "", m.index ?? 0);
-  }
-  const fontCmapObj = new Map<string, string>();
-  for (const [num, dict] of objects) {
-    if (!/\/Type\s*\/Font/.test(dict)) continue;
-    const target = /\/ToUnicode\s+(\d+) 0 R/.exec(dict);
-    if (target) fontCmapObj.set(num, target[1] ?? "");
-  }
-  const resourceFont = new Map<string, string>();
-  for (const dict of objects.values()) {
-    const fonts = /\/Font\s*<<([\s\S]*?)>>/.exec(dict);
-    if (!fonts) continue;
-    for (const ref of (fonts[1] ?? "").matchAll(/\/(\w+)\s+(\d+) 0 R/g)) resourceFont.set(ref[1] ?? "", ref[2] ?? "");
-  }
-  // latin1 is byte-faithful, so string offsets index the byte buffer exactly.
-  const inflated = new Map<string, string>();
-  for (const [num, dict] of objects) {
-    if (!dict.includes("/FlateDecode") || !dict.includes("stream")) continue;
-    const objStart = objectAt.get(num) ?? 0;
-    const streamAt = latin.indexOf("stream", objStart) + "stream".length;
-    const dataStart = streamAt + (latin[streamAt] === "\r" ? 2 : 1);
-    const dataEnd = latin.indexOf("endstream", dataStart);
-    if (dataEnd < 0) continue;
-    try {
-      inflated.set(num, inflateSync(bytes.subarray(dataStart, dataEnd)).toString("latin1"));
-    } catch {
-      // Not a deflate stream; ignore it.
-    }
-  }
-  const parseCmap = (text: string): Map<string, string> => {
-    const map = new Map<string, string>();
-    const body = /beginbfchar([\s\S]*?)endbfchar/.exec(text);
-    if (!body) return map;
-    for (const row of (body[1] ?? "").matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) {
-      const uni = row[2] ?? "";
-      map.set((row[1] ?? "").toUpperCase(), String.fromCodePoint(parseInt(uni.slice(-4), 16)));
-    }
-    return map;
-  };
-  const cmapByObj = new Map<string, Map<string, string>>();
-  for (const [num, text] of inflated) {
-    if (text.includes("beginbfchar")) cmapByObj.set(num, parseCmap(text));
-  }
-  const cmapForResource = (resource: string): Map<string, string> => {
-    const font = resourceFont.get(resource);
-    const target = font ? fontCmapObj.get(font) : undefined;
-    if (!target) return new Map();
-    return cmapByObj.get(target) ?? new Map();
-  };
-  const runs: string[] = [];
-  for (const text of inflated.values()) {
-    if (!text.includes("TJ")) continue;
-    let current = new Map<string, string>();
-    const tokens = text.match(/\/\w+\s+[\d.]+\s+Tf|\[.*?\]\s*TJ/gs) ?? [];
-    for (const token of tokens) {
-      const select = /^\/(\w+)\s/.exec(token);
-      if (select) {
-        current = cmapForResource(select[1] ?? "");
-        continue;
-      }
-      let run = "";
-      for (const hex of token.matchAll(/<([0-9a-fA-F]+)>/g)) {
-        const digits = (hex[1] ?? "").toUpperCase();
-        for (let at = 0; at + 4 <= digits.length; at += 4) run += current.get(digits.slice(at, at + 4)) ?? "";
-      }
-      if (run !== "") runs.push(run);
-    }
-  }
-  return { mediaBoxes, baseFonts, imageCount, text: runs.join(" ") };
 }
 
 /** Open an export dialog over a fresh seeded-project page; resolves with its title facts. */

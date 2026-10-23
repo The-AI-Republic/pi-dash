@@ -39,8 +39,10 @@
     "prerender": "node tools/prerender.mjs"
   },
   "dependencies": {
+    "@expo-google-fonts/inter": "^0.4.2",
     "@pidash/api-client": "workspace:*",
     "@pidash/kit": "workspace:*",
+    "@react-pdf/renderer": "^4.9.0",
     "@tanstack/react-query": "^5.90.0",
     "@tanstack/react-router": "^1.130.0",
     "@tiptap/core": "catalog:",
