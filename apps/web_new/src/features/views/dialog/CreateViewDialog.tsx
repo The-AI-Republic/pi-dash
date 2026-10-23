@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Project save-view dialog (parity/specs/views.md §5, VIEW-003,
-// VIEW-013, VIEW-014, VIEW-019; §6, VIEW-015). One dialog for every
-// entry point (the list header, the zero-views action, the palette
-// command) in two modes: create opens on defaults, update opens
+// VIEW-013, VIEW-014, VIEW-019; §6, VIEW-015; §8, VIEW-048). One dialog
+// for every entry point (the list header, the zero-views action, the
+// palette command, the detail's Save as) in two modes: create opens on
+// defaults, or on the Save-as prefill when one is provided; update opens
 // prefilled from the record. Opening resets the form. Create success
 // closes, toasts and navigates to the new view; a failed create keeps
 // the dialog open with the input intact for retry (NEWFRONT-221's reset
@@ -50,6 +51,18 @@ import { ViewIconPicker, type ViewLogoProps } from "./ViewIconPicker.js";
 import { parseViewLogo } from "./viewLogo.js";
 import { validateViewTitle } from "./viewTitle.js";
 
+/**
+ * Save-as prefill (parity/specs/views.md §8, VIEW-048): the duplicate opens
+ * on the given title with the live expression and display snapshot. Only
+ * these three ride along; description, icon and access stay at the create
+ * defaults.
+ */
+export interface SaveViewPrefill {
+  title: string;
+  display: DisplayPrefs;
+  expression: Record<string, unknown>;
+}
+
 export interface CreateViewDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -58,6 +71,11 @@ export interface CreateViewDialogProps {
   /** Cycle/module entries hide while their project features are off. */
   hideCycle: boolean;
   hideModule: boolean;
+  /**
+   * Create-mode prefill for the Save-as entry; absent on plain creates,
+   * which open on defaults. Never set in update mode.
+   */
+  prefill?: SaveViewPrefill | undefined;
 }
 
 export interface UpdateViewDialogProps extends CreateViewDialogProps {
@@ -128,6 +146,11 @@ function blankInitial(): SaveViewInitial {
   return { title: "", description: "", logo: null, display: defaultCreateDisplay() };
 }
 
+/** Save-as prefill: the duplicate's title and live display snapshot. */
+function saveAsInitial(prefill: SaveViewPrefill): SaveViewInitial {
+  return { title: prefill.title, description: "", logo: null, display: prefill.display };
+}
+
 interface SaveViewFormBase {
   onOpenChange: (open: boolean) => void;
   workspaceSlug: string;
@@ -138,9 +161,10 @@ interface SaveViewFormBase {
 }
 
 // An explicit union (Omit would collapse the discriminant): the mode
-// narrows the record, so update always carries one.
+// narrows the record, so update always carries one; create optionally
+// carries the Save-as prefill.
 type SaveViewFormProps =
-  | (SaveViewFormBase & { mode: "create"; view?: undefined })
+  | (SaveViewFormBase & { mode: "create"; view?: undefined; prefill?: SaveViewPrefill | undefined })
   | (SaveViewFormBase & { mode: "update"; view: SavedView });
 
 function SaveViewForm(props: SaveViewFormProps): React.ReactElement {
@@ -152,7 +176,12 @@ function SaveViewForm(props: SaveViewFormProps): React.ReactElement {
   // The mode union narrows the record: update always carries one.
   const initial = React.useMemo(
     // Per-visit by design: the chrome remounts this form on every open.
-    () => (props.mode === "update" ? initialFromRecord(props.view) : blankInitial()),
+    () =>
+      props.mode === "update"
+        ? initialFromRecord(props.view)
+        : props.prefill === undefined
+          ? blankInitial()
+          : saveAsInitial(props.prefill),
     [props.mode]
   );
   const [title, setTitle] = React.useState(initial.title);
@@ -349,7 +378,11 @@ function SaveViewForm(props: SaveViewFormProps): React.ReactElement {
             hideCycle={hideCycle}
             hideModule={hideModule}
             registryRef={registryRef}
-            {...(props.mode === "update" ? { expression: props.view.rich_filters } : {})}
+            {...(props.mode === "update"
+              ? { expression: props.view.rich_filters }
+              : props.prefill === undefined
+                ? {}
+                : { expression: props.prefill.expression })}
           />
         </section>
       </div>
@@ -413,14 +446,17 @@ function SaveViewDialog(props: SaveViewDialogProps): React.ReactElement {
         {props.mode === "update" ? (
           <SaveViewForm key={session} {...shared} mode="update" view={props.view} />
         ) : (
-          <SaveViewForm key={session} {...shared} mode="create" />
+          <SaveViewForm key={session} {...shared} mode="create" prefill={props.prefill} />
         )}
       </IssuesLoaderProvider>
     </Dialog>
   );
 }
 
-/** Controlled create dialog; each visit starts from defaults. */
+/**
+ * Controlled create dialog; each visit starts from defaults, or from the
+ * Save-as prefill when one is provided.
+ */
 export function CreateViewDialog(props: CreateViewDialogProps): React.ReactElement {
   return <SaveViewDialog mode="create" {...props} />;
 }

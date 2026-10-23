@@ -1,29 +1,35 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project view detail screen (parity/specs/views.md §7, VIEW-021–024, 028).
-// Reads one stored view and its project, then mounts the issues layout root
-// with the view's own display settings as the source of the rendered layout,
-// its stored expression as the scope of every page, and its stored order.
-// The header carries the project → Views → view trail (last crumb a
-// searchable switcher), the owner-only lock and the tab title. Any record
-// that cannot be read — missing, refused, blank, failed — renders the
-// missing-view state without layout chrome.
-//
-// Layout persistence, Display, filters, Add and Save as belong to the
-// following slice (VIEW-025–027, 048); the issues layout root's own switcher
-// re-renders the current view locally and stores nothing here.
+// Project view detail screen (parity/specs/views.md §7, VIEW-021–024, 028;
+// §8, VIEW-025–027, 048). Reads one stored view and its project, then
+// mounts the issues layout root with the view's own display settings as
+// the source of the rendered layout, its stored expression as the scope
+// of every page, and its stored order. The breadcrumb header carries the
+// project → Views → view trail (last crumb a searchable switcher), the
+// owner-only lock and the tab title; the layout toolbar carries the
+// layout switcher, the Display control, the filter toggle and the Add
+// entry. Layout and display switches edit a live copy and mark the view
+// dirty; the filter row edits the stored expression; Update view persists
+// either through the view's display-filter update path, and Save as forks
+// the live snapshot through the create dialog. A locked view renders its
+// stored layout with no switcher, no Display and no filter toggle. Any
+// record that cannot be read — missing, refused, blank, failed — renders
+// the missing-view state without layout chrome.
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import type { Project, SavedView } from "@pidash/api-client";
+import type { Project, SavedView, SavedViewList } from "@pidash/api-client";
+import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import {
+  DisplayControl,
   IssuesLayoutRoot,
+  LazyIssueFilters,
   ListSkeleton,
   SavedViewEmptyCard,
   ViewLayoutBody,
@@ -34,20 +40,32 @@ import {
   useWeekStart,
   type IssueSearch,
   type LayoutKind,
+  type RichFilterBuilderParts,
+  type ViewSnapshot,
   type WorkItemCreateProject,
 } from "../../issues/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { projectViewDetailQueryOptions } from "../api/detail.js";
+import { viewKeys } from "../api/keys.js";
 import { projectViewsQueryOptions } from "../api/queries.js";
+import { replaceProjectViewRow } from "../lib/projectViewActions.js";
 import { projectViewHref, projectViewsListHref, sortProjectViewsDefault } from "../lib/projectViews.js";
 import { SavedViewHeader } from "./SavedViewHeader.js";
 import { SavedViewMissingState } from "./SavedViewMissingState.js";
-import { savedViewDocumentTitle } from "./model.js";
+import { saveAsTitle, savedViewDocumentTitle } from "./model.js";
 import type { SavedViewDetailParams } from "./preload.js";
 
 const LazyWorkItemCreateDialog = React.lazy(() =>
   import("../../issues/components/WorkItemCreateDialog.js").then((module) => ({
     default: module.WorkItemCreateDialog,
+  }))
+);
+
+// The Save-as duplicate opens the create dialog; it rides its own chunk
+// with the filter section it hosts.
+const LazySaveViewDialog = React.lazy(() =>
+  import("../dialog/CreateViewDialog.js").then((module) => ({
+    default: module.CreateViewDialog,
   }))
 );
 
@@ -105,6 +123,7 @@ export function SavedViewScreen({ params, search }: SavedViewScreenProps): React
       cycleView={project?.cycle_view === true}
       moduleView={project?.module_view === true}
       estimateEnabled={project !== null && project.estimate !== null}
+      viewsEnabled={project?.issue_views_view === true}
       search={search}
       weekStart={weekStart}
       view={view.data}
@@ -132,6 +151,8 @@ interface SavedViewBodyProps {
   cycleView: boolean;
   moduleView: boolean;
   estimateEnabled: boolean;
+  /** The project's views feature; the row's saves wait for it. */
+  viewsEnabled: boolean;
   search: IssueSearch;
   weekStart: number;
   view: SavedView;
@@ -153,6 +174,7 @@ function SavedViewBody({
   cycleView,
   moduleView,
   estimateEnabled,
+  viewsEnabled,
   search,
   weekStart,
   view,
@@ -164,9 +186,11 @@ function SavedViewBody({
   onOpenProject,
 }: SavedViewBodyProps): React.ReactElement {
   const client = getAppClient();
+  const queryClient = useQueryClient();
   const projectEntity = React.useMemo(() => ({ scope: "project" as const, projectId }), [projectId]);
-  // The stored record decides the layout; the root's switcher moves a local
-  // copy so a view can be previewed in another layout without a write.
+  const locked = view.is_locked;
+  // The stored record decides the layout; the toolbar's switches move a
+  // live copy, which marks the view dirty until Update view persists it.
   const storedDisplay = React.useMemo(
     () => parseDisplayPrefs(view.display_filters, view.display_properties),
     [view.display_filters, view.display_properties]
@@ -180,6 +204,9 @@ function SavedViewBody({
     issuesQueryOptions(client, workspaceSlug, projectId, search, view.rich_filters, display.orderBy)
   );
   const [createOpen, setCreateOpen] = React.useState(false);
+  // The Save-as snapshot the row hands over; the dialog stays mounted
+  // while one is held.
+  const [saveAs, setSaveAs] = React.useState<ViewSnapshot | null>(null);
   // The empty card's create entry uses the same creatable-project rule as
   // the issues list: a guest on this project sees it dead.
   const creatable = React.useMemo<WorkItemCreateProject[]>(
@@ -208,6 +235,87 @@ function SavedViewBody({
       }}
     />
   );
+  // The view's own settings, not the personal record: Display edits the
+  // live copy and Update view persists it.
+  const displayControl = (
+    <DisplayControl
+      workspaceSlug={workspaceSlug}
+      entity={projectEntity}
+      offered={VIEW_LAYOUTS}
+      hideCycle={!cycleView}
+      hideModule={!moduleView}
+      display={display}
+      onDisplayChange={setDisplay}
+    />
+  );
+  // Project members and admins only; guests never see the entry. The modal
+  // opens scoped to this project and never touches the view record.
+  const addWorkItem = canEdit ? (
+    <Button
+      variant="primary"
+      size="small"
+      onClick={() => {
+        setCreateOpen(true);
+      }}
+    >
+      Add work item
+    </Button>
+  ) : null;
+
+  /** Adopt an Update-view PATCH echo: the record, the list row, the live copy. */
+  function adoptUpdatedView(stored: SavedView): void {
+    queryClient.setQueryData(viewKeys.projectDetail(workspaceSlug, projectId, view.id), stored);
+    queryClient.setQueryData(viewKeys.projectList(workspaceSlug, projectId), (list: SavedViewList | undefined) =>
+      replaceProjectViewRow(list, stored)
+    );
+    setDisplay(parseDisplayPrefs(stored.display_filters, stored.display_properties));
+  }
+
+  const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => (
+    <IssuesLayoutRoot
+      workspaceSlug={workspaceSlug}
+      entity={projectEntity}
+      title={view.name}
+      totalCount={totalCount}
+      resultCount={rows.length}
+      offered={VIEW_LAYOUTS}
+      display={display}
+      onDisplayChange={(next) => {
+        setDisplay((current) => mergeDisplayPrefs(current, { layout: next }));
+      }}
+      renderLayout={(active, prefs) => (
+        <ViewLayoutBody
+          layout={active}
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          projectIdentifier={projectIdentifier ?? ""}
+          entity={projectEntity}
+          prefs={prefs}
+          canEdit={canEdit}
+          richExpression={view.rich_filters}
+          hideCycle={!cycleView}
+          hideModule={!moduleView}
+          hideEstimate={!estimateEnabled}
+          weekStart={weekStart}
+          issues={rows}
+          totalCount={totalCount}
+          compact={search.layout === "compact"}
+        />
+      )}
+      emptyState={emptyCard}
+      noMatchState={emptyCard}
+      hideSwitcher={locked}
+      headerActions={
+        <>
+          {addWorkItem}
+          {locked ? null : displayControl}
+        </>
+      }
+      displayControl={locked ? undefined : displayControl}
+      filterControl={locked ? undefined : richFilter?.control}
+      filterRow={locked ? undefined : richFilter?.row}
+    />
+  );
 
   return (
     <section aria-label="Saved view" className="flex min-h-0 flex-1 flex-col">
@@ -227,39 +335,24 @@ function SavedViewBody({
           <ListSkeleton />
         </div>
       ) : (
-        <IssuesLayoutRoot
-          workspaceSlug={workspaceSlug}
-          entity={projectEntity}
-          title={view.name}
-          totalCount={totalCount}
-          resultCount={rows.length}
-          offered={VIEW_LAYOUTS}
-          display={display}
-          onDisplayChange={(next) => {
-            setDisplay((current) => mergeDisplayPrefs(current, { layout: next }));
-          }}
-          renderLayout={(active, prefs) => (
-            <ViewLayoutBody
-              layout={active}
-              workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              projectIdentifier={projectIdentifier ?? ""}
-              entity={projectEntity}
-              prefs={prefs}
-              canEdit={canEdit}
-              richExpression={view.rich_filters}
-              hideCycle={!cycleView}
-              hideModule={!moduleView}
-              hideEstimate={!estimateEnabled}
-              weekStart={weekStart}
-              issues={rows}
-              totalCount={totalCount}
-              compact={search.layout === "compact"}
-            />
-          )}
-          emptyState={emptyCard}
-          noMatchState={emptyCard}
-        />
+        <React.Suspense fallback={renderWithFilters(null)}>
+          <LazyIssueFilters
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            entity={projectEntity}
+            hideCycle={!cycleView}
+            hideModule={!moduleView}
+            viewsEnabled={viewsEnabled}
+            view={view}
+            viewDisplay={display}
+            onSavePress={(snapshot) => {
+              setSaveAs(snapshot);
+            }}
+            onViewUpdated={adoptUpdatedView}
+          >
+            {renderWithFilters}
+          </LazyIssueFilters>
+        </React.Suspense>
       )}
       {createOpen ? (
         <React.Suspense fallback={null}>
@@ -269,6 +362,21 @@ function SavedViewBody({
             workspaceSlug={workspaceSlug}
             projects={creatable}
             initialProjectId={projectId}
+          />
+        </React.Suspense>
+      ) : null}
+      {saveAs !== null ? (
+        <React.Suspense fallback={null}>
+          <LazySaveViewDialog
+            open
+            onOpenChange={() => {
+              setSaveAs(null);
+            }}
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            hideCycle={!cycleView}
+            hideModule={!moduleView}
+            prefill={{ title: saveAsTitle(view.name), display, expression: saveAs.expression }}
           />
         </React.Suspense>
       ) : null}

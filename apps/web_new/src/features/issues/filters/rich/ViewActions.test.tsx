@@ -273,7 +273,12 @@ describe("ViewActions", () => {
 
   it("creates a workspace view when the row edits a workspace view", async () => {
     const user = userEvent.setup();
-    const context = { ...savedContext(), viewScope: "workspace" as const };
+    // Save as needs a dirty view; the changed expression offers it.
+    const context = {
+      ...savedContext(),
+      viewScope: "workspace" as const,
+      storedExpression: { priority__in: "low" },
+    };
     const { calls } = renderActions((props) => ({ ...props, context }));
     await openNamedDialog(user, "Copy", "Save as");
     await user.click(screen.getByRole("button", { name: "Create View" }));
@@ -301,10 +306,45 @@ describe("ViewActions", () => {
     expect(screen.getByTestId("rich-clear-all")).toBeInTheDocument();
   });
 
-  it("offers Save as on an unlocked view and no update while clean", () => {
+  it("offers neither Save as nor Update view while the view is clean", () => {
     renderActions((props) => ({ ...props, context: savedContext() }));
-    expect(screen.getByRole("button", { name: "Save as" })).toBeInTheDocument();
+    expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
+  });
+
+  it("offers Save as next to Update view once the view is dirty", () => {
+    const changed = { ...savedContext(), storedExpression: { priority__in: "low" } };
+    renderActions((props) => ({ ...props, context: changed }));
+    expect(screen.getByRole("button", { name: "Save as" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Update view" })).toBeInTheDocument();
+  });
+
+  it("offers Save as on a layout-only change with no live conditions", () => {
+    // The stored expression rides the fork even though the row is empty.
+    const layoutDirty = { ...savedContext(), storedDisplayFilters: { layout: "kanban" } };
+    renderActions((props) => ({ ...props, context: layoutDirty, hasConditions: false }));
+    expect(screen.getByRole("button", { name: "Save as" })).toBeInTheDocument();
+  });
+
+  it("delegates the save press to the host dialog instead of the minimal form", async () => {
+    const user = userEvent.setup();
+    const onSavePress = vi.fn();
+    const changed = { ...savedContext(), storedExpression: { priority__in: "low" } };
+    const { calls } = renderActions((props) => ({ ...props, context: changed, onSavePress }));
+    await user.click(screen.getByRole("button", { name: "Save as" }));
+    expect(onSavePress).toHaveBeenCalledTimes(1);
+    expect(onSavePress).toHaveBeenCalledWith(SNAPSHOT);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it("delegates Save view on a bare list the same way", async () => {
+    const user = userEvent.setup();
+    const onSavePress = vi.fn();
+    renderActions((props) => ({ ...props, onSavePress }));
+    await user.click(screen.getByRole("button", { name: "Save view" }));
+    expect(onSavePress).toHaveBeenCalledWith(SNAPSHOT);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("falls back to my own id when the caller passes none", async () => {

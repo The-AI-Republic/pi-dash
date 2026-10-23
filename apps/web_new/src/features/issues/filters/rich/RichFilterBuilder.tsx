@@ -78,6 +78,12 @@ export interface RichFilterBuilderProps {
   /** Fired after a view create/update so the host can adopt the record. */
   onViewCreated?: ((view: SavedView) => void) | undefined;
   onViewUpdated?: ((view: SavedView) => void) | undefined;
+  /**
+   * Views-owned save dialog (parity/specs/views.md §8, VIEW-048). When the
+   * host provides it, the row's Save view/Save as entry hands it the live
+   * snapshot instead of opening the minimal form.
+   */
+  onSavePress?: ((snapshot: ViewSnapshot) => void) | undefined;
 }
 
 export interface RichFilterBuilderParts {
@@ -346,6 +352,7 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
             commit([]);
           }}
           onCreated={props.onViewCreated}
+          onSavePress={props.onSavePress}
           onUpdated={(stored) => {
             setViewRecord(stored);
             setViewConditions(parseRichExpression(stored.rich_filters));

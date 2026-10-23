@@ -3,10 +3,12 @@
 // See the LICENSE file for details.
 // Right side of the rich-filter row (parity/specs/issues.md §9, ISS-104):
 // clear all, save the current expression as a new view, save a copy from
-// a saved view, and update the view in place. The create dialog asks for
-// a name only and carries the current expression with the display filters
-// and properties; the update is offered to the owner of an unlocked,
-// changed, non-default view and patches the same three keys.
+// a dirty saved view, and update the view in place. The create dialog
+// asks for a name only and carries the current expression with the
+// display filters and properties; a delegated host opens its own dialog
+// with the same snapshot instead (parity/specs/views.md §8, VIEW-048).
+// The update is offered to the owner of an unlocked, changed, non-default
+// view and patches the same three keys.
 
 import {
   createProjectView,
@@ -25,6 +27,7 @@ import {
   buildViewCreate,
   buildViewPatch,
   entityViewContext,
+  isExpressionDirty,
   offersSaveAs,
   offersSaveView,
   offersUpdateView,
@@ -58,6 +61,14 @@ export interface ViewActionsProps {
   onCreated?: ((view: SavedView) => void) | undefined;
   /** Called after a successful update, so the host can adopt stored values. */
   onUpdated?: ((view: SavedView) => void) | undefined;
+  /**
+   * Views-owned save dialog (parity/specs/views.md §8, VIEW-048). When the
+   * host provides it, the Save view/Save as entry hands it the live
+   * snapshot instead of opening the minimal form; the host's dialog posts
+   * the same payload contract (buildViewCreate's keys). Absent on issues
+   * surfaces, which keep the minimal form.
+   */
+  onSavePress?: ((snapshot: ViewSnapshot) => void) | undefined;
 }
 
 /** Server detail when the body carries one; the fixed copy otherwise. */
@@ -82,6 +93,7 @@ export function ViewActions({
   hasConditions,
   onCreated,
   onUpdated,
+  onSavePress,
 }: ViewActionsProps): React.ReactElement | null {
   // The builder passes the id it already read; a surface mounting the row
   // without one falls back to the session read.
@@ -92,9 +104,16 @@ export function ViewActions({
   const [saving, setSaving] = React.useState(false);
   const [updating, setUpdating] = React.useState(false);
 
-  // Saving needs an expression to save; an emptied saved view still offers
-  // Update view, which is how the cleared expression reaches its record.
-  const saveOffered = canEdit && viewsEnabled && hasConditions && (offersSaveView(context) || offersSaveAs(context));
+  // Saving needs something to save. A bare list needs live conditions;
+  // Save as additionally needs a dirty view, and forkable content: live
+  // conditions, or the carried expression when only the display changed.
+  // An emptied saved view offers only Update view, which is how the
+  // cleared expression reaches its record.
+  const saveOffered =
+    canEdit &&
+    viewsEnabled &&
+    ((offersSaveView(context) && hasConditions) ||
+      (offersSaveAs(context, snapshot) && (hasConditions || !isExpressionDirty(context, snapshot))));
   const updateOffered = canEdit && viewsEnabled && offersUpdateView(context, snapshot, viewerId);
   // offersUpdateView only offers a view record, so the id is present whenever
   // the control renders.
@@ -104,6 +123,16 @@ export function ViewActions({
   function openDialog(): void {
     setName("");
     setDialogOpen(true);
+  }
+
+  function pressSave(): void {
+    // A delegated host opens its own dialog with the live snapshot; the
+    // minimal form stays for issues surfaces without a delegate.
+    if (onSavePress !== undefined) {
+      onSavePress(snapshot);
+      return;
+    }
+    openDialog();
   }
 
   async function create(): Promise<void> {
@@ -153,7 +182,7 @@ export function ViewActions({
         </Button>
       ) : null}
       {saveOffered ? (
-        <Button variant="ghost" size="small" onClick={openDialog} data-testid="rich-save-view">
+        <Button variant="ghost" size="small" onClick={pressSave} data-testid="rich-save-view">
           {context.isView ? "Save as" : "Save view"}
         </Button>
       ) : null}

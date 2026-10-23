@@ -373,6 +373,7 @@ describe("view row wiring", () => {
     richFilters: Record<string, unknown>;
     view?: RichFilterBuilderProps["view"];
     onViewUpdated?: (view: import("@pidash/api-client").SavedView) => void;
+    onSavePress?: RichFilterBuilderProps["onSavePress"];
   }): React.ReactElement {
     const { control, row } = useRichFilterBuilder({
       workspaceSlug: "acme",
@@ -382,6 +383,7 @@ describe("view row wiring", () => {
       hideModule: false,
       view: props.view,
       onViewUpdated: props.onViewUpdated,
+      onSavePress: props.onSavePress,
     });
     return (
       <div>
@@ -394,8 +396,13 @@ describe("view row wiring", () => {
   function setupView(
     richFilters: Record<string, unknown>,
     view?: RichFilterBuilderProps["view"],
-    roles: { workspaceRole: number; projectRole: number | null } = { workspaceRole: 20, projectRole: 20 }
-  ): { patches: Array<Record<string, unknown>>; onViewUpdated: ReturnType<typeof vi.fn> } {
+    roles: { workspaceRole: number; projectRole: number | null } = { workspaceRole: 20, projectRole: 20 },
+    onSavePress?: RichFilterBuilderProps["onSavePress"]
+  ): {
+    patches: Array<Record<string, unknown>>;
+    onViewUpdated: ReturnType<typeof vi.fn>;
+    onSavePress: RichFilterBuilderProps["onSavePress"];
+  } {
     const patches: Array<Record<string, unknown>> = [];
     createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
       if (url.endsWith("/auth/get-csrf-token/")) {
@@ -427,11 +434,11 @@ describe("view row wiring", () => {
     render(
       <QueryClientProvider client={queryClient}>
         <IssuesLoaderProvider>
-          <ViewHarness richFilters={richFilters} view={view} onViewUpdated={onViewUpdated} />
+          <ViewHarness richFilters={richFilters} view={view} onViewUpdated={onViewUpdated} onSavePress={onSavePress} />
         </IssuesLoaderProvider>
       </QueryClientProvider>
     );
-    return { patches, onViewUpdated };
+    return { patches, onViewUpdated, onSavePress };
   }
 
   describe("a view record without a stored expression", () => {
@@ -549,12 +556,14 @@ describe("view row wiring", () => {
       },
       { workspaceRole: 15, projectRole: 15 }
     );
-    expect(await screen.findByRole("button", { name: "Save as" })).toBeInTheDocument();
-    // An untouched view reads clean; an edit turns the update on.
+    expect(await screen.findByTestId("rich-condition")).toBeInTheDocument();
+    // An untouched view reads clean; neither save entry offers yet.
+    expect(screen.queryByRole("button", { name: "Save as" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
     const pill = screen.getByTestId("rich-condition");
     await user.click(within(pill).getByRole("button", { name: /^is$/ }));
     await user.click(await screen.findByRole("option", { name: "is not" }));
+    expect(await screen.findByRole("button", { name: "Save as" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Update view" })).toBeInTheDocument();
   });
 
@@ -574,7 +583,7 @@ describe("view row wiring", () => {
     await waitFor(() => expect(patches).toHaveLength(1));
   });
 
-  it("offers Save as for a saved view and Save view on a bare list", async () => {
+  it("offers no fork on a clean saved view; clearing offers only Update view", async () => {
     const user = userEvent.setup();
     setupView(
       { priority__in: "none" },
@@ -588,10 +597,38 @@ describe("view row wiring", () => {
         isDefault: false,
       }
     );
-    expect(await screen.findByRole("button", { name: "Save as" })).toBeInTheDocument();
+    expect(await screen.findByTestId("rich-condition")).toBeInTheDocument();
+    // Clean, even with a stored expression: no fork until something changes.
+    expect(screen.queryByRole("button", { name: "Save as" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
     const first = screen.getByTestId("rich-condition");
     await user.click(within(first).getByRole("button", { name: "Remove filter" }));
+    // Emptied: only Update view carries the cleared expression back.
+    expect(await screen.findByRole("button", { name: "Update view" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save as" })).not.toBeInTheDocument();
+  });
+
+  it("hands the live snapshot to the delegated save dialog", async () => {
+    const user = userEvent.setup();
+    const onSavePress = vi.fn();
+    setupView(
+      { priority__in: "none" },
+      {
+        view: { ...VIEW_RECORD, rich_filters: { priority__in: "urgent" } } as never,
+        isDefault: false,
+      },
+      { workspaceRole: 20, projectRole: 20 },
+      onSavePress
+    );
+    const pill = await screen.findByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /^is$/ }));
+    await user.click(await screen.findByRole("option", { name: "is not" }));
+    await user.click(await screen.findByRole("button", { name: "Save as" }));
+    expect(onSavePress).toHaveBeenCalledTimes(1);
+    expect(onSavePress).toHaveBeenCalledWith(
+      expect.objectContaining({ expression: { not: { priority__in: "urgent" } } })
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
 

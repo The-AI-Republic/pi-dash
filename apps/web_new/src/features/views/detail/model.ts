@@ -1,14 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project view detail model (parity/specs/views.md §7, VIEW-021–024).
-// Pure: the screen owns reads and navigation; this module decides the tab
-// title, the layout a stored record opens with, whether the owner-only
-// lock shows, and the copy the missing-view state renders.
+// Project view detail model (parity/specs/views.md §7, VIEW-021–024; §8,
+// VIEW-025–027, 048). Pure: the screen owns reads and navigation; this
+// module decides the tab title, the layout a stored record opens with,
+// whether the owner-only lock shows, the copy the missing-view state
+// renders, and the name a Save-as duplicate opens with.
 
 import type { SavedView } from "@pidash/api-client";
 
 import { parseLayoutKind, type LayoutKind } from "../../issues/index.js";
+import { UNTITLED_VIEW_NAME } from "../lib/viewListControls.js";
 
 /** Heading pinned by the oracle for every unreadable view (VIEW-022). */
 export const MISSING_VIEW_TITLE = "View does not exist";
@@ -45,4 +47,14 @@ export function showsPrivateLock(view: Pick<SavedView, "access">): boolean {
 export function savedViewDocumentTitle(projectName: string | undefined, view: Pick<SavedView, "name"> | null): string {
   if (view === null) return projectName === undefined || projectName === "" ? "Views" : projectName;
   return savedViewTitle(projectName, view.name);
+}
+
+/**
+ * The name a Save-as duplicate opens with (VIEW-048): the record name plus
+ * a flat ` 2` suffix — not a counter, and never re-suffixed when taken. A
+ * record with no name opens on the placeholder, not a copied string.
+ */
+export function saveAsTitle(name: string): string {
+  if (name.trim() === "") return UNTITLED_VIEW_NAME;
+  return `${name} 2`;
 }

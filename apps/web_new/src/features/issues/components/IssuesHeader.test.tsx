@@ -38,4 +38,23 @@ describe("IssuesHeader", () => {
     );
     expect(screen.getByRole("button", { name: "Display" })).toBeInTheDocument();
   });
+
+  it("hides the switcher while keeping the title, count and actions", () => {
+    render(
+      <IssuesHeader
+        title="Website"
+        totalCount={3}
+        offered={LAYOUT_ORDER}
+        active="kanban"
+        onSwitch={() => {}}
+        actions={<button type="button">Display</button>}
+        hideSwitcher
+      />
+    );
+    expect(screen.getByRole("heading", { name: "Website" })).toBeInTheDocument();
+    expect(screen.getByText("3 issues")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Display" })).toBeInTheDocument();
+    expect(screen.queryByTestId("layout-switcher-segmented")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("layout-switcher-dropdown")).not.toBeInTheDocument();
+  });
 });

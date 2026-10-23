@@ -20,6 +20,12 @@ export interface IssuesHeaderProps {
   onSwitch: (kind: LayoutKind) => void;
   /** Trailing controls (Display, filters, analytics) from later slices. */
   actions?: React.ReactNode;
+  /**
+   * Hide the layout switcher while keeping the title, count and actions
+   * (a locked saved view renders its stored layout with no switcher,
+   * parity/specs/views.md §1).
+   */
+  hideSwitcher?: boolean | undefined;
 }
 
 export function IssuesHeader({
@@ -29,6 +35,7 @@ export function IssuesHeader({
   active,
   onSwitch,
   actions,
+  hideSwitcher = false,
 }: IssuesHeaderProps): React.ReactElement {
   return (
     <div
@@ -41,7 +48,7 @@ export function IssuesHeader({
       </span>
       <div className="ml-auto flex items-center gap-(--space-2)">
         {actions}
-        <LayoutSwitcher offered={offered} active={active} onSwitch={onSwitch} />
+        {hideSwitcher ? null : <LayoutSwitcher offered={offered} active={active} onSwitch={onSwitch} />}
       </div>
     </div>
   );
