@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import socket
+import time
 import uuid
 
 import pytest
@@ -142,10 +143,10 @@ def test_worker_registration(broker_url):
     broker_probe.wait_for_registration(set(WEBHOOK_TASKS))
 
 
-def _seed_workspace_with_hook(db_conn, webhook_sink, url=None, **flags):
+def _seed_workspace_with_hook(db_conn, webhook_sink=None, url=None, *, base_url=None, **flags):
     owner = seed_helpers.user(db_conn, "contract-hook-owner")
     workspace = seed_helpers.workspace(db_conn, "contracthook", owner["id"])
-    url = url or f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    url = url or f"{base_url or config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
     hook = seed_helpers.webhook(db_conn, workspace["id"], url, issue=True, **flags)
     hook = dict(hook)
     hook["workspace_slug"] = workspace["slug"]
@@ -205,6 +206,50 @@ def test_webhook_send_success(db_conn, broker_url, webhook_sink):
     # (POST maps to create).
     assert "contract-probe" in new_rows[0]["request_body"]
     assert "create" in new_rows[0]["request_body"]
+
+
+def test_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
+    db_conn, broker_url, chunked_keepalive_sink
+):
+    """Chunked + keep-alive: finish at the terminal chunk, log 200, no retry.
+
+    The sink answers ``2\\r\\nok\\r\\n0\\r\\n\\r\\n`` and holds the socket open
+    past the client's 30 s timeout. ``requests`` returns at the terminal
+    chunk, so the real 200 is logged and the task is not requeued (Django
+    source: ``webhook_task.py:329-342``).
+    """
+    hook = _seed_workspace_with_hook(
+        db_conn, chunked_keepalive_sink, base_url=chunked_keepalive_sink.url
+    )
+    chunked_keepalive_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = broker_probe.queue_depth()
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": hook["workspace_slug"],
+            "event": "issue",
+            "event_data": {"id": "contract-chunked"},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+    )
+    deliveries = chunked_keepalive_sink.wait_for_count(1, what="chunked webhook POST")
+    assert len(deliveries) == 1
+    rows = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="chunked webhook_logs row",
+    )
+    assert len(rows) == 1
+    assert str(rows[0]["response_status"]) == "200"
+    assert rows[0]["response_body"] == "ok"
+    assert rows[0]["retry_count"] == 0
+    broker_probe.wait_for_queue_drain(baseline=baseline, what="chunked send acked")
+    time.sleep(1)
+    assert len(chunked_keepalive_sink.snapshot()) == 1, "event was redelivered"
+    assert len(_log_diff_rows(db_conn, before)) == 1
 
 
 def test_webhook_send_failure_logs_retry_count(db_conn, broker_url, webhook_sink):
