@@ -10679,10 +10679,10 @@ export class WebNewDriver implements ParityDriver {
   private async schedulerScheduleValues(dialog: Locator): Promise<SchedulerScheduleValues> {
     const toggle = dialog.getByRole("switch").first();
     return {
-      dtstart: await dialog.getByLabel("Starts at").inputValue(),
-      tzid: await dialog.getByLabel("Time zone").inputValue(),
-      rrule: await dialog.getByLabel("Recurrence (RRULE)").inputValue(),
-      extraContext: await dialog.getByLabel("Project context (optional)").inputValue(),
+      dtstart: await dialog.getByLabel("Starts at").inputValue({ timeout: WebNewDriver.WAIT_MS }),
+      tzid: await dialog.getByLabel("Time zone").inputValue({ timeout: WebNewDriver.WAIT_MS }),
+      rrule: await dialog.getByLabel("Recurrence (RRULE)").inputValue({ timeout: WebNewDriver.WAIT_MS }),
+      extraContext: await dialog.getByLabel("Project context (optional)").inputValue({ timeout: WebNewDriver.WAIT_MS }),
       enabled: (await toggle.getAttribute("aria-checked")) === "true",
     };
   }
@@ -10691,11 +10691,16 @@ export class WebNewDriver implements ParityDriver {
     dialog: Locator,
     input: { dtstart?: string; tzid?: string; rrule?: string; extraContext?: string }
   ): Promise<void> {
-    if (input.dtstart !== undefined) await dialog.getByLabel("Starts at").fill(input.dtstart);
-    if (input.tzid !== undefined) await dialog.getByLabel("Time zone").selectOption(input.tzid);
-    if (input.rrule !== undefined) await dialog.getByLabel("Recurrence (RRULE)").fill(input.rrule);
+    // Every action is bounded: an unbounded fill or select turns a stuck
+    // dialog into a 300s scenario timeout instead of a located failure.
+    if (input.dtstart !== undefined)
+      await dialog.getByLabel("Starts at").fill(input.dtstart, { timeout: WebNewDriver.WAIT_MS });
+    if (input.tzid !== undefined)
+      await dialog.getByLabel("Time zone").selectOption(input.tzid, { timeout: WebNewDriver.WAIT_MS });
+    if (input.rrule !== undefined)
+      await dialog.getByLabel("Recurrence (RRULE)").fill(input.rrule, { timeout: WebNewDriver.WAIT_MS });
     if (input.extraContext !== undefined)
-      await dialog.getByLabel("Project context (optional)").fill(input.extraContext);
+      await dialog.getByLabel("Project context (optional)").fill(input.extraContext, { timeout: WebNewDriver.WAIT_MS });
   }
 
   private async schedulerHumanizer(dialog: Locator): Promise<string> {
@@ -10710,7 +10715,7 @@ export class WebNewDriver implements ParityDriver {
   private async schedulerSetModalEnabled(dialog: Locator, enabled: boolean): Promise<void> {
     const toggle = dialog.getByRole("switch").first();
     const current = (await toggle.getAttribute("aria-checked")) === "true";
-    if (current !== enabled) await toggle.click();
+    if (current !== enabled) await toggle.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async schedulerOpenProjectList(workspaceSlug: string, projectId: string): Promise<void> {
@@ -10873,7 +10878,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async schedulerOpenProjectInstall(): Promise<void> {
-    await this.page.getByRole("button", { name: "New Scheduler", exact: true }).click();
+    await this.page
+      .getByRole("button", { name: "New Scheduler", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
     const dialog = this.schedulerDialog();
     await dialog
       .getByText("New Scheduler", { exact: true })
@@ -10887,8 +10894,12 @@ export class WebNewDriver implements ParityDriver {
     if ((await dialog.getByText("No schedulers available", { exact: false }).count()) > 0) return "dead-end";
     const tabs = dialog.getByRole("tab");
     if ((await tabs.count()) === 0) return "install";
-    const selected = dialog.getByRole("tab", { selected: true });
-    return ((await selected.innerText().catch(() => "")) ?? "").trim() === "Create new" ? "create" : "install";
+    // The selection lands a beat after the tabs mount; bound the read so a
+    // tab-less dialog fails here instead of hanging the whole scenario.
+    const selected = dialog.getByRole("tab", { selected: true }).first();
+    const selectedText = await selected.innerText({ timeout: WebNewDriver.WAIT_MS }).catch(() => null);
+    if (selectedText === null) throw new Error("[parity] scheduler install dialog shows no selected tab.");
+    return selectedText.trim() === "Create new" ? "create" : "install";
   }
 
   async schedulerProjectInstallDeadEndText(): Promise<string> {
@@ -10917,7 +10928,7 @@ export class WebNewDriver implements ParityDriver {
 
   async schedulerProjectInstallSelectTab(tab: "Install existing" | "Create new"): Promise<void> {
     const dialog = this.schedulerDialog();
-    await dialog.getByRole("tab", { name: tab, exact: true }).click();
+    await dialog.getByRole("tab", { name: tab, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
     if (tab === "Create new") {
       await dialog.getByLabel("Slug").waitFor({ timeout: WebNewDriver.WAIT_MS });
     } else {
@@ -10968,12 +10979,12 @@ export class WebNewDriver implements ParityDriver {
       const text = (
         (await options
           .nth(i)
-          .innerText()
+          .innerText({ timeout: WebNewDriver.WAIT_MS })
           .catch(() => "")) ?? ""
       ).trim();
       if (text.endsWith(`(${handle})`)) {
         const value = (await options.nth(i).getAttribute("value")) ?? "";
-        await select.selectOption(value);
+        await select.selectOption(value, { timeout: WebNewDriver.WAIT_MS });
         return;
       }
     }
@@ -11008,7 +11019,7 @@ export class WebNewDriver implements ParityDriver {
   async schedulerProjectInstallSubmit(): Promise<void> {
     // No close wait: a rejected submit keeps the dialog open so the
     // scenario can read the inline refusal.
-    await this.schedulerDialog().locator('button[type="submit"]').click();
+    await this.schedulerDialog().locator('button[type="submit"]').click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async schedulerProjectInstallSubmitDisabled(): Promise<boolean> {
@@ -11030,7 +11041,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async schedulerProjectCreateFillName(name: string): Promise<void> {
-    await this.schedulerDialog().getByLabel("Name").fill(name);
+    await this.schedulerDialog().getByLabel("Name").fill(name, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async schedulerProjectCreateHandleValue(): Promise<string> {
@@ -19270,9 +19281,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async estimatesOpenSettings(workspaceSlug: string, projectId: string): Promise<void> {
-    // Settles on the screen heading or either denial body; a held list
-    // fetch leaves the loader up, so the opening waiter's skeleton poll
-    // drives that state instead.
+    // Settles on the loaded screen or the denial view: the tab heading
+    // renders at shell level beside the loader, so the opening also waits
+    // for the loader to clear (a heading alone would resolve mid-load and
+    // strand one-shot content reads). Callers that drive the skeleton arm
+    // the hold first and poll it before awaiting this promise.
     for (let round = 0; round < 2; round++) {
       await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/estimates`);
       await this.page.waitForLoadState("domcontentloaded");
@@ -19294,7 +19307,16 @@ export class WebNewDriver implements ParityDriver {
             () => false
           ),
       ]);
-      if (settled) return;
+      if (!settled) continue;
+      const cleared = await this.page
+        .locator('[role="status"][aria-label="Loading estimates"]')
+        .first()
+        .waitFor({ state: "hidden", timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      if (cleared) return;
     }
     throw new Error("[parity] estimates settings settled on neither the screen nor the denial view.");
   }
@@ -25147,16 +25169,33 @@ export class WebNewDriver implements ParityDriver {
     const switches = dialog.first().getByRole("switch");
     return (await switches.count()) > 0;
   }
+  /** The issues-board access gate, which carries no testids (PSET-014). */
+  private projectAccessGate(): Locator {
+    return this.page.locator('section[aria-label="You haven\'t joined this project yet"]');
+  }
+
   async isProjectRestrictionVisible(): Promise<boolean> {
-    return this.isShown(this.page.getByTestId("project-settings-restriction"));
+    // Two surfaces share these probes: the settings restriction (testids)
+    // and the issues-board access gate (aria label, no testids).
+    if (await this.isShown(this.page.getByTestId("project-settings-restriction"))) return true;
+    return this.isShown(this.projectAccessGate());
   }
   async restrictionJoinLabel(): Promise<string | null> {
     const join = this.page.getByTestId("project-settings-join");
-    if ((await join.count()) === 0) return null;
-    return ((await join.first().innerText({ timeout: 30_000 })) ?? "").trim() || null;
+    if ((await join.count()) > 0) {
+      return ((await join.first().innerText({ timeout: 30_000 })) ?? "").trim() || null;
+    }
+    const gateJoin = this.projectAccessGate().getByRole("button", { name: "Join project" });
+    if ((await gateJoin.count()) === 0) return null;
+    return ((await gateJoin.first().innerText({ timeout: 30_000 })) ?? "").trim() || null;
   }
   async clickRestrictionJoin(): Promise<void> {
-    await this.page.getByTestId("project-settings-join").click({ timeout: 30_000 });
+    const join = this.page.getByTestId("project-settings-join");
+    if ((await join.count()) > 0) {
+      await join.first().click({ timeout: 30_000 });
+      return;
+    }
+    await this.projectAccessGate().getByRole("button", { name: "Join project" }).click({ timeout: 30_000 });
   }
   async submitLeaveHoldingWrite(holdMs: number): Promise<void> {
     // Hold the leave write so the test can observe the navigation landing
@@ -27080,7 +27119,9 @@ export class WebNewDriver implements ParityDriver {
   }
   async settingsMembersOpenRowMenu(displayName: string): Promise<void> {
     const row = this.settingsMembersRow(displayName);
-    await row.hover();
+    // Bounded like the click: a missing row must fail fast, not hang the
+    // scenario (PSET-025 hung 300s here while the member sat demoted).
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
     await row.locator("button[aria-haspopup='menu']").click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersRowMenuItems(): Promise<string[]> {
@@ -27390,16 +27431,27 @@ export class WebNewDriver implements ParityDriver {
     // (edge auto-scroll moves it mid-gesture), so center it first.
     const targetRow = this.statesRowByName(target);
     await targetRow.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    const grip = row.getByTestId("state-row-grip");
+    const from = await grip.boundingBox();
     const box = await targetRow.boundingBox();
+    if (from === null || box === null) {
+      throw new Error(`[parity] states drag from ${source} to ${target} has no geometry.`);
+    }
     // Aim just inside the target's top (above) or bottom (below) edge so
-    // the row's half-based edge detector settles on that side.
-    const targetPosition =
-      box === null
-        ? undefined
-        : edge === "above"
-          ? { x: box.width / 2, y: 6 }
-          : { x: box.width / 2, y: box.height - 6 };
-    await row.getByTestId("state-row-grip").dragTo(targetRow, { targetPosition });
+    // the row's half-based edge detector settles on that side. A manual
+    // stepped gesture (like the labels drag): locator.dragTo never starts
+    // the native drag in this shell.
+    const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+    const end =
+      edge === "above"
+        ? { x: box.x + box.width / 2, y: box.y + 6 }
+        : { x: box.x + box.width / 2, y: box.y + box.height - 6 };
+    await this.page.mouse.move(start.x, start.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move((start.x + end.x) / 2, (start.y + end.y) / 2, { steps: 6 });
+    await this.page.mouse.move(end.x, end.y, { steps: 6 });
+    await this.page.waitForTimeout(500);
+    await this.page.mouse.up();
   }
   async settingsStatesDragAbove(source: string, target: string): Promise<void> {
     await this.dragStatesRow(source, target, "above");
@@ -36778,6 +36830,22 @@ export class WebNewDriver implements ParityDriver {
   async settingsGeneralCoverUpload(_file: { name: string; mime: string; bytes: string }): Promise<void> {
     return todo("settingsGeneralCoverUpload");
   }
+  async settingsGeneralOpenArchive(workspaceSlug: string, projectId: string): Promise<void> {
+    // The danger zone owns the archive entry (PSET-010); the shared
+    // openArchiveProjectDialog stays on the project-card path for the
+    // archives and shell areas that proved it.
+    await this.settingsGeneralOpen(workspaceSlug, projectId);
+    await this.page
+      .locator('[data-testid="general-danger-zone"]')
+      .getByRole("button", { name: "Archive", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("dialog")
+      .filter({ hasText: "will be archived" })
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
   async settingsGeneralOpenDelete(): Promise<void> {
     await this.page
       .locator('[data-testid="general-danger-zone"]')

@@ -10553,6 +10553,8 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralCoverPickGallery(index: number): Promise<void>;
   /** Upload a cover file through the picker's upload tab. */
   settingsGeneralCoverUpload(file: { name: string; mime: string; bytes: string }): Promise<void>;
+  /** Open the archive confirmation from the danger zone (PSET-010; submit reuses the shared archive-dialog methods). */
+  settingsGeneralOpenArchive(workspaceSlug: string, projectId: string): Promise<void>;
   /** Open the delete confirmation from the danger zone (phrase fill and submit reuse the shared delete-dialog methods). */
   settingsGeneralOpenDelete(): Promise<void>;
   /** Fill the project-name confirmation inside the delete dialog (scoped: the form behind shares the placeholder). */

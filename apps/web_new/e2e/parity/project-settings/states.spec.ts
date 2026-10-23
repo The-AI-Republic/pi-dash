@@ -188,8 +188,12 @@ test(
       await test.step("a valid create persists name, description and swatch", async () => {
         await driver.settingsStatesOpenCreate("backlog");
         await driver.settingsStatesOpenColorPicker();
-        await driver.settingsStatesPickColor("#9900EF");
-        await expect.poll(() => driver.settingsStatesDotColor(), { timeout: 10_000 }).toBe("rgb(153, 0, 239)");
+        // The new palette is a fixed spread without the oracle's purple, so
+        // the new run picks a member and matches its computed color.
+        await driver.settingsStatesPickColor(driver.target === "web_new" ? "#8B5CF6" : "#9900EF");
+        await expect
+          .poll(() => driver.settingsStatesDotColor(), { timeout: 10_000 })
+          .toBe(driver.target === "web_new" ? "rgb(139, 92, 246)" : "rgb(153, 0, 239)");
         await driver.settingsStatesFillName(name);
         await driver.settingsStatesFillDescription(`${tag} describes the flow`);
         await driver.settingsStatesSubmitCreate();
@@ -333,6 +337,10 @@ test(
             .toContain("Another state exists with the same name");
           await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(true);
           expect(await driver.settingsStatesNameValue()).toBe(clash);
+          // The open form replaces the row, so close it before the shared
+          // rows assertion below.
+          await driver.settingsStatesCancelForm();
+          await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(false);
         } else {
           await expect
             .poll(
@@ -557,7 +565,10 @@ test(
         await driver.settingsStatesMarkDefault(challenger);
         await expect.poll(() => driver.settingsStatesIsDefault(challenger), { timeout: 15_000 }).toBe(true);
         await expect.poll(() => driver.settingsStatesIsDefault(previous), { timeout: 15_000 }).toBe(false);
-        expect(await defaultStateName(seed.workspaceSlug, projectId, session)).toBe(challenger);
+        // The marker flips optimistically; the server write lands after.
+        await expect
+          .poll(() => defaultStateName(seed.workspaceSlug, projectId, session), { timeout: 20_000 })
+          .toBe(challenger);
       });
 
       // bug: NEWFRONT-403 — the failed promotion keeps the optimistic
@@ -767,6 +778,10 @@ test(
             // rolls back; only a success closes it.
             await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(true);
             expect(await driver.settingsStatesNameValue()).toBe(`${tag} ghost`);
+            // The open form replaces the row, so close it before the shared
+            // rows assertion below.
+            await driver.settingsStatesCancelForm();
+            await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(false);
           } else {
             // The failed submit closes the form; the row restores underneath.
             await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(false);

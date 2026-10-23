@@ -239,6 +239,22 @@ describe("install dialog", () => {
     await expect(driver.schedulerProjectInstallMode()).resolves.toBe("create");
   });
 
+  it("fails loudly when tabs mount with no selection", async () => {
+    const selected = fake({ text: "" });
+    vi.spyOn(selected, "innerText").mockRejectedValueOnce(new Error("timeout"));
+    const dialog = fake({
+      byText: () => absent(),
+      role: (role, options) =>
+        role !== "tab"
+          ? absent()
+          : options?.["selected"] === true
+            ? fake({ first: () => selected })
+            : fake({ count: 2 }),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerProjectInstallMode()).rejects.toThrow("no selected tab");
+  });
+
   it("reads options as name plus handle and selects by handle", async () => {
     const selectOption = vi.fn(async () => undefined);
     const options = fake({
@@ -253,7 +269,7 @@ describe("install dialog", () => {
       { name: "Weekly", handle: "weekly", selected: false },
     ]);
     await driver.schedulerProjectInstallSelect("weekly");
-    expect(selectOption).toHaveBeenCalledWith("s2");
+    expect(selectOption).toHaveBeenCalledWith("s2", { timeout: 30_000 });
   });
 
   it("throws when the chosen handle is not offered", async () => {
