@@ -2216,6 +2216,32 @@ export class WebNewDriver implements ParityDriver {
     return this.draftProperty(name, property).getByRole("button").first();
   }
 
+  /**
+   * The rendered text of one project-feature slot (estimate, cycle or
+   * modules): blank when the draft's project does not offer the
+   * control, so gated rows read empty instead of throwing.
+   */
+  private async draftOptionalPropertyText(name: string, property: string): Promise<string> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    const slot = this.draftProperty(name, property);
+    if ((await slot.count()) === 0) return "";
+    return WebNewDriver.cleanDraftText(await slot.innerText().catch(() => null));
+  }
+
+  /**
+   * The trigger of one project-feature slot, failing fast with the
+   * missing control named when the project does not offer it.
+   */
+  private async draftOptionalPropertyTrigger(name: string, property: string): Promise<Locator> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    if ((await this.draftProperty(name, property).count()) === 0) {
+      throw new Error(`[parity] no ${property} control on draft ${JSON.stringify(name)}.`);
+    }
+    return this.draftPropertyTrigger(name, property);
+  }
+
   /** Open a draft's ellipsis menu and choose one entry. */
   private async openDraftMenu(name: string, entry: string): Promise<void> {
     const block = this.draftBlock(name);
@@ -18547,32 +18573,38 @@ export class WebNewDriver implements ParityDriver {
     await option.waitFor({ timeout: 15_000 });
     return (await option.getAttribute("aria-selected")) === "true";
   }
-  async draftEstimateText(_name: string): Promise<string> {
-    return todo("draftEstimateText");
+  async draftEstimateText(name: string): Promise<string> {
+    return this.draftOptionalPropertyText(name, "estimate");
   }
-  async draftOpenEstimatePicker(_name: string): Promise<void> {
-    return todo("draftOpenEstimatePicker");
+  async draftOpenEstimatePicker(name: string): Promise<void> {
+    await (await this.draftOptionalPropertyTrigger(name, "estimate")).click();
   }
-  async draftEstimatePickerVisible(_name: string): Promise<boolean> {
-    return todo("draftEstimatePickerVisible");
+  async draftEstimatePickerVisible(name: string): Promise<boolean> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    return (await this.draftProperty(name, "estimate").count()) > 0;
   }
-  async draftCycleText(_name: string): Promise<string> {
-    return todo("draftCycleText");
+  async draftCycleText(name: string): Promise<string> {
+    return this.draftOptionalPropertyText(name, "cycle");
   }
-  async draftOpenCyclePicker(_name: string): Promise<void> {
-    return todo("draftOpenCyclePicker");
+  async draftOpenCyclePicker(name: string): Promise<void> {
+    await (await this.draftOptionalPropertyTrigger(name, "cycle")).click();
   }
-  async draftCyclePickerVisible(_name: string): Promise<boolean> {
-    return todo("draftCyclePickerVisible");
+  async draftCyclePickerVisible(name: string): Promise<boolean> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    return (await this.draftProperty(name, "cycle").count()) > 0;
   }
-  async draftModuleText(_name: string): Promise<string> {
-    return todo("draftModuleText");
+  async draftModuleText(name: string): Promise<string> {
+    return this.draftOptionalPropertyText(name, "modules");
   }
-  async draftOpenModulePicker(_name: string): Promise<void> {
-    return todo("draftOpenModulePicker");
+  async draftOpenModulePicker(name: string): Promise<void> {
+    await (await this.draftOptionalPropertyTrigger(name, "modules")).click();
   }
-  async draftModulePickerVisible(_name: string): Promise<boolean> {
-    return todo("draftModulePickerVisible");
+  async draftModulePickerVisible(name: string): Promise<boolean> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    return (await this.draftProperty(name, "modules").count()) > 0;
   }
   async draftFailNextPatch(status: number, delayMs: number): Promise<void> {
     // Only the next drafts PATCH fails, once: reads and other writes
