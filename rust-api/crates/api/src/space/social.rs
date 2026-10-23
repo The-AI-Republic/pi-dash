@@ -103,6 +103,7 @@ use sqlx::Row;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_services::space::{guards, queries};
 
 // ---------------------------------------------------------------------------
@@ -627,21 +628,17 @@ fn python_dump_str(out: &mut String, text: &str) {
     out.push('"');
 }
 
-/// `django.utils.html.strip_tags`: remove every `<...>` span. The comment
-/// `save()` computes `comment_stripped` this way (`db/models/issue.py:601`;
-/// `""` stays `""`).
-fn strip_tags(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut in_tag = false;
-    for ch in value.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
+/// The `Description` mirror row's stripped text on `create()`: `Description.save`
+/// RECOMPUTES it with Django's own `strip_tags` (`db/models/description.py:22-29`),
+/// which keeps entities verbatim — unlike the comment column's entity-decoding
+/// MLStripper (`utils/html_processor.py`). Empty HTML stores NULL. (PATCH syncs
+/// the decoded form via queryset `update()`, which runs no `save()`.)
+fn description_stripped_for_create(comment_html: &str) -> Option<String> {
+    if comment_html.is_empty() {
+        None
+    } else {
+        Some(super::sanitize::strip_tags(comment_html))
     }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2032,8 +2029,9 @@ async fn comment_create_inner(
     let now = chrono::Utc::now();
     let comment_id = uuid::Uuid::new_v4();
     // `IssueComment.save`: `comment_stripped` is recomputed from
-    // `comment_html` (`db/models/issue.py:601`); absent html defaults to
-    // `"<p></p>"` (model default).
+    // `comment_html` with MLStripper (`db/models/issue.py:601` over
+    // `utils/html_processor.py`); absent html defaults to `"<p></p>"`
+    // (model default).
     let html = input
         .comment_html
         .clone()
@@ -2041,7 +2039,7 @@ async fn comment_create_inner(
     let stripped = if html.is_empty() {
         String::new()
     } else {
-        strip_tags(&html)
+        ml_strip_tags(&html)
     };
     let comment_json = input
         .comment_json
@@ -2074,7 +2072,8 @@ async fn comment_create_inner(
     .await?;
     // The `Description` mirror row (`IssueComment.save`, `:604-623`):
     // workspace/project follow the comment, `created_by` is the actor,
-    // `updated_by` stays NULL on create.
+    // `updated_by` stays NULL on create. `Description.save` recomputes the
+    // stripped text with Django's verbatim `strip_tags`, not the ML value.
     let description_id = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_stripped, description_json, description_html, description_binary) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, NULL)")
         .bind(description_id)
@@ -2082,7 +2081,7 @@ async fn comment_create_inner(
         .bind(actor.id)
         .bind(workspace_id)
         .bind(project_id)
-        .bind(&stripped)
+        .bind(description_stripped_for_create(&html))
         .bind(&comment_json)
         .bind(&html)
         .execute(&mut *tx)
@@ -2308,7 +2307,7 @@ async fn comment_partial_update_inner(
     // explicit `comment_stripped` without new html is overwritten back.
     let html = input.comment_html.clone().or(old.comment_html.clone());
     let stripped = match &html {
-        Some(text) if !text.is_empty() => strip_tags(text),
+        Some(text) if !text.is_empty() => ml_strip_tags(text),
         _ => String::new(),
     };
     let now = chrono::Utc::now();
@@ -2463,7 +2462,9 @@ async fn apply_comment_update(
             .bind(parse_old_uuid(&old.updated_by)?)
             .bind(workspace_id)
             .bind(project_id)
-            .bind(&stripped_value)
+            // A relinked Description is a fresh `create()`, so its stripped
+            // text is the `Description.save` recompute, not the ML value.
+            .bind(description_stripped_for_create(&new_html))
             .bind(&comment_json)
             .bind(&new_html)
             .execute(pool)
@@ -3845,10 +3846,23 @@ mod tests {
     }
 
     #[test]
-    fn strip_tags_matches_django() {
-        assert_eq!(strip_tags("<p>hi</p>"), "hi");
-        assert_eq!(strip_tags(""), "");
-        assert_eq!(strip_tags("<p></p>"), "");
+    fn description_mirror_keeps_entities_verbatim() {
+        // `Description.save` recomputes with Django's own `strip_tags`
+        // (`db/models/description.py:22-29`): entities verbatim, a bare `<`
+        // kept as text, empty HTML stores NULL.
+        assert_eq!(description_stripped_for_create(""), None);
+        assert_eq!(
+            description_stripped_for_create("<p>hi</p>"),
+            Some("hi".to_owned())
+        );
+        assert_eq!(
+            description_stripped_for_create("<p>Tom &amp; Jerry</p>"),
+            Some("Tom &amp; Jerry".to_owned())
+        );
+        assert_eq!(
+            description_stripped_for_create("<p>I <3 this</p>"),
+            Some("I <3 this".to_owned())
+        );
     }
 
     #[test]
