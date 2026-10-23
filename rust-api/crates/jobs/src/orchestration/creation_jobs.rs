@@ -2003,9 +2003,10 @@ mod tests {
              refresh_token_fingerprint, refresh_token_generation, \
              previous_refresh_token_hash, access_token_signing_key_version, \
              enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, \
-             os, arch, runner_version, dev_metadata, protocol_version, revoked_reason) \
+             os, arch, runner_version, dev_metadata, protocol_version, revoked_reason, \
+             last_heartbeat_at) \
              VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 0, '', '', 0, '', \
-             1, '', '', '[]', $7, '', '', '', '{}', 1, '')",
+             1, '', '', '[]', $7, '', '', '', '{}', 1, '', $2)",
         )
         .bind(id)
         .bind(now())
@@ -2409,7 +2410,7 @@ mod tests {
         assert_eq!(row.3, None);
         assert_eq!(row.6, "review");
         assert!(row.11.contains("You are reviewing"));
-        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 10);
+        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 11);
         cleanup(
             &pool,
             graph,
@@ -2583,7 +2584,7 @@ mod tests {
         assert_eq!(row.3, Some(runner));
         assert_eq!(row.5, "comment_and_run");
         assert!(!row.11.is_empty());
-        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 16);
+        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 17);
         cleanup(
             &pool,
             graph,
@@ -2813,7 +2814,7 @@ mod tests {
             })
         );
         assert!(!row.11.is_empty());
-        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 16);
+        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 17);
         cleanup(
             &pool,
             graph,
