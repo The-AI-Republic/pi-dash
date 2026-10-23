@@ -413,7 +413,6 @@ pub trait ToolStore {
     /// Insert one relation row (`relations.relate :196-207`); `Ok(false)`
     /// is the unique-violation race (re-read, don't fail).
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     async fn insert_relation(
         &self,
         issue_id: &Uuid,
@@ -612,6 +611,42 @@ impl PgToolStore {
             managed,
             toolsets: Arc::new(pidash_services::extensions::NoExtraToolsets),
         })
+    }
+
+    /// Post-commit completion comment-back for a state-changing save
+    /// (`github_signals.py:44-75`, via the jobs-layer port). The caller
+    /// gates on its own transition check; this resolves the dispatch
+    /// (group, mirror, idempotency guards) and enqueues the provider's
+    /// `post_completion_comment` job. Best-effort: failures only warn.
+    async fn enqueue_completion_comment(
+        &self,
+        issue_id: &Uuid,
+        prev_state_id: Option<&Uuid>,
+        current_state_id: Option<&Uuid>,
+    ) {
+        use pidash_jobs::integrations::github_signals::{
+            dispatch_completion_comment, dispatch_job, DispatchOutcome,
+        };
+        let outcome = dispatch_completion_comment(
+            &self.pool,
+            issue_id,
+            current_state_id,
+            false,
+            prev_state_id,
+        )
+        .await;
+        let target = match outcome {
+            Ok(DispatchOutcome::Dispatch(target)) => target,
+            Ok(DispatchOutcome::Skip(_)) => return,
+            Err(error) => {
+                tracing::warn!(%error, "completion comment dispatch lookup failed; op stands");
+                return;
+            }
+        };
+        let job = dispatch_job(&target);
+        if let Err(error) = pidash_jobs::queue::enqueue(&self.pool, &job).await {
+            tracing::warn!(%error, task = %job.task, "task enqueue failed; op stands");
+        }
     }
 }
 
@@ -1818,6 +1853,22 @@ impl ToolStore for PgToolStore {
             (tx, None, None)
         };
         tx.commit().await?;
+        // `github_signals.trigger_completion_comment`
+        // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored
+        // issue into a completed-group state enqueues the provider's
+        // `post_completion_comment`. Django fires this from
+        // `Issue.save()` (`issues.py:369`), so the tool path gets it
+        // for free; here signals are explicit calls after commit.
+        // `changed` is the transition gate (a target state was given
+        // and differs from the locked pre-save state); the dispatch
+        // helper re-checks the completed group, the mirror order (git
+        // before github) and the already-commented guard. Best-effort
+        // like the relation enqueues: the edit already committed, so
+        // a lookup or queue failure must not fail the tool.
+        if changed {
+            self.enqueue_completion_comment(issue_id, from_id.as_ref(), row.state_id.as_ref())
+                .await;
+        }
         // Post-commit dispatch drain (the `dispatch_coding_run` drain
         // shape, duplicated: unlike D-11 — whose `moved_by_run` makes
         // the outbox unreachable — human moves dispatch here, after the
