@@ -295,8 +295,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 26864,
-          "body_sha256": "0437791d7c674fbcfc2362601d818ac17e57e9ec6da6a7949862e08588605ce0",
+          "body_len": 27449,
+          "body_sha256": "e7a1201de9cd87ab786170229d1491375baa0d3418570f64c5f4e6441086bca7",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
