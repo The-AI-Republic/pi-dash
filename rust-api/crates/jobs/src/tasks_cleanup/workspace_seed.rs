@@ -42,8 +42,9 @@
 //!   `convert_uuid_to_integer(project.id)` (`sha256(str(uuid))[:8]` signed
 //!   big-endian, `utils/uuid.py:19-26`); the auto `IssueSequence` row from
 //!   `save` (NULL audit, workspace from project) PLUS the explicit
-//!   `IssueSequence.objects.create` row (bot audit) — two rows per issue,
-//!   ported as-is; `assigned_pod` resolves through
+//!   `IssueSequence.objects.create` row (NULL audit: the constructor arg
+//!   never reaches `BaseModel.save`, which wipes both audit columns with
+//!   no crum user) — two rows per issue, ported as-is; `assigned_pod` resolves through
 //!   `Pod.default_for_project_id` (`runner/models.py:174-176`, NULL when no
 //!   default pod); `completed_at` from the state's group.
 //! * `create_views`: `query` is `{}` for the seed rows (empty filters).
@@ -394,8 +395,9 @@ pub trait SeedStore {
         sequence: i64,
     ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
 
-    /// The explicit `IssueSequence.objects.create :293-298` row (bot
-    /// audit, default `sequence = 1`).
+    /// The explicit `IssueSequence.objects.create :293-298` row (NULL
+    /// audit — `BaseModel.save` wipes the constructor arg with no crum
+    /// user; default `sequence = 1`).
     fn insert_issue_sequence(
         &self,
         ctx: &RequestContext,
@@ -1790,24 +1792,23 @@ impl SeedStore for PgSeedStore {
 
     async fn insert_issue_sequence(
         &self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         issue_id: uuid::Uuid,
         project_id: uuid::Uuid,
         workspace_id: uuid::Uuid,
     ) -> Result<uuid::Uuid, String> {
-        // The explicit `.objects.create` row (`:293-298`): bot audit,
+        // The explicit `.objects.create` row (`:293-298`): NULL audit
+        // (`BaseModel.save` wipes the constructor arg, no crum user),
         // default `sequence = 1`.
-        let actor = ctx_actor(ctx)?;
         let id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO issue_sequences (created_at, updated_at, id, sequence, deleted,
                created_by_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at)
              VALUES ($1, $1, $2, 1, false,
-               $3, $4, $5, NULL, $6, NULL)
+               NULL, $3, $4, NULL, $5, NULL)
              RETURNING id",
         )
         .bind(self.now)
         .bind(uuid::Uuid::new_v4())
-        .bind(actor)
         .bind(issue_id)
         .bind(project_id)
         .bind(workspace_id)
@@ -1852,23 +1853,23 @@ impl SeedStore for PgSeedStore {
 
     async fn insert_issue_label(
         &self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         issue_id: uuid::Uuid,
         label_id: uuid::Uuid,
         project_id: uuid::Uuid,
         workspace_id: uuid::Uuid,
     ) -> Result<uuid::Uuid, String> {
-        let actor = ctx_actor(ctx)?;
+        // `.objects.create :312-318`: NULL audit (`BaseModel.save` wipes
+        // the constructor arg, no crum user).
         let id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO issue_labels (created_at, updated_at, id, created_by_id,
                issue_id, label_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, $3,
-               $4, $5, $6, NULL, $7, NULL)
+             VALUES ($1, $1, $2, NULL,
+               $3, $4, $5, NULL, $6, NULL)
              RETURNING id",
         )
         .bind(self.now)
         .bind(uuid::Uuid::new_v4())
-        .bind(actor)
         .bind(issue_id)
         .bind(label_id)
         .bind(project_id)
@@ -1881,23 +1882,23 @@ impl SeedStore for PgSeedStore {
 
     async fn insert_cycle_issue(
         &self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         issue_id: uuid::Uuid,
         cycle_id: uuid::Uuid,
         project_id: uuid::Uuid,
         workspace_id: uuid::Uuid,
     ) -> Result<uuid::Uuid, String> {
-        let actor = ctx_actor(ctx)?;
+        // `.objects.create :322-328`: NULL audit (`BaseModel.save` wipes
+        // the constructor arg, no crum user).
         let id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO cycle_issues (created_at, updated_at, id, created_by_id,
                cycle_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, $3,
-               $4, $5, $6, NULL, $7, NULL)
+             VALUES ($1, $1, $2, NULL,
+               $3, $4, $5, NULL, $6, NULL)
              RETURNING id",
         )
         .bind(self.now)
         .bind(uuid::Uuid::new_v4())
-        .bind(actor)
         .bind(cycle_id)
         .bind(issue_id)
         .bind(project_id)
@@ -1910,23 +1911,23 @@ impl SeedStore for PgSeedStore {
 
     async fn insert_module_issue(
         &self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         issue_id: uuid::Uuid,
         module_id: uuid::Uuid,
         project_id: uuid::Uuid,
         workspace_id: uuid::Uuid,
     ) -> Result<uuid::Uuid, String> {
-        let actor = ctx_actor(ctx)?;
+        // `.objects.create :333-339`: NULL audit (`BaseModel.save` wipes
+        // the constructor arg, no crum user).
         let id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO module_issues (created_at, updated_at, id, created_by_id,
                issue_id, module_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, $3,
-               $4, $5, $6, NULL, $7, NULL)
+             VALUES ($1, $1, $2, NULL,
+               $3, $4, $5, NULL, $6, NULL)
              RETURNING id",
         )
         .bind(self.now)
         .bind(uuid::Uuid::new_v4())
-        .bind(actor)
         .bind(issue_id)
         .bind(module_id)
         .bind(project_id)
