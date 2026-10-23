@@ -57,6 +57,8 @@ from .runners import (
     DevMachineRotateEndpoint,
     RunnerDetailEndpoint,
     RunnerListEndpoint,
+    RunnerPauseEndpoint,
+    RunnerResumeEndpoint,
     RunnerRevokeEndpoint,
 )
 from .runs import (
@@ -122,6 +124,8 @@ __all__ = [
     "DevMachineRotateEndpoint",
     "RunnerDetailEndpoint",
     "RunnerListEndpoint",
+    "RunnerPauseEndpoint",
+    "RunnerResumeEndpoint",
     "AgentReTickEndpoint",
     "AgentRunCancelEndpoint",
     "AgentRunDetailEndpoint",
