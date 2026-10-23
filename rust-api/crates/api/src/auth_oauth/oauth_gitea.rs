@@ -1601,7 +1601,7 @@ pub async fn invalidate_workspace_members_cache(
     let url = redis_url
         .filter(|u| !u.is_empty())
         .ok_or_else(|| "cache backend unavailable".to_owned())?;
-    let client = redis::Client::open(url).map_err(|e| e.to_string())?;
+    let client = pidash_db::redis::open_client(url).map_err(|e| e.to_string())?;
     let mut conn = client
         .get_multiplexed_async_connection()
         .await
