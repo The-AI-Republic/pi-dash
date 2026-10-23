@@ -346,8 +346,9 @@ async fn insert_new(pool: &sqlx::PgPool, row: &SessionRow) -> Result<String, Sto
 // RequestSession: the `request.session` equivalent in extensions
 // ---------------------------------------------------------------------------
 
-/// How long the saved session lives. Handlers set this; the default is
-/// "the settings age", matching a store that never calls
+/// How long the saved session lives. `load` derives it from the stored
+/// `_session_expiry` value (handlers may still override it); the default
+/// is "the settings age", matching a store that never calls
 /// `set_expiry`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SessionExpiry {
@@ -360,6 +361,42 @@ pub enum SessionExpiry {
     BrowserClose,
     /// `set_expiry(seconds)`: explicit age for both row and cookie.
     AgeSecs(i64),
+    /// `set_expiry(datetime)`: absolute expiry instant (unix seconds).
+    /// `get_expiry_age()` / `get_expiry_date()` semantics: the cookie
+    /// carries the remaining age, the row the instant itself.
+    AtUnix(i64),
+}
+
+/// The stored `_session_expiry` value, mapped the way `get_expiry_age`
+/// and `get_expiry_date` read it (`base.py:200-245`): missing (or an
+/// unparseable value) means the settings age, `0` means browser-close,
+/// an int means that many seconds, and an ISO datetime string means
+/// that absolute instant (`set_expiry` stores datetimes via
+/// `value.isoformat()`). A naive string reads as UTC; Django would 500
+/// comparing it against an aware `now()`, but no writer stores one.
+fn stored_expiry(data: &BTreeMap<String, serde_json::Value>) -> SessionExpiry {
+    let Some(value) = data.get("_session_expiry") else {
+        return SessionExpiry::Default;
+    };
+    match value {
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(0) => SessionExpiry::BrowserClose,
+            Some(secs) => SessionExpiry::AgeSecs(secs),
+            None => SessionExpiry::Default,
+        },
+        serde_json::Value::String(s) => {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                SessionExpiry::AtUnix(dt.timestamp())
+            } else if let Ok(naive) =
+                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+            {
+                SessionExpiry::AtUnix(naive.and_utc().timestamp())
+            } else {
+                SessionExpiry::Default
+            }
+        }
+        _ => SessionExpiry::Default,
+    }
 }
 
 /// Shared handle to the live session, stored in request extensions under
@@ -439,12 +476,13 @@ impl RequestSession {
                 Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
                 _ => return Self::empty(),
             };
+        let expiry = stored_expiry(&data);
         Self {
             key: Some(key),
             data,
             modified: false,
             accessed: false,
-            expiry: SessionExpiry::Default,
+            expiry,
             auth_rejected: false,
         }
     }
@@ -487,12 +525,16 @@ impl RequestSession {
     /// Empty the session, like `flush()` + `clear()`: data gone, key
     /// dropped (the next save issues a fresh one), `modified` set so the
     /// delete-cookie branch can tell "was emptied" from "was always empty".
+    /// The expiry resets too: `flush()` drops `_session_expiry` with the
+    /// rest of the dict, so a repopulated session saves under the
+    /// settings age, never a stale override.
     pub fn clear(&mut self) {
         self.data.clear();
         self.key = None;
         self.accessed = true;
         self.modified = true;
         self.auth_rejected = false;
+        self.expiry = SessionExpiry::Default;
     }
 
     /// Django `get_user` returned anonymous without flushing: hide the
@@ -631,6 +673,11 @@ impl<S> SessionConfig<S> {
                 Some(secs),
                 Some(pidash_auth::session::http_date(now_unix + secs)),
                 now_unix + secs,
+            ),
+            SessionExpiry::AtUnix(at) => (
+                Some(at - now_unix),
+                Some(pidash_auth::session::http_date(at)),
+                at,
             ),
             SessionExpiry::Default => {
                 let age = if cookie_name == self.admin_cookie_name.as_str() {
@@ -1486,6 +1533,13 @@ mod tests {
         assert_eq!(max_age, None);
         assert_eq!(expires, None);
         assert_eq!(row_expire, 1_000_000 + 604800);
+        // Absolute instant: the cookie carries the remaining age, the row
+        // the instant itself (`get_expiry_age` / `get_expiry_date`).
+        let (max_age, expires, row_expire) =
+            full.cookie_lifetime("session-id", SessionExpiry::AtUnix(1_000_500), 1_000_000);
+        assert_eq!(max_age, Some(500));
+        assert_eq!(expires.as_deref(), Some("Mon, 12 Jan 1970 13:55:00 GMT"));
+        assert_eq!(row_expire, 1_000_500);
         // Routing itself: the substring test, verbatim.
         assert_eq!(
             full.cookie_name_for("/api/instances/x/"),
@@ -1524,6 +1578,140 @@ mod tests {
             session.data.get("oauth_state").and_then(|v| v.as_str()),
             Some("xyz")
         );
+    }
+
+    #[test]
+    fn load_maps_stored_session_expiry() {
+        use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
+
+        // (payload, expected `SessionExpiry`) — the `get_expiry_age` /
+        // `get_expiry_date` read rules (`base.py:200-245`). The ISO
+        // strings are unix 1_000_000 (`1970-01-12T13:46:40Z`).
+        let cases: Vec<(serde_json::Value, SessionExpiry)> = vec![
+            (
+                serde_json::json!({"_auth_user_id": "u1"}),
+                SessionExpiry::Default,
+            ),
+            (
+                serde_json::json!({"_session_expiry": 3600}),
+                SessionExpiry::AgeSecs(3600),
+            ),
+            (
+                serde_json::json!({"_session_expiry": 0}),
+                SessionExpiry::BrowserClose,
+            ),
+            (
+                serde_json::json!({"_session_expiry": "1970-01-12T13:46:40+00:00"}),
+                SessionExpiry::AtUnix(1_000_000),
+            ),
+            (
+                serde_json::json!({"_session_expiry": "1970-01-12T13:46:40.500000"}),
+                SessionExpiry::AtUnix(1_000_000),
+            ),
+            (
+                serde_json::json!({"_session_expiry": "not-a-date"}),
+                SessionExpiry::Default,
+            ),
+            (
+                serde_json::json!({"_session_expiry": [1]}),
+                SessionExpiry::Default,
+            ),
+        ];
+        let signer = Signer::new(SECRET, SESSION_SIGNING_SALT);
+        for (payload, expected) in cases {
+            let session_data = signer.sign_object(&payload, 4_000_000_000).expect("sign");
+            let session = RequestSession::load(
+                "somekey".to_string(),
+                Some(StoredSession {
+                    session_data,
+                    expire_date_unix: 4_100_000_000,
+                }),
+                SECRET,
+                3_000_000_000,
+            );
+            assert_eq!(session.expiry, expected, "payload {payload}");
+        }
+    }
+
+    #[tokio::test]
+    async fn save_every_request_keeps_stored_expiry_age() {
+        use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
+
+        // An admin login row: `_session_expiry: 3600` in the payload. The
+        // re-save must keep now + 3600, not fall back to the 7-day age.
+        let store = MemorySessionStore::new();
+        let signer = Signer::new(SECRET, SESSION_SIGNING_SALT);
+        let session_data = signer
+            .sign_object(
+                &serde_json::json!({"_auth_user_id": "admin-1", "_session_expiry": 3600}),
+                4_000_000_000,
+            )
+            .expect("sign");
+        store
+            .save(SessionRow {
+                key: Some("adminkey123".to_string()),
+                session_data,
+                expire_date_unix: 4_100_000_000,
+                user_id: Some("admin-1".to_string()),
+                device_info: None,
+            })
+            .await
+            .expect("seed");
+        let mut full = config(Some(store.clone()));
+        full.save_every_request = true;
+        let inner = axum::Router::new().route("/api/instances/x/", axum::routing::any(read_only));
+        let response = SessionLayer::new(full)
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/instances/x/")
+                    .header(header::COOKIE, "admin-session-id=adminkey123")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookies = set_cookies(&response);
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookie_key(&cookies[0], "admin-session-id"), "adminkey123");
+        let stored = store
+            .load("adminkey123".to_string())
+            .await
+            .expect("load")
+            .expect("row");
+        assert!(
+            (stored.expire_date_unix - (now_unix() + 3600)).abs() < 60,
+            "row {}",
+            stored.expire_date_unix
+        );
+    }
+
+    #[test]
+    fn clear_resets_a_stored_expiry_override() {
+        use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
+
+        // `flush()` drops `_session_expiry` with the rest of the dict, so
+        // a cleared-then-repopulated session saves under the settings age.
+        let signer = Signer::new(SECRET, SESSION_SIGNING_SALT);
+        let session_data = signer
+            .sign_object(
+                &serde_json::json!({"_auth_user_id": "u1", "_session_expiry": 3600}),
+                4_000_000_000,
+            )
+            .expect("sign");
+        let mut session = RequestSession::load(
+            "somekey".to_string(),
+            Some(StoredSession {
+                session_data,
+                expire_date_unix: 4_100_000_000,
+            }),
+            SECRET,
+            3_000_000_000,
+        );
+        assert_eq!(session.expiry, SessionExpiry::AgeSecs(3600));
+        session.clear();
+        assert_eq!(session.expiry, SessionExpiry::Default);
     }
 
     #[test]

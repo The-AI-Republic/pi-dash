@@ -506,6 +506,34 @@ pub trait ToolStore {
         now: &DateTime<Utc>,
     ) -> Result<TransitionOutcome, StoreError>;
 
+    /// The `create_issue` post-save fire (`signals.py:74-108`): a
+    /// post-commit `handle_issue_state_transition(from=None, to=state,
+    /// actor=None, dispatch_immediate=True)` on its own transaction,
+    /// reached through the services `fire_state_transition` receiver
+    /// (PIDASHCONV-1251). Preflight runs on the drive transaction —
+    /// the `update_issue_row` probe/stub/re-run shape — so the bounce
+    /// sees the drive's own uncommitted ticker row (a pool-side bounce
+    /// would see no row and skip the explicit disarm).
+    ///
+    /// The tool saves through `Issue.save` (`issues.py:256-277`), so
+    /// the receiver fires with prior state None and the saved state;
+    /// `actor=None` is the signal default (`fire_transition_request`),
+    /// and a handler failure is swallowed with the verbatim log line
+    /// and a bumped counter — the save stands. `created_by` is the
+    /// actor: the create path runs impersonated (`issues.py:256`,
+    /// `with impersonate(user)`), as the update path does. Returns the
+    /// drive outcome (`None` when the handler was skipped or its
+    /// failure swallowed); only a *lookup* storage failure propagates,
+    /// exactly the `try` placement in `fire_state_transition` (the
+    /// `fire_after_save` precedent).
+    async fn drive_create_transition(
+        &self,
+        issue_id: &Uuid,
+        to_state: pidash_services::orchestration::creation::StateView,
+        actor_id: &Uuid,
+        now: &DateTime<Utc>,
+    ) -> Result<Option<TransitionOutcome>, StoreError>;
+
     /// Comment INSERT + `Description` INSERT + `description_id` link, one
     /// transaction (`IssueComment.save`).
     async fn create_comment_row(
@@ -2000,6 +2028,240 @@ impl ToolStore for PgToolStore {
             created_run_id: outcome.created_run,
             reason: outcome.reason,
         })
+    }
+
+    async fn drive_create_transition(
+        &self,
+        issue_id: &Uuid,
+        to_state: pidash_services::orchestration::creation::StateView,
+        actor_id: &Uuid,
+        now: &DateTime<Utc>,
+    ) -> Result<Option<TransitionOutcome>, StoreError> {
+        use pidash_jobs::orchestration::{LiveCreationStore, RunnerSeamCache, StoreDeps};
+        use pidash_services::orchestration::entries::{
+            fire_state_transition, FireOutcome, FireRequest,
+        };
+        // The creator's BYOK key presence for the managed-LLM profile
+        // closure (D-11 `drive_transition`).
+        let key_row: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+            "SELECT api_key_encrypted FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1",
+        )
+        .bind(actor_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
+        let actor = *actor_id;
+        let cloud = self.cloud.clone();
+        let managed = self.managed.clone();
+        let toolsets = Arc::clone(&self.toolsets);
+        let now_unix_secs = now.timestamp();
+        // Built twice (store + preflight take owned deps; the driver
+        // consults preflight at most once per drive).
+        let make_deps = || StoreDeps {
+            cloud: cloud.clone(),
+            managed: managed.clone(),
+            cache: RunnerSeamCache::default(),
+            toolsets: Arc::clone(&toolsets),
+            has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
+            llm_profile: move |user: Option<Uuid>| {
+                let key = user == Some(actor) && has_key;
+                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
+                pidash_services::dispatch::LlmProfile {
+                    available: profile.available,
+                    reason_code: profile.reason_code,
+                }
+            },
+            now_unix_secs,
+        };
+        // `fire_state_transition` (`signals.py:74-108`): prior state
+        // None (a create has no pre-save row), the saved state, the
+        // receiver defaults. `jitter_secs: 0.0`: the L5 quirk-5
+        // precedent (the v1 human-move drivers pass 0.0 as well).
+        // `moved_by_run: None`: the tools are human-equivalent moves,
+        // so the entry-run builder is reachable. `created_by:
+        // Some(actor)`: the create path runs impersonated
+        // (`issues.py:256`).
+        let request = FireRequest {
+            issue_id: *issue_id,
+            prev_state_id: None,
+            current_state_id: Some(to_state.id),
+            dispatch_immediate: true,
+            moved_by_run: None,
+            now: *now,
+            jitter_secs: 0.0,
+            created_by: Some(*actor_id),
+        };
+        // One transaction for the whole drive: the create already
+        // committed (no outer atomic survives `create_issue_row`), so
+        // the drive owns it. Preflight runs on that same transaction
+        // — the `update_issue_row` fused shape (PIDASHCONV-1124): the
+        // bounce must see this drive's own uncommitted ticker row
+        // (the explicit-disarm arm) — a pool-side bounce (as
+        // `TurnPreflight` runs on the dispatch path) would see no row
+        // and skip the disarm, while a pool-side lock would hang on
+        // this transaction's ticker lock. So the driver lends the tx
+        // to only one seam at a time: probe the decision behind a
+        // savepoint (the probe's bounce writes roll back), drive with
+        // a fixed-decision stub, and — only when stubbed false —
+        // re-run the services preflight after the drive, so the real
+        // bounce lands post-reconcile, exactly as in Python.
+        let matcher =
+            pidash_api::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
+        let triggered_by = pidash_db::dispatch::status::AgentRunTrigger::StateTransition.value();
+        let mut tx = pidash_db::tx::Transaction::begin(&self.pool).await?;
+        sqlx::query("SAVEPOINT turn_preflight_probe")
+            .execute(&mut **tx.inner())
+            .await?;
+        let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+        // `resolve_pod_for_issue` reads issue + pods only (no
+        // ticker), so probing pre-reconcile decides identically to
+        // Python's post-reconcile preflight. `None` still stubs
+        // false: the drive re-resolves the pod itself, and only
+        // consults the stub when it finds one (the appear-race) —
+        // the re-run then derives the true decision.
+        let probed_pod = pidash_services::orchestration::creation::resolve_pod_for_issue(
+            &mut probe_store,
+            *issue_id,
+        )
+        .await
+        .map_err(|error| StoreError::Transition(error.to_string()))?;
+        let proceed = match probed_pod {
+            Some(pod_id) => {
+                let probe =
+                    pidash_services::orchestration::dispatch::preflight_eligibility_or_bounce(
+                        &mut probe_store,
+                        *issue_id,
+                        Some(actor),
+                        pod_id,
+                        triggered_by,
+                        &matcher,
+                        *now,
+                        0.0,
+                    )
+                    .await
+                    .map_err(|error| StoreError::Transition(error.to_string()))?;
+                probe.proceed
+            }
+            None => false,
+        };
+        // The probe's outboxes stay empty (the bounce dispatches,
+        // defers, and finalizes nothing), so only the tx is
+        // recovered; the savepoint rollback erases the probe's
+        // writes, and its log lines are dropped (the re-run emits
+        // the real bounce's lines once).
+        let (mut tx, _, _, _, _, _) = probe_store.into_parts();
+        sqlx::query("ROLLBACK TO SAVEPOINT turn_preflight_probe")
+            .execute(&mut **tx.inner())
+            .await?;
+        let mut drive_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+        let mut stub = FixedPreflight {
+            proceed,
+            consulted: false,
+        };
+        let outcome = fire_state_transition(&mut drive_store, &mut stub, &request).await;
+        let (tx, pool, cache, mut dispatches, mut deferred, mut terminal_effects) =
+            drive_store.into_parts();
+        // Only a state-*lookup* storage failure propagates (Python's
+        // `try` wraps the handler call alone, `signals.py:89-98`); a
+        // handler failure arrives as `Failed` and is swallowed below.
+        let outcome = outcome.map_err(|error| match error {
+            pidash_services::orchestration::entries::EntriesError::Store(store) => {
+                StoreError::Transition(store.to_string())
+            }
+            other => StoreError::Transition(other.to_string()),
+        })?;
+        // Only a consulted stub owes the re-run: early returns
+        // (parked, queued, no creator/pod, race lost) consult
+        // nothing, and Python bounces on none of them.
+        let (tx, dispatches, deferred, terminal_effects) = if !proceed && stub.consulted {
+            // The re-run IS the real bounce when it still says so
+            // (same services fn, same tx, post-reconcile state);
+            // when eligibility flipped concurrently it proceeds and
+            // the armed ticker covers the entry on the next tick.
+            // Fresh pod first (closest to Python's read position),
+            // the probed id when the pod vanished mid-drive (as
+            // Python's single read would have seen it).
+            let mut bounce_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+            let fresh_pod = pidash_services::orchestration::creation::resolve_pod_for_issue(
+                &mut bounce_store,
+                *issue_id,
+            )
+            .await
+            .map_err(|error| StoreError::Transition(error.to_string()))?;
+            if let Some(pod_id) = fresh_pod.or(probed_pod) {
+                let rerun =
+                    pidash_services::orchestration::dispatch::preflight_eligibility_or_bounce(
+                        &mut bounce_store,
+                        *issue_id,
+                        Some(actor),
+                        pod_id,
+                        triggered_by,
+                        &matcher,
+                        *now,
+                        0.0,
+                    )
+                    .await
+                    .map_err(|error| StoreError::Transition(error.to_string()))?;
+                for log in &rerun.logs {
+                    if log.level == "WARNING" {
+                        tracing::warn!(target: "pidash.preflight", "{}", log.message);
+                    } else {
+                        tracing::info!(target: "pidash.preflight", "{}", log.message);
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    target: "pidash.preflight",
+                    "turn create drive: pod vanished mid-drive for issue {issue_id}, skipping bounce",
+                );
+            }
+            let (tx, _, _, redispatches, redeferred, reterminal) = bounce_store.into_parts();
+            dispatches.extend(redispatches);
+            deferred.extend(redeferred);
+            terminal_effects.extend(reterminal);
+            (tx, dispatches, deferred, terminal_effects)
+        } else {
+            (tx, dispatches, deferred, terminal_effects)
+        };
+        match outcome {
+            FireOutcome::NoTransition => {
+                let _ = tx.rollback().await;
+                Ok(None)
+            }
+            FireOutcome::Failed { log_line, .. } => {
+                // The save stands; nothing this drive wrote is kept
+                // (the `fire_issue_transition` precedent,
+                // PIDASHCONV-1216). The counter already bumped inside.
+                let _ = tx.rollback().await;
+                tracing::error!("{log_line}");
+                Ok(None)
+            }
+            FireOutcome::Called(transition) => {
+                tx.commit().await?;
+                // Post-commit dispatch drain: human moves dispatch
+                // here — after the commit, so the runner read sees
+                // the rows (the `drive_transition` drain shape).
+                for run_id in dispatches {
+                    pidash_jobs::dispatch::dispatch_agent_run(pool, &self.cloud, run_id, *now)
+                        .await
+                        .map_err(StoreError::from)?;
+                }
+                for consume in &deferred {
+                    pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
+                }
+                if !terminal_effects.is_empty() {
+                    // Python's transition never finalizes a run: fail closed.
+                    return Err(StoreError::Transition(
+                        "turn transition finalized a run: unreachable, no finalization on this path"
+                            .to_owned(),
+                    ));
+                }
+                Ok(Some(TransitionOutcome {
+                    created_run_id: transition.created_run,
+                    reason: transition.reason,
+                }))
+            }
+        }
     }
 
     async fn create_comment_row(
