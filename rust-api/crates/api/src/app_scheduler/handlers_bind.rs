@@ -1164,22 +1164,6 @@ fn validate_boolean_input(value: &Value) -> Result<bool, String> {
     }
 }
 
-/// DRF `ChoiceField` input for `outcome_mode`: `str(data)` looked up in
-/// the three choices, else `"..." is not a valid choice.` with the Python
-/// `str()` spelling of the input.
-fn validate_outcome_mode_input(value: &Value) -> Result<String, String> {
-    const CHOICES: &[&str] = &["create_issue", "apply_fix", "fix_and_review"];
-    let text = match value {
-        Value::String(text) => text.clone(),
-        _ => py_str(value),
-    };
-    if CHOICES.contains(&text.as_str()) {
-        Ok(text)
-    } else {
-        Err(format!("\"{text}\" is not a valid choice."))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // DRF `DateTimeField` input (Django `parse_datetime` + `enforce_timezone`)
 // ---------------------------------------------------------------------------
@@ -1640,7 +1624,6 @@ struct BindingAttrs {
     exdates: Option<Vec<String>>,
     extra_context: Option<String>,
     enabled: Option<bool>,
-    outcome_mode: Option<String>,
     pod: Option<Option<PodChoice>>,
 }
 
@@ -1667,7 +1650,8 @@ async fn validate_binding_fields(
     let mut attrs = BindingAttrs::default();
     // (field, error) in `_writable_fields` order: scheduler, project,
     // dtstart, tzid, rrule, rdates, exdates, extra_context, enabled,
-    // outcome_mode, pod.
+    // pod. `outcome_mode` was removed (PDASHOSS01-281): a stale client
+    // that still sends it is ignored like any unknown key.
     let mut errors: Vec<(&str, FieldError)> = Vec::new();
 
     // scheduler: required PK (guard-passed on install, so the re-lookup
@@ -1845,21 +1829,6 @@ async fn validate_binding_fields(
         Some(value) => match validate_boolean_input(value) {
             Ok(flag) => attrs.enabled = Some(flag),
             Err(message) => errors.push(("enabled", FieldError::List(vec![message]))),
-        },
-    }
-
-    // outcome_mode: DRF ChoiceField over the three modes.
-    match body.get("outcome_mode") {
-        None => {}
-        Some(Value::Null) => {
-            errors.push((
-                "outcome_mode",
-                FieldError::List(vec!["This field may not be null.".to_owned()]),
-            ));
-        }
-        Some(value) => match validate_outcome_mode_input(value) {
-            Ok(mode) => attrs.outcome_mode = Some(mode),
-            Err(message) => errors.push(("outcome_mode", FieldError::List(vec![message]))),
         },
     }
 
@@ -2255,9 +2224,9 @@ async fn fetch_binding_detail(
 // Row decode (fixture SELECT order → the `queries`/`db` row structs)
 // ---------------------------------------------------------------------------
 
-/// Column counts per BR1 segment (bindings 22 + schedulers 14 +
-/// `AGENT_RUN_COLUMNS` 41 + `POD_COLUMNS` 10 = 87; pinned in tests).
-const BINDING_COLUMN_COUNT: usize = 22;
+/// Column counts per BR1 segment (bindings 21 + schedulers 14 +
+/// `AGENT_RUN_COLUMNS` 41 + `POD_COLUMNS` 10 = 86; pinned in tests).
+const BINDING_COLUMN_COUNT: usize = 21;
 const SCHEDULER_COLUMN_COUNT: usize = 14;
 
 /// Decode one `scheduler_bindings` row in fixture SELECT order
@@ -2282,12 +2251,11 @@ fn decode_binding(
         exdates: row.try_get(13).map_err(|_| Denial::ServerError)?,
         extra_context: row.try_get(14).map_err(|_| Denial::ServerError)?,
         enabled: row.try_get(15).map_err(|_| Denial::ServerError)?,
-        outcome_mode: row.try_get(16).map_err(|_| Denial::ServerError)?,
-        next_run_at: row.try_get(17).map_err(|_| Denial::ServerError)?,
-        last_run_id: row.try_get(18).map_err(|_| Denial::ServerError)?,
-        last_error: row.try_get(19).map_err(|_| Denial::ServerError)?,
-        actor_id: row.try_get(20).map_err(|_| Denial::ServerError)?,
-        pod_id: row.try_get(21).map_err(|_| Denial::ServerError)?,
+        next_run_at: row.try_get(16).map_err(|_| Denial::ServerError)?,
+        last_run_id: row.try_get(17).map_err(|_| Denial::ServerError)?,
+        last_error: row.try_get(18).map_err(|_| Denial::ServerError)?,
+        actor_id: row.try_get(19).map_err(|_| Denial::ServerError)?,
+        pod_id: row.try_get(20).map_err(|_| Denial::ServerError)?,
     })
 }
 
@@ -2529,10 +2497,6 @@ async fn insert_binding(pool: &PgPool, install: &InstallAttrs) -> Result<SavedBi
     let exdates = attrs.exdates.clone().unwrap_or_default();
     let extra_context = attrs.extra_context.clone().unwrap_or_default();
     let enabled = attrs.enabled.unwrap_or(true);
-    let outcome_mode = attrs
-        .outcome_mode
-        .clone()
-        .unwrap_or_else(|| "create_issue".to_owned());
     let pod_id = attrs
         .pod
         .as_ref()
@@ -2557,7 +2521,6 @@ async fn insert_binding(pool: &PgPool, install: &InstallAttrs) -> Result<SavedBi
         .bind(iso_list_value(&exdates))
         .bind(&extra_context)
         .bind(enabled)
-        .bind(&outcome_mode)
         .bind(install.actor_id)
         .bind(pod_id)
         .execute(pool)
@@ -2581,7 +2544,6 @@ async fn insert_binding(pool: &PgPool, install: &InstallAttrs) -> Result<SavedBi
             exdates: iso_list_value(&exdates),
             extra_context,
             enabled,
-            outcome_mode,
             next_run_at: None,
             last_run_id: None,
             last_error: String::new(),
@@ -2621,10 +2583,6 @@ async fn update_binding(
         .clone()
         .unwrap_or_else(|| current.extra_context.clone());
     let enabled = attrs.enabled.unwrap_or(current.enabled);
-    let outcome_mode = attrs
-        .outcome_mode
-        .clone()
-        .unwrap_or_else(|| current.outcome_mode.clone());
     let pod_id = attrs
         .pod
         .as_ref()
@@ -2639,7 +2597,6 @@ async fn update_binding(
         .bind(&exdates)
         .bind(&extra_context)
         .bind(enabled)
-        .bind(&outcome_mode)
         .bind(pod_id)
         .bind(binding_id)
         .execute(pool)
@@ -2677,10 +2634,6 @@ fn patched_row(
             .clone()
             .unwrap_or_else(|| current.extra_context.clone()),
         enabled: attrs.enabled.unwrap_or(current.enabled),
-        outcome_mode: attrs
-            .outcome_mode
-            .clone()
-            .unwrap_or_else(|| current.outcome_mode.clone()),
         pod_id: attrs
             .pod
             .as_ref()
@@ -2891,7 +2844,7 @@ struct BindingDetailExtra<'a> {
 /// against [`shape::BINDING_SERIALIZER_FIELDS`] in tests). `detail` is
 /// `Some` on the detail GET / PATCH response only, appending the 4
 /// detail keys in [`shape::BINDING_DETAIL_FIELDS`] order (list/install
-/// pass `None` — their 25-key bodies are unchanged).
+/// pass `None` — their 24-key bodies are unchanged).
 #[allow(clippy::too_many_arguments)]
 fn render_binding_object(
     id: &Uuid,
@@ -2906,7 +2859,6 @@ fn render_binding_object(
     exdates: &Value,
     extra_context: &str,
     enabled: bool,
-    outcome_mode: &str,
     pod_id: &Option<Uuid>,
     pod_name: &Option<String>,
     next_run_at: &Option<DateTime<Utc>>,
@@ -2949,10 +2901,6 @@ fn render_binding_object(
         Value::String(extra_context.to_owned()),
     );
     row.insert("enabled".to_owned(), Value::Bool(enabled));
-    row.insert(
-        "outcome_mode".to_owned(),
-        Value::String(outcome_mode.to_owned()),
-    );
     row.insert("pod".to_owned(), render_uuid_opt(pod_id));
     row.insert(
         "pod_name".to_owned(),
@@ -3062,7 +3010,6 @@ fn render_binding_row(row: &queries::BindingListRow, timezone: &Tz) -> Result<St
         &binding.exdates,
         binding.extra_context.as_str(),
         binding.enabled,
-        binding.outcome_mode.as_str(),
         &binding.pod_id,
         &pod_name,
         &binding.next_run_at,
@@ -3111,11 +3058,7 @@ async fn render_detail_binding(
         .as_ref()
         .map(|display| display.prompt.as_str())
         .unwrap_or("");
-    let resolved_prompt = shape::resolved_prompt_for(
-        scheduler_prompt,
-        row.extra_context.as_str(),
-        row.outcome_mode.as_str(),
-    );
+    let resolved_prompt = shape::resolved_prompt_for(scheduler_prompt, row.extra_context.as_str());
     let run_count = fetch_binding_run_count(pool, &row.id).await?;
     let extra = BindingDetailExtra {
         resolved_prompt,
@@ -3138,7 +3081,6 @@ async fn render_detail_binding(
         &row.exdates,
         row.extra_context.as_str(),
         row.enabled,
-        row.outcome_mode.as_str(),
         &row.pod_id,
         &pod_name,
         &row.next_run_at,
@@ -3184,7 +3126,6 @@ fn render_saved_binding(
         &row.exdates,
         row.extra_context.as_str(),
         row.enabled,
-        row.outcome_mode.as_str(),
         &row.pod_id,
         &saved.pod_name,
         &row.next_run_at,
@@ -3391,7 +3332,7 @@ mod tests {
 
     #[test]
     fn br1_segment_layout_matches_layer_consts() {
-        assert_eq!(BINDING_COLUMN_COUNT, 22);
+        assert_eq!(BINDING_COLUMN_COUNT, 21);
         assert_eq!(SCHEDULER_COLUMN_COUNT, 14);
         assert_eq!(queries::AGENT_RUN_COLUMNS.len(), 41);
         assert_eq!(queries::POD_COLUMNS.len(), 10);
@@ -3400,7 +3341,7 @@ mod tests {
                 + SCHEDULER_COLUMN_COUNT
                 + queries::AGENT_RUN_COLUMNS.len()
                 + queries::POD_COLUMNS.len(),
-            87
+            86
         );
         // The display columns the render reads, by layer-const position.
         let run_base = BINDING_COLUMN_COUNT + SCHEDULER_COLUMN_COUNT;
@@ -3410,8 +3351,8 @@ mod tests {
         assert_eq!(queries::AGENT_RUN_COLUMNS[40], "ended_at");
         assert_eq!(queries::POD_COLUMNS[0], "id");
         assert_eq!(queries::POD_COLUMNS[3], "name");
-        assert_eq!(run_base, 36);
-        assert_eq!(pod_base, 77);
+        assert_eq!(run_base, 35);
+        assert_eq!(pod_base, 76);
     }
 
     // -- Render ---------------------------------------------------------------
@@ -3445,7 +3386,6 @@ mod tests {
             &Value::Array(vec![]),
             "",
             true,
-            "create_issue",
             &None,
             &None,
             &None,
@@ -3488,7 +3428,7 @@ mod tests {
             is_enabled: false,
         });
         let extra = BindingDetailExtra {
-            resolved_prompt: "Audit.\n\n## Work mode: create issues".to_owned(),
+            resolved_prompt: "Audit.\n\nFocus.".to_owned(),
             run_count: 7,
             scheduler_source: display.as_ref().map(|d| d.source.as_str()),
             scheduler_is_enabled: display.as_ref().map(|d| d.is_enabled),
@@ -3506,7 +3446,6 @@ mod tests {
             &Value::Array(vec![]),
             "",
             true,
-            "create_issue",
             &None,
             &None,
             &None,
@@ -3528,10 +3467,7 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, shape::BINDING_DETAIL_FIELDS);
-        assert_eq!(
-            parsed["resolved_prompt"],
-            "Audit.\n\n## Work mode: create issues"
-        );
+        assert_eq!(parsed["resolved_prompt"], "Audit.\n\nFocus.");
         assert_eq!(parsed["run_count"], 7);
         assert_eq!(parsed["scheduler_source"], "manifest");
         assert_eq!(parsed["scheduler_is_enabled"], false);
@@ -3559,7 +3495,6 @@ mod tests {
             &Value::Array(vec![]),
             "",
             true,
-            "create_issue",
             &None,
             &None,
             &None,
@@ -3620,7 +3555,6 @@ mod tests {
             &Value::Array(vec![]),
             "",
             true,
-            "create_issue",
             &None,
             &None,
             &None,
@@ -3837,25 +3771,6 @@ mod tests {
                 "{input}"
             );
         }
-    }
-
-    #[test]
-    fn outcome_mode_matches_choicefield() {
-        for mode in ["create_issue", "apply_fix", "fix_and_review"] {
-            assert_eq!(
-                validate_outcome_mode_input(&Value::String(mode.to_owned())),
-                Ok(mode.to_owned())
-            );
-        }
-        assert_eq!(
-            validate_outcome_mode_input(&Value::String("explode".to_owned())),
-            Err("\"explode\" is not a valid choice.".to_owned())
-        );
-        assert_eq!(
-            validate_outcome_mode_input(&Value::Bool(true)),
-            Err("\"True\" is not a valid choice.".to_owned()),
-            "Python str() spelling of the input"
-        );
     }
 
     // -- DateTime input ---------------------------------------------------------

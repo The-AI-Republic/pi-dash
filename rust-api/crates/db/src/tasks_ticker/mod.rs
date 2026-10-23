@@ -5,16 +5,15 @@
 //!
 //! * [`models`] — `IssueAgentTicker` (+ budget/interval/jitter helpers),
 //!   `TickerDisarmReason`, `Scheduler`, `SchedulerBinding`,
-//!   `SchedulerSource`, `OutcomeMode`, `OUTCOME_MODE_DIRECTIVES`
+//!   `SchedulerSource`
 //!   (PIDASHCONV-206). Scanners and fire paths belong to PIDASHCONV-207;
 //!   the rrule engine belongs to its own layer issue.
 
 pub mod models;
 
 pub use models::{
-    issue_agent_ticker::IssueAgentTicker, jitter_seconds, outcome_mode_directive,
-    pool_size_or_default, resolve_project_interval, scheduler::Scheduler,
-    scheduler_binding::SchedulerBinding, OnDelete, OutcomeMode, SchedulerSource,
-    TickerDisarmReason, DEFAULT_INTERVAL_SECONDS, DEFAULT_MAX_TICKS, INFINITE_MAX_TICKS,
-    JITTER_FRACTION, LAST_ERROR_MAX_LEN, OUTCOME_MODE_DIRECTIVES,
+    issue_agent_ticker::IssueAgentTicker, jitter_seconds, pool_size_or_default,
+    resolve_project_interval, scheduler::Scheduler, scheduler_binding::SchedulerBinding, OnDelete,
+    SchedulerSource, TickerDisarmReason, DEFAULT_INTERVAL_SECONDS, DEFAULT_MAX_TICKS,
+    INFINITE_MAX_TICKS, JITTER_FRACTION, LAST_ERROR_MAX_LEN,
 };

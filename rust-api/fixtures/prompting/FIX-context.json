@@ -97,7 +97,7 @@
           "name": "Security Audit",
           "slug": "security-audit"
         },
-        "task_body_len": 1091,
+        "task_body_len": 693,
         "top_keys": [
           "available_tools",
           "extra_toolsets",
@@ -111,10 +111,10 @@
           "workspace"
         ]
       },
-      "task_body_cloud": "Scan this project's source code for potential security vulnerabilities\n(injection, auth bypass, secret leakage, unsafe deserialization, SSRF,\ninsecure defaults).\n\nFor each finding, create a Pi Dash issue using the `pi-dash` CLI:\n    pi-dash issue create \\\n      --title \"[security] <short summary>\" \\\n      --description \"<file path, line range, vulnerable snippet,\n                     severity (high|medium|low), and suggested fix>\"\n\nBefore creating an issue, list existing open issues with the\n\"[security]\" title prefix and skip any finding that already has a\ncorresponding open issue (de-dupe by file + rule, not by exact title).\n\nFocus on auth.\n\nSearch for duplicates and create at most one Pi Dash backlog issue for the most important new finding.",
-      "task_body_cloud_run_differs": true,
-      "task_body_local": "Scan this project's source code for potential security vulnerabilities\n(injection, auth bypass, secret leakage, unsafe deserialization, SSRF,\ninsecure defaults).\n\nFor each finding, create a Pi Dash issue using the `pi-dash` CLI:\n    pi-dash issue create \\\n      --title \"[security] <short summary>\" \\\n      --description \"<file path, line range, vulnerable snippet,\n                     severity (high|medium|low), and suggested fix>\"\n\nBefore creating an issue, list existing open issues with the\n\"[security]\" title prefix and skip any finding that already has a\ncorresponding open issue (de-dupe by file + rule, not by exact title).\n\nFocus on auth.\n\n## Work mode: create issues\n\nFor each distinct finding, file a Pi Dash issue with the `pidash` CLI:\n    pidash issue create --project <PROJ> --title \"<short summary>\" \\\n        --description \"<file path, line range, evidence, severity, suggested fix>\"\nBefore creating an issue, list existing open issues and skip any finding that already has a corresponding open issue (de-dupe by file + root cause, not by exact title). Do NOT modify code.",
-      "trace": "context.py:521-643 (build_context), 646-663 (build_scheduler_task_body: prompt + extra_context + outcome directive joined by blank lines), 666-718 (build_scheduler_context: no issue keys, cloud branch 677-689 replaces directive); helpers 22-32 (description fallback), 35-43 (identifier), 55-69 (ancestor cap 50), 332-338 (_humanize_interval), 497-518 (extra_toolsets_vars)"
+      "task_body_cloud": "Scan this project's source code for potential security vulnerabilities\n(injection, auth bypass, secret leakage, unsafe deserialization, SSRF,\ninsecure defaults).\n\nFor each finding, create a Pi Dash issue using the `pidash` CLI:\n    pidash issue create \\\n      --project <this project's identifier> \\\n      --title \"[security] <short summary>\" \\\n      --description \"<file path, line range, vulnerable snippet,\n                     severity (high|medium|low), and suggested fix>\"\n\nBefore creating an issue, list existing open issues with the\n\"[security]\" title prefix and skip any finding that already has a\ncorresponding open issue (de-dupe by file + rule, not by exact title).\n\nFocus on auth.",
+      "task_body_cloud_run_differs": false,
+      "task_body_local": "Scan this project's source code for potential security vulnerabilities\n(injection, auth bypass, secret leakage, unsafe deserialization, SSRF,\ninsecure defaults).\n\nFor each finding, create a Pi Dash issue using the `pidash` CLI:\n    pidash issue create \\\n      --project <this project's identifier> \\\n      --title \"[security] <short summary>\" \\\n      --description \"<file path, line range, vulnerable snippet,\n                     severity (high|medium|low), and suggested fix>\"\n\nBefore creating an issue, list existing open issues with the\n\"[security]\" title prefix and skip any finding that already has a\ncorresponding open issue (de-dupe by file + rule, not by exact title).\n\nFocus on auth.",
+      "trace": "context.py:521-643 (build_context), build_scheduler_task_body (prompt + extra_context joined by a blank line; no directive since PDASHOSS01-281), build_scheduler_context (no issue keys; same body for every executor); helpers 22-32 (description fallback), 35-43 (identifier), 55-69 (ancestor cap 50), 332-338 (_humanize_interval), 497-518 (extra_toolsets_vars)"
     },
     "helpers": {
       "actor_label_display_wins": "D",
@@ -166,7 +166,7 @@
   "fixture_id": "FIX-context",
   "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
   "notes": [],
-  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "ported_from": "dbf7e996a74ccca20ae66582fe13958497e7a972",
   "trace": [
     "prompting/context.py:22-69 (description/identifier/ancestor helpers), 72-77 (_MAX_RELATIONSHIP_ITEMS=25), 80-246 (children/related/directional relations + open_blockers), 249-294 (url/actor/comment labels), 297-329 (_comments_section), 332-398 (_humanize_interval/_tick_context), 401-431 (parent payload/run kind), 434-494 (_repo_context/_code_reviews_context), 497-518 (extra_toolsets_vars), 521-643 (build_context), 646-663 (build_scheduler_task_body), 666-718 (build_scheduler_context), 721-731 (_compute_attempt)"
   ]

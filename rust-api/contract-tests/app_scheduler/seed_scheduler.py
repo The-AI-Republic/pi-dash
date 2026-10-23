@@ -51,7 +51,6 @@ def create_binding(
     rrule: str = "FREQ=HOURLY",
     tzid: str = "UTC",
     enabled: bool = True,
-    outcome_mode: str = "create_issue",
     actor_id: str | None = None,
     pod_id: str | None = None,
 ) -> dict:
@@ -60,12 +59,12 @@ def create_binding(
     conn.execute(
         """INSERT INTO scheduler_bindings (id, extra_context, enabled,
             last_error, workspace_id, project_id, scheduler_id, dtstart,
-            tzid, rrule, rdates, exdates, outcome_mode, created_at,
+            tzid, rrule, rdates, exdates, created_at,
             updated_at, actor_id, pod_id)
-        VALUES (%s,'',%s,'',%s,%s,%s,%s,%s,%s,'[]','[]',%s,%s,%s,%s,%s)""",
+        VALUES (%s,'',%s,'',%s,%s,%s,%s,%s,%s,'[]','[]',%s,%s,%s,%s)""",
         (
             bid, enabled, workspace_id, project_id, scheduler_id, dtstart,
-            tzid, rrule, outcome_mode, now, now, actor_id, pod_id,
+            tzid, rrule, now, now, actor_id, pod_id,
         ),
     )
     return {"id": bid}

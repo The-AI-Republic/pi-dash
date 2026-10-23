@@ -17,7 +17,7 @@ KEY = "pl"
 BINDING_KEYS = [
     "id", "scheduler", "scheduler_slug", "scheduler_name", "project",
     "workspace", "dtstart", "tzid", "rrule", "rdates", "exdates",
-    "extra_context", "enabled", "outcome_mode", "pod", "pod_name",
+    "extra_context", "enabled", "pod", "pod_name",
     "next_run_at", "last_run", "last_run_status", "last_run_started_at",
     "last_run_ended_at", "last_error", "created_at", "updated_at",
 ]
@@ -46,7 +46,6 @@ def test_member_lists_project_schedulers(seed):
     assert b["enabled"] is True
     assert b["next_run_at"] is not None
     assert b["next_run_at"] == "2026-10-20T00:00:00Z"
-    assert b["outcome_mode"] == "create_issue"
     assert b["id"] == str(seed["binding"]["id"])
     assert b["scheduler"] == str(seed["scheduler"]["id"])
     assert b["scheduler_slug"] == seed["scheduler"]["slug"]

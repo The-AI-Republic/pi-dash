@@ -2104,13 +2104,7 @@ type TargetCols = (
     Option<String>,
 );
 type ReviewCols = (String, Option<String>, String, bool, bool, String, String);
-type BindingCols = (
-    uuid::Uuid,
-    Option<uuid::Uuid>,
-    uuid::Uuid,
-    Option<String>,
-    Option<String>,
-);
+type BindingCols = (uuid::Uuid, Option<uuid::Uuid>, uuid::Uuid, Option<String>);
 type SchedulerCols = (String, String, Option<String>, Option<String>);
 type ParentCols = (Option<String>, Option<uuid::Uuid>, Option<String>, i64);
 
@@ -2926,7 +2920,7 @@ async fn load_scheduler_context(
         "binding_id is required for the scheduler kind",
     )?;
     let row: Option<BindingCols> = sqlx::query_as(
-        r#"SELECT b.id, b.project_id, b.scheduler_id, b.extra_context, b.outcome_mode
+        r#"SELECT b.id, b.project_id, b.scheduler_id, b.extra_context
            FROM scheduler_bindings b
            WHERE b.id = $1 AND b.workspace_id = $2 AND b.deleted_at IS NULL"#,
     )
@@ -2935,7 +2929,7 @@ async fn load_scheduler_context(
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let Some((_, project_id, scheduler_id, extra_context, outcome_mode)) = row else {
+    let Some((_, project_id, scheduler_id, extra_context)) = row else {
         return Err(Denial::NotError("scheduler binding not found".to_owned()));
     };
     let scheduler: Option<SchedulerCols> =
@@ -2960,8 +2954,6 @@ async fn load_scheduler_context(
         }
         None => (String::new(), String::new(), String::new(), None),
     };
-    let outcome_directive =
-        context::outcome_mode_directive(outcome_mode.as_deref().unwrap_or("")).to_owned();
     let input = context::SchedulerContextInput {
         workspace_slug: workspace.slug.clone(),
         workspace_name: workspace.name.clone(),
@@ -2986,7 +2978,6 @@ async fn load_scheduler_context(
         limits: Value::Null,
         scheduler_prompt: scheduler_prompt.unwrap_or_default(),
         binding_extra_context: extra_context.unwrap_or_default(),
-        outcome_directive,
     };
     Ok(context::build_scheduler_context(&input))
 }
