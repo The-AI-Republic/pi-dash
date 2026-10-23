@@ -3072,7 +3072,8 @@ async fn view_issues_list(
     let complex_where = match tree {
         None => None,
         Some(tree) => {
-            let condition = crate::app_issues::compile_filter_tree(&tree).map_err(filter_denial)?;
+            let condition =
+                crate::app_issues::compile_filter_tree(&tree, &timezone).map_err(filter_denial)?;
             let (fragment, values) = crate::app_issues::render_condition(&condition);
             Some(binder.splice(&fragment, values))
         }

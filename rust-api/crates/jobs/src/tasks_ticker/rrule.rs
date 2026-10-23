@@ -34,8 +34,11 @@
 //!   exdate cannot arrive and every exdate on these paths is exact. The
 //!   aware-exdate behavior (exact-instant exclusion) is preserved and pinned
 //!   by the `*-aware-exdate-*` golden vectors.
-//! - `validate_rrule_string` drops Python's `dtstart` anchor parameter: the
-//!   anchor only seeds the parser and its value cannot change the verdict.
+//! - `validate_rrule_string` drops Python's `dtstart` anchor parameter:
+//!   Django's anchor is always aware (`dtstart or now(utc)`), and only its
+//!   awareness feeds the verdict (a naive `UNTIL` under an aware anchor is
+//!   rejected), so the port treats the anchor as aware unless the rule text
+//!   carries its own naive `DTSTART` line, which `rrulestr` substitutes.
 //! - Naive datetimes are normalized to UTC at the caller boundary (Python
 //!   does `dtstart.replace(tzinfo=utc)` inline); this module takes
 //!   `DateTime<Utc>` throughout.
@@ -450,12 +453,22 @@ fn is_int_list_prop(name: &str) -> bool {
     )
 }
 
-/// A parsed single RRULE value: the FREQ (if any) and INTERVAL (if any).
-/// Every other property only affects validity, like in `dateutil`.
+/// A parsed single RRULE value. FREQ and INTERVAL drive our own checks;
+/// the `until`/`bysetpos`/`by*` values are kept so the `rrule.__init__`
+/// semantic checks (`check_rrule_init_semantics`) can run exactly as in
+/// `dateutil`. Properties that only affect validity (COUNT, BYDAY, …) are
+/// validated during parsing and not retained.
 #[derive(Debug, Default)]
 struct ParsedRule {
     freq: Option<String>,
     interval: Option<i64>,
+    /// `Some(true)` when an `UNTIL` value carries a zone (`Z`/offset),
+    /// `Some(false)` when it is naive, `None` when absent.
+    until: Option<bool>,
+    bysetpos: Option<Vec<i64>>,
+    byhour: Option<Vec<i64>>,
+    byminute: Option<Vec<i64>>,
+    bysecond: Option<Vec<i64>>,
 }
 
 /// Python-`int()`-shaped integer parse for RRULE values: surrounding
@@ -467,27 +480,69 @@ fn parse_rrule_int(value: &str) -> Option<i64> {
 
 /// Lenient UNTIL/date-value parse. `dateutil` runs these through its fuzzy
 /// date parser; the stored rules only ever carry ISO / iCal forms, so the
-/// formats below accept every such value. Anything else is invalid, matching
-/// the verdict (if not the internal wording) of `dateutil`.
+/// formats below accept every such value. Anything else is invalid,
+/// matching the verdict (if not the internal wording) of `dateutil`.
 fn parse_loose_datetime(value: &str) -> bool {
+    parse_loose_datetime_aware(value).is_some()
+}
+
+/// [`parse_loose_datetime`] plus the parsed value's timezone-awareness:
+/// `Some(true)` when it carries a zone (`Z`/offset), `Some(false)` when it
+/// is naive, `None` when unparseable. `rrule.__init__` compares the
+/// awareness of `DTSTART` and `UNTIL` (`rrule.py:465-472`), so the
+/// distinction the boolean form discards is needed here.
+fn parse_loose_datetime_aware(value: &str) -> Option<bool> {
     if chrono::DateTime::parse_from_rfc3339(value).is_ok() {
-        return true;
+        return Some(true);
     }
-    const FORMATS: [&str; 7] = [
-        "%Y%m%dT%H%M%SZ",
-        "%Y%m%dT%H%M%S",
-        "%Y%m%d",
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
+    const FORMATS: [(&str, bool); 7] = [
+        ("%Y%m%dT%H%M%SZ", true),
+        ("%Y%m%dT%H%M%S", false),
+        ("%Y%m%d", false),
+        ("%Y-%m-%dT%H:%M:%S%.f", false),
+        ("%Y-%m-%dT%H:%M:%S", false),
+        ("%Y-%m-%d %H:%M:%S", false),
+        ("%Y-%m-%d", false),
     ];
-    FORMATS.iter().any(|fmt| {
-        chrono::NaiveDateTime::parse_from_str(value, fmt).is_ok()
-            || chrono::NaiveDate::parse_from_str(value, fmt)
-                .map(|_| ())
-                .is_ok()
+    FORMATS.iter().find_map(|(fmt, aware)| {
+        if chrono::NaiveDateTime::parse_from_str(value, fmt).is_ok()
+            || chrono::NaiveDate::parse_from_str(value, fmt).is_ok()
+        {
+            Some(*aware)
+        } else {
+            None
+        }
     })
+}
+
+/// Parse one paren-form `BYDAY` item (`TH(+1)`) the way `dateutil`'s
+/// `_handle_BYWEEKDAY` does: `w` is the text before the first `(`,
+/// `n` is `int` of the rest minus its last char (dropped unconditionally).
+/// Returns the uppercased weekday code and the ordinal, or `None` when
+/// `dateutil` would raise (the `int` fails or the code is unknown).
+///
+/// Shared by validation (`check_byday`) and expansion canonicalization so
+/// the two cannot drift: every item the validator accepts must rewrite to
+/// something the crate parses, and every item it rejects must stay a
+/// parse error.
+fn parse_paren_byday(wday: &str) -> Option<(String, i64)> {
+    // `splt = wday.split('(')`; `w = splt[0]`; `n = int(splt[1][:-1])`.
+    let mut parts = wday.split('(');
+    let w = parts.next().unwrap_or("");
+    let rest = parts.next()?;
+    let n_str: String = {
+        let mut chars: Vec<char> = rest.chars().collect();
+        chars.pop();
+        chars.into_iter().collect()
+    };
+    let n = parse_rrule_int(&n_str)?;
+    // Uppercase like validation does (`dateutil` uppercases the whole
+    // input before parsing), so raw-case expansion matches it.
+    let w = w.to_uppercase();
+    if !WEEKDAYS.contains(&w.as_str()) {
+        return None;
+    }
+    Some((w, n))
 }
 
 /// Check one `BYDAY`/`BYWEEKDAY` value the way `dateutil`'s
@@ -496,23 +551,9 @@ fn parse_loose_datetime(value: &str) -> bool {
 fn check_byday(value: &str) -> bool {
     value.split(',').all(|wday| {
         if wday.contains('(') {
-            // `TH(+1)` form: `splt = wday.split('(')`; `w = splt[0]`;
-            // `n = int(splt[1][:-1])` (last char dropped unconditionally).
-            let mut parts = wday.split('(');
-            let w = parts.next().unwrap_or("");
-            let rest = match parts.next() {
-                Some(r) => r,
-                None => return false,
-            };
-            let n_str: String = {
-                let mut chars: Vec<char> = rest.chars().collect();
-                chars.pop();
-                chars.into_iter().collect()
-            };
-            if parse_rrule_int(&n_str).is_none() {
-                return false;
-            }
-            WEEKDAYS.contains(&w)
+            // `TH(+1)` form — shared parse with expansion canonicalization
+            // (the input is already uppercased, so the verdict is unchanged).
+            parse_paren_byday(wday).is_some()
         } else {
             // `+1MO` form: leading `[+-0-9]*` is the ordinal, the rest the code.
             let idx = wday
@@ -582,17 +623,24 @@ fn parse_single_rule(line: &str) -> Result<ParsedRule, String> {
                 None => return Err(format!("invalid '{name}': {prop_value}")),
             }
         } else if is_int_list_prop(name) {
-            let ok = prop_value
+            match prop_value
                 .split(',')
                 .map(parse_rrule_int)
-                .collect::<Option<Vec<_>>>()
-                .is_some();
-            if !ok {
-                return Err(format!("invalid '{name}': {prop_value}"));
+                .collect::<Option<Vec<i64>>>()
+            {
+                Some(values) => match name {
+                    "BYSETPOS" => parsed.bysetpos = Some(values),
+                    "BYHOUR" => parsed.byhour = Some(values),
+                    "BYMINUTE" => parsed.byminute = Some(values),
+                    "BYSECOND" => parsed.bysecond = Some(values),
+                    _ => {}
+                },
+                None => return Err(format!("invalid '{name}': {prop_value}")),
             }
         } else if name == "UNTIL" {
-            if !parse_loose_datetime(prop_value) {
-                return Err(format!("invalid 'UNTIL': {prop_value}"));
+            match parse_loose_datetime_aware(prop_value) {
+                Some(aware) => parsed.until = Some(aware),
+                None => return Err(format!("invalid 'UNTIL': {prop_value}")),
             }
         } else if name == "WKST" {
             if !WEEKDAYS.contains(&prop_value) {
@@ -612,9 +660,13 @@ fn parse_single_rule(line: &str) -> Result<ParsedRule, String> {
 /// Apply the FREQ allowlist + INTERVAL floor to a parsed rule.
 fn check_freq_interval(parsed: &ParsedRule) -> Result<(), RRuleValidationError> {
     // Without FREQ the `rrule(dtstart, **kwargs)` constructor itself fails.
+    // The qualifier is `rrule.__init__` (confirmed against live dateutil:
+    // `TypeError: rrule.__init__() missing 1 required positional argument:
+    // 'freq'`); the message below keeps it byte for byte.
     let freq = parsed.freq.as_deref().ok_or_else(|| {
         RRuleValidationError(
-            "invalid RRULE: __init__() missing 1 required positional argument: 'freq'".to_owned(),
+            "invalid RRULE: rrule.__init__() missing 1 required positional argument: 'freq'"
+                .to_owned(),
         )
     })?;
     if !ALLOWED_FREQS.contains(&freq) {
@@ -632,6 +684,101 @@ fn check_freq_interval(parsed: &ParsedRule) -> Result<(), RRuleValidationError> 
         )));
     }
     Ok(())
+}
+
+/// The `rrule.__init__` semantic checks `rrulestr` runs for us on the Django
+/// side (`dateutil/rrule.py:465-499,838-848`), returning the bare
+/// `dateutil` message so the caller wraps it as `invalid RRULE: …`. Only the
+/// properties the stored subset can carry are checked: `UNTIL` awareness
+/// against the implicit aware anchor (or an explicit `DTSTART`), the
+/// `BYSETPOS` range, and the
+/// `BYHOUR`/`BYMINUTE`/`BYSECOND` ranges (which `dateutil` enforces by
+/// building a `datetime.time` per `(hour, minute, second)` combination,
+/// lowest FREQ below `HOURLY`). `BYMONTH`, `BYMONTHDAY`, `BYYEARDAY` and
+/// `BYWEEKNO` have no range check in `rrule.__init__` — confirmed against a
+/// live `dateutil` — so they are deliberately not checked here.
+fn check_rrule_init_semantics(parsed: &ParsedRule, anchor_aware: bool) -> Result<(), String> {
+    // `if self._dtstart and self._until:` — the awareness must match
+    // (`rrule.py:462-472`); either mismatch direction raises the same
+    // message. The anchor is the aware `datetime.now(tz=utc)` unless the
+    // rule text carries its own DTSTART, which `rrulestr` substitutes.
+    if let Some(until_aware) = parsed.until {
+        if anchor_aware != until_aware {
+            return Err(
+                "RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware"
+                    .to_owned(),
+            );
+        }
+    }
+
+    // bysetpos must be in [-366, -1] or [1, 366].
+    if let Some(positions) = &parsed.bysetpos {
+        for pos in positions {
+            if *pos == 0 || !(-366..=366).contains(pos) {
+                return Err("bysetpos must be between 1 and 366, or between -366 and -1".to_owned());
+            }
+        }
+    }
+
+    // Below HOURLY, `dateutil` materializes `datetime.time(hour, minute,
+    // second)` for every combination; CPython raises the range errors.
+    // `dateutil` sorts and de-duplicates each set, and an absent list falls
+    // back to the anchor's (always in-range) components — a single in-range
+    // sentinel models that without changing which invalid value is hit
+    // first in the h→m→s iteration order.
+    if matches!(
+        parsed.freq.as_deref(),
+        Some("YEARLY" | "MONTHLY" | "WEEKLY" | "DAILY")
+    ) {
+        let hours = sorted_set(parsed.byhour.as_deref().unwrap_or(&[0]));
+        let minutes = sorted_set(parsed.byminute.as_deref().unwrap_or(&[0]));
+        let seconds = sorted_set(parsed.bysecond.as_deref().unwrap_or(&[0]));
+        for hour in &hours {
+            if !(0..=23).contains(hour) {
+                return Err("hour must be in 0..23".to_owned());
+            }
+            for minute in &minutes {
+                if !(0..=59).contains(minute) {
+                    return Err("minute must be in 0..59".to_owned());
+                }
+                for second in &seconds {
+                    if !(0..=59).contains(second) {
+                        return Err("second must be in 0..59".to_owned());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `dateutil` stores each `BYxxx` list as a sorted set.
+fn sorted_set(values: &[i64]) -> Vec<i64> {
+    let mut out = values.to_vec();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// `rrulestr` runs `rrule.__init__` before Django applies its own FREQ/
+/// INTERVAL constraints, so the constructor's semantic checks come first; a
+/// missing FREQ is the constructor's `TypeError` and wins over both.
+fn check_parsed_rule(parsed: &ParsedRule, anchor_aware: bool) -> Result<(), RRuleValidationError> {
+    if parsed.freq.is_none() {
+        return check_freq_interval(parsed);
+    }
+    check_rrule_init_semantics(parsed, anchor_aware)
+        .map_err(|msg| RRuleValidationError(format!("invalid RRULE: {msg}")))?;
+    check_freq_interval(parsed)
+}
+
+/// Whether `rrulestr` would build an aware anchor from a `DTSTART` line.
+/// A `Z`/offset value is already aware; a `TZID=` parameter supplies the
+/// zone for an otherwise naive value. `check_date_line` has already
+/// validated the shape.
+fn dtstart_aware(parms: &[&str], value: &str) -> bool {
+    parms.iter().any(|parm| parm.starts_with("TZID="))
+        || parse_loose_datetime_aware(value) == Some(true)
 }
 
 /// Check the date values of an `RDATE`/`EXDATE`/`DTSTART` line
@@ -671,7 +818,10 @@ fn check_date_line(prop: &str, parms: &[&str], value: &str) -> Result<bool, Stri
 
 /// Raise [`RRuleValidationError`] if the RRULE violates our constraints.
 ///
-/// Constraints: parses cleanly the way `dateutil.rrule.rrulestr` parses it;
+/// Constraints: parses cleanly the way `dateutil.rrule.rrulestr` parses it
+/// (including `rrule.__init__`'s semantic checks: `UNTIL` awareness against
+/// the aware anchor, the `BYSETPOS` range, the `BYHOUR`/`BYMINUTE`/`BYSECOND`
+/// ranges;
 /// FREQ is one of MINUTELY/HOURLY/DAILY/WEEKLY/MONTHLY/YEARLY; the effective
 /// fire rate is >= 1 minute (`INTERVAL >= 1`, with `0` meaning the default
 /// `1` as in `dateutil`).
@@ -695,7 +845,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), RRuleValidationError
 
     if lines.len() == 1 && (!lines[0].contains(':') || lines[0].starts_with("RRULE:")) {
         let parsed = parse_single_rule(lines[0]).map_err(invalid)?;
-        return check_freq_interval(&parsed);
+        return check_parsed_rule(&parsed, true);
     }
 
     // Multi-property mode. `dateutil` assembles a set (which never carries
@@ -706,6 +856,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), RRuleValidationError
     let mut rrule_count = 0usize;
     let mut forces_set = false;
     let mut only_rule: Option<ParsedRule> = None;
+    let mut anchor_aware = true;
     for line in &lines {
         if !line.contains(':') {
             let parsed = parse_single_rule(line).map_err(invalid)?;
@@ -739,6 +890,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), RRuleValidationError
             }
             "DTSTART" => {
                 check_date_line(prop, &parms, value).map_err(invalid)?;
+                anchor_aware = dtstart_aware(&parms, value);
             }
             _ => {
                 return Err(invalid(format!("unsupported property: {prop}")));
@@ -747,7 +899,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), RRuleValidationError
     }
     if rrule_count == 1 && !forces_set {
         if let Some(parsed) = &only_rule {
-            return check_freq_interval(parsed);
+            return check_parsed_rule(parsed, anchor_aware);
         }
     }
     // `rrule_count == 0` (e.g. a lone `DTSTART:` line) hits `rrulevals[0]`
@@ -779,6 +931,72 @@ fn dtstart_line(dtstart: DateTime<Utc>) -> String {
     format!("DTSTART:{}", dtstart.format("%Y%m%dT%H%M%SZ"))
 }
 
+/// Rewrite one `BYDAY`/`BYWEEKDAY` value's paren-form items (`TH(+1)`)
+/// into the `[+-]N + weekday` spelling (`1TH`) the `rrule` crate parses.
+///
+/// `dateutil` accepts both spellings; the crate only understands `[+-]NNDD`
+/// and byte-slices the last two bytes, which panics on non-ASCII tails
+/// (`MO(1€`) and mis-parses ASCII paren items (`TH(+1)` reads weekday
+/// `"1)"`). Non-paren items pass through byte-identical. Returns `None`
+/// when an item fails the `dateutil` parse — including `n == 0`, which
+/// `dateutil`'s `weekday` rejects ("Can't create weekday with n==0") — so
+/// the caller maps it to the parse-error result, exactly as `dateutil`
+/// raising does on the Python side.
+fn canonicalize_byday_value(value: &str) -> Option<String> {
+    let mut items = Vec::new();
+    for item in value.split(',') {
+        if !item.contains('(') {
+            items.push(item.to_owned());
+            continue;
+        }
+        let (w, n) = parse_paren_byday(item)?;
+        if n == 0 {
+            return None;
+        }
+        items.push(format!("{n}{w}"));
+    }
+    Some(items.join(","))
+}
+
+/// Canonicalize one whitespace-separated rule token for the crate: rewrite
+/// paren-form `BYDAY`/`BYWEEKDAY` items in bare, `RRULE:` and `EXRULE:`
+/// lines; every other line passes through untouched. Returns `None` when a
+/// `BYDAY` value fails the `dateutil` parse (the crate input would be a
+/// parse error there too).
+fn canonicalize_token(token: &str) -> Option<String> {
+    let (head, value) = match token.split_once(':') {
+        Some((head, value)) => (Some(head), value),
+        None => (None, token),
+    };
+    let is_rule = match head {
+        None => true,
+        Some(head) => {
+            let prop = head.split(';').next().unwrap_or("");
+            prop.eq_ignore_ascii_case("RRULE") || prop.eq_ignore_ascii_case("EXRULE")
+        }
+    };
+    if !is_rule {
+        return Some(token.to_owned());
+    }
+    let mut pairs = Vec::new();
+    for pair in value.split(';') {
+        let Some((name, pair_value)) = pair.split_once('=') else {
+            pairs.push(pair.to_owned());
+            continue;
+        };
+        if name.eq_ignore_ascii_case("BYDAY") || name.eq_ignore_ascii_case("BYWEEKDAY") {
+            pairs.push(format!("{name}={}", canonicalize_byday_value(pair_value)?));
+        } else {
+            pairs.push(pair.to_owned());
+        }
+    }
+    let body = pairs.join(";");
+    match head {
+        Some(head) => Some(format!("{head}:{body}")),
+        None => Some(body),
+    }
+}
+
 /// Build the engine set for an RRULE bundle: the rule string plus the
 /// extra one-off `rdates` and the `exdates` to skip. Returns `None` on
 /// parse error, like Python returning `None` from the `except` path.
@@ -786,11 +1004,12 @@ fn dtstart_line(dtstart: DateTime<Utc>) -> String {
 /// The rule string is whitespace-normalized the way `dateutil` splits lines
 /// (so a stray space breaks a rule in both engines); its case is preserved
 /// (the engine parses names case-insensitively and `TZID`s are
-/// case-sensitive). An embedded `DTSTART` line wins over `dtstart`, as in
-/// `dateutil`; otherwise `dtstart` anchors the series. The set is only built
-/// with members when `rdates`/`exdates` are present — mirroring the
-/// `if rdates or exdates` branches — which keeps single-rule input on the
-/// plain-rule path in both engines.
+/// case-sensitive), except paren-form `BYDAY` items, which are rewritten to
+/// the crate's `[+-]N + weekday` spelling first. An embedded `DTSTART` line
+/// wins over `dtstart`, as in `dateutil`; otherwise `dtstart` anchors the
+/// series. The set is only built with members when `rdates`/`exdates` are
+/// present — mirroring the `if rdates or exdates` branches — which keeps
+/// single-rule input on the plain-rule path in both engines.
 fn expansion_set(
     dtstart: DateTime<Utc>,
     rrule_str: &str,
@@ -809,8 +1028,16 @@ fn expansion_set(
         src.push_str(&dtstart_line(dtstart));
         src.push('\n');
     }
-    src.push_str(&tokens.join("\n"));
-    let mut set: RRuleSet = src.parse().ok()?;
+    let mut rewritten = Vec::with_capacity(tokens.len());
+    for token in &tokens {
+        rewritten.push(canonicalize_token(token)?);
+    }
+    src.push_str(&rewritten.join("\n"));
+    // The crate's `BYDAY` parser byte-slices without an ASCII guard, so a
+    // hostile or half-validated rule could still panic inside the parse; a
+    // panic here must degrade to the parse-error result, never crash the
+    // caller (request handler, job, or occurrences view).
+    let mut set: RRuleSet = std::panic::catch_unwind(|| src.parse()).ok()?.ok()?;
     // `rruleset` assembly only when extras are present, like Python.
     if !rdates.is_empty() || !exdates.is_empty() {
         for rdate in rdates {
@@ -1282,6 +1509,111 @@ mod tests {
             utc(2026, 1, 2, 9, 0),
         );
         assert_golden(next.unwrap(), "2026-01-03T09:00:00+00:00");
+    }
+
+    // PIDASHCONV-1299: paren-form `BYDAY` with a non-ASCII tail
+    // (`MO(1€`) expands as `+1MO` (first Monday), like `dateutil` —
+    // the raw item used to panic the crate's byte-slicing parser.
+    #[test]
+    fn paren_byday_non_ascii_tail_expands_as_first_monday() {
+        let rule = "FREQ=MONTHLY;BYDAY=MO(1\u{20ac}";
+        assert!(validate_rrule_string(rule).is_ok());
+        let dtstart = utc(2026, 11, 1, 9, 0);
+        let next = next_fire_from_rrule(dtstart, rule, "UTC", &[], &[], utc(2026, 11, 1, 0, 0));
+        assert_golden(next.unwrap(), "2026-11-02T09:00:00+00:00");
+        let (out, has_more) = occurrences_between(
+            dtstart,
+            rule,
+            "UTC",
+            &[],
+            &[],
+            utc(2026, 11, 1, 0, 0),
+            utc(2026, 12, 31, 0, 0),
+            100,
+        );
+        assert!(!has_more);
+        assert_eq!(out.len(), 2);
+        assert_golden(out[0], "2026-11-02T09:00:00+00:00");
+        assert_golden(out[1], "2026-12-07T09:00:00+00:00");
+    }
+
+    // PIDASHCONV-1299: ASCII paren form (`TH(+1)`) expands as `+1TH`
+    // (first Thursday), like `dateutil` — the crate used to read weekday
+    // `"1)"` and fail, leaving `next_run_at` NULL.
+    #[test]
+    fn paren_byday_ascii_expands_as_first_thursday() {
+        let rule = "FREQ=MONTHLY;BYDAY=TH(+1)";
+        assert!(validate_rrule_string(rule).is_ok());
+        let dtstart = utc(2026, 11, 1, 9, 0);
+        let next = next_fire_from_rrule(dtstart, rule, "UTC", &[], &[], utc(2026, 11, 1, 0, 0));
+        assert_golden(next.unwrap(), "2026-11-05T09:00:00+00:00");
+        let (out, has_more) = occurrences_between(
+            dtstart,
+            rule,
+            "UTC",
+            &[],
+            &[],
+            utc(2026, 11, 1, 0, 0),
+            utc(2026, 12, 31, 0, 0),
+            100,
+        );
+        assert!(!has_more);
+        assert_eq!(out.len(), 2);
+        assert_golden(out[0], "2026-11-05T09:00:00+00:00");
+        assert_golden(out[1], "2026-12-03T09:00:00+00:00");
+    }
+
+    // PIDASHCONV-1299: a zero ordinal is a parse error in `dateutil`
+    // (`weekday` rejects `n == 0`), so expansion returns `None` — never a
+    // bare weekday, which the crate would expand as every-weekday.
+    #[test]
+    fn paren_byday_zero_ordinal_is_parse_error() {
+        let dtstart = utc(2026, 11, 1, 9, 0);
+        assert!(next_fire_from_rrule(
+            dtstart,
+            "FREQ=MONTHLY;BYDAY=MO(0)",
+            "UTC",
+            &[],
+            &[],
+            utc(2026, 11, 1, 0, 0)
+        )
+        .is_none());
+        let (out, has_more) = occurrences_between(
+            dtstart,
+            "FREQ=MONTHLY;BYDAY=MO(0)",
+            "UTC",
+            &[],
+            &[],
+            utc(2026, 11, 1, 0, 0),
+            utc(2026, 12, 31, 0, 0),
+            100,
+        );
+        assert!(out.is_empty() && !has_more);
+    }
+
+    // PIDASHCONV-1299: negative, multi-item, lowercase and `BYWEEKDAY`
+    // paren forms canonicalize the same way (values verified against
+    // live `dateutil` 2.8.2).
+    #[test]
+    fn paren_byday_negative_multi_lowercase_and_byweekday() {
+        let dtstart = utc(2026, 11, 1, 9, 0);
+        let now = utc(2026, 11, 1, 0, 0);
+        for (rule, expected) in [
+            ("FREQ=MONTHLY;BYDAY=MO(-1)", "2026-11-30T09:00:00+00:00"),
+            (
+                "FREQ=MONTHLY;BYDAY=MO(+1),TU(-2)",
+                "2026-11-02T09:00:00+00:00",
+            ),
+            ("freq=monthly;byday=th(+1)", "2026-11-05T09:00:00+00:00"),
+            ("FREQ=MONTHLY;BYWEEKDAY=WE(+2)", "2026-11-11T09:00:00+00:00"),
+            (
+                "RRULE:FREQ=MONTHLY;BYDAY=TH(+1)",
+                "2026-11-05T09:00:00+00:00",
+            ),
+        ] {
+            let next = next_fire_from_rrule(dtstart, rule, "UTC", &[], &[], now);
+            assert_golden(next.unwrap(), expected);
+        }
     }
 
     // `None` on parse error, never a panic — for both expansion entries.

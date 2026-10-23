@@ -744,20 +744,20 @@ async fn insert_description_version_rows(
     _ctx: &RequestContext,
     rows: &[v::NewDescriptionVersion],
 ) -> Result<(), sqlx::Error> {
-    // No `batch_size`: one multi-row INSERT (`:105`).
-    if rows.is_empty() {
-        return Ok(());
+    // Django passes no `batch_size` to `bulk_create` (`:105`), but sqlx
+    // caps bind params at u16::MAX, so chunk like the issue-version path.
+    for chunk in rows.chunks(v::ISSUE_VERSION_BULK_BATCH_SIZE) {
+        let sql = q::bulk_insert_sql(
+            "issue_description_versions",
+            &q::ISSUE_DESCRIPTION_VERSION_COLUMNS,
+            chunk.len(),
+        );
+        let mut query = sqlx::query(&sql);
+        for row in chunk {
+            query = bind_description_version_row(query, row);
+        }
+        query.execute(&mut *conn).await?;
     }
-    let sql = q::bulk_insert_sql(
-        "issue_description_versions",
-        &q::ISSUE_DESCRIPTION_VERSION_COLUMNS,
-        rows.len(),
-    );
-    let mut query = sqlx::query(&sql);
-    for row in rows {
-        query = bind_description_version_row(query, row);
-    }
-    query.execute(&mut *conn).await?;
     Ok(())
 }
 

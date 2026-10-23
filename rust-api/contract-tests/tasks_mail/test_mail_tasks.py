@@ -8,14 +8,16 @@ project_invitation_task}.py (project_invitation revived by Django d656243d;
 see NOTE on MAIL_TASKS.)
 """
 
+import json
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from psycopg.rows import dict_row
 
 from _harness import broker_probe, celery_wire, redis_cache, taskspec
 from _harness import seed as seed_helpers
-from _harness.db import diff, snapshot, wait_for_condition as wait_for
+from _harness.db import diff, insert_row, snapshot, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
 
@@ -307,3 +309,192 @@ def _processed(conn, log_ids) -> bool:
             ([str(i) for i in log_ids],),
         )
         return cur.fetchone()["n"] == len(log_ids)
+
+
+def _mention_html(mentioned_id) -> str:
+    """Comment HTML with a multi-byte char straddling byte 17 after a tag
+    start (the é sits at bytes 16..18 of the rest after ``<``), plus one
+    real ``<mention-component>`` to rewrite."""
+    return (
+        "<p>Merci beaucoupé pour la revue</p>"
+        f'<mention-component entity_identifier="{mentioned_id}">X</mention-component>'
+    )
+
+
+def test_stack_sends_non_ascii_mention_mail(db_conn, broker_url, smtp_sink):
+    """PIDASHCONV-1284 oracle: non-ASCII mention HTML still delivers.
+
+    The mention slot's ``new_value``/``old_value`` is comment HTML
+    (``notification_task.py``): BeautifulSoup rewrites the component to
+    ``@display_name`` and the mail is sent with ``sent_at`` marked. The
+    Rust replay (``test_rust_replay.py``) mirrors these pins exactly.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "mailnonascii")
+    receiver = seed_helpers.user(db_conn, "contract-nonascii-rcv")
+    mentioned = seed_helpers.user(db_conn, "contract-mentioned")
+    issue_id = str(chain["issue"]["id"])
+    html = _mention_html(mentioned["id"])
+    log_id = seed_helpers.email_log(
+        db_conn,
+        receiver["id"],
+        chain["owner"]["id"],
+        issue_id,
+        data={
+            "issue_activity": {
+                "field": "mention",
+                "old_value": html,
+                "new_value": html,
+                "activity_time": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )["id"]
+    redis_cache.setex(issue_id, "http://localhost")
+    smtp_sink.clear()
+
+    celery_wire.publish(f"{M}.email_notification_task.stack_email_notification")
+    wait_for(
+        lambda: _processed(db_conn, [log_id]),
+        what="stack_email_notification marking processed_at",
+    )
+    delivered = smtp_sink.wait_for_count(1, what="non-ascii mention mail")
+    matches = [m for m in delivered if receiver["email"] in m["rcpt_tos"]]
+    assert matches, "stacked mention mail never arrived"
+    raw = matches[0]["raw"]
+    # ASCII-only markers: the é itself may QP-encode in the raw MIME.
+    assert f"@{mentioned['display_name']}" in raw, "mention not rewritten to @name"
+    assert "mention-component" not in raw, "raw mention-component leaked into the mail"
+    wait_for(
+        lambda: _sent(db_conn, [log_id]),
+        what="send_email_notification marking sent_at",
+    )
+
+
+def _sent(conn, log_ids) -> bool:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM email_notification_logs "
+            "WHERE id = ANY(%s::uuid[]) AND sent_at IS NOT NULL",
+            ([str(i) for i in log_ids],),
+        )
+        return cur.fetchone()["n"] == len(log_ids)
+
+
+# PIDASHCONV-1288: the subscriber email log keeps
+# ``data.issue_activity.issue_comment`` on non-comment activities — Django
+# (notification_task.py:426-447) always writes it, as "" when the activity
+# names no comment. The replay mirror lives in test_rust_replay.py.
+def _seed_1288_world(conn, slug):
+    """Issue chain + email-enabled subscriber S (not the actor).
+
+    S is an active project member subscribed to the issue, with
+    ``property_change`` email allowed (every other email gate off, so the
+    log row below can only come from the property-change gate).
+    """
+    chain = seed_helpers.issue_chain(conn, slug)
+    project, ws, issue = chain["project"], chain["workspace"], chain["issue"]
+    subscriber = seed_helpers.user(conn, f"contract-notif1288-{slug}")
+    seed_helpers.project_member(conn, project["id"], ws["id"], subscriber["id"])
+    insert_row(
+        conn,
+        "issue_subscribers",
+        {
+            "workspace_id": str(ws["id"]),
+            "project_id": str(project["id"]),
+            "issue_id": str(issue["id"]),
+            "subscriber_id": str(subscriber["id"]),
+        },
+    )
+    insert_row(
+        conn,
+        "user_notification_preferences",
+        {
+            "user_id": str(subscriber["id"]),
+            "property_change": True,
+            "state_change": False,
+            "comment": False,
+            "mention": False,
+            "issue_completed": False,
+        },
+    )
+    return chain, subscriber
+
+
+def _priority_1288_activity(issue_id, actor_id):
+    """A non-comment property-change activity (no ``issue_comment`` key)."""
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "updated",
+        "field": "priority",
+        "actor_id": str(actor_id),
+        "new_value": "high",
+        "old_value": "low",
+        "comment": "changed the priority",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": None,
+        "new_identifier": None,
+        "issue_detail": {"id": str(issue_id)},
+    }
+
+
+def _notifications_1288_args(chain, activity):
+    issue, project, owner = chain["issue"], chain["project"], chain["owner"]
+    plain = json.dumps({"description_html": "<p>plain</p>"})
+    return [
+        "issue.activity.created",
+        str(issue["id"]),
+        str(project["id"]),
+        str(owner["id"]),
+        [],
+        json.dumps([activity]),
+        plain,
+        plain,
+    ]
+
+
+def _fetch_1288_row(conn, table, receiver_id, issue_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT data FROM {table} "
+            "WHERE receiver_id = %s AND entity_identifier = %s "
+            "ORDER BY created_at DESC LIMIT 1",
+            (str(receiver_id), str(issue_id)),
+        )
+        row = cur.fetchone()
+        return row["data"] if row else None
+
+
+def _assert_1288_issue_comment_empty(data, where):
+    assert data is not None, f"{where}: no row written"
+    block = data["issue_activity"]
+    assert "issue_comment" in block, f"{where}: keys {sorted(block)}"
+    assert block["issue_comment"] == "", f"{where}: {block['issue_comment']!r}"
+
+
+def test_notifications_email_log_keeps_issue_comment(db_conn, broker_url):
+    """Django: email log carries ``issue_comment == ""`` on priority change.
+
+    The in-app Notification row is asserted too — the control, already
+    correct on both planes.
+    """
+    chain, subscriber = _seed_1288_world(db_conn, "notif1288o")
+    issue = chain["issue"]
+    celery_wire.publish(
+        f"{M}.notification_task.notifications",
+        args=_notifications_1288_args(
+            chain, _priority_1288_activity(issue["id"], chain["owner"]["id"])
+        ),
+    )
+    email_data = wait_for(
+        lambda: _fetch_1288_row(
+            db_conn, "email_notification_logs", subscriber["id"], issue["id"]
+        ),
+        what="oracle email log for notif1288o",
+    )
+    app_data = wait_for(
+        lambda: _fetch_1288_row(
+            db_conn, "notifications", subscriber["id"], issue["id"]
+        ),
+        what="oracle in-app notification for notif1288o",
+    )
+    _assert_1288_issue_comment_empty(email_data, "oracle email log")
+    _assert_1288_issue_comment_empty(app_data, "oracle in-app notification")

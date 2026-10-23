@@ -42,6 +42,55 @@ pub fn header_value(value: &str) -> Option<HeaderValue> {
     mime_header_str(value).and_then(|word| HeaderValue::from_str(&word).ok())
 }
 
+/// `django.utils.encoding.iri_to_uri` (`quote(iri,
+/// safe="/#%[]=:;$&()+,!?*@'~")`, Django 4.2 `utils/encoding.py:110-138`):
+/// `quote` always spares ASCII alphanumerics plus `-_.~`; the safe set
+/// spares the RFC 3986 reserved marks and `%`. Every other byte — UTF-8
+/// multibyte included — becomes uppercase `%XX`.
+///
+/// Django's `HttpResponseRedirect` applies this to the URL before storing
+/// `Location` (`django/http/response.py:620`); every `HttpResponseRedirect`
+/// emulation in this crate must call it before [`header_value`]. It must
+/// NOT be applied to other headers: a hand-set `response["Location"]`
+/// skips it in Django.
+pub fn iri_to_uri(joined: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(joined.len());
+    for byte in joined.bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            || matches!(
+                byte,
+                b'/' | b'#'
+                    | b'%'
+                    | b'['
+                    | b']'
+                    | b'='
+                    | b':'
+                    | b';'
+                    | b'$'
+                    | b'&'
+                    | b'('
+                    | b')'
+                    | b'+'
+                    | b','
+                    | b'!'
+                    | b'?'
+                    | b'*'
+                    | b'@'
+                    | b'\''
+            );
+        if keep {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 15) as usize] as char);
+        }
+    }
+    out
+}
+
 /// `str.splitlines` boundaries other than `\r`/`\n` (rejected before the
 /// MIME path): `Header.encode` splits on these even with a huge
 /// `maxlinelen`.
@@ -229,6 +278,30 @@ mod tests {
     fn empty_and_edge_values() {
         assert_eq!(mime_encode(""), "");
         assert!(header_value("").expect("empty").as_bytes().is_empty());
+    }
+
+    #[test]
+    fn iri_to_uri_matches_django_vectors() {
+        // Oracle: `django.utils.encoding.iri_to_uri` on the venv Django
+        // (moved from `app_assets::handlers_v1`; CR/LF rows added for
+        // PIDASHCONV-1356: `HttpResponseRedirect` percent-encodes them,
+        // so they stay a 302 instead of `BadHeaderError` 500s).
+        for (raw, expected) in [
+            ("http://h/p/a b", "http://h/p/a%20b"),
+            ("http://h/p/caf\u{e9}", "http://h/p/caf%C3%A9"),
+            ("http://h/p/100%25x", "http://h/p/100%25x"),
+            ("http://h/p/a?b#c", "http://h/p/a?b#c"),
+            ("http://h/p/a+b", "http://h/p/a+b"),
+            ("http://h/p/a\"b<c>d", "http://h/p/a%22b%3Cc%3Ed"),
+            (
+                "http://h/p/\u{4e2d}\u{6587}",
+                "http://h/p/%E4%B8%AD%E6%96%87",
+            ),
+            ("http://h/p/a\nb", "http://h/p/a%0Ab"),
+            ("http://h/p/a\rb", "http://h/p/a%0Db"),
+        ] {
+            assert_eq!(iri_to_uri(raw), expected, "iri_to_uri({raw:?})");
+        }
     }
 
     #[test]

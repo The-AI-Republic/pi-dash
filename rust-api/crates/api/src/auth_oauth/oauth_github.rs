@@ -82,6 +82,7 @@ use pidash_db::redis::RedisHandle;
 use pidash_services::auth_oauth::{error as oauth_error, exchange, providers};
 use pidash_services::auth_session::shapes::{self, HostSettings, ParamValue};
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -151,11 +152,19 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-/// `HttpResponseRedirect(url)`: 302 with a `Location` header.
+/// `HttpResponseRedirect(url)`: 302 with a `Location` header. Django
+/// percent-encodes the URL first (`iri_to_uri`,
+/// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
+/// characters the final `Location` answers 400 (`DisallowedRedirect`).
 fn redirect_response(location: String) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let too_long = location.chars().count() > shapes::MAX_URL_REDIRECT_LENGTH;
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -778,27 +787,6 @@ fn encode_password(password: &str) -> String {
     pidash_auth::password::hash_password(password, &password_salt(), 600_000)
 }
 
-/// `user.get_session_auth_hash()`: `salted_hmac` over the password field
-/// (`django/contrib/auth/__init__.py`, salt
-/// `AbstractBaseUser.get_session_auth_hash` — the construction the D-16
-/// port verifies in `license/mod.rs`).
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    const SALT: &[u8] = b"django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
-    let key = Sha256::digest([SALT, secret_key].concat());
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
-    mac.update(password_field.as_bytes());
-    let bytes = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
 /// `onboarding_step` default (`db/models/user.py:get_default_onboarding`).
 fn default_onboarding_step() -> Value {
     serde_json::json!({
@@ -1156,7 +1144,29 @@ async fn complete_login_or_signup(
     let mut user_data_value =
         serde_json::to_value(&auth.user_data).map_err(|_| CallbackFailure::Server)?;
     coerce_provider_id(&mut user_data_value);
+    // The looked-up row's `created_at`/`metadata` ride into the update
+    // side (Django's `.save()` rewrites them unchanged); absent, the
+    // ported defaults apply (PIDASHCONV-1363, as `oauth_google.rs`).
+    let provider_id = account_queries::lookup_provider_id(&user_data_value).unwrap_or("");
+    let prior: Option<(chrono::DateTime<chrono::Utc>, Value)> = if provider_id.is_empty() {
+        None
+    } else {
+        sqlx::query_as(
+            "SELECT \"created_at\", \"metadata\" FROM \"accounts\" \
+             WHERE \"user_id\" = $1 AND \"provider\" = $2 AND \"provider_account_id\" = $3 LIMIT 1",
+        )
+        .bind(user_id)
+        .bind("github")
+        .bind(provider_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CallbackFailure::Server)?
+    };
     let mut conn = pool.acquire().await.map_err(|_| CallbackFailure::Server)?;
+    let existing = prior.map(|(created_at, metadata)| account_queries::ExistingAccount {
+        created_at,
+        metadata,
+    });
     account_queries::create_update_account(
         &mut conn,
         user_id,
@@ -1165,7 +1175,7 @@ async fn complete_login_or_signup(
         &tokens,
         now,
         Uuid::new_v4(),
-        None,
+        existing,
     )
     .await
     .map_err(|_| CallbackFailure::Server)?;
@@ -1313,7 +1323,11 @@ async fn process_invitations(
     }
 
     // Accepted project invites → workspace members (role clamped to 5/15)
-    // + project members, `ignore_conflicts=True` on both.
+    // + project members, `ignore_conflicts=True` on both. Two phases, not
+    // one loop: Django commits every project-arm `workspace_members` row
+    // before the `project_members` bulk below raises (PIDASHCONV-1359 —
+    // a per-invite loop aborts on `?` after the first workspace, so a
+    // user invited in several workspaces only ever joins the first).
     // Ported bug PB-1008 (`workspace_project_join.py:76-87`): the
     // `ProjectMember` bulk omits `project` although
     // `project_members.project_id` is NOT NULL, so any accepted project
@@ -1344,6 +1358,9 @@ async fn process_invitations(
         .bind(serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true}))
         .execute(pool)
         .await?;
+    }
+    for (workspace_id, role, created_by) in &project_invites {
+        let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
         sqlx::query(
             r#"INSERT INTO "project_members" ("id", "created_at", "updated_at", "workspace_id",
                "member_id", "role", "created_by_id", "view_props", "default_props", "preferences",
@@ -1441,32 +1458,20 @@ async fn redirection_path(
     Ok("create-workspace".to_owned())
 }
 
-/// `user_login` (`authentication/utils/login.py:15-27`): `login()` writes
-/// the auth trio, then `device_info`, then the session saves (the layer
-/// persists the mutated handle on response).
+/// `device_info` half of `user_login`
+/// (`authentication/utils/login.py:21-25`): the `login()` half (rotation,
+/// the auth trio, `last_login`, the CSRF cookie) runs first via
+/// [`super::login::login_session_keys`]; this writes only `device_info`,
+/// then the session saves (the layer persists the mutated handle on
+/// response).
 fn login_session(
     handle: &SessionHandle,
     settings: &pidash_db::config::Settings,
     headers: &HeaderMap,
     remote_addr: Option<&str>,
-    user: &ResolvedUser,
     is_app: bool,
     is_space: bool,
 ) {
-    session_set(handle, "_auth_user_id", Value::String(user.id.to_string()));
-    session_set(
-        handle,
-        "_auth_user_backend",
-        Value::String("django.contrib.auth.backends.ModelBackend".to_owned()),
-    );
-    session_set(
-        handle,
-        "_auth_user_hash",
-        Value::String(session_auth_hash(
-            &user.password_field,
-            settings.secret_key.as_bytes(),
-        )),
-    );
     let domain = if is_space {
         space_base(settings)
     } else if is_app {
@@ -1552,7 +1557,7 @@ async fn app_callback(
         &request_host(&headers),
         "github",
     );
-    let outcome: Result<String, CallbackFailure> = async {
+    let outcome: Result<(String, String), CallbackFailure> = async {
         if !providers::github_configured(
             config.client_id.as_deref(),
             config.client_secret.as_deref(),
@@ -1579,7 +1584,20 @@ async fn app_callback(
             redis,
         )
         .await?;
-        login_session(&handle, settings, &headers, remote_addr, &user, true, false);
+        // `user_login(is_app=True)`: the shared `login()` half first
+        // (rotation, trio, `last_login`, CSRF cookie), then `device_info`.
+        let csrf_cookie = super::login::login_session_keys(
+            &handle,
+            &pool,
+            user.id,
+            &user.password_field,
+            secret.as_bytes(),
+            settings,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|_| CallbackFailure::Server)?;
+        login_session(&handle, settings, &headers, remote_addr, true, false);
         // `path = next_path or get_redirection_path(user)`
         // (`github.py:98-101`): the RAW session value (possibly "").
         let path = match session_next.as_deref() {
@@ -1589,16 +1607,18 @@ async fn app_callback(
                 .map_err(|_| CallbackFailure::Server)?,
         };
         let allowed_refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
-        Ok(shapes::get_safe_redirect_url(
-            &base,
-            &path,
-            &[],
-            &allowed_refs,
+        Ok((
+            shapes::get_safe_redirect_url(&base, &path, &[], &allowed_refs),
+            csrf_cookie,
         ))
     }
     .await;
     match outcome {
-        Ok(url) => redirect_response(url),
+        Ok((url, csrf_cookie)) => {
+            let mut response = redirect_response(url);
+            super::login::push_cookie(&mut response, csrf_cookie);
+            response
+        }
         Err(CallbackFailure::Auth(exc)) => redirect_response(error_location(
             &base,
             session_next.as_deref(),
@@ -1634,6 +1654,16 @@ async fn space_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_response(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_response("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn test_settings() -> pidash_db::config::Settings {
         // No `WEB_URL`: `get_allowed_hosts` allows only
@@ -1827,19 +1857,7 @@ mod tests {
     fn login_device_info_absent_header_defaults() {
         let settings = test_settings();
         let handle = SessionHandle::new(crate::middleware::RequestSession::empty());
-        let user = ResolvedUser {
-            id: Uuid::new_v4(),
-            password_field: "pw".to_owned(),
-        };
-        login_session(
-            &handle,
-            &settings,
-            &HeaderMap::new(),
-            None,
-            &user,
-            true,
-            false,
-        );
+        login_session(&handle, &settings, &HeaderMap::new(), None, true, false);
         let info = handle
             .lock()
             .get("device_info")
@@ -2300,5 +2318,338 @@ mod tests {
         let (_, is_active) = user_row.expect("user row created");
         assert!(is_active, "new user is active");
         assert_eq!(queue_rows, 0, "no emits without invites or prior inactive");
+    }
+
+    /// Seed an active user + two workspaces, each with a project and an
+    /// accepted project invite for the email (roles 5 and 20 — the
+    /// latter clamps to 15). Column lists mirror
+    /// `_harness.db.Database.make_user/make_workspace/make_project` plus
+    /// the `project_member_invites` seed in
+    /// `test_github_project_invite_join.py`.
+    async fn seed_active_user_two_project_invites(
+        pool: &sqlx::PgPool,
+        email: &str,
+        slug: &str,
+    ) -> (Uuid, Vec<Uuid>) {
+        let user_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        let mut workspace_ids = Vec::new();
+        for (index, role) in [(1, 5), (2, 20)] {
+            let workspace_id = Uuid::new_v4();
+            let project_id = Uuid::new_v4();
+            let ws_slug = format!("{slug}-w{index}");
+            sqlx::query(
+                r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                    "owner_id", "timezone", "background_color")
+                   VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+            )
+            .bind(now)
+            .bind(workspace_id)
+            .bind(format!("kernel ws {ws_slug}"))
+            .bind(&ws_slug)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("seed workspace");
+            sqlx::query(
+                r#"INSERT INTO "projects"
+                   ("created_at", "updated_at", "id", "name", "description", "network",
+                    "identifier", "workspace_id", "cycle_view", "module_view",
+                    "issue_views_view", "page_view", "intake_view", "archive_in",
+                    "close_in", "logo_props", "is_time_tracking_enabled",
+                    "is_issue_type_enabled", "guest_view_all_features", "timezone",
+                    "members_can_edit_states", "repo_url", "base_branch",
+                    "agent_default_interval_seconds", "agent_default_max_ticks",
+                    "agent_ticking_enabled", "is_default",
+                    "agent_review_default_interval_seconds",
+                    "default_agent_executor",
+                    "agent_test_default_interval_seconds")
+                   VALUES ($1,$1,$2,$3,'',0,$4,$5,true,true,true,true,true,
+                           365,365,'{}',true,false,false,'UTC',true,'','',
+                           10800,10,true,false,10800,'local_runner',10800)"#,
+            )
+            .bind(now)
+            .bind(project_id)
+            .bind(format!("kernel proj {ws_slug}"))
+            .bind(format!("k9{index}{}", tag_suffix()))
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("seed project");
+            sqlx::query(
+                r#"INSERT INTO "project_member_invites" ("id", "created_at", "updated_at",
+                    "project_id", "workspace_id", "email", "accepted", "token", "role")
+                   VALUES ($1, $2, $2, $3, $4, $5, TRUE, $6, $7)"#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(now)
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(email)
+            .bind(format!(
+                "tok-1359-{}",
+                &Uuid::new_v4().simple().to_string()[..8]
+            ))
+            .bind(role)
+            .execute(pool)
+            .await
+            .expect("seed project invite");
+            workspace_ids.push(workspace_id);
+        }
+        (user_id, workspace_ids)
+    }
+
+    fn tag_suffix() -> String {
+        Uuid::new_v4().simple().to_string()[..6].to_owned()
+    }
+
+    async fn cleanup_project_kernel_world(
+        pool: &sqlx::PgPool,
+        email: &str,
+        workspace_ids: &[Uuid],
+    ) {
+        let user_ids: Vec<Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(email)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        for user_id in &user_ids {
+            for table in ["accounts", "profiles"] {
+                sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "user_id" = $1"#))
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .ok();
+            }
+            for (table, column) in [
+                ("workspace_members", "member_id"),
+                ("project_members", "member_id"),
+            ] {
+                sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "{column}" = $1"#))
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .ok();
+            }
+        }
+        sqlx::query(r#"DELETE FROM "project_member_invites" WHERE "email" = $1"#)
+            .bind(email)
+            .execute(pool)
+            .await
+            .ok();
+        for workspace_id in workspace_ids {
+            sqlx::query(r#"DELETE FROM "projects" WHERE "workspace_id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query(r#"DELETE FROM "workspaces" WHERE "id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+        for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+    }
+
+    /// Two accepted project invites in two workspaces: the kernel fails
+    /// into `Server` (the ported PB-1008 500) only AFTER committing both
+    /// workspace-member rows (PIDASHCONV-1359 — the pre-fix per-invite
+    /// loop aborted on `?` after the first workspace, so the user never
+    /// joined the second). Zero project-member rows, both invites intact.
+    #[tokio::test]
+    async fn github_kernel_two_project_invites_join_both_workspaces() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1359-{tag}@example.test");
+        let slug = format!("gh1359-{tag}");
+        let (user_id, workspace_ids) =
+            seed_active_user_two_project_invites(&pool, &email, &slug).await;
+
+        let auth = kernel_auth(&email);
+        let headers = kernel_headers();
+        // No workspace invites: no cache handle is needed and none is touched.
+        let outcome = complete_login_or_signup(
+            &pool,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+        )
+        .await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let members: Vec<(Uuid, i16)> = sqlx::query_as(
+            r#"SELECT "workspace_id", "role" FROM "workspace_members"
+               WHERE "member_id" = $1"#,
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read members");
+        let project_rows: i64 =
+            sqlx::query_scalar(r#"SELECT COUNT(*) FROM "project_members" WHERE "member_id" = $1"#)
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count project members");
+        let invites: Vec<(bool, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            r#"SELECT "accepted", "deleted_at" FROM "project_member_invites"
+               WHERE "email" = $1"#,
+        )
+        .bind(&email)
+        .fetch_all(&pool)
+        .await
+        .expect("read invites");
+        cleanup_project_kernel_world(&pool, &email, &workspace_ids).await;
+
+        assert!(
+            matches!(outcome, Err(CallbackFailure::Server)),
+            "kernel fails into the ported 500"
+        );
+        let mut got = members;
+        got.sort();
+        let mut want = vec![(workspace_ids[0], 5), (workspace_ids[1], 15)];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "both invite workspaces joined (role 20 clamps to 15)"
+        );
+        assert_eq!(
+            project_rows, 0,
+            "project bulk raised before writing anything"
+        );
+        assert_eq!(invites.len(), 2, "both invites survive");
+        assert!(
+            invites.iter().all(|(accepted, _)| *accepted),
+            "invites stay accepted"
+        );
+        assert!(
+            invites.iter().all(|(_, deleted_at)| deleted_at.is_none()),
+            "invites stay live"
+        );
+    }
+
+    /// Returning user with an old linked account: the upsert keeps the
+    /// row's `created_at`/`metadata` and only rewrites the token fields
+    /// + `last_connected_at`/`updated_at` (PIDASHCONV-1363). Django's
+    /// shared `OauthAdapter.create_update_account` loads the row and
+    /// `.save()`s it back, so both columns survive every login; passing
+    /// `existing: None` into the kernel resets them to now/`{}`.
+    /// FAILS pre-fix (created_at reset to now, metadata to `{}`).
+    #[tokio::test]
+    async fn github_kernel_returning_login_preserves_account_history() {
+        use chrono::TimeZone;
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1363-{tag}@example.test");
+        let provider_id = format!("gh1363-{tag}");
+        let slug = format!("gh1363-{tag}");
+        let old_created = chrono::Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let old_metadata = serde_json::json!({"k": 1});
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{tag}"))
+        .bind(&email)
+        .bind(chrono::Utc::now())
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "accounts" ("id", "created_at", "updated_at", "user_id",
+                "provider_account_id", "provider", "access_token",
+                "access_token_expired_at", "refresh_token",
+                "refresh_token_expired_at", "last_connected_at", "id_token", "metadata")
+               VALUES ($1, $2, $2, $3, $4, 'github', 'old-access', NULL,
+                       'old-refresh', NULL, $2, '', $5)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(old_created)
+        .bind(user_id)
+        .bind(&provider_id)
+        .bind(&old_metadata)
+        .execute(&pool)
+        .await
+        .expect("seed account");
+
+        let mut auth = kernel_auth(&email);
+        auth.user_data.user.provider_id = Value::String(provider_id.clone());
+        let headers = kernel_headers();
+        let outcome = complete_login_or_signup(
+            &pool,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+        )
+        .await;
+
+        let row: Option<(chrono::DateTime<chrono::Utc>, Value, String)> = sqlx::query_as(
+            r#"SELECT "created_at", "metadata", "access_token" FROM "accounts"
+               WHERE "user_id" = $1 AND "provider" = 'github'
+                 AND "provider_account_id" = $2"#,
+        )
+        .bind(user_id)
+        .bind(&provider_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("read account");
+        cleanup_kernel_world(&pool, &email, &slug).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        let (created_at, metadata, access_token) = row.expect("account row survives");
+        assert_eq!(created_at, old_created, "created_at preserved");
+        assert_eq!(metadata, old_metadata, "metadata preserved");
+        assert_eq!(access_token, "kernel-access-token", "token fields update");
     }
 }

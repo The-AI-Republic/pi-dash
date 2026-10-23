@@ -33,10 +33,6 @@ on:
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-app-cycles-origin.yml"
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract-tests-app-cycles-origin.yml"
 
 permissions:
   contents: read

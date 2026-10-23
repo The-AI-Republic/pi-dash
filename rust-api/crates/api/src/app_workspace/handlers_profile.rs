@@ -105,8 +105,9 @@ use serde_json::{Map, Value};
 use sqlx::Row;
 
 use crate::app_issues::{
-    complex_filter, fetch_count, fetch_json_rows, legacy_sql, multi_map, order_key, page_denial,
-    query_last, query_values, render_condition, shape_row, Binder, Denial, FilteredSet, QueryMap,
+    complex_filter, fetch_count, fetch_json_rows, filters_timezone, legacy_sql, multi_map,
+    order_key, page_denial, query_last, query_values, render_condition, shape_row, Binder, Denial,
+    FilteredSet, QueryMap,
 };
 use crate::app_workspace::gates;
 use crate::state::AppState;
@@ -770,6 +771,7 @@ fn profile_filtered_set(
     query: &QueryMap,
     group_by: Option<&str>,
     sub_group_by: Option<&str>,
+    tz: &chrono_tz::Tz,
 ) -> Result<FilteredSet, Denial> {
     let mut binder = Binder::new();
     // Bind order is the QRY-C contract: `$1` target, `$2` slug, `$3`
@@ -783,7 +785,7 @@ fn profile_filtered_set(
         "issue.id IN (SELECT i.id {})",
         qp::profile_issues_from_where()
     )];
-    if let Some(cond) = complex_filter(query)? {
+    if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
         fragments.push(binder.splice(&fragment, values));
     }
@@ -900,7 +902,18 @@ async fn user_profile_issues(
     }
     let group_by = params.group_by.as_deref();
     let sub_group_by = params.sub_group_by.as_deref();
-    let filtered = profile_filtered_set(&user_id, &slug, &viewer, &query, group_by, sub_group_by)?;
+    // The *viewer's* zone: Django activates `request.user.user_timezone`,
+    // not the profile target's.
+    let timezone = filters_timezone(&pool, &viewer, &query).await?;
+    let filtered = profile_filtered_set(
+        &user_id,
+        &slug,
+        &viewer,
+        &query,
+        group_by,
+        sub_group_by,
+        &timezone,
+    )?;
     // Total count over the pre-annotation set (the `deepcopy` at `:157`).
     let total_sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
     let total_count = fetch_count(&pool, &total_sql, filtered.values.clone()).await?;
@@ -2726,8 +2739,16 @@ mod tests {
             ),
         );
         query.insert("priority".to_owned(), OneOrMany::One("high".to_owned()));
-        let filtered = profile_filtered_set(&uid, "acme", &viewer, &query, Some("priority"), None)
-            .expect("filtered set");
+        let filtered = profile_filtered_set(
+            &uid,
+            "acme",
+            &viewer,
+            &query,
+            Some("priority"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("filtered set");
         // Scope binds first, then the compiled legacy binds.
         assert_eq!(filtered.values.len(), 3 + 2 + 1);
         assert_holders_continuous(&filtered.from_where, &filtered.values);
@@ -2765,6 +2786,7 @@ mod tests {
             &query,
             Some("priority"),
             Some("state__group"),
+            &chrono_tz::UTC,
         )
         .expect("filtered set");
         let count_filter = qp::grouped_count_filter_sql("issue");

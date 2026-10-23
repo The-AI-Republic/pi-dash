@@ -11,6 +11,8 @@
 //!   `bgtasks/issue_activities_task.py` (`:928-:1501`) (PIDASHCONV-198).
 //! * [`activity_tracks`] — field trackers from
 //!   `bgtasks/issue_activities_task.py` (`:41-:556`) (PIDASHCONV-196).
+//! * [`html_entities`] — generated HTML5 named-entity table backing
+//!   [`link_crawl`]'s title decoding (PIDASHCONV-1280).
 //! * [`link_crawl`] — `bgtasks/work_item_link_task.py` (PIDASHCONV-200).
 //! * [`log_decode`] — pure helpers from `bgtasks/logger_task.py` (`:38-:60`)
 //!   and `bgtasks/event_tracking_task.py` (`:43-:59`) (PIDASHCONV-202).
@@ -25,6 +27,7 @@
 pub mod activity_issue;
 pub mod activity_misc;
 pub mod activity_tracks;
+pub mod html_entities;
 pub mod link_crawl;
 pub mod log_decode;
 pub mod page_extract;

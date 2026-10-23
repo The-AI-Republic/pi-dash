@@ -25,9 +25,10 @@
 //! membership resolution), the SQL text for the handler-owned
 //! lookups/writes, the `convert_to_utc` mirror, the snapshot math, and
 //! the row rendering. The request-context plumbing (`Actor`, `Tenant`,
-//! `Membership`, `Denial`, [`actor`], [`resolve_tenant`],
-//! [`load_membership`]) mirrors the D-32 `app_intake` layout so sibling
-//! handler issues (PIDASHCONV-321/323/377/410) can reuse it through
+//! `Membership`, `Denial`, [`actor`], [`resolve_project_id`],
+//! [`load_project_tenant`], [`load_membership`]) mirrors the D-32
+//! `app_intake` layout so sibling handler issues
+//! (PIDASHCONV-321/323/377/410) can reuse it through
 //! `super::handlers_misc` instead of copying it.
 //!
 //! Ported bugs (translate, don't redesign):
@@ -340,39 +341,24 @@ fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
-/// Resolve `slug` + `project_id` the way the view kwargs do:
-/// `_rewrite_project_kwarg` (`app/views/base.py:49-79`) accepts a UUID
-/// or a workspace-scoped project identifier (upper-cased, like
-/// `Project.save` normalizes it). An unresolvable identifier answers
-/// `Http404("Project not found")` (`db/models/project.py:218`); a missing project row answers the
-/// `ObjectDoesNotExist` branch (which is what `convert_to_utc`'s
-/// `Project.objects.get` raises on the date-check path).
-pub async fn resolve_tenant(
+/// Resolve `slug` + `project_id` to the id the permission gate scopes on,
+/// mirroring `_rewrite_project_kwarg` (`app/views/base.py:49-79`): a UUID
+/// `project_id` is returned untouched with NO row lookup (Django returns
+/// early there, before any project query), an identifier is resolved via
+/// `Project.resolve` (`db/models/project.py:192-220`) — upper-cased like
+/// `Project.save` normalizes it — and an unresolvable identifier answers
+/// `Http404("Project not found")` (`db/models/project.py:218`).
+pub async fn resolve_project_id(
     pool: &PgPool,
     slug: &str,
     project_raw: &str,
-) -> Result<Tenant, Denial> {
+) -> Result<Uuid, Denial> {
     if let Ok(id) = project_raw.parse::<Uuid>() {
-        let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
-            r#"SELECT p.id, p.workspace_id, p.timezone, p.estimate_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        let Some((project_id, workspace_id, timezone, estimate_id)) = row else {
-            return Err(Denial::NotFound);
-        };
-        return Ok(Tenant {
-            workspace_id,
-            project_id,
-            timezone,
-            estimate_id,
-        });
+        return Ok(id);
     }
     let upper = normalize_resolve_identifier(project_raw);
-    let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT p.id, p.workspace_id, p.timezone, p.estimate_id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
            WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
     )
     .bind(slug)
@@ -380,15 +366,33 @@ pub async fn resolve_tenant(
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    match row {
-        Some((project_id, workspace_id, timezone, estimate_id)) => Ok(Tenant {
+    row.map(|row| row.0).ok_or(Denial::NotFoundDetail)
+}
+
+/// Load the project row facts the downstream view needs (`timezone`,
+/// `estimate_id`) — but only AFTER the permission gate has run, so a
+/// caller without access never learns whether the project exists.
+/// `None` when the row is missing or soft-deleted; each caller decides
+/// what a miss means (date-check 404s on it, transfer reads no estimate).
+pub async fn load_project_tenant(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<Option<Tenant>, Denial> {
+    let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT p.id, p.workspace_id, p.timezone, p.estimate_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(
+        row.map(|(project_id, workspace_id, timezone, estimate_id)| Tenant {
             workspace_id,
             project_id,
             timezone,
             estimate_id,
         }),
-        None => Err(Denial::NotFoundDetail),
-    }
+    )
 }
 
 /// Membership facts for the guards layer, resolved with the same row
@@ -673,11 +677,11 @@ pub async fn date_check(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_raw).await {
-        Ok(tenant) => tenant,
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -698,6 +702,14 @@ pub async fn date_check(
         return Denial::BadError("Start date and end date both are required".to_owned())
             .into_response();
     }
+    // After the required check (`base.py:526-530`), `convert_to_utc`
+    // loads the project row (`Project.objects.get(id=project_id)`): a
+    // miss is the `ObjectDoesNotExist` branch -> 404 NOT_FOUND_BODY.
+    let tenant = match load_project_tenant(pool, &project_id).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) => return Denial::NotFound.into_response(),
+        Err(denial) => return denial.into_response(),
+    };
     // `str(...)` of the raw value, exactly like `convert_to_utc(date=str(...))`.
     let start_raw = py_str(data.get("start_date"));
     let end_raw = py_str(data.get("end_date"));
@@ -718,19 +730,11 @@ pub async fn date_check(
         Ok(exclude) => exclude,
         Err(denial) => return denial.into_response(),
     };
-    let overlap = match overlap_exists(
-        pool,
-        &slug,
-        &tenant.project_id,
-        &start_date,
-        &end_date,
-        exclude,
-    )
-    .await
-    {
-        Ok(overlap) => overlap,
-        Err(denial) => return denial.into_response(),
-    };
+    let overlap =
+        match overlap_exists(pool, &slug, &project_id, &start_date, &end_date, exclude).await {
+            Ok(overlap) => overlap,
+            Err(denial) => return denial.into_response(),
+        };
     if overlap {
         raw_json_response(DATE_CHECK_CONFLICT_BODY.to_owned())
     } else {
@@ -932,11 +936,11 @@ pub async fn transfer_issues(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_raw).await {
-        Ok(tenant) => tenant,
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -964,11 +968,20 @@ pub async fn transfer_issues(
         NewCycleId::Id(id) => id,
         NewCycleId::InvalidDetail => return Denial::InvalidDetail.into_response(),
     };
+    // `transfer_cycle_issues` reads only the project's estimate link
+    // (`cycle_transfer_issues.py:152-157`), a filter that yields no rows for
+    // a missing project — so a miss is `None`, never a 404 beyond the gate.
+    let estimate_id = match load_project_tenant(pool, &project_id).await {
+        Ok(Some(tenant)) => tenant.estimate_id,
+        Ok(None) => None,
+        Err(denial) => return denial.into_response(),
+    };
     match run_transfer(
         &state,
         pool,
         &slug,
-        &tenant,
+        &project_id,
+        estimate_id,
         &actor,
         &cycle_id,
         &new_cycle_id,
@@ -1043,11 +1056,13 @@ pub struct OldCycleCounts {
 }
 
 /// The `transfer_cycle_issues` sequence after the endpoint guards.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_transfer(
     state: &AppState,
     pool: &PgPool,
     slug: &str,
-    tenant: &Tenant,
+    project_id: &Uuid,
+    estimate_id: Option<Uuid>,
     actor: &Actor,
     cycle_id: &Uuid,
     new_cycle_id: &Uuid,
@@ -1060,7 +1075,7 @@ pub async fn run_transfer(
            WHERE w.slug = $1 AND c.project_id = $2 AND c.id = $3 AND c.deleted_at IS NULL"#,
     )
     .bind(slug)
-    .bind(tenant.project_id)
+    .bind(project_id)
     .bind(new_cycle_id)
     .fetch_optional(pool)
     .await
@@ -1077,26 +1092,25 @@ pub async fn run_transfer(
     }
     // Old-cycle counts (`:72-143`); a missing source answers 400, not
     // 404 (BUG-transfer-source-400).
-    let Some(counts) = old_cycle_counts(pool, slug, &tenant.project_id, cycle_id).await? else {
+    let Some(counts) = old_cycle_counts(pool, slug, project_id, cycle_id).await? else {
         return Err(Denial::BadError(
             pidash_services::app_cycles::queries::SOURCE_CYCLE_MISSING_ERROR.to_owned(),
         ));
     };
     // Points estimates only when the project links a points estimate
     // (`:152-157`).
-    let use_estimates = project_uses_points(pool, tenant).await?;
+    let use_estimates = project_uses_points(pool, estimate_id).await?;
     let mut assignee_estimates: Vec<EstimateRow> = Vec::new();
     let mut label_estimates: Vec<EstimateRow> = Vec::new();
     let mut points_chart: Value = Value::Object(Map::new());
     if use_estimates {
         assignee_estimates =
-            assignee_estimate_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
-        label_estimates =
-            label_estimate_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
+            assignee_estimate_distribution(pool, slug, project_id, cycle_id).await?;
+        label_estimates = label_estimate_distribution(pool, slug, project_id, cycle_id).await?;
         points_chart = burndown_points_value(
             pool,
             slug,
-            &tenant.project_id,
+            project_id,
             cycle_id,
             counts.start_date,
             counts.end_date,
@@ -1104,12 +1118,12 @@ pub async fn run_transfer(
         )
         .await?;
     }
-    let assignees = assignee_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
-    let labels = label_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
+    let assignees = assignee_distribution(pool, slug, project_id, cycle_id).await?;
+    let labels = label_distribution(pool, slug, project_id, cycle_id).await?;
     let chart = burndown_issues_value(
         pool,
         slug,
-        &tenant.project_id,
+        project_id,
         cycle_id,
         counts.total,
         counts.start_date,
@@ -1136,7 +1150,7 @@ pub async fn run_transfer(
         .map_err(|_| Denial::ServerError)?;
     // Move the open-group bridges (`:435-459`, `bulk_update(["cycle_id"],
     // batch_size=100)` — one UPDATE lands the same rows).
-    let moved = movable_bridges(pool, slug, &tenant.project_id, cycle_id).await?;
+    let moved = movable_bridges(pool, slug, project_id, cycle_id).await?;
     if !moved.is_empty() {
         let ids: Vec<Uuid> = moved.iter().map(|bridge| bridge.bridge_id).collect();
         sqlx::query(r#"UPDATE cycle_issues SET cycle_id = $1 WHERE id = ANY($2)"#)
@@ -1189,7 +1203,7 @@ pub async fn run_transfer(
     kwargs.insert("issue_id".to_owned(), Value::Null);
     kwargs.insert(
         "project_id".to_owned(),
-        Value::String(tenant.project_id.to_string()),
+        Value::String(project_id.to_string()),
     );
     kwargs.insert(
         "current_instance".to_owned(),
@@ -1260,8 +1274,8 @@ pub async fn old_cycle_counts(
 
 /// Points-estimate check (`:152-157`): the project links an estimate of
 /// type `points`.
-pub async fn project_uses_points(pool: &PgPool, tenant: &Tenant) -> Result<bool, Denial> {
-    let Some(estimate_id) = tenant.estimate_id else {
+pub async fn project_uses_points(pool: &PgPool, estimate_id: Option<Uuid>) -> Result<bool, Denial> {
+    let Some(estimate_id) = estimate_id else {
         return Ok(false);
     };
     let row: Option<(String,)> =
@@ -2076,28 +2090,27 @@ pub async fn user_properties_context(
     let pool = pool_of(state)
         .map_err(|denial| denial.into_response())?
         .clone();
-    // The `workspace__slug` lookup: an unknown slug answers the
-    // `ObjectDoesNotExist` branch, exactly like the view filters.
-    let workspace: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    if workspace.is_none() {
-        return Err(Denial::NotFound.into_response());
-    }
     let cycle_id = parse_id(&cycle_raw)?;
-    let tenant = resolve_tenant(&pool, &slug, &project_raw)
+    // `_rewrite_project_kwarg` returns early for a UUID `project_id` (no row
+    // lookup) and answers `Project not found` for an unresolvable identifier;
+    // the gate then runs, so an unknown workspace slug (or a project the
+    // caller cannot see) is 403 before any project/workspace row is read.
+    let project_id = resolve_project_id(&pool, &slug, &project_raw)
         .await
         .map_err(|denial| denial.into_response())?;
-    let membership = load_membership(&pool, &slug, &tenant.project_id, &actor.id)
+    let membership = load_membership(&pool, &slug, &project_id, &actor.id)
         .await
         .map_err(|denial| denial.into_response())?;
     let gate =
         gate_for_path(method, USER_PROPERTIES_PATH).map_err(|denial| denial.into_response())?;
     check_gate(&gate, &slug, &membership).map_err(|denial| denial.into_response())?;
+    // Only now read the project row (workspace + timezone). A miss is the
+    // `ObjectDoesNotExist` branch the view raises on `get`/`get_or_create`.
+    let tenant = match load_project_tenant(&pool, &project_id).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) => return Err(Denial::NotFound.into_response()),
+        Err(denial) => return Err(denial.into_response()),
+    };
     Ok(UserPropertiesContext {
         pool,
         tenant,

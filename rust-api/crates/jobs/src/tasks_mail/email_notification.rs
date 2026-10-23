@@ -372,10 +372,17 @@ fn match_open_tag(s: &str) -> Option<OpenTag> {
     }
     let rest = &s[1..];
     let name_len = "mention-component".len();
-    if rest.len() < name_len || !rest[..name_len].eq_ignore_ascii_case("mention-component") {
+    // Byte-compare: `rest[..name_len]` panics when byte `name_len`
+    // lands inside a multi-byte char (PIDASHCONV-1284). `.get(..)`
+    // also subsumes the short-`rest` check.
+    let is_name = rest
+        .as_bytes()
+        .get(..name_len)
+        .is_some_and(|b| b.eq_ignore_ascii_case(b"mention-component"));
+    if !is_name {
         return None;
     }
-    match rest[name_len..].chars().next() {
+    match rest.get(name_len..).and_then(|tail| tail.chars().next()) {
         Some(c) if c.is_whitespace() || c == '/' || c == '>' => {}
         _ => return None,
     }
@@ -414,7 +421,14 @@ fn match_close_tag(s: &str) -> Option<usize> {
     }
     let rest = &s[2..];
     let name_len = "mention-component".len();
-    if rest.len() < name_len || !rest[..name_len].eq_ignore_ascii_case("mention-component") {
+    // Byte-compare: `rest[..name_len]` panics when byte `name_len`
+    // lands inside a multi-byte char (PIDASHCONV-1284). `.get(..)`
+    // also subsumes the short-`rest` check.
+    let is_name = rest
+        .as_bytes()
+        .get(..name_len)
+        .is_some_and(|b| b.eq_ignore_ascii_case(b"mention-component"));
+    if !is_name {
         return None;
     }
     let mut j = 2 + name_len;
@@ -2429,6 +2443,79 @@ mod part2_tests {
         assert_eq!(
             process_mention(html, &lookup_of(&map)).expect("comments skipped"),
             html
+        );
+    }
+
+    #[test]
+    fn match_open_tag_non_ascii_around_name_boundary() {
+        // PIDASHCONV-1284: `rest[..17]` panicked when byte 17 after `<`
+        // fell inside a multi-byte char. Every width at every offset.
+        for ch in ['é', '’', '😀'] {
+            for offset in 0..=17 {
+                let rest = format!("{}{ch}{}", "a".repeat(offset), "b".repeat(20));
+                assert!(
+                    match_open_tag(&format!("<{rest}")).is_none(),
+                    "offset {offset} char {ch:?}"
+                );
+            }
+            // Byte 17 inside the char even when the 17-byte name matches:
+            // `<mention-componenté…>` is not a tag (é is no delimiter).
+            let rest = format!("mention-component{ch} tail");
+            assert!(
+                match_open_tag(&format!("<{rest}")).is_none(),
+                "name prefix + {ch:?}"
+            );
+        }
+        // Positive control: the real tag still matches.
+        assert!(match_open_tag("<mention-component entity_identifier=\"u1\">").is_some());
+    }
+
+    #[test]
+    fn match_close_tag_non_ascii_around_name_boundary() {
+        // PIDASHCONV-1284: same slicing panic via `</` (`match_close_tag`).
+        for ch in ['é', '’', '😀'] {
+            for offset in 0..=17 {
+                let rest = format!("{}{ch}{}", "a".repeat(offset), "b".repeat(20));
+                assert!(
+                    match_close_tag(&format!("</{rest}")).is_none(),
+                    "offset {offset} char {ch:?}"
+                );
+            }
+            let rest = format!("mention-component{ch}>");
+            assert!(
+                match_close_tag(&format!("</{rest}")).is_none(),
+                "name prefix + {ch:?}"
+            );
+        }
+        assert_eq!(
+            match_close_tag("</mention-component>"),
+            Some("</mention-component>".len())
+        );
+    }
+
+    #[test]
+    fn mention_rewrites_non_ascii_html_without_panic() {
+        // PIDASHCONV-1284: the issue's example — é straddles byte 17
+        // after the `<p>` tag start — plus a real mention to rewrite.
+        let map = names(&[("u1", "Ada L")]);
+        let html = "<p>Merci beaucoupé pour la revue</p><mention-component entity_identifier=\"u1\">Ada</mention-component>";
+        assert_eq!(
+            process_mention(html, &lookup_of(&map)).expect("rewrite"),
+            "<p>Merci beaucoupé pour la revue</p>@Ada L"
+        );
+    }
+
+    #[test]
+    fn mention_close_scan_skips_non_ascii_bogus_close() {
+        // `match_close` probes `match_close_tag` at every walk stop; a
+        // `</` whose 17th byte lands inside é must not panic.
+        let map = names(&[("u1", "Ada")]);
+        let bogus = format!("</p{}é>", "A".repeat(15));
+        let html =
+            format!("<mention-component entity_identifier=\"u1\">x{bogus}tail</mention-component>");
+        assert_eq!(
+            process_mention(&html, &lookup_of(&map)).expect("rewrite"),
+            "@Ada"
         );
     }
 

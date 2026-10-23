@@ -137,6 +137,41 @@ def forge_session_key(user: SeededUser) -> str:
     return key
 
 
+def rewrite_session(
+    key: str,
+    user: SeededUser,
+    *,
+    auth_hash: str | None = None,
+    backend: str | None = None,
+) -> None:
+    """Rewrite a live session row's signed payload (tamper tests).
+
+    ``auth_hash``/``backend`` replace the corresponding claim; omitted
+    claims keep the values a real login would carry. The server-side
+    Django auth middleware must treat a mismatching hash or backend as an
+    anonymous request and flush the row.
+    """
+    secret = _contract_secret()
+    data = _sign_session(
+        {
+            "_auth_user_id": user.id,
+            "_auth_user_backend": SESSION_BACKEND if backend is None else backend,
+            "_auth_user_hash": (
+                _session_auth_hash(user.password_hash, secret)
+                if auth_hash is None
+                else auth_hash
+            ),
+        },
+        secret,
+    )
+    with db_cursor() as cur:
+        cur.execute(
+            "UPDATE sessions SET session_data = %s WHERE session_key = %s",
+            (data, key),
+        )
+        assert cur.rowcount == 1, f"no live session row for {key!r}"
+
+
 def login_client(user: SeededUser) -> httpx.Client:
     client = httpx.Client(base_url=config_base_url(), timeout=30.0)
     client.cookies.set(SESSION_COOKIE, forge_session_key(user))

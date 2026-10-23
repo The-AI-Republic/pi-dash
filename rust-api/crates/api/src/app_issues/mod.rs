@@ -702,6 +702,15 @@ fn bind_sea_value<'q>(
         SeaValue::Char(value) => Ok(query.bind(value.map(|char| char.to_string()))),
         SeaValue::Bytes(value) => Ok(query.bind(value.clone().map(|bytes| (*bytes).clone()))),
         SeaValue::Uuid(value) => Ok(query.bind(value.clone().map(|id| *id))),
+        // Rich date / datetime filters bind typed params (`DATE` /
+        // `timestamptz`), like the ORM. The remaining chrono variants are
+        // never emitted; they only keep the match exhaustive.
+        SeaValue::ChronoDate(value) => Ok(query.bind(value.clone().map(|date| *date))),
+        SeaValue::ChronoDateTimeUtc(value) => Ok(query.bind(value.clone().map(|moment| *moment))),
+        SeaValue::ChronoTime(_)
+        | SeaValue::ChronoDateTime(_)
+        | SeaValue::ChronoDateTimeLocal(_)
+        | SeaValue::ChronoDateTimeWithTimeZone(_) => Err(Denial::ServerError),
     }
 }
 
@@ -820,9 +829,11 @@ pub fn filter_denial(error: pidash_db::filter::FilterError) -> Denial {
 /// Compile one `filters`-param tree against `IssueFilterSet`: structure
 /// and shapes via the kernel tree, every leaf through
 /// [`pidash_db::filterset`] (the `_build_leaf_q` equivalent — the leaf
-/// dict goes to the FilterSet, not to bare columns).
+/// dict goes to the FilterSet, not to bare columns). `tz` is the request
+/// user's zone, for naive datetime inputs.
 pub fn compile_filter_tree(
     tree: &pidash_db::filter::FilterTree,
+    tz: &chrono_tz::Tz,
 ) -> Result<Condition, pidash_db::filter::FilterError> {
     use pidash_db::filter::{FilterTree, Lookup};
     fn leaf_name(field: &str, lookup: Lookup) -> String {
@@ -849,24 +860,24 @@ pub fn compile_filter_tree(
         FilterTree::And(children) => {
             let mut cond = Condition::all();
             for child in children {
-                cond = cond.add(compile_filter_tree(child)?);
+                cond = cond.add(compile_filter_tree(child, tz)?);
             }
             Ok(cond)
         }
         FilterTree::Or(children) => {
             let mut cond = Condition::any();
             for child in children {
-                cond = cond.add(compile_filter_tree(child)?);
+                cond = cond.add(compile_filter_tree(child, tz)?);
             }
             Ok(cond)
         }
-        FilterTree::Not(child) => Ok(compile_filter_tree(child)?.not()),
+        FilterTree::Not(child) => Ok(compile_filter_tree(child, tz)?.not()),
         FilterTree::Leaf(leaves) => {
             let provided: Vec<(String, Value)> = leaves
                 .iter()
                 .map(|leaf| (leaf_name(&leaf.field, leaf.lookup), leaf.value.clone()))
                 .collect();
-            pidash_db::filterset::build_combined(&provided)
+            pidash_db::filterset::build_combined(&provided, tz)
         }
     }
 }
@@ -874,16 +885,45 @@ pub fn compile_filter_tree(
 /// The `filters` query param compiled to a [`Condition`], or `None` when
 /// absent/empty (the backend returns the queryset unchanged then).
 /// Python parses `request.query_params.get("filters")` — the last value
-/// wins for repeats.
-pub fn complex_filter(query: &QueryMap) -> Result<Option<Condition>, Denial> {
+/// wins for repeats. `tz` is the request user's zone, for naive datetime
+/// inputs.
+pub fn complex_filter(query: &QueryMap, tz: &chrono_tz::Tz) -> Result<Option<Condition>, Denial> {
     let raw = query_last(query, "filters").unwrap_or_default();
     if raw.is_empty() {
         return Ok(None);
     }
     match pidash_db::filter::FilterTree::parse_param_opt(&raw).map_err(filter_denial)? {
-        Some(tree) => compile_filter_tree(&tree).map(Some).map_err(filter_denial),
+        Some(tree) => compile_filter_tree(&tree, tz)
+            .map(Some)
+            .map_err(filter_denial),
         None => Ok(None),
     }
+}
+
+/// The request user's zone for rich-filter compilation, for callers whose
+/// gate does not already carry one (cycle / module / profile lists).
+/// Loaded only when a `filters` param is present: unfiltered requests keep
+/// their current behavior. A bad zone or a missing user row is a 500 —
+/// Django blows up the same way in `TimezoneMixin.initial`, before the
+/// view body runs.
+pub async fn filters_timezone(
+    pool: &sqlx::PgPool,
+    user_id: &uuid::Uuid,
+    query: &QueryMap,
+) -> Result<chrono_tz::Tz, Denial> {
+    if query_last(query, "filters")
+        .map(|raw| raw.is_empty())
+        .unwrap_or(true)
+    {
+        return Ok(chrono_tz::UTC);
+    }
+    let row: Option<(String,)> = sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let (name,) = row.ok_or(Denial::ServerError)?;
+    name.parse().map_err(|_| Denial::ServerError)
 }
 
 // ---- legacy predicates --------------------------------------------------------
@@ -1418,7 +1458,7 @@ pub fn filtered_set(
     // Rich filters (`filters` JSON via ComplexFilterBackend + IssueFilterSet).
     let mut complex_sql = String::new();
     if layers.rich {
-        if let Some(cond) = complex_filter(query)? {
+        if let Some(cond) = complex_filter(query, &gate.timezone)? {
             let (fragment, values) = render_condition(&cond);
             complex_sql = binder.splice(&fragment, values);
         }

@@ -77,7 +77,8 @@ use pidash_services::auth_session::tasks as tasks_kernel;
 
 use crate::assistant::governor::throttle_check;
 use crate::assistant::throttles::ThrottleSpec;
-use crate::auth_session::render::render_csrf_failure;
+use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
+use crate::auth_session::throttle_ident;
 use crate::edge;
 use crate::license::handlers_auth_forms::client_ip;
 use crate::state::AppState;
@@ -371,11 +372,19 @@ fn csrf_failure_response(root_url: &str) -> Response {
 // ---------------------------------------------------------------------------
 
 /// `HttpResponseRedirect`: 302 + `Location`, `Vary: Cookie`, and any
-/// `Set-Cookie` values the branch issued.
+/// `Set-Cookie` values the branch issued. Django percent-encodes the URL
+/// first (`iri_to_uri`, `django/http/response.py:620`). Past
+/// `MAX_URL_REDIRECT_LENGTH` characters the final `Location` answers
+/// 400 (`DisallowedRedirect`).
 fn redirect_response(location: String, set_cookies: Vec<String>) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let too_long = location.chars().count() > shapes_kernel::MAX_URL_REDIRECT_LENGTH;
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     let mut builder = Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -424,7 +433,9 @@ fn throttle_429() -> Response {
 
 /// DRF `UnsupportedMediaType` (`exceptions.py:217`): the request's
 /// content type echoed verbatim. `Vary: Cookie`, same as above.
-fn unsupported_media_type_response(content_type: &str) -> Response {
+/// Shared with the magic-generate handler (PIDASHCONV-1351), whose
+/// DRF views parse `request.data` under the same default parsers.
+pub(crate) fn unsupported_media_type_response(content_type: &str) -> Response {
     (
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         [
@@ -584,7 +595,8 @@ async fn user_by_pk(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<Option<UserRo
 // ---------------------------------------------------------------------------
 
 /// `user.check_password(candidate)` (`hashers.py`): `False` on
-/// mismatch *and* on unparsable hashes.
+/// mismatch *and* on unparsable hashes. The setter side effect
+/// (re-hash outdated hashes) lives in `provider_outcome`, not here.
 fn check_password(candidate: &str, encoded: &str) -> bool {
     pidash_auth::password::verify_password(candidate, encoded).unwrap_or(false)
 }
@@ -1458,7 +1470,7 @@ async fn provider_outcome(
     form: kernel::EmailForm,
     normalized: &str,
     raw_password: &str,
-    existing: Option<&UserRow>,
+    existing: Option<&mut UserRow>,
 ) -> Result<kernel::ProviderOutcome, Response> {
     let enable_email_password = config_value(pool, "ENABLE_EMAIL_PASSWORD", None)
         .await
@@ -1473,6 +1485,23 @@ async fn provider_outcome(
                 return Ok(kernel::ProviderOutcome::BadPassword {
                     email: normalized.to_owned(),
                 });
+            }
+            // Django's `check_password` setter (`base_user.py:111-123`): a
+            // correct password on an outdated hash re-encodes with the
+            // default hasher at once (`save(update_fields=["password"])`
+            // writes only that column — no `updated_at` bump). This is the
+            // same row the session tail reads, so the session hash covers
+            // the new field exactly as `login()` does after the setter.
+            if let Some(new_hash) =
+                pidash_auth::password::rehash_if_outdated(raw_password, &user.password)
+            {
+                sqlx::query(r#"UPDATE "users" SET "password" = $1 WHERE "id" = $2"#)
+                    .bind(&new_hash)
+                    .bind(user.id)
+                    .execute(pool)
+                    .await
+                    .map_err(|_| server_error())?;
+                user.password = new_hash;
             }
             Ok(kernel::ProviderOutcome::Ok)
         }
@@ -1555,18 +1584,20 @@ async fn evaluate_attempt(
         kernel::FormField::Missing => "",
     };
     let normalized = kernel::normalize_email(raw_email);
-    let existing = user_by_email(pool, &normalized)
+    let mut existing = user_by_email(pool, &normalized)
         .await
         .map_err(|_| server_error())?;
     let user_exists = existing.is_some();
-    let user_row = existing.clone();
     let provider = if (req.form == kernel::EmailForm::SignIn) != user_exists {
         // The view's own existence pre-check fails: the provider is
         // never constructed (`Q-provider-order`).
         kernel::ProviderOutcome::Ok
     } else {
-        provider_outcome(pool, req.form, &normalized, raw_password, existing.as_ref()).await?
+        provider_outcome(pool, req.form, &normalized, raw_password, existing.as_mut()).await?
     };
+    // Cloned after the provider ran: a sign-in re-hash above already
+    // rewrote `password` in place for the session tail.
+    let user_row = existing.clone();
     let attempt = kernel::EmailAttempt {
         form: req.form,
         instance_ok: true,
@@ -2037,11 +2068,6 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| info.0.ip().to_string());
-    let forwarded = parts
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok());
-    let ip = client_ip(forwarded, peer.as_deref()).unwrap_or_default();
     // Throttle before the handler (`APIView.initial`: auth, then
     // permissions, then throttles); authenticated callers bypass the
     // anon scope. Histories live in the shared redis db under the DRF
@@ -2093,11 +2119,9 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         }
     }
     if !authenticated {
-        let ident = if ip.is_empty() {
-            "127.0.0.1".to_owned()
-        } else {
-            ip.clone()
-        };
+        // DRF `get_ident`, not the first-entry `client_ip` stamp:
+        // the whole X-Forwarded-For chain is the bucket.
+        let ident = throttle_ident(&parts.headers, peer);
         if !check_email_throttle(state, &ident).await {
             return throttle_429();
         }
@@ -2295,6 +2319,17 @@ async fn signout_space(State(state): State<AppState>, req: axum::extract::Reques
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(
+            redirect_response(long, Vec::new()).status(),
+            StatusCode::BAD_REQUEST
+        );
+        let ok = redirect_response("http://app.test/?next_path=/x".to_owned(), Vec::new());
+        assert_eq!(ok.status(), StatusCode::FOUND);
+    }
 
     fn prov_with(secret: Option<&str>, token: Option<&str>) -> Provenance {
         Provenance {
