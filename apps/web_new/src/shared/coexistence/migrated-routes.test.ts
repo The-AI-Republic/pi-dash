@@ -165,6 +165,33 @@ describe("bundled list", () => {
     expect(isMigratedPath("/acme/browse")).toBe(false);
   });
 
+  it("serves every workspace-settings section and the webhook detail subtree", () => {
+    for (const path of [
+      "/acme/settings",
+      "/acme/settings/members",
+      "/acme/settings/billing",
+      "/acme/settings/exports",
+      "/acme/settings/integrations",
+      "/acme/settings/webhooks",
+      "/acme/settings/webhooks/00000000-0000-0000-0000-000000000000",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(true);
+    }
+    // Sections the area does not own stay on the old app: project settings
+    // land with their own gate, and the profile legacy forwards plus any
+    // unknown section have no web_new page at this address.
+    for (const path of [
+      "/acme/settings/projects/1",
+      "/acme/settings/api-tokens",
+      "/acme/settings/account",
+      "/acme/settings/unknown",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(false);
+    }
+    expect(resolveLinkKind("/acme/settings/members")).toBe("router");
+    expect(resolveLinkKind("/acme/settings/unknown")).toBe("anchor");
+  });
+
   it("keeps workspace matching out of reserved top-level names and the bare root", () => {
     for (const name of [
       "api",
@@ -237,6 +264,23 @@ describe("parity with the Caddy generator", () => {
     "/acme/browse/ACME-1/",
     "/acme/browse/ACME-1/x",
     "/acme/browse",
+    // Workspace settings (WSET area gate). The six sections and the whole
+    // webhook detail subtree move; project settings stay on the old app
+    // until their own gate, and so do the profile-owned legacy forwards.
+    "/acme/settings",
+    "/acme/settings/",
+    "/acme/settings/members",
+    "/acme/settings/billing",
+    "/acme/settings/exports",
+    "/acme/settings/integrations",
+    "/acme/settings/webhooks",
+    "/acme/settings/webhooks/1",
+    "/acme/settings/webhooks/1/x",
+    "/acme/settings/projects/1",
+    "/acme/settings/projects",
+    "/acme/settings/api-tokens",
+    "/acme/settings/account",
+    "/acme/settings/unknown",
     "/acme.dev",
     "/acme.dev/projects",
     "/foo",
