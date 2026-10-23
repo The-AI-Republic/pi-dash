@@ -321,6 +321,7 @@ fn twin_map_issue(row: &sqlx::postgres::PgRow) -> Result<IssueView, sqlx::Error>
         priority: row.try_get("priority")?,
         sequence_id: row.try_get("sequence_id")?,
         target_date: row.try_get("target_date")?,
+        work_type: row.try_get("work_type")?,
     })
 }
 
@@ -344,6 +345,7 @@ fn twin_map_project(row: &sqlx::postgres::PgRow) -> Result<ProjectView, sqlx::Er
         interval_impl: i64::from(interval_impl),
         interval_review: i64::from(interval_review),
         interval_test: i64::from(interval_test),
+        default_work_type: row.try_get("default_work_type")?,
     })
 }
 
@@ -540,6 +542,7 @@ impl CreationSeam for HandoffStore<'_, '_> {
             .bind(&row.phase_kind)
             .bind(&row.run_config)
             .bind(row.now)
+            .bind(&row.work_type)
             .fetch_one(&mut **self.tx.inner())
             .await
             .map_err(Self::db)?;

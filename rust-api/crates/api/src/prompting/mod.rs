@@ -111,7 +111,7 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json_cpython::{
     parse_request_bytes_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
-use pidash_services::prompting::{composer, context, recipes, registry, validation};
+use pidash_services::prompting::{composer, context, recipes, registry, validation, work_types};
 
 /// `views.py:59`: numeric `WorkspaceMember.role` for the admin role.
 pub const WORKSPACE_ADMIN_ROLE: i32 = 20;
@@ -227,6 +227,9 @@ enum Denial {
     UnsupportedMediaType(String),
     /// 400, `{"error":…, "kinds":[…]}` (unknown kind).
     BadKind(String),
+    /// 400, `{"error":"unknown work type …","work_types":[…]}`; carries the
+    /// Python `repr` of the rejected value (`views.py` `_resolve_work_type`).
+    BadWorkType(String),
     /// 404, `{"error":…}` (unknown section / no active override).
     NotError(String),
     /// 403, `{"error":…}` (tier gates / draft gates).
@@ -278,6 +281,14 @@ impl Denial {
                     serde_json::to_string(&recipes::all_kinds()).expect("kinds serialize"),
                 ),
             ),
+            Denial::BadWorkType(repr) => (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "{{\"error\":{},\"work_types\":{}}}",
+                    json_string(&format!("unknown work type {repr}")),
+                    serde_json::to_string(&work_types::keys()).expect("work types serialize"),
+                ),
+            ),
             Denial::NotError(message) => (
                 StatusCode::NOT_FOUND,
                 format!("{{\"error\":{}}}", json_string(message)),
@@ -323,6 +334,66 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
+}
+
+/// Python `repr()` of one string: single quotes unless the text holds one
+/// (then double, unless it holds both — then single with `\'`), with
+/// `\n`/`\t`/`\r`/`\\` escapes and `\x`/`\u`/`\U` for the rest of the
+/// non-printables.
+fn py_repr_str(text: &str) -> String {
+    let use_double = text.contains('\'') && !text.contains('"');
+    let quote = if use_double { '"' } else { '\'' };
+    let mut out = String::from(quote);
+    for c in text.chars() {
+        match c {
+            '\'' if !use_double => out.push_str("\\'"),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let code = c as u32;
+                if code < 0x100 {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else if code < 0x10000 {
+                    out.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// `_resolve_work_type` (`views.py`): `raw or DEFAULT_WORK_TYPE`, which must
+/// name a registered work type, else the 400 naming the known ones. `raw`
+/// is a query-param string or a request-body JSON value; falsy values
+/// (missing, null, `""`, `0`, `false`, empty containers) select the
+/// default. A truthy non-string can never be a key: numbers and booleans
+/// get the 400 with their Python repr, while lists/objects are unhashable
+/// in Python's `in` check (an uncaught `TypeError`, the 500).
+fn resolve_work_type(raw: Option<&Value>) -> Result<&'static str, Denial> {
+    let raw = match raw {
+        Some(value) if json_truthy(value) => value,
+        _ => return Ok(work_types::DEFAULT_WORK_TYPE),
+    };
+    match raw {
+        Value::String(key) => work_types::keys()
+            .into_iter()
+            .find(|known| known == key)
+            .ok_or_else(|| Denial::BadWorkType(py_repr_str(key))),
+        Value::Bool(_) => Err(Denial::BadWorkType("True".to_owned())),
+        Value::Number(number) => Err(Denial::BadWorkType(number.to_string())),
+        _ => Err(Denial::ServerError),
+    }
+}
+
+/// [`resolve_work_type`] for a `?work_type=` query param.
+fn resolve_work_type_param(query: &HashMap<String, String>) -> Result<&'static str, Denial> {
+    resolve_work_type(query.get("work_type").cloned().map(Value::String).as_ref())
 }
 
 /// DRF `UserRateThrottle` over the shared cache (`throttling.py:193-202`):
@@ -1106,11 +1177,13 @@ async fn load_index(
     })
 }
 
-/// `_section_breakdown` (`views.py:102-146`): resolve every section in
-/// the kind's recipe and attach `needs_attention` from the override row
-/// that actually resolved, in `ResolvedSectionSerializer` field order.
+/// `_section_breakdown` (`views.py`): resolve every section in the kind's
+/// recipe (expanded for `work_type`) and attach `needs_attention` from the
+/// override row that actually resolved, in `ResolvedSectionSerializer`
+/// field order.
 fn section_breakdown(
     kind: &str,
+    work_type: &str,
     workspace_id: &uuid::Uuid,
     user_id: Option<&uuid::Uuid>,
     loaded: &LoadedIndex,
@@ -1118,6 +1191,7 @@ fn section_breakdown(
     let workspace_str = workspace_id.to_string();
     let user_str = user_id.map(uuid::Uuid::to_string);
     let recipe = recipes::recipe_for(kind, None).map_err(|_| Denial::ServerError)?;
+    let recipe = work_types::expand(recipe, work_type).map_err(|_| Denial::ServerError)?;
     let mut out = Vec::with_capacity(recipe.len());
     for key in recipe {
         let section = registry::get_section(key).map_err(|_| Denial::ServerError)?;
@@ -1209,6 +1283,7 @@ async fn list_sections_inner(
     if recipes::recipe_for(&kind, None).is_err() {
         return Err(Denial::BadKind(kind));
     }
+    let work_type = resolve_work_type_param(query)?;
     let scope = resolve_scope(query);
     let user = if scope == SCOPE_USER {
         Some(actor.id)
@@ -1216,10 +1291,11 @@ async fn list_sections_inner(
         None
     };
     let loaded = load_index(&pool, &workspace.id, user.as_ref()).await?;
-    let sections = section_breakdown(&kind, &workspace.id, user.as_ref(), &loaded)?;
-    let mut body = serde_json::Map::with_capacity(3);
+    let sections = section_breakdown(&kind, work_type, &workspace.id, user.as_ref(), &loaded)?;
+    let mut body = serde_json::Map::with_capacity(4);
     body.insert("kind".to_owned(), Value::String(kind));
     body.insert("scope".to_owned(), Value::String(scope.to_owned()));
+    body.insert("work_type".to_owned(), Value::String(work_type.to_owned()));
     body.insert("sections".to_owned(), Value::Array(sections));
     Ok(Value::Object(body))
 }
@@ -1826,6 +1902,7 @@ async fn compiled_template_inner(
     if recipes::recipe_for(kind, None).is_err() {
         return Err(Denial::BadKind(kind.to_owned()));
     }
+    let work_type = resolve_work_type_param(query)?;
     let scope = resolve_scope(query);
     let user = if scope == SCOPE_USER {
         Some(actor.id)
@@ -1840,11 +1917,13 @@ async fn compiled_template_inner(
         Some(workspace_str.as_str()),
         user_str.as_deref(),
         &loaded.index,
+        Some(work_type),
     )
     .map_err(|_| Denial::ServerError)?;
-    let mut body = serde_json::Map::with_capacity(4);
+    let mut body = serde_json::Map::with_capacity(5);
     body.insert("kind".to_owned(), Value::String(kind.to_owned()));
     body.insert("scope".to_owned(), Value::String(scope.to_owned()));
+    body.insert("work_type".to_owned(), Value::String(work_type.to_owned()));
     body.insert(
         "template_body".to_owned(),
         Value::String(compiled.template_body),
@@ -1858,9 +1937,14 @@ async fn compiled_template_inner(
             .iter()
             .any(|section| section.source.starts_with("user:"))
     {
-        let automatic =
-            composer::compile_template(kind, Some(workspace_str.as_str()), None, &loaded.index)
-                .map_err(|_| Denial::ServerError)?;
+        let automatic = composer::compile_template(
+            kind,
+            Some(workspace_str.as_str()),
+            None,
+            &loaded.index,
+            Some(work_type),
+        )
+        .map_err(|_| Denial::ServerError)?;
         body.insert(
             "automatic_template_body".to_owned(),
             Value::String(automatic.template_body),
@@ -1935,11 +2019,38 @@ async fn preview_prompt_inner(
     }
     let user = if scope_user { Some(actor.id) } else { None };
 
-    let context_value = if kind == recipes::KIND_SCHEDULER {
-        load_scheduler_context(&pool, &workspace, &data).await?
+    let (mut context_value, issue_work_type) = if kind == recipes::KIND_SCHEDULER {
+        (
+            load_scheduler_context(&pool, &workspace, &data).await?,
+            None,
+        )
     } else {
-        load_issue_context(&pool, &workspace, kind, &data).await?
+        let (context_value, effective) = load_issue_context(&pool, &workspace, kind, &data).await?;
+        (context_value, Some(effective))
     };
+
+    // The work type to preview with (`views.py`): the explicit request
+    // value, else the issue's effective work type (scheduler previews use
+    // the default). A present `work_type` — even null or `""` — is taken as
+    // given; only an absent key falls back to the issue's.
+    let raw_work_type = data
+        .as_object()
+        .and_then(|obj| obj.get("work_type"))
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| issue_work_type.map(|key| Value::String(key.to_owned())));
+    let work_type = resolve_work_type(raw_work_type.as_ref())?;
+    if issue_work_type.is_some() {
+        // Honor the requested work type in the rendered text too,
+        // mirroring the `run.kind` override.
+        let resolved = work_types::get_work_type(work_type).map_err(|_| Denial::ServerError)?;
+        if let Some(obj) = context_value.as_object_mut() {
+            obj.insert(
+                "work_type".to_owned(),
+                serde_json::json!({"key": resolved.key, "title": resolved.title}),
+            );
+        }
+    }
 
     // Optional unsaved draft (`views.py:393-423`): render this section's
     // draft body in place of its resolved one.
@@ -1955,6 +2066,8 @@ async fn preview_prompt_inner(
             .and_then(Value::as_str)
             .ok_or_else(|| Denial::BadError("body is required to preview a draft".to_owned()))?;
         if recipes::recipe_for(kind, None)
+            .ok()
+            .and_then(|recipe| work_types::expand(recipe, work_type).ok())
             .map(|recipe| !recipe.contains(&section_key))
             .unwrap_or(true)
         {
@@ -1999,10 +2112,12 @@ async fn preview_prompt_inner(
         // The preview stub run carries no executor selection
         // (`getattr(run, "executor_kind", "local_runner")`).
         None,
+        Some(work_type),
     )
     .map_err(|err| Denial::RenderFailed(err.message().to_owned()))?;
-    let mut body = serde_json::Map::with_capacity(2);
+    let mut body = serde_json::Map::with_capacity(3);
     body.insert("kind".to_owned(), Value::String(kind.to_owned()));
+    body.insert("work_type".to_owned(), Value::String(work_type.to_owned()));
     body.insert("prompt".to_owned(), Value::String(composed.text));
     Ok(Value::Object(body))
 }
@@ -2053,6 +2168,7 @@ struct IssueRow {
     target_date: Option<chrono::NaiveDate>,
     git_work_branch: Option<String>,
     workpad: Option<String>,
+    work_type: Option<String>,
 }
 
 /// Row shapes for the preview loaders. Tuple aliases keep the
@@ -2070,6 +2186,7 @@ type IssueCols = (
     Option<chrono::NaiveDate>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 type ProjectCols = (
     uuid::Uuid,
@@ -2082,6 +2199,7 @@ type ProjectCols = (
     Option<i32>,
     Option<i32>,
     Option<i32>,
+    String,
 );
 type CommentCols = (
     Option<String>,
@@ -2117,16 +2235,20 @@ type ParentCols = (Option<String>, Option<uuid::Uuid>, Option<String>, i64);
 /// `_issue_context` (`views.py:441-461`): the issue must live in this
 /// workspace (tenant isolation); anything unresolvable is the 404. The
 /// default manager drops soft-deleted issues.
+///
+/// Returns the context plus the issue's effective work type
+/// (`work_types.effective_work_type(issue)`).
 async fn load_issue_context(
     pool: &sqlx::PgPool,
     workspace: &Workspace,
     kind: &str,
     data: &Value,
-) -> Result<Value, Denial> {
+) -> Result<(Value, &'static str), Denial> {
     let issue_id = required_id(data, "issue_id", "issue_id is required for this kind")?;
     let row: Option<IssueCols> = sqlx::query_as(
         r#"SELECT i.id, i.project_id, i.state_id, i.parent_id, i.name, i.description_stripped,
-                  i.priority, i.sequence_id, i.target_date, i.git_work_branch, i.workpad
+                  i.priority, i.sequence_id, i.target_date, i.git_work_branch, i.workpad,
+                  i.work_type
            FROM issues i
            WHERE i.id = $1 AND i.workspace_id = $2 AND i.deleted_at IS NULL"#,
     )
@@ -2150,6 +2272,7 @@ async fn load_issue_context(
         target_date: cols.8,
         git_work_branch: cols.9,
         workpad: cols.10,
+        work_type: cols.11,
     };
 
     let project = load_project(pool, &issue.project_id).await?;
@@ -2205,6 +2328,8 @@ async fn load_issue_context(
         project_id: project.id.clone(),
         project_name: project.name.clone(),
         project_description: project.description.clone(),
+        issue_work_type: issue.work_type.clone(),
+        project_default_work_type: Some(project.default_work_type.clone()),
         repo,
         code_reviews: context::code_reviews_context(&reviews),
         parent,
@@ -2237,7 +2362,11 @@ async fn load_issue_context(
             *kind_value = Value::String(kind.to_owned());
         }
     }
-    Ok(context_value)
+    let effective = work_types::effective_work_type(
+        issue.work_type.as_deref(),
+        Some(project.default_work_type.as_str()),
+    );
+    Ok((context_value, effective))
 }
 
 /// `template_name_for` (`orchestration/agent_phases.py:179-188`):
@@ -2265,13 +2394,15 @@ struct ProjectRow {
     interval_impl: i64,
     interval_review: i64,
     interval_test: i64,
+    default_work_type: String,
 }
 
 async fn load_project(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<ProjectRow, Denial> {
     let row: Option<ProjectCols> = sqlx::query_as(
         r#"SELECT id, identifier, name, description, repo_url, base_branch,
                   agent_default_max_ticks, agent_default_interval_seconds,
-                  agent_review_default_interval_seconds, agent_test_default_interval_seconds
+                  agent_review_default_interval_seconds, agent_test_default_interval_seconds,
+                  default_work_type
            FROM projects WHERE id = $1"#,
     )
     .bind(project_id)
@@ -2292,6 +2423,7 @@ async fn load_project(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<Pr
         interval_impl: row.7.map(i64::from).unwrap_or(10800),
         interval_review: row.8.map(i64::from).unwrap_or(10800),
         interval_test: row.9.map(i64::from).unwrap_or(10800),
+        default_work_type: row.10,
     })
 }
 

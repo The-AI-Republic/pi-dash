@@ -960,6 +960,8 @@ async fn render_cloud_issue_prompt<'a>(
         project_id: project.id.to_string(),
         project_name: project.name.clone(),
         project_description: project.description.clone(),
+        issue_work_type: issue.work_type.clone(),
+        project_default_work_type: Some(project.default_work_type.clone()),
         repo,
         code_reviews: prompting_context::code_reviews_context(&bundle.reviews),
         parent: bundle.parent.clone(),

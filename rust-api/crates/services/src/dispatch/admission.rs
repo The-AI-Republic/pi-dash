@@ -631,12 +631,13 @@ pub struct PhaseTemplate<'a> {
 /// (in phase order) whose `template_name` has no recipe-table entry. Both
 /// tables arrive as data — `managed_recipes` is shaped like
 /// `crate::prompting::recipes::MANAGED_RECIPES` so the live table plugs in
-/// directly.
-pub fn managed_runner_configuration_check(
+/// directly (only the kind names are read, so the entry type is generic —
+/// the live table carries work-type slots alongside section keys).
+pub fn managed_runner_configuration_check<E>(
     managed: &ManagedRunnerSettings,
     default_agent_executor: &str,
     phases: &[PhaseTemplate<'_>],
-    managed_recipes: &[(&str, &[&str])],
+    managed_recipes: &[(&str, &[E])],
 ) -> Vec<ConfigurationError> {
     let mut errors = Vec::new();
     if default_agent_executor == AgentExecutorKind::ManagedRunner.value() && !managed.enabled {

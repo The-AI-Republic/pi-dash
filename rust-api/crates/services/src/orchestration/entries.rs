@@ -1444,6 +1444,7 @@ mod tests {
             priority: Some("none".to_owned()),
             sequence_id: 10,
             target_date: None,
+            work_type: None,
         }
     }
 
@@ -1463,6 +1464,7 @@ mod tests {
             interval_impl: 10_800,
             interval_review: 10_800,
             interval_test: 10_800,
+            default_work_type: "software".to_owned(),
         }
     }
 

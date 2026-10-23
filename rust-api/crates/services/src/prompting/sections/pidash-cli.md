@@ -9,7 +9,7 @@ customizable: locked
 
 ### Environment
 
-The CLI reads the following from the process environment — never pass them as flags, and never print, log, or commit their values:
+The CLI reads the following from the process environment — never pass them as flags, and never print, log, or otherwise record their values in any output:
 
 - `PIDASH_API_URL` — base URL of this Pi Dash instance.
 - `PIDASH_WORKSPACE_SLUG` — the workspace the issue lives in.
@@ -31,7 +31,7 @@ On success every command prints a single JSON document to stdout and exits `0`. 
   - Filters (each comma-separated; values OR within a flag, flags AND together): `--state <name-or-UUID>` (unknown names fail and list the valid ones), `--state-group <backlog|unstarted|started|review|test|completed|cancelled>`, `--parent <PROJ-123|UUID|none>` (`none` = top-level only), `--label <name-or-UUID>`, `--priority <urgent|high|medium|low|none>`. Add `--fields id,sequence_id,name,state,parent` for a small payload. Example: `pidash issue list --project ENG --parent ENG-12 --state Backlog --fields id,sequence_id,name,state` lists the Backlog sub-issues of `ENG-12` in one call — prefer this over paging the whole project and calling `issue get` on each item. `--parent` is also how a later run finds the children an earlier run already created, so a split never files duplicates.
 - `pidash issue create --project <PROJ-or-UUID> --title "<title>" [--description <md> | --description-file <path>] [--priority <none|low|medium|high|urgent>] [--state "<state-name-or-UUID>"] [--parent <PROJ-123-or-UUID>] [--label <name-or-UUID>[,...]]` — file a new work item under the named project. Use this for capturing **discovered scope that does not belong on the current issue** (a follow-up bug, a separated task, a missing prerequisite), or — with `--parent` — for filing a **child issue** when you split an issue into genuinely separate tasks (see the "Split into child issues" outcome in "Analyze & scope"). Do **not** create an issue to track sub-steps of the current run — use the workpad comment for that. `--parent` attaches the new item as a sub-issue of the given issue (project-scoped identifier like `PROJ-123`, or a raw UUID); the server validates the parent. `--label` attaches labels that **already exist** in the project — see "Labels" below. Record the new issue's identifier in the workpad so the operator can find it. The description is markdown and keeps its structure (headings, nested and task lists, code blocks, tables). For a long or multi-line body, write it to a file or pipe it with `--description-file -` instead of quoting it inline, since shell quoting of long markdown is error-prone. Empty input is an error.
 - `pidash issue patch <identifier> --state "<state-name>"` — move the issue to a different state. The name is case-insensitive; the CLI resolves it to a UUID for you. You can also pass a state UUID directly.
-- `pidash issue patch <identifier> [--title <s>] [--description <md> | --description-file <path>] [--priority <none|low|medium|high|urgent>] [--parent <PROJ-123-or-UUID>] [--clear-parent] [--add-label <name-or-UUID>[,...]] [--remove-label <name-or-UUID>[,...]] [--label <name-or-UUID>[,...]] [--clear-labels]` — update other fields. At least one flag is required. `--parent` re-parents the issue under the given issue (identifier or UUID), e.g. to attach an existing issue to a tracking parent; `--clear-parent` detaches it to top-level. `--parent` and `--clear-parent` are mutually exclusive. Prefer `--add-label` / `--remove-label` over `--label`: they keep the labels a human already set, while `--label` and `--clear-labels` replace the whole set (see "Labels"). Do **not** edit title or description for planning or progress tracking — use the workpad comment instead. The one case where `--description` is correct is recording the child list on a **tracking parent** after a split (see "Split into child issues" in "Analyze & scope").
+- `pidash issue patch <identifier> [--title <s>] [--description <md> | --description-file <path>] [--priority <none|low|medium|high|urgent>] [--parent <PROJ-123-or-UUID>] [--clear-parent] [--add-label <name-or-UUID>[,...]] [--remove-label <name-or-UUID>[,...]] [--label <name-or-UUID>[,...]] [--clear-labels] [--work-type <key> | --clear-work-type]` — update other fields. `--work-type` sets the issue's work type (the per-work-type guidance in prompts like this one); it is locked to humans once the issue is being worked, so do not try to change it from a run. At least one flag is required. `--parent` re-parents the issue under the given issue (identifier or UUID), e.g. to attach an existing issue to a tracking parent; `--clear-parent` detaches it to top-level. `--parent` and `--clear-parent` are mutually exclusive. Prefer `--add-label` / `--remove-label` over `--label`: they keep the labels a human already set, while `--label` and `--clear-labels` replace the whole set (see "Labels"). Do **not** edit title or description for planning or progress tracking — use the workpad comment instead. The one case where `--description` is correct is recording the child list on a **tracking parent** after a split (see "Split into child issues" in "Analyze & scope").
 - `pidash issue relate <identifier> --blocked-by <ID>[,<ID>...]` — record that `<identifier>` cannot finish until each listed issue does. Other flags (exactly one per call): `--blocking`, `--relates-to`, `--duplicate`, `--start-before`, `--start-after`, `--finish-before`, `--finish-after`, `--implemented-by`, `--implements`; each names the relation from `<identifier>`'s side, so `relate B --blocked-by A` and `relate A --blocking B` are the same edge. IDs are identifiers or UUIDs. Idempotent: already-related pairs come back under `unchanged`, and a pair that already has a *different* relation comes back under `conflicts` untouched (unrelate it first if you mean to change it). Prints `{issue, relation_type, created, unchanged, conflicts, relations}`.
 - `pidash issue unrelate <identifier> --blocked-by <ID>[,<ID>...]` — remove that exact relation (same flags as `relate`). Pairs without it come back under `not_related`; that is not an error.
 - `pidash issue wait <identifier>` — record that you have read this issue's open blockers, decided you cannot safely proceed, and are yielding. It buys back the tick this run is spending, so waiting costs no net budget: call it, then `pidash run yield --outcome waiting_on_external`. Say *why* in your workpad first — nothing on the platform reads that note, but the next tick's you will. Read `applied` and `reason` in the printed `{applied, reason, used, granted, waited, cap}`: a refusal (`wait_cap_reached` once the one-pool allowance is spent, `infinite_pool` when the issue has no cap, `no_ticker`) is a normal exit 0, changes nothing, and means further waiting spends normal budget — tell the human in a comment rather than looping on it. A transport or permission error exits non-zero like any other CLI call; yield anyway rather than retrying. Calling it twice in one run buys two ticks while the allowance lasts.
@@ -40,7 +40,7 @@ On success every command prints a single JSON document to stdout and exits `0`. 
 
 #### Comments
 
-Comments are the human ↔ agent conversation channel. Use them to ask clarifying questions, post blocker notices, share PR links, and announce completion. **Comments are not for tracking your own progress — that's what the workpad is for.**
+Comments are the human ↔ agent conversation channel. Use them to ask clarifying questions, post blocker notices, share links to deliverables, and announce completion. **Comments are not for tracking your own progress — that's what the workpad is for.**
 
 - `pidash comment list <identifier>` — list comments on the issue. Each entry has `id` (UUID), `comment_html`, `comment_stripped`, `labels`, `actor_detail`, `speaker_type`, `speaker_label`, `speaker_agent_run_id`, and timestamps. Read these in chronological order to pick up any human replies since your last run.
 - `pidash comment add <identifier> --body-file <path> --as-agent "<agent name>" --agent-run-id "{{ run.id }}" [--fold]` — post a new comment from a file and mark it as spoken by this AI agent run. `--body <markdown>` works for one-liners. Prefer `--body-file` for anything multi-line — shell quoting of markdown is error-prone. When you post any issue comment during this run, always include `--as-agent` and `--agent-run-id`; use your actual runtime name if you know it (`Codex`, `Claude Code`, etc.), otherwise use `AI Agent`.
@@ -104,7 +104,7 @@ Schedulers are the workspace's recurring agent jobs — a prompt plus a cadence,
 
 {% if run.kind != "scheduler" %}#### Run outcome
 
-- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--stop-ticking] [--note "<one line>"]` — report this run's outcome. Call it once, as your **last** `pidash` command, after any state move. The outcome is informational: `done` means "this run's turn is done", and `waiting_on_external` (waiting on CI, a merge, or a dependency issue) applies in **every** stage. No outcome stops the issue's ticking clock, and a run that reports nothing keeps ticking too. `--stop-ticking` is the only run-side signal that stops it — send it when the issue is finished or parked on a human, never while CI, a merge, or a dependency wait remains. See "Ending the run" for what each outcome means and exactly when to stop the clock.
+- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--stop-ticking] [--note "<one line>"]` — report this run's outcome. Call it once, as your **last** `pidash` command, after any state move. The outcome is informational: `done` means "this run's turn is done", and `waiting_on_external` (waiting on an external process — automated checks, the deliverable being accepted — or a dependency issue) applies in **every** stage. No outcome stops the issue's ticking clock, and a run that reports nothing keeps ticking too. `--stop-ticking` is the only run-side signal that stops it — send it when the issue is finished or parked on a human, never while an external-process or dependency wait remains. See "Ending the run" for what each outcome means and exactly when to stop the clock.
 
 {% endif %}#### Debugging
 
@@ -133,7 +133,7 @@ pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 
-{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether you opened a PR or finished a `noncode` task (investigation, status check, comment-only response), move to the `review` group and report the outcome. The runner never moves an issue to `completed`/Done; a human closes it:
+{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether the task produced a durable deliverable or only an answer (investigation, status check, comment-only response), move to the `review` group and report the outcome. The runner never moves an issue to `completed`/Done; a human closes it:
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Review"
@@ -145,16 +145,16 @@ pidash run yield --outcome done   # turn done — the issue moved on; review run
 pidash issue patch {{ issue.identifier }} --state "In Test"      # approved
 pidash issue patch {{ issue.identifier }} --state "In Progress"  # changes needed
 pidash run yield --outcome done                                  # after either move: your turn is done
-pidash run yield --outcome waiting_on_external                   # staying: waiting on CI or the PR — keep ticking
+pidash run yield --outcome waiting_on_external                   # staying: waiting on an external process — keep ticking
 pidash run yield --outcome waiting_on_human --stop-ticking       # staying: waiting on a human reviewer
 ```
-{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test and stops the clock so a human takes it from there (unless the project explicitly lets agents merge and close — then merge and move it to Done instead); **defects** send it back to In Progress with the open items listed (see "Test cycle" Step 3 and "Available states"):
+{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test and stops the clock so a human takes it from there (unless the project explicitly lets agents accept and close — then accept the deliverable and move it to Done instead); **defects** send it back to In Progress with the open items listed (see "Test cycle" Step 3 and "Available states"):
 
 ```sh
 pidash run yield --outcome done --stop-ticking                   # pass — leave In Test; a human takes it from here
 pidash issue patch {{ issue.identifier }} --state "In Progress"  # defects
 pidash run yield --outcome done                                  # after the move: your turn is done
-pidash run yield --outcome waiting_on_external                   # nothing changed — CI or a dependency still pending
+pidash run yield --outcome waiting_on_external                   # nothing changed — an external process or a dependency still pending
 ```
 {% endif %}{% else %}File a finding as a new issue under this project:
 
@@ -173,11 +173,11 @@ pidash issue create --project {{ project.identifier }} --title "<short summary>"
 _(state list unavailable — call `pidash state list` to retrieve it before moving state)_
 {% endif %}
 
-Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description.{% if run.kind == "coding-task" %} The mapping that trips runs up most often: a finished issue — a `code_change` that opened a PR **or** a finished `noncode` task — is awaiting a human → `review` group ("In Review"). The runner never moves an issue to `completed` ("Done"); that's a human's call. Use `cancelled` for "this will not be done".{% endif %}
+Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description.{% if run.kind == "coding-task" %} The mapping that trips runs up most often: a finished issue — deliverable produced **or** question answered — is awaiting a human → `review` group ("In Review"). The runner never moves an issue to `completed` ("Done"); that's a human's call. Use `cancelled` for "this will not be done".{% endif %}
 
 ### Conventions
 
 - All writes are real and immediate. There is no undo. Confirm intent against your workpad plan before mutating.
 - Never retry the same `pidash` command more than twice. On non-zero exit, read the JSON on stderr, decide whether the failure is retryable, back off, and record the outcome in the workpad.
-- Never print, log, commit, or comment on the value of `PIDASH_TOKEN` or anything else whose name begins with `PIDASH_`. If you see the token echoed anywhere, stop and record it in the workpad.
+- Never print, log, or comment on the value of `PIDASH_TOKEN` or anything else whose name begins with `PIDASH_`, and never include it in any deliverable. If you see the token echoed anywhere, stop and record it in the workpad.
 - When pasting `pidash` JSON back into the workpad for audit, enclose it in a fenced ` ``` ` block.

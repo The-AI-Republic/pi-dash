@@ -2129,6 +2129,7 @@ mod tests {
             priority: Some("none".to_owned()),
             sequence_id: 1,
             target_date: None,
+            work_type: None,
         }
     }
 
@@ -2148,6 +2149,7 @@ mod tests {
             interval_impl: 10800,
             interval_review: 10800,
             interval_test: 10800,
+            default_work_type: "software".to_owned(),
         }
     }
 
