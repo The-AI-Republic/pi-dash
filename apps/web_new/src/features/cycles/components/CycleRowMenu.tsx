@@ -108,7 +108,6 @@ export function CycleRowMenu({
         items={items}
       />
       <UpdateCycleDialog
-        mode="update"
         open={editOpen}
         onOpenChange={setEditOpen}
         workspaceSlug={workspaceSlug}

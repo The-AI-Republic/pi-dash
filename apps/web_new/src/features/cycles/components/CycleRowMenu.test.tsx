@@ -114,24 +114,25 @@ function transport(url: string, init: { method?: string }): Promise<unknown> {
 
 async function renderMenu(cycle: CycleRowData, canMutate: boolean, initialEntry: string = LIST_PATH): Promise<void> {
   const rootRoute = createRootRoute({ component: () => <Outlet /> });
-  const menuRoute = (path: string): ReturnType<typeof createRoute> =>
-    createRoute({
-      getParentRoute: () => rootRoute,
-      path,
-      component: () => (
-        <div className="group">
-          <CycleRowMenu
-            workspaceSlug="acme"
-            projectId={CYCLES_PROJECT_ID}
-            cycle={cycle}
-            canMutate={canMutate}
-            currentProject={{ id: CYCLES_PROJECT_ID, name: "Website relaunch", identifier: "WEB" }}
-          />
-        </div>
-      ),
-    });
+  const menuScreen = (): React.ReactElement => (
+    <div className="group">
+      <CycleRowMenu
+        workspaceSlug="acme"
+        projectId={CYCLES_PROJECT_ID}
+        cycle={cycle}
+        canMutate={canMutate}
+        currentProject={{ id: CYCLES_PROJECT_ID, name: "Website relaunch", identifier: "WEB" }}
+      />
+    </div>
+  );
+  const listRoute = createRoute({ getParentRoute: () => rootRoute, path: LIST_PATH, component: menuScreen });
+  const detailRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: DETAIL_PATH,
+    component: menuScreen,
+  });
   router = createRouter({
-    routeTree: rootRoute.addChildren([menuRoute(LIST_PATH), menuRoute(DETAIL_PATH)]),
+    routeTree: rootRoute.addChildren([listRoute, detailRoute]),
     history: createMemoryHistory({ initialEntries: [initialEntry] }),
     defaultPreload: false,
   });
