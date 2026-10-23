@@ -26,6 +26,10 @@ const ACTIONS = [
   "waitFor",
   "textContent",
   "allTextContents",
+  "innerText",
+  "allInnerTexts",
+  "getAttribute",
+  "isDisabled",
   "inputValue",
 ];
 
@@ -51,8 +55,11 @@ class Recorder {
   // has to describe the paths it cares about.
   respond: Respond = ({ method }) => {
     if (method === "count") return 0;
-    if (method === "allTextContents") return [];
-    if (method === "textContent" || method === "inputValue" || method === "title") return "";
+    if (method === "allTextContents" || method === "allInnerTexts") return [];
+    if (method === "textContent" || method === "inputValue" || method === "title" || method === "innerText") {
+      return "";
+    }
+    if (method === "getAttribute") return null;
     if (method === "isDisabled" || method === "isVisible") return false;
     return undefined;
   };
@@ -131,14 +138,21 @@ class Recorder {
     matches: (url: URL) => boolean;
     handler: (route: { request(): { method(): string }; continue(): Promise<void> }) => Promise<void>;
   }> {
+    return this.routed().map((entry) => ({
+      ...entry,
+      handler: entry.handler as (route: {
+        request(): { method(): string };
+        continue(): Promise<void>;
+      }) => Promise<void>,
+    }));
+  }
+
+  routed(): Array<{ matches: (url: URL) => boolean; handler: (route: unknown) => Promise<void> }> {
     return this.calls
       .filter((call) => call.path === "page.route")
       .map((call) => ({
         matches: call.args[0] as (url: URL) => boolean,
-        handler: call.args[1] as (route: {
-          request(): { method(): string };
-          continue(): Promise<void>;
-        }) => Promise<void>,
+        handler: call.args[1] as (route: unknown) => Promise<void>,
       }));
   }
 
@@ -146,6 +160,10 @@ class Recorder {
     return this.calls
       .filter((call) => call.path === "page.on")
       .map((call) => call.args[1] as (request: { url(): string; method(): string }) => void);
+  }
+
+  unrouted(): number {
+    return this.calls.filter((call) => call.path === "page.unroute").length;
   }
 }
 
@@ -617,5 +635,228 @@ describe("drafts list-surface reads (NEWFRONT-782)", () => {
     expect(seen).toEqual(["GET /api/workspaces/acme/draft-issues/"]);
     expect(recorder.gotos()).toEqual(["/acme/drafts"]);
     expectTrace(recorder.trace(), ["off page.off"]);
+  });
+});
+
+describe("row identity (NEWFRONT-783, DRAFT-007)", () => {
+  it("reads the marker from the row's first button", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "innerText" ? "  PAR " : undefined);
+    await expect(new WebNewDriver(recorder.page()).draftRowProjectMarker("One")).resolves.toBe("PAR");
+    expectTrace(recorder.trace(), ["waitFor", NAME_BLOCK, "innerText", 'getByRole("button").first()']);
+  });
+
+  it("reports whether the work-type mark is on the row", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => (method === "count" && path.includes("data-draft-type-mark") ? 1 : 0);
+    await expect(new WebNewDriver(recorder.page()).draftRowTypeMarkPresent("One")).resolves.toBe(true);
+    const bare = new Recorder();
+    await expect(new WebNewDriver(bare.page()).draftRowTypeMarkPresent("One")).resolves.toBe(false);
+    expectTrace(bare.trace(), ["waitFor", NAME_BLOCK, "count", "data-draft-type-mark"]);
+  });
+});
+
+describe("inline property reads (NEWFRONT-783, DRAFT-012-016)", () => {
+  it("reads each property slot's text through its hook", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method !== "innerText") return undefined;
+      if (path.includes("draft-property") && path.includes("state")) return "  Doing ";
+      if (path.includes("draft-property") && path.includes("priority")) return "High";
+      if (path.includes("draft-property") && path.includes("labels")) return "Mine, Theirs";
+      if (path.includes("draft-property") && path.includes("assignees")) return "  You ";
+      return "";
+    };
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.draftStateText("One")).resolves.toBe("Doing");
+    await expect(driver.draftPriorityText("One")).resolves.toBe("High");
+    await expect(driver.draftLabelsText("One")).resolves.toBe("Mine, Theirs");
+    await expect(driver.draftAssigneesText("One")).resolves.toBe("You");
+    expectTrace(recorder.trace(), [
+      "waitFor",
+      "data-draft-property=",
+      "state",
+      "waitFor",
+      "data-draft-property=",
+      "priority",
+      "waitFor",
+      "data-draft-property=",
+      "labels",
+      "waitFor",
+      "data-draft-property=",
+      "assignees",
+    ]);
+  });
+
+  it("opens each picker through its slot's trigger", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.draftOpenStatePicker("One");
+    await driver.draftOpenPriorityPicker("One");
+    await driver.draftOpenLabelsPicker("One");
+    await driver.draftOpenAssigneesPicker("One");
+    expectTrace(recorder.clicks(), [
+      "data-draft-property=",
+      "state",
+      "data-draft-property=",
+      "priority",
+      "data-draft-property=",
+      "labels",
+      "data-draft-property=",
+      "assignees",
+    ]);
+  });
+
+  it("reads both date triggers as one span of text", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method !== "innerText") return undefined;
+      if (path.includes("draft-start-date-trigger")) return "Oct 12, 2026";
+      if (path.includes("draft-due-date-trigger")) return "Oct 18, 2026";
+      return "";
+    };
+    await expect(new WebNewDriver(recorder.page()).draftDatesText("One")).resolves.toBe("Oct 12, 2026 Oct 18, 2026");
+  });
+
+  it("opens each date picker through its trigger", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.draftOpenStartDatePicker("One");
+    await driver.draftOpenDueDatePicker("One");
+    expectTrace(recorder.clicks(), ["draft-start-date-trigger", "draft-due-date-trigger"]);
+  });
+
+  it("reports whether a picker option reads selected", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => (method === "getAttribute" && path.includes("High") ? "true" : "false");
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.draftPickerOptionSelected("High")).resolves.toBe(true);
+    await expect(driver.draftPickerOptionSelected("Low")).resolves.toBe(false);
+    expectTrace(recorder.trace(), ["waitFor", 'getByRole("option"', "High", "getAttribute"]);
+  });
+
+  it("edits through the row menu's edit entry", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).editDraftByName("One");
+    expectTrace(recorder.trace(), ["waitFor", NAME_BLOCK, "click", "Actions for One", "menuitem", "Edit"]);
+  });
+});
+
+describe("shared picker reads (NEWFRONT-783)", () => {
+  it("reads combobox option labels without their glyphs", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && path.includes("listbox")) return 1;
+      if (method === "allInnerTexts") return [" Doing ", "", "Backlog"];
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).pickerOptionTexts()).resolves.toEqual(["Doing", "Backlog"]);
+    expectTrace(recorder.trace(), ["count", "listbox", "allInnerTexts", 'getByRole("option"']);
+  });
+
+  it("falls back to the label picker's option buttons", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "allInnerTexts" ? [" Mine ", ""] : undefined);
+    await expect(new WebNewDriver(recorder.page()).pickerOptionTexts()).resolves.toEqual(["Mine"]);
+    expectTrace(recorder.trace(), ["count", "listbox", "allInnerTexts", "Project labels"]);
+  });
+
+  it("picks from the listbox when one is open", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => (method === "count" && path.includes("listbox") ? 1 : 0);
+    await new WebNewDriver(recorder.page()).pickerPick("Doing");
+    expectTrace(recorder.trace(), ["count", "listbox", "click", 'getByRole("option"', "Doing"]);
+  });
+
+  it("picks a label from the label picker's buttons", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).pickerPick("Mine");
+    expectTrace(recorder.trace(), ["count", "listbox", "click", "Project labels", "Mine"]);
+  });
+
+  it("dismisses a picker with Escape", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).pickerPressEscape();
+    expect(recorder.pressed()).toEqual(["Escape"]);
+  });
+});
+
+describe("calendar days (NEWFRONT-783, DRAFT-016)", () => {
+  it("picks an in-month day by its number", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).datePickerPickDay(12);
+    expectTrace(recorder.trace(), ["click", "button[data-in-month"]);
+  });
+
+  it("reports whether an in-month day is disabled", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) =>
+      method === "isDisabled" && path.includes("button[data-in-month") ? true : false;
+    await expect(new WebNewDriver(recorder.page()).datePickerDayDisabled(21)).resolves.toBe(true);
+    const open = new Recorder();
+    await expect(new WebNewDriver(open.page()).datePickerDayDisabled(9)).resolves.toBe(false);
+  });
+});
+
+describe("failing the next drafts PATCH (NEWFRONT-783, DRAFT-012)", () => {
+  it("routes only drafts API traffic", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).draftFailNextPatch(500, 0);
+    expect(recorder.routed()).toHaveLength(1);
+    const { matches } = recorder.routed()[0]!;
+    expect(matches(new URL("https://api.test/api/workspaces/acme/draft-issues/"))).toBe(true);
+    expect(matches(new URL("https://api.test/api/workspaces/acme/draft-issues/123/"))).toBe(true);
+    expect(matches(new URL("https://api.test/api/workspaces/acme/issues/"))).toBe(false);
+    expect(matches(new URL("https://api.test/api/other/"))).toBe(false);
+  });
+
+  it("lets reads and other writes through untouched", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).draftFailNextPatch(500, 0);
+    const { handler } = recorder.routed()[0]!;
+    let continued = 0;
+    let fulfilled = 0;
+    const route = {
+      request: () => ({ method: () => "GET" }),
+      continue: async () => {
+        continued += 1;
+      },
+      fulfill: async () => {
+        fulfilled += 1;
+      },
+    };
+    await handler(route);
+    expect(continued).toBe(1);
+    expect(fulfilled).toBe(0);
+    expect(recorder.unrouted()).toBe(0);
+  });
+
+  it("fails the next PATCH once, then removes itself", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).draftFailNextPatch(500, 0);
+    const { handler } = recorder.routed()[0]!;
+    const fulfilled: unknown[] = [];
+    const route = {
+      request: () => ({ method: () => "PATCH" }),
+      continue: async () => {},
+      fulfill: async (answer: unknown) => {
+        fulfilled.push(answer);
+      },
+    };
+    await handler(route);
+    expect(fulfilled).toEqual([{ status: 500, contentType: "application/json", body: "{}" }]);
+    expect(recorder.unrouted()).toBe(1);
+  });
+
+  it("clears an armed failure, and stays quiet with none armed", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.draftClearPatchFailure();
+    expect(recorder.unrouted()).toBe(0);
+    await driver.draftFailNextPatch(500, 0);
+    await driver.draftClearPatchFailure();
+    expect(recorder.unrouted()).toBe(1);
+    await driver.draftClearPatchFailure();
+    expect(recorder.unrouted()).toBe(1);
   });
 });

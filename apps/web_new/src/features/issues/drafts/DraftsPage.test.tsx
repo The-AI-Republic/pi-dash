@@ -145,6 +145,8 @@ interface StubOptions {
   pagesAfterCreate?: DraftIssueListResponse[];
   projects?: ProjectDetails[];
   listStatus?: number;
+  patchStatus?: number;
+  patchGate?: Promise<void>;
   deleteStatus?: number;
   deleteBody?: unknown;
   promoteStatus?: number;
@@ -188,6 +190,10 @@ function stubClient(options: StubOptions = {}) {
       return json(options.deleteStatus ?? 204, options.deleteBody ?? {});
     }
     if (/draft-issues\/[^/?]+\/$/.test(url) && method === "PATCH") {
+      if (options.patchGate !== undefined) await options.patchGate;
+      if (options.patchStatus !== undefined && options.patchStatus >= 400) {
+        return json(options.patchStatus, { error: "boom" });
+      }
       return json(200, draft(DRAFT_1, "One", { priority: "high" }));
     }
     if (url.includes("/draft-to-issue/") && method === "POST") {
@@ -454,12 +460,35 @@ describe("first-run screens", () => {
 
 describe("row flows", () => {
   it("opens edit through the menu with the draft's snapshot", async () => {
-    const h = renderPage({ pages: [page([draft(DRAFT_1, "One")])] });
+    const h = renderPage({
+      pages: [
+        page([
+          draft(DRAFT_1, "One", {
+            description_html: "<p>body</p>",
+            state_id: "723e4567-e89b-12d3-a456-426614174006",
+            priority: "high",
+            label_ids: ["813e4567-e89b-42d3-8456-426614174009"],
+            assignee_ids: ["913e4567-e89b-42d3-8456-426614174010"],
+            start_date: "2026-02-01",
+            target_date: "2026-02-10",
+          }),
+        ]),
+      ],
+    });
     await screen.findByText("One");
     fireEvent.click(openMenu().getByRole("menuitem", { name: "Edit" }));
     const props = h.dialog.seen.at(-1);
     expect(props?.edit).toMatchObject({ kind: "draft", id: DRAFT_1, projectId: PROJECT });
-    expect(props?.edit?.snapshot).toMatchObject({ name: "One" });
+    expect(props?.edit?.snapshot).toMatchObject({
+      name: "One",
+      description_html: "<p>body</p>",
+      state_id: "723e4567-e89b-12d3-a456-426614174006",
+      priority: "high",
+      label_ids: ["813e4567-e89b-42d3-8456-426614174009"],
+      assignee_ids: ["913e4567-e89b-42d3-8456-426614174010"],
+      start_date: "2026-02-01",
+      target_date: "2026-02-10",
+    });
   });
 
   it("opens a copy with the duplicated payload", async () => {
@@ -762,6 +791,83 @@ describe("cache", () => {
       expect(
         h.calls.find((call) => call.method === "PATCH" && call.url.includes(`/draft-issues/${DRAFT_1}/`))
       ).toMatchObject({ body: { priority: "high" } })
+    );
+  });
+
+  it("sends one row's picks in order, holding the second until the first lands", async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const sent: unknown[] = [];
+    createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string } = {}) => {
+      const method = init.method ?? "GET";
+      const json = (status: number, payload: unknown) => ({
+        status,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(payload),
+      });
+      if (url.includes("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
+      if (url.includes("/draft-issues/") && !/draft-issues\/[^/?]+/.test(url)) {
+        return json(200, page([draft(DRAFT_1, "One")]));
+      }
+      if (url.endsWith("/projects/details/")) return json(200, [project()]);
+      if (/draft-issues\/[^/?]+\/$/.test(url) && method === "PATCH") {
+        const body: unknown = init.body === undefined ? undefined : JSON.parse(init.body);
+        if (sent.length === 0) await firstGate;
+        sent.push(body);
+        return json(200, { ...(body as object) });
+      }
+      return json(200, {});
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DraftsPage workspaceSlug={SLUG} CreateDialog={dialogStub().CreateDialog} onCreateProject={vi.fn()} />
+      </QueryClientProvider>
+    );
+    await screen.findByText("One");
+    const strip = await screen.findByTestId("draft-properties");
+    fireEvent.click(within(strip).getByRole("button", { name: "None" }));
+    fireEvent.click(await screen.findByRole("option", { name: "High" }));
+    // The first pick paints at once while its PATCH waits on the gate.
+    expect(await within(strip).findByRole("button", { name: "High" })).toBeInTheDocument();
+    fireEvent.click(within(strip).getByRole("button", { name: "High" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Low" }));
+    // The second PATCH holds until the first one answers: no second
+    // write and no second paint while the gate stays shut.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(sent).toEqual([]);
+    expect(within(strip).queryByRole("button", { name: "Low" })).not.toBeInTheDocument();
+    await act(async () => {
+      releaseFirst();
+    });
+    await waitFor(() => expect(sent).toEqual([{ priority: "high" }, { priority: "low" }]));
+    expect(await within(strip).findByRole("button", { name: "Low" })).toBeInTheDocument();
+  });
+
+  it("rolls a rejected pick back on the row and explains the failure", async () => {
+    // The gate holds the failing PATCH so the optimistic paint stays
+    // observable, mirroring the oracle's delayed failure.
+    let release!: () => void;
+    const patchGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    renderPage({ pages: [page([draft(DRAFT_1, "One")])], patchStatus: 500, patchGate });
+    await screen.findByText("One");
+    const strip = await screen.findByTestId("draft-properties");
+    fireEvent.click(within(strip).getByRole("button", { name: "None" }));
+    fireEvent.click(await screen.findByRole("option", { name: "High" }));
+    expect(await within(strip).findByRole("button", { name: "High" })).toBeInTheDocument();
+    await act(async () => {
+      release();
+    });
+    expect(await within(strip).findByRole("button", { name: "None" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(toasts.notifyError).toHaveBeenCalledWith("Couldn't save the change", expect.any(String))
     );
   });
 });

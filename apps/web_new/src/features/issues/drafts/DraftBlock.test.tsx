@@ -123,6 +123,26 @@ describe("DraftBlock", () => {
     expect(screen.queryByRole("button", { name: /^Copy / })).not.toBeInTheDocument();
   });
 
+  it("shows the work-type mark beside the marker for a typed draft", () => {
+    const { container } = setup(draft({ type_id: "623e4567-e89b-42d3-8456-426614174005" }));
+    const mark = container.querySelector("[data-draft-type-mark]");
+    expect(mark).toBeInTheDocument();
+    expect(mark).toHaveAttribute("aria-label", "Work type");
+    // The mark sits before the marker button, which stays the row's
+    // first button for reading surfaces.
+    const buttons = within(screen.getByRole("article", { name: "Draft Half written" })).getAllByRole("button");
+    expect(buttons[0]).toHaveTextContent("PAR");
+  });
+
+  it("shows no work-type mark for an untyped draft", () => {
+    const typed = setup(draft({ type_id: "623e4567-e89b-42d3-8456-426614174005" }));
+    expect(typed.container.querySelector("[data-draft-type-mark]")).toBeInTheDocument();
+    typed.unmount();
+    const { container } = setup(draft({ type_id: null }));
+    expect(container.querySelector("[data-draft-type-mark]")).not.toBeInTheDocument();
+    expect(screen.getByText("Half written", { exact: true })).toBeInTheDocument();
+  });
+
   it("names an untitled draft with an empty title and skips its copy", async () => {
     const h = setup(draft({ name: null, project_id: null }), { identifier: null });
     expect(screen.getByRole("article", { name: "Draft" })).toBeInTheDocument();

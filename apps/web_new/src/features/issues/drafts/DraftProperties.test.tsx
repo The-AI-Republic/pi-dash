@@ -10,7 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import type { DraftIssue, ProjectDetails } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { DraftProperties, stateGroupOf } from "./DraftProperties.js";
@@ -24,6 +24,9 @@ const ESTIMATE = "823e4567-e89b-12d3-a456-426614174007";
 const pickers = vi.hoisted(() => ({
   calls: [] as Array<Record<string, unknown>>,
 }));
+
+const toasts = vi.hoisted(() => ({ notifySuccess: vi.fn(), notifyError: vi.fn() }));
+vi.mock("../../../shared/shell/index.js", () => toasts);
 
 vi.mock("../../../shared/pickers/index.js", () => {
   const stub = (name: string) => (props: Record<string, unknown>) => {
@@ -58,11 +61,15 @@ vi.mock("../labels/LabelPicker.js", () => ({
   },
 }));
 
+vi.mock("../labels/api.js", () => ({ useLabels: vi.fn() }));
+
 vi.mock("../dropdowns/weekStart.js", () => ({ useWeekStart: () => 0 }));
 
 import { usePickerStates } from "../../../shared/pickers/reference.js";
+import { useLabels } from "../labels/api.js";
 
 const states = vi.mocked(usePickerStates);
+const labelRead = vi.mocked(useLabels);
 
 function draft(overrides: Partial<DraftIssue> = {}): DraftIssue {
   return {
@@ -122,6 +129,12 @@ function renderStrip(row = draft(), properties = project(), editable = true) {
   return { ...result, onWrite, calls: pickers.calls };
 }
 
+beforeEach(() => {
+  toasts.notifySuccess.mockReset();
+  toasts.notifyError.mockReset();
+  labelRead.mockReturnValue({ data: [] } as never);
+});
+
 afterEach(() => {
   resetAppClient();
 });
@@ -142,7 +155,7 @@ describe("DraftProperties", () => {
   it("renders the always-on strip and writes each pick as its own field", () => {
     states.mockReturnValue({ data: [{ id: STATE, group: "started" }] } as never);
     stubClient();
-    const { onWrite, calls } = renderStrip();
+    const { onWrite, calls } = renderStrip(draft({ start_date: "2026-02-01", target_date: "2026-02-10" }));
     const state = calls.find((call) => call.name === "state")!;
     (state["onChange"] as (id: string) => void)("state-2");
     expect(onWrite).toHaveBeenCalledWith({ state_id: "state-2" });
@@ -157,10 +170,120 @@ describe("DraftProperties", () => {
     expect(onWrite).toHaveBeenCalledWith({ assignee_ids: ["user-2"] });
     const start = calls.find((call) => call.name === "date" && call.label === "Start date")!;
     (start["onChange"] as (date: string | null) => void)("2026-02-03");
-    expect(onWrite).toHaveBeenCalledWith({ start_date: "2026-02-03" });
+    expect(onWrite).toHaveBeenCalledWith({ start_date: "2026-02-03", target_date: "2026-02-10" });
     const due = calls.find((call) => call.name === "date" && call.label === "Due date")!;
     (due["onChange"] as (date: string | null) => void)(null);
-    expect(onWrite).toHaveBeenCalledWith({ target_date: null });
+    expect(onWrite).toHaveBeenCalledWith({ start_date: "2026-02-01", target_date: null });
+  });
+
+  it("scopes every project picker to the draft's own project and preloads names", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { calls } = renderStrip();
+    for (const name of ["state", "label", "member"]) {
+      const picker = calls.find((call) => call.name === name)!;
+      expect(picker["workspaceSlug"]).toBe(SLUG);
+      expect(picker["projectId"]).toBe(PROJECT);
+    }
+    expect(calls.find((call) => call.name === "state")?.["preload"]).toBe(true);
+    expect(calls.find((call) => call.name === "member")?.["preload"]).toBe(true);
+    expect(labelRead).toHaveBeenCalledWith(SLUG, PROJECT, true);
+  });
+
+  it("bounds each calendar by the stored counterpart day", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { calls } = renderStrip(draft({ start_date: "2026-02-01", target_date: "2026-02-10" }));
+    const start = calls.find((call) => call.name === "date" && call.label === "Start date")!;
+    expect(start["max"]).toBe("2026-02-10");
+    const due = calls.find((call) => call.name === "date" && call.label === "Due date")!;
+    expect(due["min"]).toBe("2026-02-01");
+  });
+
+  it("writes a due pick against a missing start day", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { onWrite, calls } = renderStrip(draft({ start_date: null, target_date: null }));
+    const due = calls.find((call) => call.name === "date" && call.label === "Due date")!;
+    (due["onChange"] as (date: string | null) => void)("2026-02-10");
+    expect(onWrite).toHaveBeenCalledWith({ start_date: null, target_date: "2026-02-10" });
+    expect(toasts.notifyError).not.toHaveBeenCalled();
+  });
+
+  it("refuses an inverted date pick with a notice and keeps the old dates", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { onWrite, calls } = renderStrip(draft({ start_date: "2026-02-01", target_date: "2026-02-10" }));
+    const start = calls.find((call) => call.name === "date" && call.label === "Start date")!;
+    (start["onChange"] as (date: string | null) => void)("2026-02-11");
+    expect(onWrite).not.toHaveBeenCalled();
+    expect(toasts.notifyError).toHaveBeenCalledWith("Couldn't save the dates", expect.any(String));
+    const due = calls.find((call) => call.name === "date" && call.label === "Due date")!;
+    (due["onChange"] as (date: string | null) => void)("2026-01-31");
+    expect(onWrite).not.toHaveBeenCalled();
+    expect(toasts.notifyError).toHaveBeenCalledTimes(2);
+  });
+
+  it("names the chosen labels on the trigger once they resolve", () => {
+    states.mockReturnValue({ data: [] } as never);
+    labelRead.mockReturnValue({
+      data: [
+        { id: "label-1", name: "Mine" },
+        { id: "label-2", name: "Theirs" },
+      ],
+    } as never);
+    stubClient();
+    const { calls } = renderStrip(draft({ label_ids: ["label-1", "label-2"] }));
+    const trigger = calls.find((call) => call.name === "label")?.["trigger"] as React.ReactElement<{
+      children: Array<React.ReactElement<{ children: unknown }>>;
+      disabled: boolean;
+    }>;
+    expect(trigger.props.children[0]?.props.children).toBe("Mine, Theirs");
+    expect(trigger.props.disabled).toBe(false);
+  });
+
+  it("counts the selection on the trigger while names are pending", () => {
+    states.mockReturnValue({ data: [] } as never);
+    labelRead.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { calls } = renderStrip(draft({ label_ids: ["label-1"] }));
+    const trigger = calls.find((call) => call.name === "label")?.["trigger"] as React.ReactElement<{
+      children: Array<React.ReactElement<{ children: unknown }>>;
+    }>;
+    expect(trigger.props.children[0]?.props.children).toBe("1 selected");
+  });
+
+  it("prompts for labels on the trigger with no selection", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { calls } = renderStrip(draft({ label_ids: [] }));
+    const trigger = calls.find((call) => call.name === "label")?.["trigger"] as React.ReactElement<{
+      children: Array<React.ReactElement<{ children: unknown }>>;
+    }>;
+    expect(trigger.props.children[0]?.props.children).toBe("Labels");
+  });
+
+  it("locks the labels trigger for a guest", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { calls } = renderStrip(draft(), project(), false);
+    const trigger = calls.find((call) => call.name === "label")?.["trigger"] as React.ReactElement<{
+      disabled: boolean;
+    }>;
+    expect(trigger.props.disabled).toBe(true);
+  });
+
+  it("marks each control for reading surfaces in strip order", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { container } = renderStrip(
+      draft({ module_ids: ["module-1"], cycle_id: "cycle-1", estimate_point: ESTIMATE }),
+      project({ module_view: true, cycle_view: true, estimate: ESTIMATE })
+    );
+    const hooks = [...container.querySelectorAll("[data-draft-property]")].map((node) =>
+      node.getAttribute("data-draft-property")
+    );
+    expect(hooks).toEqual(["state", "priority", "labels", "start", "due", "assignees", "modules", "cycle", "estimate"]);
   });
 
   it("passes an unknown priority through as none", () => {

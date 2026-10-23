@@ -353,6 +353,11 @@ export class WebNewDriver implements ParityDriver {
     this.page = page;
   }
 
+  /** The armed one-shot drafts PATCH failure, if draftFailNextPatch set one. */
+  private draftPatchFailureRoute:
+    | { matches: (url: URL) => boolean; handler: (route: Route) => Promise<void> }
+    | undefined = undefined;
+
   // Runner-chat stubs and counters (NEWFRONT-549); set by the chat methods.
   private runnerChatSessionCreateFailRemaining = 0;
   private runnerChatSessionCreateDelayMs = 0;
@@ -2082,6 +2087,23 @@ export class WebNewDriver implements ParityDriver {
       .locator("[data-draft-block]")
       .filter({ has: this.page.locator("p[data-draft-name]", { hasText: name }) })
       .first();
+  }
+
+  /** One inline property slot inside a named draft row. */
+  private draftProperty(name: string, property: string): Locator {
+    return this.draftBlock(name).locator(`[data-draft-property="${property}"]`);
+  }
+
+  /** The rendered text of one inline property slot. */
+  private async draftPropertyText(name: string, property: string): Promise<string> {
+    const slot = this.draftProperty(name, property);
+    await slot.waitFor({ timeout: 60_000 });
+    return ((await slot.innerText()) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  /** The trigger opening one inline property picker. */
+  private draftPropertyTrigger(name: string, property: string): Locator {
+    return this.draftProperty(name, property).getByRole("button").first();
   }
 
   /** Open a draft's ellipsis menu and choose one entry. */
@@ -3831,7 +3853,23 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pickerOptionTexts(): Promise<string[]> {
-    return todo("pickerOptionTexts");
+    // Kit combobox options pair an aria-hidden glyph with the label, so
+    // only the label spans are read: avatar initials would otherwise
+    // glue onto member names. The label picker renders no listbox; its
+    // option buttons carry the names directly.
+    const listbox = this.page.getByRole("listbox").last();
+    if ((await listbox.count()) > 0) {
+      const texts = await listbox
+        .getByRole("option")
+        .locator(':scope > span:not([aria-hidden="true"])')
+        .allInnerTexts();
+      return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+    }
+    const labels = await this.page
+      .locator('ul[aria-label="Project labels"]')
+      .getByTestId("label-picker-option")
+      .allInnerTexts();
+    return labels.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   async pickerHasSearch(): Promise<boolean> {
@@ -3850,8 +3888,17 @@ export class WebNewDriver implements ParityDriver {
     return todo("pickerSearchFocused");
   }
 
-  async pickerPick(_text: string): Promise<void> {
-    return todo("pickerPick");
+  async pickerPick(text: string): Promise<void> {
+    const listbox = this.page.getByRole("listbox").last();
+    if ((await listbox.count()) > 0) {
+      await listbox.getByRole("option", { name: text }).first().click({ timeout: 15_000 });
+      return;
+    }
+    await this.page
+      .locator('ul[aria-label="Project labels"]')
+      .getByRole("button", { name: text })
+      .first()
+      .click({ timeout: 15_000 });
   }
 
   async pickerOptionDisabled(_text: string): Promise<boolean> {
@@ -3886,12 +3933,17 @@ export class WebNewDriver implements ParityDriver {
     return todo("datePickerVisibleMonth");
   }
 
-  async datePickerPickDay(_day: number): Promise<void> {
-    return todo("datePickerPickDay");
+  /** One in-month calendar day button, by its day number. */
+  private calendarDay(day: number): Locator {
+    return this.page.locator('button[data-in-month="true"]', { hasText: new RegExp(`^${day}$`) }).first();
   }
 
-  async datePickerDayDisabled(_day: number): Promise<boolean> {
-    return todo("datePickerDayDisabled");
+  async datePickerPickDay(day: number): Promise<void> {
+    await this.calendarDay(day).click();
+  }
+
+  async datePickerDayDisabled(day: number): Promise<boolean> {
+    return this.calendarDay(day).isDisabled();
   }
 
   async datePickerPortalAttached(_label: string): Promise<boolean> {
@@ -16544,11 +16596,16 @@ export class WebNewDriver implements ParityDriver {
     // Issues-era drafts driver reads.
     return this.visibleDraftNames();
   }
-  async draftRowProjectMarker(_name: string): Promise<string> {
-    return todo("draftRowProjectMarker");
+  async draftRowProjectMarker(name: string): Promise<string> {
+    // The marker is the row's first button and carries the identifier.
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    return ((await block.getByRole("button").first().innerText()) ?? "").trim();
   }
-  async draftRowTypeMarkPresent(_name: string): Promise<boolean> {
-    return todo("draftRowTypeMarkPresent");
+  async draftRowTypeMarkPresent(name: string): Promise<boolean> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    return (await block.locator("[data-draft-type-mark]").count()) > 0;
   }
   async draftRowMenuEntries(_name: string): Promise<string[]> {
     return todo("draftRowMenuEntries");
@@ -16562,8 +16619,8 @@ export class WebNewDriver implements ParityDriver {
   async draftRowQuickActionVisible(_name: string): Promise<boolean> {
     return todo("draftRowQuickActionVisible");
   }
-  async editDraftByName(_name: string): Promise<void> {
-    return todo("editDraftByName");
+  async editDraftByName(name: string): Promise<void> {
+    await this.openDraftMenu(name, "Edit");
   }
   async cancelDraftDelete(_name: string): Promise<void> {
     return todo("cancelDraftDelete");
@@ -16571,41 +16628,51 @@ export class WebNewDriver implements ParityDriver {
   async confirmDraftDelete(): Promise<void> {
     return todo("confirmDraftDelete");
   }
-  async draftStateText(_name: string): Promise<string> {
-    return todo("draftStateText");
+  async draftStateText(name: string): Promise<string> {
+    return this.draftPropertyText(name, "state");
   }
-  async draftOpenStatePicker(_name: string): Promise<void> {
-    return todo("draftOpenStatePicker");
+  async draftOpenStatePicker(name: string): Promise<void> {
+    await this.draftPropertyTrigger(name, "state").click();
   }
-  async draftPriorityText(_name: string): Promise<string> {
-    return todo("draftPriorityText");
+  async draftPriorityText(name: string): Promise<string> {
+    return this.draftPropertyText(name, "priority");
   }
-  async draftOpenPriorityPicker(_name: string): Promise<void> {
-    return todo("draftOpenPriorityPicker");
+  async draftOpenPriorityPicker(name: string): Promise<void> {
+    await this.draftPropertyTrigger(name, "priority").click();
   }
-  async draftLabelsText(_name: string): Promise<string> {
-    return todo("draftLabelsText");
+  async draftLabelsText(name: string): Promise<string> {
+    return this.draftPropertyText(name, "labels");
   }
-  async draftOpenLabelsPicker(_name: string): Promise<void> {
-    return todo("draftOpenLabelsPicker");
+  async draftOpenLabelsPicker(name: string): Promise<void> {
+    await this.draftPropertyTrigger(name, "labels").click();
   }
-  async draftAssigneesText(_name: string): Promise<string> {
-    return todo("draftAssigneesText");
+  async draftAssigneesText(name: string): Promise<string> {
+    return this.draftPropertyText(name, "assignees");
   }
-  async draftOpenAssigneesPicker(_name: string): Promise<void> {
-    return todo("draftOpenAssigneesPicker");
+  async draftOpenAssigneesPicker(name: string): Promise<void> {
+    await this.draftPropertyTrigger(name, "assignees").click();
   }
-  async draftDatesText(_name: string): Promise<string> {
-    return todo("draftDatesText");
+  async draftDatesText(name: string): Promise<string> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    const start = ((await block.getByTestId("draft-start-date-trigger").innerText()) ?? "").trim();
+    const due = ((await block.getByTestId("draft-due-date-trigger").innerText()) ?? "").trim();
+    return `${start} ${due}`.trim();
   }
-  async draftOpenStartDatePicker(_name: string): Promise<void> {
-    return todo("draftOpenStartDatePicker");
+  async draftOpenStartDatePicker(name: string): Promise<void> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    await block.getByTestId("draft-start-date-trigger").click();
   }
-  async draftOpenDueDatePicker(_name: string): Promise<void> {
-    return todo("draftOpenDueDatePicker");
+  async draftOpenDueDatePicker(name: string): Promise<void> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    await block.getByTestId("draft-due-date-trigger").click();
   }
-  async draftPickerOptionSelected(_text: string): Promise<boolean> {
-    return todo("draftPickerOptionSelected");
+  async draftPickerOptionSelected(text: string): Promise<boolean> {
+    const option = this.page.getByRole("listbox").last().getByRole("option", { name: text }).first();
+    await option.waitFor({ timeout: 15_000 });
+    return (await option.getAttribute("aria-selected")) === "true";
   }
   async draftEstimateText(_name: string): Promise<string> {
     return todo("draftEstimateText");
@@ -16634,11 +16701,36 @@ export class WebNewDriver implements ParityDriver {
   async draftModulePickerVisible(_name: string): Promise<boolean> {
     return todo("draftModulePickerVisible");
   }
-  async draftFailNextPatch(_status: number, _delayMs: number): Promise<void> {
-    return todo("draftFailNextPatch");
+  async draftFailNextPatch(status: number, delayMs: number): Promise<void> {
+    // Only the next drafts PATCH fails, once: reads and other writes
+    // pass through, and the handler removes itself after answering so
+    // a retried save goes to the real server. The delay keeps the
+    // optimistic value on screen long enough to poll for it. A URL
+    // predicate (not a glob) routes the request.
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") && url.pathname.includes("/draft-issues/");
+    const handler = async (route: Route): Promise<void> => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      // Answer first, unroute after: removing the handler from inside
+      // itself finalizes the route and a later fulfill throws
+      // "already handled".
+      try {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await route.fulfill({ status, contentType: "application/json", body: "{}" });
+      } finally {
+        await this.draftClearPatchFailure();
+      }
+    };
+    this.draftPatchFailureRoute = { matches, handler };
+    await this.page.route(matches, handler);
   }
   async draftClearPatchFailure(): Promise<void> {
-    return todo("draftClearPatchFailure");
+    const current = this.draftPatchFailureRoute;
+    this.draftPatchFailureRoute = undefined;
+    if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
   }
   async draftsEntryRequests(workspaceSlug: string): Promise<string[]> {
     const seen = new Set<string>();

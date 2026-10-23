@@ -1,12 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// One workspace draft (parity/specs/issues.md §12, ISS-137/138/139/140).
-// A row-shaped block: project short code with click-to-copy, the draft's
-// name, its inline property strip and a hover quick action whose menu
-// repeats the right-click entries. Both openers render the shared row
-// catalog (draftActions.ts) in pinned order (drafts spec §3.1,
-// DRAFT-009), so the two can never drift.
+// One workspace draft (parity/specs/issues.md §12, ISS-137/138/139/140;
+// parity/specs/drafts.md §3.1, DRAFT-007).
+// A row-shaped block: the work-type mark when the draft holds a type,
+// the project short code with click-to-copy, the draft's name, its
+// inline property strip and a hover quick action whose menu repeats the
+// right-click entries. Both openers render the shared row catalog
+// (draftActions.ts) in pinned order (drafts spec §3.1, DRAFT-009), so
+// the two can never drift.
 // Double-clicking the block edits it. The name paragraph carries the
 // draft's title for reading surfaces; the block also carries
 // `data-draft-block` so parity hooks can find it without the old app's
@@ -14,7 +16,7 @@
 
 import { Tooltip, cn } from "@pidash/kit";
 import type { DraftIssue, ProjectDetails } from "@pidash/api-client";
-import { Copy, Ellipsis, PenLine, SquareStack, Trash2 } from "lucide-react";
+import { Copy, Ellipsis, PenLine, Shapes, SquareStack, Trash2 } from "lucide-react";
 import * as React from "react";
 
 import { notifySuccess } from "../../../shared/shell/index.js";
@@ -90,6 +92,17 @@ export function DraftBlock({
       )}
     >
       <div className="flex min-w-0 items-center gap-(--space-2)">
+        {draft.type_id === null ? null : (
+          <span
+            data-draft-type-mark=""
+            role="img"
+            aria-label="Work type"
+            title="Work type"
+            className="inline-flex shrink-0 items-center text-(--text-muted)"
+          >
+            <Shapes size={14} strokeWidth={1.5} aria-hidden="true" />
+          </span>
+        )}
         {identifier === null ? null : (
           <button
             type="button"

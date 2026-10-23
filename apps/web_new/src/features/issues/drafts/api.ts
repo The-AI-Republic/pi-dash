@@ -144,6 +144,32 @@ function invalidateDrafts(queryClient: QueryClient, workspaceSlug: string): void
   void queryClient.invalidateQueries({ queryKey: draftKeys.all(workspaceSlug) });
 }
 
+/**
+ * One sequential lane per draft row: every field write on the same
+ * draft waits for the earlier ones, so two full-payload date PATCHes
+ * cannot race and land out of order (parity/specs/drafts.md §3.2).
+ * Different rows keep their own lanes and still run side by side, and
+ * a failed write never blocks the lane behind it. The returned promise
+ * settles exactly as the task does, so callers keep their own errors.
+ */
+export function createDraftWriteQueue(): <T>(draftId: string, task: () => Promise<T>) => Promise<T> {
+  const tails = new Map<string, Promise<unknown>>();
+  return function enqueue<T>(draftId: string, task: () => Promise<T>): Promise<T> {
+    const prior = tails.get(draftId) ?? Promise.resolve();
+    const next = prior.then(task, task);
+    const settled = next.then(
+      () => {
+        if (tails.get(draftId) === settled) tails.delete(draftId);
+      },
+      () => {
+        if (tails.get(draftId) === settled) tails.delete(draftId);
+      }
+    );
+    tails.set(draftId, settled);
+    return next;
+  };
+}
+
 /** True when the server refused a delete on creator-or-admin grounds. */
 export function isDraftPermissionRefusal(error: unknown): boolean {
   if (isApiError(error)) {

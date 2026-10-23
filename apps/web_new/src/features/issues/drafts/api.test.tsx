@@ -31,6 +31,7 @@ import {
   DRAFT_PROMOTED_BODY,
   DRAFT_PROMOTED_TITLE,
   DRAFT_UPDATE_FAILED_TITLE,
+  createDraftWriteQueue,
   draftKeys,
   draftListQueryOptions,
   draftTotalCount,
@@ -324,6 +325,77 @@ describe("isDraftPermissionRefusal", () => {
     expect(isDraftPermissionRefusal(new ApiError({ status: 500, code: "http", message: "Server error" }))).toBe(false);
     expect(isDraftPermissionRefusal(new Error("Network down"))).toBe(false);
     expect(isDraftPermissionRefusal("nope")).toBe(false);
+  });
+});
+
+describe("createDraftWriteQueue", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((accept, refuse) => {
+      resolve = accept;
+      reject = refuse;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("runs one draft's writes in order and answers each task's value", async () => {
+    const queue = createDraftWriteQueue();
+    const first = deferred<string>();
+    const order: string[] = [];
+    const one = queue(DRAFT_1, async () => {
+      order.push("first-start");
+      const value = await first.promise;
+      order.push("first-end");
+      return value;
+    });
+    const two = queue(DRAFT_1, async () => {
+      order.push("second");
+      return "two";
+    });
+    // The lane holds the second write until the first settles.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(order).toEqual(["first-start"]);
+    first.resolve("one");
+    await expect(one).resolves.toBe("one");
+    await expect(two).resolves.toBe("two");
+    expect(order).toEqual(["first-start", "first-end", "second"]);
+  });
+
+  it("runs different drafts' writes side by side", async () => {
+    const queue = createDraftWriteQueue();
+    const started: string[] = [];
+    const one = queue(DRAFT_1, async () => {
+      started.push(DRAFT_1);
+      return 1;
+    });
+    const two = queue(DRAFT_2, async () => {
+      started.push(DRAFT_2);
+      return 2;
+    });
+    await expect(one).resolves.toBe(1);
+    await expect(two).resolves.toBe(2);
+    expect(started).toEqual([DRAFT_1, DRAFT_2]);
+  });
+
+  it("keeps the lane open after a failure and reports the task's error", async () => {
+    const queue = createDraftWriteQueue();
+    const failing = queue(DRAFT_1, async () => {
+      throw new Error("refused");
+    });
+    const following = queue(DRAFT_1, async () => "recovered");
+    await expect(failing).rejects.toThrow("refused");
+    await expect(following).resolves.toBe("recovered");
+    // A settled lane accepts new work without waiting on the past.
+    await expect(queue(DRAFT_1, async () => "again")).resolves.toBe("again");
+    // A lone failure still settles the lane it ran on.
+    await expect(
+      queue(DRAFT_1, async () => {
+        throw new Error("alone");
+      })
+    ).rejects.toThrow("alone");
+    await expect(queue(DRAFT_1, async () => "after")).resolves.toBe("after");
   });
 });
 
