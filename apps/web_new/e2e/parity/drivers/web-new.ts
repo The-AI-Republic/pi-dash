@@ -16893,17 +16893,34 @@ export class WebNewDriver implements ParityDriver {
     return todo("cyclesGrantClipboardAccess");
   }
 
-  async modulesOpenList(_workspaceSlug: string, _projectId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("modulesOpenList");
+  async modulesOpenList(workspaceSlug: string, projectId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/projects/${projectId}/modules`, cookies);
+    await this.modulesListWaitSettled();
   }
-  async modulesAwaitRow(_name: string): Promise<void> {
-    return todo("modulesAwaitRow");
+  async modulesAwaitRow(name: string): Promise<void> {
+    // The list or board card whose own name span carries exactly `name`.
+    // Scope to the span so a module called "Alpha 2" never answers for
+    // "Alpha"; the row wrappers also carry the name as data.
+    const exact = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+    await this.page
+      .locator('[data-testid="modules-row"], [data-testid="modules-board-card"], [data-testid="modules-timeline-row"]')
+      .filter({ has: this.page.locator('[data-testid$="-name"]', { hasText: exact }) })
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesCurrentUrl(): Promise<string> {
-    return todo("modulesCurrentUrl");
+    return this.page.url();
   }
-  async modulesSetLayout(_layout: "list" | "board" | "timeline"): Promise<void> {
-    return todo("modulesSetLayout");
+  async modulesSetLayout(layout: "list" | "board" | "timeline"): Promise<void> {
+    if (await this.modulesListSwitcherVisible()) {
+      await this.modulesListSwitchLayout(layout);
+    } else {
+      await this.modulesListCompactSwitchLayout(layout === "board" ? "board" : "list");
+    }
+    const settled = await this.currentModulesLayout();
+    if (settled !== layout) {
+      throw new Error(`[parity] modules layout is ${String(settled)}, expected ${layout}.`);
+    }
   }
   async modulesSetSort(_label: string): Promise<void> {
     return todo("modulesSetSort");
@@ -19106,19 +19123,27 @@ export class WebNewDriver implements ParityDriver {
     return todo("pagesGatingGoBack");
   }
 
-  // Modules list frame and header controls (NEWFRONT-306, MOD-001..007). Stubs;
-  // the modules area lands on web_new later. Appended per the shared contract.
+  // Modules list frame and header controls (NEWFRONT-306, MOD-001..007).
+  // Slice A (NEWFRONT-793) reads the row names, the trail and the tab
+  // title; the Add action, search, ordering, filters and chips stay stubs
+  // for slices B and F.
 
   async modulesRowNames(): Promise<string[]> {
-    return todo("modulesRowNames");
+    return this.modulesListVisibleNames();
   }
 
   async modulesBreadcrumb(): Promise<ModulesBreadcrumb> {
-    return todo("modulesBreadcrumb");
+    const trail = await this.page.evaluate(() => {
+      const nav = document.querySelector('nav[aria-label="Breadcrumb"]');
+      if (!nav) return [];
+      return [...nav.querySelectorAll("li")].map((item) => (item.textContent ?? "").replace(/\s+/g, " ").trim());
+    });
+    // The first crumb names the project; everything after it is the trail.
+    return { project: trail[0] ?? "", trail: trail.slice(1) };
   }
 
   async modulesPageTitle(): Promise<string> {
-    return todo("modulesPageTitle");
+    return this.page.title();
   }
 
   async modulesAddLabel(): Promise<string | null> {
@@ -19242,11 +19267,29 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesGateFacts(): Promise<ModulesGateFacts> {
-    return todo("modulesGateFacts");
+    const gate = this.modulesGate();
+    await gate.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const button = gate.getByRole("button", { name: "Manage features", exact: true });
+    const facts = await gate.evaluate((root) => ({
+      explanation: ((root as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim(),
+      hasArt:
+        root.querySelectorAll("img").length > 0 ||
+        root.querySelector('[data-testid$="-art"], svg[role="img"]') !== null,
+    }));
+    const shown = (await button.count()) > 0;
+    return {
+      explanation: facts.explanation,
+      buttonLabel: shown ? (await button.innerText()).replace(/\s+/g, " ").trim() : null,
+      buttonDisabled: shown ? await button.isDisabled() : false,
+      hasArt: facts.hasArt,
+    };
   }
 
   async modulesGateToFeatures(): Promise<void> {
-    return todo("modulesGateToFeatures");
+    await this.modulesGate()
+      .getByRole("button", { name: "Manage features", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL(/\/settings\/projects\/[^/]+\/features(\/|$)/, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesTimelineRowNames(): Promise<string[]> {
@@ -19745,46 +19788,216 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Modules list states, layouts, rows and cards (NEWFRONT-307,
-  // --- MOD-008..012, MOD-020). Throwing stubs until the area lands.
+  // --- MOD-008..012, MOD-020). Slice A (NEWFRONT-793) fills the list
+  // --- shell: settle detection, name readers, the layout switcher and
+  // --- the slow-fetch skeleton probe. Zero/nomatch, rows' progress and
+  // --- peek, and card extras stay stubs for slices B, D, F and H.
 
-  async modulesListOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("modulesListOpenList");
+  /** The modules list screen, whatever body state it is showing. */
+  private modulesScreen(): Locator {
+    return this.page.getByTestId("modules-list-screen").last();
+  }
+
+  /** The settled content: rows, cards or timeline name rows. */
+  private modulesContent(): Locator {
+    return this.page.getByTestId("modules-list").last();
+  }
+
+  /** The one loading body, exclusive of every settled state. */
+  private modulesSkeleton(): Locator {
+    return this.page.getByTestId("modules-list-skeleton").last();
+  }
+
+  /** The flag gate (modules off for the project). */
+  private modulesGate(): Locator {
+    return this.page.getByTestId("modules-feature-gate").last();
+  }
+
+  /**
+   * The wide layout switcher. The compact menu is a different control, so
+   * a small screen reads this as absent (MOD-011).
+   */
+  private modulesLayoutSwitcher(): Locator {
+    return this.page.getByRole("group", { name: "Module layout", exact: true }).last();
+  }
+
+  /** The layout option inside the wide switcher, by its layout key. */
+  private modulesLayoutOption(key: ModulesListLayout): Locator {
+    return this.modulesLayoutSwitcher().locator(`[data-layout="${key}"]`);
+  }
+
+  /** The compact menu's trigger; its name carries the current layout. */
+  private modulesCompactTrigger(): Locator {
+    return this.page.getByTestId("modules-layout-menu").getByRole("button").last();
+  }
+
+  /** The switcher button that is currently pressed, or null when none is. */
+  private async activeModulesLayout(): Promise<ModulesListLayout | null> {
+    const switcher = this.modulesLayoutSwitcher();
+    if ((await switcher.count()) === 0 || !(await this.isShown(switcher))) return null;
+    for (const key of ["list", "board", "timeline"] as const) {
+      const pressed = await this.modulesLayoutOption(key)
+        .getAttribute("aria-pressed")
+        .catch(() => null);
+      if (pressed === "true") return key;
+    }
+    return null;
+  }
+
+  /** The active layout's key, read from the pressed option or the compact trigger. */
+  private async currentModulesLayout(): Promise<ModulesListLayout | null> {
+    const active = await this.activeModulesLayout();
+    if (active !== null) return active;
+    const trigger = await this.page
+      .evaluate(() => {
+        const menu = document.querySelector('[data-testid="modules-layout-menu"]');
+        const button = menu?.querySelector("button");
+        return button?.getAttribute("aria-label") ?? null;
+      })
+      .catch(() => null);
+    if (trigger === null) return null;
+    const suffix = /current (.+)$/.exec(trigger)?.[1];
+    if (suffix === "List") return "list";
+    if (suffix === "Board") return "board";
+    if (suffix === "Timeline") return "timeline";
+    return null;
+  }
+
+  /**
+   * Wait until the screen leaves the loading body: rows, a zero state or
+   * a no-match state. The zero and no-match probes arrive with slices F
+   * and B; until then a settled empty list reads as rows with no names,
+   * which is what this slice can prove.
+   */
+  private async modulesListWaitSettled(): Promise<void> {
+    await this.page
+      .locator('[data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"]')
+      .last()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async modulesListOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    const current = new URL(this.page.url()).pathname.replace(/\/$/, "");
+    if (!current.endsWith(`/projects/${projectId}/modules`)) {
+      await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules`, { waitUntil: "domcontentloaded" });
+      await this.page.waitForLoadState("domcontentloaded");
+    }
+    await this.modulesListWaitSettled();
   }
 
   async modulesListVisibleNames(): Promise<string[]> {
-    return todo("modulesListVisibleNames");
+    return this.modulesNamesIn("modules-row-name");
   }
 
   async modulesListBoardCardNames(): Promise<string[]> {
-    return todo("modulesListBoardCardNames");
+    return this.modulesNamesIn("modules-board-card-name");
   }
 
   async modulesListTimelineNames(): Promise<string[]> {
-    return todo("modulesListTimelineNames");
+    return this.modulesNamesIn("modules-timeline-row-name");
+  }
+
+  private async modulesNamesIn(testId: string): Promise<string[]> {
+    const content = this.modulesContent();
+    if ((await content.count()) === 0) return [];
+    const names = content.getByTestId(testId);
+    const texts = await names.allInnerTexts();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
   }
 
   async modulesListEmptyKind(): Promise<ModulesListEmptyKind> {
-    return todo("modulesListEmptyKind");
+    await this.modulesListWaitSettled();
+    const rendered =
+      (await this.modulesListVisibleNames()).length +
+      (await this.modulesListBoardCardNames()).length +
+      (await this.modulesListTimelineNames()).length;
+    if (rendered > 0) return "rows";
+    // The zero and no-match containers belong to slices F (MOD-009) and
+    // B (MOD-010); this slice settles an empty project as rows.
+    return "rows";
   }
 
   async modulesListNoMatchHeading(): Promise<string | null> {
-    return todo("modulesListNoMatchHeading");
+    // Slice B (NEWFRONT-794) owns the no-match container.
+    return null;
   }
 
   async modulesListNoMatchHint(): Promise<string | null> {
-    return todo("modulesListNoMatchHint");
+    // Slice B (NEWFRONT-794) owns the no-match container.
+    return null;
   }
 
   async modulesListSkeletonVisible(): Promise<boolean> {
-    return todo("modulesListSkeletonVisible");
+    return this.isShown(this.modulesSkeleton());
   }
 
   async modulesListSkeletonShownOnSlowFetch(
-    _workspaceSlug: string,
-    _projectId: string,
-    _layout: ModulesListLayout
+    workspaceSlug: string,
+    projectId: string,
+    layout: ModulesListLayout
   ): Promise<ModulesListSkeletonResult> {
-    return todo("modulesListSkeletonShownOnSlowFetch");
+    await this.modulesListOpenList(workspaceSlug, projectId);
+    if ((await this.currentModulesLayout()) !== layout) {
+      await this.modulesListSwitchLayout(layout);
+    }
+    // Hold every list read on reload; later reads pass through. Four holds
+    // cover React StrictMode's double effect plus the first settle read.
+    const listPath = `/api/workspaces/${workspaceSlug}/projects/${projectId}/modules/`;
+    let holdsLeft = 4;
+    await this.page.route(
+      (url) => url.pathname === listPath,
+      async (route) => {
+        if (holdsLeft > 0) {
+          holdsLeft -= 1;
+          await new Promise((resolve) => setTimeout(resolve, 8_000));
+        }
+        // The catch-path unroute may land mid-hold; the request is then
+        // already released, and "already handled" is not a failure.
+        await route.continue().catch(() => null);
+      }
+    );
+    try {
+      await this.page.reload({ waitUntil: "domcontentloaded" });
+      const seen = await this.modulesSkeletonShowsWithin(45_000);
+      let layoutMatched = false;
+      let exclusive = false;
+      if (seen) {
+        const shown = await this.modulesSkeleton()
+          .getAttribute("data-layout")
+          .catch(() => null);
+        layoutMatched = shown === layout;
+        exclusive = await this.modulesSkeletonIsExclusive();
+      }
+      await this.page.unrouteAll({ behavior: "wait" }).catch(() => undefined);
+      await this.modulesListWaitSettled();
+      return { shown: seen, layoutMatched, exclusive };
+    } catch (error) {
+      await this.page.unrouteAll({ behavior: "wait" }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * Whether the skeleton paints within `timeoutMs`. The wait is a bounded
+   * visibility wait rather than a polling loop so a slow list that never
+   * paints reads as "not shown" instead of failing the scenario.
+   */
+  private async modulesSkeletonShowsWithin(timeoutMs: number): Promise<boolean> {
+    await this.modulesSkeleton()
+      .first()
+      .waitFor({ state: "visible", timeout: timeoutMs })
+      .catch(() => undefined);
+    return this.modulesListSkeletonVisible();
+  }
+
+  /** No rows, cards, bars or gate beside the skeleton. */
+  private async modulesSkeletonIsExclusive(): Promise<boolean> {
+    const rendered =
+      (await this.modulesListVisibleNames()).length +
+      (await this.modulesListBoardCardNames()).length +
+      (await this.modulesListTimelineNames()).length;
+    if (rendered > 0) return false;
+    return !(await this.isShown(this.modulesGate()));
   }
 
   async modulesListZeroStateVisible(): Promise<boolean> {
@@ -19820,35 +20033,60 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesListLayoutOptionCount(): Promise<number> {
-    return todo("modulesListLayoutOptionCount");
+    const switcher = this.modulesLayoutSwitcher();
+    if ((await switcher.count()) === 0) return 0;
+    return switcher.getByRole("button").count();
   }
 
   async modulesListActiveLayout(): Promise<ModulesListLayout> {
-    return todo("modulesListActiveLayout");
+    for (let attempt = 0; attempt < WebNewDriver.WAIT_MS / 100; attempt += 1) {
+      const active = await this.currentModulesLayout();
+      if (active !== null) return active;
+      await this.page.waitForTimeout(100);
+    }
+    throw new Error("[parity] no modules layout reads as active.");
   }
 
   async modulesListSwitcherVisible(): Promise<boolean> {
-    return todo("modulesListSwitcherVisible");
+    return this.isShown(this.modulesLayoutSwitcher());
   }
 
-  async modulesListSwitchLayout(_layout: ModulesListLayout): Promise<void> {
-    return todo("modulesListSwitchLayout");
+  async modulesListSwitchLayout(layout: ModulesListLayout): Promise<void> {
+    await this.modulesLayoutOption(layout).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.modulesListActiveLayout(), { timeout: WebNewDriver.WAIT_MS }).toBe(layout);
+    await this.modulesListWaitSettled();
   }
 
   async modulesListReload(): Promise<void> {
-    return todo("modulesListReload");
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.modulesListWaitSettled();
   }
 
   async modulesListCompactMenuVisible(): Promise<boolean> {
-    return todo("modulesListCompactMenuVisible");
+    return this.isShown(this.modulesCompactTrigger());
   }
 
   async modulesListCompactMenuOptions(): Promise<string[]> {
-    return todo("modulesListCompactMenuOptions");
+    await this.modulesCompactTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await items.allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    await items
+      .first()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
   }
 
-  async modulesListCompactSwitchLayout(_layout: "list" | "board"): Promise<void> {
-    return todo("modulesListCompactSwitchLayout");
+  async modulesListCompactSwitchLayout(layout: "list" | "board"): Promise<void> {
+    const label = layout === "list" ? "List layout" : "Gallery layout";
+    await this.modulesCompactTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    const item = this.page.getByRole("menuitem", { name: label, exact: true });
+    await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.modulesListActiveLayout(), { timeout: WebNewDriver.WAIT_MS }).toBe(layout);
+    await this.modulesListWaitSettled();
   }
 
   async modulesListRowProgress(_name: string): Promise<ModulesListRowProgress> {
