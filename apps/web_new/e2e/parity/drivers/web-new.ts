@@ -15853,8 +15853,45 @@ export class WebNewDriver implements ParityDriver {
     }
   }
 
-  async cyclesEditOpenUpdateDialog(_name: string): Promise<void> {
-    return todo("cyclesEditOpenUpdateDialog");
+  /** One live-list cycle row by its rendered name (NEWFRONT-711, CYC-022/028). */
+  private cycleRowRoot(name: string): Locator {
+    return this.page.locator('div[data-testid="cycle-row"]').filter({ hasText: name }).first();
+  }
+
+  /** The row's menu trigger (NEWFRONT-711): hover-revealed on desktop. */
+  private cycleRowMenuTrigger(name: string): Locator {
+    return this.cycleRowRoot(name).getByRole("button", { name: `Cycle actions for ${name}` });
+  }
+
+  /** Open the row menu the way the desktop list does: hover, then the trigger. */
+  private async cycleRowMenuOpen(name: string): Promise<void> {
+    const row = this.cycleRowRoot(name);
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByRole("button", { name: `Cycle actions for ${name}` }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** Pick an open row-menu entry by its heading text. */
+  private async cycleRowMenuPick(title: string): Promise<void> {
+    await this.page
+      .getByRole("menuitem")
+      .filter({ has: this.page.locator("h5", { hasText: title }) })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** The open delete dialog, scoped by its heading (toasts also carry role=dialog). */
+  private cycleDeleteDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: "Delete cycle" }) })
+      .first();
+  }
+
+  async cyclesEditOpenUpdateDialog(name: string): Promise<void> {
+    await this.cycleRowMenuOpen(name);
+    await this.cycleRowMenuPick("Edit");
+    await this.page.getByRole("heading", { name: "Update cycle" }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesEditOpenListRaw(workspaceSlug: string, projectId: string): Promise<void> {
@@ -15975,8 +16012,13 @@ export class WebNewDriver implements ParityDriver {
     return { visible: true, disabled: disabled || ariaDisabled === "true" };
   }
 
-  async cyclesEditOpenPeek(_name: string): Promise<void> {
-    return todo("cyclesEditOpenPeek");
+  async cyclesEditOpenPeek(name: string): Promise<void> {
+    // Live rows peek through the hover-revealed eye control (their link
+    // navigates to detail instead), so hover first, then click it.
+    const row = this.cycleRowRoot(name);
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByRole("button", { name: `Quick look at ${name}` }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.page.url(), { timeout: WebNewDriver.WAIT_MS }).toContain("peekCycle=");
   }
 
   async cyclesEditOpenDetailMenu(): Promise<void> {
@@ -15984,19 +16026,58 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cyclesEditDeleteDialogText(): Promise<{ heading: string; body: string } | null> {
-    return todo("cyclesEditDeleteDialogText");
+    const dialog = this.cycleDeleteDialog();
+    try {
+      await expect.poll(async () => (await dialog.count()) > 0, { timeout: WebNewDriver.WAIT_MS }).toBe(true);
+    } catch {
+      return null;
+    }
+    const heading = dialog.getByRole("heading", { name: "Delete cycle" }).first();
+    const title = (await heading.innerText().catch(() => "")).trim();
+    // The consequence copy is the description directly under the
+    // heading; read it from the heading element so the kit's heading
+    // level and wrapper nesting do not matter.
+    const body = await heading.evaluate(descriptionAfterHeading).catch(() => "");
+    return { heading: title, body };
   }
 
   async cyclesEditDeleteConfirm(): Promise<void> {
-    return todo("cyclesEditDeleteConfirm");
+    const dialog = this.cycleDeleteDialog();
+    // Attach before clicking: an instantly-fulfilled write (failure
+    // shaping) would otherwise complete before the wait exists, wasting
+    // the budget while the toast expires. Returns once the write lands
+    // (the toast renders with it); callers read the toast immediately and
+    // let later assertions imply the close, so a slow detach can never
+    // outlast the toast.
+    const responded = this.page
+      .waitForResponse((response) => response.request().method() === "DELETE" && response.url().includes("/cycles/"), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .catch(() => null);
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await responded;
   }
 
   async cyclesEditDeleteCancel(): Promise<void> {
-    return todo("cyclesEditDeleteCancel");
+    const dialog = this.cycleDeleteDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesEditFailNextDeleteWrite(): Promise<void> {
-    return todo("cyclesEditFailNextDeleteWrite");
+    // Page-scoped: fulfills the permission refusal the server returns for
+    // forbidden deletes, passing every other request through untouched.
+    await this.page.route("**/cycles/*/", async (route) => {
+      if (route.request().method() === "DELETE") {
+        await route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "You don't have the required permissions." }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
   }
 
   async cyclesEditDetailReadOnlyNotice(): Promise<string | null> {
@@ -17052,14 +17133,24 @@ export class WebNewDriver implements ParityDriver {
   async cyclesClearFavoriteDelays(): Promise<void> {
     return todo("cyclesClearFavoriteDelays");
   }
-  async cyclesRowMenuTriggerVisible(_name: string): Promise<boolean> {
-    return todo("cyclesRowMenuTriggerVisible");
+  async cyclesRowMenuTriggerVisible(name: string): Promise<boolean> {
+    return this.isShown(this.cycleRowMenuTrigger(name));
   }
-  async cyclesRowHover(_name: string): Promise<void> {
-    return todo("cyclesRowHover");
+  async cyclesRowHover(name: string): Promise<void> {
+    await this.cycleRowRoot(name).hover({ timeout: WebNewDriver.WAIT_MS });
   }
-  async cyclesRowMenuOpenNewTab(_name: string): Promise<string> {
-    return todo("cyclesRowMenuOpenNewTab");
+  async cyclesRowMenuOpenNewTab(name: string): Promise<string> {
+    await this.cycleRowMenuOpen(name);
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }),
+      this.page
+        .getByRole("menuitem")
+        .filter({ has: this.page.locator("h5", { hasText: "Open in new tab" }) })
+        .first()
+        .click(),
+    ]);
+    await popup.waitForLoadState("domcontentloaded").catch(() => undefined);
+    return popup.url();
   }
   async cyclesTransferSearchFill(_text: string): Promise<void> {
     return todo("cyclesTransferSearchFill");
@@ -17068,10 +17159,20 @@ export class WebNewDriver implements ParityDriver {
     return todo("cyclesTransferEmptyText");
   }
   async cyclesArchivedEmptyDetail(): Promise<string | null> {
-    return todo("cyclesArchivedEmptyDetail");
+    // Contract with NEWFRONT-701's zero-state (CYC-027): the pinned
+    // heading plus its supporting line share one parent card, so the
+    // detail is the card's text minus the heading. If 701's markup
+    // nests them deeper, it updates this reader through the edge.
+    const heading = this.page.getByRole("heading", { name: "No archived cycles yet" }).first();
+    if (!(await this.isShown(heading))) return null;
+    const card = heading.locator("xpath=..");
+    const text = (await card.innerText().catch(() => "")).trim().replace(/\s+/g, " ");
+    const head = (await heading.innerText().catch(() => "")).trim();
+    const detail = text.replace(head, "").trim();
+    return detail === "" ? null : detail;
   }
   async cyclesGrantClipboardAccess(): Promise<void> {
-    return todo("cyclesGrantClipboardAccess");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   }
 
   async modulesOpenList(workspaceSlug: string, projectId: string, cookies: ParityBrowserCookie[]): Promise<void> {

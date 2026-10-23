@@ -4,8 +4,29 @@
 // Cycles area barrel (NEWFRONT-859 seeds it with the member-timezone
 // date display; slice A extends it with the route shell and states;
 // slice B adds the list body, rows, search, peek, and share helpers;
-// slice C adds the list filters, menu, chips, and predicate).
+// slice C adds the list filters, menu, chips, and predicate; slice E
+// adds the row menu, delete/archive dialogs and mutations, the menu
+// model, and the finished read-only notice).
 export { cycleDetailKeys, cycleDetailQueryOptions, useCycleDetail } from "./api/cycleDetail.js";
+export {
+  CYCLE_ARCHIVE_FAILED_LINE,
+  CYCLE_ARCHIVE_FAILED_TITLE,
+  CYCLE_ARCHIVE_LINE,
+  CYCLE_ARCHIVE_TITLE,
+  CYCLE_DELETED_TITLE,
+  CYCLE_DELETE_FAILED_LINE,
+  CYCLE_DELETE_FAILED_TITLE,
+  CYCLE_PERMISSION_TITLE,
+  CYCLE_RESTORED_LINE,
+  CYCLE_RESTORED_TITLE,
+  CYCLE_RESTORE_FAILED_LINE,
+  CYCLE_RESTORE_FAILED_TITLE,
+  useArchiveCycle,
+  useDeleteCycle,
+  useRestoreCycle,
+  type CycleMutation,
+  type CycleMutationTarget,
+} from "./api/cycleMutations.js";
 export {
   resetCycleFilterStore,
   useCycleFilterStore,
@@ -28,7 +49,9 @@ export {
   CycleMemberDatesFrame,
   type CycleMemberDateRange,
 } from "./components/CycleMemberDates.js";
+export { CycleArchiveDialog, type CycleArchiveDialogProps } from "./components/CycleArchiveDialog.js";
 export { CycleDateSpan, type CycleDateSpanProps } from "./components/CycleDateSpan.js";
+export { CycleDeleteDialog, type CycleDeleteDialogProps } from "./components/CycleDeleteDialog.js";
 export { CycleDetailGate, type CycleDetailGateProps } from "./components/CycleDetailGate.js";
 export { CycleFilterChips, type CycleFilterChipsProps } from "./components/CycleFilterChips.js";
 export {
@@ -42,6 +65,8 @@ export { CycleGroup, type CycleGroupProps } from "./components/CycleGroup.js";
 export { CyclePeekPanel, type CyclePeekPanelProps } from "./components/CyclePeekPanel.js";
 export { CycleProgressRing, type CycleProgressRingProps } from "./components/CycleProgressRing.js";
 export { CycleRow, type CycleRowProps } from "./components/CycleRow.js";
+export { CycleRowMenu, type CycleRowMenuProps } from "./components/CycleRowMenu.js";
+export { FinishedCycleNotice, type FinishedCycleNoticeProps } from "./components/FinishedCycleNotice.js";
 export { CyclesFeatureGate, type CyclesFeatureGateProps } from "./components/CyclesFeatureGate.js";
 export { CyclesListBody, type CyclesListBodyProps } from "./components/CyclesListBody.js";
 export { CyclesListHeader, type CyclesListHeaderProps } from "./components/CyclesListHeader.js";
@@ -108,6 +133,14 @@ export {
   type CycleListFilters,
 } from "./lib/cycleFilters.js";
 export { parseCyclesListSearch } from "./lib/cycleListSearch.js";
+export {
+  CYCLE_ARCHIVE_GATE_HINT,
+  cycleMenuEntries,
+  isCycleArchived,
+  isCycleFinished,
+  type CycleMenuEntry,
+  type CycleMenuEntryId,
+} from "./lib/cycleMenu.js";
 export { selectCycleMemberDirectory, UNKNOWN_CYCLE_MEMBER, type CycleMemberEntry } from "./lib/cycleMembers.js";
 export {
   cycleProgressCounts,

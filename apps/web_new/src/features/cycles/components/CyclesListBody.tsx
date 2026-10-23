@@ -85,7 +85,8 @@ export function CyclesListBody({
   const directory = React.useMemo(() => selectCycleMemberDirectory(directoryQuery.data ?? []), [directoryQuery.data]);
 
   const projectTimeZone = project.data?.timezone ?? "UTC";
-  const showFavoriteMarker = isProjectAuthorized(roles.data?.[projectId] ?? null);
+  const canMutate = isProjectAuthorized(roles.data?.[projectId] ?? null);
+  const showFavoriteMarker = canMutate;
   const loaded = cycles.data ?? [];
   const noMatch = loaded.length > 0 && groups.visible.length === 0;
   const peeking = peekCycleId === null ? null : (loaded.find((cycle) => cycle.id === peekCycleId) ?? null);
@@ -105,6 +106,12 @@ export function CyclesListBody({
     directory,
     showFavoriteMarker,
     onPeek,
+    canMutate,
+    currentProject: {
+      id: projectId,
+      name: project.data?.name ?? "",
+      identifier: project.data?.identifier ?? "",
+    },
   };
 
   return (

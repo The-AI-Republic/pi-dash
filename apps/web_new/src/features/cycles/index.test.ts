@@ -6,6 +6,14 @@ import { describe, expect, it } from "vitest";
 import {
   archivedCyclesQueryOptions,
   countCycleFilters,
+  CYCLE_ARCHIVE_FAILED_LINE,
+  CYCLE_ARCHIVE_FAILED_TITLE,
+  CYCLE_ARCHIVE_GATE_HINT,
+  CYCLE_ARCHIVE_LINE,
+  CYCLE_ARCHIVE_TITLE,
+  CYCLE_DELETED_TITLE,
+  CYCLE_DELETE_FAILED_LINE,
+  CYCLE_DELETE_FAILED_TITLE,
   CYCLE_FILTER_CHIP_LABELS,
   CYCLE_FILTER_DIMENSIONS,
   CYCLE_FILTER_SECTION_TITLES,
@@ -17,6 +25,11 @@ import {
   CYCLE_MEMBER_DATES_LABEL,
   CYCLE_OPEN_NEW_TAB_FAILED_TITLE,
   CYCLE_OVERLAP_TITLE,
+  CYCLE_PERMISSION_TITLE,
+  CYCLE_RESTORED_LINE,
+  CYCLE_RESTORED_TITLE,
+  CYCLE_RESTORE_FAILED_LINE,
+  CYCLE_RESTORE_FAILED_TITLE,
   CYCLE_TITLE_MAX_LENGTH,
   CYCLES_CRUMB,
   copyCycleLink,
@@ -30,7 +43,10 @@ import {
   cycleDetailQueryOptions,
   cycleFailureMessage,
   cycleFormDays,
+  cycleMenuEntries,
+  CycleArchiveDialog,
   CycleDateSpan,
+  CycleDeleteDialog,
   CycleDetailGate,
   CycleFilterChips,
   CycleFilterMenu,
@@ -45,6 +61,7 @@ import {
   CyclePeekPanel,
   CycleProgressRing,
   CycleRow,
+  CycleRowMenu,
   cycleSpanModel,
   CyclesFeatureGate,
   cyclesFeatureHref,
@@ -64,6 +81,7 @@ import {
   CyclesZeroState,
   EMPTY_CYCLE_FILTERS,
   filterCyclesByQuery,
+  FinishedCycleNotice,
   focusFirstCalendarDay,
   formatCycleSpanText,
   formatMemberDate,
@@ -78,6 +96,8 @@ import {
   invalidateArchivedCycleReads,
   invalidateCycleLists,
   invalidateCycleReads,
+  isCycleArchived,
+  isCycleFinished,
   isCycleGoneAway,
   lifecycleLabel,
   lifecycleTone,
@@ -93,10 +113,13 @@ import {
   resolveCyclesBody,
   selectCycleMemberDirectory,
   UNKNOWN_CYCLE_MEMBER,
+  useArchiveCycle,
   useCycleDetail,
   useCycleFilterStore,
   useCycleListFilter,
   useCycleSearchStore,
+  useDeleteCycle,
+  useRestoreCycle,
   zoneOffsetMinutes,
 } from "./index.js";
 
@@ -211,5 +234,31 @@ describe("cycles barrel", () => {
     expect(validateCycleRange).toBeDefined();
     expect(cycleOverlapMessage).toBeDefined();
     expect(cycleFailureMessage).toBeDefined();
+  });
+
+  it("re-exports the row menu, its dialogs and mutations, and the read-only notice", () => {
+    expect(CYCLE_ARCHIVE_GATE_HINT).toBe("Only completed cycles can be archived");
+    expect(cycleMenuEntries).toBeDefined();
+    expect(isCycleArchived).toBeDefined();
+    expect(isCycleFinished).toBeDefined();
+    expect(CYCLE_DELETED_TITLE).toBe("Cycle deleted successfully.");
+    expect(CYCLE_DELETE_FAILED_TITLE).toBe("Failed to delete cycle");
+    expect(CYCLE_DELETE_FAILED_LINE).toBe("The cycle is still there. Try again.");
+    expect(CYCLE_PERMISSION_TITLE).toBe("You don't have permission to perform this action.");
+    expect(CYCLE_ARCHIVE_TITLE).toBe("Archive success");
+    expect(CYCLE_ARCHIVE_LINE).toBe("Your archives can be found in project archives.");
+    expect(CYCLE_ARCHIVE_FAILED_TITLE).toBe("Couldn't archive the cycle");
+    expect(CYCLE_ARCHIVE_FAILED_LINE).toBe("The cycle is still in the live list. Try again.");
+    expect(CYCLE_RESTORED_TITLE).toBe("Cycle restored");
+    expect(CYCLE_RESTORED_LINE).toBe("The cycle has been restored.");
+    expect(CYCLE_RESTORE_FAILED_TITLE).toBe("Cycle restore failed");
+    expect(CYCLE_RESTORE_FAILED_LINE).toBe("The cycle is still archived. Try again.");
+    expect(useDeleteCycle).toBeDefined();
+    expect(useArchiveCycle).toBeDefined();
+    expect(useRestoreCycle).toBeDefined();
+    expect(CycleRowMenu).toBeDefined();
+    expect(CycleDeleteDialog).toBeDefined();
+    expect(CycleArchiveDialog).toBeDefined();
+    expect(FinishedCycleNotice).toBeDefined();
   });
 });

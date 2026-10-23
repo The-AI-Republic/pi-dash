@@ -6,6 +6,7 @@
 // the lifecycle marker, the date span, and the extras for the row's
 // state; the eye opens the quick look.
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -50,6 +51,8 @@ async function renderRow(
         directory={directory()}
         showFavoriteMarker
         onPeek={onPeek}
+        canMutate
+        currentProject={{ id: CYCLES_PROJECT_ID, name: "Website relaunch", identifier: "WEB" }}
         {...props}
         cycle={props.cycle}
       />
@@ -65,7 +68,12 @@ async function renderRow(
     history: createMemoryHistory({ initialEntries: [`/acme/projects/${CYCLES_PROJECT_ID}/cycles`] }),
     defaultPreload: false,
   });
-  const result = render(<RouterProvider router={router} />);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const result = render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>
+  );
   await screen.findByTestId("cycle-row");
   return result;
 }
@@ -193,5 +201,10 @@ describe("CycleRow", async () => {
     await renderRow({ cycle: row });
     expect(screen.getByText("0")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "0% complete" })).toBeInTheDocument();
+  });
+
+  it("mounts the row menu trigger beside the quick look", async () => {
+    await renderRow({ cycle: upcomingRow({ name: "Cycle 7" }) });
+    expect(screen.getByRole("button", { name: "Cycle actions for Cycle 7" })).toBeInTheDocument();
   });
 });

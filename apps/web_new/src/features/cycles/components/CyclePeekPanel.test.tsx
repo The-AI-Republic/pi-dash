@@ -171,4 +171,13 @@ describe("CyclePeekPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open cycle in new tab" }));
     await waitFor(() => expect(openExternal).toHaveBeenCalledWith(address));
   });
+
+  it("offers a finished cycle no edit or delete affordance (CYC-023)", async () => {
+    detail.row = makeCycleRow({ name: "Done 1", status: "COMPLETED" });
+    renderPeek();
+    expect(await screen.findByTestId("cycle-peek-body")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /edit/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /edit|delete/i })).not.toBeInTheDocument();
+  });
 });
