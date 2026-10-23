@@ -1676,6 +1676,11 @@ pub async fn process_invitations(
     .bind(email)
     .fetch_all(pool)
     .await?;
+    // Two phases, not one loop: Django commits every project-arm
+    // `workspace_members` row before the `project_members` bulk below
+    // raises (PIDASHCONV-1359 — a per-invite loop aborts on `?` after
+    // the first workspace, so a user invited in several workspaces only
+    // ever joins the first).
     if !project_invites.is_empty() {
         let props = default_props_json();
         let prefs = default_preferences_json();
@@ -1707,6 +1712,13 @@ pub async fn process_invitations(
             .bind(invite.created_by_id)
             .execute(pool)
             .await?;
+        }
+        for invite in &project_invites {
+            let role = if invite.role == 5 || invite.role == 15 {
+                i32::from(invite.role)
+            } else {
+                15
+            };
             // Ported bug: `project_id` is missing here, so this raises
             // `IntegrityError` on Postgres (`project_members.project_id`
             // is NOT NULL) — every app-callback success with accepted
@@ -3281,5 +3293,229 @@ mod tests {
             }
         }
         assert_eq!(project_rows, 0, "no project invites seeded");
+    }
+
+    /// Seed an active user + two workspaces, each with a project and an
+    /// accepted project invite for the email (roles 5 and 20 — the
+    /// latter clamps to 15). Column lists mirror
+    /// `_harness.db.Database.make_user/make_workspace/make_project` plus
+    /// the `project_member_invites` seed in
+    /// `test_github_project_invite_join.py`.
+    async fn seed_active_user_two_project_invites(
+        pool: &sqlx::PgPool,
+        email: &str,
+        slug: &str,
+    ) -> (uuid::Uuid, Vec<uuid::Uuid>) {
+        let user_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        let mut workspace_ids = Vec::new();
+        for (index, role) in [(1, 5), (2, 20)] {
+            let workspace_id = uuid::Uuid::new_v4();
+            let project_id = uuid::Uuid::new_v4();
+            let ws_slug = format!("{slug}-w{index}");
+            sqlx::query(
+                r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                    "owner_id", "timezone", "background_color")
+                   VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+            )
+            .bind(now)
+            .bind(workspace_id)
+            .bind(format!("kernel ws {ws_slug}"))
+            .bind(&ws_slug)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("seed workspace");
+            sqlx::query(
+                r#"INSERT INTO "projects"
+                   ("created_at", "updated_at", "id", "name", "description", "network",
+                    "identifier", "workspace_id", "cycle_view", "module_view",
+                    "issue_views_view", "page_view", "intake_view", "archive_in",
+                    "close_in", "logo_props", "is_time_tracking_enabled",
+                    "is_issue_type_enabled", "guest_view_all_features", "timezone",
+                    "members_can_edit_states", "repo_url", "base_branch",
+                    "agent_default_interval_seconds", "agent_default_max_ticks",
+                    "agent_ticking_enabled", "is_default",
+                    "agent_review_default_interval_seconds",
+                    "default_agent_executor",
+                    "agent_test_default_interval_seconds")
+                   VALUES ($1,$1,$2,$3,'',0,$4,$5,true,true,true,true,true,
+                           365,365,'{}',true,false,false,'UTC',true,'','',
+                           10800,10,true,false,10800,'local_runner',10800)"#,
+            )
+            .bind(now)
+            .bind(project_id)
+            .bind(format!("kernel proj {ws_slug}"))
+            .bind(format!(
+                "k9{index}{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..6]
+            ))
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("seed project");
+            sqlx::query(
+                r#"INSERT INTO "project_member_invites" ("id", "created_at", "updated_at",
+                    "project_id", "workspace_id", "email", "accepted", "token", "role")
+                   VALUES ($1, $2, $2, $3, $4, $5, TRUE, $6, $7)"#,
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(now)
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(email)
+            .bind(format!(
+                "tok-1359-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ))
+            .bind(role)
+            .execute(pool)
+            .await
+            .expect("seed project invite");
+            workspace_ids.push(workspace_id);
+        }
+        (user_id, workspace_ids)
+    }
+
+    async fn cleanup_project_kernel_world(
+        pool: &sqlx::PgPool,
+        email: &str,
+        workspace_ids: &[uuid::Uuid],
+    ) {
+        let user_ids: Vec<uuid::Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(email)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        for user_id in &user_ids {
+            for (table, column) in [
+                ("workspace_members", "member_id"),
+                ("project_members", "member_id"),
+            ] {
+                sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "{column}" = $1"#))
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .ok();
+            }
+        }
+        sqlx::query(r#"DELETE FROM "project_member_invites" WHERE "email" = $1"#)
+            .bind(email)
+            .execute(pool)
+            .await
+            .ok();
+        for workspace_id in workspace_ids {
+            sqlx::query(r#"DELETE FROM "projects" WHERE "workspace_id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query(r#"DELETE FROM "workspaces" WHERE "id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+        for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+    }
+
+    /// Two accepted project invites in two workspaces: `process_invitations`
+    /// fails with the ported PB-1008 NOT NULL violation only AFTER
+    /// committing both workspace-member rows (PIDASHCONV-1359 — the
+    /// pre-fix per-invite loop aborted on `?` after the first workspace,
+    /// so the user never joined the second). Zero project-member rows,
+    /// both invites intact.
+    #[tokio::test]
+    async fn gitea_kernel_two_project_invites_join_both_workspaces() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("ge1359-{tag}@example.test");
+        let slug = format!("ge1359-{tag}");
+        let (user_id, workspace_ids) =
+            seed_active_user_two_project_invites(&pool, &email, &slug).await;
+
+        // No workspace invites: no cache handle is needed and none is touched.
+        let outcome = process_invitations(&pool, None, user_id, &email, chrono::Utc::now()).await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let members: Vec<(uuid::Uuid, i16)> = sqlx::query_as(
+            r#"SELECT "workspace_id", "role" FROM "workspace_members"
+               WHERE "member_id" = $1"#,
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read members");
+        let project_rows: i64 =
+            sqlx::query_scalar(r#"SELECT COUNT(*) FROM "project_members" WHERE "member_id" = $1"#)
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count project members");
+        let invites: Vec<(bool, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            r#"SELECT "accepted", "deleted_at" FROM "project_member_invites"
+               WHERE "email" = $1"#,
+        )
+        .bind(&email)
+        .fetch_all(&pool)
+        .await
+        .expect("read invites");
+        cleanup_project_kernel_world(&pool, &email, &workspace_ids).await;
+
+        let err = outcome.expect_err("kernel fails into the ported 500");
+        assert!(
+            err.to_string().contains("project_id"),
+            "ported PB-1008 NOT NULL violation, got: {err}"
+        );
+        let mut got = members;
+        got.sort();
+        let mut want = vec![(workspace_ids[0], 5), (workspace_ids[1], 15)];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "both invite workspaces joined (role 20 clamps to 15)"
+        );
+        assert_eq!(
+            project_rows, 0,
+            "project bulk raised before writing anything"
+        );
+        assert_eq!(invites.len(), 2, "both invites survive");
+        assert!(
+            invites.iter().all(|(accepted, _)| *accepted),
+            "invites stay accepted"
+        );
+        assert!(
+            invites.iter().all(|(_, deleted_at)| deleted_at.is_none()),
+            "invites stay live"
+        );
     }
 }
