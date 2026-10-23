@@ -107,6 +107,12 @@ const happyPath = (url: string) => {
 };
 
 describe("saved-view detail route preload", () => {
+  it("validates the search with the issues screen's schema", () => {
+    const validate = Route.options.validateSearch as unknown as (raw: Record<string, unknown>) => unknown;
+    expect(validate({})).toEqual({});
+    expect(validate({ layout: "compact" })).toEqual({ layout: "compact" });
+  });
+
   it("shows the list skeleton while the route loads", () => {
     const Pending = Route.options.pendingComponent;
     if (!Pending) throw new Error("missing pending component");
