@@ -55,6 +55,9 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 
 vi.mock("../../../shared/charts/index.js", () => ({
   RadarChart: () => <div data-testid="mock-chart-radar" />,
+  AreaChart: () => <div data-testid="mock-chart-area" />,
+  BarChart: () => <div data-testid="mock-chart-bar" />,
+  resolveChartScheme: () => "light",
 }));
 
 vi.mock("../../../core/session/hooks.js", async (importOriginal) => {
@@ -316,7 +319,51 @@ describe("AnalyticsScreen", () => {
     await waitFor(() => expect(screen.getAllByTestId("analytics-headline-card")).toHaveLength(5));
     expect(screen.queryByTestId("analytics-radar")).not.toBeInTheDocument();
     expect(screen.queryByTestId("analytics-active")).not.toBeInTheDocument();
-    expect(contractMocks.getAnalyticsChart).not.toHaveBeenCalled();
+    expect(screen.getByTestId("analytics-created")).toBeInTheDocument();
+    expect(screen.getByTestId("analytics-custom")).toBeInTheDocument();
     expect(contractMocks.getProjectStats).not.toHaveBeenCalled();
+    // The work-items tab reads its own graphs, never the overview radar graph.
+    await waitFor(() => expect(contractMocks.getAnalyticsChart.mock.calls.length).toBeGreaterThanOrEqual(2));
+    const types = contractMocks.getAnalyticsChart.mock.calls.map((call) => (call[2] as { type: string }).type);
+    expect(types).toContain("work-items");
+    expect(types).toContain("custom-work-items");
+    expect(types).not.toContain("projects");
+  });
+
+  it("mounts the created-vs-resolved and custom-insights sections on the work-items tab", async () => {
+    mockReads();
+    contractMocks.getAnalyticsChart.mockImplementation(
+      async (_client: unknown, _slug: string, query: { type: string }) => {
+        if (query.type === "work-items") {
+          return {
+            data: [
+              {
+                key: "2026-10-01",
+                name: "2026-10-01",
+                count: 1,
+                created_issues: 1,
+                completed_issues: 0,
+              },
+            ],
+            schema: {},
+          };
+        }
+        return { data: [{ key: "urgent", name: "urgent", count: 1 }], schema: {} };
+      }
+    );
+    renderScreen({ tabId: "work-items", projectIds: [ALPHA] });
+    await screen.findByTestId("mock-chart-area");
+    await screen.findByTestId("mock-chart-bar");
+    expect(contractMocks.getAnalyticsChart).toHaveBeenCalledWith(expect.anything(), "acme", {
+      type: "work-items",
+      projectIds: [ALPHA],
+    });
+    expect(contractMocks.getAnalyticsChart).toHaveBeenCalledWith(expect.anything(), "acme", {
+      type: "custom-work-items",
+      xAxis: "PRIORITY",
+      yAxis: "WORK_ITEM_COUNT",
+      projectIds: [ALPHA],
+    });
+    expect(screen.getByTestId("analytics-custom-trigger-1")).toHaveTextContent("Priority");
   });
 });

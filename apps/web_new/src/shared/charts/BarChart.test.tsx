@@ -42,6 +42,7 @@ vi.mock("recharts", () => ({
     stackId?: string;
     radius?: unknown;
     shape?: (shapeProps: FakeShapeProps) => ReactNode;
+    children?: ReactNode;
   }) => (
     <div
       data-testid="mock-bar"
@@ -52,6 +53,7 @@ vi.mock("recharts", () => ({
       data-radius={props.radius === undefined ? undefined : JSON.stringify(props.radius)}
       data-shape={props.shape === undefined ? "none" : "custom"}
     >
+      {props.children}
       {props.shape?.({
         x: 0,
         y: 0,
@@ -62,8 +64,14 @@ vi.mock("recharts", () => ({
       })}
     </div>
   ),
-  Rectangle: (props: { radius?: unknown }) => (
-    <div data-testid="mock-rectangle" data-radius={JSON.stringify(props.radius)} />
+  Cell: ({ fill }: { fill?: string }) => <div data-testid="mock-cell" data-fill={fill} />,
+  Rectangle: (props: { radius?: unknown; ["data-top-rounded"]?: boolean; ["data-bottom-rounded"]?: boolean }) => (
+    <div
+      data-testid="mock-rectangle"
+      data-radius={JSON.stringify(props.radius)}
+      data-top-rounded={String(props["data-top-rounded"])}
+      data-bottom-rounded={String(props["data-bottom-rounded"])}
+    />
   ),
   Tooltip: ({ content }: { content?: ReactNode }) => <div data-testid="mock-tooltip">{content}</div>,
 }));
@@ -121,6 +129,25 @@ describe("BarChart", () => {
       JSON.stringify([4, 4, 4, 4]),
       JSON.stringify([0, 0, 0, 0]),
     ]);
+    expect(shapes.map((node) => node.dataset["topRounded"])).toEqual(["true", "false"]);
+    expect(shapes.map((node) => node.dataset["bottomRounded"])).toEqual(["true", "false"]);
+  });
+
+  it("paints per-bar fills through cells in single-series mode", async () => {
+    render(<BarChart bars={BARS} segments={[{ name: "Count", color: "#6172e8" }]} fills={["#ef4444"]} />);
+    await screen.findByTestId("mock-bar-chart");
+    const cells = screen.getAllByTestId("mock-cell");
+    expect(cells.map((node) => node.dataset["fill"])).toEqual(["#ef4444", "#6172e8"]);
+  });
+
+  it("renders no cells without fills or when stacked", async () => {
+    const { unmount } = render(<BarChart bars={BARS} segments={SEGMENTS} />);
+    await screen.findByTestId("mock-bar-chart");
+    expect(screen.queryByTestId("mock-cell")).not.toBeInTheDocument();
+    unmount();
+    render(<BarChart bars={BARS} segments={SEGMENTS} stacked fills={["#ef4444", "#f97316"]} />);
+    await screen.findByTestId("mock-bar-chart");
+    expect(screen.queryByTestId("mock-cell")).not.toBeInTheDocument();
   });
 
   it("resolves kit dark chrome under the dark document theme", async () => {

@@ -20,7 +20,14 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
   return { ...original, ...contractMocks };
 });
 
-import { analyticsProjectsChartQueryOptions, useAnalyticsProjectsChart } from "./charts.js";
+import {
+  analyticsCustomChartQueryOptions,
+  analyticsProjectsChartQueryOptions,
+  analyticsWorkItemsChartQueryOptions,
+  useAnalyticsCustomChart,
+  useAnalyticsProjectsChart,
+  useAnalyticsWorkItemsChart,
+} from "./charts.js";
 import { analyticsKeys } from "./keys.js";
 
 const CLIENT = { stub: true } as unknown as ApiClient;
@@ -48,6 +55,21 @@ describe("analyticsKeys charts", () => {
       "projects",
       ["a"],
     ]);
+  });
+
+  it("keys custom reads by scope and axis choice with a null split", () => {
+    expect(analyticsKeys.customCharts("acme", ["a"], "PRIORITY", "WORK_ITEM_COUNT", null)).toEqual([
+      "ws",
+      "acme",
+      "analytics",
+      "charts",
+      "custom-work-items",
+      ["a"],
+      "PRIORITY",
+      "WORK_ITEM_COUNT",
+      null,
+    ]);
+    expect(analyticsKeys.customCharts("acme", ["a"], "PRIORITY", "WORK_ITEM_COUNT", "STATES")).toContain("STATES");
   });
 });
 
@@ -86,5 +108,93 @@ describe("useAnalyticsProjectsChart", () => {
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual(rows);
+  });
+});
+
+describe("analyticsWorkItemsChartQueryOptions", () => {
+  it("requests the work-items series under a normalized scope", async () => {
+    const series = { data: [], schema: {} };
+    contractMocks.getAnalyticsChart.mockResolvedValue(series);
+    const options = analyticsWorkItemsChartQueryOptions(CLIENT, "acme", ["b", "a", "b"]);
+    expect(options.queryKey).toEqual(["ws", "acme", "analytics", "charts", "work-items", ["b", "a"]]);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(series);
+    expect(contractMocks.getAnalyticsChart).toHaveBeenCalledWith(CLIENT, "acme", {
+      type: "work-items",
+      projectIds: ["b", "a"],
+    });
+  });
+});
+
+describe("useAnalyticsWorkItemsChart", () => {
+  it("reads the series through the app client", async () => {
+    const series = { data: [], schema: {} };
+    contractMocks.getAnalyticsChart.mockResolvedValue(series);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useAnalyticsWorkItemsChart("acme", []), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(series);
+  });
+});
+
+describe("analyticsCustomChartQueryOptions", () => {
+  it("requests the custom graph with axes and an absent split omitted", async () => {
+    const graph = { data: [], schema: {} };
+    contractMocks.getAnalyticsChart.mockResolvedValue(graph);
+    const options = analyticsCustomChartQueryOptions(CLIENT, "acme", ["b", "a", "b"], {
+      xAxis: "PRIORITY",
+      yAxis: "WORK_ITEM_COUNT",
+    });
+    expect(options.queryKey).toEqual([
+      "ws",
+      "acme",
+      "analytics",
+      "charts",
+      "custom-work-items",
+      ["b", "a"],
+      "PRIORITY",
+      "WORK_ITEM_COUNT",
+      null,
+    ]);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(graph);
+    expect(contractMocks.getAnalyticsChart).toHaveBeenCalledWith(CLIENT, "acme", {
+      type: "custom-work-items",
+      xAxis: "PRIORITY",
+      yAxis: "WORK_ITEM_COUNT",
+      projectIds: ["b", "a"],
+    });
+  });
+
+  it("sends the split once chosen", async () => {
+    contractMocks.getAnalyticsChart.mockResolvedValue({ data: [], schema: {} });
+    const options = analyticsCustomChartQueryOptions(CLIENT, "acme", [], {
+      xAxis: "PRIORITY",
+      yAxis: "WORK_ITEM_COUNT",
+      groupBy: "STATES",
+    });
+    expect(options.queryKey).toContain("STATES");
+    await options.queryFn?.({} as never);
+    expect(contractMocks.getAnalyticsChart).toHaveBeenCalledWith(CLIENT, "acme", {
+      type: "custom-work-items",
+      xAxis: "PRIORITY",
+      yAxis: "WORK_ITEM_COUNT",
+      groupBy: "STATES",
+      projectIds: [],
+    });
+  });
+});
+
+describe("useAnalyticsCustomChart", () => {
+  it("reads the custom graph through the app client", async () => {
+    const graph = { data: [], schema: {} };
+    contractMocks.getAnalyticsChart.mockResolvedValue(graph);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(
+      () => useAnalyticsCustomChart("acme", [], { xAxis: "PRIORITY", yAxis: "WORK_ITEM_COUNT" }),
+      { wrapper: wrapper(queryClient) }
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(graph);
   });
 });

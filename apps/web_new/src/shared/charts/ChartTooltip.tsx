@@ -20,9 +20,15 @@ export function ChartTooltipContent(props: Record<string, unknown>): React.React
   if (entries.length === 0) return null;
   return (
     <div className="shadow-popover flex min-w-32 flex-col gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--surface) px-(--space-3) py-(--space-2)">
-      <div className="text-meta font-medium text-(--text)">{mapTooltipLabel(props["label"])}</div>
+      <div data-testid="chart-tooltip-label" className="text-meta font-medium text-(--text)">
+        {mapTooltipLabel(props["label"])}
+      </div>
       {entries.map((entry, index) => (
-        <div key={`${entry.name}-${index}`} className="flex items-center gap-(--space-2)">
+        <div
+          key={`${entry.name}-${index}`}
+          data-testid="chart-tooltip-row"
+          className="flex items-center gap-(--space-2)"
+        >
           {entry.color === undefined ? null : (
             <span
               aria-hidden="true"
@@ -30,8 +36,12 @@ export function ChartTooltipContent(props: Record<string, unknown>): React.React
               className="size-2 shrink-0 rounded-full"
             />
           )}
-          <span className="text-meta flex-1 text-(--text-muted)">{entry.name}</span>
-          <span className="text-meta font-medium text-(--text)">{entry.value}</span>
+          <span data-testid="chart-tooltip-name" className="text-meta flex-1 text-(--text-muted)">
+            {entry.name}
+          </span>
+          <span data-testid="chart-tooltip-value" className="text-meta font-medium text-(--text)">
+            {entry.value}
+          </span>
         </div>
       ))}
     </div>

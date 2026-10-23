@@ -13,33 +13,67 @@ import {
   AnalyticsScreen,
   AnalyticsSectionGuidance,
   AnalyticsTabStrip,
+  analyticsCustomChartQueryOptions,
   analyticsKeys,
   analyticsProjectsChartQueryOptions,
   analyticsProjectStatsQueryOptions,
   analyticsScopeSearch,
   analyticsTabHref,
   analyticsTotalsQueryOptions,
+  analyticsWorkItemsChartQueryOptions,
+  buildCustomChartModel,
+  capitalizeCustomLabel,
   completionPercent,
   completionTone,
+  CREATED_SERIES_NAME,
+  CreatedResolvedSection,
+  CUSTOM_AXES,
+  CUSTOM_METRICS,
+  CUSTOM_SINGLE_SERIES_NAME,
+  CUSTOM_SPLIT_CLEAR_LABEL,
+  CUSTOM_SPLIT_EMPTY_LABEL,
+  customAxisLabel,
+  CustomInsightPickers,
+  CustomInsightsSection,
+  customMetricLabel,
   DEFAULT_ANALYTICS_TAB,
+  DEFAULT_CUSTOM_METRIC,
+  DEFAULT_CUSTOM_SPLIT,
+  DEFAULT_CUSTOM_X_AXIS,
   defaultAnalyticsTabHref,
+  formatCustomDateLabel,
+  formatSeriesMonth,
   HeadlineCards,
   headlineCardsForTab,
+  indexStateColors,
   isAnalyticsTabId,
+  isCapitalizedCustomAxis,
+  isCustomDateAxis,
   MANY_PROJECTS_LABEL,
   normalizeAnalyticsScope,
   OVERVIEW_HEADLINE_CARDS,
   parseAnalyticsSearch,
   RadarSection,
+  RESOLVED_SERIES_NAME,
   resolveActiveProjects,
   resolveAnalyticsScope,
   selectAnalyticsProjects,
   selectAnalyticsTab,
+  selectCreatedResolvedColors,
+  selectCreatedResolvedPoints,
+  selectCustomBarLabel,
+  selectCustomSegmentLabel,
+  selectCustomSplitOptions,
+  selectCustomXOptions,
   selectHeadlineValue,
   selectPickerSummary,
+  selectPriorityBarColor,
+  selectStateBarColor,
+  useAnalyticsCustomChart,
   useAnalyticsProjectsChart,
   useAnalyticsProjectStats,
   useAnalyticsTotals,
+  useAnalyticsWorkItemsChart,
   WORK_ITEMS_HEADLINE_CARDS,
 } from "./index.js";
 
@@ -56,15 +90,50 @@ describe("analytics barrel", () => {
     expect(typeof analyticsProjectStatsQueryOptions).toBe("function");
     expect(typeof useAnalyticsProjectsChart).toBe("function");
     expect(typeof useAnalyticsProjectStats).toBe("function");
+    expect(typeof analyticsWorkItemsChartQueryOptions).toBe("function");
+    expect(typeof useAnalyticsWorkItemsChart).toBe("function");
+    expect(typeof analyticsCustomChartQueryOptions).toBe("function");
+    expect(typeof useAnalyticsCustomChart).toBe("function");
     expect(typeof RadarSection).toBe("function");
     expect(typeof ActiveProjectsSection).toBe("function");
+    expect(typeof CreatedResolvedSection).toBe("function");
+    expect(typeof CustomInsightPickers).toBe("function");
+    expect(typeof CustomInsightsSection).toBe("function");
     expect(typeof AnalyticsSectionGuidance).toBe("function");
     expect(typeof completionPercent).toBe("function");
     expect(typeof completionTone).toBe("function");
     expect(typeof resolveActiveProjects).toBe("function");
     expect(typeof analyticsKeys.totals).toBe("function");
     expect(typeof analyticsKeys.charts).toBe("function");
+    expect(typeof analyticsKeys.customCharts).toBe("function");
     expect(typeof analyticsKeys.projectStats).toBe("function");
+    expect(typeof formatSeriesMonth).toBe("function");
+    expect(typeof selectCreatedResolvedColors).toBe("function");
+    expect(typeof selectCreatedResolvedPoints).toBe("function");
+    expect(typeof customAxisLabel).toBe("function");
+    expect(typeof customMetricLabel).toBe("function");
+    expect(typeof isCustomDateAxis).toBe("function");
+    expect(typeof isCapitalizedCustomAxis).toBe("function");
+    expect(typeof selectCustomXOptions).toBe("function");
+    expect(typeof selectCustomSplitOptions).toBe("function");
+    expect(typeof buildCustomChartModel).toBe("function");
+    expect(typeof capitalizeCustomLabel).toBe("function");
+    expect(typeof formatCustomDateLabel).toBe("function");
+    expect(typeof indexStateColors).toBe("function");
+    expect(typeof selectCustomBarLabel).toBe("function");
+    expect(typeof selectCustomSegmentLabel).toBe("function");
+    expect(typeof selectPriorityBarColor).toBe("function");
+    expect(typeof selectStateBarColor).toBe("function");
+    expect(CUSTOM_AXES.length).toBe(12);
+    expect(CUSTOM_METRICS.length).toBe(1);
+    expect(CUSTOM_SPLIT_CLEAR_LABEL).toBe("No value");
+    expect(CUSTOM_SPLIT_EMPTY_LABEL).toBe("Add Property");
+    expect(DEFAULT_CUSTOM_METRIC).toBe("WORK_ITEM_COUNT");
+    expect(DEFAULT_CUSTOM_X_AXIS).toBe("PRIORITY");
+    expect(DEFAULT_CUSTOM_SPLIT).toBeNull();
+    expect(CUSTOM_SINGLE_SERIES_NAME).toBe("Count");
+    expect(RESOLVED_SERIES_NAME).toBe("Resolved");
+    expect(CREATED_SERIES_NAME).toBe("Created");
     expect(typeof headlineCardsForTab).toBe("function");
     expect(typeof selectHeadlineValue).toBe("function");
     expect(typeof selectAnalyticsTab).toBe("function");

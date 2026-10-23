@@ -880,9 +880,223 @@ describe("analytics section guidance", () => {
     expect(evaluated?.args[1]).toBe("analytics-radar");
   });
 
+  it("maps the created-vs-resolved section to its testid", async () => {
+    const recorder = new Recorder();
+    recorder.evaluateImpl = () => "Create projects to start tracking here.";
+    await expect(new WebNewDriver(recorder.page()).analyticsSectionGuidance("Created vs Resolved")).resolves.toBe(
+      "Create projects to start tracking here."
+    );
+    const evaluated = recorder.calls.find((call) => call.method === "evaluate");
+    expect(evaluated?.args[1]).toBe("analytics-created");
+  });
+
   it("answers null for an unknown section without touching the page", async () => {
     const recorder = new Recorder();
     await expect(new WebNewDriver(recorder.page()).analyticsSectionGuidance("No Such Section")).resolves.toBeNull();
     expect(recorder.trace()).toEqual([]);
+  });
+});
+
+describe("analytics created vs resolved", () => {
+  it("reads the settled facts with the guidance reader", async () => {
+    const recorder = new Recorder();
+    const plotted = { legend: ["Resolved", "Created"], xLabels: ["Oct 01, 2026"], series: 2 };
+    recorder.evaluateImpl = (...args: never[]) => (args.length > 1 ? null : plotted);
+    await expect(new WebNewDriver(recorder.page()).analyticsCreatedResolvedFacts()).resolves.toEqual({
+      ...plotted,
+      guidance: null,
+    });
+    expectTrace(recorder.trace(), ["waitForFunction page.waitForFunction", "evaluate page.evaluate"]);
+    expect(recorder.calls.filter((call) => call.method === "evaluate")).toHaveLength(2);
+  });
+
+  it("throws when the section never settles", async () => {
+    const recorder = new Recorder();
+    recorder.waitForFunctionImpl = async () => {
+      throw new Error("timeout");
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsCreatedResolvedFacts()).rejects.toThrow(
+      "analytics created-vs-resolved section never settled"
+    );
+  });
+
+  it("reads whether the loader shows", async () => {
+    const recorder = new Recorder();
+    recorder.evaluateImpl = () => true;
+    await expect(new WebNewDriver(recorder.page()).analyticsCreatedResolvedLoading()).resolves.toBe(true);
+    const settled = new Recorder();
+    settled.evaluateImpl = () => false;
+    await expect(new WebNewDriver(settled.page()).analyticsCreatedResolvedLoading()).resolves.toBe(false);
+  });
+});
+
+describe("analytics custom pickers", () => {
+  it("reads the three trigger labels", async () => {
+    const recorder = new Recorder();
+    const labels = { metric: "Work item", xAxis: "Priority", split: "Add Property" };
+    recorder.evaluateImpl = () => labels;
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomPickerLabels()).resolves.toEqual(labels);
+    expectTrace(recorder.trace(), ["evaluate page.evaluate"]);
+  });
+
+  it("opens a picker, reads its options, and closes it", async () => {
+    const recorder = new Recorder();
+    recorder.evaluateImpl = () => ["No value", "Priority"];
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomPickerOptions(2)).resolves.toEqual([
+      "No value",
+      "Priority",
+    ]);
+    expectTrace(recorder.trace(), [
+      'click page.getByTestId("analytics-custom-trigger-2")',
+      "waitForFunction page.waitForFunction",
+      "evaluate page.evaluate",
+      "press keyboard",
+      "waitForFunction page.waitForFunction",
+    ]);
+    expect(recorder.pressed()).toEqual(["Escape"]);
+    expect(recorder.waitForFunctions().map((args) => args[1])).toEqual([true, false]);
+  });
+
+  it("throws when the picker never opens", async () => {
+    const recorder = new Recorder();
+    recorder.waitForFunctionImpl = async () => {
+      throw new Error("timeout");
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomPickerOptions(1)).rejects.toThrow(
+      "custom picker 1 never opened"
+    );
+  });
+
+  it("selects the matching option and waits out the re-query", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count") return 2;
+      if (method === "innerText" && path.includes(".nth(0)")) return "Priority";
+      if (method === "innerText" && path.includes(".nth(1)")) return "State name";
+      return undefined;
+    };
+    await new WebNewDriver(recorder.page()).analyticsCustomPickerSelect(2, "State name");
+    expectTrace(recorder.trace(), [
+      'click page.getByTestId("analytics-custom-trigger-2")',
+      "waitForFunction page.waitForFunction",
+      "count",
+      "click",
+      "waitForFunction page.waitForFunction",
+      "waitForFunction page.waitForFunction",
+      "waitForFunction page.waitForFunction",
+    ]);
+    const clicks = recorder.calls.filter((call) => call.method === "click");
+    expect(clicks).toHaveLength(2);
+    expect(clicks[1]?.path).toContain(".nth(1)");
+    const waits = recorder.waitForFunctions();
+    expect(waits.map((args) => args[1])).toEqual([true, false, { index: 2, label: "State name" }, { timeout: 30000 }]);
+  });
+
+  it("maps the clear row back to the empty-split label", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count") return 1;
+      if (method === "innerText" && path.includes(".nth(0)")) return "No value";
+      return undefined;
+    };
+    await new WebNewDriver(recorder.page()).analyticsCustomPickerSelect(2, "No value");
+    const waits = recorder.waitForFunctions();
+    expect(waits.map((args) => args[1])).toEqual([
+      true,
+      false,
+      { index: 2, label: "Add Property" },
+      { timeout: 30000 },
+    ]);
+  });
+
+  it("throws when the option is missing", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => {
+      if (method === "count") return 1;
+      if (method === "innerText") return "Priority";
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomPickerSelect(1, "Missing")).rejects.toThrow(
+      'custom picker 1 has no "Missing" option'
+    );
+  });
+
+  it("throws when the pick never settles on its label", async () => {
+    const recorder = new Recorder();
+    let waits = 0;
+    recorder.respond = ({ method }) => {
+      if (method === "count") return 1;
+      if (method === "innerText") return "Label";
+      return undefined;
+    };
+    recorder.waitForFunctionImpl = async () => {
+      waits += 1;
+      if (waits === 3) throw new Error("timeout");
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomPickerSelect(1, "Label")).rejects.toThrow(
+      'custom picker 1 never settled on "Label"'
+    );
+  });
+});
+
+describe("analytics custom chart", () => {
+  it("reads the settled chart facts", async () => {
+    const recorder = new Recorder();
+    const facts = {
+      segments: [{ cx: 10, cy: 20, fill: "#ef4444", topRounded: true, bottomRounded: true }],
+      xLabels: ["Urgent"],
+      legend: false,
+    };
+    recorder.evaluateImpl = () => facts;
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomChartFacts()).resolves.toEqual(facts);
+    expectTrace(recorder.trace(), ["waitForFunction page.waitForFunction", "evaluate page.evaluate"]);
+  });
+
+  it("throws when the section never settles", async () => {
+    const recorder = new Recorder();
+    recorder.waitForFunctionImpl = async () => {
+      throw new Error("timeout");
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomChartFacts()).rejects.toThrow(
+      "analytics custom-insights section never settled"
+    );
+  });
+
+  it("hovers one bar and reads its tooltip segments", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => {
+      if (method === "count") return 3;
+      return undefined;
+    };
+    const rows = [
+      { label: "Backlog", value: "1" },
+      { label: "Done", value: "1" },
+    ];
+    recorder.evaluateImpl = () => rows;
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomTooltipSegments(0)).resolves.toEqual(rows);
+    expectTrace(recorder.trace(), ["count", "hover", "waitForFunction page.waitForFunction", "evaluate page.evaluate"]);
+    const hovers = recorder.calls.filter((call) => call.method === "hover");
+    expect(hovers).toHaveLength(1);
+    expect(hovers[0]?.path).toContain(".nth(0)");
+  });
+
+  it("answers no rows when the bar is missing", async () => {
+    const recorder = new Recorder();
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomTooltipSegments(0)).resolves.toEqual([]);
+    expect(recorder.trace().filter((line) => line.startsWith("hover"))).toEqual([]);
+    expect(recorder.trace().filter((line) => line.startsWith("evaluate"))).toEqual([]);
+  });
+
+  it("answers no rows when the tooltip never appears", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => {
+      if (method === "count") return 1;
+      return undefined;
+    };
+    recorder.waitForFunctionImpl = async () => {
+      throw new Error("timeout");
+    };
+    recorder.evaluateImpl = () => [];
+    await expect(new WebNewDriver(recorder.page()).analyticsCustomTooltipSegments(0)).resolves.toEqual([]);
   });
 });

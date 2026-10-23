@@ -5,7 +5,7 @@
 // NEWFRONT-732).
 import { describe, expect, it } from "vitest";
 
-import { BAR_END_RADIUS, singleBarRadius, stackedBarRadii, stackedSegmentRadius } from "./rounding.js";
+import { BAR_END_RADIUS, roundedEnds, singleBarRadius, stackedBarRadii, stackedSegmentRadius } from "./rounding.js";
 
 describe("singleBarRadius", () => {
   it("rounds both ends of every bar", () => {
@@ -94,5 +94,25 @@ describe("stackedBarRadii", () => {
 
   it("returns no rows for no bars", () => {
     expect(stackedBarRadii([])).toEqual([]);
+  });
+});
+
+describe("roundedEnds", () => {
+  it("reports both ends for fully rounded tuples", () => {
+    expect(roundedEnds([4, 4, 4, 4])).toEqual({ top: true, bottom: true });
+  });
+
+  it("reports each extreme alone", () => {
+    expect(roundedEnds([4, 4, 0, 0])).toEqual({ top: true, bottom: false });
+    expect(roundedEnds([0, 0, 4, 4])).toEqual({ top: false, bottom: true });
+  });
+
+  it("reports neither end for square tuples", () => {
+    expect(roundedEnds([0, 0, 0, 0])).toEqual({ top: false, bottom: false });
+  });
+
+  it("rounds an end when either of its corners rounds", () => {
+    expect(roundedEnds([4, 0, 0, 0])).toEqual({ top: true, bottom: false });
+    expect(roundedEnds([0, 0, 0, 4])).toEqual({ top: false, bottom: true });
   });
 });

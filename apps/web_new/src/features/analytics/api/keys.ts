@@ -6,7 +6,7 @@
 // clears one subtree; the picker selection is part of every key so
 // each scope caches separately.
 
-import type { AnalyticsChartQuery } from "@pidash/api-client";
+import type { AnalyticsChartQuery, AnalyticsXAxis, AnalyticsYAxis } from "@pidash/api-client";
 
 import { workspaceScope } from "../../../core/query/client.js";
 
@@ -23,6 +23,18 @@ export const analyticsKeys = {
   /** One charts read under one normalized project scope. */
   charts: (workspaceSlug: string, kind: AnalyticsChartKind, projectIds: readonly string[]) =>
     [...analyticsKeys.all(workspaceSlug), "charts", kind, projectIds] as const,
+  /**
+   * One custom-graph read under one normalized project scope and one
+   * axis choice (spec §16.6; NEWFRONT-733). The axes ride the key so
+   * every re-pick caches separately; an absent split keys as null.
+   */
+  customCharts: (
+    workspaceSlug: string,
+    projectIds: readonly string[],
+    xAxis: AnalyticsXAxis,
+    yAxis: AnalyticsYAxis,
+    groupBy: AnalyticsXAxis | null
+  ) => [...analyticsKeys.all(workspaceSlug), "charts", "custom-work-items", projectIds, xAxis, yAxis, groupBy] as const,
   /** Per-project stats under one normalized project scope. */
   projectStats: (workspaceSlug: string, projectIds: readonly string[]) =>
     [...analyticsKeys.all(workspaceSlug), "project-stats", projectIds] as const,

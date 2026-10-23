@@ -21618,11 +21618,56 @@ export class WebNewDriver implements ParityDriver {
     }
     return null;
   }
+  /**
+   * Wait until the created-vs-resolved section settles: the loader
+   * is gone and the section shows its plot or its guidance panel.
+   * The svg check covers the lazy chart chunk landing after the
+   * fetch resolves.
+   */
+  private async analyticsAwaitCreatedResolved(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const section = document.querySelector('[data-testid="analytics-created"]');
+          if (!section || section.querySelector('[data-testid="analytics-created-skeleton"]')) return false;
+          return (
+            section.querySelector("svg") !== null ||
+            section.querySelector('[data-testid="analytics-section-guidance"]') !== null
+          );
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics created-vs-resolved section never settled.");
+      });
+  }
+
   async analyticsCreatedResolvedFacts(): Promise<AnalyticsCreatedResolvedFacts> {
-    return todo("analyticsCreatedResolvedFacts");
+    await this.analyticsAwaitCreatedResolved();
+    const guidance = await this.analyticsSectionGuidance("Created vs Resolved");
+    const plotted = await this.page.evaluate(() => {
+      const section = document.querySelector('[data-testid="analytics-created"]');
+      const legend = section?.querySelector('[data-testid="chart-legend"]') ?? null;
+      return {
+        legend:
+          legend === null
+            ? []
+            : [...legend.children]
+                .map((entry) => ((entry.textContent ?? "") as string).trim())
+                .filter((text) => text !== ""),
+        xLabels: [...(section?.querySelectorAll(".recharts-x-ticks .recharts-cartesian-axis-tick") ?? [])]
+          .map((tick) => ((tick.textContent ?? "") as string).trim())
+          .filter((text) => text !== ""),
+        series: section?.querySelectorAll("g.recharts-area").length ?? 0,
+      };
+    });
+    return { ...plotted, guidance };
   }
   async analyticsCreatedResolvedLoading(): Promise<boolean> {
-    return todo("analyticsCreatedResolvedLoading");
+    return this.page.evaluate(
+      () =>
+        document.querySelector('[data-testid="analytics-created"] [data-testid="analytics-created-skeleton"]') !== null
+    );
   }
   async analyticsSectionGuidance(title: string): Promise<string | null> {
     // Section testids by driver title. Slice B owns the overview pair;
@@ -21631,6 +21676,7 @@ export class WebNewDriver implements ParityDriver {
     const sections: Record<string, string> = {
       "Project Insights": "analytics-radar",
       "Active Projects": "analytics-active",
+      "Created vs Resolved": "analytics-created",
     };
     const testid = sections[title];
     if (testid === undefined) return null;
@@ -21647,20 +21693,147 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Analytics custom insights, tables, dialog (NEWFRONT-377, ANL-010..017).
+
+  /**
+   * Wait until the custom-insights section settles: the skeleton is
+   * gone and the section shows its plot or its guidance panel. The
+   * pickers carry no svg, so any svg is the bar chart (the lazy
+   * chunk may land after the fetch resolves).
+   */
+  private async analyticsAwaitCustom(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const section = document.querySelector('[data-testid="analytics-custom"]');
+          if (!section || section.querySelector('[data-testid="analytics-custom-skeleton"]')) return false;
+          return (
+            section.querySelector("svg") !== null ||
+            section.querySelector('[data-testid="analytics-section-guidance"]') !== null
+          );
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics custom-insights section never settled.");
+      });
+  }
+
   async analyticsCustomPickerLabels(): Promise<{ metric: string; xAxis: string; split: string }> {
-    return todo("analyticsCustomPickerLabels");
+    return this.page.evaluate(() => {
+      const read = (index: number): string => {
+        const trigger = document.querySelector(`[data-testid="analytics-custom-trigger-${index}"]`);
+        return ((trigger?.textContent ?? "") as string).trim();
+      };
+      return { metric: read(0), xAxis: read(1), split: read(2) };
+    });
   }
-  async analyticsCustomPickerOptions(_index: 0 | 1 | 2): Promise<string[]> {
-    return todo("analyticsCustomPickerOptions");
+
+  /** Wait until exactly one custom picker listbox opens or closes. */
+  private async analyticsAwaitCustomListbox(index: 0 | 1 | 2, present: boolean): Promise<void> {
+    await this.page
+      .waitForFunction(
+        (expectPresent) => (document.querySelector("[role='listbox']") !== null) === expectPresent,
+        present,
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error(`[parity] custom picker ${index} ${present ? "never opened" : "never closed"}.`);
+      });
   }
-  async analyticsCustomPickerSelect(_index: 0 | 1 | 2, _label: string): Promise<void> {
-    return todo("analyticsCustomPickerSelect");
+
+  async analyticsCustomPickerOptions(index: 0 | 1 | 2): Promise<string[]> {
+    await this.page.getByTestId(`analytics-custom-trigger-${index}`).click();
+    await this.analyticsAwaitCustomListbox(index, true);
+    const options = await this.page.evaluate(() =>
+      [...document.querySelectorAll("[role='listbox'] [role='option']")]
+        .map((option) => {
+          const label = option.querySelector(":scope > span.truncate");
+          return ((label?.textContent ?? option.textContent ?? "") as string).trim();
+        })
+        .filter((text) => text !== "")
+    );
+    await this.page.keyboard.press("Escape");
+    await this.analyticsAwaitCustomListbox(index, false);
+    return options;
   }
+
+  async analyticsCustomPickerSelect(index: 0 | 1 | 2, label: string): Promise<void> {
+    await this.page.getByTestId(`analytics-custom-trigger-${index}`).click();
+    await this.analyticsAwaitCustomListbox(index, true);
+    const options = this.page.locator("[role='listbox'] [role='option']");
+    const count = await options.count();
+    let picked = false;
+    for (let at = 0; at < count; at += 1) {
+      if ((await options.nth(at).innerText()).trim() !== label) continue;
+      await options.nth(at).click();
+      picked = true;
+      break;
+    }
+    if (!picked) throw new Error(`[parity] custom picker ${index} has no ${JSON.stringify(label)} option.`);
+    await this.analyticsAwaitCustomListbox(index, false);
+    // Clearing the split reads back the empty-split label, not the
+    // clear row's own text; every other pick reads back verbatim.
+    // The label and the re-query's pending state commit together, so
+    // the settle wait below never observes the stale plot.
+    const expected = index === 2 && label === "No value" ? "Add Property" : label;
+    await this.page
+      .waitForFunction(
+        (expectation: { index: number; label: string }) => {
+          const trigger = document.querySelector(`[data-testid="analytics-custom-trigger-${expectation.index}"]`);
+          return ((trigger?.textContent ?? "") as string).trim() === expectation.label;
+        },
+        { index, label: expected },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error(`[parity] custom picker ${index} never settled on ${JSON.stringify(expected)}.`);
+      });
+    await this.analyticsAwaitCustom();
+  }
+
   async analyticsCustomChartFacts(): Promise<AnalyticsCustomChartFacts> {
-    return todo("analyticsCustomChartFacts");
+    await this.analyticsAwaitCustom();
+    return this.page.evaluate(() => {
+      const section = document.querySelector('[data-testid="analytics-custom"]');
+      return {
+        segments: [...(section?.querySelectorAll<SVGPathElement>("g.recharts-bar-rectangle path") ?? [])].map(
+          (path) => {
+            const box = path.getBBox();
+            return {
+              cx: box.x + box.width / 2,
+              cy: box.y,
+              fill: path.getAttribute("fill") ?? "",
+              // Stock single-series bars carry no rounding
+              // attributes and round both ends; stacked segments
+              // report theirs from the custom shape.
+              topRounded: path.getAttribute("data-top-rounded") !== "false",
+              bottomRounded: path.getAttribute("data-bottom-rounded") !== "false",
+            };
+          }
+        ),
+        xLabels: [...(section?.querySelectorAll(".recharts-x-ticks .recharts-cartesian-axis-tick") ?? [])]
+          .map((tick) => ((tick.textContent ?? "") as string).trim())
+          .filter((text) => text !== ""),
+        legend: section?.querySelector('[data-testid="chart-legend"]') !== null,
+      };
+    });
   }
-  async analyticsCustomTooltipSegments(_barIndex: number): Promise<AnalyticsCustomTooltipRow[]> {
-    return todo("analyticsCustomTooltipSegments");
+
+  async analyticsCustomTooltipSegments(barIndex: number): Promise<AnalyticsCustomTooltipRow[]> {
+    const groups = this.page.locator('[data-testid="analytics-custom"] g.recharts-bar-rectangle');
+    if ((await groups.count()) <= barIndex) return [];
+    await groups.nth(barIndex).hover({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .waitForFunction(() => document.querySelector('[data-testid="chart-tooltip-row"]') !== null, {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .catch(() => undefined);
+    return this.page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="chart-tooltip-row"]')].map((row) => ({
+        label: ((row.querySelector('[data-testid="chart-tooltip-name"]')?.textContent ?? "") as string).trim(),
+        value: ((row.querySelector('[data-testid="chart-tooltip-value"]')?.textContent ?? "") as string).trim(),
+      }))
+    );
   }
   async analyticsExportRowCount(_kind: AnalyticsExportTable): Promise<number> {
     return todo("analyticsExportRowCount");

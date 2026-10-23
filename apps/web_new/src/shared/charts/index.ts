@@ -17,8 +17,8 @@ export { CHART_PALETTE_SLOTS, chartPalette, chartSlotColor, resolveChartScheme }
 export { RadarChart } from "./RadarChart.js";
 export type { RadarChartProps } from "./RadarChart.js";
 export type { BarShapeRenderProps, RadarTickProps, RechartsModule } from "./recharts.js";
-export { BAR_END_RADIUS, singleBarRadius, stackedBarRadii, stackedSegmentRadius } from "./rounding.js";
-export type { BarSegmentRadius } from "./rounding.js";
+export { BAR_END_RADIUS, roundedEnds, singleBarRadius, stackedBarRadii, stackedSegmentRadius } from "./rounding.js";
+export type { BarSegmentRadius, RoundedEnds } from "./rounding.js";
 export {
   barSegmentKey,
   mapAreaData,

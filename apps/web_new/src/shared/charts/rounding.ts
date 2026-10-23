@@ -11,6 +11,21 @@
 /** Corner radii [top-left, top-right, bottom-right, bottom-left]. */
 export type BarSegmentRadius = [number, number, number, number];
 
+/** Which horizontal ends of a segment radius tuple actually round. */
+export interface RoundedEnds {
+  top: boolean;
+  bottom: boolean;
+}
+
+/**
+ * Read the rounded ends off one radius tuple (NEWFRONT-733). The
+ * bar wrapper reports these as data attributes so the parity
+ * driver can assert edge-only rounding without parsing paths.
+ */
+export function roundedEnds(radius: BarSegmentRadius): RoundedEnds {
+  return { top: radius[0] > 0 || radius[1] > 0, bottom: radius[2] > 0 || radius[3] > 0 };
+}
+
 /** Rounded end radius, matching the kit control radius. */
 export const BAR_END_RADIUS = 4;
 
