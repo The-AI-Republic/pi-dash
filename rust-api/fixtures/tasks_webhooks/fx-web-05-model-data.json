@@ -63,6 +63,7 @@
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
     "created_by",
     "updated_by",
     "workspace",
@@ -72,7 +73,7 @@
     "estimate",
     "default_state"
    ],
-   "json": "{\"id\": \"00000014-1111-4111-8111-111111111111\", \"cover_image_url\": \"https://cdn.example.com/cover.png\", \"created_at\": \"2026-01-15T10:20:30Z\", \"updated_at\": \"2026-01-16T11:21:31Z\", \"deleted_at\": null, \"name\": \"Golden Project\", \"description\": \"golden desc\", \"description_text\": null, \"description_html\": null, \"network\": 2, \"identifier\": \"GLD\", \"emoji\": null, \"icon_prop\": null, \"module_view\": false, \"cycle_view\": false, \"issue_views_view\": false, \"page_view\": true, \"intake_view\": false, \"is_time_tracking_enabled\": false, \"is_issue_type_enabled\": false, \"is_default\": true, \"guest_view_all_features\": false, \"members_can_edit_states\": true, \"cover_image\": \"https://cdn.example.com/cover.png\", \"archive_in\": 0, \"close_in\": 0, \"logo_props\": {}, \"archived_at\": \"2026-07-01T00:00:00Z\", \"timezone\": \"UTC\", \"external_source\": null, \"external_id\": null, \"repo_url\": \"\", \"base_branch\": \"main\", \"agent_default_interval_seconds\": 10800, \"agent_default_max_ticks\": 10, \"agent_review_default_interval_seconds\": 10800, \"agent_test_default_interval_seconds\": 10800, \"agent_ticking_enabled\": true, \"default_agent_executor\": \"local_runner\", \"created_by\": null, \"updated_by\": null, \"workspace\": \"0000000a-1111-4111-8111-111111111111\", \"default_assignee\": null, \"project_lead\": null, \"cover_image_asset\": null, \"estimate\": null, \"default_state\": null}"
+   "json": "{\"id\": \"00000014-1111-4111-8111-111111111111\", \"cover_image_url\": \"https://cdn.example.com/cover.png\", \"created_at\": \"2026-01-15T10:20:30Z\", \"updated_at\": \"2026-01-16T11:21:31Z\", \"deleted_at\": null, \"name\": \"Golden Project\", \"description\": \"golden desc\", \"description_text\": null, \"description_html\": null, \"network\": 2, \"identifier\": \"GLD\", \"emoji\": null, \"icon_prop\": null, \"module_view\": false, \"cycle_view\": false, \"issue_views_view\": false, \"page_view\": true, \"intake_view\": false, \"is_time_tracking_enabled\": false, \"is_issue_type_enabled\": false, \"is_default\": true, \"guest_view_all_features\": false, \"members_can_edit_states\": true, \"cover_image\": \"https://cdn.example.com/cover.png\", \"archive_in\": 0, \"close_in\": 0, \"logo_props\": {}, \"archived_at\": \"2026-07-01T00:00:00Z\", \"timezone\": \"UTC\", \"external_source\": null, \"external_id\": null, \"repo_url\": \"\", \"base_branch\": \"main\", \"agent_default_interval_seconds\": 10800, \"agent_default_max_ticks\": 10, \"agent_review_default_interval_seconds\": 10800, \"agent_test_default_interval_seconds\": 10800, \"agent_ticking_enabled\": true, \"default_agent_executor\": \"local_runner\", \"default_work_type\": \"general\", \"created_by\": null, \"updated_by\": null, \"workspace\": \"0000000a-1111-4111-8111-111111111111\", \"default_assignee\": null, \"project_lead\": null, \"cover_image_asset\": null, \"estimate\": null, \"default_state\": null}"
   },
   "issue": {
    "keys": [

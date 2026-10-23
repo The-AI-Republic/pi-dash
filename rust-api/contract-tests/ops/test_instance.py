@@ -371,10 +371,10 @@ def seed_project(
             members_can_edit_states, archive_in, close_in, logo_props, timezone,
             repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks,
             agent_review_default_interval_seconds, agent_test_default_interval_seconds,
-            agent_ticking_enabled, default_agent_executor)
+            agent_ticking_enabled, default_agent_executor, default_work_type)
            values (%s,%s,%s,%s,'',2,%s,%s,%s,%s,
              false,false,false,true,false,false,false,false,false,true,
-             0,0,'{}','UTC','','main',10800,10,10800,10800,true,'local_runner')""",
+             0,0,'{}','UTC','','main',10800,10,10800,10800,true,'local_runner', 'software')""",
         (
             created_at,
             created_at,

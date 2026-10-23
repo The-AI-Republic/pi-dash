@@ -1651,6 +1651,8 @@ def test_rust_workspace_seed_before_after(db_conn, broker_url):
     # bot audit, first-project default, workspace timezone.
     assert _seed_count(db_conn, "projects") == before_projects + 1
     assert project["name"] == workspace["name"]
+    # No repo bound: `save()` resolves the blank work type (PDASHOSS01-234).
+    assert project["default_work_type"] == "general"
     expected_identifier = "".join(
         ch for ch in workspace["name"] if ch.isalnum()
     )[:5].upper()
@@ -1974,6 +1976,8 @@ def test_rust_dummy_data_before_after(db_conn, broker_url):
     assert project["is_default"] is True
     assert project["intake_view"] is True
     assert project["default_agent_executor"] == "local_runner"
+    # No repo bound: `save()` resolves the blank work type (PDASHOSS01-234).
+    assert project["default_work_type"] == "general"
     assert project["timezone"] == workspace["timezone"]
     assert project["created_by_id"] is None
     assert project["updated_by_id"] is None
