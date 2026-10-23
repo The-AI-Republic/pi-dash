@@ -17,6 +17,16 @@ import {
   analyticsKeys,
   analyticsProjectsChartQueryOptions,
   analyticsProjectStatsQueryOptions,
+  analyticsStatsQueryOptions,
+  AnalyticsTable,
+  breakdownRows,
+  breakdownTableColumns,
+  customTableColumns,
+  customTableRows,
+  filterByFirstColumn,
+  rowCountLabel,
+  StateBreakdownSection,
+  useAnalyticsStats,
   analyticsScopeSearch,
   analyticsTabHref,
   analyticsTotalsQueryOptions,
@@ -88,6 +98,17 @@ describe("analytics barrel", () => {
     expect(typeof analyticsTotalsQueryOptions).toBe("function");
     expect(typeof analyticsProjectsChartQueryOptions).toBe("function");
     expect(typeof analyticsProjectStatsQueryOptions).toBe("function");
+    expect(typeof analyticsStatsQueryOptions).toBe("function");
+    expect(typeof useAnalyticsStats).toBe("function");
+    expect(typeof AnalyticsTable).toBe("function");
+    expect(typeof StateBreakdownSection).toBe("function");
+    expect(typeof analyticsKeys.stats).toBe("function");
+    expect(typeof filterByFirstColumn).toBe("function");
+    expect(typeof rowCountLabel).toBe("function");
+    expect(typeof customTableColumns).toBe("function");
+    expect(typeof customTableRows).toBe("function");
+    expect(typeof breakdownTableColumns).toBe("function");
+    expect(typeof breakdownRows).toBe("function");
     expect(typeof useAnalyticsProjectsChart).toBe("function");
     expect(typeof useAnalyticsProjectStats).toBe("function");
     expect(typeof analyticsWorkItemsChartQueryOptions).toBe("function");

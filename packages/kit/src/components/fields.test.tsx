@@ -35,6 +35,13 @@ describe("Input", () => {
     expect(field).toHaveAttribute("aria-describedby", message.id);
   });
 
+  it("keeps a hidden label associated with the field", () => {
+    render(<Input label="Search rows" placeholder="Search" hideLabel />);
+    const field = screen.getByLabelText("Search rows");
+    expect(field).toHaveAttribute("placeholder", "Search");
+    expect(screen.getByText("Search rows")).toHaveClass("sr-only");
+  });
+
   it("carries the visible focus ring classes", () => {
     render(<Input label="Title" />);
     expect(screen.getByLabelText("Title").className).toContain("focus-visible:outline-2");

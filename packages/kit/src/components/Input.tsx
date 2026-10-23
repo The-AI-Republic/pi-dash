@@ -14,6 +14,8 @@ export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> 
   trailing?: React.ReactNode;
   /** Handle on the underlying input for callers that focus it directly. */
   inputRef?: React.Ref<HTMLInputElement> | undefined;
+  /** Keep the label for assistive tech but hide it visually. */
+  hideLabel?: boolean;
 }
 
 export function Input({
@@ -24,12 +26,13 @@ export function Input({
   className,
   trailing,
   inputRef,
+  hideLabel = false,
   ...rest
 }: InputProps): React.ReactElement {
   const generatedId = React.useId();
   const fieldId = id ?? generatedId;
   return (
-    <FieldScaffold label={label} hint={hint} error={error} fieldId={fieldId}>
+    <FieldScaffold label={label} hint={hint} error={error} fieldId={fieldId} hideLabel={hideLabel}>
       {(describedBy) => (
         // The wrapper stays mounted with or without a trailing control so
         // the field never remounts (and loses focus) when one appears.
