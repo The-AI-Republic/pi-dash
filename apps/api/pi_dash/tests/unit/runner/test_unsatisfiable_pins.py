@@ -230,7 +230,12 @@ def test_failed_drain_does_not_skip_other_pods(db, create_user, workspace, pod, 
     other_pod = Pod.objects.create(workspace=workspace, project=project, name="second", created_by=create_user)
     for target_pod in (pod, other_pod):
         dead = _make_runner(
-            create_user, workspace, target_pod, f"gone-{target_pod.pk}", status=RunnerStatus.OFFLINE, heartbeat_age=STALE
+            create_user,
+            workspace,
+            target_pod,
+            f"gone-{target_pod.pk}",
+            status=RunnerStatus.OFFLINE,
+            heartbeat_age=STALE,
         )
         _make_pinned_run(create_user, workspace, target_pod, dead, age=PAST_BOUND)
 
