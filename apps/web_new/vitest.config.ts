@@ -84,6 +84,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-new-add-runner.test.ts",
       "e2e/parity/drivers/web-new-profile.test.ts",
       "e2e/parity/drivers/web-new-analytics.test.ts",
+      "e2e/parity/drivers/web-new-exports-history.test.ts",
       "e2e/parity/drivers/modal-copy.test.tsx",
       "e2e/parity/helpers/calendar-dates.test.ts",
       "e2e/parity/drivers/web-favorites.test.ts",
