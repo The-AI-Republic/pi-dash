@@ -18,9 +18,17 @@ import { useResolvedScheme } from "../../../core/theme/index.js";
 import { BarChart, resolveChartScheme } from "../../../shared/charts/index.js";
 import { usePickerWorkspaceStates } from "../../../shared/pickers/reference.js";
 import { useAnalyticsCustomChart } from "../api/charts.js";
-import { DEFAULT_CUSTOM_METRIC, DEFAULT_CUSTOM_SPLIT, DEFAULT_CUSTOM_X_AXIS } from "../lib/customAxes.js";
+import { analyticsCsvColumns, buildAnalyticsCsv, downloadCsvFile } from "../../../shared/export/csv.js";
+import {
+  customAxisLabel,
+  DEFAULT_CUSTOM_METRIC,
+  DEFAULT_CUSTOM_SPLIT,
+  DEFAULT_CUSTOM_X_AXIS,
+} from "../lib/customAxes.js";
 import { buildCustomChartModel } from "../lib/customChart.js";
+import { customTableColumns, customTableRows } from "../lib/table.js";
 import { AnalyticsSectionGuidance } from "./AnalyticsSectionGuidance.js";
+import { AnalyticsTable } from "./AnalyticsTable.js";
 import { CustomInsightPickers } from "./CustomInsightPickers.js";
 
 export interface CustomInsightsSectionProps {
@@ -50,6 +58,7 @@ export function CustomInsightsSection({ workspaceSlug, projectIds }: CustomInsig
   const rows = graph.data?.data ?? [];
   const showGuidance = !loading && (graph.isError || rows.length === 0);
 
+  const currentYear = new Date().getFullYear();
   const model = buildCustomChartModel({
     rows,
     schema: graph.data?.schema ?? {},
@@ -57,8 +66,13 @@ export function CustomInsightsSection({ workspaceSlug, projectIds }: CustomInsig
     split,
     states: states.data ?? [],
     scheme: resolveChartScheme(scheme, customDark),
-    currentYear: new Date().getFullYear(),
+    currentYear,
   });
+  const columns = React.useMemo(
+    () => customTableColumns(xAxis, split, graph.data?.schema ?? {}),
+    [xAxis, split, graph.data?.schema]
+  );
+  const tableRows = React.useMemo(() => customTableRows(rows, xAxis, currentYear), [rows, xAxis, currentYear]);
 
   return (
     <section aria-labelledby="analytics-custom-heading" data-testid="analytics-custom">
@@ -80,7 +94,18 @@ export function CustomInsightsSection({ workspaceSlug, projectIds }: CustomInsig
       ) : showGuidance ? (
         <AnalyticsSectionGuidance title={CUSTOM_INSIGHTS_GUIDANCE} description="" />
       ) : (
-        <BarChart bars={model.bars} segments={model.segments} stacked={split !== null} fills={model.fills} />
+        <>
+          <BarChart bars={model.bars} segments={model.segments} stacked={split !== null} fills={model.fills} />
+          <AnalyticsTable
+            testId="analytics-custom-table"
+            columns={columns}
+            rows={tableRows}
+            countNoun={customAxisLabel(xAxis)}
+            onExport={(visible) => {
+              downloadCsvFile(buildAnalyticsCsv(workspaceSlug, analyticsCsvColumns(columns), visible));
+            }}
+          />
+        </>
       )}
     </section>
   );

@@ -23288,6 +23288,8 @@ export class WebNewDriver implements ParityDriver {
   private analyticsChartsGates: Array<() => void> = [];
   private analyticsStatsStalled = false;
   private analyticsStatsGates: Array<() => void> = [];
+  private analyticsInsightStatsStalled = false;
+  private analyticsInsightStatsGates: Array<() => void> = [];
 
   private async analyticsReadHook(): Promise<void> {
     if (this.analyticsReadHookInstalled) return;
@@ -23302,6 +23304,8 @@ export class WebNewDriver implements ParityDriver {
           const chartsPath =
             url.pathname.endsWith("/advance-analytics-charts/") || url.pathname.endsWith("/advance-analytics-charts");
           const statsPath = url.pathname.endsWith("/project-stats/") || url.pathname.endsWith("/project-stats");
+          const insightStatsPath =
+            url.pathname.endsWith("/advance-analytics-stats/") || url.pathname.endsWith("/advance-analytics-stats");
           if (totalsPath && this.analyticsTotalsStalled.has(url.searchParams.get("tab") ?? "")) {
             await new Promise<void>((resolve) => {
               this.analyticsTotalsGates.push(resolve);
@@ -23313,6 +23317,10 @@ export class WebNewDriver implements ParityDriver {
           } else if (statsPath && this.analyticsStatsStalled) {
             await new Promise<void>((resolve) => {
               this.analyticsStatsGates.push(resolve);
+            });
+          } else if (insightStatsPath && this.analyticsInsightStatsStalled) {
+            await new Promise<void>((resolve) => {
+              this.analyticsInsightStatsGates.push(resolve);
             });
           }
         } catch {
@@ -23689,32 +23697,69 @@ export class WebNewDriver implements ParityDriver {
       }))
     );
   }
-  async analyticsExportRowCount(_kind: AnalyticsExportTable): Promise<number> {
-    return todo("analyticsExportRowCount");
+  /** The one table section for a parity table kind (chart first, insight second). */
+  private analyticsExportTable(kind: AnalyticsExportTable): Locator {
+    return this.page.getByTestId(kind === "chart" ? "analytics-custom-table" : "analytics-breakdown-table");
   }
-  async analyticsExportHeaders(_kind: AnalyticsExportTable): Promise<string[]> {
-    return todo("analyticsExportHeaders");
+
+  /** The export action inside one analytics table's toolbar. */
+  private analyticsExportAction(kind: AnalyticsExportTable): Locator {
+    return this.analyticsExportTable(kind).getByRole("button", { name: "Export as csv" });
   }
-  async analyticsExportCountLabel(_kind: AnalyticsExportTable): Promise<string> {
-    return todo("analyticsExportCountLabel");
+
+  /** The visible search input for one analytics table, expanding it if collapsed. */
+  private async analyticsExportSearchBox(kind: AnalyticsExportTable): Promise<Locator> {
+    const box = this.analyticsExportTable(kind).getByPlaceholder("Search");
+    if (!(await box.isVisible())) {
+      await this.analyticsExportTable(kind).getByRole("button", { name: "Search", exact: true }).click({
+        timeout: WebNewDriver.WAIT_MS,
+      });
+      await box.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    }
+    return box;
   }
-  async analyticsExportSearchExpanded(_kind: AnalyticsExportTable): Promise<boolean> {
-    return todo("analyticsExportSearchExpanded");
+
+  async analyticsExportRowCount(kind: AnalyticsExportTable): Promise<number> {
+    return this.analyticsExportTable(kind).locator("tbody tr").count();
   }
-  async analyticsExportSearchClose(_kind: AnalyticsExportTable): Promise<void> {
-    return todo("analyticsExportSearchClose");
+  async analyticsExportHeaders(kind: AnalyticsExportTable): Promise<string[]> {
+    const heads = this.analyticsExportTable(kind).locator("thead th");
+    return (await heads.allTextContents()).map((text) => text.trim());
   }
-  async analyticsExportEmptyText(_kind: AnalyticsExportTable): Promise<string | null> {
-    return todo("analyticsExportEmptyText");
+  async analyticsExportCountLabel(kind: AnalyticsExportTable): Promise<string> {
+    return ((await this.analyticsExportTable(kind).getByTestId("analytics-table-count").textContent()) ?? "").trim();
+  }
+  async analyticsExportSearchExpanded(kind: AnalyticsExportTable): Promise<boolean> {
+    return this.analyticsExportTable(kind).getByPlaceholder("Search").isVisible();
+  }
+  async analyticsExportSearchClose(kind: AnalyticsExportTable): Promise<void> {
+    const box = this.analyticsExportTable(kind).getByPlaceholder("Search");
+    if (!(await box.isVisible())) throw new Error("[parity] analytics table search box is already closed.");
+    await this.analyticsExportTable(kind).getByRole("button", { name: "Close search", exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await box.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+  async analyticsExportEmptyText(kind: AnalyticsExportTable): Promise<string | null> {
+    const table = this.analyticsExportTable(kind);
+    if ((await table.locator("tbody tr").count()) !== 1) return null;
+    const cells = table.locator("tbody tr").first().locator("td");
+    if ((await cells.count()) !== 1) return null;
+    const text = ((await cells.first().textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return text.length > 20 ? text : null;
   }
   async analyticsInsightTableStall(): Promise<void> {
-    return todo("analyticsInsightTableStall");
+    this.analyticsInsightStatsStalled = true;
+    await this.analyticsReadHook();
   }
   async analyticsInsightTableRelease(): Promise<void> {
-    return todo("analyticsInsightTableRelease");
+    this.analyticsInsightStatsStalled = false;
+    const gates = this.analyticsInsightStatsGates;
+    this.analyticsInsightStatsGates = [];
+    gates.forEach((release) => release());
   }
   async analyticsInsightSkeletonCells(): Promise<number> {
-    return todo("analyticsInsightSkeletonCells");
+    return this.analyticsExportTable("insight").locator("td > span[style*='height'][style*='20px']").count();
   }
   async analyticsDialogOpenFromIssues(
     _workspaceSlug: string,
@@ -24262,32 +24307,52 @@ export class WebNewDriver implements ParityDriver {
   // Appended; existing entries above are untouched per the shared contract.
   // ---------------------------------------------------------------------------
 
-  async analyticsExportOpen(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("analyticsExportOpen");
+  async analyticsExportOpen(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/analytics/work-items`, cookies);
+    await this.page.getByTestId("analytics-custom-table").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("analytics-breakdown-table")
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async analyticsExportButtonCount(): Promise<number> {
-    return todo("analyticsExportButtonCount");
+    return this.page.getByRole("button", { name: "Export as csv" }).count();
   }
 
-  async analyticsExportRowCells(_kind: AnalyticsExportTable): Promise<string[][]> {
-    return todo("analyticsExportRowCells");
+  async analyticsExportRowCells(kind: AnalyticsExportTable): Promise<string[][]> {
+    const rows = this.analyticsExportTable(kind).locator("tbody tr");
+    const count = await rows.count();
+    const out: string[][] = [];
+    for (let index = 0; index < count; index += 1) {
+      out.push((await rows.nth(index).locator("td").allTextContents()).map((text) => text.trim()));
+    }
+    return out;
   }
 
-  async analyticsExportSearch(_kind: AnalyticsExportTable, _query: string): Promise<void> {
-    return todo("analyticsExportSearch");
+  async analyticsExportSearch(kind: AnalyticsExportTable, query: string): Promise<void> {
+    await (await this.analyticsExportSearchBox(kind)).fill(query, { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async analyticsExportClearSearch(_kind: AnalyticsExportTable): Promise<void> {
-    return todo("analyticsExportClearSearch");
+  async analyticsExportClearSearch(kind: AnalyticsExportTable): Promise<void> {
+    await (await this.analyticsExportSearchBox(kind)).fill("", { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async analyticsExportDownload(_kind: AnalyticsExportTable): Promise<LocalFileDownload> {
-    return todo("analyticsExportDownload");
+  async analyticsExportDownload(kind: AnalyticsExportTable): Promise<LocalFileDownload> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebNewDriver.WAIT_MS }),
+      this.analyticsExportAction(kind).click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const path = await download.path();
+    if (!path) throw new Error("[parity] analytics export download landed without a path.");
+    return { fileName: download.suggestedFilename(), content: this.readDownload(path) };
   }
 
-  async analyticsExportYieldsNoDownload(_kind: AnalyticsExportTable): Promise<boolean> {
-    return todo("analyticsExportYieldsNoDownload");
+  async analyticsExportYieldsNoDownload(kind: AnalyticsExportTable): Promise<boolean> {
+    await this.analyticsExportAction(kind).click({ timeout: WebNewDriver.WAIT_MS });
+    return this.page.waitForEvent("download", { timeout: 5_000 }).then(
+      () => false,
+      () => true
+    );
   }
 
   async profileActivityOpen(workspaceSlug: string, userId: string, cookies: ParityBrowserCookie[]): Promise<void> {

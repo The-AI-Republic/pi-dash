@@ -29,6 +29,7 @@ import { CreatedResolvedSection } from "./CreatedResolvedSection.js";
 import { CustomInsightsSection } from "./CustomInsightsSection.js";
 import { HeadlineCards } from "./HeadlineCards.js";
 import { RadarSection } from "./RadarSection.js";
+import { StateBreakdownSection } from "./StateBreakdownSection.js";
 
 export interface AnalyticsScreenProps {
   workspaceSlug: string;
@@ -109,6 +110,7 @@ export function AnalyticsScreen({
                 <div className="grid gap-(--space-6)">
                   <CreatedResolvedSection workspaceSlug={workspaceSlug} projectIds={scope} />
                   <CustomInsightsSection workspaceSlug={workspaceSlug} projectIds={scope} />
+                  <StateBreakdownSection workspaceSlug={workspaceSlug} projectIds={scope} projects={selectable} />
                 </div>
               )}
             </section>
