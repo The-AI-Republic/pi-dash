@@ -340,7 +340,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // beat entries fire the sweeps and the L6 handlers exist with
     // live seam providers (`oss_worker::runner_seams::RunnerSeams`
     // over the PIDASHCONV-862 executors), so the Rust worker owns
-    // all thirteen — otherwise the runs are lost at switchover
+    // all fourteen — otherwise the runs are lost at switchover
     // (parity gap W-runner, plus the four dormant names the
     // registers also own).
     let redis = match ctx
@@ -377,6 +377,11 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         runner_seams.clone(),
     );
     crate::runner_runs::register_offline_recovery_tasks(
+        registry,
+        ctx.pools.primary().clone(),
+        runner_seams.clone(),
+    );
+    crate::runner_runs::register_unsatisfiable_pins_tasks(
         registry,
         ctx.pools.primary().clone(),
         runner_seams,
@@ -580,7 +585,7 @@ mod tests {
             crate::tasks_export::ISSUE_EXPORT_TASK,
             crate::tasks_export::ANALYTIC_EXPORT_TASK,
         ]);
-        assert_eq!(expected.len(), 76, "worker-owned count drifted");
+        assert_eq!(expected.len(), 77, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");

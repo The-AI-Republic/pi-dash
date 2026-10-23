@@ -280,10 +280,19 @@ NON_PI_DASH_TASKS = {
 # pinned truth; any mismatch is beat drift. Once main merges into
 # rust-dev, Django gains the entry and the map row goes stale (the
 # check fails until the row is deleted).
-# Currently empty: PIDASHCONV-1087 deleted the last rows
-# (PIDASHCONV-1063's two offline-runner sweeps) after the
+# PIDASHCONV-1087 deleted the PIDASHCONV-1063 rows after the
 # PIDASHCONV-1055 merge (2d029396).
-RUST_AHEAD_BEAT_ENTRIES = {}
+RUST_AHEAD_BEAT_ENTRIES = {
+    # PDASHOSS01-233: Python PR #541 (stacked on #507) adds the
+    # every-minute unsatisfiable-pin reconcile; the Rust PR lands it on
+    # rust-dev ahead of the next main merge.
+    "runner-reconcile-unsatisfiable-pins": {
+        "task": "runner.reconcile_unsatisfiable_pins",
+        "cadence": "crontab(minute=*/1 hour=* day_of_month=* month_of_year=* day_of_week=*)",
+        "issue": "PDASHOSS01-233",
+        "commit": "PR #541",
+    },
+}
 
 # Beat cadence the Rust entry must equal, rendered deterministically.
 def _rust_cadence_string(entry: dict) -> str:

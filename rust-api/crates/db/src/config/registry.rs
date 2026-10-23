@@ -322,6 +322,8 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("MIN_RUNNER_VERSION", V::Null),
         ("RUNNER_AGENT_STALL_THRESHOLD_SECS", V::from(360)),
         ("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", V::from(90)),
+        // Bounded auto-release for unsatisfiable runner pins (PDASHOSS01-233).
+        ("RUNNER_PIN_AUTO_RELEASE_SECS", V::from(600)),
         // Desktop-bundled managed runner.
         ("MANAGED_RUNNER_ENABLED", V::from("false")),
         ("MANAGED_RUNNER_MAX_PER_USER_PROJECT", V::from(1)),

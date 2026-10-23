@@ -6,7 +6,9 @@
 //! (PIDASHCONV-539):
 //!
 //! * [`EXPIRE_TASK`] — `expire_stale_approvals` (`:42-97`).
-//! * [`MARK_OFFLINE_TASK`] — `mark_offline_runners` (`:100-111`).
+//! * [`MARK_OFFLINE_TASK`] — `mark_offline_runners` (`:100-111`), plus
+//!   the BUSY-but-dead flip (`_sweep_dead_busy_runners`, PDASHOSS01-233)
+//!   shared with `sweep_stale_runners`.
 //! * [`SWEEP_IDLE_TASK`] — `sweep_idle_sessions` (`:117-138`).
 //! * [`SWEEP_STALE_TASK`] — `sweep_stale_runners` (`:141-153`).
 //! * [`SWEEP_STREAMS_TASK`] — `sweep_old_streams` (`:155-202`).
@@ -88,7 +90,9 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use pidash_db::runner_enroll::columns::enums::{RUNNER_STATUS_OFFLINE, RUNNER_STATUS_ONLINE};
+use pidash_db::runner_enroll::columns::enums::{
+    RUNNER_STATUS_BUSY, RUNNER_STATUS_OFFLINE, RUNNER_STATUS_ONLINE,
+};
 use pidash_db::runner_runs::{agent_run, approval};
 use pidash_services::runner_runs::finalization::{
     finalize_error_code, finalize_update_sql, lock_run_for_finalize_sql, plan_finalize_values,
@@ -263,6 +267,23 @@ pub fn stamp_approval_expired_sql() -> String {
 pub fn mark_online_runners_offline_sql() -> String {
     "UPDATE \"runner\" SET \"status\" = $1 WHERE (\"runner\".\"status\" = $2 AND NOT \
      (\"runner\".\"last_heartbeat_at\" >= $3 AND \"runner\".\"last_heartbeat_at\" IS NOT NULL))"
+        .to_owned()
+}
+
+/// BUSY-but-dead flip (`_sweep_dead_busy_runners`, PDASHOSS01-233):
+/// `BUSY` runners past the threshold holding no busy-status run go
+/// `OFFLINE` (a runner still holding one is left to the stall reaper,
+/// whose finalization releases it). Same heartbeat `NOT (… IS NOT
+/// NULL)` shape as the online flip, so a `NULL` heartbeat counts as
+/// stale. Binds: `$1` `offline`, `$2` `busy`, `$3` threshold; the
+/// `BUSY_STATUSES` list and `SELECT 1` are inlined like
+/// `RELEASE_RUNNER_IF_IDLE_SQL`.
+pub fn mark_dead_busy_runners_offline_sql() -> String {
+    "UPDATE \"runner\" SET \"status\" = $1 WHERE (\"runner\".\"status\" = $2 AND NOT \
+     (\"runner\".\"last_heartbeat_at\" >= $3 AND \"runner\".\"last_heartbeat_at\" IS NOT NULL) AND \
+     NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', \
+     'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', \
+     'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1)))"
         .to_owned()
 }
 
@@ -499,6 +520,12 @@ pub trait SweepsRunsStore: Send + Sync {
         &self,
         threshold: DateTime<Utc>,
     ) -> impl Future<Output = Result<u64, SweepsError>> + Send;
+    /// BUSY-but-dead flip (`_sweep_dead_busy_runners`): idle `BUSY` rows
+    /// past `threshold` to `OFFLINE`. Returns the affected count.
+    fn mark_dead_busy_runners_offline(
+        &self,
+        threshold: DateTime<Utc>,
+    ) -> impl Future<Output = Result<u64, SweepsError>> + Send;
     /// Idle-session candidates (`tasks.py:127-129`): `(id, runner_id)` in
     /// `values_list` order.
     fn idle_sessions(
@@ -651,8 +678,8 @@ where
 
 /// `mark_offline_runners` (`tasks.py:100-111`): one `UPDATE` flipping
 /// `ONLINE` runners with no heartbeat in
-/// [`HEARTBEAT_OFFLINE_GRACE_SECS`] to `OFFLINE`. Returns the affected
-/// count.
+/// [`HEARTBEAT_OFFLINE_GRACE_SECS`] to `OFFLINE`, then the BUSY-but-dead
+/// flip at the same threshold. Returns the summed affected count.
 pub async fn drive_mark_offline_runners<S>(
     store: &S,
     now: &DateTime<Utc>,
@@ -665,7 +692,11 @@ where
     if affected > 0 {
         tracing::info!("marked {affected} runner(s) offline via heartbeat timeout");
     }
-    Ok(affected)
+    let dead_busy = store.mark_dead_busy_runners_offline(threshold).await?;
+    if dead_busy > 0 {
+        tracing::info!("marked {dead_busy} dead busy runner(s) offline via heartbeat timeout");
+    }
+    Ok(affected + dead_busy)
 }
 
 /// `sweep_idle_sessions` (`tasks.py:117-138`): revoke unrevoked sessions
@@ -699,9 +730,9 @@ where
     Ok(sessions.len())
 }
 
-/// `sweep_stale_runners` (`tasks.py:141-153`): the same flip as
+/// `sweep_stale_runners` (`tasks.py:141-153`): the same two flips as
 /// [`drive_mark_offline_runners`] with the configured threshold
-/// (default 50s). Returns the affected count.
+/// (default 50s). Returns the summed affected count.
 pub async fn drive_sweep_stale_runners<S>(
     store: &S,
     now: &DateTime<Utc>,
@@ -715,7 +746,11 @@ where
     if affected > 0 {
         tracing::info!("sweep_stale_runners flipped {affected} offline");
     }
-    Ok(affected)
+    let dead_busy = store.mark_dead_busy_runners_offline(threshold).await?;
+    if dead_busy > 0 {
+        tracing::info!("sweep_stale_runners flipped {dead_busy} dead busy runner(s) offline");
+    }
+    Ok(affected + dead_busy)
 }
 
 /// `sweep_old_streams` (`tasks.py:155-202`): per runner with sessions,
@@ -991,6 +1026,19 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         Ok(result.rows_affected())
     }
 
+    async fn mark_dead_busy_runners_offline(
+        &self,
+        threshold: DateTime<Utc>,
+    ) -> Result<u64, SweepsError> {
+        let result = sqlx::query(&mark_dead_busy_runners_offline_sql())
+            .bind(RUNNER_STATUS_OFFLINE)
+            .bind(RUNNER_STATUS_BUSY)
+            .bind(threshold)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     async fn idle_sessions(
         &self,
         threshold: DateTime<Utc>,
@@ -1200,6 +1248,8 @@ mod tests {
         emitted: Mutex<Vec<Uuid>>,
         emit_err_runs: HashSet<Uuid>,
         offline_thresholds: Mutex<Vec<DateTime<Utc>>>,
+        dead_busy_affected: u64,
+        dead_busy_thresholds: Mutex<Vec<DateTime<Utc>>>,
         offline_affected: u64,
         idle: Vec<(Uuid, Uuid)>,
         revoked: Mutex<Vec<Vec<Uuid>>>,
@@ -1242,6 +1292,13 @@ mod tests {
         ) -> Result<u64, SweepsError> {
             self.offline_thresholds.lock().unwrap().push(threshold);
             Ok(self.offline_affected)
+        }
+        async fn mark_dead_busy_runners_offline(
+            &self,
+            threshold: DateTime<Utc>,
+        ) -> Result<u64, SweepsError> {
+            self.dead_busy_thresholds.lock().unwrap().push(threshold);
+            Ok(self.dead_busy_affected)
         }
         async fn idle_sessions(
             &self,
@@ -1887,6 +1944,43 @@ mod tests {
         );
     }
 
+    /// PDASHOSS01-233: both sweepers also run the BUSY-but-dead flip at
+    /// their own threshold and return the summed count.
+    #[tokio::test]
+    async fn sweepers_also_flip_dead_busy_runners() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 2, 22, 53, 29).unwrap();
+        let store = FakeStore {
+            offline_affected: 2,
+            dead_busy_affected: 3,
+            ..Default::default()
+        };
+        assert_eq!(drive_mark_offline_runners(&store, &now).await.unwrap(), 5);
+        assert_eq!(
+            store.dead_busy_thresholds.lock().unwrap().as_slice(),
+            &[Utc.with_ymd_and_hms(2026, 10, 2, 22, 51, 59).unwrap()]
+        );
+        let store = FakeStore {
+            dead_busy_affected: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            drive_sweep_stale_runners(&store, &now, 50).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            store.dead_busy_thresholds.lock().unwrap().as_slice(),
+            &[Utc.with_ymd_and_hms(2026, 10, 2, 22, 52, 39).unwrap()]
+        );
+    }
+
+    /// Django's `_sweep_dead_busy_runners` SQL (PR #541 capture, `%s`
+    /// literals for the scalar binds).
+    #[test]
+    fn dead_busy_flip_sql_matches_django() {
+        let django = "UPDATE \"runner\" SET \"status\" = $1 WHERE (\"runner\".\"status\" = $2 AND NOT (\"runner\".\"last_heartbeat_at\" >= $3 AND \"runner\".\"last_heartbeat_at\" IS NOT NULL) AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1)))";
+        assert_eq!(mark_dead_busy_runners_offline_sql(), django);
+    }
+
     #[tokio::test]
     async fn sweep_stale_uses_configured_threshold() {
         let store = FakeStore {
@@ -2133,7 +2227,7 @@ mod tests {
         for task in l6a {
             assert!(registry.owns(task), "{task} registered");
         }
-        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 13);
+        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 14);
         assert!(crate::runner_runs::is_runner_runs_task(EXPIRE_TASK));
         assert!(crate::runner_runs::is_runner_runs_task(
             "runner.reconcile_stalled_runs"

@@ -62,6 +62,7 @@ pub mod live_drains;
 pub mod offline_recovery;
 pub mod pubsub;
 pub mod session_service;
+pub mod unsatisfiable_pins;
 pub mod usage;
 
 pub use drain::{

@@ -1363,6 +1363,9 @@ pub const TASKS: &[TaskRow] = &[
         name: "runner.reconcile_stalled_runs",
     },
     TaskRow {
+        name: "runner.reconcile_unsatisfiable_pins",
+    },
+    TaskRow {
         name: "runner.release_pins_on_offline_runners",
     },
     TaskRow {
@@ -1881,6 +1884,11 @@ mod tests {
         pidash_jobs::runner_runs::register_offline_recovery_tasks(
             &mut registry,
             pool.clone(),
+            runner_seams.clone(),
+        );
+        pidash_jobs::runner_runs::register_unsatisfiable_pins_tasks(
+            &mut registry,
+            pool.clone(),
             runner_seams,
         );
         // D-11 execution tasks (PIDASHCONV-832 + PIDASHCONV-866):
@@ -2046,7 +2054,7 @@ mod tests {
         );
         assert_eq!(
             pidash_jobs::runner_runs::TASK_NAMES.len(),
-            13,
+            14,
             "runner_runs group drifted"
         );
         assert_eq!(
@@ -2059,7 +2067,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 77, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 78, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> =
             TASKS.iter().map(|row| row.name).collect();
@@ -2086,7 +2094,7 @@ mod tests {
             .get("schedule")
             .and_then(|v| v.as_array())
             .expect("schedule");
-        assert_eq!(schedule.len(), 28);
+        assert_eq!(schedule.len(), 29);
         let find = |name: &str| {
             schedule
                 .iter()
