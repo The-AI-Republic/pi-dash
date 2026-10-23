@@ -834,6 +834,42 @@ mod smtp {
     /// override it, so a `NULL` `EMAIL_FROM` row falls back here
     /// (`EmailMessage.from_email` → `settings.DEFAULT_FROM_EMAIL`).
     const DEFAULT_FROM_EMAIL: &str = "webmaster@localhost";
+    /// Django's `EMAIL_HOST`/`EMAIL_PORT` globals: the project overrides
+    /// neither (`settings/common.py`), so a falsy host dials `localhost`
+    /// and port 0 dials 25 (`smtp.py:33-34`).
+    const DEFAULT_SMTP_HOST: &str = "localhost";
+    const DEFAULT_SMTP_PORT: i64 = 25;
+
+    /// `self.host = host or settings.EMAIL_HOST` (`smtp.py:33`): `None`
+    /// arrives as `""` (see the `EmailConfig` construction), and both
+    /// fall back to `localhost`.
+    fn resolve_host(host: &str) -> &str {
+        if host.is_empty() {
+            DEFAULT_SMTP_HOST
+        } else {
+            host
+        }
+    }
+
+    /// `self.port = port or settings.EMAIL_PORT` (`smtp.py:34`): only 0
+    /// is falsy, so only 0 falls back to 25; negatives and huge ports
+    /// keep failing at connect, exactly like Python's `OverflowError`.
+    fn resolve_port(port: i64) -> i64 {
+        if port == 0 {
+            DEFAULT_SMTP_PORT
+        } else {
+            port
+        }
+    }
+
+    /// `self.from_email = from_email or settings.DEFAULT_FROM_EMAIL`
+    /// (`message.py:239`): `None` and `""` both fall back.
+    fn resolve_from(from_email: Option<&str>) -> &str {
+        match from_email {
+            Some(from) if !from.is_empty() => from,
+            _ => DEFAULT_FROM_EMAIL,
+        }
+    }
     /// `local_hostname`: Django sends the cached FQDN; only the bytes on
     /// the wire differ, never any response, so a fixed name is used.
     const LOCAL_HOSTNAME: &str = "localhost";
@@ -1019,7 +1055,7 @@ mod smtp {
     /// separator goes to stdout, flushed per message. A failed write
     /// propagates (`fail_silently=False`) into the generic fallthrough.
     pub fn send_console(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
-        let from = from_email.unwrap_or(DEFAULT_FROM_EMAIL);
+        let from = resolve_from(from_email);
         check_headers(from, recipients)?;
         // The render is shared with the DATA path (same accepted
         // approximation: exact bytes unobservable past the server), with
@@ -1037,7 +1073,7 @@ mod smtp {
     /// success — the outbox append is in-process with no HTTP-observable
     /// effect, so there is nothing further to mirror.
     pub fn send_locmem(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
-        let from = from_email.unwrap_or(DEFAULT_FROM_EMAIL);
+        let from = resolve_from(from_email);
         check_headers(from, recipients)
     }
 
@@ -1316,17 +1352,20 @@ mod smtp {
     }
 
     pub async fn send_test_email(cfg: EmailConfig<'_>) -> Result<(), MailError> {
+        // `EmailBackend.__init__` (`smtp.py:33-34`): falsy host/port fall
+        // back to the globals before anything dials.
+        let host = resolve_host(cfg.host);
         // `port=int(...)` already ran; a range failure is `OverflowError`
         // at connect, inside the `try` — the generic fallthrough.
-        let port: u16 = u16::try_from(cfg.port).map_err(|_| MailError::Failed)?;
+        let port: u16 = u16::try_from(resolve_port(cfg.port)).map_err(|_| MailError::Failed)?;
         // `SMTP(host, port)` / `SMTP_SSL(host, port)`: refused/reset-class
         // errors are builtin `ConnectionError`, timeouts `TimeoutError`,
         // DNS and the rest fall through.
-        let stream = TcpStream::connect((cfg.host, port)).await.map_err(map_io)?;
+        let stream = TcpStream::connect((host, port)).await.map_err(map_io)?;
         let mut io = if cfg.use_ssl {
             // `SMTP_SSL`: the TLS handshake error is `ssl.SSLError`,
             // inside the `try` — the generic fallthrough.
-            upgrade_tls(stream, cfg.host).await?
+            upgrade_tls(stream, host).await?
         } else {
             Io::Plain(tokio::io::BufReader::new(stream))
         };
@@ -1355,7 +1394,7 @@ mod smtp {
             };
             // The buffer is drained here (every reply was consumed), so
             // reclaiming the stream loses nothing past STARTTLS.
-            io = upgrade_tls(buffered.into_inner(), cfg.host).await?;
+            io = upgrade_tls(buffered.into_inner(), host).await?;
             lines = ehlo(&mut io).await?;
         }
         // `login()` when both are set (`if self.username and self.password`).
@@ -1378,7 +1417,7 @@ mod smtp {
         // `_send`: addresses are sanitized and the message rendered here —
         // after the transport is up — so a bad header answers
         // `BadHeaderError` even though the server was already reached.
-        let from = cfg.from_email.unwrap_or(DEFAULT_FROM_EMAIL);
+        let from = resolve_from(cfg.from_email);
         check_headers(from, cfg.recipients)?;
         let envelope_from = quote_address(from);
         // `sendmail`: `MAIL` refusal (any code, 421 included) is
@@ -1490,6 +1529,29 @@ mod smtp {
             assert_eq!(
                 send_locmem(Some("from@example.com\nX: y"), &to),
                 Err(MailError::BadHeader)
+            );
+        }
+
+        /// PIDASHCONV-1366: Django's framework fallbacks. `host or
+        /// settings.EMAIL_HOST` / `port or settings.EMAIL_PORT`
+        /// (`smtp.py:33-34`) and `from_email or settings.DEFAULT_FROM_EMAIL`
+        /// (`message.py:239`); the project overrides none of the globals
+        /// (`settings/common.py`), so `localhost` / 25 /
+        /// `webmaster@localhost`. Only `""`/`None` (host, from) and 0
+        /// (port) are falsy — a blank space or a negative port stays.
+        #[test]
+        fn fallback_resolvers_match_django_falsiness() {
+            assert_eq!(resolve_host(""), DEFAULT_SMTP_HOST);
+            assert_eq!(resolve_host("mail.example.com"), "mail.example.com");
+            assert_eq!(resolve_host(" "), " ");
+            assert_eq!(resolve_port(0), DEFAULT_SMTP_PORT);
+            assert_eq!(resolve_port(587), 587);
+            assert_eq!(resolve_port(-1), -1);
+            assert_eq!(resolve_from(None), DEFAULT_FROM_EMAIL);
+            assert_eq!(resolve_from(Some("")), DEFAULT_FROM_EMAIL);
+            assert_eq!(
+                resolve_from(Some("noreply@example.com")),
+                "noreply@example.com"
             );
         }
 
@@ -1820,6 +1882,70 @@ mod smtp {
             ))
             .await;
             assert_eq!(result, Err(MailError::RecipientsRefused));
+        }
+
+        /// PIDASHCONV-1366: an empty host dials `localhost` (`smtp.py:33`),
+        /// so a local sink answers and the send succeeds. Pre-fix this
+        /// failed resolving `""` (`MailError::Failed`).
+        #[tokio::test]
+        async fn empty_host_falls_back_to_localhost() {
+            let to = ["probe@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+            server.await.unwrap();
+        }
+
+        /// PIDASHCONV-1366: an empty from address sends as
+        /// `webmaster@localhost` (`message.py:239`). Pre-fix the envelope
+        /// was `MAIL FROM:<>` with an empty `From:` header.
+        #[tokio::test]
+        async fn empty_from_uses_default_sender() {
+            let to = ["probe@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some(""),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+            let transcript = server.await.unwrap();
+            assert!(
+                transcript
+                    .iter()
+                    .any(|l| l == "C: MAIL FROM:<webmaster@localhost>"),
+                "transcript: {transcript:?}"
+            );
         }
 
         #[test]
