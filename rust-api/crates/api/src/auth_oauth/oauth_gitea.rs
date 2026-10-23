@@ -137,11 +137,23 @@ pub fn urlencode_pairs(pairs: &[(String, String)]) -> String {
 
 /// Ordered error params: `exc.get_error_dict()` (`error.py:88-92`) plus an
 /// optional `next_path` echo appended last (`app/gitea.py`, `space/gitea.py`).
-pub fn error_params(code: i32, name: &str, next_path: Option<&str>) -> Vec<(String, String)> {
-    let mut out = vec![
-        ("error_code".to_owned(), code.to_string()),
-        ("error_message".to_owned(), name.to_owned()),
-    ];
+pub fn error_params(
+    exc: &AuthenticationException,
+    next_path: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = exc
+        .get_error_dict()
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key,
+                match value {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                },
+            )
+        })
+        .collect();
     if let Some(next) = next_path {
         out.push(("next_path".to_owned(), next.to_owned()));
     }
@@ -769,8 +781,9 @@ pub async fn find_user_by_email(
 }
 
 /// `Adapter.__check_signup` (`base.py:103-121`): when `ENABLE_SIGNUP` is
-/// `"0"` and no `WorkspaceMemberInvite` row carries the email, signup
-/// raises `SIGNUP_DISABLED` (5015) with the email as payload.
+/// `"0"` and no live `WorkspaceMemberInvite` row carries the email,
+/// signup raises `SIGNUP_DISABLED` (5015) with the email as payload. The
+/// default manager excludes soft-deleted invites.
 pub async fn check_signup(
     pool: &sqlx::PgPool,
     secret_key: &str,
@@ -797,21 +810,22 @@ pub async fn check_signup(
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspace_member_invites WHERE email = $1 LIMIT 1"#)
-            .bind(email)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| {
-                AuthenticationException::new(
-                    5015,
-                    "SIGNUP_DISABLED",
-                    vec![(
-                        "email".to_owned(),
-                        serde_json::Value::String(email.to_owned()),
-                    )],
-                )
-            })?;
+    let invited: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT id FROM workspace_member_invites WHERE email = $1 AND deleted_at IS NULL LIMIT 1"#,
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| {
+        AuthenticationException::new(
+            5015,
+            "SIGNUP_DISABLED",
+            vec![(
+                "email".to_owned(),
+                serde_json::Value::String(email.to_owned()),
+            )],
+        )
+    })?;
     if invited.is_none() {
         return Err(AuthenticationException::new(
             5015,
@@ -2524,7 +2538,7 @@ async fn app_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(exc.error_code, &exc.error_message, echo_raw);
+        let params = error_params(&exc, echo_raw);
         return redirect(app_callback_error_location(
             session.host.as_deref(),
             &params,
@@ -2538,11 +2552,7 @@ async fn app_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(
-            exc.error_code,
-            &exc.error_message,
-            validated_echo.as_deref(),
-        );
+        let params = error_params(&exc, validated_echo.as_deref());
         return redirect(app_callback_error_location(
             session.host.as_deref(),
             &params,
@@ -2571,11 +2581,7 @@ async fn app_callback(
     let user = match authenticated {
         Ok(user) => user,
         Err(AuthError::Provider(exc)) => {
-            let params = error_params(
-                exc.error_code,
-                &exc.error_message,
-                validated_echo.as_deref(),
-            );
+            let params = error_params(&exc, validated_echo.as_deref());
             return redirect(app_callback_error_location(
                 session.host.as_deref(),
                 &params,
@@ -2707,11 +2713,7 @@ async fn space_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(
-            exc.error_code,
-            &exc.error_message,
-            validated_next.as_deref(),
-        );
+        let params = error_params(&exc, validated_next.as_deref());
         return redirect(space_error_location(&base, &params));
     }
     let Some(code) = code else {
@@ -2720,11 +2722,7 @@ async fn space_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(
-            exc.error_code,
-            &exc.error_message,
-            validated_next.as_deref(),
-        );
+        let params = error_params(&exc, validated_next.as_deref());
         return redirect(space_error_location(&base, &params));
     };
     let pool = match pool_or_500(&state) {
@@ -2750,11 +2748,7 @@ async fn space_callback(
     let user = match authenticated {
         Ok(user) => user,
         Err(AuthError::Provider(exc)) => {
-            let params = error_params(
-                exc.error_code,
-                &exc.error_message,
-                validated_next.as_deref(),
-            );
+            let params = error_params(&exc, validated_next.as_deref());
             return redirect(space_error_location(&base, &params));
         }
         Err(AuthError::Server(denial)) => return denial.into_response(),
@@ -2855,7 +2849,10 @@ mod tests {
         // F11 app-gitea quirk: `urljoin(None, "?error...")` is the bare ref.
         let location = app_callback_error_location(
             None,
-            &error_params(5123, "GITEA_OAUTH_PROVIDER_ERROR", None),
+            &error_params(
+                &AuthenticationException::new(5123, "GITEA_OAUTH_PROVIDER_ERROR", Vec::new()),
+                None,
+            ),
         );
         assert!(location.starts_with("?error_code=5123"), "{location}");
         assert!(location.contains("error_message=GITEA_OAUTH_PROVIDER_ERROR"));
@@ -2867,7 +2864,10 @@ mod tests {
         // empty path — the golden pins `""`, not `"/"`.
         let location = app_error_location(
             "http://app.example",
-            &error_params(5112, "GITEA_NOT_CONFIGURED", Some("/x")),
+            &error_params(
+                &AuthenticationException::new(5112, "GITEA_NOT_CONFIGURED", Vec::new()),
+                Some("/x"),
+            ),
         );
         assert_eq!(
             location,
@@ -2879,7 +2879,10 @@ mod tests {
     fn urljoin_keeps_trailing_slash_base_path() {
         let location = app_error_location(
             "http://app.example/",
-            &error_params(5000, "INSTANCE_NOT_CONFIGURED", None),
+            &error_params(
+                &AuthenticationException::new(5000, "INSTANCE_NOT_CONFIGURED", Vec::new()),
+                None,
+            ),
         );
         assert_eq!(
             location,
@@ -2905,7 +2908,10 @@ mod tests {
         // Space twin never urljoins: the base path survives verbatim.
         let location = space_error_location(
             "http://space.example/spaces/",
-            &error_params(5112, "GITEA_NOT_CONFIGURED", Some("/x")),
+            &error_params(
+                &AuthenticationException::new(5112, "GITEA_NOT_CONFIGURED", Vec::new()),
+                Some("/x"),
+            ),
         );
         assert_eq!(
             location,
@@ -2927,12 +2933,22 @@ mod tests {
 
     #[test]
     fn error_params_order_matches_get_error_dict() {
-        let params = error_params(5000, "INSTANCE_NOT_CONFIGURED", Some("/x"));
+        let params = error_params(
+            &AuthenticationException::new(
+                5015,
+                "SIGNUP_DISABLED",
+                vec![(
+                    "email".to_owned(),
+                    serde_json::Value::String("new@example.test".to_owned()),
+                )],
+            ),
+            Some("/x"),
+        );
         let keys: Vec<&str> = params.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["error_code", "error_message", "next_path"]);
+        assert_eq!(keys, ["error_code", "error_message", "email", "next_path"]);
         assert_eq!(
             urlencode_pairs(&params),
-            "error_code=5000&error_message=INSTANCE_NOT_CONFIGURED&next_path=%2Fx"
+            "error_code=5015&error_message=SIGNUP_DISABLED&email=new%40example.test&next_path=%2Fx"
         );
     }
 
