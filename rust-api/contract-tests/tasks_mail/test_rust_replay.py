@@ -27,13 +27,14 @@ tests cannot observe each other's rows. See ``_harness/rust_queue.py``.
 """
 
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 
 import pytest
 from psycopg.rows import dict_row
 
-from _harness import redis_cache, rust_queue
+from _harness import config, redis_cache, rust_queue
 from _harness import seed as seed_helpers
 from _harness.db import diff as _diff
 from _harness.db import insert_row, snapshot
@@ -70,7 +71,11 @@ def _drain_matching(task_name):
     """
     from kombu import Connection
 
-    from _harness import config
+    if not os.environ.get(config.CELERY_BROKER_URL):
+        # No broker configured (standalone Rust boot, PIDASHCONV-1108):
+        # there is nothing to observe, and the Rust worker has no broker
+        # client, so the absence pin holds vacuously.
+        return []
 
     matched = []
     others = []
