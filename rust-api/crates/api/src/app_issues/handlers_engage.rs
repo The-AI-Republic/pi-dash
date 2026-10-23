@@ -1557,7 +1557,7 @@ fn app_origin(state: &AppState) -> String {
 // Asset URLs + nested lite shapes
 // ---------------------------------------------------------------------------
 
-/// `SELECT` for the logo/cover/avatar asset row behind `*_url`
+/// `SELECT` for the logo/avatar asset row behind `*_url`
 /// properties.
 fn logo_asset_sql() -> String {
     // The asset FK traversal is `_base_manager` (a soft-deleted asset
@@ -1577,7 +1577,7 @@ fn asset_url(
     issue_id: Option<&str>,
 ) -> Result<Option<String>, Denial> {
     match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
         }
         Some("ISSUE_ATTACHMENT") => {
@@ -1609,11 +1609,11 @@ fn asset_url(
     }
 }
 
-/// Resolve a logo/cover/avatar URL the way the model properties do: the
+/// Resolve a logo/avatar URL the way the model properties do: the
 /// asset's `asset_url` when the FK is set (even when that computes to
 /// `None` — no fall-through), else the raw string column when
 /// non-empty, else `None`.
-async fn logo_or_cover_url(
+async fn logo_or_avatar_url(
     pool: &sqlx::PgPool,
     raw: Option<String>,
     asset_id: Option<uuid::Uuid>,
@@ -1684,7 +1684,7 @@ pub(crate) async fn fetch_user_lite(
         .map(|raw| raw.parse::<uuid::Uuid>())
         .transpose()
         .map_err(|_| Denial::ServerError)?;
-    let avatar_url = logo_or_cover_url(pool, opt_str(o, "avatar")?, asset_id).await?;
+    let avatar_url = logo_or_avatar_url(pool, opt_str(o, "avatar")?, asset_id).await?;
     Ok(UserLiteOwned {
         id: req_str(o, "id")?,
         first_name: req_str(o, "first_name")?,
@@ -1701,8 +1701,6 @@ pub(crate) struct ProjectLiteOwned {
     id: String,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_url: Option<String>,
     logo_props: Value,
     description: String,
     is_default: bool,
@@ -1716,8 +1714,6 @@ pub(crate) fn project_lite_value(row: &ProjectLiteOwned) -> Result<Value, Denial
         id: &row.id,
         identifier: &row.identifier,
         name: &row.name,
-        cover_image: row.cover_image.as_deref(),
-        cover_image_url: row.cover_image_url.as_deref(),
         logo_props: &row.logo_props,
         description: &row.description,
         is_default: row.is_default,
@@ -1735,23 +1731,16 @@ pub(crate) async fn fetch_project_lite(
 ) -> Result<ProjectLiteOwned, Denial> {
     let row = fetch_optional_object(
         pool,
-        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
+        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
         &[SqlParam::Uuid(*project_id)],
     )
     .await?
     .ok_or(Denial::ServerError)?;
     let o = obj(&row)?;
-    let asset_id = opt_str(o, "cover_image_asset_id")?
-        .map(|raw| raw.parse::<uuid::Uuid>())
-        .transpose()
-        .map_err(|_| Denial::ServerError)?;
-    let cover_image_url = logo_or_cover_url(pool, opt_str(o, "cover_image")?, asset_id).await?;
     Ok(ProjectLiteOwned {
         id: req_str(o, "id")?,
         identifier: req_str(o, "identifier")?,
         name: req_str(o, "name")?,
-        cover_image: opt_str(o, "cover_image")?,
-        cover_image_url,
         logo_props: o.get("logo_props").cloned().ok_or(Denial::ServerError)?,
         description: req_str(o, "description")?,
         is_default: req_bool(o, "is_default")?,
@@ -1799,7 +1788,7 @@ pub(crate) async fn fetch_workspace_lite(
         .map(|raw| raw.parse::<uuid::Uuid>())
         .transpose()
         .map_err(|_| Denial::ServerError)?;
-    let logo_url = logo_or_cover_url(pool, opt_str(o, "logo")?, asset_id).await?;
+    let logo_url = logo_or_avatar_url(pool, opt_str(o, "logo")?, asset_id).await?;
     Ok(WorkspaceLiteOwned {
         name: req_str(o, "name")?,
         slug: req_str(o, "slug")?,
@@ -1895,7 +1884,7 @@ async fn fetch_issue_flat(
 
 /// Column counts of the builder select lists (the join widths the
 /// positional offsets below assume).
-const PROJECT_COLS: usize = 46;
+const PROJECT_COLS: usize = 44;
 const WORKSPACE_COLS: usize = 14;
 const ISSUE_COLS: usize = 34;
 
@@ -1909,18 +1898,16 @@ const HISTORY_COMMENTS_PROJECT_AT: usize = 24;
 const LIST_MEMBER_AT: usize = 24;
 const LIST_PROJECT_AT: usize = 25;
 
-/// `history_reactions_prefetch_sql` selects reactions 11 + user 40.
+/// `history_reactions_prefetch_sql` selects reactions 11 + user 38.
 const PREFETCH_USER_AT: usize = 11;
 
-/// Within-table offsets into `PROJECT_COLUMNS` (46).
+/// Within-table offsets into `PROJECT_COLUMNS` (44).
 const P_ID: usize = 5;
 const P_NAME: usize = 6;
 const P_DESCRIPTION: usize = 7;
 const P_IDENTIFIER: usize = 12;
 const P_IS_DEFAULT: usize = 24;
-const P_COVER_IMAGE: usize = 27;
-const P_COVER_IMAGE_ASSET_ID: usize = 28;
-const P_LOGO_PROPS: usize = 32;
+const P_LOGO_PROPS: usize = 30;
 
 /// Within-table offsets into `WORKSPACE_COLUMNS` (14).
 const W_ID: usize = 5;
@@ -1942,14 +1929,14 @@ const I_SEQUENCE_ID: usize = 21;
 const I_SORT_ORDER: usize = 22;
 const I_IS_DRAFT: usize = 25;
 
-/// Within-table offsets into `USER_COLUMNS` (40).
+/// Within-table offsets into `USER_COLUMNS` (38).
 const U_ID: usize = 2;
 const U_DISPLAY_NAME: usize = 6;
 const U_FIRST_NAME: usize = 7;
 const U_LAST_NAME: usize = 8;
 const U_AVATAR: usize = 9;
 const U_AVATAR_ASSET_ID: usize = 10;
-const U_IS_BOT: usize = 35;
+const U_IS_BOT: usize = 33;
 
 /// Within-table offsets into `COMMENT_COLUMNS` (24).
 const C_CREATED_AT: usize = 0;
@@ -2013,20 +2000,14 @@ const R_COMMENT_ID: usize = 9;
 const R_REACTION: usize = 10;
 
 /// Decode the project-lite nest from a joined row at `base`.
-async fn decode_project_lite(
-    pool: &sqlx::PgPool,
+fn decode_project_lite(
     row: &sqlx::postgres::PgRow,
     base: usize,
 ) -> Result<ProjectLiteOwned, Denial> {
-    let asset_id = cell_opt_uuid(row, base + P_COVER_IMAGE_ASSET_ID)?;
-    let cover_image = cell_opt_string(row, base + P_COVER_IMAGE)?;
-    let cover_image_url = logo_or_cover_url(pool, cover_image.clone(), asset_id).await?;
     Ok(ProjectLiteOwned {
         id: cell_uuid(row, base + P_ID)?.to_string(),
         identifier: cell_string(row, base + P_IDENTIFIER)?,
         name: cell_string(row, base + P_NAME)?,
-        cover_image,
-        cover_image_url,
         logo_props: cell_json(row, base + P_LOGO_PROPS)?,
         description: cell_string(row, base + P_DESCRIPTION)?,
         is_default: cell_bool(row, base + P_IS_DEFAULT)?,
@@ -2041,7 +2022,7 @@ async fn decode_workspace_lite(
 ) -> Result<WorkspaceLiteOwned, Denial> {
     let asset_id = cell_opt_uuid(row, base + W_LOGO_ASSET_ID)?;
     let logo = cell_opt_string(row, base + W_LOGO)?;
-    let logo_url = logo_or_cover_url(pool, logo, asset_id).await?;
+    let logo_url = logo_or_avatar_url(pool, logo, asset_id).await?;
     Ok(WorkspaceLiteOwned {
         name: cell_string(row, base + W_NAME)?,
         slug: cell_string(row, base + W_SLUG)?,
@@ -2080,7 +2061,7 @@ async fn decode_user_lite(
     }
     let asset_id = cell_opt_uuid(row, base + U_AVATAR_ASSET_ID)?;
     let avatar = cell_string(row, base + U_AVATAR)?;
-    let avatar_url = logo_or_cover_url(pool, Some(avatar.clone()), asset_id).await?;
+    let avatar_url = logo_or_avatar_url(pool, Some(avatar.clone()), asset_id).await?;
     Ok(Some(UserLiteOwned {
         id: cell_uuid(row, base + U_ID)?.to_string(),
         first_name: cell_string(row, base + U_FIRST_NAME)?,
@@ -3872,7 +3853,7 @@ async fn render_history_comment(
     reactions: Vec<CommentReactionView>,
 ) -> Result<Value, Denial> {
     let base = CommentBaseOwned::from_positional(row)?;
-    let project = decode_project_lite(pool, row, HISTORY_COMMENTS_PROJECT_AT).await?;
+    let project = decode_project_lite(row, HISTORY_COMMENTS_PROJECT_AT)?;
     let workspace =
         decode_workspace_lite(pool, row, HISTORY_COMMENTS_PROJECT_AT + PROJECT_COLS).await?;
     let issue = decode_issue_flat(
@@ -3912,7 +3893,7 @@ async fn render_list_comment(
 ) -> Result<Value, Denial> {
     let base = CommentBaseOwned::from_positional(row)?;
     let is_member = cell_bool(row, LIST_MEMBER_AT)?;
-    let project = decode_project_lite(pool, row, LIST_PROJECT_AT).await?;
+    let project = decode_project_lite(row, LIST_PROJECT_AT)?;
     let workspace = decode_workspace_lite(pool, row, LIST_PROJECT_AT + PROJECT_COLS).await?;
     let issue = decode_issue_flat(row, LIST_PROJECT_AT + PROJECT_COLS + WORKSPACE_COLS)?;
     let actor = match base.actor_id {
@@ -4025,7 +4006,7 @@ async fn render_history_activity(
     use pidash_services::app_issues::serializers_engage::{
         issue_activity_to_representation, ActivitySourceData, IssueActivityRow,
     };
-    let project = decode_project_lite(pool, row, HISTORY_PROJECT_AT).await?;
+    let project = decode_project_lite(row, HISTORY_PROJECT_AT)?;
     let workspace = decode_workspace_lite(pool, row, HISTORY_PROJECT_AT + PROJECT_COLS).await?;
     let issue = decode_issue_flat(row, HISTORY_PROJECT_AT + PROJECT_COLS + WORKSPACE_COLS)?;
     let actor = decode_user_lite(
@@ -4098,8 +4079,6 @@ async fn render_history_activity(
         id: &render.project.id,
         identifier: &render.project.identifier,
         name: &render.project.name,
-        cover_image: render.project.cover_image.as_deref(),
-        cover_image_url: render.project.cover_image_url.as_deref(),
         logo_props: &render.project.logo_props,
         description: &render.project.description,
         is_default: render.project.is_default,
@@ -6411,7 +6390,7 @@ async fn subscriber_list(
                     Err(_) => return Denial::ServerError.into_response(),
                 };
                 let avatar_url =
-                    match logo_or_cover_url(&pool, Some(avatar.clone()), asset_id).await {
+                    match logo_or_avatar_url(&pool, Some(avatar.clone()), asset_id).await {
                         Ok(url) => url,
                         Err(error) => return error.into_response(),
                     };
@@ -6883,7 +6862,7 @@ mod tests {
             count(super::super::queries_core::PREFETCH_ISSUE_COLUMNS),
             ISSUE_COLS
         );
-        assert_eq!(count(super::super::queries_core::USER_COLUMNS), 40);
+        assert_eq!(count(super::super::queries_core::USER_COLUMNS), 38);
         // Spot-check the within-table offsets this module decodes.
         let project: Vec<&str> = super::super::queries_core::PROJECT_COLUMNS
             .split(',')

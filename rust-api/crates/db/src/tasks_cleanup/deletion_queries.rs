@@ -724,7 +724,6 @@ const SET_NULL_FKS: &[(&str, &str)] = &[
     ("modules", "lead_id"),
     ("notifications", "triggered_by_id"),
     ("project_deploy_boards", "intake_id"),
-    ("projects", "cover_image_asset_id"),
     ("projects", "default_state_id"),
     ("projects", "estimate_id"),
     ("runner", "dev_machine_id"),
@@ -732,7 +731,6 @@ const SET_NULL_FKS: &[(&str, &str)] = &[
     ("scheduler_bindings", "last_run_id"),
     ("scheduler_bindings", "pod_id"),
     ("users", "avatar_asset_id"),
-    ("users", "cover_image_asset_id"),
     ("workspace_join_requests", "responded_by_id"),
     ("workspaces", "logo_asset_id"),
 ];

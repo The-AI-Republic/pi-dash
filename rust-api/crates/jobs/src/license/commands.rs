@@ -13,7 +13,7 @@
 //!
 //! * `configure_instance` requires the `SECRET_KEY` env var (missing or
 //!   empty raises, `configure_instance.py:39-43`).
-//! * the seed loop covers the 36 `instance_config_variables`
+//! * the seed loop covers the 35 `instance_config_variables`
 //!   (`utils/instance_config_variables/core.py`; `extended.py` is empty),
 //!   skipping keys that are not db-sourced (`:45-47`), `get_or_create` per
 //!   key (`:48`), setting category/encrypted/value + encrypt branch on
@@ -115,9 +115,9 @@ pub struct SeedVariable {
     pub default: Option<&'static str>,
 }
 
-/// The 36 seeded variables in `core.py` order
+/// The 35 seeded variables in `core.py` order
 /// (`instance_config_variables/__init__.py:7-8`).
-pub const SEED_VARIABLES: [SeedVariable; 36] = [
+pub const SEED_VARIABLES: [SeedVariable; 35] = [
     SeedVariable {
         key: "ENABLE_SIGNUP",
         category: "AUTHENTICATION",
@@ -331,12 +331,6 @@ pub const SEED_VARIABLES: [SeedVariable; 36] = [
         category: "AI",
         is_encrypted: false,
         default: Some("gpt-3.5-turbo"),
-    },
-    SeedVariable {
-        key: "UNSPLASH_ACCESS_KEY",
-        category: "UNSPLASH",
-        is_encrypted: true,
-        default: Some(""),
     },
 ];
 
@@ -1248,8 +1242,8 @@ mod tests {
     // -- seed table ---------------------------------------------------------
 
     #[test]
-    fn seed_table_has_36_variables_in_core_order() {
-        assert_eq!(SEED_VARIABLES.len(), 36);
+    fn seed_table_has_35_variables_in_core_order() {
+        assert_eq!(SEED_VARIABLES.len(), 35);
         let keys: Vec<&str> = SEED_VARIABLES.iter().map(|var| var.key).collect();
         assert_eq!(
             &keys[..4],
@@ -1266,7 +1260,6 @@ mod tests {
         assert!(keys.contains(&"GITEA_CLIENT_SECRET"));
         assert!(keys.contains(&"EMAIL_HOST_PASSWORD"));
         assert!(keys.contains(&"LLM_API_KEY"));
-        assert!(keys.contains(&"UNSPLASH_ACCESS_KEY"));
         // `IS_GITEA_ENABLED` is both seeded and derived (ported quirk).
         assert!(keys.contains(&"IS_GITEA_ENABLED"));
         assert_eq!(
@@ -1304,14 +1297,14 @@ mod tests {
     }
 
     #[test]
-    fn fresh_seed_creates_36_rows_then_skips_derived_as_ported() {
+    fn fresh_seed_creates_35_rows_then_skips_derived_as_ported() {
         let store = MemSeed::default();
         let registry = registry();
         let env = MapEnv::default().with("SECRET_KEY", "s3cret");
         let report = block(configure_instance(&env, &store, &registry, &keyring()))
             .expect("configure succeeds");
-        // All 36 seeded, in table order.
-        assert_eq!(report.seeded_keys().len(), 36);
+        // All 35 seeded, in table order.
+        assert_eq!(report.seeded_keys().len(), 35);
         assert_eq!(
             report.seeded_keys()[..4].to_vec(),
             vec![
@@ -1379,7 +1372,7 @@ mod tests {
         let env = MapEnv::default().with("SECRET_KEY", "s3cret");
         let report = block(configure_instance(&env, &store, &registry, &keyring()))
             .expect("configure succeeds");
-        // The pre-existing row keeps its value; only the other 35 seed
+        // The pre-existing row keeps its value; only the other 34 seed
         // (IS_GITEA_ENABLED seeds fresh here, so the derived gate trips).
         assert_eq!(
             store
@@ -1389,7 +1382,7 @@ mod tests {
                 .as_deref(),
             Some("custom")
         );
-        assert_eq!(report.seeded_keys().len(), 35);
+        assert_eq!(report.seeded_keys().len(), 34);
         assert!(report.lines.iter().any(|line| {
             line.kind == LineKind::Warning
                 && line.text == "ENABLE_SIGNUP configuration already exists"
@@ -1472,9 +1465,9 @@ mod tests {
             .with("GOOGLE_CLIENT_SECRET", "s3cr3t");
         let report = block(configure_instance(&env, &store, &registry, &keyring()))
             .expect("configure succeeds");
-        // 35 seeds (IS_GITEA_ENABLED skipped as env-sourced) + 4 derived
+        // 34 seeds (IS_GITEA_ENABLED skipped as env-sourced) + 4 derived
         // rows, all reported with the same "loaded with value" line.
-        assert_eq!(report.seeded_keys().len(), 39);
+        assert_eq!(report.seeded_keys().len(), 38);
         // Full presence → "1". (Note the ordering quirk this port keeps:
         // the seed loop runs first, so an UNSET secret is already seeded as
         // `""` and the `"0"` caller default never applies post-seed — with

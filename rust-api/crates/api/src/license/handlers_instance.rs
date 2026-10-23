@@ -237,7 +237,7 @@ async fn count_workspaces(pool: &sqlx::PgPool) -> Result<i64, HandlerError> {
 // GET config derivation (instance.py:50-167)
 // ---------------------------------------------------------------------------
 
-/// The 15 `get_configuration_value` items with the view's inline env
+/// The 14 `get_configuration_value` items with the view's inline env
 /// defaults (`instance.py:66-126`), `os.environ.get` evaluated at call
 /// time.
 fn config_items() -> Vec<LegacyItem> {
@@ -265,7 +265,6 @@ fn config_items() -> Vec<LegacyItem> {
         env_default("SLACK_CLIENT_ID", ConfigValue::Null),
         env_default("POSTHOG_API_KEY", ConfigValue::Null),
         env_default("POSTHOG_HOST", ConfigValue::Null),
-        env_default("UNSPLASH_ACCESS_KEY", empty()),
         env_default("LLM_API_KEY", empty()),
     ]
 }
@@ -285,7 +284,6 @@ struct ConfigPayload {
     slack_client_id: Option<String>,
     posthog_api_key: Option<String>,
     posthog_host: Option<String>,
-    has_unsplash_configured: bool,
     has_llm_configured: bool,
     file_size_limit: f64,
     is_smtp_configured: bool,
@@ -310,7 +308,7 @@ fn py_str(value: &ConfigValue) -> String {
 }
 
 /// Python truthiness: empty string / `None` / zero are false
-/// (`bool(UNSPLASH_ACCESS_KEY)`, `instance.py:150-159`).
+/// (`bool(LLM_API_KEY)` / `bool(EMAIL_HOST)`, `instance.py:145,151`).
 fn py_truthy(value: &ConfigValue) -> bool {
     match value {
         ConfigValue::Null => false,
@@ -366,8 +364,7 @@ async fn build_config(
         slack_client_id: opt_str(&values[10]),
         posthog_api_key: opt_str(&values[11]),
         posthog_host: opt_str(&values[12]),
-        has_unsplash_configured: py_truthy(&values[13]),
-        has_llm_configured: py_truthy(&values[14]),
+        has_llm_configured: py_truthy(&values[13]),
         file_size_limit: parse_file_size_limit(std::env::var("FILE_SIZE_LIMIT").ok())?,
         is_smtp_configured: py_truthy(&values[7]),
         admin_base_url: urls.admin_base_url.clone(),
@@ -1877,7 +1874,6 @@ mod tests {
             slack_client_id: None,
             posthog_api_key: None,
             posthog_host: None,
-            has_unsplash_configured: false,
             has_llm_configured: false,
             file_size_limit: 5242880.0,
             is_smtp_configured: false,
@@ -1911,7 +1907,6 @@ mod tests {
                 "slack_client_id",
                 "posthog_api_key",
                 "posthog_host",
-                "has_unsplash_configured",
                 "has_llm_configured",
                 "file_size_limit",
                 "is_smtp_configured",

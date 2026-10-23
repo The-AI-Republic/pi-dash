@@ -568,8 +568,6 @@ struct ProjectRow {
     id: Uuid,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<Uuid>,
     logo_props: serde_json::Value,
     description: String,
     is_default: bool,
@@ -577,7 +575,7 @@ struct ProjectRow {
 
 async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<ProjectRow>, Denial> {
     let row = sqlx::query(
-        r#"SELECT id, identifier, name, cover_image, cover_image_asset_id, logo_props, description, is_default FROM "projects" WHERE "projects"."id" = $1"#,
+        r#"SELECT id, identifier, name, logo_props, description, is_default FROM "projects" WHERE "projects"."id" = $1"#,
     )
     .bind(project_id)
     .fetch_optional(pool)
@@ -588,12 +586,6 @@ async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Projec
             id: row.try_get("id").map_err(|_| Denial::ServerError)?,
             identifier: row.try_get("identifier").map_err(|_| Denial::ServerError)?,
             name: row.try_get("name").map_err(|_| Denial::ServerError)?,
-            cover_image: row
-                .try_get("cover_image")
-                .map_err(|_| Denial::ServerError)?,
-            cover_image_asset_id: row
-                .try_get("cover_image_asset_id")
-                .map_err(|_| Denial::ServerError)?,
             logo_props: row.try_get("logo_props").map_err(|_| Denial::ServerError)?,
             description: row
                 .try_get("description")
@@ -604,37 +596,8 @@ async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Projec
     .transpose()
 }
 
-/// `cover_image_url` (`db/models/project.py:176-185`): the cover asset's
-/// URL, else the raw `cover_image` text, else null.
-async fn cover_image_url(pool: &PgPool, project: &ProjectRow) -> Result<Option<String>, Denial> {
-    if let Some(asset_id) = project.cover_image_asset_id {
-        let row: Option<(String,)> = sqlx::query_as(
-            r#"SELECT entity_type FROM "file_assets" WHERE "file_assets"."id" = $1"#,
-        )
-        .bind(asset_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        if let Some((entity_type,)) = row {
-            match entity_type.as_str() {
-                "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
-                    return Ok(Some(format!("/api/assets/v2/static/{asset_id}/")));
-                }
-                _ => return Ok(project.cover_image.clone()),
-            }
-        }
-    }
-    Ok(project.cover_image.clone())
-}
-
 fn opt_uuid(id: &Option<Uuid>) -> serde_json::Value {
     id.map(|id| serde_json::Value::String(id.to_string()))
-        .unwrap_or(serde_json::Value::Null)
-}
-
-fn opt_string(text: &Option<String>) -> serde_json::Value {
-    text.clone()
-        .map(serde_json::Value::String)
         .unwrap_or(serde_json::Value::Null)
 }
 
@@ -645,11 +608,9 @@ fn opt_dt(moment: &Option<DateTime<Utc>>, timezone: chrono_tz::Tz) -> serde_json
 }
 
 /// `ProjectLiteSerializer` (`app/serializers/project.py:120-132`), the
-/// `project_detail` nest: 8 keys in `Meta.fields` order. `cover_image`
-/// renders the raw text (null when unset); `cover_image_url` the asset
-/// URL (null when no asset resolves).
-fn render_project_detail(project: &ProjectRow, cover_url: Option<String>) -> serde_json::Value {
-    let mut map = serde_json::Map::with_capacity(8);
+/// `project_detail` nest: 6 keys in `Meta.fields` order.
+fn render_project_detail(project: &ProjectRow) -> serde_json::Value {
+    let mut map = serde_json::Map::with_capacity(6);
     map.insert(
         "id".to_string(),
         serde_json::Value::String(project.id.to_string()),
@@ -661,13 +622,6 @@ fn render_project_detail(project: &ProjectRow, cover_url: Option<String>) -> ser
     map.insert(
         "name".to_string(),
         serde_json::Value::String(project.name.clone()),
-    );
-    map.insert("cover_image".to_string(), opt_string(&project.cover_image));
-    map.insert(
-        "cover_image_url".to_string(),
-        cover_url
-            .map(serde_json::Value::String)
-            .unwrap_or(serde_json::Value::Null),
     );
     map.insert("logo_props".to_string(), project.logo_props.clone());
     map.insert(
@@ -756,8 +710,7 @@ pub async fn render_intake_row(
         Some(project) => project,
         None => return Err(Denial::ServerError),
     };
-    let cover_url = cover_image_url(pool, &project).await?;
-    let detail = render_project_detail(&project, cover_url);
+    let detail = render_project_detail(&project);
     Ok(render_intake(intake, detail, pending_issue_count, timezone))
 }
 

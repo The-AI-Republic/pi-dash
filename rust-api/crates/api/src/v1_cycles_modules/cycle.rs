@@ -2108,10 +2108,9 @@ pub async fn file_asset_url(
         return Ok(None);
     };
     match entity_type.as_deref() {
-        Some("WORKSPACE_LOGO")
-        | Some("USER_AVATAR")
-        | Some("USER_COVER")
-        | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
+        Some("WORKSPACE_LOGO") | Some("USER_AVATAR") => {
+            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
+        }
         Some("ISSUE_ATTACHMENT") => {
             let slug: Option<String> = match workspace_id {
                 Some(id) => {
@@ -2262,11 +2261,11 @@ pub async fn expand_workspace(pool: &PgPool, workspace_id: &uuid::Uuid) -> Resul
     Ok(Value::Object(map))
 }
 
-/// `ProjectLiteSerializer`: `id`, `identifier`, `name`, `cover_image`,
-/// `icon_prop`, `emoji`, `description`, `is_default`, `cover_image_url`.
+/// `ProjectLiteSerializer`: `id`, `identifier`, `name`, `icon_prop`,
+/// `emoji`, `description`, `is_default`.
 pub async fn expand_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<Value, Denial> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "identifier", "name", "cover_image", "cover_image_asset_id", "icon_prop", "emoji", "description", "is_default" FROM "projects" WHERE "id" = $1"#,
+        r#"SELECT "id", "identifier", "name", "icon_prop", "emoji", "description", "is_default" FROM "projects" WHERE "id" = $1"#,
     )
     .bind(project_id)
     .fetch_optional(pool)
@@ -2275,15 +2274,7 @@ pub async fn expand_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<Va
     let Some(row) = row else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
-    let asset_id = row_uuid_opt(&row, "cover_image_asset_id", "expand-project")?;
-    let mut cover_image_url = Value::Null;
-    if let Some(asset_id) = asset_id {
-        cover_image_url = file_asset_url(pool, &asset_id)
-            .await?
-            .map(Value::String)
-            .unwrap_or(Value::Null);
-    }
-    let mut map = serde_json::Map::with_capacity(9);
+    let mut map = serde_json::Map::with_capacity(7);
     map.insert(
         "id".to_owned(),
         render_uuid(&row_uuid(&row, "id", "expand-project")?),
@@ -2295,10 +2286,6 @@ pub async fn expand_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<Va
     map.insert(
         "name".to_owned(),
         Value::String(row_string(&row, "name", "expand-project")?),
-    );
-    map.insert(
-        "cover_image".to_owned(),
-        render_string_opt(&row_string_opt(&row, "cover_image", "expand-project")?),
     );
     map.insert(
         "icon_prop".to_owned(),
@@ -2319,7 +2306,6 @@ pub async fn expand_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<Va
                 .map_err(|error| db_error(error, "expand-project"))?,
         ),
     );
-    map.insert("cover_image_url".to_owned(), cover_image_url);
     Ok(Value::Object(map))
 }
 

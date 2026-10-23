@@ -11,7 +11,7 @@
 //! `asset_url` goldens and the read-shape list.
 //!
 //! The branching mirrors `pidash-db` `app_assets::asset_url` exactly
-//! (same table, app-plane port, D-31): the four static logo/cover types
+//! (same table, app-plane port, D-31): the two static logo/avatar types
 //! render `/api/assets/v2/static/<id>/`; `ISSUE_ATTACHMENT` renders the
 //! workspace/project/issue URL; the four description types render the
 //! workspace/project URL; anything else — including `None` and
@@ -23,17 +23,18 @@
 //! Ported bugs (translate, don't redesign; listed for the PR):
 //!
 //! * `DRAFT_ISSUE_ATTACHMENT` has no branch (`asset.py:79-100`
-//!   enumerates 9 of the 10 `EntityTypeContext` values) → `None`.
+//!   enumerates 7 of the 8 `EntityTypeContext` values) → `None`.
+//!
+//! The former `USER_COVER` / `PROJECT_COVER` types were removed from
+//! `EntityTypeContext` (PDASHOSS01-237); legacy rows carrying them fall
+//! through to `None`.
 //! * The serializer's `asset_url = CharField(read_only=True)` renders
 //!   this property; `None` renders JSON `null`.
 
 /// Entity types served from the static endpoint (`asset_url` first
 /// branch, `db/models/asset.py:81-87`).
 pub fn is_static_asset_type(entity_type: &str) -> bool {
-    matches!(
-        entity_type,
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER"
-    )
+    matches!(entity_type, "WORKSPACE_LOGO" | "USER_AVATAR")
 }
 
 /// Entity types rendering the description URL (`asset.py:92-98`).
@@ -116,8 +117,9 @@ mod tests {
             .as_array()
             .expect("asset_url goldens");
         assert!(!goldens.is_empty());
-        // The goldens cover all 10 entity types plus null: the 9
-        // branched values plus the unbranched DRAFT_ISSUE_ATTACHMENT.
+        // The goldens cover all 8 entity types plus null (the 7 branched
+        // values plus the unbranched DRAFT_ISSUE_ATTACHMENT) and the two
+        // removed cover types, whose legacy rows fall through to null.
         let mut seen: Vec<String> = Vec::new();
         for (i, golden) in goldens.iter().enumerate() {
             let entity_type = golden["entity_type"].as_str();
@@ -175,12 +177,7 @@ mod tests {
     #[test]
     fn branch_predicates_partition_entity_types() {
         // Every static/description grouping the kernel relies on.
-        for t in [
-            "WORKSPACE_LOGO",
-            "USER_AVATAR",
-            "USER_COVER",
-            "PROJECT_COVER",
-        ] {
+        for t in ["WORKSPACE_LOGO", "USER_AVATAR"] {
             assert!(is_static_asset_type(t), "{t}");
             assert!(!is_description_asset_type(t), "{t}");
         }
@@ -193,7 +190,13 @@ mod tests {
             assert!(!is_static_asset_type(t), "{t}");
             assert!(is_description_asset_type(t), "{t}");
         }
-        for t in ["ISSUE_ATTACHMENT", "DRAFT_ISSUE_ATTACHMENT", "NOPE"] {
+        for t in [
+            "ISSUE_ATTACHMENT",
+            "DRAFT_ISSUE_ATTACHMENT",
+            "USER_COVER",
+            "PROJECT_COVER",
+            "NOPE",
+        ] {
             assert!(!is_static_asset_type(t), "{t}");
             assert!(!is_description_asset_type(t), "{t}");
         }

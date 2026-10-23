@@ -89,9 +89,7 @@ pub const SWEEP_SQL: &str = "UPDATE \"file_assets\" SET \"deleted_at\" = $1 WHER
 pub fn entity_id_field(entity_type: &str) -> Option<&'static str> {
     match entity_type {
         "WORKSPACE_LOGO" => Some("workspace_id"),
-        "PROJECT_COVER" => Some("project_id"),
         "USER_AVATAR" => Some("user_id"),
-        "USER_COVER" => Some("user_id"),
         "ISSUE_ATTACHMENT" => Some("issue_id"),
         "ISSUE_DESCRIPTION" => Some("issue_id"),
         "PAGE_DESCRIPTION" => Some("page_id"),
@@ -656,9 +654,7 @@ mod tests {
     fn entity_map_covers_enum_minus_draft_attachment() {
         let cases = [
             ("WORKSPACE_LOGO", Some("workspace_id")),
-            ("PROJECT_COVER", Some("project_id")),
             ("USER_AVATAR", Some("user_id")),
-            ("USER_COVER", Some("user_id")),
             ("ISSUE_ATTACHMENT", Some("issue_id")),
             ("ISSUE_DESCRIPTION", Some("issue_id")),
             ("PAGE_DESCRIPTION", Some("page_id")),
@@ -666,6 +662,9 @@ mod tests {
             ("DRAFT_ISSUE_DESCRIPTION", Some("draft_issue_id")),
             // Present on the enum but absent from the mapping: no column.
             ("DRAFT_ISSUE_ATTACHMENT", None),
+            // Removed from the enum and the mapping (PDASHOSS01-237).
+            ("PROJECT_COVER", None),
+            ("USER_COVER", None),
             ("BOGUS", None),
             ("", None),
         ];

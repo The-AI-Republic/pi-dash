@@ -87,7 +87,7 @@
 //!
 //! # Residuals (pathological, beyond review scope)
 //!
-//! * Avatar/cover/logo assets whose `entity_type` is not one of the four
+//! * Avatar/logo assets whose `entity_type` is not one of the two
 //!   static types resolve to `None` ([`static_asset_url`]); live upload
 //!   paths always use the static types, and the attachment/description URL
 //!   shapes would need workspace/project joins for data that cannot occur.
@@ -118,8 +118,8 @@ use pidash_services::app_issues::{
     IssueActivityRow,
 };
 use pidash_services::app_project::ser_member::{
-    project_lite_to_representation, resolve_project_cover_image_url, resolve_workspace_logo_url,
-    workspace_lite_to_representation, ProjectLiteRow, WorkspaceLiteRow,
+    project_lite_to_representation, resolve_workspace_logo_url, workspace_lite_to_representation,
+    ProjectLiteRow, WorkspaceLiteRow,
 };
 use pidash_services::app_project::ser_shared::{user_lite_to_representation, UserLiteRow};
 use pidash_services::app_workspace::models_user::user as user_model;
@@ -339,13 +339,13 @@ async fn check_class_gate(
 // ---------------------------------------------------------------------------
 
 /// `FileAsset.asset_url` over the joined entity row
-/// (`db/models/asset.py:80-100`): the four static types render
+/// (`db/models/asset.py:77-96`): the two static types render
 /// `/api/assets/v2/static/<id>/`; anything else maps to `None`
 /// (pathological residual — live upload paths always use the static
-/// types for avatar/cover/logo assets).
+/// types for avatar/logo assets).
 fn static_asset_url(entity_type: Option<&str>, asset_id: &str) -> Option<String> {
     match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Some(format!("/api/assets/v2/static/{asset_id}/"))
         }
         _ => None,
@@ -363,29 +363,26 @@ struct ProfileProject {
     pending_issues: i64,
 }
 
-/// [`qp::profile_user_sql`] row: the 8 `user_data` columns plus the
-/// `avatar` / `cover_image` source columns (email and cover are
-/// nullable; `date_joined` is `timestamptz`).
+/// [`qp::profile_user_sql`] row: the 7 `user_data` columns plus the
+/// `avatar` source columns (email is nullable; `date_joined` is
+/// `timestamptz`).
 type ProfileUserRow = (
     Option<String>,
     String,
     String,
     String,
     Option<uuid::Uuid>,
-    Option<String>,
-    Option<uuid::Uuid>,
     chrono::DateTime<chrono::Utc>,
     String,
     String,
 );
 
-/// The 8-key inline `user_data` dict (`user.py:356-365`), pre-rendered.
+/// The 7-key inline `user_data` dict (`user.py:356-364`), pre-rendered.
 struct ProfileUserData {
     email: Option<String>,
     first_name: String,
     last_name: String,
     avatar_url: Option<String>,
-    cover_image_url: Option<String>,
     date_joined: String,
     user_timezone: String,
     display_name: String,
@@ -417,12 +414,11 @@ fn render_profile_body(projects: &[ProfileProject], user: &ProfileUserData) -> S
     }
     rows.push(']');
     format!(
-        "{{\"project_data\":{rows},\"user_data\":{{\"email\":{},\"first_name\":{},\"last_name\":{},\"avatar_url\":{},\"cover_image_url\":{},\"date_joined\":{},\"user_timezone\":{},\"display_name\":{}}}}}",
+        "{{\"project_data\":{rows},\"user_data\":{{\"email\":{},\"first_name\":{},\"last_name\":{},\"avatar_url\":{},\"date_joined\":{},\"user_timezone\":{},\"display_name\":{}}}}}",
         opt(&user.email),
         json_string(&user.first_name),
         json_string(&user.last_name),
         opt(&user.avatar_url),
-        opt(&user.cover_image_url),
         json_string(&user.date_joined),
         json_string(&user.user_timezone),
         json_string(&user.display_name),
@@ -450,8 +446,6 @@ async fn user_profile(
         last_name,
         avatar,
         avatar_asset_id,
-        cover_image,
-        cover_image_asset_id,
         date_joined,
         user_timezone,
         display_name,
@@ -466,28 +460,19 @@ async fn user_profile(
         .await
         .map_err(|_| Denial::ServerError)?;
     let role = role.map(|row| row.0).ok_or(Denial::NotFound)?;
-    // Asset entity rows for the `avatar_url` / `cover_image_url`
-    // properties (`db/models/user.py:143-165`, FK-first, text fallback).
+    // Asset entity row for the `avatar_url` property
+    // (`db/models/user.py:134-142`, FK-first, text fallback).
     let mut avatar_entity: Option<Option<String>> = None;
-    let mut cover_entity: Option<Option<String>> = None;
-    if avatar_asset_id.is_some() || cover_image_asset_id.is_some() {
+    if avatar_asset_id.is_some() {
         let rows: Vec<(uuid::Uuid, Option<String>)> =
             sqlx::query_as("SELECT id, entity_type FROM file_assets WHERE id = ANY($1)")
-                .bind(
-                    [avatar_asset_id, cover_image_asset_id]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>(),
-                )
+                .bind(avatar_asset_id.into_iter().collect::<Vec<_>>())
                 .fetch_all(&pool)
                 .await
                 .map_err(|_| Denial::ServerError)?;
         for (id, entity) in &rows {
             if Some(*id) == avatar_asset_id {
                 avatar_entity = Some(entity.clone());
-            }
-            if Some(*id) == cover_image_asset_id {
-                cover_entity = Some(entity.clone());
             }
         }
     }
@@ -498,15 +483,6 @@ async fn user_profile(
             user_model::avatar_url(true, url.as_deref(), &avatar).map(str::to_owned)
         }
         None => user_model::avatar_url(false, None, &avatar).map(str::to_owned),
-    };
-    let cover_entity_type: Option<String> = cover_entity.flatten();
-    let cover_image_url = match cover_image_asset_id {
-        Some(id) => {
-            let url = static_asset_url(cover_entity_type.as_deref(), &id.to_string());
-            user_model::cover_image_url(true, url.as_deref(), cover_image.as_deref())
-                .map(str::to_owned)
-        }
-        None => user_model::cover_image_url(false, None, cover_image.as_deref()).map(str::to_owned),
     };
     // `role >= 15` branch (`:289`, the literal — guests keep `[]`).
     let mut projects = Vec::new();
@@ -552,7 +528,6 @@ async fn user_profile(
                 first_name,
                 last_name,
                 avatar_url,
-                cover_image_url,
                 date_joined: crate::serializer::render_datetime(&date_joined),
                 user_timezone,
                 display_name,
@@ -1897,8 +1872,6 @@ fn activity_row_selects() -> String {
         i.target_date AS issue_target_date, i.sequence_id AS issue_sequence_id,
         i.sort_order AS issue_sort_order, i.is_draft AS issue_is_draft,
         p.id AS project_id, p.identifier AS project_identifier, p.name AS project_name,
-        p.cover_image AS project_cover_image,
-        p.cover_image_asset_id AS project_cover_image_asset_id,
         p.logo_props AS project_logo_props, p.description AS project_description,
         p.is_default AS project_is_default,
         w.name AS workspace_name, w.slug AS workspace_slug, w.id AS workspace_id,
@@ -1906,7 +1879,7 @@ fn activity_row_selects() -> String {
     )
 }
 
-/// Batch-resolve `entity_type` for a page's asset ids (avatar/cover/logo
+/// Batch-resolve `entity_type` for a page's asset ids (avatar/logo
 /// `asset_url` inputs). Returns `id → entity_type`.
 async fn fetch_asset_entities(
     pool: &sqlx::PgPool,
@@ -1993,8 +1966,6 @@ fn render_activity_row(
     let deleted_at = instant_opt(row, "a_deleted_at", timezone)?;
     let (avatar_attached, avatar_asset_url) =
         asset_url(assets, uuid_of(row, "actor_avatar_asset_id")?);
-    let (cover_attached, cover_asset_url) =
-        asset_url(assets, uuid_of(row, "project_cover_image_asset_id")?);
     let (logo_attached, logo_asset_url) =
         asset_url(assets, uuid_of(row, "workspace_logo_asset_id")?);
     let attachments: Vec<&str> = match row.get("attachments") {
@@ -2065,12 +2036,6 @@ fn render_activity_row(
         id: required(row, "project_id")?,
         identifier: required(row, "project_identifier")?,
         name: required(row, "project_name")?,
-        cover_image: text(row, "project_cover_image"),
-        cover_image_url: resolve_project_cover_image_url(
-            cover_attached,
-            cover_asset_url.as_deref(),
-            text(row, "project_cover_image"),
-        ),
         logo_props: row.get("project_logo_props").ok_or(Denial::ServerError)?,
         description: required(row, "project_description")?,
         is_default: row
@@ -2161,15 +2126,11 @@ async fn activity_flat_response(
         let sql = format!("SELECT COUNT(*) {from_where}");
         fetch_count(pool, &sql, values).await?
     };
-    // One batched asset-entity lookup for the page's avatar/cover/logo
+    // One batched asset-entity lookup for the page's avatar/logo
     // resolutions.
     let mut asset_ids = Vec::new();
     for row in &page {
-        for key in [
-            "actor_avatar_asset_id",
-            "project_cover_image_asset_id",
-            "workspace_logo_asset_id",
-        ] {
+        for key in ["actor_avatar_asset_id", "workspace_logo_asset_id"] {
             if let Some(Value::String(raw)) = row.get(key) {
                 if let Ok(id) = raw.parse::<uuid::Uuid>() {
                     if !asset_ids.contains(&id) {
@@ -2378,7 +2339,6 @@ mod tests {
                 first_name: "Ada".to_owned(),
                 last_name: "L".to_owned(),
                 avatar_url: Some("https://x/y.png".to_owned()),
-                cover_image_url: None,
                 date_joined: "2025-01-01T00:00:00Z".to_owned(),
                 user_timezone: "UTC".to_owned(),
                 display_name: "Ada".to_owned(),
@@ -2386,7 +2346,7 @@ mod tests {
         );
         assert_eq!(
             body,
-            r#"{"project_data":[{"id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","logo_props":{},"created_issues":5,"assigned_issues":7,"completed_issues":3,"pending_issues":4}],"user_data":{"email":"ada@x.io","first_name":"Ada","last_name":"L","avatar_url":"https://x/y.png","cover_image_url":null,"date_joined":"2025-01-01T00:00:00Z","user_timezone":"UTC","display_name":"Ada"}}"#
+            r#"{"project_data":[{"id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","logo_props":{},"created_issues":5,"assigned_issues":7,"completed_issues":3,"pending_issues":4}],"user_data":{"email":"ada@x.io","first_name":"Ada","last_name":"L","avatar_url":"https://x/y.png","date_joined":"2025-01-01T00:00:00Z","user_timezone":"UTC","display_name":"Ada"}}"#
         );
         // Guest branch: `project_data` is `[]`, email may be null.
         let guest = render_profile_body(
@@ -2396,7 +2356,6 @@ mod tests {
                 first_name: "".to_owned(),
                 last_name: "".to_owned(),
                 avatar_url: None,
-                cover_image_url: None,
                 date_joined: "2025-01-01T00:00:00Z".to_owned(),
                 user_timezone: "UTC".to_owned(),
                 display_name: "x".to_owned(),
@@ -2873,7 +2832,7 @@ mod tests {
     }
 
     #[test]
-    fn static_asset_url_covers_four_types() {
+    fn static_asset_url_covers_two_types() {
         assert_eq!(
             static_asset_url(Some("USER_AVATAR"), "abc"),
             Some("/api/assets/v2/static/abc/".to_owned())
@@ -2931,8 +2890,6 @@ mod tests {
         );
         row.insert("project_identifier".to_owned(), Value::from("ENG"));
         row.insert("project_name".to_owned(), Value::from("Eng"));
-        row.insert("project_cover_image".to_owned(), Value::Null);
-        row.insert("project_cover_image_asset_id".to_owned(), Value::Null);
         row.insert("project_logo_props".to_owned(), serde_json::json!({}));
         row.insert("project_description".to_owned(), Value::from("d"));
         row.insert("project_is_default".to_owned(), Value::from(false));

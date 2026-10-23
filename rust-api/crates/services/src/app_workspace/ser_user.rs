@@ -5,7 +5,7 @@
 //! * `UserSerializer` (`:15-61`, `validate_first_name` /
 //!   `validate_last_name` URL guards, dynamic fields minus `password`,
 //!   24-key read-only list)
-//! * `UserMeSerializer` (`:63-88`, exact 19-key list including the
+//! * `UserMeSerializer` (`:63-86`, exact 17-key list including the
 //!   duplicated `is_email_verified`)
 //! * `UserMeSettingsSerializer` (`:90-139`, `get_workspace` last-workspace
 //!   vs fallback branches)
@@ -24,8 +24,8 @@
 //!
 //! * [`contains_url`] is reused from [`super::ser_workspace`] (the port
 //!   of `pi_dash/utils/url.py:26-53`); the name guards delegate to it.
-//! * `avatar_url` / `cover_image_url` arrive already resolved (the models
-//!   layer owns the property port, `db/models/user.py:142-162`); this
+//! * `avatar_url` arrives already resolved (the models layer owns the
+//!   property port, `db/models/user.py:134-142`); this
 //!   module only places the value (`None` renders `null`).
 //! * The nested `member` slots of `ser_workspace`'s member views are
 //!   generic over these lite renderers; handlers compose the two.
@@ -40,11 +40,11 @@
 //! * BUG-onboarded (`user.py:59-60`): `get_is_onboarded` is defined
 //!   *inside* `class Meta`, so it is dead code — no `is_onboarded` field
 //!   is declared and nothing renders. Ported by omitting it.
-//! * BUG-dup (`user.py:79,83,87`): `UserMeSerializer.fields` lists
+//! * BUG-dup (`user.py:77,81,85`): `UserMeSerializer.fields` lists
 //!   `is_email_verified` twice and `read_only_fields = fields` keeps the
 //!   duplicate. DRF builds the field map as a dict, so the wire keeps one
-//!   copy at the first position (18 keys, verified live). The [`USER_ME_FIELDS`]
-//!   const carries all 19 entries verbatim; the view renders 18.
+//!   copy at the first position (16 keys, verified live). The [`USER_ME_FIELDS`]
+//!   const carries all 17 entries verbatim; the view renders 16.
 //! * BUG-asymmetry (`user.py:117-138`): the `get_workspace` branches
 //!   return different shapes — the last-workspace branch has
 //!   `last_workspace_name` / `last_workspace_logo` plus `fallback_*`
@@ -74,7 +74,7 @@ use thiserror::Error as ThisError;
 /// `password` (`user.py:29`), verified against the live serializer.
 /// (Declared `id` keeps its `Meta` position; M2M-only names never
 /// appear because `_meta.fields` excludes them. See BUG-dynamic.)
-pub const USER_WIRE_FIELDS: [&str; 39] = [
+pub const USER_WIRE_FIELDS: [&str; 37] = [
     "last_login",
     "id",
     "username",
@@ -85,8 +85,6 @@ pub const USER_WIRE_FIELDS: [&str; 39] = [
     "last_name",
     "avatar",
     "avatar_asset",
-    "cover_image",
-    "cover_image_asset",
     "date_joined",
     "created_at",
     "updated_at",
@@ -144,15 +142,13 @@ pub const USER_READ_ONLY_FIELDS: [&str; 24] = [
     "token_updated_at",
 ];
 
-/// `UserMeSerializer.Meta.fields` (`user.py:66-86`) verbatim: 19 entries
+/// `UserMeSerializer.Meta.fields` (`user.py:66-84`) verbatim: 17 entries
 /// *including* the duplicated `is_email_verified` (BUG-dup). The
 /// rendered wire order is [`USER_ME_WIRE_FIELDS`].
-pub const USER_ME_FIELDS: [&str; 19] = [
+pub const USER_ME_FIELDS: [&str; 17] = [
     "id",
     "avatar",
-    "cover_image",
     "avatar_url",
-    "cover_image_url",
     "date_joined",
     "display_name",
     "email",
@@ -169,19 +165,17 @@ pub const USER_ME_FIELDS: [&str; 19] = [
     "last_login_time",
 ];
 
-/// `UserMeSerializer.Meta.read_only_fields` (`user.py:87`): `= fields`,
+/// `UserMeSerializer.Meta.read_only_fields` (`user.py:85`): `= fields`,
 /// duplicate included.
-pub const USER_ME_READ_ONLY_FIELDS: [&str; 19] = USER_ME_FIELDS;
+pub const USER_ME_READ_ONLY_FIELDS: [&str; 17] = USER_ME_FIELDS;
 
 /// `UserMeSerializer` wire keys in output order (verified against the
 /// live serializer): the duplicated `is_email_verified` collapses to one
-/// copy at its first position, so 18 keys render (BUG-dup).
-pub const USER_ME_WIRE_FIELDS: [&str; 18] = [
+/// copy at its first position, so 16 keys render (BUG-dup).
+pub const USER_ME_WIRE_FIELDS: [&str; 16] = [
     "id",
     "avatar",
-    "cover_image",
     "avatar_url",
-    "cover_image_url",
     "date_joined",
     "display_name",
     "email",
@@ -310,8 +304,6 @@ pub struct UserRow<'a> {
     pub last_name: &'a str,
     pub avatar: &'a str,
     pub avatar_asset: Option<&'a str>,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_asset: Option<&'a str>,
     pub date_joined: &'a str,
     pub created_at: &'a str,
     pub updated_at: &'a str,
@@ -356,8 +348,6 @@ pub struct UserView<'a> {
     pub last_name: &'a str,
     pub avatar: &'a str,
     pub avatar_asset: Option<&'a str>,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_asset: Option<&'a str>,
     pub date_joined: &'a str,
     pub created_at: &'a str,
     pub updated_at: &'a str,
@@ -400,8 +390,6 @@ pub fn user_to_representation<'a>(row: &'a UserRow<'a>) -> UserView<'a> {
         last_name: row.last_name,
         avatar: row.avatar,
         avatar_asset: row.avatar_asset,
-        cover_image: row.cover_image,
-        cover_image_asset: row.cover_image_asset,
         date_joined: row.date_joined,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -432,18 +420,15 @@ pub fn user_to_representation<'a>(row: &'a UserRow<'a>) -> UserView<'a> {
     }
 }
 
-/// A `User` row for [`user_me_to_representation`] (`user.py:63-88`):
-/// `avatar_url` / `cover_image_url` are the resolved model properties
-/// (`None` renders `null`); `cover_image` / `email` are nullable
-/// columns; `last_login_time` is a nullable datetime (pre-rendered DRF
+/// A `User` row for [`user_me_to_representation`] (`user.py:63-86`):
+/// `avatar_url` is the resolved model property (`None` renders `null`);
+/// `email` is a nullable column; `last_login_time` is a nullable datetime (pre-rendered DRF
 /// string when set).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserMeRow<'a> {
     pub id: &'a str,
     pub avatar: &'a str,
-    pub cover_image: Option<&'a str>,
     pub avatar_url: Option<&'a str>,
-    pub cover_image_url: Option<&'a str>,
     pub date_joined: &'a str,
     pub display_name: &'a str,
     pub email: Option<&'a str>,
@@ -459,15 +444,13 @@ pub struct UserMeRow<'a> {
     pub last_login_time: Option<&'a str>,
 }
 
-/// `UserMeSerializer.to_representation` output, in wire order: 18 keys —
+/// `UserMeSerializer.to_representation` output, in wire order: 16 keys —
 /// the duplicated `is_email_verified` renders once (BUG-dup).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserMeView<'a> {
     pub id: &'a str,
     pub avatar: &'a str,
-    pub cover_image: Option<&'a str>,
     pub avatar_url: Option<&'a str>,
-    pub cover_image_url: Option<&'a str>,
     pub date_joined: &'a str,
     pub display_name: &'a str,
     pub email: Option<&'a str>,
@@ -483,14 +466,12 @@ pub struct UserMeView<'a> {
     pub last_login_time: Option<&'a str>,
 }
 
-/// Port of `UserMeSerializer` (`user.py:63-88`).
+/// Port of `UserMeSerializer` (`user.py:63-86`).
 pub fn user_me_to_representation<'a>(row: &'a UserMeRow<'a>) -> UserMeView<'a> {
     UserMeView {
         id: row.id,
         avatar: row.avatar,
-        cover_image: row.cover_image,
         avatar_url: row.avatar_url,
-        cover_image_url: row.cover_image_url,
         date_joined: row.date_joined,
         display_name: row.display_name,
         email: row.email,
@@ -814,11 +795,11 @@ mod tests {
         assert_eq!(
             const_list(&USER_ME_FIELDS),
             str_list(&serializers["UserMeSerializer"]["fields"]),
-            "UserMeSerializer fields (19, dup included)"
+            "UserMeSerializer fields (17, dup included)"
         );
         assert_eq!(
             serializers["UserMeSerializer"]["read_only"].as_str(),
-            Some("= fields (:87)"),
+            Some("= fields (:85)"),
             "UserMeSerializer read_only"
         );
         assert_eq!(
@@ -895,8 +876,6 @@ mod tests {
                 "last_name",
                 "avatar",
                 "avatar_asset",
-                "cover_image",
-                "cover_image_asset",
                 "date_joined",
                 "created_at",
                 "updated_at",
@@ -931,9 +910,7 @@ mod tests {
             [
                 "id",
                 "avatar",
-                "cover_image",
                 "avatar_url",
-                "cover_image_url",
                 "date_joined",
                 "display_name",
                 "email",
@@ -979,13 +956,13 @@ mod tests {
 
     #[test]
     fn user_me_duplicate_collapses_on_wire() {
-        // BUG-dup (user.py:79,83,87): the 19-entry fields list carries
+        // BUG-dup (user.py:77,81,85): the 17-entry fields list carries
         // `is_email_verified` twice; the live wire renders one copy at
         // the first position.
-        assert_eq!(USER_ME_FIELDS.len(), 19);
-        assert_eq!(USER_ME_FIELDS[12], "is_email_verified");
-        assert_eq!(USER_ME_FIELDS[16], "is_email_verified");
-        assert_eq!(USER_ME_WIRE_FIELDS.len(), 18);
+        assert_eq!(USER_ME_FIELDS.len(), 17);
+        assert_eq!(USER_ME_FIELDS[10], "is_email_verified");
+        assert_eq!(USER_ME_FIELDS[14], "is_email_verified");
+        assert_eq!(USER_ME_WIRE_FIELDS.len(), 16);
         assert_eq!(
             USER_ME_WIRE_FIELDS
                 .iter()
@@ -997,7 +974,7 @@ mod tests {
         let deduped: Vec<&str> = USER_ME_FIELDS
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != 16)
+            .filter(|(i, _)| *i != 14)
             .map(|(_, k)| *k)
             .collect();
         assert_eq!(deduped, USER_ME_WIRE_FIELDS.to_vec());
@@ -1020,8 +997,8 @@ mod tests {
     /// boundary pre-rendered, so the oracles use the production `Z` form
     /// (the probe's minimal settings render `-06:00` for the same
     /// instants).
-    const USER: &str = r##"{"last_login":null,"id":"11111111-1111-1111-1111-111111111111","username":"ada_lovelace","mobile_number":null,"email":"ada@acme.test","display_name":"","first_name":"Ada","last_name":"Lovelace","avatar":"avatars/a.png","avatar_asset":null,"cover_image":null,"cover_image_asset":null,"date_joined":"2026-01-15T12:30:45.123456Z","created_at":"2026-01-15T12:30:45.123456Z","updated_at":"2026-01-16T08:05:04Z","last_location":"","created_location":"","is_superuser":false,"is_managed":false,"is_password_expired":false,"is_active":true,"is_staff":false,"is_email_verified":true,"is_password_autoset":false,"is_password_reset_required":false,"token":"tok_abc","last_active":"2026-01-16T08:05:04Z","last_login_time":"2026-01-16T08:05:04Z","last_logout_time":null,"last_login_ip":"1.2.3.4","last_logout_ip":"","last_login_medium":"password","last_login_uagent":"Mozilla/5.0 (x) \"q\"","token_updated_at":null,"is_bot":false,"bot_type":null,"user_timezone":"UTC","is_email_valid":true,"masked_at":null}"##;
-    const ME: &str = r##"{"id":"11111111-1111-1111-1111-111111111111","avatar":"avatars/a.png","cover_image":null,"avatar_url":"avatars/a.png","cover_image_url":null,"date_joined":"2026-01-15T12:30:45.123456Z","display_name":"","email":"ada@acme.test","first_name":"Ada","last_name":"Lovelace","is_active":true,"is_bot":false,"is_email_verified":true,"user_timezone":"UTC","username":"ada_lovelace","is_password_autoset":false,"last_login_medium":"password","last_login_time":"2026-01-16T08:05:04Z"}"##;
+    const USER: &str = r##"{"last_login":null,"id":"11111111-1111-1111-1111-111111111111","username":"ada_lovelace","mobile_number":null,"email":"ada@acme.test","display_name":"","first_name":"Ada","last_name":"Lovelace","avatar":"avatars/a.png","avatar_asset":null,"date_joined":"2026-01-15T12:30:45.123456Z","created_at":"2026-01-15T12:30:45.123456Z","updated_at":"2026-01-16T08:05:04Z","last_location":"","created_location":"","is_superuser":false,"is_managed":false,"is_password_expired":false,"is_active":true,"is_staff":false,"is_email_verified":true,"is_password_autoset":false,"is_password_reset_required":false,"token":"tok_abc","last_active":"2026-01-16T08:05:04Z","last_login_time":"2026-01-16T08:05:04Z","last_logout_time":null,"last_login_ip":"1.2.3.4","last_logout_ip":"","last_login_medium":"password","last_login_uagent":"Mozilla/5.0 (x) \"q\"","token_updated_at":null,"is_bot":false,"bot_type":null,"user_timezone":"UTC","is_email_valid":true,"masked_at":null}"##;
+    const ME: &str = r##"{"id":"11111111-1111-1111-1111-111111111111","avatar":"avatars/a.png","avatar_url":"avatars/a.png","date_joined":"2026-01-15T12:30:45.123456Z","display_name":"","email":"ada@acme.test","first_name":"Ada","last_name":"Lovelace","is_active":true,"is_bot":false,"is_email_verified":true,"user_timezone":"UTC","username":"ada_lovelace","is_password_autoset":false,"last_login_medium":"password","last_login_time":"2026-01-16T08:05:04Z"}"##;
     const LITE: &str = r##"{"id":"11111111-1111-1111-1111-111111111111","first_name":"Ada","last_name":"Lovelace","avatar":"avatars/a.png","avatar_url":"avatars/a.png","is_bot":false,"display_name":""}"##;
     const ADMIN_LITE: &str = r##"{"id":"11111111-1111-1111-1111-111111111111","first_name":"Ada","last_name":"Lovelace","avatar":"avatars/a.png","avatar_url":"avatars/a.png","is_bot":false,"display_name":"","email":"ada@acme.test","last_login_medium":"password"}"##;
     /// `get_workspace` is DB-backed (invites, profile, memberships), so
@@ -1045,8 +1022,6 @@ mod tests {
             last_name: "Lovelace",
             avatar: "avatars/a.png",
             avatar_asset: None,
-            cover_image: None,
-            cover_image_asset: None,
             date_joined: "2026-01-15T12:30:45.123456Z",
             created_at: "2026-01-15T12:30:45.123456Z",
             updated_at: "2026-01-16T08:05:04Z",
@@ -1081,9 +1056,7 @@ mod tests {
         UserMeRow {
             id: "11111111-1111-1111-1111-111111111111",
             avatar: "avatars/a.png",
-            cover_image: None,
             avatar_url: Some("avatars/a.png"),
-            cover_image_url: None,
             date_joined: "2026-01-15T12:30:45.123456Z",
             display_name: "",
             email: Some("ada@acme.test"),

@@ -65,7 +65,6 @@ USER_DATA_KEYS = {
     "first_name",
     "last_name",
     "avatar_url",
-    "cover_image_url",
     "date_joined",
     "user_timezone",
     "display_name",

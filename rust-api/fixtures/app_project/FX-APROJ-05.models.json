@@ -210,24 +210,6 @@
           "default": true
         },
         {
-          "name": "cover_image",
-          "column": "cover_image",
-          "type": "TextField",
-          "null": true,
-          "blank": true
-        },
-        {
-          "name": "cover_image_asset",
-          "column": "cover_image_asset_id",
-          "type": "ForeignKey",
-          "null": true,
-          "blank": true,
-          "db_index": true,
-          "fk_to": "db.FileAsset",
-          "on_delete": "SET_NULL",
-          "related_name": "project_cover_image"
-        },
-        {
           "name": "estimate",
           "column": "estimate_id",
           "type": "ForeignKey",
@@ -2206,8 +2188,6 @@
         "last_name",
         "avatar",
         "avatar_asset",
-        "cover_image",
-        "cover_image_asset",
         "date_joined",
         "created_at",
         "updated_at",

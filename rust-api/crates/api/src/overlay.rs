@@ -137,8 +137,8 @@ impl Overlay {
 /// family (`app_integrations`, PIDASHCONV-443/446/450/452/454): the five
 /// GitHub App install-flow routes (443), the workspace GitHub shell
 /// (446), the project-github bind + status routes (450), the two git
-/// project-repository paths (452), and the two AI-assistant POSTs plus
-/// the Unsplash GET (454); sibling D-33 handler issues extend that
+/// project-repository paths (452), and the two AI-assistant POSTs
+/// (454); sibling D-33 handler issues extend that
 /// merge, keeping both sides — plus the D-31 legacy v1 asset routes
 /// (`app_assets`, PIDASHCONV-394; sibling handler issues 400/412 extend
 /// that merge, keeping both sides) — plus the D-23 OpenAPI schema trio
@@ -193,7 +193,7 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
         // PIDASHCONV-395, in `app_intake`; D-33 GitHub App install flow
         // (PIDASHCONV-443) + workspace GitHub handlers (PIDASHCONV-446)
         // + project-github (PIDASHCONV-450) + git project-repository
-        // (PIDASHCONV-452) + external LLM/Unsplash (PIDASHCONV-454)
+        // (PIDASHCONV-452) + external LLM (PIDASHCONV-454)
         // + git provider-accounts (PIDASHCONV-451) + webhooks
         // (PIDASHCONV-453), all in `app_integrations`; D-31 v2
         // user/workspace/static/restore assets (PIDASHCONV-400) + v2

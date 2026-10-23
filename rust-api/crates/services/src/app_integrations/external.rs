@@ -3,7 +3,7 @@
 //! Ports the pure half of `apps/api/pi_dash/app/views/external/base.py`
 //! (243 lines): the `SUPPORTED_PROVIDERS` table (`:42-73`), the
 //! `get_llm_config` branches (`:76-120`), the `get_llm_response` request
-//! shape (`:123-145`), and the Unsplash URL builders (`:234-238`).
+//! shape (`:123-145`).
 //! The HTTP shell (routes, session auth, gates, config-row SQL, the
 //! outbound OpenAI/`requests` calls) lives in
 //! [`crate::app_integrations::handlers_external`]; the wire behavior is
@@ -14,8 +14,6 @@
 //!
 //! Ported bugs (translate, don't redesign):
 //!
-//! * B3 (`base.py:235`): the Unsplash search URL renders `page=${page}`
-//!   with a stray `$`; [`unsplash_search_url`] keeps it byte-for-byte.
 //! * B5 (`base.py:159,163`): `task`/`prompt` default to `False`, not
 //!   `""`. A falsy `task` answers 400; a falsy `prompt` flows into
 //!   `get_llm_response` as `False`, so `task + "\n" + prompt` raises
@@ -251,42 +249,6 @@ pub fn response_html(text: &str) -> String {
     text.replace('\n', "<br/>")
 }
 
-// ---------------------------------------------------------------------------
-// Unsplash URL builders (`base.py:234-238`)
-// ---------------------------------------------------------------------------
-
-/// Search URL (`base.py:235`) — B3 kept: `page=${page}` with the stray
-/// `$` is ported byte-for-byte.
-pub fn unsplash_search_url(access_key: &str, query: &str, page: &str, per_page: &str) -> String {
-    format!(
-        "https://api.unsplash.com/search/photos/?client_id={access_key}&query={query}&page=${page}&per_page={per_page}"
-    )
-}
-
-/// List URL (`base.py:237`).
-pub fn unsplash_list_url(access_key: &str, page: &str, per_page: &str) -> String {
-    format!(
-        "https://api.unsplash.com/photos/?client_id={access_key}&page={page}&per_page={per_page}"
-    )
-}
-
-/// `query = request.GET.get("query", False)` — only a non-empty query
-/// takes the search shape; `page`/`per_page` default to `"1"`/`"20"`
-/// as raw strings with no int coercion (`base.py:230-232`).
-pub fn unsplash_url(
-    access_key: &str,
-    query: Option<&str>,
-    page: Option<&str>,
-    per_page: Option<&str>,
-) -> String {
-    let page = page.unwrap_or("1");
-    let per_page = per_page.unwrap_or("20");
-    match query {
-        Some(q) if !q.is_empty() => unsplash_search_url(access_key, q, page, per_page),
-        _ => unsplash_list_url(access_key, page, per_page),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,40 +395,6 @@ mod tests {
     fn response_html_replaces_newlines() {
         assert_eq!(response_html("a\nb\nc"), "a<br/>b<br/>c");
         assert_eq!(response_html("flat"), "flat");
-    }
-
-    // -- FX-EXT-01: unsplash shapes (incl B3) ----------------------------------
-
-    #[test]
-    fn unsplash_urls_match_fixture_shapes() {
-        let gold = fixture("fx-ext-01-llm.json");
-        let shape = gold["endpoints"]["unsplash"]["url_shape"]
-            .as_str()
-            .expect("shape");
-        assert!(shape.contains("page=$"), "fixture pins the B3 stray $");
-        assert_eq!(
-            unsplash_search_url("KEY", "cats", "2", "5"),
-            "https://api.unsplash.com/search/photos/?client_id=KEY&query=cats&page=$2&per_page=5"
-        );
-        assert_eq!(
-            unsplash_list_url("KEY", "2", "5"),
-            "https://api.unsplash.com/photos/?client_id=KEY&page=2&per_page=5"
-        );
-    }
-
-    #[test]
-    fn unsplash_url_dispatch_and_raw_defaults() {
-        // Missing/empty query takes the list shape; page/per_page stay
-        // raw strings with "1"/"20" defaults (base.py:230-232).
-        assert_eq!(
-            unsplash_url("K", None, None, None),
-            "https://api.unsplash.com/photos/?client_id=K&page=1&per_page=20"
-        );
-        assert_eq!(
-            unsplash_url("K", Some(""), None, None),
-            "https://api.unsplash.com/photos/?client_id=K&page=1&per_page=20"
-        );
-        assert!(unsplash_url("K", Some("cats"), Some("2"), Some("5")).contains("/search/photos/"));
     }
 
     #[test]

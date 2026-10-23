@@ -1721,7 +1721,7 @@ fn push_sort_order(body: &mut String, value: Option<&Value>) {
 // ---------------------------------------------------------------------------
 
 /// Rename one fragment column list for the full-row composite: strip the
-/// table qualifier (and quoting) and add the group prefix, so the 175
+/// table qualifier (and quoting) and add the group prefix, so the 173
 /// colliding `created_at`/`id`/… outputs become unique JSON keys.
 fn prefixed_columns(columns: &str, table: &str, prefix: &str) -> Vec<String> {
     let qualifier = format!("{table}.");
@@ -1740,7 +1740,7 @@ fn prefixed_columns(columns: &str, table: &str, prefix: &str) -> Vec<String> {
 
 /// The full-statement column-alias list, derived from the same fragment
 /// consts `identifier_full_sql` embeds — in the same order (issue 34, the 9
-/// annotations, project 46, workspace 14, parent 34, state 18, ticker 20).
+/// annotations, project 44, workspace 14, parent 34, state 18, ticker 20).
 /// Postgres validates the COUNT at runtime (a wrong count errors); the unit
 /// tests pin the ORDER against the consts, so transcription drift fails the
 /// build instead of silently mislabeling columns.
@@ -2865,7 +2865,7 @@ mod tests {
             "t_",
         ));
         let actual = full_row_aliases();
-        assert_eq!(actual.len(), 175);
+        assert_eq!(actual.len(), 173);
         assert_eq!(actual, expected);
         // Spot the group boundaries: a shifted block fails loudly.
         assert_eq!(actual[0], "i_created_at");
@@ -2873,15 +2873,15 @@ mod tests {
         assert_eq!(actual[34], "cycle_id");
         assert_eq!(actual[42], "is_intake");
         assert_eq!(actual[43], "p_created_at");
-        assert_eq!(actual[88], "p_default_agent_executor");
-        assert_eq!(actual[89], "w_created_at");
-        assert_eq!(actual[102], "w_background_color");
-        assert_eq!(actual[103], "par_created_at");
-        assert_eq!(actual[136], "par_agent_executor");
-        assert_eq!(actual[137], "s_created_at");
-        assert_eq!(actual[154], "s_external_id");
-        assert_eq!(actual[155], "t_created_at");
-        assert_eq!(actual[174], "t_resume_parent_run_id");
+        assert_eq!(actual[86], "p_default_agent_executor");
+        assert_eq!(actual[87], "w_created_at");
+        assert_eq!(actual[100], "w_background_color");
+        assert_eq!(actual[101], "par_created_at");
+        assert_eq!(actual[134], "par_agent_executor");
+        assert_eq!(actual[135], "s_created_at");
+        assert_eq!(actual[152], "s_external_id");
+        assert_eq!(actual[153], "t_created_at");
+        assert_eq!(actual[172], "t_resume_parent_run_id");
         // Unique: no `row_to_json` key collision survives.
         let mut unique = actual.clone();
         unique.sort();

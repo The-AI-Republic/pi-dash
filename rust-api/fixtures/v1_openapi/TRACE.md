@@ -156,6 +156,14 @@ djangorestframework 3.15.2, Django 4.2.30.
   (`COMPONENT_SCHEMAS_JSON`) so no `$ref` dangles. Guarded by the Rust
   unit tests in `doc.rs` and the contract test
   `rust-api/contract-tests/v1_openapi/test_refs_resolve.py`.
+- PDASHOSS01-237 (cover-image removal, Python PR #523): `Project`,
+  `ProjectCreateRequest`, `PatchedProjectUpdateRequest` and
+  `UserAssetUploadRequest` re-copied from `manage.py spectacular
+  --format openapi-json` on the #523 branch (`cover_image*` properties and
+  the `USER_COVER` enum member gone); the other 85 schemas were byte-equal
+  to that regeneration and are untouched. The `django_doc_*` provenance
+  fields still describe the original d656243d3 capture. The Assets tag
+  description in `FX-OPENAPI-01.meta.json` follows `settings/openapi.py`.
 
 ## Out of scope (reading context, not ported here)
 

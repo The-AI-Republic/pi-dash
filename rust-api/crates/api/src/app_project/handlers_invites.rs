@@ -115,9 +115,8 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::project::ProjectFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
 use pidash_services::app_project::ser_member::{
-    invite_to_representation, project_lite_to_representation, resolve_project_cover_image_url,
-    resolve_workspace_logo_url, workspace_lite_to_representation, ProjectLiteRow,
-    ProjectMemberInviteRow, WorkspaceLiteRow,
+    invite_to_representation, project_lite_to_representation, resolve_workspace_logo_url,
+    workspace_lite_to_representation, ProjectLiteRow, ProjectMemberInviteRow, WorkspaceLiteRow,
 };
 use pidash_services::app_project::ser_project::{DeployBoardRead, DEPLOY_BOARD_INITIAL_BODY};
 use pidash_services::app_project::tasks::{
@@ -714,10 +713,9 @@ struct AssetRef {
 /// port's transcription).
 fn render_asset_url(asset: &AssetRef) -> Option<String> {
     match asset.entity_type.as_deref() {
-        Some("WORKSPACE_LOGO")
-        | Some("USER_AVATAR")
-        | Some("USER_COVER")
-        | Some("PROJECT_COVER") => Some(format!("/api/assets/v2/static/{}/", asset.id)),
+        Some("WORKSPACE_LOGO") | Some("USER_AVATAR") => {
+            Some(format!("/api/assets/v2/static/{}/", asset.id))
+        }
         Some("ISSUE_ATTACHMENT") => Some(format!(
             "/api/assets/v2/workspaces/{}/projects/{}/issues/{}/attachments/{}/",
             asset.workspace_slug.as_deref().unwrap_or(""),
@@ -814,8 +812,6 @@ struct InviteRow {
     project_id: uuid::Uuid,
     project_identifier: String,
     project_name: String,
-    project_cover_image: Option<String>,
-    project_cover_asset_id: Option<uuid::Uuid>,
     project_logo_props: Value,
     project_description: String,
     project_is_default: bool,
@@ -829,7 +825,6 @@ struct InviteRow {
 const INVITE_SELECT: &str = "i.id, i.created_at, i.updated_at, i.deleted_at, i.email, i.accepted, \
      i.token, i.message, i.responded_at, i.role, i.created_by_id, i.updated_by_id, \
      p.id AS project_id, p.identifier AS project_identifier, p.name AS project_name, \
-     p.cover_image AS project_cover_image, p.cover_image_asset_id AS project_cover_asset_id, \
      p.logo_props AS project_logo_props, p.description AS project_description, \
      p.is_default AS project_is_default, \
      w.id AS workspace_id, w.name AS workspace_name, w.slug AS workspace_slug, \
@@ -864,12 +859,6 @@ fn invite_row(row: &sqlx::postgres::PgRow) -> Result<InviteRow, Denial> {
             .map_err(|_| Denial::ServerError)?,
         project_name: row
             .try_get("project_name")
-            .map_err(|_| Denial::ServerError)?,
-        project_cover_image: row
-            .try_get("project_cover_image")
-            .map_err(|_| Denial::ServerError)?,
-        project_cover_asset_id: row
-            .try_get("project_cover_asset_id")
             .map_err(|_| Denial::ServerError)?,
         project_logo_props: row
             .try_get("project_logo_props")
@@ -1016,7 +1005,6 @@ struct RenderedInvite {
     responded_at: Option<String>,
     created_by: Option<String>,
     updated_by: Option<String>,
-    cover_image_url: Option<String>,
     logo_url: Option<String>,
 }
 
@@ -1041,13 +1029,6 @@ fn render_invite(
             .map(|dt| crate::serializer::render_datetime_in(dt, tz)),
         created_by: row.created_by_id.map(|id| id.to_string()),
         updated_by: row.updated_by_id.map(|id| id.to_string()),
-        cover_image_url: resolve_project_cover_image_url(
-            row.project_cover_asset_id.is_some(),
-            row.project_cover_asset_id
-                .and_then(|id| assets.get(&id).map(String::as_str)),
-            row.project_cover_image.as_deref(),
-        )
-        .map(str::to_owned),
         logo_url: resolve_workspace_logo_url(
             row.workspace_logo_asset_id.is_some(),
             row.workspace_logo_asset_id
@@ -1062,8 +1043,6 @@ fn render_invite(
             id: &rendered.project_id,
             identifier: &row.project_identifier,
             name: &row.project_name,
-            cover_image: row.project_cover_image.as_deref(),
-            cover_image_url: rendered.cover_image_url.as_deref(),
             logo_props: &row.project_logo_props,
             description: &row.project_description,
             is_default: row.project_is_default,
@@ -1093,7 +1072,6 @@ fn render_invite(
 
 /// Collect the asset ids one invite row references.
 fn invite_asset_ids(row: &InviteRow, out: &mut Vec<uuid::Uuid>) {
-    out.extend(row.project_cover_asset_id);
     out.extend(row.workspace_logo_asset_id);
 }
 
@@ -1127,8 +1105,6 @@ struct BoardRow {
     workspace_logo_asset_id: Option<uuid::Uuid>,
     project_identifier: Option<String>,
     project_name: Option<String>,
-    project_cover_image: Option<String>,
-    project_cover_asset_id: Option<uuid::Uuid>,
     project_logo_props: Option<Value>,
     project_description: Option<String>,
     project_is_default: Option<bool>,
@@ -1140,7 +1116,6 @@ const BOARD_SELECT: &str = "b.id, b.created_at, b.updated_at, b.deleted_at, b.en
      b.workspace_id, w.name AS workspace_name, w.slug AS workspace_slug, \
      w.logo AS workspace_logo, w.logo_asset_id AS workspace_logo_asset_id, \
      p.id AS project_id, p.identifier AS project_identifier, p.name AS project_name, \
-     p.cover_image AS project_cover_image, p.cover_image_asset_id AS project_cover_asset_id, \
      p.logo_props AS project_logo_props, p.description AS project_description, \
      p.is_default AS project_is_default, b.project_id AS board_project_id, b.intake_id AS intake_id \
      FROM deploy_boards b \
@@ -1210,12 +1185,6 @@ fn board_row(
                 .map_err(|_| Denial::ServerError)?,
             project_name: row
                 .try_get("project_name")
-                .map_err(|_| Denial::ServerError)?,
-            project_cover_image: row
-                .try_get("project_cover_image")
-                .map_err(|_| Denial::ServerError)?,
-            project_cover_asset_id: row
-                .try_get("project_cover_asset_id")
                 .map_err(|_| Denial::ServerError)?,
             project_logo_props: row
                 .try_get("project_logo_props")
@@ -1321,19 +1290,11 @@ fn render_board(
             Some(description),
             Some(is_default),
         ) => {
-            let cover_image_url = resolve_project_cover_image_url(
-                row.project_cover_asset_id.is_some(),
-                row.project_cover_asset_id
-                    .and_then(|id| assets.get(&id).map(String::as_str)),
-                row.project_cover_image.as_deref(),
-            );
             let id = id.to_string();
             serde_json::to_value(project_lite_to_representation(&ProjectLiteRow {
                 id: &id,
                 identifier,
                 name,
-                cover_image: row.project_cover_image.as_deref(),
-                cover_image_url,
                 logo_props,
                 description,
                 is_default,
@@ -1393,7 +1354,6 @@ fn render_board(
 
 /// Collect the asset ids one board row references.
 fn board_asset_ids(row: &BoardRow, out: &mut Vec<uuid::Uuid>) {
-    out.extend(row.project_cover_asset_id);
     out.extend(row.workspace_logo_asset_id);
 }
 
@@ -4545,8 +4505,6 @@ mod tests {
                 id: "p",
                 identifier: "I",
                 name: "n",
-                cover_image: None,
-                cover_image_url: None,
                 logo_props: &logo_props,
                 description: "",
                 is_default: true,

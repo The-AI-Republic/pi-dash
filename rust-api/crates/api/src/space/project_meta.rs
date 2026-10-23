@@ -29,7 +29,7 @@
 //! `pidash_services::space::serializers::lite`. This module owns the HTTP
 //! shell (routes, session timezone, row fetching) plus the three reads no
 //! query builder covers: the nested project row, the workspace-detail row
-//! and the logo/cover asset row for the `DeployBoardSerializer` nests
+//! and the logo asset row for the `DeployBoardSerializer` nests
 //! (see below).
 //!
 //! Reads go through `row_to_json` (the `app_issues` pattern): Postgres
@@ -49,16 +49,16 @@
 //! board's `project_id` is null (nested `None`); `project_details` uses the
 //! app `ProjectLiteSerializer` keys
 //! (`app/serializers/project.py:120-133`: `id, identifier, name,
-//! cover_image, cover_image_url, logo_props, description, is_default`) and
+//! logo_props, description, is_default`) and
 //! `workspace_detail` the app `WorkspaceLiteSerializer` keys
 //! (`app/serializers/workspace.py:79-83`: `name, slug, id, logo_url`).
-//! `cover_image_url` / `logo_url` follow the model properties
-//! (`db/models/project.py:176-185`, `db/models/workspace.py:146-153`):
+//! `logo_url` follows the model property
+//! (`db/models/workspace.py:146-153`):
 //! the asset's `asset_url` when the FK is set (`db/models/asset.py:80-99`),
 //! else the raw string column, else `null`.
 //!
-//! Forward-FK reads (`board.project`, `board.workspace`, the logo/cover
-//! assets) use Django's `_base_manager`, which with no
+//! Forward-FK reads (`board.project`, `board.workspace`, the logo
+//! asset) use Django's `_base_manager`, which with no
 //! `base_manager_name` override is a plain `Manager` with no `deleted_at`
 //! filter — so the nested fetches below carry no `deleted_at IS NULL`
 //! guard and a soft-deleted nested row still renders (PIDASHCONV-1262). A
@@ -498,8 +498,6 @@ struct ProjectRow {
     id: String,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_asset_id: Option<String>,
     icon_prop: Value,
     emoji: Option<String>,
     logo_props: Value,
@@ -514,8 +512,6 @@ impl ProjectRow {
             id: req_str(o, "id")?,
             identifier: req_str(o, "identifier")?,
             name: req_str(o, "name")?,
-            cover_image: opt_str(o, "cover_image")?,
-            cover_image_asset_id: opt_str(o, "cover_image_asset_id")?,
             icon_prop: req_json(o, "icon_prop")?,
             emoji: opt_str(o, "emoji")?,
             logo_props: req_json(o, "logo_props")?,
@@ -540,7 +536,7 @@ struct WorkspaceRow {
 /// guard because the forward FK uses the unscoped `_base_manager`
 /// (module docs). Columns are exactly what [`ProjectRow`] consumes.
 fn project_detail_sql() -> String {
-    "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"icon_prop\", \"projects\".\"emoji\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)".to_string()
+    "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"icon_prop\", \"projects\".\"emoji\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)".to_string()
 }
 
 /// `SELECT` for the workspace-detail row. No query builder covers it (the
@@ -564,10 +560,10 @@ impl WorkspaceRow {
 }
 
 // ---------------------------------------------------------------------------
-// logo_url / cover_image_url (model properties)
+// logo_url (model property)
 // ---------------------------------------------------------------------------
 
-/// `SELECT` for the logo/cover asset row. No query builder covers it (the
+/// `SELECT` for the logo asset row. No query builder covers it (the
 /// Python reads it through the FK inside the property), which is unscoped
 /// (module docs), so there is no `deleted_at` guard. The workspace slug
 /// rides along for the attachment URL branches.
@@ -587,7 +583,7 @@ fn asset_url(
     issue_id: Option<&str>,
 ) -> Option<String> {
     match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Some(format!("/api/assets/v2/static/{asset_id}/"))
         }
         Some("ISSUE_ATTACHMENT") => {
@@ -617,13 +613,13 @@ fn asset_url(
     }
 }
 
-/// Resolve a logo/cover URL like the model properties do
-/// (`db/models/workspace.py:146-153`, `db/models/project.py:176-185`): the
+/// Resolve a logo URL like the model property does
+/// (`db/models/workspace.py:146-153`): the
 /// asset's `asset_url` when the FK is set (even when that computes to
 /// `None`), else the raw string column, else `None`. A dangling FK is a 500
 /// like Python's `DoesNotExist` → fallback envelope (unreachable under FK
 /// integrity).
-async fn logo_or_cover_url(
+async fn logo_url_of(
     pool: &sqlx::PgPool,
     raw: Option<String>,
     asset_id: Option<String>,
@@ -660,8 +656,6 @@ struct ProjectDetailsView {
     id: String,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_url: Option<String>,
     logo_props: Value,
     description: Option<String>,
     is_default: bool,
@@ -722,18 +716,10 @@ async fn render_board(
                     .await?
                     .ok_or(HandlerError::ObjectNotFound)?;
             let project = ProjectRow::from_value(&row)?;
-            let cover_image_url = logo_or_cover_url(
-                pool,
-                project.cover_image.clone(),
-                project.cover_image_asset_id.clone(),
-            )
-            .await?;
             Some(ProjectDetailsView {
                 id: project.id,
                 identifier: project.identifier,
                 name: project.name,
-                cover_image: project.cover_image,
-                cover_image_url,
                 logo_props: project.logo_props,
                 description: project.description,
                 is_default: project.is_default,
@@ -748,7 +734,7 @@ async fn render_board(
     .await?
     .ok_or(HandlerError::ObjectNotFound)?;
     let workspace = WorkspaceRow::from_value(&workspace_row)?;
-    let logo_url = logo_or_cover_url(
+    let logo_url = logo_url_of(
         pool,
         workspace.logo.clone(),
         workspace.logo_asset_id.clone(),
@@ -790,7 +776,7 @@ async fn render_board(
 
 /// Render the meta leaf through the reviewed lite serializer
 /// (`space/serializer/project.py:10-22`): `id, identifier, name,
-/// cover_image, icon_prop, emoji, description`.
+/// icon_prop, emoji, description`.
 fn render_meta(project: &ProjectRow) -> Result<String, HandlerError> {
     let description = project
         .description
@@ -800,7 +786,6 @@ fn render_meta(project: &ProjectRow) -> Result<String, HandlerError> {
         id: &project.id,
         identifier: &project.identifier,
         name: &project.name,
-        cover_image: project.cover_image.as_deref(),
         icon_prop: &project.icon_prop,
         emoji: project.emoji.as_deref(),
         description,
@@ -1198,8 +1183,6 @@ mod tests {
                 id: "p".to_owned(),
                 identifier: "CT00003".to_owned(),
                 name: "n".to_owned(),
-                cover_image: None,
-                cover_image_url: None,
                 logo_props: serde_json::json!({}),
                 description: Some(String::new()),
                 is_default: false,
@@ -1251,8 +1234,6 @@ mod tests {
                 "id",
                 "identifier",
                 "name",
-                "cover_image",
-                "cover_image_url",
                 "logo_props",
                 "description",
                 "is_default"
@@ -1294,8 +1275,13 @@ mod tests {
 
     #[test]
     fn asset_url_branches_match_model_property() {
+        // Cover kinds are no longer entity types: no static branch.
         assert_eq!(
             asset_url("a1", Some("PROJECT_COVER"), None, None, None),
+            None
+        );
+        assert_eq!(
+            asset_url("a1", Some("USER_AVATAR"), None, None, None),
             Some("/api/assets/v2/static/a1/".to_owned())
         );
         assert_eq!(

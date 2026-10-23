@@ -28,7 +28,7 @@
 //! `project.py:120-133` / `workspace.py:79-83`). The space `lite.rs` twins
 //! are NOT used: space workspace-lite lacks `logo_url` and space
 //! project-lite carries `icon_prop`/`emoji` instead of
-//! `cover_image_url`/`logo_props`/`is_default`. The app `IssueFlatSerializer`
+//! `logo_props`/`is_default`. The app `IssueFlatSerializer`
 //! (11 keys) is ported here as [`AppIssueFlatRow`] / [`AppIssueFlatView`]:
 //! no merged port covers it — space `issue_flat` lacks `complexity_score` —
 //! and no other D-26 sub-issue owns it (only FX-ISS-05 references it).
@@ -544,8 +544,6 @@ mod tests {
             id: "33333333-3333-3333-3333-333333333333",
             identifier: "P1",
             name: "Proj",
-            cover_image: None,
-            cover_image_url: None,
             logo_props,
             description: "d",
             is_default: false,
@@ -678,7 +676,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&view).expect("serializes"),
-            r#"{"id":"55555555-5555-5555-5555-555555555555","actor_detail":{"id":"11111111-1111-1111-1111-111111111111","first_name":"Fix","last_name":"Ture","avatar":"","avatar_url":null,"is_bot":false,"display_name":"fx-user"},"issue_detail":{"id":"44444444-4444-4444-4444-444444444444","name":"I","description_json":{"x":1},"description_html":"<p>i</p>","priority":"high","complexity_score":3,"start_date":"2026-11-04","target_date":null,"sequence_id":7,"sort_order":1.5,"is_draft":false},"project_detail":{"id":"33333333-3333-3333-3333-333333333333","identifier":"P1","name":"Proj","cover_image":null,"cover_image_url":null,"logo_props":{"a":1},"description":"d","is_default":false},"workspace_detail":{"name":"WS","slug":"ws","id":"22222222-2222-2222-2222-222222222222","logo_url":null},"source_data":null,"created_at":"2026-10-02T12:34:56.123456Z","updated_at":"2026-10-03T01:02:03Z","deleted_at":null,"verb":"updated","field":"state","old_value":"a","new_value":"b","comment":"c","attachments":["https://x/y"],"old_identifier":"66666666-6666-6666-6666-666666666666","new_identifier":null,"epoch":1720000000.5,"created_by":null,"updated_by":null,"project":"33333333-3333-3333-3333-333333333333","workspace":"22222222-2222-2222-2222-222222222222","issue":"44444444-4444-4444-4444-444444444444","issue_comment":null,"actor":"11111111-1111-1111-1111-111111111111"}"#,
+            r#"{"id":"55555555-5555-5555-5555-555555555555","actor_detail":{"id":"11111111-1111-1111-1111-111111111111","first_name":"Fix","last_name":"Ture","avatar":"","avatar_url":null,"is_bot":false,"display_name":"fx-user"},"issue_detail":{"id":"44444444-4444-4444-4444-444444444444","name":"I","description_json":{"x":1},"description_html":"<p>i</p>","priority":"high","complexity_score":3,"start_date":"2026-11-04","target_date":null,"sequence_id":7,"sort_order":1.5,"is_draft":false},"project_detail":{"id":"33333333-3333-3333-3333-333333333333","identifier":"P1","name":"Proj","logo_props":{"a":1},"description":"d","is_default":false},"workspace_detail":{"name":"WS","slug":"ws","id":"22222222-2222-2222-2222-222222222222","logo_url":null},"source_data":null,"created_at":"2026-10-02T12:34:56.123456Z","updated_at":"2026-10-03T01:02:03Z","deleted_at":null,"verb":"updated","field":"state","old_value":"a","new_value":"b","comment":"c","attachments":["https://x/y"],"old_identifier":"66666666-6666-6666-6666-666666666666","new_identifier":null,"epoch":1720000000.5,"created_by":null,"updated_by":null,"project":"33333333-3333-3333-3333-333333333333","workspace":"22222222-2222-2222-2222-222222222222","issue":"44444444-4444-4444-4444-444444444444","issue_comment":null,"actor":"11111111-1111-1111-1111-111111111111"}"#,
         );
     }
 
@@ -718,7 +716,7 @@ mod tests {
         let rendered = serde_json::to_string(&view).expect("serializes");
         assert_eq!(
             rendered,
-            r#"{"id":"55555555-5555-5555-5555-555555555555","actor_detail":null,"issue_detail":null,"project_detail":{"id":"33333333-3333-3333-3333-333333333333","identifier":"P1","name":"Proj","cover_image":null,"cover_image_url":null,"logo_props":{"a":1},"description":"d","is_default":false},"workspace_detail":{"name":"WS","slug":"ws","id":"22222222-2222-2222-2222-222222222222","logo_url":null},"source_data":null,"created_at":"2026-10-02T12:34:56.123456Z","updated_at":"2026-10-03T01:02:03Z","deleted_at":"2026-10-03T01:02:03Z","verb":"created","field":null,"old_value":null,"new_value":null,"comment":"","attachments":[],"old_identifier":null,"new_identifier":null,"epoch":null,"created_by":"11111111-1111-1111-1111-111111111111","updated_by":"11111111-1111-1111-1111-111111111111","project":"33333333-3333-3333-3333-333333333333","workspace":"22222222-2222-2222-2222-222222222222","issue":null,"issue_comment":null,"actor":null}"#,
+            r#"{"id":"55555555-5555-5555-5555-555555555555","actor_detail":null,"issue_detail":null,"project_detail":{"id":"33333333-3333-3333-3333-333333333333","identifier":"P1","name":"Proj","logo_props":{"a":1},"description":"d","is_default":false},"workspace_detail":{"name":"WS","slug":"ws","id":"22222222-2222-2222-2222-222222222222","logo_url":null},"source_data":null,"created_at":"2026-10-02T12:34:56.123456Z","updated_at":"2026-10-03T01:02:03Z","deleted_at":"2026-10-03T01:02:03Z","verb":"created","field":null,"old_value":null,"new_value":null,"comment":"","attachments":[],"old_identifier":null,"new_identifier":null,"epoch":null,"created_by":"11111111-1111-1111-1111-111111111111","updated_by":"11111111-1111-1111-1111-111111111111","project":"33333333-3333-3333-3333-333333333333","workspace":"22222222-2222-2222-2222-222222222222","issue":null,"issue_comment":null,"actor":null}"#,
         );
     }
 

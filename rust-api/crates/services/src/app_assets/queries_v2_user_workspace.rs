@@ -62,10 +62,9 @@
 //!   checks `if workspace is None: return` — dead code, the row can never
 //!   be `None`. [`WorkspaceLookup::Get`] ports the `.get` shape; the delete
 //!   action keeps no `None` arm, exactly like the source.
-//! * BUG (`v2.py:45` vs `:63`, `:257` vs `:279`): the avatar/logo clear
-//!   writes `""` while the cover clear writes `None`
-//!   ([`USER_AVATAR_CLEARED`], [`USER_COVER_CLEARED`],
-//!   [`WORKSPACE_LOGO_CLEARED`], [`PROJECT_COVER_CLEARED`]). Ported as-is.
+//! * `USER_COVER` / `PROJECT_COVER` were removed from `EntityTypeContext`
+//!   (PDASHOSS01-237): the posts reject them with the entity-type 400 and
+//!   the save/delete actions have no cover arm (legacy cover rows no-op).
 //! * BUG (`v2.py:319`): the workspace post defaults `entity_identifier`
 //!   to `False`, so a `WORKSPACE_LOGO` post without identifier spreads
 //!   `workspace_id=False` into the create (DB error path), unlike the
@@ -93,8 +92,6 @@ pub const FILE_ASSET_TABLE: &str = columns::TABLE;
 pub const USER_TABLE: &str = "users";
 /// `workspaces` (`db/models/workspace.py:181`).
 pub const WORKSPACE_TABLE: &str = "workspaces";
-/// `projects` (`db/models/project.py:252`).
-pub const PROJECT_TABLE: &str = "projects";
 
 /// Django's join alias for the single `workspace__slug` join, kept verbatim
 /// (same alias-map convention as the merged `db` queries precedent).
@@ -106,12 +103,8 @@ const U0: &str = "U0";
 
 /// `USER_AVATAR` (`db/models/asset.py:38`).
 pub const ENTITY_USER_AVATAR: &str = "USER_AVATAR";
-/// `USER_COVER` (`db/models/asset.py:37`).
-pub const ENTITY_USER_COVER: &str = "USER_COVER";
 /// `WORKSPACE_LOGO` (`db/models/asset.py:39`).
 pub const ENTITY_WORKSPACE_LOGO: &str = "WORKSPACE_LOGO";
-/// `PROJECT_COVER` (`db/models/asset.py:40`).
-pub const ENTITY_PROJECT_COVER: &str = "PROJECT_COVER";
 /// `ISSUE_ATTACHMENT` (`db/models/asset.py:34`).
 pub const ENTITY_ISSUE_ATTACHMENT: &str = "ISSUE_ATTACHMENT";
 /// `ISSUE_DESCRIPTION` (`db/models/asset.py:35`).
@@ -121,9 +114,9 @@ pub const ENTITY_PAGE_DESCRIPTION: &str = "PAGE_DESCRIPTION";
 /// `COMMENT_DESCRIPTION` (`db/models/asset.py:33`).
 pub const ENTITY_COMMENT_DESCRIPTION: &str = "COMMENT_DESCRIPTION";
 
-/// Entity types the user post accepts (`v2.py:120`): a hardcoded 2-value
-/// list, NOT `EntityTypeContext.values`.
-pub const USER_POST_ENTITY_TYPES: &[&str] = &[ENTITY_USER_AVATAR, ENTITY_USER_COVER];
+/// Entity types the user post accepts (`v2.py:89`):
+/// `entity_type != USER_AVATAR`, NOT `EntityTypeContext.values`.
+pub const USER_POST_ENTITY_TYPES: &[&str] = &[ENTITY_USER_AVATAR];
 
 /// MIME types either post accepts (`v2.py:127-133`, `:329-335`).
 pub const ALLOWED_FILE_TYPES: &[&str] = &[
@@ -135,13 +128,13 @@ pub const ALLOWED_FILE_TYPES: &[&str] = &[
 ];
 
 /// `FileAsset.EntityTypeContext.values` membership for the workspace post
-/// (`v2.py:322`): the full 10-value set
+/// (`v2.py:260`): the full 8-value set
 /// (`pidash_db::app_assets::columns::ENTITY_TYPES`).
 pub fn is_known_entity_type(entity_type: &str) -> bool {
     columns::ENTITY_TYPES.contains(&entity_type)
 }
 
-/// `get_entity_id_field` (`v2.py:204-234`): the 7-branch mapping from
+/// `get_entity_id_field` (`v2.py:173-196`): the 6-branch mapping from
 /// entity type to the FK column the create spreads. `None` is the
 /// fallthrough `{}` (`:234`) — ported per-branch verbatim against the
 /// PROJECT variant (which adds `draft_issue_id`) and the DUPLICATE variant
@@ -150,11 +143,8 @@ pub fn get_entity_id_field(entity_type: &str) -> Option<&'static str> {
     if entity_type == ENTITY_WORKSPACE_LOGO {
         // v2.py:206-207.
         Some("workspace_id")
-    } else if entity_type == ENTITY_PROJECT_COVER {
-        // v2.py:210-211.
-        Some("project_id")
-    } else if entity_type == ENTITY_USER_AVATAR || entity_type == ENTITY_USER_COVER {
-        // v2.py:214-218.
+    } else if entity_type == ENTITY_USER_AVATAR {
+        // v2.py:178-180.
         Some("user_id")
     } else if entity_type == ENTITY_ISSUE_ATTACHMENT || entity_type == ENTITY_ISSUE_DESCRIPTION {
         // v2.py:221-225.
@@ -206,8 +196,8 @@ pub fn post_error_body(err: PostValidationError) -> Value {
     }
 }
 
-/// User-post entity check (`v2.py:120`):
-/// `if not entity_type or entity_type not in ["USER_AVATAR", "USER_COVER"]`.
+/// User-post entity check (`v2.py:89`):
+/// `if entity_type != FileAsset.EntityTypeContext.USER_AVATAR`.
 /// `None` models the `request.data.get("entity_type", False)` default.
 pub fn validate_user_entity_type(entity_type: Option<&str>) -> Result<&str, PostValidationError> {
     match entity_type {
@@ -396,7 +386,7 @@ pub fn workspace_asset_lookup_sql() -> String {
 
 /// User post create (`v2.py:147-154`): `attributes`, `asset`, `size`,
 /// `user` + `created_by` (both the caller), `entity_type`. `workspace_id`
-/// is NULL; the avatar/cover link is NOT set here — only via
+/// is NULL; the avatar link is NOT set here — only via
 /// patch/`entity_asset_save`. `$1..$6` follow the listed column order.
 /// `RETURNING "id"` feeds the `str(asset.id)` response.
 pub fn user_insert_sql() -> String {
@@ -483,23 +473,13 @@ pub fn entity_link_update_sql(table: &str, fk_col: &str) -> String {
 
 /// `User.avatar_asset_id` (`db/models/user.py:69-75`).
 pub const USER_AVATAR_FK: &str = "avatar_asset_id";
-/// `User.cover_image_asset_id` (`db/models/user.py:78-84`).
-pub const USER_COVER_FK: &str = "cover_image_asset_id";
 /// `Workspace.logo_asset_id` (`db/models/workspace.py:124-130`).
 pub const WORKSPACE_LOGO_FK: &str = "logo_asset_id";
-/// `Project.cover_image_asset_id` (`db/models/project.py:108-114`).
-pub const PROJECT_COVER_FK: &str = "cover_image_asset_id";
 
-/// `user.avatar = ""` (`v2.py:45`) — empty string, while the cover below
-/// uses `None`. Ported as-is.
+/// `user.avatar = ""` (`v2.py:45`) — empty string. Ported as-is.
 pub const USER_AVATAR_CLEARED: &str = "";
-/// `user.cover_image = None` (`v2.py:63`) — asymmetry with `avatar`
-/// ported as-is.
-pub const USER_COVER_CLEARED: Option<&str> = None;
-/// `workspace.logo = ""` (`v2.py:257`). Ported as-is.
+/// `workspace.logo = ""` (`v2.py:215`). Ported as-is.
 pub const WORKSPACE_LOGO_CLEARED: &str = "";
-/// `project.cover_image = ""` (`v2.py:279`). Ported as-is.
-pub const PROJECT_COVER_CLEARED: &str = "";
 
 /// What `UserAssetsV2Endpoint.entity_asset_save` does (`v2.py:41-78`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,9 +487,6 @@ pub enum UserSaveAction {
     /// `USER_AVATAR`: clear `avatar`, reap the previous link, set
     /// `avatar_asset_id`, full save, invalidate (`:43-59`).
     SetAvatar,
-    /// `USER_COVER`: clear `cover_image`, reap the previous link, set
-    /// `cover_image_asset_id`, full save, invalidate (`:61-77`).
-    SetCover,
     /// Any other type: return, nothing happens (`:78`). Unreachable from
     /// `post` (which rejects non-USER_* types); patch-time defence.
     Noop,
@@ -519,8 +496,6 @@ pub enum UserSaveAction {
 pub fn user_save_action(entity_type: &str) -> UserSaveAction {
     if entity_type == ENTITY_USER_AVATAR {
         UserSaveAction::SetAvatar
-    } else if entity_type == ENTITY_USER_COVER {
-        UserSaveAction::SetCover
     } else {
         UserSaveAction::Noop
     }
@@ -531,9 +506,6 @@ pub fn user_save_action(entity_type: &str) -> UserSaveAction {
 pub enum UserDeleteAction {
     /// `USER_AVATAR`: `avatar_asset_id=None`, save, invalidate (`:82-93`).
     ClearAvatar,
-    /// `USER_COVER`: `cover_image_asset_id=None`, save, invalidate
-    /// (`:95-106`).
-    ClearCover,
     /// Any other type: return (`:107`).
     Noop,
 }
@@ -542,8 +514,6 @@ pub enum UserDeleteAction {
 pub fn user_delete_action(entity_type: &str) -> UserDeleteAction {
     if entity_type == ENTITY_USER_AVATAR {
         UserDeleteAction::ClearAvatar
-    } else if entity_type == ENTITY_USER_COVER {
-        UserDeleteAction::ClearCover
     } else {
         UserDeleteAction::Noop
     }
@@ -563,7 +533,7 @@ pub enum WorkspaceLookup {
 }
 
 /// What `WorkspaceFileAssetEndpoint.entity_asset_save` does
-/// (`v2.py:247-284`): only `WORKSPACE_LOGO` and `PROJECT_COVER` link;
+/// (`v2.py:209-231`): only `WORKSPACE_LOGO` links;
 /// `ISSUE`/`PAGE`/`COMMENT`/`DRAFT` rows link NOTHING here (`:283-284`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceSaveAction {
@@ -571,10 +541,6 @@ pub enum WorkspaceSaveAction {
     /// previous logo, set `logo=""` + `logo_asset_id`, save, invalidate
     /// (`:249-268`).
     SetLogo,
-    /// `PROJECT_COVER`: [`WorkspaceLookup::FilterFirst`], reap the
-    /// previous cover, set `cover_image=""` + `cover_image_asset_id`,
-    /// save (`:271-282`, no invalidations).
-    SetCover,
     /// Any other type: return, nothing (`:283-284`).
     Noop,
 }
@@ -583,8 +549,6 @@ pub enum WorkspaceSaveAction {
 pub fn workspace_save_action(entity_type: &str) -> WorkspaceSaveAction {
     if entity_type == ENTITY_WORKSPACE_LOGO {
         WorkspaceSaveAction::SetLogo
-    } else if entity_type == ENTITY_PROJECT_COVER {
-        WorkspaceSaveAction::SetCover
     } else {
         WorkspaceSaveAction::Noop
     }
@@ -597,9 +561,6 @@ pub enum WorkspaceDeleteAction {
     /// `WORKSPACE_LOGO`: [`WorkspaceLookup::Get`], `logo_asset_id=None`,
     /// save, invalidate (`:288-302`).
     ClearLogo,
-    /// `PROJECT_COVER`: [`WorkspaceLookup::FilterFirst`], miss returns,
-    /// else `cover_image_asset_id=None`, save (`:304-310`).
-    ClearCover,
     /// Any other type: return (`:311-312`).
     Noop,
 }
@@ -608,8 +569,6 @@ pub enum WorkspaceDeleteAction {
 pub fn workspace_delete_action(entity_type: &str) -> WorkspaceDeleteAction {
     if entity_type == ENTITY_WORKSPACE_LOGO {
         WorkspaceDeleteAction::ClearLogo
-    } else if entity_type == ENTITY_PROJECT_COVER {
-        WorkspaceDeleteAction::ClearCover
     } else {
         WorkspaceDeleteAction::Noop
     }
@@ -618,20 +577,16 @@ pub fn workspace_delete_action(entity_type: &str) -> WorkspaceDeleteAction {
 /// The lookup each workspace entity action reads through.
 pub fn workspace_save_lookup(action: WorkspaceSaveAction) -> Option<WorkspaceLookup> {
     match action {
-        WorkspaceSaveAction::SetLogo | WorkspaceSaveAction::SetCover => {
-            Some(WorkspaceLookup::FilterFirst)
-        }
+        WorkspaceSaveAction::SetLogo => Some(WorkspaceLookup::FilterFirst),
         WorkspaceSaveAction::Noop => None,
     }
 }
 
 /// The lookup each workspace delete action reads through: the logo branch
-/// uses `.get` (with the dead `None` check), the cover branch
-/// `.filter().first()`.
+/// uses `.get` (with the dead `None` check).
 pub fn workspace_delete_lookup(action: WorkspaceDeleteAction) -> Option<WorkspaceLookup> {
     match action {
         WorkspaceDeleteAction::ClearLogo => Some(WorkspaceLookup::Get),
-        WorkspaceDeleteAction::ClearCover => Some(WorkspaceLookup::FilterFirst),
         WorkspaceDeleteAction::Noop => None,
     }
 }
@@ -667,7 +622,7 @@ pub const USER_POST_COMMIT: &[CacheInvalidation] = &[
 /// Workspace-logo save + delete invalidations
 /// (`v2.py:260-267,:294-301`): `/api/workspaces/` (`user=False`),
 /// `/api/users/me/workspaces/` (`user=True`), `/api/instances/`
-/// (`user=False`). The project-cover branches invalidate nothing.
+/// (`user=False`).
 pub const WORKSPACE_LOGO_POST_COMMIT: &[CacheInvalidation] = &[
     CacheInvalidation {
         path: "/api/workspaces/",
@@ -771,9 +726,7 @@ mod tests {
     fn entity_literals_are_known_types() {
         for t in [
             ENTITY_USER_AVATAR,
-            ENTITY_USER_COVER,
             ENTITY_WORKSPACE_LOGO,
-            ENTITY_PROJECT_COVER,
             ENTITY_ISSUE_ATTACHMENT,
             ENTITY_ISSUE_DESCRIPTION,
             ENTITY_PAGE_DESCRIPTION,
@@ -789,13 +742,11 @@ mod tests {
         let branches = g["WorkspaceFileAssetEndpoint"]["get_entity_id_field"]["branches"]
             .as_array()
             .expect("branches array");
-        assert_eq!(branches.len(), 7, "golden pins 7 branches");
+        assert_eq!(branches.len(), 6, "golden pins 6 branches");
         // Every golden branch maps to the same FK column here.
         let cases: &[(&str, Option<&str>)] = &[
             ("WORKSPACE_LOGO", Some("workspace_id")),
-            ("PROJECT_COVER", Some("project_id")),
             ("USER_AVATAR", Some("user_id")),
-            ("USER_COVER", Some("user_id")),
             ("ISSUE_ATTACHMENT", Some("issue_id")),
             ("ISSUE_DESCRIPTION", Some("issue_id")),
             ("PAGE_DESCRIPTION", Some("page_id")),
@@ -804,10 +755,13 @@ mod tests {
         for (entity, want) in cases {
             assert_eq!(get_entity_id_field(entity), *want, "{entity}");
         }
-        // Fallthrough `{}` (v2.py:234), incl. the DRAFT types this variant
-        // deliberately omits (divergence note in the golden).
+        // Fallthrough `{}` (v2.py:196), incl. the DRAFT types this variant
+        // deliberately omits (divergence note in the golden) and the
+        // removed cover types.
         for entity in [
             "NOPE",
+            "PROJECT_COVER",
+            "USER_COVER",
             "DRAFT_ISSUE_ATTACHMENT",
             "DRAFT_ISSUE_DESCRIPTION",
             "",
@@ -876,12 +830,15 @@ mod tests {
             validate_user_entity_type(Some("USER_AVATAR")),
             Ok("USER_AVATAR")
         );
-        assert_eq!(
-            validate_user_entity_type(Some("USER_COVER")),
-            Ok("USER_COVER")
-        );
-        // `not entity_type`: missing, empty, and non-USER_* all 400.
-        for bad in [None, Some(""), Some("WORKSPACE_LOGO"), Some("NOPE")] {
+        // `!= USER_AVATAR`: missing, empty, the removed USER_COVER and
+        // anything else all 400.
+        for bad in [
+            None,
+            Some(""),
+            Some("USER_COVER"),
+            Some("WORKSPACE_LOGO"),
+            Some("NOPE"),
+        ] {
             assert_eq!(
                 validate_user_entity_type(bad),
                 Err(PostValidationError::EntityType),
@@ -892,11 +849,17 @@ mod tests {
 
     #[test]
     fn workspace_entity_validation_uses_full_value_set() {
-        // Full 10-value set accepted here (unlike the user 2-list).
+        // Full 8-value set accepted here (unlike the user avatar-only check).
         for t in columns::ENTITY_TYPES {
             assert_eq!(validate_workspace_entity_type(Some(t)), Ok(*t), "{t}");
         }
-        for bad in [None, Some(""), Some("NOPE")] {
+        for bad in [
+            None,
+            Some(""),
+            Some("NOPE"),
+            Some("USER_COVER"),
+            Some("PROJECT_COVER"),
+        ] {
             assert_eq!(
                 validate_workspace_entity_type(bad),
                 Err(PostValidationError::EntityType),
@@ -1079,25 +1042,18 @@ mod tests {
             entity_link_update_sql(WORKSPACE_TABLE, WORKSPACE_LOGO_FK),
             "UPDATE \"workspaces\" SET \"logo_asset_id\" = $1 WHERE \"id\" = $2",
         );
-        assert_eq!(
-            entity_link_update_sql(PROJECT_TABLE, PROJECT_COVER_FK),
-            "UPDATE \"projects\" SET \"cover_image_asset_id\" = $1 WHERE \"id\" = $2",
-        );
     }
 
     #[test]
     fn entity_actions_match_golden() {
         assert_eq!(user_save_action("USER_AVATAR"), UserSaveAction::SetAvatar);
-        assert_eq!(user_save_action("USER_COVER"), UserSaveAction::SetCover);
+        assert_eq!(user_save_action("USER_COVER"), UserSaveAction::Noop);
         assert_eq!(user_save_action("WORKSPACE_LOGO"), UserSaveAction::Noop);
         assert_eq!(
             user_delete_action("USER_AVATAR"),
             UserDeleteAction::ClearAvatar
         );
-        assert_eq!(
-            user_delete_action("USER_COVER"),
-            UserDeleteAction::ClearCover
-        );
+        assert_eq!(user_delete_action("USER_COVER"), UserDeleteAction::Noop);
         assert_eq!(
             user_delete_action("ISSUE_ATTACHMENT"),
             UserDeleteAction::Noop
@@ -1106,12 +1062,10 @@ mod tests {
             workspace_save_action("WORKSPACE_LOGO"),
             WorkspaceSaveAction::SetLogo
         );
-        assert_eq!(
-            workspace_save_action("PROJECT_COVER"),
-            WorkspaceSaveAction::SetCover
-        );
-        // ISSUE/PAGE/COMMENT/DRAFT link NOTHING on patch (v2.py:283-284).
+        // ISSUE/PAGE/COMMENT/DRAFT (and legacy PROJECT_COVER rows) link
+        // NOTHING on patch (v2.py:231).
         for t in [
+            "PROJECT_COVER",
             "ISSUE_ATTACHMENT",
             "PAGE_DESCRIPTION",
             "COMMENT_DESCRIPTION",
@@ -1130,26 +1084,14 @@ mod tests {
             Some(WorkspaceLookup::FilterFirst)
         );
         assert_eq!(
-            workspace_save_lookup(WorkspaceSaveAction::SetCover),
-            Some(WorkspaceLookup::FilterFirst)
-        );
-        assert_eq!(
             workspace_delete_lookup(WorkspaceDeleteAction::ClearLogo),
             Some(WorkspaceLookup::Get)
         );
-        assert_eq!(
-            workspace_delete_lookup(WorkspaceDeleteAction::ClearCover),
-            Some(WorkspaceLookup::FilterFirst)
-        );
-        // Clear-value asymmetry ported as-is.
+        // Clear values ported as-is.
         assert_eq!(USER_AVATAR_CLEARED, "");
-        assert_eq!(USER_COVER_CLEARED, None);
         assert_eq!(WORKSPACE_LOGO_CLEARED, "");
-        assert_eq!(PROJECT_COVER_CLEARED, "");
         assert_eq!(USER_AVATAR_FK, "avatar_asset_id");
-        assert_eq!(USER_COVER_FK, "cover_image_asset_id");
         assert_eq!(WORKSPACE_LOGO_FK, "logo_asset_id");
-        assert_eq!(PROJECT_COVER_FK, "cover_image_asset_id");
     }
 
     #[test]

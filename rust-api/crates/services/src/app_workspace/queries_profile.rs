@@ -1049,17 +1049,17 @@ pub fn user_props_insert_sql() -> String {
     )
 }
 
-/// `User.objects.get(pk=user_id)` (`user.py:283`): the 8 `user_data`
-/// columns (`:356-365`) plus the `avatar`/`cover_image` source columns
-/// the `avatar_url`/`cover_image_url` properties resolve through
-/// (`db/models/user.py:143-165`, FK-first, text fallback). No
+/// `User.objects.get(pk=user_id)` (`user.py:283`): the 7 `user_data`
+/// columns (`:356-364`) plus the `avatar` source columns the
+/// `avatar_url` property resolves through (`db/models/user.py:134-142`,
+/// FK-first, text fallback). No
 /// soft-delete scope — `User.objects` is Django's stock `UserManager`.
 /// Miss → [`USER_GET_MISS_STATUS`] (see the fixture-deviation note in the
 /// module docs). Params: `$1` uid.
 pub fn profile_user_sql() -> String {
     format!(
         "SELECT email, first_name, last_name, avatar, avatar_asset_id, \
-         cover_image, cover_image_asset_id, date_joined, user_timezone, display_name \
+         date_joined, user_timezone, display_name \
          FROM {USERS} WHERE id = $1 LIMIT 1"
     )
 }
@@ -1071,14 +1071,13 @@ pub fn profile_user_sql() -> String {
 /// Body: [`OBJECT_NOT_FOUND_BODY`].
 pub const USER_GET_MISS_STATUS: u16 = 404;
 
-/// `user_data` keys in emission order (`user.py:356-365`). Matches
+/// `user_data` keys in emission order (`user.py:356-364`). Matches
 /// `contract-tests/.../test_workspace_extras.py::USER_DATA_KEYS` as a set.
 pub const USER_DATA_KEYS: &[&str] = &[
     "email",
     "first_name",
     "last_name",
     "avatar_url",
-    "cover_image_url",
     "date_joined",
     "user_timezone",
     "display_name",
@@ -1823,7 +1822,6 @@ mod tests {
             "first_name",
             "last_name",
             "avatar_url",
-            "cover_image_url",
             "date_joined",
             "user_timezone",
             "display_name",
@@ -1839,7 +1837,6 @@ mod tests {
             "first_name",
             "last_name",
             "avatar_asset_id",
-            "cover_image_asset_id",
             "date_joined",
             "user_timezone",
             "display_name",

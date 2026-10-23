@@ -835,13 +835,11 @@ struct WorkspaceLite {
     logo_url: Option<String>,
 }
 
-/// One nested project lite row, resolved (cover precedence applied).
+/// One nested project lite row.
 struct ProjectLite {
     id: String,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_url: Option<String>,
     logo_props: Value,
     description: String,
     is_default: bool,
@@ -893,8 +891,8 @@ const FULL_SELECT: &str = r#"SELECT pm.id, pm.created_at, pm.updated_at, pm.dele
        pm.preferences::text AS preferences, pm.sort_order, pm.is_active,
        pm.created_by_id, pm.updated_by_id, pm.project_id, pm.workspace_id, pm.member_id,
        w.name AS w_name, w.slug AS w_slug, w.id AS w_id, w.logo AS w_logo, w.logo_asset_id AS w_logo_asset,
-       p.id AS p_id, p.identifier AS p_identifier, p.name AS p_name, p.cover_image AS p_cover,
-       p.cover_image_asset_id AS p_cover_asset, p.logo_props::text AS p_logo_props,
+       p.id AS p_id, p.identifier AS p_identifier, p.name AS p_name,
+       p.logo_props::text AS p_logo_props,
        p.description AS p_description, p.is_default AS p_is_default,
        u.id AS u_id, u.first_name AS u_first, u.last_name AS u_last, u.avatar AS u_avatar,
        u.avatar_asset_id AS u_avatar_asset, u.is_bot AS u_is_bot, u.display_name AS u_display,
@@ -904,11 +902,11 @@ const FULL_SELECT: &str = r#"SELECT pm.id, pm.created_at, pm.updated_at, pm.dele
        JOIN projects p ON p.id = pm.project_id
        LEFT JOIN users u ON u.id = pm.member_id"#;
 
-/// Asset ids referenced by one decoded row (workspace logo + project
-/// cover + member avatar), for the batched `file_assets` read.
+/// Asset ids referenced by one decoded row (workspace logo + member
+/// avatar), for the batched `file_assets` read.
 fn row_asset_ids(row: &sqlx::postgres::PgRow) -> Vec<uuid::Uuid> {
     let mut ids = Vec::new();
-    for column in ["w_logo_asset", "p_cover_asset", "u_avatar_asset"] {
+    for column in ["w_logo_asset", "u_avatar_asset"] {
         if let Ok(Some(id)) = row.try_get::<Option<uuid::Uuid>, _>(column) {
             ids.push(id);
         }
@@ -965,9 +963,6 @@ fn decode_full(
         .try_get("w_logo_asset")
         .map_err(|_| Denial::ServerError)?;
     let p_id: uuid::Uuid = row.try_get("p_id").map_err(|_| Denial::ServerError)?;
-    let p_cover_asset: Option<uuid::Uuid> = row
-        .try_get("p_cover_asset")
-        .map_err(|_| Denial::ServerError)?;
     let u_id: Option<uuid::Uuid> = row.try_get("u_id").map_err(|_| Denial::ServerError)?;
     let u_avatar_asset: Option<uuid::Uuid> = row
         .try_get("u_avatar_asset")
@@ -980,15 +975,6 @@ fn decode_full(
             .as_ref()
             .and_then(|id| assets.get(id).map(String::as_str)),
         w_logo.as_deref(),
-    )
-    .map(str::to_owned);
-    let p_cover: Option<String> = row.try_get("p_cover").map_err(|_| Denial::ServerError)?;
-    let cover_image_url = ser_member::resolve_project_cover_image_url(
-        p_cover_asset.is_some(),
-        p_cover_asset
-            .as_ref()
-            .and_then(|id| assets.get(id).map(String::as_str)),
-        p_cover.as_deref(),
     )
     .map(str::to_owned);
     let u_avatar: Option<String> = row.try_get("u_avatar").unwrap_or(None);
@@ -1016,8 +1002,6 @@ fn decode_full(
             .try_get("p_identifier")
             .map_err(|_| Denial::ServerError)?,
         name: row.try_get("p_name").map_err(|_| Denial::ServerError)?,
-        cover_image: p_cover,
-        cover_image_url,
         logo_props: parse_jsonb(&logo_props)?,
         description: row
             .try_get("p_description")
@@ -1098,8 +1082,6 @@ fn render_full(member: &FullMember) -> String {
         id: &member.project.id,
         identifier: &member.project.identifier,
         name: &member.project.name,
-        cover_image: member.project.cover_image.as_deref(),
-        cover_image_url: member.project.cover_image_url.as_deref(),
         logo_props: &member.project.logo_props,
         description: &member.project.description,
         is_default: member.project.is_default,
@@ -1160,8 +1142,6 @@ fn render_full_admin(member: &FullMember) -> String {
         id: &member.project.id,
         identifier: &member.project.identifier,
         name: &member.project.name,
-        cover_image: member.project.cover_image.as_deref(),
-        cover_image_url: member.project.cover_image_url.as_deref(),
         logo_props: &member.project.logo_props,
         description: &member.project.description,
         is_default: member.project.is_default,

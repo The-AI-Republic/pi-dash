@@ -51,16 +51,17 @@ def test_post_shape_and_asset_url(org):
     assert row["entity_type"] == "ISSUE_DESCRIPTION"
 
 
-def test_post_project_cover_500_duplicate_kwarg(org):
-    # Ported bug: PROJECT_COVER resolves to {"project_id": ...} which
-    # collides with the explicit project_id kwarg → TypeError → 500.
-    r = org.request(
-        "POST", proj_base(org), "admin",
-        json=proj_payload(entity_type="PROJECT_COVER",
-                          entity_identifier=org.project["id"]),
-    )
-    assert r.status_code == 500
-    assert r.json() == {"error": "Something went wrong please try again later"}
+def test_post_removed_cover_types_invalid(org):
+    # PDASHOSS01-237: PROJECT_COVER / USER_COVER left EntityTypeContext, so
+    # the mint guard rejects them like any unknown entity type.
+    for entity_type in ("PROJECT_COVER", "USER_COVER"):
+        r = org.request(
+            "POST", proj_base(org), "admin",
+            json=proj_payload(entity_type=entity_type,
+                              entity_identifier=org.project["id"]),
+        )
+        assert r.status_code == 400, entity_type
+        assert r.json() == {"error": "Invalid entity type.", "status": False}
 
 
 def test_post_invalid_entity_type(org):
@@ -216,24 +217,31 @@ def test_detail_denied_roles(org):
     assert r.status_code == 401
 
 
-def _cover_asset(org, name):
-    r = org.request(
-        "POST", f"/api/assets/v2/workspaces/{org.workspace['slug']}/", "admin",
-        json={"name": name, "type": "image/png", "size": 60,
-              "entity_type": "PROJECT_COVER",
-              "entity_identifier": org.project["id"]},
+def _legacy_cover_asset(org, name):
+    # A pre-PDASHOSS01-237 PROJECT_COVER row (the type can no longer be
+    # minted, so seed it directly), uploaded and project-less.
+    asset = seed_a.create_asset(
+        org.conn, workspace_id=org.workspace["id"],
+        created_by_id=org.admin["id"], name=name,
+        entity_type="PROJECT_COVER", entity_identifier=org.project["id"],
+        uploaded=True,
     )
-    assert r.status_code == 200, r.text
-    return r.json()["asset_id"]
+    return asset["id"]
 
 
 def bulk_path(org, entity_id):
     return f"{proj_base(org)}{entity_id}/bulk/"
 
 
-def test_bulk_cover_links_project(org):
-    first = _cover_asset(org, "c1.png")
-    second = _cover_asset(org, "c2.png")
+def test_bulk_legacy_cover_is_noop(org):
+    # PDASHOSS01-237 removed the PROJECT_COVER bulk branch: a legacy cover
+    # first row matches no arm, so the view answers 204 and writes nothing.
+    first = _legacy_cover_asset(org, "c1.png")
+    second = _legacy_cover_asset(org, "c2.png")
+    before = org.conn.execute(
+        "SELECT updated_by_id, updated_at FROM projects WHERE id = %s",
+        (org.project["id"],),
+    ).fetchone()
     entity_id = str(uuid.uuid4())
     r = org.request(
         "POST", bulk_path(org, entity_id), "admin",
@@ -241,18 +249,12 @@ def test_bulk_cover_links_project(org):
     )
     assert r.status_code == 204, r.text
     for aid in (first, second):
-        assert seed_a.fetch(org.conn, aid)["project_id"] == org.project["id"]
-    # PIDASHCONV-929: save_project_cover runs a full project.save(), which
-    # stamps updated_by/updated_at (db/models/base.py:24-44) — not a bare
-    # SET cover_image_asset_id.
-    row = org.conn.execute(
-        "SELECT cover_image_asset_id, updated_by_id, updated_at"
-        " FROM projects WHERE id = %s",
+        assert seed_a.fetch(org.conn, aid)["project_id"] is None
+    after = org.conn.execute(
+        "SELECT updated_by_id, updated_at FROM projects WHERE id = %s",
         (org.project["id"],),
     ).fetchone()
-    assert str(row[0]) in (first, second)
-    assert str(row[1]) == org.admin["id"]
-    assert row[2] is not None
+    assert after == before
 
 
 def test_bulk_empty_400(org):
@@ -273,7 +275,7 @@ def test_bulk_unknown_ids_404(org):
 
 
 def test_bulk_roles(org):
-    first = _cover_asset(org, "c3.png")
+    first = _legacy_cover_asset(org, "c3.png")
     denied = {"error": "You don't have the required permissions."}
     r = org.request(
         "POST", bulk_path(org, str(uuid.uuid4())), "outsider",
