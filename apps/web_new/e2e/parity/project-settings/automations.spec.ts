@@ -262,7 +262,13 @@ test(
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
       await opened;
-      expect(sawLoader).toBe(false);
+      if (driver.target === "web_new") {
+        // Intended (NEWFRONT-397, NEWFRONT-606): the skeleton shows while
+        // the held retrieve is in flight, then yields to the rows.
+        expect(sawLoader).toBe(true);
+      } else {
+        expect(sawLoader).toBe(false);
+      }
       expect(await driver.projectAutomationsLoaderVisible()).toBe(false);
       expect(await driver.projectAutomationsArchiveOn()).toBe(false);
     } finally {
