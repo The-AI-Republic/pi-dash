@@ -28,18 +28,20 @@ pub enum RunCmdCommand {
 
 /// The §7 outcome vocabulary. Kept in sync with
 /// `pi_dash.orchestration.scheduling.RUN_OUTCOMES`.
+///
+/// Outcomes are informational: they describe what the run did and never
+/// control the ticking clock. Only `--stop-ticking` stops it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub enum Outcome {
-    /// Did work; more to do in this stage — tick again.
+    /// Did work; more to do in this stage.
     Progressed,
-    /// Asked the human a question (or told them the budget is spent) —
-    /// the clock stops until a human acts.
+    /// Asked the human a question (or told them the budget is spent).
     WaitingOnHuman,
-    /// In Progress is waiting on CI or a merge — keep ticking.
+    /// Waiting on CI, a merge, or another external dependency.
     WaitingOnExternal,
-    /// This stage's exit condition is met — the issue was moved on, or it
-    /// is approved / verified and stays.
+    /// This run's turn is done — the stage's exit condition is met: the
+    /// issue was moved on, or it is approved / verified and stays.
     Done,
     /// Cannot proceed; "Blocking the run" was followed.
     Blocked,
@@ -59,12 +61,18 @@ impl Outcome {
 
 #[derive(Debug, Args)]
 pub struct YieldArgs {
-    /// The outcome to report.
+    /// The outcome to report. Informational only — no outcome stops or
+    /// keeps the ticking clock.
     #[arg(long, value_enum)]
     pub outcome: Outcome,
     /// One-line note stored with the outcome (optional).
     #[arg(long)]
     pub note: Option<String>,
+    /// Stop this issue's ticking clock: no further agent run should be
+    /// scheduled on it. Use when the issue is finished or parked for a
+    /// human. Outcomes alone never stop the clock.
+    #[arg(long)]
+    pub stop_ticking: bool,
     /// Override the run id. Defaults to `PIDASH_RUN_ID`, which the daemon
     /// sets on the agent process; only scripted use should need this.
     #[arg(long)]
@@ -90,7 +98,10 @@ pub async fn run(args: RunCmdArgs, paths: &crate::util::paths::Paths) -> i32 {
     }
 }
 
-/// `POST workspaces/{slug}/agent-runs/{run_id}/yield/` with the outcome.
+/// `POST workspaces/{slug}/agent-runs/{run_id}/yield/` with the outcome
+/// and, when requested, the explicit stop-ticking signal. Without
+/// `--stop-ticking` the key is absent entirely, so older servers that do
+/// not know it see the same body as before.
 pub async fn cmd_yield(client: &ApiClient, args: YieldArgs) -> Result<(), CliError> {
     let run_id = resolve_run_id(args.run_id.as_deref(), client.env.run_id.as_deref())?;
     let path = yield_path(&client.env.workspace_slug, run_id);
@@ -102,6 +113,9 @@ pub async fn cmd_yield(client: &ApiClient, args: YieldArgs) -> Result<(), CliErr
         .filter(|n| !n.is_empty())
     {
         body["note"] = json!(note);
+    }
+    if args.stop_ticking {
+        body["stop_ticking"] = json!(true);
     }
     let resp = client.post(&path, &body).await?;
     println!(

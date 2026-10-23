@@ -39,12 +39,7 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
 /// so the daemon (and every subprocess it forks) inherits the operator's
 /// interactive PATH instead of `systemd --user`'s minimal default. See
 /// `service::capture_install_time_path` for the full rationale.
-fn render_unit(
-    exe: &str,
-    config_dir: &str,
-    data_dir: &str,
-    path_env: Option<&str>,
-) -> String {
+fn render_unit(exe: &str, config_dir: &str, data_dir: &str, path_env: Option<&str>) -> String {
     let path_line = match path_env {
         Some(p) => format!("\nEnvironment=\"PATH={}\"", systemd_double_quoted_escape(p)),
         None => String::new(),
@@ -281,9 +276,7 @@ mod tests {
             Some("/home/user/.local/bin:/usr/local/bin:/usr/bin"),
         );
         assert!(
-            body.contains(
-                "Environment=\"PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin\""
-            ),
+            body.contains("Environment=\"PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin\""),
             "unit body must include captured PATH; got:\n{body}"
         );
     }

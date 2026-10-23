@@ -284,10 +284,11 @@ mod tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
         let loaded = load_config(&paths).unwrap();
@@ -512,13 +513,14 @@ model_default = "o4-mini"
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 
@@ -560,6 +562,7 @@ model_default = "o4-mini"
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![
@@ -596,10 +599,11 @@ model_default = "o4-mini"
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![sample_runner("keep", tmp.path().join("wd"))],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 
@@ -635,6 +639,7 @@ model_default = "o4-mini"
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![

@@ -372,6 +372,12 @@ pub struct PatchArgs {
     #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
     pub clear_labels: bool,
 
+    /// Record the git branch this issue's work lives on, so later agent runs
+    /// check it out instead of cutting a new one. Set it only after the
+    /// branch exists on the remote. `--git-work-branch ""` clears it.
+    #[arg(long = "git-work-branch", value_name = "BRANCH")]
+    pub git_work_branch: Option<String>,
+
     /// Work type for this issue (e.g. `software`, `general`) — selects which
     /// per-work-type guidance the agent prompts carry. The server validates
     /// the key and rejects agent-attributed changes while the issue is being
@@ -841,6 +847,7 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
         state_uuid,
         parent,
         labels,
+        args.git_work_branch.as_deref(),
         work_type,
     )?;
 
@@ -957,6 +964,7 @@ fn merge_labels(
 /// contract — including `parent: null` for `--clear-parent`, `labels: []` for
 /// `--clear-labels`, and the fact that either alone satisfies the guard — is
 /// unit-testable.
+#[allow(clippy::too_many_arguments)]
 fn build_patch_body(
     title: Option<&str>,
     description: Option<&str>,
@@ -964,6 +972,7 @@ fn build_patch_body(
     state_uuid: Option<String>,
     parent: ParentPatch,
     label_uuids: Option<Vec<String>>,
+    git_work_branch: Option<&str>,
     work_type: WorkTypePatch,
 ) -> Result<Map<String, Value>, CliError> {
     let mut body: Map<String, Value> = Map::new();
@@ -999,6 +1008,11 @@ fn build_patch_body(
     if let Some(uuids) = label_uuids {
         body.insert("labels".into(), label_array(uuids));
     }
+    // An empty string is a real mutation too: it clears the recorded branch.
+    if let Some(branch) = git_work_branch {
+        body.insert("git_work_branch".into(), Value::String(branch.to_string()));
+    }
+
     match work_type {
         WorkTypePatch::Set(key) => {
             body.insert("work_type".into(), Value::String(key));
@@ -1012,7 +1026,7 @@ fn build_patch_body(
     if body.is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels/--work-type/--clear-work-type is required",
+            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels/--work-type/--clear-work-type/--git-work-branch is required",
         ));
     }
 
@@ -1057,11 +1071,19 @@ async fn cmd_attach_review(client: &ApiClient, args: AttachReviewArgs) -> Result
 fn build_search_params(args: &SearchArgs) -> Result<Vec<(&'static str, String)>, CliError> {
     let q = args.query.trim();
     if q.is_empty() {
-        return Err(CliError::new(EXIT_INVALID, "search query must not be empty"));
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "search query must not be empty",
+        ));
     }
 
     let mut params: Vec<(&'static str, String)> = vec![("q", q.to_string())];
-    if let Some(p) = args.project.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(p) = args
+        .project
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         params.push(("project", p.to_string()));
     }
     // Send `status` only when it differs from the server default to keep
@@ -1358,6 +1380,7 @@ mod tests {
             None,
             ParentPatch::Unchanged,
             None,
+            None,
             WorkTypePatch::Unchanged,
         )
         .expect("description alone is a valid mutation");
@@ -1366,6 +1389,43 @@ mod tests {
             Some("| a |\n|---|\n| 1 |")
         );
         assert!(!body.contains_key("description_html"));
+    }
+
+    #[test]
+    fn build_patch_body_sends_git_work_branch_and_satisfies_guard() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            Some("pi-dash/eng-42"),
+            WorkTypePatch::Unchanged,
+        )
+        .expect("a work branch alone is a valid mutation");
+        assert_eq!(
+            body.get("git_work_branch").and_then(Value::as_str),
+            Some("pi-dash/eng-42")
+        );
+        assert_eq!(body.len(), 1);
+
+        // An explicit empty value clears the recorded branch.
+        let cleared = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            Some(""),
+            WorkTypePatch::Unchanged,
+        )
+        .expect("clearing is a valid mutation");
+        assert_eq!(
+            cleared.get("git_work_branch").and_then(Value::as_str),
+            Some("")
+        );
     }
 
     #[derive(Debug, clap::Parser)]
@@ -1610,6 +1670,7 @@ mod tests {
             None,
             ParentPatch::Set("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()),
             None,
+            None,
             WorkTypePatch::Unchanged,
         )
         .expect("parent is a valid mutation");
@@ -1621,8 +1682,17 @@ mod tests {
 
     #[test]
     fn build_patch_body_clear_parent_sends_null() {
-        let body = build_patch_body(None, None, None, None, ParentPatch::Clear, None, WorkTypePatch::Unchanged)
-            .expect("clear-parent is a valid mutation");
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Clear,
+            None,
+            None,
+            WorkTypePatch::Unchanged,
+        )
+        .expect("clear-parent is a valid mutation");
         // `--clear-parent` must emit an explicit JSON null (detach), not omit
         // the key — omitting it would leave the parent unchanged server-side.
         assert_eq!(body.get("parent"), Some(&Value::Null));
@@ -1640,17 +1710,39 @@ mod tests {
                 None,
                 ParentPatch::Set("x".to_string()),
                 None,
+                None,
                 WorkTypePatch::Unchanged
             )
             .is_ok()
         );
-        assert!(build_patch_body(None, None, None, None, ParentPatch::Clear, None, WorkTypePatch::Unchanged).is_ok());
+        assert!(
+            build_patch_body(
+                None,
+                None,
+                None,
+                None,
+                ParentPatch::Clear,
+                None,
+                None,
+                WorkTypePatch::Unchanged
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn build_patch_body_empty_is_rejected() {
-        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None, WorkTypePatch::Unchanged)
-            .expect_err("no mutations must be rejected");
+        let err = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            WorkTypePatch::Unchanged,
+        )
+        .expect_err("no mutations must be rejected");
         assert_eq!(err.exit_code, EXIT_INVALID);
         // The guard message advertises the parent flags so agents can discover them.
         assert!(err.message.contains("--parent"));
@@ -1731,6 +1823,7 @@ mod tests {
             None,
             ParentPatch::Unchanged,
             None,
+            None,
             WorkTypePatch::Set("general".to_string()),
         )
         .expect("work type alone is a valid mutation");
@@ -1752,6 +1845,7 @@ mod tests {
             None,
             ParentPatch::Unchanged,
             None,
+            None,
             WorkTypePatch::Clear,
         )
         .expect("clear-work-type is a valid mutation");
@@ -1766,6 +1860,7 @@ mod tests {
             None,
             None,
             ParentPatch::Unchanged,
+            None,
             None,
             WorkTypePatch::Unchanged,
         )
@@ -1799,7 +1894,11 @@ mod tests {
     #[test]
     fn run_ai_path_targets_the_work_item_run_ai_route() {
         assert_eq!(
-            run_ai_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+            run_ai_path(
+                "eng",
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222"
+            ),
             "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/run-ai/"
         );
     }
@@ -1824,7 +1923,11 @@ mod tests {
     #[test]
     fn wait_path_targets_the_work_item_wait_route() {
         assert_eq!(
-            wait_path("eng", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"),
+            wait_path(
+                "eng",
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222"
+            ),
             "workspaces/eng/projects/11111111-1111-1111-1111-111111111111/work-items/22222222-2222-2222-2222-222222222222/wait/"
         );
     }
@@ -1914,6 +2017,7 @@ mod tests {
             None,
             ParentPatch::Unchanged,
             Some(vec!["l-bug".to_string()]),
+            None,
             WorkTypePatch::Unchanged,
         )
         .expect("labels alone is a valid mutation");
@@ -1924,15 +2028,33 @@ mod tests {
     fn build_patch_body_clear_labels_sends_an_empty_array() {
         // `--clear-labels` must emit `[]` (detach all), not omit the key —
         // omitting it would leave the labels untouched server-side.
-        let body = build_patch_body(None, None, None, None, ParentPatch::Unchanged, Some(vec![]), WorkTypePatch::Unchanged)
-            .expect("clear-labels is a valid mutation");
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            Some(vec![]),
+            None,
+            WorkTypePatch::Unchanged,
+        )
+        .expect("clear-labels is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!([])));
     }
 
     #[test]
     fn build_patch_body_guard_advertises_the_label_flags() {
-        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None, WorkTypePatch::Unchanged)
-            .expect_err("no mutations must be rejected");
+        let err = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            WorkTypePatch::Unchanged,
+        )
+        .expect_err("no mutations must be rejected");
         for flag in ["--label", "--add-label", "--remove-label", "--clear-labels"] {
             assert!(
                 err.message.contains(flag),

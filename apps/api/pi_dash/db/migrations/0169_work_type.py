@@ -22,7 +22,7 @@ def _stamp_existing_projects_software(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0167_wait_budget"),
+        ("db", "0168_ticker_stop_signal_disarm_reason"),
     ]
 
     operations = [

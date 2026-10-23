@@ -203,6 +203,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str) -> Result<()
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![],
@@ -445,6 +446,7 @@ pub async fn apply_enroll_response(
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![],
@@ -789,7 +791,10 @@ mod tests {
         .await
         .unwrap();
         let wd = &applied.runner.workspace.working_dir;
-        assert!(wd.starts_with(paths.data_dir.join("workspaces")), "wd: {wd:?}");
+        assert!(
+            wd.starts_with(paths.data_dir.join("workspaces")),
+            "wd: {wd:?}"
+        );
         // The persisted config validates (exclusive dir, no collision).
         file::load_config(&paths).unwrap().validate().unwrap();
     }
