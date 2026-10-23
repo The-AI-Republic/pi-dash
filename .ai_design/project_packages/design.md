@@ -581,7 +581,7 @@ says core or `pidash` extension, per §4.2.
 
 `ProjectMember`, `ProjectMemberInvite`, `ProjectUserProperty`,
 `default_assignee`, `project_lead` (people); `Runner` and `DevMachine`
-(`runner/models.py:382`) and anything else naming a machine; every
+(`runner/models.py:400`) and anything else naming a machine; every
 credential, token and env _value_; `AgentRun` and its `done_payload`,
 `prompt_manifest`, `agent_metadata`, transcripts and logs; `IssueComment`
 and the agent workpad; `IssueAgentTicker` runtime state; `UserFavorite`,
@@ -663,7 +663,7 @@ floor, because both name Pi Dash concepts:
 
 There is already a capability channel to hang the core list on:
 `Runner.capabilities` (`runner/models.py`, a JSON list reported at
-enrollment) and `AgentRun.required_capabilities` (`runner/models.py:991`,
+enrollment) and `AgentRun.required_capabilities` (`runner/models.py:1029`,
 a JSON list used when matching a run to a runner). v1 **declares**
 capabilities for informed consent and displays them at install; it does
 not yet feed them into the matcher. §10.3 is explicit about why that
@@ -1246,7 +1246,7 @@ that the first draft of this design did not have to consider: **a skill
 folder can contain executable scripts, and the runtime is expected to run
 them.** Combined with the fact that Pi Dash's async runs pass
 `--permission-mode bypassPermissions` — constructed unconditionally at
-`runner/src/claude_code/bridge.rs:63` — on hosts holding the user's git
+`runner/src/claude_code/bridge.rs:58` — on hosts holding the user's git
 credentials and source, a package that could ship a script would be a
 remote-code-execution channel from a stranger to the installer's laptop.
 §10.5 is how that is contained, and it is the reason this design does not
@@ -1317,10 +1317,10 @@ The gate therefore sits at **run creation**, not on the switch:
 
    | Creation site | Reaches the rulebook? |
    |---|---|
-   | `_create_continuation_run` (`orchestration/service.py:443`, creates at `:478`) | yes — `build_first_turn` → `prompting/sections/intro.md:20` |
-   | `_create_and_dispatch_run` (`:735`, creates at `:785`) | yes — same path |
-   | `_create_project_move_handoff_run` (`:569`, creates at `:604`) | **yes** — calls `build_first_turn` for the **target** project; reached from `utils/issue_move.py:358` when an issue is moved into the project |
-   | `dispatch_scheduler_run` (`:846`, creates at `:953`) | **yes** — `build_scheduler_turn` → `prompting/sections/scheduler-intro.md:16` renders `project.description`; reached from `bgtasks/scheduler.py:226` |
+   | `_create_continuation_run` (`orchestration/service.py:444`, creates at `:479`) | yes — `build_first_turn` → `prompting/sections/intro.md:20` |
+   | `_create_and_dispatch_run` (`:749`, creates at `:799`) | yes — same path |
+   | `_create_project_move_handoff_run` (`:583`, creates at `:618`) | **yes** — calls `build_first_turn` for the **target** project; reached from `utils/issue_move.py:358` when an issue is moved into the project |
+   | `dispatch_scheduler_run` (`:860`, creates at `:967`) | **yes** — `build_scheduler_turn` → `prompting/sections/scheduler-intro.md:16` renders `project.description`; reached from `bgtasks/scheduler.py:226` |
    | direct runs, `runner/views/runs.py:256` (creates at `:316`) | not today, and only by accident — the `KIND_DIRECT` recipe (`prompting/recipes.py:122`) happens to omit every rulebook-bearing section, though `build_direct_turn` already puts `project.description` in the context (`prompting/composer.py:484`). Guard it too rather than depend on a recipe staying that way. |
 
    The last three are the ones a "gate the obvious triggers" reading
@@ -1453,13 +1453,13 @@ What a package skill inherits from 260:
    get that gate relaxed.
 5. **Delivery to a Pi Dash-owned root, never the user's own namespace or
    the repo's.** 260 settles the mechanics: `$CODEX_HOME/skills/` for
-   Codex (`CodexSection.codex_home`, `runner/src/config/schema.rs:191`,
+   Codex (`CodexSection.codex_home`, `runner/src/config/schema.rs:249`,
    whose comment notes "the user's own Codex install (if any) is neither
    read nor written"), and for Claude Code an `--add-dir` root — **not**
    `--plugin-dir`, which 260's review and test passes both corrected,
    because a `--plugin-dir` skill sits in the plugin layer that does not
    pick up disk changes. Note `ClaudeCodeSection`
-   (`runner/src/config/schema.rs:448`) carries only `binary` and
+   (`runner/src/config/schema.rs:469`) carries only `binary` and
    `model_default`, so there is no Claude config-dir override to lean on.
 6. **Reconcile, never append.** 260 extends the `RUNNER_OWNED_ENTRIES`
    pattern (`runner/src/workspace/resolve.rs:123`) so that what Pi Dash
@@ -2216,7 +2216,7 @@ is null, through one shared helper called from **all five** `AgentRun`
 creation sites (§10.2's table), and keep the refusal on the ticking switch
 as well.* Note there is no single choke point to hang this on — the two
 issue-run helpers (`_create_and_dispatch_run` / `_create_continuation_run`,
-`orchestration/service.py:735`/`:443`) cover the six familiar triggers but
+`orchestration/service.py:749`/`:444`) cover the six familiar triggers but
 not the project-move handoff or the scheduler, and both of those compose
 the rulebook. A shared helper rather than five inlined checks is what
 keeps a sixth creation site from silently skipping the gate.
