@@ -9,12 +9,14 @@
 //! `issue_links` lookup + full-row save.
 //!
 //! Ordering is crawl-FIRST, DB-lookup-SECOND (`:264` before `:267`): a dead
-//! link still pays for the crawl. A missing `IssueLink` row only warns and
-//! acks (`IssueLink.DoesNotExist → return`, `:269-271`).
+//! link still pays for the crawl. A missing or soft-deleted `IssueLink` row
+//! only warns and acks (`IssueLink.DoesNotExist → return`, `:269-271`).
 //!
 //! The deterministic deltas of the Python full `save()` are the `metadata`
-//! write plus the `auto_now` `updated_at` touch, so the port issues exactly
-//! that `UPDATE` (no `update_fields` narrowing, matching the source).
+//! write, the `auto_now` `updated_at` touch, and the worker-context audit
+//! blanking (`created_by`/`updated_by` NULL, `base.py:21-31` — no crum
+//! user), so the port issues exactly that `UPDATE` (no `update_fields`
+//! narrowing, matching the source).
 
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -40,11 +42,15 @@ pub const TASK_NAMES: [&str; 1] = [CRAWL_TASK_NAME];
 
 /// `SELECT` mirroring `IssueLink.objects.get(id=id)`
 /// (`db_table = "issue_links"`, `issue.py:480`; UUID pk, `base.py:18`).
-pub const FIND_LINK_SQL: &str = r#"SELECT id, metadata FROM issue_links WHERE id = $1"#;
+/// The default manager is the `SoftDeletionManager` (`mixins.py:56-66`),
+/// so soft-deleted rows are invisible to the lookup.
+pub const FIND_LINK_SQL: &str =
+    r#"SELECT id, metadata FROM issue_links WHERE id = $1 AND deleted_at IS NULL"#;
 
-/// Full-row save delta: `metadata` plus the `auto_now` `updated_at` touch.
-pub const SAVE_LINK_METADATA_SQL: &str =
-    r#"UPDATE issue_links SET metadata = $1, updated_at = NOW() WHERE id = $2"#;
+/// Full-row save delta: `metadata`, the `auto_now` `updated_at` touch, and
+/// the worker-context audit blanking (`base.py:21-31` — no crum user, so
+/// the full save persists both NULLs; same semantics as PB-2008/PB-2009).
+pub const SAVE_LINK_METADATA_SQL: &str = r#"UPDATE issue_links SET metadata = $1, updated_at = NOW(), created_by_id = NULL, updated_by_id = NULL WHERE id = $2"#;
 
 /// `(id, url)` out of a Celery payload. The Python signature is
 /// `crawl_work_item_link_title(id, url)`, so `.delay(id, url)` arrives as
@@ -263,10 +269,15 @@ mod tests {
     fn sql_targets_issue_links_metadata() {
         assert!(FIND_LINK_SQL.contains("issue_links"));
         assert!(FIND_LINK_SQL.contains("WHERE id = $1"));
+        // SoftDeletionManager parity: stamped rows are invisible (PIDASHCONV-1281).
+        assert!(FIND_LINK_SQL.contains("deleted_at IS NULL"));
         assert!(SAVE_LINK_METADATA_SQL.contains("issue_links"));
         assert!(SAVE_LINK_METADATA_SQL.contains("metadata = $1"));
-        // Full save(): no update_fields narrowing — updated_at touched.
+        // Full save(): no update_fields narrowing — updated_at touched, and
+        // the worker-context audit blanking persists both NULLs (PB-2008/2009 semantics).
         assert!(SAVE_LINK_METADATA_SQL.contains("updated_at"));
+        assert!(SAVE_LINK_METADATA_SQL.contains("created_by_id = NULL"));
+        assert!(SAVE_LINK_METADATA_SQL.contains("updated_by_id = NULL"));
         assert!(SAVE_LINK_METADATA_SQL.contains("WHERE id = $2"));
     }
 
