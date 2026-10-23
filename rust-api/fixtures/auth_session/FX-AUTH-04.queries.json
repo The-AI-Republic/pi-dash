@@ -64,7 +64,7 @@
  "password": {
   "set_check": {
    "algo": "pbkdf2_sha256",
-   "iterations": "1500000",
+   "iterations": "600000",
    "check_true": true,
    "check_false": false
   },

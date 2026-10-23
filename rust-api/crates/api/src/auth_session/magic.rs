@@ -957,15 +957,16 @@ fn generate_token() -> String {
 
 /// `set_password(uuid4().hex)` (`adapter/base.py:308-310`): PBKDF2-SHA256
 /// with a fresh 22-alphanumeric salt (`BasePasswordHasher.salt()`) at the
-/// fixture iteration count. Returns `(password_hash, raw_password)` — the
-/// raw value is discarded by the caller (it is never stored).
+/// pinned Django 4.2 iteration count. Returns `(password_hash,
+/// raw_password)` — the raw value is discarded by the caller (it is never
+/// stored).
 fn autoset_password() -> (String, String) {
     let raw = uuid::Uuid::new_v4().simple().to_string();
     let salt = django_random_string(22);
     let hash = pidash_auth::password::hash_password(
         &raw,
         &salt,
-        pidash_services::auth_session::models::PASSWORD_HASH_ITERATIONS,
+        pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
     (hash, raw)
 }
