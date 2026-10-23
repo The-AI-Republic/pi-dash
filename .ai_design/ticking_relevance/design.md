@@ -193,7 +193,7 @@ implements — §10):
 | Issue enters the bucket (from outside) | Wake. Human move → free entry run now (§4.5 if a run is active). Arm the clock on the stage's interval if `used < cap`.                                                                                                                                                                 |
 | Issue moves between rooms              | No rebuild. Agent move (§5.6) → if `used < cap`, queue the entry run (counts); if the pool is spent, fire nothing — the issue parks (§5.4). Human move → free entry run regardless. Re-time the clock to the new interval. Capture the implementation parent on every cross-stage move. |
 | Timer due                              | `fire_tick`: read the _current_ stage at claim → prompt kind; `used += 1`; render fresh.                                                                                                                                                                                                |
-| Run ends with an outcome (§7)          | If the issue is still in the stage the run was rendered for: `progressed` / `waiting_on_external` → next tick; `done` (stay) / `waiting_on_human` / `blocked` → clock stops. If the issue has already moved on: ignore — the clock is already set for the new room.                     |
+| Run ends with an outcome (§7)          | If the issue is still in the stage the run was rendered for: every outcome → next tick; only an explicit `stop_ticking` on the yield → clock stops (`stop_signal`). If the issue has already moved on: ignore — the clock is already set for the new room.                              |
 | Pool spent (`used == cap`)             | Clock stops, `cap_hit`. In Progress additionally → Paused at run end (as today). Re-tick appears.                                                                                                                                                                                       |
 | Re-tick                                | `granted += agent_default_max_ticks` (a fresh pool); fire now (§4.5 if a run is active).                                                                                                                                                                                                |
 | Run AI / Comment & Run                 | One free run now; the clock re-times only if `used < cap`.                                                                                                                                                                                                                              |
@@ -543,7 +543,7 @@ has no callers. So every review ticks to its cap saying "no change".
 travels the same way, as the run's last act:
 
 ```
-pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"]
+pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"] [--stop-ticking]
 ```
 
 **Which run?** The cloud must know _which_ AgentRun is reporting. The CLI
@@ -551,45 +551,65 @@ reads `PIDASH_RUN_ID` from the environment (§5.6 step 1) and sends it as
 `X-Pi-Dash-Run-Id`. The endpoint verifies the run exists, is active, belongs
 to the authenticated runner, and is for the issue named in the request;
 then writes `run.done_payload = {"status": <outcome>, "note": …,
-"yielded_at": …}`. A yield with no run id, a stale run id, or another
-runner's run id is rejected — the outcome must be attributable or it is
-worthless.
+"yielded_at": …, "stop_ticking": <bool, when sent>}`. A yield with no run
+id, a stale run id, or another runner's run id is rejected — the outcome
+must be attributable or it is worthless.
 
-| Outcome               | Meaning                                                                                                 | Ticker effect                                                                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `progressed`          | did work, more to do                                                                                    | keep ticking (`next_run_at = now + interval`)                                                                                                             |
-| `waiting_on_human`    | posted a question / spent-budget notice                                                                 | disarm (`terminal_signal`); re-arm on human action (§5.5)                                                                                                 |
-| `waiting_on_external` | In Progress waiting on CI or a merge                                                                    | keep ticking (heartbeat)                                                                                                                                  |
-| `done`                | this stage's exit condition is met — the issue was moved on, **or** it is approved / verified and stays | stop the clock — **unless** the issue has already moved on, in which case the clock is already set for the new stage and must be left alone (guard below) |
-| `blocked`             | cannot proceed                                                                                          | disarm; issue → Blocked per `blocking`                                                                                                                    |
+**Outcomes are informational only (PDASHOSS01-247).** `done` means "this
+run's turn is done"; `progressed`, `waiting_on_external`,
+`waiting_on_human` and `blocked` describe what happened. None of them
+stops the clock. The clock stops only on the optional boolean
+`stop_ticking` — the agent's explicit "no further agent run can do
+anything useful on this issue": parked for a human decision or close, or
+waiting on a human answer.
 
-**The guard: `done` must not stop a clock that has moved on.** A run that
-moves the issue forward (step 5 of §4.3) and _then_ yields `done` (step 6)
-would, with today's hook, stop the issue's clock — which one second earlier
-was re-timed for the **next** stage and (with §4.5) holds the queued entry
-run. `reconcile` therefore compares the stage the run was rendered for with the
-issue's _current_ stage. The run needs a `phase_kind` stamp at creation:
-`prompt_manifest` carries the kind only for Cloud Agent runs (`{"v": 2,
-"kind": …}`); for local runs it is a bare list of section entries, so it
-cannot be used for this.
+| Signal                              | Meaning                                            | Ticker effect                                                                            |
+| ----------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `progressed`                        | did work, more to do                               | keep ticking (`next_run_at = now + interval`)                                            |
+| `waiting_on_human`                  | posted a question / spent-budget notice            | keep ticking                                                                             |
+| `waiting_on_external`               | waiting on CI, a merge, or a blocker               | keep ticking (heartbeat)                                                                 |
+| `done`                              | this run's turn is done                            | keep ticking                                                                             |
+| `blocked`                           | cannot proceed                                     | keep ticking; issue → Blocked per `blocking`                                             |
+| `--stop-ticking` (with any outcome) | no further agent run can do anything useful here   | stop the clock (`stop_signal`) — **unless** the issue has already moved on (guard below) |
+| _(no report)_                       | the run crashed, was cancelled, or forgot to yield | keep ticking in every stage; the budget bounds the cost                                  |
 
-- same stage → apply the outcome to the ticker as in the table;
+The other stops are unchanged: leaving the ticking states
+(`left_ticking_state`), the tick budget (`cap_hit` / `pool_spent`, §5),
+and the user / project switches (`user_disabled`). `terminal_signal`
+survives only as a legacy disarm reason on rows written before
+`stop_signal` existed; `reconcile` no longer writes it.
+
+**The guard: a signal from a run whose stage has moved on is ignored —
+`stop_ticking` included.** A run that moves the issue forward (step 5 of
+§4.3) and _then_ yields (step 6) must not touch the clock — which one
+second earlier was re-timed for the **next** stage and (with §4.5) holds
+the queued entry run. `reconcile` therefore compares the stage the run was
+rendered for with the issue's _current_ stage. The run needs a
+`phase_kind` stamp at creation: `prompt_manifest` carries the kind only
+for Cloud Agent runs (`{"v": 2, "kind": …}`); for local runs it is a bare
+list of section entries, so it cannot be used for this.
+
+- same stage → apply the signal to the ticker as in the table;
 - different stage → the run already handed the issue on; **do nothing** to
   the ticker.
 
 This makes the yield/move order irrelevant to correctness, so the agent
-does not have to remember one.
+does not have to remember one. A queued `pending_entry` likewise outranks
+the finished run's signal.
 
-**Defaults.** A run that exits without yielding is treated per kind:
-`coding-task` → `progressed` (keep ticking; the budget still bounds it);
-`review` / `test` → `done` (stay; disarm). The review/test default is the
-cost-safe one — an approved review that forgets to yield must not tick to
-its cap as it does today.
+**Defaults.** A run that exits without yielding means `progressed` in
+every stage — no report keeps ticking, and the budget bounds the cost.
+`noop` is retired as a vocabulary word; "nothing changed" is `progressed`
+with no changes, and never stops the clock.
 
-`noop` is retired as a vocabulary word; "nothing changed" is `done` (stay)
-for review/test and `progressed` with no changes for In Progress.
-`waiting_on_external` is for In Progress only; a review or test waiting on
-a _person_ (a reviewer, the human who closes to Done) is `done` (stay).
+**Re-arming.** A state move, Run AI, Re-tick or Comment & Run clears a
+`stop_signal` disarm exactly as it cleared `terminal_signal` (§5.5).
+
+**Rollout.** The server ships first and is backward compatible: it accepts
+the flag, and a no-flag yield keeps ticking. Until the prompts teach
+`--stop-ticking` (PDASHOSS01-250), review and test runs that stay in place
+tick until their budget runs out instead of stopping — the intended safe
+side: work continues, and cost is bounded by `agent_default_max_ticks`.
 
 ## 8. Prompt changes
 
