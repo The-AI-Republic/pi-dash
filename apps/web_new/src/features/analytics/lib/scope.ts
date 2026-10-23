@@ -28,9 +28,11 @@ export function normalizeAnalyticsScope(ids: readonly string[]): string[] {
 /**
  * Projects the analytics screen may scope to: joined by the caller
  * (a workspace role on the row) and not archived. The same set
- * drives the no-project empty view and the picker options.
+ * drives the no-project empty view, the picker options, and the
+ * active-projects join. Generic over the row so callers keep their
+ * wider fields (identity, marks).
  */
-export function selectAnalyticsProjects(projects: readonly ScopeProject[]): ScopeProject[] {
+export function selectAnalyticsProjects<P extends ScopeProject>(projects: readonly P[]): P[] {
   return projects.filter((project) => project.member_role !== null && project.archived_at === null);
 }
 

@@ -4,17 +4,23 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ActiveProjectsSection,
   ALL_PROJECTS_LABEL,
   ANALYTICS_TAB_IDS,
   ANALYTICS_TAB_LABELS,
   AnalyticsEmptyView,
   AnalyticsPicker,
   AnalyticsScreen,
+  AnalyticsSectionGuidance,
   AnalyticsTabStrip,
   analyticsKeys,
+  analyticsProjectsChartQueryOptions,
+  analyticsProjectStatsQueryOptions,
   analyticsScopeSearch,
   analyticsTabHref,
   analyticsTotalsQueryOptions,
+  completionPercent,
+  completionTone,
   DEFAULT_ANALYTICS_TAB,
   defaultAnalyticsTabHref,
   HeadlineCards,
@@ -24,11 +30,15 @@ import {
   normalizeAnalyticsScope,
   OVERVIEW_HEADLINE_CARDS,
   parseAnalyticsSearch,
+  RadarSection,
+  resolveActiveProjects,
   resolveAnalyticsScope,
   selectAnalyticsProjects,
   selectAnalyticsTab,
   selectHeadlineValue,
   selectPickerSummary,
+  useAnalyticsProjectsChart,
+  useAnalyticsProjectStats,
   useAnalyticsTotals,
   WORK_ITEMS_HEADLINE_CARDS,
 } from "./index.js";
@@ -42,7 +52,19 @@ describe("analytics barrel", () => {
     expect(typeof HeadlineCards).toBe("function");
     expect(typeof useAnalyticsTotals).toBe("function");
     expect(typeof analyticsTotalsQueryOptions).toBe("function");
+    expect(typeof analyticsProjectsChartQueryOptions).toBe("function");
+    expect(typeof analyticsProjectStatsQueryOptions).toBe("function");
+    expect(typeof useAnalyticsProjectsChart).toBe("function");
+    expect(typeof useAnalyticsProjectStats).toBe("function");
+    expect(typeof RadarSection).toBe("function");
+    expect(typeof ActiveProjectsSection).toBe("function");
+    expect(typeof AnalyticsSectionGuidance).toBe("function");
+    expect(typeof completionPercent).toBe("function");
+    expect(typeof completionTone).toBe("function");
+    expect(typeof resolveActiveProjects).toBe("function");
     expect(typeof analyticsKeys.totals).toBe("function");
+    expect(typeof analyticsKeys.charts).toBe("function");
+    expect(typeof analyticsKeys.projectStats).toBe("function");
     expect(typeof headlineCardsForTab).toBe("function");
     expect(typeof selectHeadlineValue).toBe("function");
     expect(typeof selectAnalyticsTab).toBe("function");

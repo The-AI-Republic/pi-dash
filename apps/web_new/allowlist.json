@@ -18,6 +18,7 @@
     "markdown-it",
     "react",
     "react-dom",
+    "recharts",
     "zod",
     "zustand"
   ],

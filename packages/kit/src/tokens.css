@@ -25,6 +25,24 @@
   --warning: #d9912b;
   --danger: #e5484d;
 
+  /* Charts: ten categorical slots (parity/specs/analytics.md §10,
+     NEWFRONT-732). Light values are oracle-pinned; dark slots are
+     brighter twins for dark surfaces. The contrast and custom themes
+     inherit these: segment hues encode data and always pair with a
+     text label, so they do not follow the text-contrast remap. The
+     charts.ts module mirrors these values for SVG/JS use; its test
+     pins the mirror. */
+  --chart-1: #6172e8;
+  --chart-2: #8b6edb;
+  --chart-3: #e05f99;
+  --chart-4: #29a383;
+  --chart-5: #cb8a37;
+  --chart-6: #3aa7c1;
+  --chart-7: #f1b24a;
+  --chart-8: #e84855;
+  --chart-9: #50c799;
+  --chart-10: #b35f9e;
+
   /* Type */
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
@@ -118,6 +136,16 @@
   --success: #3db86c;
   --warning: #e5a84a;
   --danger: #f2555a;
+  --chart-1: #93a0f2;
+  --chart-2: #b094e8;
+  --chart-3: #ec8ab8;
+  --chart-4: #4fc3a2;
+  --chart-5: #dfa761;
+  --chart-6: #66bfd4;
+  --chart-7: #f6c573;
+  --chart-8: #f0707a;
+  --chart-9: #76d8b0;
+  --chart-10: #c984b8;
   --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.5);
   --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
 }
@@ -187,6 +215,16 @@
     --success: #3db86c;
     --warning: #e5a84a;
     --danger: #f2555a;
+    --chart-1: #93a0f2;
+    --chart-2: #b094e8;
+    --chart-3: #ec8ab8;
+    --chart-4: #4fc3a2;
+    --chart-5: #dfa761;
+    --chart-6: #66bfd4;
+    --chart-7: #f6c573;
+    --chart-8: #f0707a;
+    --chart-9: #76d8b0;
+    --chart-10: #c984b8;
     --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.5);
     --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
   }

@@ -38,6 +38,7 @@ const ACTIONS = [
   "getAttribute",
   "fill",
   "inputValue",
+  "hover",
 ];
 
 /** One stubbed route handler invocation. */
@@ -578,5 +579,310 @@ describe("analytics totals stall", () => {
     const unparseable = stubRoute("http://[");
     await hook(unparseable);
     expect(unparseable.fellThrough()).toBe(true);
+  });
+});
+
+describe("analytics charts stall", () => {
+  function stubRoute(url: string, method = "GET"): StubRoute & { fellThrough: () => boolean } {
+    let fellThrough = false;
+    return {
+      request: () => ({ method: () => method, url: () => url }),
+      fallback: async () => {
+        fellThrough = true;
+      },
+      fellThrough: () => fellThrough,
+    };
+  }
+
+  function installedHook(recorder: Recorder): (route: StubRoute) => Promise<void> {
+    const [installed] = recorder.routes;
+    if (!installed) throw new Error("expected the charts stall to install its route hook");
+    return installed.handler;
+  }
+
+  it("shares one route hook with the totals stall", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.analyticsTotalsStall("overview");
+    await driver.analyticsChartsStall("projects");
+    await driver.analyticsChartsStall("work-items");
+    expect(recorder.routes).toHaveLength(1);
+    expect(recorder.routes[0]?.pattern).toBe("**/api/workspaces/**");
+  });
+
+  it("holds a stalled charts read until release", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.analyticsChartsStall("projects");
+    const route = stubRoute("https://app.test/api/workspaces/acme/advance-analytics-charts/?type=projects");
+    let settled = false;
+    const pending = installedHook(recorder)(route).then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    expect(route.fellThrough()).toBe(false);
+    await driver.analyticsChartsRelease();
+    await pending;
+    expect(settled).toBe(true);
+    expect(route.fellThrough()).toBe(true);
+  });
+
+  it("holds one stalled read per chart kind and releases every gate", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.analyticsChartsStall("projects");
+    await driver.analyticsChartsStall("work-items");
+    const first = stubRoute("https://app.test/api/workspaces/acme/advance-analytics-charts?type=projects");
+    const second = stubRoute("https://app.test/api/workspaces/acme/advance-analytics-charts/?type=work-items");
+    let settled = 0;
+    const hook = installedHook(recorder);
+    const pending = Promise.all([hook(first).then(() => (settled += 1)), hook(second).then(() => (settled += 1))]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(0);
+    await driver.analyticsChartsRelease();
+    await pending;
+    expect(settled).toBe(2);
+  });
+
+  it("falls through reads outside the stall", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.analyticsChartsStall("projects");
+    const hook = installedHook(recorder);
+    const otherType = stubRoute("https://app.test/api/workspaces/acme/advance-analytics-charts/?type=work-items");
+    await hook(otherType);
+    expect(otherType.fellThrough()).toBe(true);
+    const otherPath = stubRoute("https://app.test/api/workspaces/acme/advance-analytics/?tab=overview");
+    await hook(otherPath);
+    expect(otherPath.fellThrough()).toBe(true);
+    const post = stubRoute("https://app.test/api/workspaces/acme/advance-analytics-charts/?type=projects", "POST");
+    await hook(post);
+    expect(post.fellThrough()).toBe(true);
+  });
+});
+
+describe("analytics project-stats stall", () => {
+  function stubRoute(url: string, method = "GET"): StubRoute & { fellThrough: () => boolean } {
+    let fellThrough = false;
+    return {
+      request: () => ({ method: () => method, url: () => url }),
+      fallback: async () => {
+        fellThrough = true;
+      },
+      fellThrough: () => fellThrough,
+    };
+  }
+
+  function installedHook(recorder: Recorder): (route: StubRoute) => Promise<void> {
+    const [installed] = recorder.routes;
+    if (!installed) throw new Error("expected the stats stall to install its route hook");
+    return installed.handler;
+  }
+
+  it("shares one route hook with the other stalls", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.analyticsTotalsStall("overview");
+    await driver.analyticsChartsStall("projects");
+    await driver.analyticsProjectStatsStall();
+    expect(recorder.routes).toHaveLength(1);
+  });
+
+  it("holds a stalled stats read until release", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.analyticsProjectStatsStall();
+    const route = stubRoute("https://app.test/api/workspaces/acme/project-stats/?fields=total_issues,completed_issues");
+    let settled = false;
+    const pending = installedHook(recorder)(route).then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    expect(route.fellThrough()).toBe(false);
+    await driver.analyticsProjectStatsRelease();
+    await pending;
+    expect(settled).toBe(true);
+    expect(route.fellThrough()).toBe(true);
+    // A later stall starts clean: the released gates do not linger.
+    await driver.analyticsProjectStatsStall();
+    const second = stubRoute("https://app.test/api/workspaces/acme/project-stats/");
+    let secondSettled = false;
+    const secondPending = installedHook(recorder)(second).then(() => {
+      secondSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(secondSettled).toBe(false);
+    await driver.analyticsProjectStatsRelease();
+    await secondPending;
+    expect(secondSettled).toBe(true);
+  });
+
+  it("falls through reads outside the stall", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.analyticsProjectStatsStall();
+    const hook = installedHook(recorder);
+    const otherPath = stubRoute("https://app.test/api/workspaces/acme/advance-analytics-charts/?type=projects");
+    await hook(otherPath);
+    expect(otherPath.fellThrough()).toBe(true);
+    const post = stubRoute("https://app.test/api/workspaces/acme/project-stats/", "POST");
+    await hook(post);
+    expect(post.fellThrough()).toBe(true);
+  });
+
+  it("falls the stats read through once released", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.analyticsProjectStatsStall();
+    await driver.analyticsProjectStatsRelease();
+    const route = stubRoute("https://app.test/api/workspaces/acme/project-stats/");
+    await installedHook(recorder)(route);
+    expect(route.fellThrough()).toBe(true);
+  });
+});
+
+describe("analytics radar", () => {
+  it("reads the settled summary rows in order", async () => {
+    const recorder = new Recorder();
+    const rows = [
+      { dimension: "Work Items", count: "2" },
+      { dimension: "Cycles", count: "0" },
+    ];
+    recorder.evaluateImpl = () => rows;
+    await expect(new WebNewDriver(recorder.page()).analyticsRadarSummary()).resolves.toEqual(rows);
+    expectTrace(recorder.trace(), ["waitForFunction page.waitForFunction", "evaluate page.evaluate"]);
+  });
+
+  it("throws when the radar section never settles", async () => {
+    const recorder = new Recorder();
+    recorder.waitForFunctionImpl = async () => {
+      throw new Error("timeout");
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsRadarSummary()).rejects.toThrow(
+      "analytics radar section never settled"
+    );
+  });
+
+  it("reads the radar facts", async () => {
+    const recorder = new Recorder();
+    const facts = { dimensions: ["Work Items", "Cycles"], plotted: true };
+    recorder.evaluateImpl = () => facts;
+    await expect(new WebNewDriver(recorder.page()).analyticsRadarFacts()).resolves.toEqual(facts);
+    expectTrace(recorder.trace(), ["waitForFunction page.waitForFunction", "evaluate page.evaluate"]);
+  });
+
+  it("reads whether the skeleton shows", async () => {
+    const recorder = new Recorder();
+    recorder.evaluateImpl = () => true;
+    await expect(new WebNewDriver(recorder.page()).analyticsRadarLoading()).resolves.toBe(true);
+    const settled = new Recorder();
+    settled.evaluateImpl = () => false;
+    await expect(new WebNewDriver(settled.page()).analyticsRadarLoading()).resolves.toBe(false);
+  });
+});
+
+describe("analytics active projects", () => {
+  it("reads the settled rows in order", async () => {
+    const recorder = new Recorder();
+    const rows = [
+      { name: "Alpha", badge: "100%", tone: "success", truncated: true },
+      { name: "Beta", badge: "50%", tone: "danger", truncated: false },
+    ];
+    recorder.evaluateImpl = () => rows;
+    await expect(new WebNewDriver(recorder.page()).analyticsActiveProjects()).resolves.toEqual(rows);
+    expectTrace(recorder.trace(), ["waitForFunction page.waitForFunction", "evaluate page.evaluate"]);
+  });
+
+  it("throws when the list never settles", async () => {
+    const recorder = new Recorder();
+    recorder.waitForFunctionImpl = async () => {
+      throw new Error("timeout");
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsActiveProjects()).rejects.toThrow(
+      "analytics active-projects list never settled"
+    );
+  });
+
+  it("reads whether placeholder rows show", async () => {
+    const recorder = new Recorder();
+    recorder.evaluateImpl = () => true;
+    await expect(new WebNewDriver(recorder.page()).analyticsActiveProjectsLoading()).resolves.toBe(true);
+    const settled = new Recorder();
+    settled.evaluateImpl = () => false;
+    await expect(new WebNewDriver(settled.page()).analyticsActiveProjectsLoading()).resolves.toBe(false);
+  });
+
+  it("hovers the matching row and reads its tooltip", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count") return 2;
+      if (method === "innerText" && path.includes(".nth(0)")) return "Alpha";
+      if (method === "innerText" && path.includes(".nth(1)")) return "Beta Project";
+      return undefined;
+    };
+    recorder.evaluateImpl = () => "Beta Project";
+    await expect(new WebNewDriver(recorder.page()).analyticsActiveProjectTooltip("Beta Project")).resolves.toBe(
+      "Beta Project"
+    );
+    expectTrace(recorder.trace(), [
+      'count page.locator("[data-testid=\\"analytics-active-row\\"]")',
+      "hover",
+      "waitForFunction page.waitForFunction",
+      "evaluate page.evaluate",
+    ]);
+    const hovers = recorder.calls.filter((call) => call.method === "hover");
+    expect(hovers).toHaveLength(1);
+    expect(hovers[0]?.path).toContain(".nth(1)");
+  });
+
+  it("answers null when no row matches", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => {
+      if (method === "count") return 1;
+      if (method === "innerText") return "Alpha";
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsActiveProjectTooltip("Missing")).resolves.toBeNull();
+    expect(recorder.trace().filter((line) => line.startsWith("hover"))).toEqual([]);
+    expect(recorder.trace().filter((line) => line.startsWith("evaluate"))).toEqual([]);
+  });
+
+  it("answers null when no rows render", async () => {
+    const recorder = new Recorder();
+    await expect(new WebNewDriver(recorder.page()).analyticsActiveProjectTooltip("Alpha")).resolves.toBeNull();
+  });
+
+  it("answers null when the tooltip never appears", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => {
+      if (method === "count") return 1;
+      if (method === "innerText") return "Alpha";
+      return undefined;
+    };
+    recorder.waitForFunctionImpl = async () => {
+      throw new Error("timeout");
+    };
+    recorder.evaluateImpl = () => null;
+    await expect(new WebNewDriver(recorder.page()).analyticsActiveProjectTooltip("Alpha")).resolves.toBeNull();
+  });
+});
+
+describe("analytics section guidance", () => {
+  it("reads the guidance text of a known section", async () => {
+    const recorder = new Recorder();
+    recorder.evaluateImpl = () => "Nothing to plot yet. Add work to see it here.";
+    await expect(new WebNewDriver(recorder.page()).analyticsSectionGuidance("Project Insights")).resolves.toBe(
+      "Nothing to plot yet. Add work to see it here."
+    );
+    const evaluated = recorder.calls.find((call) => call.method === "evaluate");
+    expect(evaluated?.args[1]).toBe("analytics-radar");
+  });
+
+  it("answers null for an unknown section without touching the page", async () => {
+    const recorder = new Recorder();
+    await expect(new WebNewDriver(recorder.page()).analyticsSectionGuidance("No Such Section")).resolves.toBeNull();
+    expect(recorder.trace()).toEqual([]);
   });
 });
