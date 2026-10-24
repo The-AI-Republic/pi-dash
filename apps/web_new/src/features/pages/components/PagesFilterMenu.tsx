@@ -11,7 +11,7 @@ import { ListFilter, Search } from "lucide-react";
 import * as React from "react";
 
 import type { PageCreatorOption, PageDateCondition, PageDatePreset, PageFilters } from "../lib/pageList.js";
-import { PAGE_DATE_PRESETS } from "../lib/pageList.js";
+import { PAGE_DATE_PRESETS, selectPageCreators } from "../lib/pageList.js";
 
 export interface PagesFilterMenuProps {
   filters: PageFilters;
@@ -36,11 +36,7 @@ export function PagesFilterMenu({
     if (customDateValue !== null) setCustomDate(customDateValue);
   }, [customDateValue]);
   const visibleCreators = React.useMemo(
-    () =>
-      creators
-        .map((creator) => (creator.id === currentUserId ? { ...creator, name: "You" } : creator))
-        .filter((creator) => creator.name.toLowerCase().includes(creatorQuery.trim().toLowerCase()))
-        .sort((left, right) => left.name.localeCompare(right.name)),
+    () => selectPageCreators(creators, creatorQuery, currentUserId),
     [creators, creatorQuery, currentUserId]
   );
 
