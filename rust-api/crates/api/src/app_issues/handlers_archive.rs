@@ -727,6 +727,7 @@ struct OwnedRun {
     done_payload: Option<Value>,
     error: String,
     error_code: String,
+    failure_reason: String,
     llm_model: String,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -890,6 +891,7 @@ impl OwnedRun {
             done_payload: self.done_payload.as_ref(),
             error: &self.error,
             error_code: &self.error_code,
+            failure_reason: &self.failure_reason,
             llm_model: &self.llm_model,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
@@ -1070,7 +1072,7 @@ async fn fetch_state(
 /// `LATEST_AGENT_RUN_SQL` / `ACTIVE_AGENT_RUN_SQL`, mapped positionally:
 /// both `llm_model` columns share one name, so name lookup cannot tell
 /// the run's from the live row's. Positions follow the consts' select
-/// order (28 columns; anything else is a 500). A NULL live `updated_at`
+/// order (29 columns; anything else is a 500). A NULL live `updated_at`
 /// means the join missed, so there is no live row.
 async fn fetch_agent_run(
     pool: &sqlx::PgPool,
@@ -1091,7 +1093,7 @@ async fn fetch_agent_run(
     let Some(row) = row else {
         return Ok(None);
     };
-    if row.len() != 28 {
+    if row.len() != 29 {
         return Err(Denial::ServerError);
     }
     let id: uuid::Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
@@ -1110,27 +1112,28 @@ async fn fetch_agent_run(
     let done_payload: Option<Value> = row.try_get(9).map_err(|_| Denial::ServerError)?;
     let error: String = row.try_get(10).map_err(|_| Denial::ServerError)?;
     let error_code: String = row.try_get(11).map_err(|_| Denial::ServerError)?;
-    let llm_model: String = row.try_get(12).map_err(|_| Denial::ServerError)?;
-    let input_tokens: Option<i64> = row.try_get(13).map_err(|_| Denial::ServerError)?;
-    let output_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
-    let total_tokens: Option<i64> = row.try_get(15).map_err(|_| Denial::ServerError)?;
-    let runner_name: Option<String> = row.try_get(16).map_err(|_| Denial::ServerError)?;
-    let observed_run_id: Option<uuid::Uuid> = row.try_get(17).map_err(|_| Denial::ServerError)?;
+    let failure_reason: String = row.try_get(12).map_err(|_| Denial::ServerError)?;
+    let llm_model: String = row.try_get(13).map_err(|_| Denial::ServerError)?;
+    let input_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
+    let output_tokens: Option<i64> = row.try_get(15).map_err(|_| Denial::ServerError)?;
+    let total_tokens: Option<i64> = row.try_get(16).map_err(|_| Denial::ServerError)?;
+    let runner_name: Option<String> = row.try_get(17).map_err(|_| Denial::ServerError)?;
+    let observed_run_id: Option<uuid::Uuid> = row.try_get(18).map_err(|_| Denial::ServerError)?;
     let last_event_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(18).map_err(|_| Denial::ServerError)?;
-    let last_event_kind: Option<String> = row.try_get(19).map_err(|_| Denial::ServerError)?;
-    let last_event_summary: Option<String> = row.try_get(20).map_err(|_| Denial::ServerError)?;
-    let agent_pid: Option<i32> = row.try_get(21).map_err(|_| Denial::ServerError)?;
-    let agent_subprocess_alive: Option<bool> = row.try_get(22).map_err(|_| Denial::ServerError)?;
-    let approvals_pending: Option<i32> = row.try_get(23).map_err(|_| Denial::ServerError)?;
-    let usage: Option<Value> = row.try_get(24).map_err(|_| Denial::ServerError)?;
-    let live_llm_model: Option<String> = row.try_get(25).map_err(|_| Denial::ServerError)?;
-    let turn_count: Option<i32> = row.try_get(26).map_err(|_| Denial::ServerError)?;
-    let agent_health: Option<String> = row.try_get(27).map_err(|_| Denial::ServerError)?;
+        row.try_get(19).map_err(|_| Denial::ServerError)?;
+    let last_event_kind: Option<String> = row.try_get(20).map_err(|_| Denial::ServerError)?;
+    let last_event_summary: Option<String> = row.try_get(21).map_err(|_| Denial::ServerError)?;
+    let agent_pid: Option<i32> = row.try_get(22).map_err(|_| Denial::ServerError)?;
+    let agent_subprocess_alive: Option<bool> = row.try_get(23).map_err(|_| Denial::ServerError)?;
+    let approvals_pending: Option<i32> = row.try_get(24).map_err(|_| Denial::ServerError)?;
+    let usage: Option<Value> = row.try_get(25).map_err(|_| Denial::ServerError)?;
+    let live_llm_model: Option<String> = row.try_get(26).map_err(|_| Denial::ServerError)?;
+    let turn_count: Option<i32> = row.try_get(27).map_err(|_| Denial::ServerError)?;
+    let agent_health: Option<String> = row.try_get(28).map_err(|_| Denial::ServerError)?;
     let agent_last_activity_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(28).map_err(|_| Denial::ServerError)?;
-    let live_updated_at: Option<chrono::DateTime<chrono::Utc>> =
         row.try_get(29).map_err(|_| Denial::ServerError)?;
+    let live_updated_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get(30).map_err(|_| Denial::ServerError)?;
     Ok(Some(OwnedRun {
         id: id.to_string(),
         status,
@@ -1145,6 +1148,7 @@ async fn fetch_agent_run(
         done_payload,
         error,
         error_code,
+        failure_reason,
         llm_model,
         input_tokens,
         output_tokens,

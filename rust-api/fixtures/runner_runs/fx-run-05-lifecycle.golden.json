@@ -562,7 +562,7 @@
   },
   {
    "case": "empty-detail",
-   "html": "<p><strong>Run failed.</strong> (no diagnostic detail)</p>"
+   "html": "<p><strong>Run failed.</strong></p><p>(no diagnostic detail)</p>"
   },
   {
    "case": "no-work-item",

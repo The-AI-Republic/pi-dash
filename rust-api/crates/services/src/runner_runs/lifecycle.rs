@@ -34,7 +34,9 @@
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::runner_runs::agent_run;
 use pidash_types::runner_runs::{
-    enrich_run_error, merge_usage, AgentRunStatus, RefusalCategory, RunnerInfo,
+    classify_failure, classify_run_error_for_reason, enrich_run_error, merge_usage, policy_for,
+    repeated_failure_limit_for, AgentRunStatus, FailurePolicy, RefusalCategory, RunFailureReason,
+    RunnerInfo,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -295,7 +297,7 @@ pub fn live_state_by_runner_sql() -> String {
 }
 
 /// Pause phase-2 re-read (`apply_run_paused:197`):
-/// `select_related("work_item").get(id)` — 41 + 34 columns, `.get()`
+/// `select_related("work_item").get(id)` — 42 + 34 columns, `.get()`
 /// so no `LIMIT`. A missing row returns from the whole function
 /// *before* the `on_commit` registration, skipping the drain too.
 /// Param: `$1` run id.
@@ -311,7 +313,7 @@ pub fn pause_reread_sql() -> String {
 
 /// `_pause_and_drain` re-read (`apply_run_paused:231-239`):
 /// `select_related("work_item", "work_item__state",
-/// "work_item__project").filter(pk).first()` — 41 + 34 + 46 + 18
+/// "work_item__project").filter(pk).first()` — 42 + 34 + 46 + 18
 /// columns. Join order follows Django's field-definition order
 /// (projects before states), not the argument order. Param: `$1` run id.
 pub fn pause_drain_reread_sql() -> String {
@@ -330,7 +332,7 @@ pub fn pause_drain_reread_sql() -> String {
 
 /// Failure-comment re-read (`_post_failure_comment:367`):
 /// `select_related("work_item", "work_item__project").filter(pk).first()` —
-/// 41 + 34 + 46 columns. Param: `$1` run id.
+/// 42 + 34 + 46 columns. Param: `$1` run id.
 pub fn failure_reread_sql() -> String {
     format!(
         "SELECT {}, {}, {} FROM \"agent_run\" LEFT OUTER JOIN \"issues\" ON \
@@ -812,13 +814,16 @@ pub fn runner_busy_update_sql() -> &'static str {
 /// `done_payload`/`tokens`/`model`/`refusal_category` are raw frame
 /// values; `error_detail` the raw `detail` (stringified-and-checked,
 /// since Django crashes on truthy non-strings here); `live` the
-/// live-state snapshot; `runner` the enrich signals for `FAILED`.
+/// live-state snapshot; `runner` the enrich signals for `FAILED`;
+/// `runner_failure_reason` the raw frame `reason` (the runner protocol's
+/// `FailureReason`, PDASHOSS01-183 — `Null` on paths without one).
 /// (`RunnerInfo` has no `PartialEq`, so neither does this struct.)
 #[derive(Debug, Clone)]
 pub struct TerminalUpdateInputs<'a> {
     pub status: AgentRunStatus,
     pub done_payload: &'a Value,
     pub error_detail: &'a Value,
+    pub runner_failure_reason: &'a Value,
     pub refusal_category: &'a Value,
     pub tokens: &'a Value,
     pub model: &'a Value,
@@ -832,12 +837,15 @@ pub struct TerminalUpdateInputs<'a> {
 /// pre-merge — the merge runs in the finalize step against the locked
 /// row); `error` on `COMPLETED` (`""`), `FAILED` (enriched, only when
 /// the detail is non-empty) and `REFUSED` (raw, same gate);
-/// `refusal_category` always on `REFUSED`. Usage/model follow
+/// `refusal_category` always on `REFUSED`; `failure_reason` always on
+/// `FAILED` (classified from the *raw* detail plus the runner reason,
+/// before enrichment — PDASHOSS01-183). Usage/model follow
 /// [`usage_updates`] with the frame model winning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminalUpdates {
     pub status: AgentRunStatus,
     pub done_payload: Option<Value>,
+    pub failure_reason: Option<String>,
     pub error: Option<String>,
     pub refusal_category: Option<RefusalCategory>,
     pub usage: Option<Value>,
@@ -855,6 +863,7 @@ pub fn plan_terminal_updates(
     let mut updates = TerminalUpdates {
         status: inputs.status,
         done_payload: None,
+        failure_reason: None,
         error: None,
         refusal_category: None,
         usage: None,
@@ -863,6 +872,27 @@ pub fn plan_terminal_updates(
     if inputs.status == AgentRunStatus::Completed {
         updates.done_payload = Some(inputs.done_payload.clone());
         updates.error = Some(String::new());
+    }
+    if inputs.status == AgentRunStatus::Failed {
+        // `classify(error_detail, runner_reason=str(runner_failure_reason
+        // or ""))`: `str(raw or "")` inside `classify`. A truthy
+        // non-string detail classifies by its `str()` here and then
+        // crashes the enrich step below, exactly as the source does.
+        let raw = if py_truthy(inputs.error_detail) {
+            py_str(inputs.error_detail)
+        } else {
+            String::new()
+        };
+        let runner_reason = if py_truthy(inputs.runner_failure_reason) {
+            py_str(inputs.runner_failure_reason)
+        } else {
+            String::new()
+        };
+        updates.failure_reason = Some(
+            classify_failure(&raw, &runner_reason, "")
+                .value()
+                .to_owned(),
+        );
     }
     if inputs.status == AgentRunStatus::Failed && py_truthy(inputs.error_detail) {
         let detail = terminal_detail_str(inputs.error_detail)?;
@@ -906,7 +936,7 @@ fn terminal_detail_str(detail: &Value) -> Result<&str, LifecycleError> {
 
 /// Caller-`updates` extras for the finalize values, in exact dict
 /// insertion order: per-status keys first (`done_payload`, `error` /
-/// `refusal_category`, `error` / `error`), then `usage`, then
+/// `refusal_category`, `error` / `failure_reason`, `error`), then `usage`, then
 /// `llm_model`. `status`/`ended_at`/`queue_position` are *not* extras —
 /// they overwrite the finalize base in place.
 pub fn terminal_extras(updates: &TerminalUpdates) -> Vec<(&'static str, SetValue)> {
@@ -932,6 +962,9 @@ pub fn terminal_extras(updates: &TerminalUpdates) -> Vec<(&'static str, SetValue
             }
         }
         _ => {
+            if let Some(reason) = &updates.failure_reason {
+                extras.push(("failure_reason", SetValue::Text(reason.clone())));
+            }
             if let Some(error) = &updates.error {
                 extras.push(("error", SetValue::Text(error.clone())));
             }
@@ -966,28 +999,230 @@ pub fn is_infra_failure_detail(stripped_detail: &str) -> bool {
         .any(|prefix| stripped_detail.starts_with(prefix))
 }
 
-/// Plan the failure comment (`_post_failure_comment:341-399`): strip,
-/// suppress infra noise, then render — the `<pre>` detail block, or
-/// `(no diagnostic detail)` when empty. `None` means suppressed; the
-/// executing layer still runs the row re-read and the dedupe check
-/// (a hit or a missing work item also means silence).
-pub fn plan_failure_comment(error: &str, run_id: Uuid) -> Option<CommentPlan> {
+/// The failure comment past the prefix gate (`_post_failure_comment`,
+/// `:363-365`): the stripped detail it will render, for the run it
+/// belongs to. Everything else the comment needs — the stored
+/// `failure_reason`, the failure streak, the dedupe verdict — is read by
+/// the executing layer after the run re-read (PDASHOSS01-183), then fed
+/// to [`failure_comment_gate`] and [`FailureCommentPlan::render`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureCommentPlan {
+    pub run_id: Uuid,
+    pub detail: String,
+}
+
+/// Plan the failure comment (`_post_failure_comment:341-399`): strip and
+/// suppress infra noise. `None` means suppressed before any SQL; the
+/// executing layer still runs the row re-read, the streak gate and the
+/// dedupe check (each can also mean silence).
+pub fn plan_failure_comment(error: &str, run_id: Uuid) -> Option<FailureCommentPlan> {
     let detail = py_strip(error);
     if is_infra_failure_detail(detail) {
         return None;
     }
-    let html = if detail.is_empty() {
-        format!(
-            "<p><strong>Run failed.</strong> {}</p>",
-            escape_html("(no diagnostic detail)")
-        )
+    Some(FailureCommentPlan {
+        run_id,
+        detail: detail.to_owned(),
+    })
+}
+
+/// The reason the streak query counts, when the gate needs it: only a
+/// non-empty stored reason routes on policy (`reason = (run.failure_reason
+/// or "").strip()` / `if reason:`).
+pub fn failure_comment_streak_reason(failure_reason: &str) -> Option<&str> {
+    let reason = py_strip(failure_reason);
+    (!reason.is_empty()).then_some(reason)
+}
+
+/// The per-reason gate (`_post_failure_comment`, PDASHOSS01-183) run
+/// after the re-read and before the dedupe check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureCommentGate {
+    /// A free-retry failure below the backstop: retried silently.
+    Suppress,
+    /// Post the comment; `clock_stopped` adds the paused paragraph and
+    /// raises the clock-stopped notification after the insert.
+    Post { clock_stopped: bool },
+}
+
+/// Decide the gate from the stored reason and the streak
+/// (`consecutive_failure_streak`; ignored for an empty reason). Mirrors
+/// the decision `_apply_failure_policy` makes when the run's `RUN_ENDED`
+/// reconciles right after this hook.
+pub fn failure_comment_gate(failure_reason: &str, streak: u32) -> FailureCommentGate {
+    let reason = py_strip(failure_reason);
+    if reason.is_empty() {
+        return FailureCommentGate::Post {
+            clock_stopped: false,
+        };
+    }
+    let policy = policy_for(reason);
+    let hit_backstop = streak >= repeated_failure_limit_for(reason);
+    if policy == FailurePolicy::RetryFree && !hit_backstop {
+        return FailureCommentGate::Suppress;
+    }
+    FailureCommentGate::Post {
+        clock_stopped: hit_backstop || policy == FailurePolicy::NeedsHuman,
+    }
+}
+
+/// The paused paragraph's text (`_post_failure_comment`).
+const CLOCK_STOPPED_PARAGRAPH: &str = "Automatic runs on this issue are paused — no further tick budget will be spent on this failure. Once it is fixed, press Re-tick (or Run AI) to resume.";
+
+/// A rendered failure comment plus what the clock-stopped notification
+/// reuses (`label`, `action`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedFailureComment {
+    pub comment: CommentPlan,
+    pub clock_stopped: bool,
+    pub label: String,
+    pub action: String,
+}
+
+impl FailureCommentPlan {
+    /// Render the body (`_post_failure_comment`, PDASHOSS01-183): the
+    /// reason label + action header (plain `Run failed.` for an unknown or
+    /// empty reason), the paused paragraph when the clock stopped, then
+    /// the `<pre>` detail — or `(no diagnostic detail)` when there is
+    /// neither a detail nor a label. Each argument escaped as
+    /// `format_html` does.
+    pub fn render(&self, failure_reason: &str, clock_stopped: bool) -> RenderedFailureComment {
+        let reason = py_strip(failure_reason);
+        let label = RunFailureReason::from_value(reason)
+            .map(|known| known.label())
+            .unwrap_or("");
+        let action = classify_run_error_for_reason(Some(&self.detail), Some(reason))
+            .map(|diagnostic| diagnostic.action)
+            .unwrap_or_default();
+        let mut html = String::new();
+        if label.is_empty() {
+            html.push_str("<p><strong>Run failed.</strong></p>");
+        } else {
+            let suffix = if action.is_empty() {
+                String::new()
+            } else {
+                format!(" {action}")
+            };
+            html.push_str(&format!(
+                "<p><strong>Run failed — {}.</strong>{}</p>",
+                escape_html(label),
+                escape_html(&suffix)
+            ));
+        }
+        if clock_stopped {
+            html.push_str(&format!("<p>{}</p>", escape_html(CLOCK_STOPPED_PARAGRAPH)));
+        }
+        if !self.detail.is_empty() {
+            html.push_str(&format!("<pre>{}</pre>", escape_html(&self.detail)));
+        } else if label.is_empty() {
+            html.push_str(&format!("<p>{}</p>", escape_html("(no diagnostic detail)")));
+        }
+        RenderedFailureComment {
+            comment: CommentPlan::failure(html, self.run_id),
+            clock_stopped,
+            label: label.to_owned(),
+            action,
+        }
+    }
+}
+
+/// `Notification.sender` for the clock-stopped notification
+/// (`_notify_clock_stopped`, PDASHOSS01-183).
+pub const CLOCK_STOPPED_SENDER: &str = "in_app:agent_runs:clock_stopped";
+
+/// `Notification.entity_name` for the clock-stopped notification.
+pub const CLOCK_STOPPED_ENTITY_NAME: &str = "issue";
+
+/// One receiver candidate (`issue.created_by`, then `run.runner.owner`):
+/// the user id when the FK is set, plus the two flags the filter reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverCandidate {
+    pub user_id: Option<Uuid>,
+    pub is_active: bool,
+    pub is_bot: bool,
+}
+
+/// `_notify_clock_stopped`'s receiver loop: candidates in order, the
+/// first occurrence of an id wins, inactive users and bots are skipped.
+/// An empty answer means no notification at all.
+pub fn clock_stopped_receivers(candidates: &[ReceiverCandidate]) -> Vec<Uuid> {
+    let mut receivers: Vec<Uuid> = Vec::new();
+    for candidate in candidates {
+        let Some(user_id) = candidate.user_id else {
+            continue;
+        };
+        if receivers.contains(&user_id) {
+            continue;
+        }
+        if !candidate.is_active || candidate.is_bot {
+            continue;
+        }
+        receivers.push(user_id);
+    }
+    receivers
+}
+
+/// `_notify_clock_stopped`'s `message_html` (`format_html`, each argument
+/// escaped).
+pub fn clock_stopped_message_html(issue_name: &str, label: &str, action: &str) -> String {
+    let label = if label.is_empty() {
+        "the last run failed"
     } else {
-        format!(
-            "<p><strong>Run failed.</strong></p><pre>{}</pre>",
-            escape_html(detail)
-        )
+        label
     };
-    Some(CommentPlan::failure(html, run_id))
+    let action = if action.is_empty() {
+        "Fix the cause, then press Re-tick to resume."
+    } else {
+        action
+    };
+    format!(
+        "<p>Automatic agent runs on <strong>{}</strong> are paused: {}. {}</p>",
+        escape_html(issue_name),
+        escape_html(label),
+        escape_html(action)
+    )
+}
+
+/// The issue half of the clock-stopped notification's `data`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockStoppedIssue<'a> {
+    pub id: Uuid,
+    pub name: &'a str,
+    /// `str(issue.project.identifier) if issue.project_id else ""`.
+    pub project_identifier: &'a str,
+    pub sequence_id: i32,
+}
+
+/// `_notify_clock_stopped`'s `data` payload, in the source dict order.
+pub fn clock_stopped_data(
+    issue: &ClockStoppedIssue<'_>,
+    run_id: Uuid,
+    failure_reason: &str,
+    action: &str,
+) -> Value {
+    serde_json::json!({
+        "issue": {
+            "id": issue.id.to_string(),
+            "name": issue.name,
+            "identifier": issue.project_identifier,
+            "sequence_id": issue.sequence_id,
+        },
+        "agent_run": {
+            "id": run_id.to_string(),
+            "failure_reason": failure_reason,
+            "action": action,
+        },
+    })
+}
+
+/// Clock-stopped notification `INSERT` (`Notification.objects.bulk_create`
+/// — no `save()`, so the audit FKs stay NULL), one row per call: `$1` id,
+/// `$2`/`$3` now, `$4` workspace, `$5` project, `$6` data, `$7` issue id
+/// (`entity_identifier`), `$8` `"issue"`, `$9` title (issue name), `$10`
+/// message html, `$11` sender, `$12` receiver. `message`,
+/// `message_stripped`, `triggered_by` and the three state stamps are NULL.
+pub fn clock_stopped_notification_insert_sql() -> &'static str {
+    "INSERT INTO \"notifications\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"project_id\", \"data\", \"entity_identifier\", \"entity_name\", \"title\", \"message\", \"message_html\", \"message_stripped\", \"sender\", \"triggered_by_id\", \"receiver_id\", \"read_at\", \"snoozed_till\", \"archived_at\") VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, NULL, $10, NULL, $11, NULL, $12, NULL, NULL, NULL)"
 }
 
 #[cfg(test)]
@@ -1481,6 +1716,7 @@ mod tests {
             status,
             done_payload,
             error_detail,
+            runner_failure_reason: &Value::Null,
             refusal_category,
             tokens,
             model,
@@ -1710,7 +1946,10 @@ mod tests {
             &Value::Null,
         );
         let updates = plan_terminal_updates(&inputs).expect("plans");
-        assert!(terminal_extras(&updates).is_empty());
+        // Only the canonical reason (PDASHOSS01-183): every FAILED row
+        // carries one, detail or not.
+        let keys: Vec<&str> = terminal_extras(&updates).iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, ["failure_reason"]);
     }
 
     #[test]
@@ -1773,6 +2012,169 @@ mod tests {
     // failure comment
     // ------------------------------------------------------------------
 
+    /// The pre-taxonomy comment: a re-read row with no stored
+    /// `failure_reason` (legacy rows) renders exactly the FX-RUN-05 body.
+    fn legacy_comment(detail: &str, run_id: Uuid) -> Option<CommentPlan> {
+        plan_failure_comment(detail, run_id).map(|plan| plan.render("", false).comment)
+    }
+
+    fn fx10() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../../fixtures/runner_runs/fx-run-10-failure.golden.json"
+        ))
+        .expect("FX-RUN-10 parses")
+    }
+
+    /// FX-RUN-10 `failure_comment`: the real `_post_failure_comment` body
+    /// for every reason × detail × streak (I/O mocked, streak injected) —
+    /// prefix gate, policy gate, render and the notify decision.
+    #[test]
+    fn failure_comment_replays_fx_run_10() {
+        let fx = fx10();
+        let rows = fx["failure_comment"].as_array().expect("rows");
+        assert_eq!(rows.len(), 480);
+        for row in rows {
+            let detail = row["detail"].as_str().expect("detail");
+            let reason = row["failure_reason"].as_str().expect("reason");
+            let streak = row["streak"].as_u64().expect("streak") as u32;
+            let rendered =
+                plan_failure_comment(detail, Uuid::nil()).and_then(
+                    |plan| match failure_comment_gate(reason, streak) {
+                        FailureCommentGate::Suppress => None,
+                        FailureCommentGate::Post { clock_stopped } => {
+                            Some(plan.render(reason, clock_stopped))
+                        }
+                    },
+                );
+            let case = format!("({detail:?}, {reason:?}, streak={streak})");
+            assert_eq!(
+                rendered.as_ref().map(|r| r.comment.comment_html.as_str()),
+                row["html"].as_str(),
+                "html {case}"
+            );
+            let notified = rendered.as_ref().is_some_and(|r| r.clock_stopped);
+            assert_eq!(Value::Bool(notified), row["notified"], "notified {case}");
+            if notified {
+                let rendered = rendered.as_ref().expect("rendered");
+                assert_eq!(
+                    Some(rendered.label.as_str()),
+                    row["notify_label"].as_str(),
+                    "label {case}"
+                );
+                assert_eq!(
+                    Some(rendered.action.as_str()),
+                    row["notify_action"].as_str(),
+                    "action {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clock_stopped_notification_replays_fx_run_10() {
+        let fx = fx10();
+        let rows = fx["clock_stopped_notification"].as_array().expect("rows");
+        assert_eq!(rows.len(), 3);
+        for row in rows {
+            assert_eq!(
+                Some(
+                    clock_stopped_message_html(
+                        row["issue_name"].as_str().expect("name"),
+                        row["label"].as_str().expect("label"),
+                        row["action"].as_str().expect("action"),
+                    )
+                    .as_str()
+                ),
+                row["message_html"].as_str()
+            );
+        }
+        assert_eq!(CLOCK_STOPPED_SENDER, "in_app:agent_runs:clock_stopped");
+    }
+
+    #[test]
+    fn clock_stopped_receivers_dedupe_and_filter_in_order() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let active = |id| ReceiverCandidate {
+            user_id: Some(id),
+            is_active: true,
+            is_bot: false,
+        };
+        assert_eq!(clock_stopped_receivers(&[active(a), active(b)]), vec![a, b]);
+        assert_eq!(clock_stopped_receivers(&[active(a), active(a)]), vec![a]);
+        let bot = ReceiverCandidate {
+            is_bot: true,
+            ..active(a)
+        };
+        let inactive = ReceiverCandidate {
+            is_active: false,
+            ..active(b)
+        };
+        assert!(clock_stopped_receivers(&[bot, inactive]).is_empty());
+        let none = ReceiverCandidate {
+            user_id: None,
+            is_active: true,
+            is_bot: false,
+        };
+        assert_eq!(clock_stopped_receivers(&[none, active(b)]), vec![b]);
+        let data = clock_stopped_data(
+            &ClockStoppedIssue {
+                id: a,
+                name: "n",
+                project_identifier: "PROJ",
+                sequence_id: 7,
+            },
+            b,
+            "timeout",
+            "act",
+        );
+        assert_eq!(data["issue"]["identifier"], "PROJ");
+        assert_eq!(data["issue"]["sequence_id"], 7);
+        assert_eq!(data["agent_run"]["failure_reason"], "timeout");
+    }
+
+    #[test]
+    fn terminal_failed_classifies_raw_detail_with_runner_reason() {
+        let detail = json!("401 Unauthorized");
+        let reason = json!("agent_crash");
+        let null = Value::Null;
+        let mut inputs =
+            terminal_inputs(AgentRunStatus::Failed, &null, &detail, &null, &null, &null);
+        inputs.runner_failure_reason = &reason;
+        let updates = plan_terminal_updates(&inputs).expect("plans");
+        assert_eq!(
+            updates.failure_reason.as_deref(),
+            Some("agent_error.provider_auth_or_access")
+        );
+        // Classified before enrichment: the stored error is enriched, the
+        // reason came from the raw detail; `failure_reason` precedes
+        // `error` in the dict order.
+        let keys: Vec<&str> = terminal_extras(&updates).iter().map(|(k, _)| *k).collect();
+        assert_eq!(&keys[..2], ["failure_reason", "error"]);
+        // Old runners' bare reasons stay platform-side.
+        let workspace = json!("workspace_setup");
+        inputs.runner_failure_reason = &workspace;
+        let updates = plan_terminal_updates(&inputs).expect("plans");
+        assert_eq!(updates.failure_reason.as_deref(), Some("workspace_setup"));
+        // No detail at all still classifies (the invariant).
+        inputs.error_detail = &null;
+        inputs.runner_failure_reason = &null;
+        let updates = plan_terminal_updates(&inputs).expect("plans");
+        assert_eq!(
+            updates.failure_reason.as_deref(),
+            Some("agent_error.unknown")
+        );
+        // Non-FAILED terminal states never write it.
+        let completed =
+            terminal_inputs(AgentRunStatus::Completed, &null, &null, &null, &null, &null);
+        assert_eq!(
+            plan_terminal_updates(&completed)
+                .expect("plans")
+                .failure_reason,
+            None
+        );
+    }
+
     fn failure_case<'a>(fx: &'a Value, name: &str) -> &'a Value {
         fx.get("post_failure_comment")
             .and_then(Value::as_array)
@@ -1786,7 +2188,7 @@ mod tests {
     fn failure_comment_matches_fixture() {
         let fx = fixture();
         let gold = failure_case(&fx, "normal");
-        let plan = plan_failure_comment("boom detail", Uuid::nil()).expect("comment");
+        let plan = legacy_comment("boom detail", Uuid::nil()).expect("comment");
         assert_eq!(
             plan.comment_html,
             gold["comment"]
@@ -1804,7 +2206,7 @@ mod tests {
         );
         assert_eq!(plan.speaker, CommentSpeaker::System);
         // Detail is stripped before render.
-        let plan = plan_failure_comment("  boom detail\n", Uuid::nil()).expect("comment");
+        let plan = legacy_comment("  boom detail\n", Uuid::nil()).expect("comment");
         assert!(plan.comment_html.ends_with("<pre>boom detail</pre>"));
     }
 
@@ -1823,7 +2225,7 @@ mod tests {
             "agent stalled: no events for >30s",
         ] {
             assert_eq!(
-                plan_failure_comment(detail, Uuid::nil()),
+                legacy_comment(detail, Uuid::nil()),
                 None,
                 "suppressed: {detail}"
             );
@@ -1837,8 +2239,7 @@ mod tests {
         );
         // Case-sensitive: caps variant posts.
         let caps = failure_case(&fx, "prefix-case-sensitive?");
-        let plan =
-            plan_failure_comment("Daemon Shutdown Requested (caps)", Uuid::nil()).expect("posts");
+        let plan = legacy_comment("Daemon Shutdown Requested (caps)", Uuid::nil()).expect("posts");
         assert_eq!(
             plan.comment_html,
             caps.get("html").and_then(Value::as_str).expect("html")
@@ -1851,7 +2252,7 @@ mod tests {
         let fx = fixture();
         let gold = failure_case(&fx, "empty-detail");
         for detail in ["", "   "] {
-            let plan = plan_failure_comment(detail, Uuid::nil()).expect("placeholder posts");
+            let plan = legacy_comment(detail, Uuid::nil()).expect("placeholder posts");
             assert_eq!(
                 plan.comment_html,
                 gold.get("html").and_then(Value::as_str).expect("html")
@@ -1859,7 +2260,7 @@ mod tests {
         }
         assert_eq!(
             gold.get("html").and_then(Value::as_str),
-            Some("<p><strong>Run failed.</strong> (no diagnostic detail)</p>")
+            Some("<p><strong>Run failed.</strong></p><p>(no diagnostic detail)</p>")
         );
     }
 
@@ -1915,7 +2316,7 @@ mod tests {
     fn lock_sql_match_django_tails() {
         let pause = lock_run_for_pause_sql();
         assert!(pause.starts_with("SELECT \"agent_run\".\"id\", "), "prefix");
-        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 41)]);
+        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 42)]);
         assert!(
             pause.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \
@@ -1928,7 +2329,7 @@ mod tests {
         let requeue = lock_run_for_requeue_sql();
         assert_eq!(
             select_runs(&requeue),
-            vec![("\"agent_run\"".to_owned(), 41)]
+            vec![("\"agent_run\"".to_owned(), 42)]
         );
         assert!(
             requeue.ends_with(
@@ -1947,7 +2348,7 @@ mod tests {
         assert_eq!(
             select_runs(&reread),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 42),
                 ("\"issues\"".to_owned(), 34),
             ]
         );
@@ -1963,7 +2364,7 @@ mod tests {
         assert_eq!(
             select_runs(&drain),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 42),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
                 ("\"states\"".to_owned(), 18),
@@ -1983,7 +2384,7 @@ mod tests {
         assert_eq!(
             select_runs(&failure),
             vec![
-                ("\"agent_run\"".to_owned(), 41),
+                ("\"agent_run\"".to_owned(), 42),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
             ]

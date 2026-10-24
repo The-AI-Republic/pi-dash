@@ -2437,8 +2437,15 @@ mod tests {
                 "terminal_hooks_applied_at",
                 "terminal_capacity_released_at",
                 "error",
-                "error_code"
+                "error_code",
+                "failure_reason"
             ]
+        );
+        // The `finalize_agent_run` safety net (PDASHOSS01-183):
+        // `classify(error, error_code="heartbeat_reaped")`.
+        assert_eq!(
+            values.clauses[7].value,
+            SetValue::Text("runner_offline".to_string())
         );
         assert_eq!(
             values.clauses[0].value,
@@ -2480,9 +2487,10 @@ mod tests {
         assert_eq!(set_columns, columns);
         assert!(update.contains(&detail));
         assert!(update.contains("'heartbeat_reaped'"));
+        assert!(update.contains("'runner_offline'"));
         // The rendered D-15 UPDATE binds one param per clause, id last.
         let rendered = finalize_update_sql(&values);
-        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $8"));
+        assert!(rendered.ends_with("WHERE \"agent_run\".\"id\" = $9"));
         // Lock predicate for the reaper call: expected runner, no status.
         assert!(finalize_lock_passes(
             AgentRunStatus::Running,

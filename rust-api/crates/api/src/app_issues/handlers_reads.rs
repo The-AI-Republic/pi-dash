@@ -1936,6 +1936,7 @@ fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
         done_payload: row.get("done_payload").filter(|value| !value.is_null()),
         error: get_str(row, "error").unwrap_or_default(),
         error_code: get_str(row, "error_code").unwrap_or_default(),
+        failure_reason: get_str(row, "failure_reason").unwrap_or_default(),
         llm_model: get_str(row, "llm_model").unwrap_or_default(),
         input_tokens: get_i64(row, "input_tokens"),
         output_tokens: get_i64(row, "output_tokens"),

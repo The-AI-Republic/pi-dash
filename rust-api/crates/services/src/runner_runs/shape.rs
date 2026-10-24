@@ -78,7 +78,7 @@ use pidash_types::runner_runs::{error_diagnostic, RunErrorDiagnostic};
 // ---------------------------------------------------------------------------
 
 /// `AgentRunSerializer.Meta.fields` (`serializers.py:294-329`).
-pub const RUN_WIRE_FIELDS: [&str; 34] = [
+pub const RUN_WIRE_FIELDS: [&str; 35] = [
     "id",
     "status",
     "executor_kind",
@@ -104,6 +104,7 @@ pub const RUN_WIRE_FIELDS: [&str; 34] = [
     "done_payload",
     "error",
     "error_code",
+    "failure_reason",
     "error_diagnostic",
     "refusal_category",
     "llm_model",
@@ -347,6 +348,7 @@ pub struct AgentRunView<'a> {
     pub done_payload: Option<&'a Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub error_diagnostic: Option<RunErrorDiagnostic>,
     pub refusal_category: &'a str,
     pub llm_model: &'a str,
@@ -378,7 +380,8 @@ pub fn run_list_to_representation<'a>(
 
 /// Port of `AgentRunSerializer` for the per-run detail
 /// (`serializers.py:260-330`): `error_diagnostic` runs
-/// `classify_run_error(run.error)` (`serializers.py:273`).
+/// `classify_run_error(run.error, failure_reason=run.failure_reason)`
+/// (`serializers.py:273`, PDASHOSS01-183).
 pub fn run_detail_to_representation<'a>(
     run: &'a AgentRun,
     pod: &'a PodMiniRow<'a>,
@@ -421,7 +424,12 @@ fn run_to_representation<'a>(
         done_payload: run.done_payload.as_ref(),
         error: &run.error,
         error_code: &run.error_code,
-        error_diagnostic: error_diagnostic(Some(run.error.as_str()), is_list),
+        failure_reason: &run.failure_reason,
+        error_diagnostic: error_diagnostic(
+            Some(run.error.as_str()),
+            Some(run.failure_reason.as_str()),
+            is_list,
+        ),
         refusal_category: &run.refusal_category,
         llm_model: &run.llm_model,
         input_tokens: run.input_tokens,
@@ -982,6 +990,7 @@ mod tests {
             },
             error: text(&body["error"]),
             refusal_category: text(&body["refusal_category"]),
+            failure_reason: text(&body["failure_reason"]),
             llm_model: text(&body["llm_model"]),
             usage: body["usage"].clone(),
             input_tokens: body["input_tokens"].as_i64(),

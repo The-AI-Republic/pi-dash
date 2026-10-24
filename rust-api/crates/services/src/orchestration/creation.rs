@@ -301,10 +301,10 @@ pub const RUN_INSERT_SQL: &str =
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, error_code, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error, refusal_category, llm_model, usage, created_at, \
-    assigned_at, queue_position, started_at, ended_at) \
+    lease_expires_at, done_payload, error, refusal_category, failure_reason, llm_model, usage, \
+    created_at, assigned_at, queue_position, started_at, ended_at) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $9, $10, \
-    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, '', '', '', '{}', $14, \
+    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, '', '', '', '', '{}', $14, \
     NULL, NULL, NULL, NULL)";
 
 /// `run.save(update_fields=["prompt", "prompt_manifest"])`
@@ -340,11 +340,22 @@ pub fn finalize_lock_sql() -> String {
 
 /// The finalize write (`agent_run_finalization.py:52-71`):
 /// status/ended_at/queue NULL/terminal NULLs + the updates
-/// (`error_code`, `error`). `$1` ended_at, `$2` error_code, `$3` error,
-/// `$4` the run id.
+/// (`error_code`, `error`) + the `failure_reason` safety net
+/// (PDASHOSS01-183, see [`finalize_failure_reason`]). `$1` ended_at, `$2`
+/// error_code, `$3` error, `$4` failure_reason, `$5` the run id.
 pub const FINALIZE_UPDATE_SQL: &str = "UPDATE agent_run SET status = 'failed', ended_at = $1, \
     queue_position = NULL, terminal_hooks_applied_at = NULL, \
-    terminal_capacity_released_at = NULL, error_code = $2, error = $3 WHERE id = $4";
+    terminal_capacity_released_at = NULL, error_code = $2, error = $3, \
+    failure_reason = $4 WHERE id = $5";
+
+/// `finalize_agent_run`'s `failure_reason` safety net for these FAILED
+/// writes (PDASHOSS01-183): `classify(error, error_code=error_code)` —
+/// no runner reason on the orchestration paths.
+pub fn finalize_failure_reason(error_code: &str, error: &str) -> String {
+    pidash_types::runner_runs::classify_failure(error, "", error_code)
+        .value()
+        .to_owned()
+}
 
 /// The cloud terminal-event guard (`agent_run_finalization.py:72-75`).
 /// `$1` is the run id.

@@ -1566,7 +1566,7 @@ mod tests {
              \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \
              \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \
              \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \
-             \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \
+             \"agent_run\".\"refusal_category\", \"agent_run\".\"failure_reason\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \
              \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \
              \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \
              \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \

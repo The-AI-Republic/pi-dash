@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 
+from _harness.db import wait_for_condition
 from _harness.http import bearer_client
 
 from .conftest import DAEMON
@@ -161,6 +162,119 @@ def test_daemon_run_fail_shape(machine_client, daemon_run, seeder):
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "failed"
     )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # The runner's structured reason plus the raw detail (PDASHOSS01-183).
+        ({"reason": "agent_crash", "detail": "401 authentication_failed"},
+         "agent_error.provider_auth_or_access"),
+        ({"reason": "agent_crash", "detail": "getaddrinfo ENOTFOUND api.anthropic.com"},
+         "agent_error.provider_network"),
+        # Digit boundaries: 4030 is not a 403.
+        ({"reason": "agent_crash", "detail": "agent exited with status 4030"},
+         "agent_error.process_failure"),
+        # Old runners' bare reasons stay platform-side.
+        ({"reason": "workspace_setup", "detail": "clone failed: command not found"},
+         "workspace_setup"),
+        ({"reason": "internal", "detail": "turn/completed without conclusion"}, "internal"),
+        # No reason, no recognisable text: the fail-safe bucket.
+        ({"detail": "boom"}, "agent_error.unknown"),
+        ({}, "agent_error.unknown"),
+    ],
+)
+def test_daemon_run_fail_stores_failure_reason(machine_client, daemon_run, seeder, body, expected):
+    response = machine_client.post(
+        f"{DAEMON}/runs/{daemon_run['id']}/fail/",
+        json=body,
+        headers=_idem(),
+    )
+    assert response.json() == {"ok": True}
+    row = seeder.db.fetchone(
+        "SELECT status, failure_reason FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    )
+    assert row["status"] == "failed"
+    assert row["failure_reason"] == expected
+
+
+def test_daemon_run_fail_on_issue_posts_reason_comment_and_notifies(
+    machine_client, daemon_run, daemon_world, seeder
+):
+    """A needs-human failure on an issue posts the reason label + action
+    and the paused paragraph, and notifies the runner's owner once."""
+    # The comment's author is the reserved agent bot user, which every live
+    # deployment already has; seed it so the pin does not depend on the
+    # backend's first-call get_or_create.
+    if not seeder.db.fetchval("SELECT 1 FROM users WHERE username = 'pi_dash_agent'"):
+        agent = seeder.create_user()
+        seeder.db.execute(
+            "UPDATE users SET username = 'pi_dash_agent', is_bot = true WHERE id = %s",
+            (agent["id"],),
+        )
+    issue = seeder.create_issue(daemon_world["workspace"]["id"], daemon_world["project"]["id"])
+    seeder.db.execute(
+        "UPDATE agent_run SET work_item_id = %s WHERE id = %s", (issue["id"], daemon_run["id"])
+    )
+    try:
+        response = machine_client.post(
+            f"{DAEMON}/runs/{daemon_run['id']}/fail/",
+            json={"reason": "agent_crash", "detail": "401 authentication_failed"},
+            headers=_idem(),
+        )
+        assert response.json() == {"ok": True}
+        comment = wait_for_condition(
+            lambda: seeder.db.fetchone(
+                "SELECT comment_html, speaker_type, speaker_label FROM issue_comments "
+                "WHERE issue_id = %s AND speaker_agent_run_id = %s",
+                (issue["id"], daemon_run["id"]),
+            ),
+            what="failure comment",
+        )
+        assert comment["speaker_type"] == "system"
+        assert comment["speaker_label"] == "Pi Dash"
+        html = comment["comment_html"]
+        assert html.startswith(
+            "<p><strong>Run failed — Provider authentication or access failed.</strong> "
+            "Re-authenticate "
+        ), html
+        assert (
+            "<p>Automatic runs on this issue are paused — no further tick budget will be "
+            "spent on this failure. Once it is fixed, press Re-tick (or Run AI) to resume.</p>"
+        ) in html
+        owner = seeder.db.fetchval(
+            "SELECT owner_id FROM runner WHERE id = (SELECT runner_id FROM agent_run WHERE id = %s)",
+            (daemon_run["id"],),
+        )
+        notes = wait_for_condition(
+            lambda: seeder.db.fetchall(
+                "SELECT receiver_id, sender, entity_name, title, message_html, data "
+                "FROM notifications WHERE entity_identifier = %s",
+                (issue["id"],),
+            ),
+            what="clock-stopped notification",
+        )
+        assert len(notes) == 1
+        note = notes[0]
+        assert str(note["receiver_id"]) == str(owner)
+        assert note["sender"] == "in_app:agent_runs:clock_stopped"
+        assert note["entity_name"] == "issue"
+        assert note["message_html"].startswith("<p>Automatic agent runs on <strong>")
+        assert note["data"]["agent_run"]["failure_reason"] == "agent_error.provider_auth_or_access"
+        assert note["data"]["issue"]["id"] == str(issue["id"])
+    finally:
+        seeder.db.execute("DELETE FROM notifications WHERE entity_identifier = %s", (issue["id"],))
+        descriptions = [
+            row["description_id"]
+            for row in seeder.db.fetchall(
+                "SELECT description_id FROM issue_comments WHERE issue_id = %s", (issue["id"],)
+            )
+            if row["description_id"]
+        ]
+        seeder.db.execute("DELETE FROM issue_comments WHERE issue_id = %s", (issue["id"],))
+        for description_id in descriptions:
+            seeder.db.execute("DELETE FROM descriptions WHERE id = %s", (description_id,))
+        seeder.db.execute("UPDATE agent_run SET work_item_id = NULL WHERE id = %s", (daemon_run["id"],))
 
 
 def test_daemon_run_fail_refusal_shape(machine_client, daemon_run, seeder):
