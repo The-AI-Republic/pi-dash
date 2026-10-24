@@ -17,6 +17,8 @@ import { pickerKeys } from "../../../../shared/pickers/index.js";
 import { notifyError } from "../../../../shared/shell/index.js";
 import { pickerStatesQueryOptions } from "../../../../shared/pickers/reference.js";
 import { issueKeys } from "../../api/keys.js";
+import { ISSUE_TYPES_FLAG } from "../../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../../edition/providers.js";
 import { issueDetailQueryOptions } from "../../api/queries.js";
 import { CreatedByRow } from "./CreatedByRow.js";
 import { PRODUCT_CREATOR_NAME, UNKNOWN_CREATOR_NAME, isIntakeBot, selectCreator } from "./creator.js";
@@ -430,6 +432,8 @@ afterEach(() => {
   cleanup();
   resetAppClient();
   resetRegisteredStores();
+  resetEditionIssuesProviders();
+  delete edition.flags[ISSUE_TYPES_FLAG];
   vi.clearAllMocks();
 });
 
@@ -1000,6 +1004,38 @@ describe("SidebarProperties", () => {
       assigned_runner_id: RUNNER_GPU,
       agent_executor: "local_runner",
     });
+  });
+
+  it("adds the cloud type properties under the sidebar rows, and nothing in the community build (ISS-235)", () => {
+    registerEditionIssuesProviders({
+      issueTypeDetail: { properties: () => <span data-testid="type-properties">Type: Bug</span> },
+    });
+    const first = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture()}
+        project={projectFixture()}
+        editable
+      />,
+      first.queryClient
+    );
+    expect(screen.queryByTestId("detail-type-properties")).toBeNull();
+    cleanup();
+    edition.flags[ISSUE_TYPES_FLAG] = true;
+    const second = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture()}
+        project={projectFixture()}
+        editable
+      />,
+      second.queryClient
+    );
+    expect(screen.getByTestId("detail-type-properties")).toContainElement(screen.getByTestId("type-properties"));
   });
 
   it("patches state with the picked id", async () => {

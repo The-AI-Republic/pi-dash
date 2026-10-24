@@ -3,13 +3,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Issue } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
+import { ISSUE_DEDUPE_FLAG } from "../edition/flags.js";
 import { EMOJI_PICKER_LABEL } from "../reactions/EmojiPicker.js";
 import { ISSUE_REACTIONS_LABEL } from "../reactions/IssueReactions.js";
 import { DESCRIPTION_LABEL } from "./IssueDescriptionField.js";
@@ -91,6 +93,23 @@ function renderColumn(
         description_stripped: "version one",
         description_json: {},
       });
+    } else if (url.includes("/search-issues/")) {
+      status = 200;
+      body = JSON.stringify([
+        {
+          id: "923e4567-e89b-12d3-a456-426614174009",
+          name: "Fix login redirect",
+          start_date: null,
+          sequence_id: 9,
+          project__name: "Web",
+          project__identifier: "WEB",
+          project_id: PROJECT,
+          workspace__slug: SLUG,
+          state__name: "Todo",
+          state__group: "unstarted",
+          state__color: "#5e6ad2",
+        },
+      ]);
     } else if (url.includes("description-versions")) {
       status = 200;
       body = JSON.stringify({
@@ -166,9 +185,25 @@ function descriptionView(): HTMLElement {
 
 afterEach(() => {
   resetAppClient();
+  delete edition.flags[ISSUE_DEDUPE_FLAG];
 });
 
 describe("DetailMainColumn", () => {
+  it("mounts the cloud duplicate popover beside the save indicator, and nothing in the community build (ISS-231)", async () => {
+    renderColumn();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(screen.queryByTestId("detail-duplicate-popover")).toBeNull();
+    cleanup();
+    edition.flags[ISSUE_DEDUPE_FLAG] = true;
+    renderColumn();
+    expect(await screen.findByTestId("detail-duplicate-popover", undefined, { timeout: 3000 })).toBeInTheDocument();
+    // The popover lives in the header row, ahead of the description block.
+    const popover = screen.getByTestId("detail-duplicate-popover");
+    expect(popover.compareDocumentPosition(descriptionView()) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    );
+  });
+
   it("saves title edits through the item update", async () => {
     const { patches } = renderColumn();
     const box = screen.getByRole("textbox", { name: TITLE_LABEL });

@@ -4,9 +4,12 @@
 // State picker (parity/specs/issues.md §17, ISS-209). Single-select over
 // the project's workflow states in server order, each with its group
 // glyph in the state's own color. There is no clear row — a state is
-// always set — and no workflow-aware option in this build. Reads resolve
-// lazily on open behind a spinner; a caller that has to name an existing
-// value before the popup opens preloads the list instead.
+// always set. Reads resolve lazily on open behind a spinner; a caller that
+// has to name an existing value before the popup opens preloads the list
+// instead. A caller may pass an option gate (the cloud workflow, ISS-233):
+// a refused row stays listed, greyed, with the rule's sentence under its
+// name, so the reader sees where the workflow leads without being able to
+// take it. Without a gate every row is open, which is the community case.
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import * as React from "react";
 
@@ -33,6 +36,14 @@ export interface StatePickerProps {
   preload?: boolean;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
+  /** Per-row gate; null or absent leaves every row open. */
+  optionGate?: ((option: StateOption) => StateGateReading | null) | undefined;
+}
+
+/** What a gate says about one row: refused, and why. */
+export interface StateGateReading {
+  disabled: boolean;
+  reason?: string | undefined;
 }
 
 /** Group glyph in the state's own color; the intake picker reuses it for triage states. */
@@ -41,12 +52,25 @@ export function StateGlyph({ option, size = 16 }: { option: StateOption; size?: 
   return <Icon size={size} strokeWidth={1.5} style={{ color: option.color }} aria-hidden="true" />;
 }
 
-function toComboboxOption(option: StateOption): ComboboxOption {
-  return {
+function toComboboxOption(option: StateOption, reading: StateGateReading | null = null): ComboboxOption {
+  const base: ComboboxOption = {
     id: option.id,
     label: option.name,
     searchText: `${option.name} ${option.group}`,
     icon: <StateGlyph option={option} />,
+  };
+  if (reading === null || reading.reason === undefined) {
+    return reading === null ? base : { ...base, disabled: reading.disabled };
+  }
+  return {
+    ...base,
+    disabled: reading.disabled,
+    content: (
+      <span className="flex min-w-0 flex-col">
+        <span className="truncate">{option.name}</span>
+        <span className="text-meta text-(--text-muted)">{reading.reason}</span>
+      </span>
+    ),
   };
 }
 
@@ -64,6 +88,7 @@ export function StatePicker({
   preload = false,
   open: controlledOpen,
   onOpenChange,
+  optionGate,
 }: StatePickerProps): React.ReactElement {
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false);
   const open = controlledOpen ?? uncontrolledOpen;
@@ -103,7 +128,7 @@ export function StatePicker({
   return (
     <Combobox
       trigger={trigger ?? defaultTrigger()}
-      options={options.map(toComboboxOption)}
+      options={options.map((option) => toComboboxOption(option, optionGate?.(option) ?? null))}
       value={value}
       onSelect={onChange}
       listLabel="States"

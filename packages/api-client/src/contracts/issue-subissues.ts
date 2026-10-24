@@ -18,6 +18,11 @@ import { ISSUE_PRIORITIES, IssueListItem } from "./issues.js";
 export const SubIssueItem = z.object({
   ...IssueListItem.shape,
   state_group: z.nullable(z.string()),
+  /**
+   * Work-item type, present only where the edition enables custom types
+   * (ISS-234/235). Absence reads as "no type", never as an error.
+   */
+  type_id: z.optional(nullableUuid()),
 });
 export type SubIssueItem = z.infer<typeof SubIssueItem>;
 

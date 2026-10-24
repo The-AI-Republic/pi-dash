@@ -30,8 +30,10 @@ import {
 } from "../../../../shared/pickers/index.js";
 import { useUpdateExecutionTarget } from "../../api/executionTarget.js";
 import { useUpdateIssue } from "../../api/mutations.js";
+import { stateOptionGate } from "../../edition/workflow.js";
 import { selectWaitingBadge } from "../waiting/waiting.js";
 import { CreatedByRow } from "./CreatedByRow.js";
+import { DetailTypeProperties } from "../../edition/DetailTypeSlots.js";
 import { selectCreator } from "./creator.js";
 import { isWorklogEnabled } from "../widgets/worklog/worklog.js";
 import { WorklogSidebarSection } from "../widgets/worklog/WorklogSidebarSection.js";
@@ -119,6 +121,7 @@ export function SidebarProperties({
           variant={ROW_VARIANT}
           placeholder="Set state"
           preload={issue.state_id !== null}
+          optionGate={stateOptionGate(projectId, issue.state_id)}
           onChange={(stateId) => update.mutate({ state_id: stateId })}
         />
       </SidebarRow>
@@ -166,6 +169,12 @@ export function SidebarProperties({
         issue={issue}
         project={project}
         stateGroup={stateGroup}
+        editable={editable}
+      />
+      <DetailTypeProperties
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        issueId={issue.id}
         editable={editable}
       />
       {isWorklogEnabled() ? (

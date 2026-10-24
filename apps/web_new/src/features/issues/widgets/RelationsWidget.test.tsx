@@ -9,6 +9,9 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
+import { EPICS_FLAG } from "../edition/flags.js";
+import { resetEditionIssuesProviders } from "../edition/providers.js";
 import { issueKeys } from "../api/keys.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { RelationsWidget } from "./RelationsWidget.js";
@@ -56,6 +59,11 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+
+afterEach(() => {
+  resetEditionIssuesProviders();
+  delete edition.flags[EPICS_FLAG];
+});
 
 function renderWidget(options: Parameters<typeof stubTransport>[0] = {}, canEdit = true) {
   const { calls, transport } = stubTransport(options);
@@ -362,6 +370,37 @@ describe("relations widget", () => {
   it("opens the shared work-item form from a row's Edit entry", async () => {
     const user = userEvent.setup();
     renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: /Update work item/i }, { timeout: 10_000 });
+    expect(within(dialog).getByDisplayValue("Peer work item")).toBeInTheDocument();
+  });
+
+  it("edits an epic through the edition's own dialog, not the work-item form (ISS-232)", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    const user = userEvent.setup();
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] }, peerIsEpic: true });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit epic" }, { timeout: 10_000 });
+    expect(within(dialog).getByLabelText("Epic name")).toHaveValue("Peer work item");
+    expect(screen.queryByRole("dialog", { name: /Update work item/i })).not.toBeInTheDocument();
+  });
+
+  it("closes the epic dialog from its own dismissals", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    const user = userEvent.setup();
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] }, peerIsEpic: true });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit epic" }, { timeout: 10_000 });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit epic" })).not.toBeInTheDocument());
+  });
+
+  it("falls back to the work-item form for an epic in the community build", async () => {
+    const user = userEvent.setup();
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] }, peerIsEpic: true });
     await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
     await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
     const dialog = await screen.findByRole("dialog", { name: /Update work item/i }, { timeout: 10_000 });

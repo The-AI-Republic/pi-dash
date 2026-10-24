@@ -24,6 +24,8 @@ import { LabelChips } from "../../labels/LabelChips.js";
 import { LabelPicker } from "../../labels/LabelPicker.js";
 import { useLabels } from "../../labels/api.js";
 import { useIssueCycleWrite, useIssueModulesWrite } from "../../api/membership.js";
+import { OverdueBadge } from "../../edition/OverdueBadge.js";
+import { TransferHopNote } from "../../edition/TransferHopNote.js";
 import { parentIssueQueryOptions, useParentWrite } from "../../api/parent.js";
 import { useUpdateIssue } from "../../api/mutations.js";
 import { ParentPickerDialog } from "./ParentPickerDialog.js";
@@ -36,6 +38,14 @@ const ROW_TEXT = "text-body min-w-0 truncate text-left";
 
 /** Notice title when a sidebar property write is refused (rows A use the same wording). */
 export const PROPERTY_SAVE_FAILED_B_TITLE = "Couldn't update the work item";
+
+/** Today's calendar day, for the cloud overdue badge's own reading. */
+function localToday(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
 
 /** The parent's short identifier, e.g. WEB-12. */
 export function parentIdentifier(parentSequence: number, projectIdentifier: string): string {
@@ -89,8 +99,8 @@ export interface DueDateRowProps {
 
 /**
  * Due date: bounded by the start date and flagged overdue by state
- * group. The cloud overdue badge beside it belongs to NEWFRONT-657; the
- * OSS build renders nothing there, as the edition spec requires.
+ * group. The cloud edition adds its overdue badge beside the date
+ * (ISS-236); the community build renders the row exactly as before.
  */
 export function DueDateRow({
   workspaceSlug,
@@ -121,6 +131,9 @@ export function DueDateRow({
           testId="sidebar-due-picker"
           onChange={(iso) => update.mutate({ target_date: iso })}
         />
+        {issue.target_date === null || issue.target_date === undefined ? null : (
+          <OverdueBadge dueDay={issue.target_date} today={localToday()} overdue={overdue} />
+        )}
       </div>
     </SidebarRow>
   );
@@ -206,16 +219,24 @@ export function CycleRow({
 }: CycleRowProps): React.ReactElement {
   return (
     <SidebarRow label="Cycle">
-      <CyclePicker
-        workspaceSlug={workspaceSlug}
-        projectId={projectId}
-        value={issue.cycle_id}
-        disabled={disabled || isSaving}
-        variant={ROW_VARIANT}
-        placeholder="No cycle"
-        preload={issue.cycle_id !== null}
-        onChange={onChange}
-      />
+      <div className="flex min-w-0 flex-col gap-(--space-1)">
+        <CyclePicker
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          value={issue.cycle_id}
+          disabled={disabled || isSaving}
+          variant={ROW_VARIANT}
+          placeholder="No cycle"
+          preload={issue.cycle_id !== null}
+          onChange={onChange}
+        />
+        <TransferHopNote
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          issueId={issue.id}
+          cycleId={issue.cycle_id}
+        />
+      </div>
     </SidebarRow>
   );
 }
