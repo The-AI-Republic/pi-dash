@@ -76,8 +76,8 @@ export function CycleDetailSidebar({
 
   const directory = React.useMemo(() => selectCycleMemberDirectory(directoryQuery.data ?? []), [directoryQuery.data]);
   // The skeleton stands until every sidebar read lands. Disabled
-  // reads stay pending (idle), so the estimates pair joins the gate
-  // only while estimates are enabled.
+  // reads stay pending (idle), so each optional pair joins the gate
+  // only while its availability flag holds.
   const pending = [
     progress,
     issues,

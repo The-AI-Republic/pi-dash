@@ -309,10 +309,10 @@ export function showPointsRow(input: {
 
 /**
  * Whether the progress measure picker renders (spec §14, EST-019).
- * Numeric point systems offer the totals measure when the project has
- * estimates enabled or the cycle already carries point data. A
- * categories system is text-family: the picker is absent, never rendered
- * disabled. Other families and no active system fall back to counts.
+ * The picker shows when the project has estimates enabled or the cycle
+ * already carries point data. A categories system is text-family: the
+ * picker is absent there, never rendered disabled. Every other family,
+ * including time, keeps the estimates measure when enabled.
  */
 export function showProgressMeasure(input: {
   estimatesEnabled: boolean;
@@ -320,8 +320,8 @@ export function showProgressMeasure(input: {
   progress: CycleProgress;
 }): boolean {
   const { estimatesEnabled, estimateType, progress } = input;
-  if (estimateType !== null && estimateType !== undefined && estimateType !== "points") return false;
-  if (estimateType === "points" && estimatesEnabled) return true;
+  if (estimateType === "categories") return false;
+  if (estimatesEnabled) return true;
   return (progress.total_estimate_points ?? 0) > 0;
 }
 

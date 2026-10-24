@@ -170,7 +170,9 @@ export function CycleSidebarProgress({
     snapshot: { progress_snapshot: cycle.progress_snapshot ?? null },
   });
   const measureAvailable = showProgressMeasure({ estimatesEnabled, estimateType, progress });
-  const activeMeasure: CycleProgressMeasure = measureAvailable ? measure : "issues";
+  // Estimates-off projects always read back to counts, even when point
+  // data keeps the picker visible (spec §6.3, EST-019).
+  const activeMeasure: CycleProgressMeasure = estimatesEnabled && measureAvailable ? measure : "issues";
   const analytics = activeMeasure === "points" ? pointsAnalytics : issuesAnalytics;
   const grandTotal = progressGrandTotal(progress, activeMeasure);
   const stem = BREAKDOWN_FILTER_STEMS[tab];
@@ -270,11 +272,11 @@ export function CycleSidebarProgress({
               data-testid="cycle-progress-measure"
               className="text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text) hover:bg-(--subtle)"
             >
-              {measureLabel(measure)}
+              {measureLabel(activeMeasure)}
             </button>
           }
           options={CYCLE_PROGRESS_MEASURES.map((entry) => ({ id: entry.value, label: entry.label }))}
-          value={measure}
+          value={activeMeasure}
           onSelect={(id) => setMeasure(id === "points" ? "points" : "issues")}
           listLabel={MEASURE_LIST_LABEL}
           emptyText="No measures"

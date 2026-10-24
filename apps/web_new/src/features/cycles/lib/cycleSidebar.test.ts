@@ -426,8 +426,18 @@ describe("progress measure gate", () => {
     );
   });
 
-  it("hides for a time system without point data", () => {
-    expect(showProgressMeasure({ estimatesEnabled: true, estimateType: "time", progress: makeProgress() })).toBe(false);
+  it("shows for an enabled time system", () => {
+    expect(showProgressMeasure({ estimatesEnabled: true, estimateType: "time", progress: makeProgress() })).toBe(true);
+  });
+
+  it("shows for point data without an enabled system on any non-categories family", () => {
+    expect(
+      showProgressMeasure({
+        estimatesEnabled: false,
+        estimateType: "time",
+        progress: makeProgress({ total_estimate_points: 2 }),
+      })
+    ).toBe(true);
   });
 
   it("hides with no system and no point data", () => {

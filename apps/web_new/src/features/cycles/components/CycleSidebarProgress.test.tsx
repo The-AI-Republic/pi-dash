@@ -102,7 +102,7 @@ interface ProgressHarness {
   tab?: CycleBreakdownTab;
 }
 
-function renderProgress(harness: ProgressHarness = {}): ReturnType<typeof render> {
+function renderProgress(harness: ProgressHarness = {}): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   function Host(): React.ReactElement {
     const [tab, setTab] = React.useState<CycleBreakdownTab>(harness.tab ?? "States");
@@ -122,7 +122,7 @@ function renderProgress(harness: ProgressHarness = {}): ReturnType<typeof render
       />
     );
   }
-  return render(
+  render(
     <QueryClientProvider client={client}>
       <Host />
     </QueryClientProvider>
@@ -215,6 +215,47 @@ describe("CycleSidebarProgress", () => {
     expect(screen.queryByTestId("cycle-progress-measure")).toBeNull();
     expect(screen.queryByTestId("cycle-progress-points")).toBeNull();
     expect(screen.getByTestId("cycle-progress-work-items").textContent).toBe("1/3");
+  });
+
+  it("offers the measure for an enabled time system", () => {
+    renderProgress({ estimatesEnabled: true, estimateType: "time" });
+    expect(screen.getByTestId("cycle-progress-measure")).toHaveTextContent("Work items");
+  });
+
+  it("snaps back to counts when estimates are turned off with point data present", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    function Host({ estimatesEnabled }: { estimatesEnabled: boolean }): React.ReactElement {
+      return (
+        <CycleSidebarProgress
+          workspaceSlug={WS}
+          projectId={CYCLES_PROJECT_ID}
+          cycle={datedCycle()}
+          projectTimeZone="UTC"
+          estimatesEnabled={estimatesEnabled}
+          estimateType="points"
+          progress={makeCycleProgress()}
+          issuesAnalytics={makeCycleDistribution()}
+          pointsAnalytics={pointsAnalytics()}
+          tab="States"
+          onTabChange={() => {}}
+        />
+      );
+    }
+    const view = render(
+      <QueryClientProvider client={client}>
+        <Host estimatesEnabled />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByTestId("cycle-progress-measure"));
+    await userEvent.click(screen.getByRole("option", { name: "Estimates" }));
+    expect(screen.getByTestId("cycle-progress-measure")).toHaveTextContent("Estimates");
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <Host estimatesEnabled={false} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("cycle-progress-measure")).toHaveTextContent("Work items");
+    expect((await screen.findByTestId(entryTestId("backlog"))).textContent).toContain("33%");
   });
 
   it("keeps counts when the measure is unavailable after a prior points choice", async () => {
