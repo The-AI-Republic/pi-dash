@@ -404,6 +404,25 @@ mod tests {
     use super::*;
     use tower::ServiceExt;
 
+    /// Assistant-model seam double for registration-only tests: the
+    /// trait defaults with a canned title (no test here drives
+    /// dispatch).
+    #[derive(Debug)]
+    struct DefaultSeam;
+
+    impl pidash_services::extensions::AssistantModelSeam for DefaultSeam {
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("canned".to_owned()) })
+        }
+    }
+
     /// Serialise the env-mutating boot tests: they share the process
     /// environment with the other tests in this binary.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -662,7 +681,16 @@ mod tests {
             )),
             std::sync::Arc::new(tasks_cleanup::assets::NoopLiveConvert),
         );
-        tasks_cleanup::register_workspace_seed(&mut registry, pool.clone(), std::env::temp_dir());
+        let seed_settings = pidash_db::config::Settings::test_defaults();
+        tasks_cleanup::register_workspace_seed(
+            &mut registry,
+            pool.clone(),
+            std::env::temp_dir(),
+            seed_settings.cloud_agent.clone(),
+            seed_settings.managed_runner.clone(),
+            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            std::sync::Arc::new(DefaultSeam),
+        );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
         tasks_cleanup::register_expiry(
             &mut registry,

@@ -381,18 +381,26 @@ pub const USER_FLAGS_SELECT_SQL: &str = "SELECT is_active, is_bot FROM users WHE
 // SQL: render bundle (mirrors the api prompt-preview loaders)
 // ---------------------------------------------------------------------------
 
-/// `issue.labels` (`context.py:536`): live link + live label, newest
-/// first. `$1` is the issue id.
+/// `issue.labels` (`context.py:536`): the M2M manager filters only
+/// through the label's default manager (`l.deleted_at IS NULL`) and
+/// never through the link table, so soft-deleted links still render
+/// and re-added labels repeat once per historical row (PB-2031).
+/// Newest label first (`Label.Meta.ordering`, `-created_at`). `$1`
+/// is the issue id.
 pub const BUNDLE_LABELS_SQL: &str = "SELECT l.name FROM issue_labels il \
     JOIN labels l ON l.id = il.label_id \
-    WHERE il.issue_id = $1 AND il.deleted_at IS NULL AND l.deleted_at IS NULL \
+    WHERE il.issue_id = $1 AND l.deleted_at IS NULL \
     ORDER BY l.created_at DESC";
 
-/// `issue.assignees` (`context.py:537`): display name / email pairs. `$1`
-/// is the issue id.
+/// `issue.assignees` (`context.py:537`): display name / email pairs.
+/// The M2M manager never filters the link table's `deleted_at`, so
+/// soft-deleted assignments still render and re-added assignees
+/// repeat once per historical row (PB-2031). Newest user first
+/// (`User.Meta.ordering`, `-created_at`; `db/models/user.py:137`).
+/// `$1` is the issue id.
 pub const BUNDLE_ASSIGNEES_SQL: &str = "SELECT u.display_name, u.email FROM issue_assignees ia \
-    JOIN users u ON u.id = ia.assignee_id WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL \
-    ORDER BY u.id";
+    JOIN users u ON u.id = ia.assignee_id WHERE ia.issue_id = $1 \
+    ORDER BY u.created_at DESC";
 
 /// `State.objects.filter(project=…)` (`context.py:538-544`): triage
 /// excluded, `sequence` order. `$1` is the project id.
@@ -769,6 +777,10 @@ pub struct RenderBundle {
     pub ticker: Option<TickerBudget>,
     /// The new run's direct parent `done_payload` (by id, may be absent).
     pub direct_parent_payload: Option<Value>,
+    /// Whether the new run has a parent run at all. Travels separately
+    /// from `direct_parent_payload`: a parent with a NULL payload must
+    /// render the fallback, never the ticker payload (PIDASHCONV-1232).
+    pub has_parent_run: bool,
     /// The ticker-stashed resume parent `done_payload` (may be absent).
     pub ticker_parent_payload: Option<Value>,
     pub override_rows: Vec<composer::OverrideRow>,
@@ -1042,12 +1054,18 @@ pub fn tick_value(
 }
 
 /// The review prompt's implementation payload (`context.py:401-416`):
-/// the run's own parent, else the ticker-stashed resume parent.
+/// the run's own parent when one exists, else the ticker-stashed resume
+/// parent.
 pub fn parent_done_payload(
     direct_parent_payload: Option<&Value>,
+    has_parent_run: bool,
     ticker_parent_payload: Option<&Value>,
 ) -> String {
-    let picked = context::resolve_parent_payload(direct_parent_payload, ticker_parent_payload);
+    let picked = context::resolve_parent_payload(
+        direct_parent_payload,
+        has_parent_run,
+        ticker_parent_payload,
+    );
     context::parent_done_payload_json(picked)
 }
 
@@ -1142,6 +1160,7 @@ pub fn render_first_turn(
         comments_section: context::comments_section(&bundle.comments),
         parent_done_payload: parent_done_payload(
             bundle.direct_parent_payload.as_ref(),
+            bundle.has_parent_run,
             bundle.ticker_parent_payload.as_ref(),
         ),
         workpad_body: issue.workpad.clone().unwrap_or_default(),
@@ -2192,6 +2211,7 @@ mod tests {
             prior_run_count: 0,
             ticker: None,
             direct_parent_payload: None,
+            has_parent_run: false,
             ticker_parent_payload: None,
             override_rows: Vec::new(),
         }

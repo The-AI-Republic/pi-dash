@@ -8,8 +8,11 @@
 //!
 //! * [`pod`] — `Pod` (`models.py:52-177`): manager soft-delete scope,
 //!   `clean`/`save` workspace denorm + autofill, `default_for_project_id`
-//!   (`:173-176`), constraints/indexes. Pod *views* are D-13's; the
-//!   model lives here per the epic and D-13's split reuses this module.
+//!   (`:173-176`), constraints/indexes, and the shared default-pod
+//!   creation helper for the `post_save(Project)` receiver
+//!   (`runner/signals.py:32-66`, PIDASHCONV-1297). Pod *views* are
+//!   D-13's; the model lives here per the epic and D-13's split reuses
+//!   this module.
 //! * [`agent_run`] — `AgentRun` (`models.py:872-1161`): all 42
 //!   columns/defaults/constraints/indexes, `save` pod-resolution order
 //!   + owner→created_by mirror (`:1104-1134`), token pseudo-fields as
@@ -51,11 +54,13 @@
 //!
 //! # Reads vs writes
 //!
-//! `Pod.default_for_project_id` is the only executing query in this
-//! layer ([`pod::default_for_project_id`], runtime `sqlx::query` —
-//! no `query!` macros: no build-time database, no offline cache,
-//! following the `license/queries` precedent; Django's `%s`
-//! placeholders render as Postgres `$N`). Everything else is pure:
+//! `Pod.default_for_project_id` and the default-pod creation helper
+//! are the only executing queries in this layer
+//! ([`pod::default_for_project_id`], [`pod::ensure_default_pod`],
+//! runtime `sqlx::query` — no `query!` macros: no build-time
+//! database, no offline cache, following the `license/queries`
+//! precedent; Django's `%s` placeholders render as Postgres `$N`).
+//! Everything else is pure:
 //! column lists, defaults (all Django-side — the live tables carry no
 //! `column_default`, so Rust inserts must supply these values
 //! explicitly), save-rule decision functions over pre-fetched inputs,

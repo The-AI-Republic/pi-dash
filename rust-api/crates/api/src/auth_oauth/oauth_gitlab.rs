@@ -49,7 +49,8 @@
 //! - B4 (`adapter/base.py:299`, also in `PORTED_BUGS`): `is_signup =
 //!   bool(user)` is inverted as written (existing user reports `True`);
 //!   kept verbatim, including the `check_sync_enabled() and not
-//!   is_signup` gate that therefore syncs existing users only.
+//!   is_signup` gate that therefore syncs newly created users only,
+//!   never existing ones.
 //! - B5 (`workspace_project_join.py:76-87`, also in `PORTED_BUGS`):
 //!   `ProjectMember` bulk_create omits the non-nullable `project_id`, so
 //!   any accepted project invite turns the callback into a 500.
@@ -1052,8 +1053,9 @@ pub const SIGNUP_DISABLED_CODE: i32 = 5015;
 pub const SIGNUP_DISABLED_NAME: &str = "SIGNUP_DISABLED";
 
 /// `__check_signup` (`base.py:103-122`): with signups disabled
-/// (`ENABLE_SIGNUP == "0"`, legacy default `"1"`) a missing workspace
-/// invite raises `SIGNUP_DISABLED` (payload: the sanitized email). A
+/// (`ENABLE_SIGNUP == "0"`, legacy default `"1"`) a missing live workspace
+/// invite raises `SIGNUP_DISABLED` (payload: the sanitized email). The
+/// default manager excludes soft-deleted invites. A
 /// config-store or DB failure escapes (Django 500), it is not a
 /// provider error.
 async fn check_signup(pool: &PgPool, secret_key: &str, email: &str) -> Result<(), CallbackOutcome> {
@@ -1084,12 +1086,13 @@ async fn check_signup(pool: &PgPool, secret_key: &str, email: &str) -> Result<()
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(i32,)> =
-        sqlx::query_as(r#"SELECT 1 FROM "workspace_member_invites" WHERE email = $1 LIMIT 1"#)
-            .bind(email)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| CallbackOutcome::Server)?;
+    let invited: Option<(i32,)> = sqlx::query_as(
+        r#"SELECT 1 FROM "workspace_member_invites" WHERE email = $1 AND deleted_at IS NULL LIMIT 1"#,
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| CallbackOutcome::Server)?;
     if invited.is_none() {
         return Err(CallbackOutcome::Provider(ProviderError::with_payload(
             SIGNUP_DISABLED_CODE,
@@ -1395,7 +1398,7 @@ async fn gitlab_sync_enabled(pool: &PgPool, secret_key: &str) -> Result<bool, De
     }))
 }
 
-/// `sync_user_data` (`base.py:256-287`, existing user + sync
+/// `sync_user_data` (`base.py:256-287`, new user + sync
 /// enabled): names, `display_name` (stored or derived), avatar URL
 /// fallback (S3 upload is the follow-up gap — old-asset delete is
 /// skipped with it), then a full-row save with its side effects.
@@ -2020,7 +2023,7 @@ async fn callback_success(
     let email = sanitize_email(&user_data.email).map_err(CallbackOutcome::Provider)?;
     let found = find_user_by_email(pool, &email).await?;
     // B4: `is_signup = bool(user)` — inverted as written.
-    let _is_signup = found.is_some();
+    let is_signup = found.is_some();
 
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -2074,7 +2077,7 @@ async fn callback_success(
             };
             insert_profile(pool, uuid::Uuid::new_v4(), id, now).await?;
             insert_notification_preference(pool, uuid::Uuid::new_v4(), id, now).await?;
-            DbUser {
+            let mut created = DbUser {
                 id,
                 email: email.clone(),
                 password: password_hash,
@@ -2083,10 +2086,11 @@ async fn callback_success(
                 is_staff: false,
                 display_name: email.split('@').next().unwrap_or_default().to_owned(),
                 avatar,
-            }
-        }
-        Some(existing) => {
-            if gitlab_sync_enabled(pool, secret.as_str()).await? {
+            };
+            // IDP sync (`base.py:345`): `check_sync_enabled() and not
+            // is_signup` — with the inverted flag this runs for NEW
+            // users only, never existing ones (PB-1024).
+            if !is_signup && gitlab_sync_enabled(pool, secret.as_str()).await? {
                 let first_name = name_or_empty(&user_data.user.first_name);
                 let last_name = name_or_empty(&user_data.user.last_name);
                 let display_name = get_display_name(&email);
@@ -2099,7 +2103,7 @@ async fn callback_success(
                 };
                 sync_user_data(
                     pool,
-                    &existing,
+                    &created,
                     &first_name,
                     &last_name,
                     &display_name,
@@ -2107,15 +2111,12 @@ async fn callback_success(
                     now,
                 )
                 .await?;
-                DbUser {
-                    display_name,
-                    avatar,
-                    ..existing
-                }
-            } else {
-                existing
+                created.display_name = display_name;
+                created.avatar = avatar;
             }
+            created
         }
+        Some(existing) => existing,
     };
 
     // `save_user_data()`: stamps (+ activation mail) and the save.

@@ -12,6 +12,8 @@ URL names the kwargs module_id/issue_id but DRF's default
 retrieve/update look for `pk`. DELETE is a custom action and works.
 """
 
+import json
+
 from .conftest import module_url, modules_url
 
 SERVER_ERROR = {"error": "Something went wrong please try again later"}
@@ -145,3 +147,29 @@ def test_destroy(api, seed, tenant_a, project_a, auth_a, module_a, issue_a):
 def test_requires_auth(api, tenant_a, project_a, module_a):
     r = api.get(_module_issues_url(tenant_a, project_a, module_a))
     assert r.status_code == 401, r.text
+
+
+def test_module_issues_state_id_in_filter(
+        api, seed, tenant_a, project_a, auth_a, module_a):
+    # PIDASHCONV-1317: the module-issues list runs the same rich-filter
+    # compiler; UUID lists must bind typed (pre-fix Rust 500d).
+    ws = tenant_a["workspace"]["id"]
+    state_a = seed.state(project_a, ws, name="Mod state A", group="unstarted")
+    state_b = seed.state(project_a, ws, name="Mod state B", group="started")
+    issue_a = seed.issue(ws, project_a, name="Mod filter A", state_id=state_a)
+    issue_b = seed.issue(ws, project_a, name="Mod filter B", state_id=state_b)
+    seed.module_issue(ws, project_a, module_a, issue_a)
+    seed.module_issue(ws, project_a, module_a, issue_b)
+    r = api.get(
+        _module_issues_url(tenant_a, project_a, module_a), headers=auth_a,
+        params={"filters": json.dumps({"and": [{"state_id__in": state_a}]})},
+    )
+    assert r.status_code == 200, r.text
+    assert {row["id"] for row in r.json()["results"]} == {issue_a}
+    r = api.get(
+        _module_issues_url(tenant_a, project_a, module_a), headers=auth_a,
+        params={"filters": json.dumps(
+            {"and": [{"state_id__in": f"{state_a},{state_b}"}]})},
+    )
+    assert r.status_code == 200, r.text
+    assert {row["id"] for row in r.json()["results"]} == {issue_a, issue_b}

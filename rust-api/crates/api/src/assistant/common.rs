@@ -972,10 +972,12 @@ pub fn base_url_blocked(state: &AppState, base_url: &str) -> bool {
 }
 
 /// `last_verified_at.isoformat()` (`llm_config.py:37`,
-/// `stt_config.py:40`): UTC renders `+00:00`; microseconds appear only
-/// when nonzero (chrono `AutoSi` matches both halves).
+/// `stt_config.py:40`): UTC renders `+00:00`; microseconds print as
+/// exactly six digits when nonzero, and no fraction when zero.
+/// chrono `AutoSi` trims trailing zeros (`.123`), so this shares the
+/// [`py_iso`] rendering instead of `to_rfc3339_opts`.
 pub fn isoformat(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
+    py_iso(dt)
 }
 
 /// `workspace_role_by_slug` (`core/permissions.py:48-56`): the caller's
@@ -1194,6 +1196,11 @@ mod tests {
             .expect("parses")
             .with_timezone(&chrono::Utc);
         assert_eq!(isoformat(&whole), "2026-09-29T13:50:51+00:00");
+        // Trailing-zero micros keep six digits (PIDASHCONV-1246).
+        let trailing = chrono::DateTime::parse_from_rfc3339("2026-10-18T12:00:05.123+00:00")
+            .expect("parses")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(isoformat(&trailing), "2026-10-18T12:00:05.123000+00:00");
     }
 }
 
@@ -1203,11 +1210,11 @@ mod tests {
 // The rest of this module is the 255 half of the merge: session actor, role
 // lookup, owned-thread scope, thread wire shape, error bodies, cursor
 // parsing, plus the JSON helpers its handlers share. Two names from this
-// half were renamed at the 255/256 merge because `common` already owns
-// them with different contracts: `pool_of` (borrowed `&PgPool`) is
-// `pool_ref` here, and the JSON-only `parse_body` is `parse_json_body`
-// here. Nothing else was renamed; both halves are byte-identical to their
-// pre-merge files apart from those two renames.
+// half was renamed at the 255/256 merge because `common` already owns
+// it with a different contract: `pool_of` (borrowed `&PgPool`) is
+// `pool_ref` here. (The merge also renamed the JSON-only `parse_body`
+// to `parse_json_body`; PIDASHCONV-1240 removed that reader and its
+// callers negotiate through [`parse_body`] instead.)
 // Shared handler plumbing for the assistant thread surface (D-06, stage 5).
 //
 // Ports the pieces every `apps/api/pi_dash/assistant/views/*.py` handler
@@ -1489,6 +1496,19 @@ pub fn or_empty_str(value: Option<&serde_json::Value>) -> HandlerResult<String> 
     }
 }
 
+/// [`or_empty_str`] over a negotiated body field: JSON values coerce
+/// exactly as before; a file part in a text position is the `UploadedFile`
+/// Django hands the view, which `[:255]`/`strip()` cannot take (the base
+/// view maps the `TypeError`/`AttributeError` to the generic 500, verified
+/// live); a missing field is `""`.
+pub fn or_empty_body(field: Option<&BodyField>) -> HandlerResult<String> {
+    match field {
+        None => Ok(String::new()),
+        Some(BodyField::Json(value)) => or_empty_str(Some(value)),
+        Some(BodyField::File { .. }) => Err(server_error()),
+    }
+}
+
 /// Python `str[:n]` on the title fields (`threads.py:77,91`): code points,
 /// never mid-UTF-8 (the `[:255]` semantic trap).
 pub fn truncate_chars(text: &str, bound: usize) -> String {
@@ -1595,26 +1615,6 @@ pub fn thread_not_found() -> Response {
     json_response(StatusCode::NOT_FOUND, THREAD_NOT_FOUND_BODY.to_owned())
 }
 
-/// Parse a request body the way DRF does for JSON posts (the intake
-/// `parse_json_body` precedent): empty → `{}`; malformed → the DRF `ParseError`
-/// 400; non-object JSON → the attribute errors the view code hits (500).
-/// The contract suite only sends objects; the shape is pinned for parity.
-pub fn parse_json_body(raw: &[u8]) -> HandlerResult<serde_json::Value> {
-    if raw.is_empty() {
-        return Ok(serde_json::Value::Object(Default::default()));
-    }
-    match serde_json::from_slice::<serde_json::Value>(raw) {
-        Ok(value) if value.is_object() => Ok(value),
-        Ok(_) => Err(server_error()),
-        // The intake `parse_json_body` precedent: DRF interpolates the parser
-        // message (`ParseError('JSON parse error - %s')`).
-        Err(error) => Err(json_response(
-            StatusCode::BAD_REQUEST,
-            serde_json::json!({"detail": format!("JSON parse error - {error}")}).to_string(),
-        )),
-    }
-}
-
 #[cfg(test)]
 mod thread_surface_tests {
     use super::*;
@@ -1681,6 +1681,21 @@ mod thread_surface_tests {
         );
         assert!(or_empty_str(Some(&serde_json::json!(5))).is_err());
         assert!(or_empty_str(Some(&serde_json::json!(true))).is_err());
+    }
+
+    #[test]
+    fn or_empty_body_files_are_server_errors() {
+        assert_eq!(or_empty_body(None).expect("missing"), "");
+        assert_eq!(
+            or_empty_body(Some(&BodyField::Json(serde_json::json!("hi")))).expect("json"),
+            "hi"
+        );
+        // A file part in a text position: `[:255]`/`strip()` cannot
+        // take an `UploadedFile` (generic 500, verified live).
+        assert!(or_empty_body(Some(&BodyField::File {
+            filename: "n.txt".to_owned()
+        }))
+        .is_err());
     }
 
     #[test]

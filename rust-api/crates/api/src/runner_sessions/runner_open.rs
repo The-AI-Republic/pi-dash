@@ -804,6 +804,17 @@ impl RunnerPorts for SessionPorts<'_> {
         self.live.post_run_orchestration(run_id).await
     }
 
+    async fn post_run_orchestration_in_tx<'t>(
+        &self,
+        tx: pidash_db::tx::Transaction<'t>,
+        pool: &'t PgPool,
+        run_id: Uuid,
+    ) -> Result<pidash_db::tx::Transaction<'t>, PortError> {
+        self.live
+            .post_run_orchestration_in_tx(tx, pool, run_id)
+            .await
+    }
+
     async fn complete_project_move_handoff(&self, run_id: Uuid) -> Result<(), PortError> {
         self.live.complete_project_move_handoff(run_id).await
     }

@@ -69,10 +69,10 @@ use super::runs::{
     ISSUE_NOT_FOUND_BODY,
 };
 use super::{json_response, server_error};
+use crate::project_move_handoff::RedisAdmissionCache;
+use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
-use crate::v1_work_items::handlers_actions::{
-    dispatch_deps, draw_jitter, fetch_project, IssueRow, RequestCache,
-};
+use crate::v1_work_items::handlers_actions::{dispatch_deps, draw_jitter, fetch_project, IssueRow};
 
 // ---------------------------------------------------------------------------
 // Exact bodies (only arms this port answers)
@@ -524,7 +524,7 @@ async fn rollback_then(tx: DbTransaction<'_>, response: Response) -> Response {
 async fn drain_direct_dispatch(
     pool: &PgPool,
     cloud: &pidash_db::config::CloudAgentSettings,
-    cache: &RequestCache,
+    cache: &RedisAdmissionCache,
     dispatches: Vec<Uuid>,
     deferred: Vec<DeferredConsume>,
     now: DateTime<Utc>,
@@ -991,6 +991,7 @@ async fn render_cloud_issue_prompt<'a>(
         comments_section: prompting_context::comments_section(&bundle.comments),
         parent_done_payload: parent_done_payload(
             bundle.direct_parent_payload.as_ref(),
+            bundle.has_parent_run,
             bundle.ticker_parent_payload.as_ref(),
         ),
         workpad_body: issue.workpad.clone().unwrap_or_default(),
@@ -1275,7 +1276,9 @@ pub async fn post_direct(
         requested: scope.requested.as_deref(),
         now_unix_secs: now.timestamp(),
     };
-    let cache = RequestCache::default();
+    let cache = RedisAdmissionCache {
+        client: redis_client(state),
+    };
     let mut deferred: Vec<DeferredConsume> = Vec::new();
     let mut collect = |consume: DeferredConsume| deferred.push(consume);
     let fields = match resolve_execution_fields(

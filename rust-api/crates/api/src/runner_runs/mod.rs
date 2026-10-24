@@ -45,12 +45,15 @@
 //!   `test_web_chat_approval_decide_shape`), so the session lookup, the
 //!   offline-reject matrix, and the XADD wire shape are behavior, not
 //!   plumbing. D-14's outbox port takes over when it merges.
-//! * Matcher drains, D-12 orchestration, and D-11 `dispatch_waiting` are
-//!   warn-logged no-ops: every call site is isolated in Python (a drain
-//!   failure only logs), so no response byte depends on them, and the
-//!   Python plane still runs the beat tasks until cutover. The one
-//!   exception is `_pause_and_drain`'s drain, which is unisolated in
-//!   Python and 500s after commit when it raises — case-closed below.
+//! * Matcher drains (PIDASHCONV-862), D-12 orchestration
+//!   (`disarm_on_terminal_signal`, the deferred pause, the pending-entry
+//!   fire) and D-11 `dispatch_waiting` are real: they call the ported
+//!   executors, so a daemon terminal transition drains the freed runner,
+//!   disarms the ticker after `stop_ticking`, applies a deferred pause,
+//!   fires a pending entry, and completes a move handoff on the api plane.
+//!   The post-run sub-calls are isolated in Python (each logs), while the
+//!   drains stay unisolated (`_pause_and_drain` propagates) — see the
+//!   per-method docs.
 //! * `agent_system_user_id` and the Celery emits (`fire_tick`,
 //!   `runner.apply_agent_run_terminal_effects` via the F-09 publisher)
 //!   are real: comments need the actor row, and the emits are plain
@@ -1024,6 +1027,21 @@ pub trait RunnerPorts: Send + Sync {
         &self,
         run_id: uuid::Uuid,
     ) -> impl std::future::Future<Output = Result<(), PortError>> + Send;
+    /// [`post_run_orchestration`](Self::post_run_orchestration) on the
+    /// caller's transaction. `apply_terminal_effects` runs
+    /// `_apply_post_run_orchestration` inside its `transaction.atomic()`
+    /// (`agent_run_finalization.py:105-199`), which already holds the
+    /// issue `FOR UPDATE`; the deferred pause re-locks that issue row, so
+    /// running it on a second connection self-deadlocks (the second
+    /// connection waits for the hooks transaction, which waits for the
+    /// pause). Returns the transaction so the caller keeps writing the
+    /// hooks marker on it.
+    fn post_run_orchestration_in_tx<'t>(
+        &self,
+        tx: pidash_db::tx::Transaction<'t>,
+        pool: &'t PgPool,
+        run_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<pidash_db::tx::Transaction<'t>, PortError>> + Send;
     /// `complete_project_move_handoff(run_id)` (D-12, after the hooks
     /// transaction commits, isolated).
     fn complete_project_move_handoff(
@@ -1155,15 +1173,19 @@ pub async fn active_session_exists(
 }
 
 /// The production ports: real outbox enqueue, real system-user lookup,
-/// real Celery emits; matcher drains, D-12 orchestration, and D-11
-/// dispatch stay warn-logged no-ops until their providers merge (every
-/// call site is isolated in Python, so no response byte depends on
-/// them — except `_pause_and_drain`'s drain, which propagates; see
-/// [`run_endpoints`](self::run_endpoints)).
+/// real Celery emits, real matcher drains, real D-12 orchestration, and
+/// real D-11 `dispatch_waiting`. The post-run orchestration sub-calls are
+/// isolated in Python (each logs); the drains are unisolated (propagate);
+/// see [`run_endpoints`](self::run_endpoints).
 #[derive(Debug, Clone)]
 pub struct LivePorts {
     pool: PgPool,
     redis: Option<redis::Client>,
+    /// The request state: carries the resolved settings (cloud-agent /
+    /// managed-runner / runner) plus the toolsets and assistant seams the
+    /// D-12 handoff and deferred-pause drivers need. Held by value
+    /// (`AppState` is `Clone`).
+    state: AppState,
 }
 
 impl LivePorts {
@@ -1180,11 +1202,44 @@ impl LivePorts {
             .as_deref()
             .filter(|url| !url.is_empty())
             .and_then(|url| redis::Client::open(url).ok());
-        Self { pool, redis }
+        Self {
+            pool,
+            redis,
+            state: state.clone(),
+        }
     }
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// `_fire_pending_entry` (`run_lifecycle.py:141-154`): the run's work
+    /// item pending ticker, if any, fires now instead of waiting for the
+    /// scanner's next pass. A run with no work item, or an issue with no
+    /// enabled `pending_entry` ticker, is a no-op.
+    async fn fire_pending_entry(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
+        let work_item_id: Option<Option<uuid::Uuid>> =
+            sqlx::query_scalar(r#"SELECT "work_item_id" FROM "agent_run" WHERE "id" = $1"#)
+                .bind(run_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| PortError::Transport(error.to_string()))?;
+        let Some(Some(work_item_id)) = work_item_id else {
+            return Ok(());
+        };
+        let ticker_id: Option<uuid::Uuid> = sqlx::query_scalar(
+            r#"SELECT "id" FROM "issue_agent_ticker"
+               WHERE "issue_id" = $1 AND "enabled" = true AND "pending_entry" = true
+               LIMIT 1"#,
+        )
+        .bind(work_item_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| PortError::Transport(error.to_string()))?;
+        let Some(ticker_id) = ticker_id else {
+            return Ok(());
+        };
+        self.emit_fire_tick(ticker_id).await
     }
 }
 
@@ -1239,26 +1294,247 @@ impl RunnerPorts for LivePorts {
     }
 
     async fn drain_for_runner_by_id(&self, runner_id: uuid::Uuid) -> Result<(), PortError> {
-        // D-14 provider pending (PIDASHCONV-546 fixtures only): the
-        // matcher still runs on the Python plane until cutover.
-        tracing::warn!(%runner_id, "drain_for_runner_by_id: D-14 provider pending; skipped");
-        Ok(())
+        // `matcher.py:298-304`: real matcher drain (PIDASHCONV-862).
+        // Unisolated in Python (`_pause_and_drain` propagates), so a
+        // failure propagates to the caller.
+        let runner = self.state.settings().runner.clone();
+        pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+            &self.pool,
+            self.redis.as_ref(),
+            &runner,
+            runner_id,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn drain_pod_by_id(&self, pod_id: uuid::Uuid) -> Result<(), PortError> {
-        tracing::warn!(%pod_id, "drain_pod_by_id: D-14 provider pending; skipped");
-        Ok(())
+        // `matcher.py:242-251`: real matcher pod drain (PIDASHCONV-862).
+        let runner = self.state.settings().runner.clone();
+        pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            &self.pool,
+            self.redis.as_ref(),
+            &runner,
+            pod_id,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn post_run_orchestration(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
-        // D-12 provider pending (fixtures only): isolated in Python, so
-        // no response byte depends on it.
-        tracing::warn!(%run_id, "post_run_orchestration: D-12 provider pending; skipped");
+        // `_apply_post_run_orchestration` (`run_lifecycle.py:103-139`):
+        // disarm, deferred pause, pending-entry fire — each isolated in
+        // Python (try/except + log), so every failure is logged and the
+        // call still returns `Ok`.
+        let settings = self.state.settings();
+        let cloud = settings.cloud_agent.clone();
+        let managed = settings.managed_runner.clone();
+        if let Err(error) =
+            pidash_jobs::orchestration::disarm_on_terminal_signal(&self.pool, run_id).await
+        {
+            tracing::error!(
+                ?error,
+                run_id = %run_id,
+                "orchestration.error: run-ended reconcile failed"
+            );
+        }
+        if let Err(error) = pidash_jobs::orchestration::maybe_apply_deferred_pause_live(
+            &self.pool,
+            &cloud,
+            &managed,
+            run_id,
+            self.state.toolsets().clone(),
+        )
+        .await
+        {
+            tracing::error!(
+                ?error,
+                run_id = %run_id,
+                "orchestration.error: deferred-pause failed"
+            );
+        }
+        if let Err(error) = self.fire_pending_entry(run_id).await {
+            tracing::error!(
+                ?error,
+                run_id = %run_id,
+                "orchestration.error: pending-entry fire failed"
+            );
+        }
         Ok(())
     }
 
+    async fn post_run_orchestration_in_tx<'t>(
+        &self,
+        tx: pidash_db::tx::Transaction<'t>,
+        pool: &'t PgPool,
+        run_id: uuid::Uuid,
+    ) -> Result<pidash_db::tx::Transaction<'t>, PortError> {
+        // `_apply_post_run_orchestration` (`run_lifecycle.py:103-139`) on
+        // the caller's transaction. Disarm locks only the ticker, so its
+        // executor runs beside the caller's issue/run locks; the deferred
+        // pause re-locks the issue row and so runs on `tx`.
+        if let Err(error) =
+            pidash_jobs::orchestration::disarm_on_terminal_signal(&self.pool, run_id).await
+        {
+            tracing::error!(
+                ?error,
+                run_id = %run_id,
+                "orchestration.error: run-ended reconcile failed"
+            );
+        }
+        let settings = self.state.settings();
+        let deps = pidash_jobs::orchestration::StoreDeps {
+            cloud: settings.cloud_agent.clone(),
+            managed: settings.managed_runner.clone(),
+            cache: crate::project_move_handoff::RedisAdmissionCache {
+                client: crate::runner_enroll::teardown::redis_client(&self.state),
+            },
+            // The pause path creates no runs: the presence closures are
+            // unread (`maybe_apply_deferred_pause_live`), so the keyless
+            // answers mirror it.
+            has_usable_llm_config: |_actor: uuid::Uuid| false,
+            toolsets: self.state.toolsets().clone(),
+            llm_profile: |_actor: Option<uuid::Uuid>| pidash_services::dispatch::LlmProfile {
+                available: false,
+                reason_code: String::new(),
+            },
+            now_unix_secs: chrono::Utc::now().timestamp(),
+        };
+        let mut store = pidash_jobs::orchestration::LiveCreationStore::new(tx, pool, deps);
+        match pidash_services::orchestration::dispatch::maybe_apply_deferred_pause(
+            &mut store,
+            run_id,
+            chrono::Utc::now(),
+            0.0,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                for line in &outcome.logs {
+                    if line.level == "WARNING" {
+                        tracing::warn!("{}", line.message);
+                    } else {
+                        tracing::info!("{}", line.message);
+                    }
+                }
+            }
+            Err(error) => tracing::error!(
+                ?error,
+                run_id = %run_id,
+                "orchestration.error: deferred-pause failed"
+            ),
+        }
+        let (mut tx, _pool, _cache, _dispatches, _deferred, _terminal_effects) = store.into_parts();
+        // `_fire_pending_entry` (`run_lifecycle.py:141-155`): the run's
+        // work item pending ticker, if any, fires now. Read on the
+        // caller's transaction, after the pause's write.
+        let work_item_id: Option<uuid::Uuid> = match sqlx::query_scalar::<_, Option<uuid::Uuid>>(
+            r#"SELECT "work_item_id" FROM "agent_run" WHERE "id" = $1"#,
+        )
+        .bind(run_id)
+        .fetch_optional(&mut **tx.inner())
+        .await
+        {
+            Ok(row) => row.flatten(),
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    run_id = %run_id,
+                    "orchestration.error: pending-entry lookup failed"
+                );
+                None
+            }
+        };
+        let ticker_id: Option<uuid::Uuid> = match work_item_id {
+            Some(work_item_id) => sqlx::query_scalar::<_, uuid::Uuid>(
+                r#"SELECT "id" FROM "issue_agent_ticker"
+                   WHERE "issue_id" = $1 AND "enabled" = true AND "pending_entry" = true
+                   LIMIT 1"#,
+            )
+            .bind(work_item_id)
+            .fetch_optional(&mut **tx.inner())
+            .await
+            .unwrap_or(None),
+            None => None,
+        };
+        if let Some(ticker_id) = ticker_id {
+            // `_fire_pending_entry` queues `fire_tick.delay` with
+            // `transaction.on_commit`, so a rolled-back hooks transaction
+            // must not publish a tick for it.
+            let pool = self.pool.clone();
+            tx.on_commit(move || {
+                tokio::spawn(async move {
+                    if let Err(error) = emit_celery(
+                        &pool,
+                        FIRE_TICK_TASK,
+                        vec![Value::String(ticker_id.to_string())],
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            ?error,
+                            ticker_id = %ticker_id,
+                            "orchestration.error: pending-entry fire failed"
+                        );
+                    }
+                });
+            });
+        }
+        Ok(tx)
+    }
+
     async fn complete_project_move_handoff(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
-        tracing::warn!(%run_id, "complete_project_move_handoff: D-12 provider pending; skipped");
+        // `complete_project_move_handoff(run_id)` (`service.py:644-732`):
+        // the D-12 live executor (own transaction, committed, then the
+        // handoff tx's own post-commit effects). Isolated in Python (the
+        // terminal transition already committed), so a failure is logged
+        // by the caller.
+        let settings = self.state.settings();
+        let cloud = settings.cloud_agent.clone();
+        let managed = settings.managed_runner.clone();
+        let replacement = pidash_jobs::orchestration::complete_project_move_handoff_live(
+            &self.pool,
+            &cloud,
+            &managed,
+            run_id,
+            self.state.toolsets().clone(),
+            self.state.assistant_seam().clone(),
+        )
+        .await
+        .map_err(|error| PortError::Transport(error.to_string()))?;
+        let Some(replacement_id) = replacement else {
+            return Ok(());
+        };
+        // `dispatch_after_commit` -> `dispatch_agent_run` -> for a
+        // runner-plane run `drain_pod_by_id(run.pod_id)`
+        // (`cloud_agent/dispatch.py:61-70`). The jobs executor runs the
+        // dispatch but returns only the run id, so re-read the decision's
+        // inputs: a replacement still QUEUED on a non-cloud executor is
+        // the `PodDrain` arm and must be matched now, not on a later poll.
+        let pending: Option<(String, String, Option<uuid::Uuid>)> = sqlx::query_as(
+            r#"SELECT "status", "executor_kind", "pod_id"
+               FROM "agent_run" WHERE "id" = $1"#,
+        )
+        .bind(replacement_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| PortError::Transport(error.to_string()))?;
+        let Some((status, executor_kind, pod_id)) = pending else {
+            return Ok(());
+        };
+        if status == "queued"
+            && executor_kind != pidash_types::dispatch::AgentExecutorKind::CloudAgent.value()
+        {
+            if let Some(pod_id) = pod_id {
+                crate::runner_enroll::teardown::drain_pod_by_id(&self.pool, &self.state, pod_id)
+                    .await
+                    .map_err(|()| {
+                        PortError::Transport("project move handoff pod drain failed".to_owned())
+                    })?;
+            }
+        }
         Ok(())
     }
 
@@ -1320,11 +1596,20 @@ impl RunnerPorts for LivePorts {
     }
 
     async fn dispatch_waiting(&self, workspace_id: uuid::Uuid) -> Result<(), PortError> {
-        // D-11 provider pending: unisolated in Python (the capacity
-        // marker stays unset on failure), but no contract input covers
-        // the marker timing.
-        tracing::warn!(%workspace_id, "dispatch_waiting: D-11 provider pending; skipped");
-        Ok(())
+        // `dispatch_waiting(workspace_id)` (`dispatch.py:20-48`): lease and
+        // offer queued cloud runs up to workspace capacity (D-11). Disabled
+        // instances answer `0` without touching the database. Unisolated in
+        // Python (the capacity marker stays unset on failure).
+        let cloud = self.state.settings().cloud_agent.clone();
+        pidash_jobs::dispatch::dispatch_waiting(
+            &self.pool,
+            &cloud,
+            workspace_id,
+            chrono::Utc::now(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn emit_terminal_effects(&self, run_id: uuid::Uuid) -> Result<(), PortError> {

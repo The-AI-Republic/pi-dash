@@ -15,6 +15,8 @@ minio behind the Django S3 settings (``USE_MINIO=1``).
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
+from io import StringIO
 
 import pytest
 from psycopg.rows import dict_row
@@ -201,6 +203,8 @@ def _old(days: int = 60) -> str:
 
 
 def test_delete_api_logs(db_conn, broker_url):
+    # Non-NULL ip_address: the column is Postgres inet and every real row
+    # has one (PIDASHCONV-1289). A NULL here would skip the inet decode path.
     row = insert_row(
         db_conn,
         "api_activity_logs",
@@ -209,6 +213,7 @@ def test_delete_api_logs(db_conn, broker_url):
             "path": "/contract/old",
             "method": "GET",
             "response_code": 200,
+            "ip_address": "10.0.0.1",
             "created_at": _old(),
         },
     )
@@ -1532,3 +1537,122 @@ def test_soft_delete_entry_models_ack(
         assert _column_is_null(
             db_conn, "agent_run", extra["agent_run_id"], "scheduler_binding_id"
         ), "SET_NULL broken: agent_run still points at the stamped binding"
+
+
+def test_sync_description_version_large_workspace(db_conn, broker_url):
+    """Backfill over >4369 live issues in one workspace (PIDASHCONV-1294).
+
+    Django source: `pi_dash/bgtasks/issue_description_version_sync.py:40-120`.
+    The sync writes one multi-row INSERT per workspace group at the
+    default batch_size; with 4,400 live issues the Rust port exceeded
+    sqlx's u16 bind-param cap and wrote nothing. `batch_size` is omitted
+    so both backends use their default (5000); `offset` starts at the
+    pre-seed total so the window covers exactly the new rows.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.bulk_issues(db_conn, f"1294desc-{tag}", 4400)
+    wid = chain["workspace"]["id"]
+    celery_wire.publish(
+        f"{M}.issue_description_version_sync.sync_issue_description_version",
+        kwargs={"offset": chain["pre_total"], "countdown": 300},
+    )
+
+    def _done():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM issue_description_versions"
+                " WHERE workspace_id = %s::uuid",
+                (str(wid),),
+            )
+            n = cur.fetchone()["n"]
+            return n if n == 4400 else None
+
+    wait_for(_done, what="4400 description versions written")
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM ("
+            " SELECT issue_id FROM issue_description_versions"
+            " WHERE workspace_id = %s::uuid GROUP BY issue_id HAVING COUNT(*) = 1"
+            ") one",
+            (str(wid),),
+        )
+        assert cur.fetchone()["n"] == 4400
+
+
+class _MLStripper(HTMLParser):
+    """Local copy of Django's MLStripper (html_processor.py:9-25)."""
+
+    def __init__(self):
+        super().__init__()
+        self.reset()
+        self.strict = False
+        self.convert_charrefs = True
+        self.text = StringIO()
+
+    def handle_data(self, d):
+        self.text.write(d)
+
+    def get_data(self):
+        return self.text.getvalue()
+
+
+def _ml_strip(html: str) -> str:
+    stripper = _MLStripper()
+    stripper.feed(html)
+    return stripper.get_data()
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<p>a &amp; b</p>",
+        "<p>1 < 2 and 3 > 1</p>",
+        "<p>x&nbsp;y</p>",
+    ],
+)
+def test_track_page_version_description_stripped(db_conn, broker_url, html):
+    """track_page_version stores HTMLParser text: entities decoded, bare < kept.
+
+    PIDASHCONV-1296. PageVersion.save recomputes description_stripped with
+    the HTMLParser-based MLStripper, so the version carries ``a & b`` (not
+    ``a &amp; b``) and keeps a bare ``<`` as text. The oracle worker boots
+    with page_version_task in -I (oracle_worker_includes.txt); the stock
+    Django worker never registers it (PB-1510).
+    """
+    tag = uuid.uuid4().hex[:8]
+    owner = seed_helpers.user(db_conn, f"contract-trackver-{tag}")
+    workspace = seed_helpers.workspace(db_conn, f"contracttrackver{tag}", owner["id"])
+    page = insert_row(
+        db_conn,
+        "pages",
+        {
+            "workspace_id": str(workspace["id"]),
+            "owned_by_id": str(owner["id"]),
+            "name": f"track version {tag}",
+            "description_json": {},
+            "description_html": html,
+            "access": 0,
+            "color": "",
+            "is_locked": False,
+            "view_props": {},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+        },
+    )
+    celery_wire.publish(
+        f"{M}.page_version_task.track_page_version",
+        args=[str(page["id"]), None, str(owner["id"])],
+    )
+
+    def _version_row():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT description_stripped FROM "page_versions"'
+                " WHERE page_id = %s::uuid ORDER BY last_saved_at DESC LIMIT 1",
+                (str(page["id"]),),
+            )
+            return cur.fetchone()
+
+    row = wait_for(_version_row, what="page_version stripped by django worker")
+    assert row["description_stripped"] == _ml_strip(html)

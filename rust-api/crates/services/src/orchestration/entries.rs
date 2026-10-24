@@ -1562,6 +1562,7 @@ mod tests {
             prior_run_count: 0,
             ticker: None,
             direct_parent_payload: None,
+            has_parent_run: false,
             ticker_parent_payload: None,
             override_rows: Vec::new(),
         }

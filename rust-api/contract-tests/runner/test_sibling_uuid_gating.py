@@ -190,3 +190,101 @@ def test_web_machine_revoke_uppercase_real_id_404s(
     url = f"{WEB}/dev-machines/{machine_id.upper()}/revoke/"
     _assert_framework_404(web_post(user_client, url, {}))
     _assert_framework_404(anon_client.post(url, json={}))
+
+
+# -- daemon session routes (PIDASHCONV-1212) --------------------------------
+# ``runner_sessions/machine.rs`` + ``runner_sessions/runner_poll.rs`` parsed
+# the path UUIDs with ``Uuid::from_str`` (uppercase / hyphenless accepted)
+# instead of the ``<uuid:>`` converter, so they served spellings Django
+# 404s before any view runs. Each route must answer Django's framework 404
+# for a non-canonical spelling and leave the session table untouched.
+
+
+def _machine_id(seeder, machine_flow) -> str:
+    """The dev machine bound to the flow's ``mt_`` token."""
+    dev_machine_id = seeder.db.fetchval(
+        "SELECT dev_machine_id FROM machine_token WHERE user_id = "
+        "(SELECT owner_id FROM runner WHERE id = %s) AND host_label = %s",
+        (machine_flow["runner_id"], machine_flow["host_label"]),
+    )
+    assert dev_machine_id, "machine token has no bound dev machine"
+    return str(dev_machine_id)
+
+
+def _non_canonical_spellings(value: str) -> list[str]:
+    return [value.upper(), value.replace("-", "")]
+
+
+def test_daemon_runner_session_poll_non_canonical_404s(
+    machine_client, anon_client, machine_flow
+):
+    rid = machine_flow["runner_id"]
+    opened = machine_client.post(f"{DAEMON}/runners/{rid}/sessions/", json={})
+    assert opened.status_code == 201, opened.text
+    sid = opened.json()["session_id"]
+    for bad_rid in _non_canonical_spellings(rid):
+        _assert_framework_404(machine_client.post(f"{DAEMON}/runners/{bad_rid}/sessions/{sid}/poll", json={}))
+        _assert_framework_404(anon_client.post(f"{DAEMON}/runners/{bad_rid}/sessions/{sid}/poll", json={}))
+    for bad_sid in _non_canonical_spellings(sid):
+        _assert_framework_404(machine_client.post(f"{DAEMON}/runners/{rid}/sessions/{bad_sid}/poll", json={}))
+        _assert_framework_404(anon_client.post(f"{DAEMON}/runners/{rid}/sessions/{bad_sid}/poll", json={}))
+    machine_client.delete(f"{DAEMON}/runners/{rid}/sessions/{sid}/")
+
+
+def test_daemon_machine_session_open_non_canonical_404s(
+    settings, machine_flow, seeder, anon_client
+):
+    mid = _machine_id(seeder, machine_flow)
+    with bearer_client(settings.base_url, machine_flow["machine_token"], timeout=40.0) as client:
+        for bad_mid in _non_canonical_spellings(mid):
+            url = f"{DAEMON}/dev-machines/{bad_mid}/sessions/"
+            _assert_framework_404(client.post(url, json={}))
+            _assert_framework_404(anon_client.post(url, json={}))
+    created = seeder.db.fetchval(
+        "SELECT count(*) FROM machine_session WHERE dev_machine_id = %s", (mid,)
+    )
+    assert created == 0, "non-canonical open created a machine session"
+
+
+def test_daemon_machine_session_delete_non_canonical_404s(
+    settings, machine_flow, seeder, anon_client
+):
+    mid = _machine_id(seeder, machine_flow)
+    with bearer_client(settings.base_url, machine_flow["machine_token"], timeout=40.0) as client:
+        opened = client.post(f"{DAEMON}/dev-machines/{mid}/sessions/", json={})
+        assert opened.status_code == 201, opened.text
+        sid = opened.json()["session_id"]
+        for bad_mid in _non_canonical_spellings(mid):
+            url = f"{DAEMON}/dev-machines/{bad_mid}/sessions/{sid}/"
+            _assert_framework_404(client.delete(url))
+            _assert_framework_404(anon_client.delete(url))
+        for bad_sid in _non_canonical_spellings(sid):
+            url = f"{DAEMON}/dev-machines/{mid}/sessions/{bad_sid}/"
+            _assert_framework_404(client.delete(url))
+            _assert_framework_404(anon_client.delete(url))
+        revoked = seeder.db.fetchval(
+            "SELECT revoked_at FROM machine_session WHERE id = %s", (sid,)
+        )
+        assert revoked is None, "non-canonical delete revoked the session"
+        client.delete(f"{DAEMON}/dev-machines/{mid}/sessions/{sid}/")
+    seeder.db.execute("DELETE FROM machine_session WHERE dev_machine_id = %s", (mid,))
+
+
+def test_daemon_machine_session_poll_non_canonical_404s(
+    settings, machine_flow, seeder, anon_client
+):
+    mid = _machine_id(seeder, machine_flow)
+    with bearer_client(settings.base_url, machine_flow["machine_token"], timeout=40.0) as client:
+        opened = client.post(f"{DAEMON}/dev-machines/{mid}/sessions/", json={})
+        assert opened.status_code == 201, opened.text
+        sid = opened.json()["session_id"]
+        for bad_mid in _non_canonical_spellings(mid):
+            url = f"{DAEMON}/dev-machines/{bad_mid}/sessions/{sid}/poll"
+            _assert_framework_404(client.post(url, json={}))
+            _assert_framework_404(anon_client.post(url, json={}))
+        for bad_sid in _non_canonical_spellings(sid):
+            url = f"{DAEMON}/dev-machines/{mid}/sessions/{bad_sid}/poll"
+            _assert_framework_404(client.post(url, json={}))
+            _assert_framework_404(anon_client.post(url, json={}))
+        client.delete(f"{DAEMON}/dev-machines/{mid}/sessions/{sid}/")
+    seeder.db.execute("DELETE FROM machine_session WHERE dev_machine_id = %s", (mid,))

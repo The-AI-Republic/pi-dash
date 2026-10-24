@@ -34,6 +34,7 @@ use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags as SvcUserFlags,
 };
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::ops::boot::cache_key;
 use pidash_services::orchestration::creation::{
     self as creation_kernel, active_run_sql, finalize_failure_reason, latest_prior_run_sql,
     run_insert_returning_sql, run_lock_sql, run_select_sql, user_id_for_run,
@@ -140,12 +141,15 @@ pub(crate) async fn drain_publish_effects(
 // The D-12 handoff twin seam (the driver is called, never inlined)
 // ---------------------------------------------------------------------------
 
-/// Redis-backed [`AdmissionCache`]: the first production implementation
-/// of the sync trait. Each call opens a short sync connection (the
-/// trait is sync; only cloud admission paths touch it). An unset or
-/// unusable `REDIS_URL` fails closed like Python's backend failure.
+/// Redis-backed [`AdmissionCache`]: the production implementation of
+/// the sync trait, shared by the handoff twin, the direct-create tail,
+/// and the v1 work-item actions. Each call opens a short sync
+/// connection (the trait is sync; only cloud admission paths touch
+/// it). Keys go through Django's [`cache_key`] (`:1:{key}`), so Rust
+/// and Django count the same buckets. An unset or unusable `REDIS_URL`
+/// fails closed like Python's backend failure.
 #[derive(Clone)]
-pub(crate) struct RedisAdmissionCache {
+pub struct RedisAdmissionCache {
     pub(crate) client: Option<redis::Client>,
 }
 
@@ -165,7 +169,9 @@ impl AdmissionCache for RedisAdmissionCache {
             return cache_unavailable("bucket_count");
         };
         let mut connection = client.get_connection()?;
-        let value: Option<i64> = redis::cmd("GET").arg(key).query(&mut connection)?;
+        let value: Option<i64> = redis::cmd("GET")
+            .arg(cache_key(key))
+            .query(&mut connection)?;
         Ok(value)
     }
 
@@ -177,14 +183,16 @@ impl AdmissionCache for RedisAdmissionCache {
         // `cache.add(key, 1, timeout) or cache.incr(key)`: set-if-absent
         // with TTL, else increment.
         let set: Option<String> = redis::cmd("SET")
-            .arg(key)
+            .arg(cache_key(key))
             .arg(1)
             .arg("EX")
             .arg(timeout_secs)
             .arg("NX")
             .query(&mut connection)?;
         if set.is_none() {
-            let _: i64 = redis::cmd("INCR").arg(key).query(&mut connection)?;
+            let _: i64 = redis::cmd("INCR")
+                .arg(cache_key(key))
+                .query(&mut connection)?;
         }
         Ok(())
     }
@@ -1286,6 +1294,10 @@ async fn twin_load_render_bundle(
         Some(id) => twin_bundle_done_payload(tx, id).await?,
         None => None,
     };
+    // A parent run with a NULL payload must render the fallback, never
+    // the ticker payload — so its existence travels separately from the
+    // payload itself (PIDASHCONV-1232).
+    let has_parent_run = parent_run_id.is_some();
     let ticker_parent_payload = {
         let resume: Option<(Option<Uuid>,)> = sqlx::query_as(TICKER_RESUME_SELECT_SQL)
             .bind(issue_id)
@@ -1329,6 +1341,7 @@ async fn twin_load_render_bundle(
             enabled,
         }),
         direct_parent_payload,
+        has_parent_run,
         ticker_parent_payload,
         override_rows,
     })
