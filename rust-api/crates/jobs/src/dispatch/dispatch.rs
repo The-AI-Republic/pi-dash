@@ -237,7 +237,7 @@ pub fn managed_refusal_detail(reason: &str) -> &'static str {
         }
         "no_managed_runner_for_project" => "This project has no Pi Dash Agent on your desktop yet.",
         "managed_runner_paused" => {
-            "The Pi Dash Agent on your desktop is paused. Resume it in the runner list to run here."
+            "Your Pi Dash Agent for this project is paused. Resume it to run here."
         }
         _ => "Pi Dash Agent is not available",
     }
@@ -1295,7 +1295,7 @@ mod tests {
             ),
             (
                 "managed_runner_paused",
-                "The Pi Dash Agent on your desktop is paused. Resume it in the runner list to run here.",
+                "Your Pi Dash Agent for this project is paused. Resume it to run here.",
             ),
         ] {
             assert_eq!(details[reason], expected, "fixture row {reason}");

@@ -1335,7 +1335,7 @@ pub enum RunnerInsertOutcome {
     Server,
 }
 
-/// E7 runner insert (`:726-735`): the 30-column `INSERT` in
+/// E7 runner insert (`:726-735`): the 32-column `INSERT` in
 /// `COLUMNS` order (`Runner.save()`'s auto-resolve is a no-op — `pod`
 /// is always set).
 #[allow(clippy::too_many_arguments)]
