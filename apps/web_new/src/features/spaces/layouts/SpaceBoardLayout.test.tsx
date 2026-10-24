@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { firstPageGroups } from "./model.js";
 import { SPACE_BOARD_END_REACH_PX, SPACE_BOARD_SCROLL_DEBOUNCE_MS, SpaceBoardLayout } from "./SpaceBoardLayout.js";
-import { boardIssue, DONE_ID, EMPTY_ID, firstPage, STATES, TODO_ID } from "./testFixtures.js";
+import { boardIssue, DONE_ID, EMPTY_ID, firstPage, issueHref, LABELS, STATES, TODO_ID } from "./testFixtures.js";
 
 interface ObserverRecord {
   callback: IntersectionObserverCallback;
@@ -41,6 +41,8 @@ function renderBoard(
       failed={new Set(overrides.failed ?? [])}
       onLoadMore={onLoadMore}
       projectIdentifier="SPC"
+      labels={LABELS}
+      issueHref={issueHref}
     />
   );
   return onLoadMore;
@@ -111,7 +113,11 @@ describe("SpaceBoardLayout (SPC-024)", () => {
     const todo = column(TODO_ID);
     expect(within(todo).getByTestId("space-group-name")).toHaveTextContent("Todo");
     expect(within(todo).getByTestId("space-group-count")).toHaveTextContent("55");
-    expect(within(todo).getByTestId("space-state-marker")).toHaveAttribute("title", "Todo");
+    expect(
+      within(within(todo).getByTestId("space-board-column-header")).getByTestId("space-state-marker")
+    ).toHaveAttribute("title", "Todo");
+    // The card carries its own state marker as well (SPC-028).
+    expect(within(todo).getByTestId("space-card-state")).toHaveTextContent("Todo");
     expect(within(todo).getByText("Card title")).toBeInTheDocument();
     expect(within(todo).getByText("SPC-7")).toBeInTheDocument();
   });
@@ -249,6 +255,8 @@ describe("SpaceBoardLayout paging (SPC-026)", () => {
         failed={new Set()}
         onLoadMore={onLoadMore}
         projectIdentifier="SPC"
+        labels={LABELS}
+        issueHref={issueHref}
       />
     );
     scrollColumnTo(within(column(TODO_ID)).getByTestId("space-board-column-scroll"), 520);
@@ -275,6 +283,8 @@ describe("SpaceBoardLayout paging (SPC-026)", () => {
         failed={new Set()}
         onLoadMore={onLoadMore}
         projectIdentifier="SPC"
+        labels={LABELS}
+        issueHref={issueHref}
       />
     );
     scrollColumnTo(within(column(TODO_ID)).getByTestId("space-board-column-scroll"), 520);
@@ -285,6 +295,8 @@ describe("SpaceBoardLayout paging (SPC-026)", () => {
         failed={new Set()}
         onLoadMore={onLoadMore}
         projectIdentifier="SPC"
+        labels={LABELS}
+        issueHref={issueHref}
       />
     );
     act(() => {

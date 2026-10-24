@@ -9,6 +9,7 @@
 // once per gesture, thanks to the debounce, and placeholder cards hold the
 // place while the page is in flight.
 
+import type { SpaceBoardIssue, SpaceBoardLabel } from "@pidash/api-client";
 import * as React from "react";
 
 import type { SpaceGroupsState } from "./useSpaceGroups.js";
@@ -30,6 +31,12 @@ export interface SpaceBoardLayoutProps {
   failed: ReadonlySet<string>;
   onLoadMore: SpaceGroupsState["loadMore"];
   projectIdentifier: string;
+  labels: readonly SpaceBoardLabel[];
+  issueHref: (issue: SpaceBoardIssue) => string;
+  openIssueId?: string | undefined;
+  onOpenIssue?: ((issue: SpaceBoardIssue) => void) | undefined;
+  votesEnabled?: boolean;
+  reactionsEnabled?: boolean;
 }
 
 export function SpaceBoardLayout({
@@ -38,6 +45,12 @@ export function SpaceBoardLayout({
   failed,
   onLoadMore,
   projectIdentifier,
+  labels,
+  issueHref,
+  openIssueId,
+  onOpenIssue,
+  votesEnabled = false,
+  reactionsEnabled = false,
 }: SpaceBoardLayoutProps): React.ReactElement {
   return (
     <div
@@ -52,6 +65,12 @@ export function SpaceBoardLayout({
           failed={failed.has(group.stateId)}
           onLoadMore={() => onLoadMore(group.stateId)}
           projectIdentifier={projectIdentifier}
+          labels={labels}
+          issueHref={issueHref}
+          openIssueId={openIssueId}
+          onOpenIssue={onOpenIssue}
+          votesEnabled={votesEnabled}
+          reactionsEnabled={reactionsEnabled}
         />
       ))}
     </div>
@@ -64,9 +83,27 @@ interface BoardColumnProps {
   failed: boolean;
   onLoadMore: () => void;
   projectIdentifier: string;
+  labels: readonly SpaceBoardLabel[];
+  issueHref: (issue: SpaceBoardIssue) => string;
+  openIssueId: string | undefined;
+  onOpenIssue: ((issue: SpaceBoardIssue) => void) | undefined;
+  votesEnabled: boolean;
+  reactionsEnabled: boolean;
 }
 
-function BoardColumn({ group, paging, failed, onLoadMore, projectIdentifier }: BoardColumnProps): React.ReactElement {
+function BoardColumn({
+  group,
+  paging,
+  failed,
+  onLoadMore,
+  projectIdentifier,
+  labels,
+  issueHref,
+  openIssueId,
+  onOpenIssue,
+  votesEnabled,
+  reactionsEnabled,
+}: BoardColumnProps): React.ReactElement {
   // The observer root is state, not a ref value: the scroller mounts in this
   // same render, so a ref read during render would still be null.
   const [scroller, setScroller] = React.useState<HTMLDivElement | null>(null);
@@ -115,7 +152,19 @@ function BoardColumn({ group, paging, failed, onLoadMore, projectIdentifier }: B
         className="flex min-h-0 flex-1 flex-col gap-(--space-1) overflow-y-auto p-(--space-1)"
       >
         {group.issues.map((issue) => (
-          <SpaceIssueRow key={issue.id} issue={issue} projectIdentifier={projectIdentifier} card />
+          <SpaceIssueRow
+            key={issue.id}
+            issue={issue}
+            state={group.state}
+            labels={labels}
+            projectIdentifier={projectIdentifier}
+            issueHref={issueHref(issue)}
+            selected={issue.id === openIssueId}
+            onOpenIssue={onOpenIssue}
+            votesEnabled={votesEnabled}
+            reactionsEnabled={reactionsEnabled}
+            card
+          />
         ))}
         {paging ? <PlaceholderCards /> : null}
         <div ref={sentinel} data-testid="space-board-column-sentinel" className="h-px w-full shrink-0" />

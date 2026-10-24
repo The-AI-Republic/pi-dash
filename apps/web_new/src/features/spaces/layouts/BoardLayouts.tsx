@@ -8,7 +8,13 @@
 // filter that emptied the board.
 
 import { EmptyState } from "@pidash/kit";
-import type { ApiClient, SpaceBoardIssuePage, SpaceBoardState } from "@pidash/api-client";
+import type {
+  ApiClient,
+  SpaceBoardIssue,
+  SpaceBoardIssuePage,
+  SpaceBoardLabel,
+  SpaceBoardState,
+} from "@pidash/api-client";
 import * as React from "react";
 
 import { SPACE_LANDING_HREF, type SpaceBoardFilters, type SpaceLayout } from "../lib/address.js";
@@ -55,6 +61,12 @@ export interface BoardLayoutsProps {
   states: readonly SpaceBoardState[];
   page: SpaceBoardIssuePage;
   projectIdentifier: string;
+  labels: readonly SpaceBoardLabel[];
+  openIssueId?: string | undefined;
+  onOpenIssue?: ((issue: SpaceBoardIssue) => void) | undefined;
+  issueHref: (issue: SpaceBoardIssue) => string;
+  votesEnabled?: boolean;
+  reactionsEnabled?: boolean;
 }
 
 export function BoardLayouts({
@@ -65,6 +77,12 @@ export function BoardLayouts({
   states,
   page,
   projectIdentifier,
+  labels,
+  openIssueId,
+  onOpenIssue,
+  issueHref,
+  votesEnabled = false,
+  reactionsEnabled = false,
 }: BoardLayoutsProps): React.ReactElement {
   const { groups, paging, failed, loadMore } = useSpaceGroups(client, anchor, filters, states, page);
   if (page.total_count === 0) return <EmptyBoardNotice />;
@@ -75,6 +93,12 @@ export function BoardLayouts({
       failed={failed}
       onLoadMore={loadMore}
       projectIdentifier={projectIdentifier}
+      labels={labels}
+      issueHref={issueHref}
+      openIssueId={openIssueId}
+      onOpenIssue={onOpenIssue}
+      votesEnabled={votesEnabled}
+      reactionsEnabled={reactionsEnabled}
     />
   ) : (
     <SpaceListLayout
@@ -83,6 +107,10 @@ export function BoardLayouts({
       failed={failed}
       onLoadMore={loadMore}
       projectIdentifier={projectIdentifier}
+      labels={labels}
+      issueHref={issueHref}
+      openIssueId={openIssueId}
+      onOpenIssue={onOpenIssue}
     />
   );
 }

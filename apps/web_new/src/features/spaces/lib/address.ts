@@ -50,6 +50,11 @@ export function spaceBoardPath(anchor: string): string {
   return `${SPACE_BOARD_PREFIX}/${encodeURIComponent(anchor)}/`;
 }
 
+/** One issue's open address, keeping the board layout and every filter. */
+export function spaceIssueHref(anchor: string, search: SpaceBoardSearch, issueId: string): string {
+  return normalizeBoardHref(anchor, { ...search, peekId: issueId });
+}
+
 export function spaceLegacyPath(workspaceSlug: string, projectId: string): string {
   return `${SPACE_BASE}/${encodeURIComponent(workspaceSlug)}/${encodeURIComponent(projectId)}/`;
 }
