@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Runner status presentation (NEWFRONT-540, RUN-011). Four display states
-// share one tone map across the table badge and the rail dot. A row that
-// was added but never enrolled has no live session yet and reads as
-// offline until its first token exchange.
+// share one tone map across the table badge, the rail dot, the detail
+// screen and the chat header.
 
 import type { BadgeTone } from "@pidash/kit";
 import type { Runner } from "@pidash/api-client";
@@ -29,10 +28,13 @@ export const RUNNER_STATUS_TONES: Record<RunnerStatus, BadgeTone> = {
 };
 
 /**
- * The state a row displays (RUN-011). A never-enrolled runner reads
- * offline; everything else reports its server status.
+ * The state a row displays (RUN-011): the server status, verbatim. The
+ * old overview badge, rail dots and chat gate all render raw status —
+ * never-enrolled rows read as offline because the server reports them
+ * offline, not through a client-side enrolment gate (NEWFRONT-557: the
+ * gate contradicted the oracle-pinned chat fixtures, whose live runners
+ * carry status online with enrolled_at null).
  */
-export function runnerDisplayStatus(runner: Pick<Runner, "status" | "enrolled_at">): RunnerStatus {
-  if (runner.enrolled_at === null) return "offline";
+export function runnerDisplayStatus(runner: Pick<Runner, "status">): RunnerStatus {
   return runner.status;
 }

@@ -33,16 +33,19 @@ export interface ActivityPanelProps {
 }
 
 export function ActivityPanel({ runnerName, liveState, tickMs, now }: ActivityPanelProps): React.ReactElement {
-  const [, setTick] = React.useState(0);
   const clock = now ?? Date.now;
   const interval = tickMs ?? ACTIVITY_TICK_MS;
+  // The tick writes the wall clock into state: a bare counter leaves the
+  // age expression memoizable on props alone, so the panel would never
+  // re-render its relative age (NEWFRONT-557).
+  const [moment, setMoment] = React.useState(() => clock());
+  const clockRef = React.useRef(clock);
+  clockRef.current = clock;
 
   React.useEffect(() => {
-    const id = setInterval(() => setTick((n) => n + 1), interval);
+    const id = setInterval(() => setMoment(clockRef.current()), interval);
     return () => clearInterval(id);
   }, [interval]);
-
-  const moment = clock();
   const badge = activityBadge(liveState ?? null, moment);
   const state = liveState ?? null;
 

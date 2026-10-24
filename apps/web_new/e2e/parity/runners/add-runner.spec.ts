@@ -422,7 +422,10 @@ test(
 
       // No daemon write-back: the 90s poll budget expires into the timeout panel.
       await expect.poll(() => driver.addRunnerRemotePhase(), { timeout: 150_000 }).toBe("timeout");
-      expect(await driver.addRunnerRemoteText()).toContain("did not report back");
+      // Each app keeps its own timeout copy (NEWFRONT-557, same treatment
+      // as the runs labels in NEWFRONT-545).
+      const timeoutCopy = driver.target === "web_new" ? "has not answered yet" : "did not report back";
+      expect(await driver.addRunnerRemoteText()).toContain(timeoutCopy);
 
       // Server: the request is still pending (the daemon may yet report).
       const requestId = polledRequestId(await driver.addRunnerStatusSpyUrls());

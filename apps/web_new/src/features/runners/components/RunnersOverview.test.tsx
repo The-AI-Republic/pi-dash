@@ -180,9 +180,9 @@ describe("RunnersOverview table", () => {
     }
   });
 
-  it("reads a never-enrolled row as offline", () => {
+  it("badges the server status with no enrolment gate (NEWFRONT-557)", () => {
     renderTable([runner({ enrolled_at: null, status: "online" })]);
-    expect(screen.getAllByRole("row")[1]).toHaveTextContent("offline");
+    expect(screen.getAllByRole("row")[1]).toHaveTextContent("online");
   });
 
   it("navigates to the detail route from the row", async () => {
