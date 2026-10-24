@@ -7,9 +7,9 @@
 // vitest.config.ts aliases in). Configs, package manifests and the test setup
 // file reach every test without an import edge; vitest would answer a change
 // to one of them by running the whole suite, so they are left out of the list
-// and do not widen the run. The full suite on every push to web-new-dev
-// covers them. Agents run this locally (`pnpm --filter web_new
-// test:changed`) and CI runs it on PRs.
+// and do not widen the run. The NEWFRONT full-suite scheduler runs the whole
+// suite on web-new-dev every 12 hours and covers them. Agents run this
+// locally (`pnpm --filter web_new test:changed`) and CI runs it on PRs.
 //
 // Usage: node checks/test-changed.mjs [--base <ref>] [--full] [vitest args...]
 //   --base <ref>  diff against this ref (default: merge base of HEAD and
@@ -92,7 +92,8 @@ function main(
   const changedFiles = changedFilesSince(base, git, root);
   const plan = planRun({ ...opts, changedFiles, root });
   log(`test:changed: tests affected by ${changedFiles.length} file(s) changed since ${base}`);
-  if (plan.skipped.length > 0) log(`test:changed: no import edge, left to CI's full suite: ${plan.skipped.join(", ")}`);
+  if (plan.skipped.length > 0)
+    log(`test:changed: no import edge, left to the scheduled full suite: ${plan.skipped.join(", ")}`);
   return runVitest(plan.args);
 }
 

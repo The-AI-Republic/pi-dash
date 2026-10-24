@@ -148,7 +148,7 @@ describe("main", () => {
     expect(runs).toEqual([["related", "--run", "--passWithNoTests"]]);
     expect(logs).toEqual([
       "test:changed: tests affected by 1 file(s) changed since HEAD^1",
-      "test:changed: no import edge, left to CI's full suite: apps/web_new/vitest.config.ts",
+      "test:changed: no import edge, left to the scheduled full suite: apps/web_new/vitest.config.ts",
     ]);
   });
 
