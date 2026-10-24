@@ -2076,9 +2076,11 @@ async fn callback_success(
                 };
                 // `delete_old_avatar` + `download_and_upload_avatar`
                 // (`base.py:278-284`): the signup asset is the old avatar.
-                // On success only the FK moves — `avatar` keeps the `''`
-                // the delete wrote; the provider URL lands only when the
-                // upload fails.
+                // On success only the FK moves — Django never writes
+                // `avatar` here, so it keeps the `''` the delete wrote
+                // when a signup asset existed, and the signup provider
+                // URL otherwise (the delete is a no-op without one).
+                // The provider URL lands only when the upload fails.
                 super::delete_old_avatar(
                     &client,
                     pool,
@@ -2104,7 +2106,14 @@ async fn callback_success(
                 )
                 .await
                 {
-                    Some(asset_id) => (String::new(), Some(asset_id)),
+                    Some(asset_id) => (
+                        if signup_asset.is_some() {
+                            String::new()
+                        } else {
+                            avatar_url.clone()
+                        },
+                        Some(asset_id),
+                    ),
                     None => (avatar_url, None),
                 };
                 sync_user_data(

@@ -30,8 +30,10 @@ gitlab-callback test in the module and poison the suite.
 import base64
 import os
 import sys
+import threading
 import uuid
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -56,6 +58,74 @@ CONFIG_KEYS = (
 AVATAR_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 )
+
+
+class _FailOnceAvatarStub:
+    """Avatar stub whose first download fails, then serves the PNG (F1).
+
+    Same surface ``_world`` uses from ``RoutingStub`` (``url`` + ``requests``
+    entries shaped as ``{method, path, headers, body}``). The first
+    ``GET /avatar.png`` answers 500 — both backends treat it as a failed
+    download and fall back to the provider URL — and every later hit serves
+    ``AVATAR_PNG`` as ``image/png``. Kept local (not a harness extension):
+    no other suite needs a sequencing stub.
+    """
+
+    def __init__(self):
+        outer = self
+        self.requests: list[dict] = []
+        self._failed_once = False
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                outer.requests.append(
+                    {
+                        "method": self.command,
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": b"",
+                    }
+                )
+                if urlsplit(self.path).path != "/avatar.png":
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", "9")
+                    self.end_headers()
+                    self.wfile.write(b"not found")
+                    return
+                if not outer._failed_once:
+                    outer._failed_once = True
+                    self.send_response(500)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", "10")
+                    self.end_headers()
+                    self.wfile.write(b"flaky host")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(AVATAR_PNG)))
+                self.end_headers()
+                self.wfile.write(AVATAR_PNG)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def __enter__(self) -> "_FailOnceAvatarStub":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
 
 
 def _delete_config(database_url):
@@ -121,7 +191,7 @@ def _delete_bucket(bucket):
 
 
 @contextmanager
-def _world(sync_enabled):
+def _world(sync_enabled, avatar_stub_factory=None):
     database_url = config.database_url()
     store = Database(database_url)
     tag = uuid.uuid4().hex[:8]
@@ -129,7 +199,12 @@ def _world(sync_enabled):
     bucket = s3h.contract_bucket()
     s3h.s3_setup_bucket(bucket)
     world = {"tag": tag, "email": email, "bucket": bucket}
-    with RoutingStub({("GET", "/avatar.png"): (200, AVATAR_PNG, "image/png")}) as avatars:
+    avatar_stub = (
+        avatar_stub_factory()
+        if avatar_stub_factory is not None
+        else RoutingStub({("GET", "/avatar.png"): (200, AVATAR_PNG, "image/png")})
+    )
+    with avatar_stub as avatars:
         gitlab_routes = {
             ("POST", "/oauth/token"): (
                 200,
@@ -200,6 +275,13 @@ def gitlab_avatar_world(ensure_instance):
 def gitlab_avatar_sync_world(ensure_instance):
     """Fresh signup email behind a stub GitLab + avatar stub, sync on."""
     with _world(sync_enabled=True) as world:
+        yield world
+
+
+@pytest.fixture()
+def gitlab_avatar_failonce_sync_world(ensure_instance):
+    """Sync on; the avatar stub fails the first download, then serves the PNG."""
+    with _world(sync_enabled=True, avatar_stub_factory=_FailOnceAvatarStub) as world:
         yield world
 
 
@@ -313,7 +395,9 @@ def test_gitlab_signup_sync_replaces_avatar(client: httpx.Client, gitlab_avatar_
     rows = db.fetchall(
         database_url,
         "SELECT id, asset, deleted_at FROM file_assets"
-        " WHERE user_id = %s ORDER BY created_at",
+        # Both assets share one `now` on Rust, so `created_at` ties; the
+        # soft-deleted signup asset sorts first deterministically instead.
+        " WHERE user_id = %s ORDER BY deleted_at NULLS LAST",
         (user["id"],),
     )
     assert len(rows) == 2, ("expected the signup asset + its sync replacement", rows)
@@ -336,4 +420,60 @@ def test_gitlab_signup_sync_replaces_avatar(client: httpx.Client, gitlab_avatar_
     assert s3h.s3_head_key(bucket, new["asset"]) == 200, (
         "new S3 object present",
         new["asset"],
+    )
+
+
+def test_gitlab_signup_sync_keeps_url_when_signup_upload_fails(
+    client: httpx.Client, gitlab_avatar_failonce_sync_world
+):
+    """Sync success after a failed signup upload keeps the provider URL.
+
+    Runs against both backends. The signup download fails (flaky avatar
+    host), so no signup asset exists; sync's ``delete_old_avatar`` is a
+    no-op and the re-download succeeds. Django's sync arm never writes
+    ``user.avatar`` on success (``base.py:278-284``), so the signup
+    provider URL survives beside the new FK. Regression for
+    PIDASHCONV-1323 F1: the port blanked ``avatar`` unconditionally.
+    """
+    database_url = config.database_url()
+    world = gitlab_avatar_failonce_sync_world
+    email, bucket = world["email"], world["bucket"]
+
+    _drive_callback(client)
+
+    avatar_hits = [
+        r
+        for r in world["avatars"].requests
+        if urlsplit(r["path"]).path == "/avatar.png"
+    ]
+    assert len(avatar_hits) == 2, (
+        "signup (failed) + sync (succeeded) each download the avatar",
+        world["avatars"].requests,
+    )
+
+    user = db.fetchone(
+        database_url,
+        "SELECT id, avatar, avatar_asset_id FROM users WHERE email = %s",
+        (email,),
+    )
+    assert user is not None, "callback created the user"
+    assert user["avatar"] == world["avatar_url"], (
+        "provider URL survives the sync success (no signup asset to clear)",
+        user,
+    )
+    rows = db.fetchall(
+        database_url,
+        "SELECT id, asset, entity_type, is_uploaded, deleted_at"
+        " FROM file_assets WHERE user_id = %s",
+        (user["id"],),
+    )
+    assert len(rows) == 1, ("only the sync replacement lands", rows)
+    (row,) = rows
+    assert row["entity_type"] == "USER_AVATAR", row
+    assert row["is_uploaded"] is True, row
+    assert row["deleted_at"] is None, row
+    assert user["avatar_asset_id"] == row["id"], (user, rows)
+    assert s3h.s3_head_key(bucket, row["asset"]) == 200, (
+        "replacement S3 object present",
+        row["asset"],
     )

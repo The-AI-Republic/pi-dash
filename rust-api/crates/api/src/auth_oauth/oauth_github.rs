@@ -2083,6 +2083,13 @@ mod tests {
     /// `CREATE TABLE IF NOT EXISTS` can collide on the sequence.
     static SCHEMA_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// Serializes the live-kernel tests: the sync test seeds the global
+    /// `ENABLE_GITHUB_SYNC` row, which a sibling kernel would otherwise
+    /// read mid-flight under default parallel `cargo test`
+    /// (PIDASHCONV-1323 F2). Each kernel holds it for the whole body,
+    /// including teardown (which deletes the flag row again).
+    static KERNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn kernel_pool() -> Option<sqlx::PgPool> {
         match std::env::var("DATABASE_URL") {
             Ok(url) => {
@@ -2283,6 +2290,7 @@ mod tests {
     /// workspace, and evicts the member-list cache keys.
     #[tokio::test]
     async fn github_kernel_inactive_invited_user_emits_mail_event_and_evicts() {
+        let _kernel = KERNEL_LOCK.lock().await;
         let Some(pool) = kernel_pool().await else {
             return;
         };
@@ -2396,6 +2404,7 @@ mod tests {
     /// New user, no invites: the login succeeds and emits nothing.
     #[tokio::test]
     async fn github_kernel_new_user_without_invites_emits_nothing() {
+        let _kernel = KERNEL_LOCK.lock().await;
         let Some(pool) = kernel_pool().await else {
             return;
         };
@@ -2613,6 +2622,7 @@ mod tests {
     /// joined the second). Zero project-member rows, both invites intact.
     #[tokio::test]
     async fn github_kernel_two_project_invites_join_both_workspaces() {
+        let _kernel = KERNEL_LOCK.lock().await;
         let Some(pool) = kernel_pool().await else {
             return;
         };
@@ -2704,6 +2714,7 @@ mod tests {
     #[tokio::test]
     async fn github_kernel_returning_login_preserves_account_history() {
         use chrono::TimeZone;
+        let _kernel = KERNEL_LOCK.lock().await;
         let Some(pool) = kernel_pool().await else {
             return;
         };
@@ -2907,6 +2918,7 @@ mod tests {
     /// provider URL (no row, FK NULL).
     #[tokio::test]
     async fn github_kernel_signup_uploads_avatar() {
+        let _kernel = KERNEL_LOCK.lock().await;
         let Some(pool) = kernel_pool().await else {
             return;
         };
@@ -2994,6 +3006,7 @@ mod tests {
     /// avatar string. Pre-fix no row ever lands and the FK stays NULL.
     #[tokio::test]
     async fn github_kernel_signup_sync_replaces_avatar() {
+        let _kernel = KERNEL_LOCK.lock().await;
         let Some(pool) = kernel_pool().await else {
             return;
         };
@@ -3049,10 +3062,12 @@ mod tests {
                 .fetch_optional(&pool)
                 .await
                 .expect("read user");
+        // Both assets share one `now`, so `created_at` ties; the
+        // soft-deleted signup asset sorts first deterministically instead.
         let asset_rows: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
             r#"SELECT "id", "deleted_at" FROM "file_assets"
                WHERE "user_id" = (SELECT "id" FROM "users" WHERE "email" = $1)
-               ORDER BY "created_at""#,
+               ORDER BY "deleted_at" NULLS LAST"#,
         )
         .bind(&email)
         .fetch_all(&pool)
