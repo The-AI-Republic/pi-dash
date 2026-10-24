@@ -12,6 +12,7 @@ afterEach(() => {
   localStorage.removeItem(THEME_PALETTE_STORAGE_KEY);
   document.documentElement.removeAttribute("data-theme");
   document.documentElement.style.removeProperty("color-scheme");
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -51,7 +52,7 @@ describe("markInstanceBootScheme", () => {
   });
 
   it("follows the OS when no choice is stored", () => {
-    vi.spyOn(window, "matchMedia").mockReturnValue({
+    vi.stubGlobal("matchMedia", () => ({
       matches: true,
       media: "(prefers-color-scheme: dark)",
       onchange: null,
@@ -60,7 +61,7 @@ describe("markInstanceBootScheme", () => {
       addListener: () => undefined,
       removeListener: () => undefined,
       dispatchEvent: () => false,
-    });
+    }));
     expect(markInstanceBootScheme()).toBe("dark");
   });
 });
