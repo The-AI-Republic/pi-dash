@@ -192,6 +192,7 @@ describe("creation filters", () => {
   const cases: ReadonlyArray<[PageDatePreset, string, boolean]> = [
     ["today", atDay(0, 9), true],
     ["today", atDay(-1, 9), false],
+    ["today", atDay(1, 0), false],
     ["yesterday", atDay(-1, 9), true],
     ["yesterday", atDay(0, 9), false],
     ["last_7_days", atDay(-7), true],
@@ -220,6 +221,9 @@ describe("creation filters", () => {
 
   it("evaluates every cutoff from the local start of today", () => {
     expect(Date.parse(atDay(0))).toBe(localStartOfToday);
+    expect(matchesCreationPreset(atDay(0, 23), "today", NOW)).toBe(true);
+    expect(matchesCreationPreset(atDay(1), "today", NOW)).toBe(false);
+    expect(matchesCreationPreset(new Date(localStartDaysAgo(-1) - 1).toISOString(), "today", NOW)).toBe(true);
     expect(matchesCreationPreset(new Date(localStartDaysAgo(7)).toISOString(), "last_7_days", NOW)).toBe(true);
     expect(matchesCreationPreset(new Date(localStartDaysAgo(7) - 1).toISOString(), "last_7_days", NOW)).toBe(false);
     expect(matchesCreationPreset(new Date(localStartDaysAgo(30)).toISOString(), "last_30_days", NOW)).toBe(true);

@@ -186,7 +186,7 @@ export function matchesCreationPreset(createdAt: string, condition: PageDateCond
   if (typeof condition === "object") return sameLocalDay(new Date(created), condition.custom);
   switch (condition) {
     case "today":
-      return created >= dayStart(now);
+      return created >= dayStart(now) && created < dayStart(now, 1);
     case "yesterday":
       return created >= dayStart(now, -1) && created < dayStart(now);
     case "last_7_days":
