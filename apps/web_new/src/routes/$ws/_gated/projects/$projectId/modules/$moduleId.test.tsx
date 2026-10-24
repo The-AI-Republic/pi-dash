@@ -192,7 +192,9 @@ describe("module detail route", () => {
     } as never);
     expect(mocks.projects).toHaveBeenCalledWith(expect.anything(), "acme");
     expect(mocks.detail).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, MODULE);
-    expect(mocks.loadKanban).toHaveBeenCalledTimes(1);
+    // The shared prefetch starts the board chunk too (NEWFRONT-623), so
+    // the route asserts requested, not once — the loader dedupes.
+    expect(mocks.loadKanban).toHaveBeenCalled();
     expect(mocks.loadLeaves).toHaveBeenCalledTimes(1);
   }, 20000);
 
