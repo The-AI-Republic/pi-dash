@@ -59,7 +59,7 @@ use uuid::Uuid;
 use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{append_event, dispatch_agent_run};
 use crate::orchestration::{LiveCreationStore, StoreDeps};
-use crate::queue::{enqueue_in, NewJob};
+use crate::queue::{enqueue, enqueue_in, NewJob};
 use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
@@ -1324,19 +1324,65 @@ impl PreflightSeam for BinPreflight {
     }
 }
 
+/// What a state-changing transition hands its caller for the
+/// post-commit completion comment-back (`github_signals.py:44-75`):
+/// the moved issue, its locked pre-save state (Django's
+/// `capture_prior_state` value), and the new state.
+struct TransitionDispatch {
+    issue_id: Uuid,
+    from_state_id: Option<Uuid>,
+    target_id: Uuid,
+}
+
+/// Post-commit completion comment-back for a state-changing
+/// transition (`github_signals.py:44-75`, via the jobs-layer port;
+/// the `tools_local_store::enqueue_completion_comment` shape from
+/// PIDASHCONV-1252). Resolves the dispatch (group, mirror,
+/// idempotency guards) and enqueues the provider's
+/// `post_completion_comment` job. Best-effort: failures only warn.
+async fn enqueue_completion_comment(
+    pool: &PgPool,
+    issue_id: &Uuid,
+    prev_state_id: Option<&Uuid>,
+    current_state_id: Option<&Uuid>,
+) {
+    use crate::integrations::github_signals::{
+        dispatch_completion_comment, dispatch_job, DispatchOutcome,
+    };
+    let outcome =
+        dispatch_completion_comment(pool, issue_id, current_state_id, false, prev_state_id).await;
+    let target = match outcome {
+        Ok(DispatchOutcome::Dispatch(target)) => target,
+        Ok(DispatchOutcome::Skip(_)) => return,
+        Err(error) => {
+            tracing::warn!(%error, "completion comment dispatch lookup failed; op stands");
+            return;
+        }
+    };
+    let job = dispatch_job(&target);
+    if let Err(error) = enqueue(pool, &job).await {
+        tracing::warn!(%error, task = %job.task, "task enqueue failed; op stands");
+    }
+}
+
 /// `pidash_transition_current_issue` (`tools.py:309-343`): look the
 /// target state up in the run's project, lock the bound issue, no-op
 /// on same state, save through the model (audit stamps as the
 /// creator), then route through the live
 /// `handle_issue_state_transition` with the run stamped as the mover.
 /// Takes the audit transaction by value (the creation store owns it
-/// while driving) and returns it for commit or rollback.
+/// while driving) and returns it for commit or rollback, plus — only
+/// when the state changed — the [`TransitionDispatch`] the caller
+/// fires after the commit lands.
 async fn op_transition_current_issue<'a>(
     ctx: &'a ToolCtx,
     tx: Transaction<'a>,
     scope: &ToolScope,
     state_id: &str,
-) -> (Transaction<'a>, Result<Value, ToolExecError>) {
+) -> (
+    Transaction<'a>,
+    Result<(Value, Option<TransitionDispatch>), ToolExecError>,
+) {
     let mut tx = tx;
     // `run.work_item.project_id` evaluates before the `.get()` call,
     // so a run with no bound issue raises before parsing `state_id`.
@@ -1383,9 +1429,11 @@ async fn op_transition_current_issue<'a>(
     };
     if plan::transition_same_state(from_state_id, target_id) {
         let result = plan::transition_result(false, &target_name, &target_id.to_string());
-        let value = serde_json::to_value(result).map_err(|error| {
-            ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
-        });
+        let value = serde_json::to_value(result)
+            .map(|value| (value, None))
+            .map_err(|error| {
+                ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
+            });
         return (tx, value);
     }
     let now = Utc::now();
@@ -1424,7 +1472,13 @@ async fn op_transition_current_issue<'a>(
     let (tx, outcome) = outcome;
     let value = outcome.map(|()| {
         let result = plan::transition_result(true, &target_name, &target_id.to_string());
-        serde_json::to_value(result).expect("transition result serializes")
+        let value = serde_json::to_value(result).expect("transition result serializes");
+        let dispatch = TransitionDispatch {
+            issue_id,
+            from_state_id,
+            target_id,
+        };
+        (value, Some(dispatch))
     });
     (tx, value)
 }
@@ -2571,8 +2625,8 @@ async fn dispatch_fn(
                     let (tx, outcome) =
                         op_transition_current_issue(ctx, tx, &scope, state_id).await;
                     match outcome {
-                        Ok(result) => {
-                            write_commit(
+                        Ok((result, dispatch)) => {
+                            let committed = write_commit(
                                 ctx,
                                 WriteAudit {
                                     tx,
@@ -2582,7 +2636,35 @@ async fn dispatch_fn(
                                 TOOL_TRANSITION_CURRENT_ISSUE,
                                 result,
                             )
-                            .await
+                            .await;
+                            // `github_signals.trigger_completion_comment`
+                            // (`bgtasks/github_signals.py:44-75`): a save
+                            // moving a mirrored issue into a
+                            // completed-group state enqueues the
+                            // provider's `post_completion_comment`.
+                            // Django fires this from `Issue.save()`
+                            // (`tools.py:335`), so the tool path gets it
+                            // for free; here signals are explicit calls
+                            // after commit. `None` is the unchanged-state
+                            // no-op (`updated: false`); the dispatch
+                            // helper re-checks the completed group, the
+                            // mirror order (git before github) and the
+                            // already-commented guard. Best-effort like
+                            // the relation enqueues: the edit already
+                            // committed, so a lookup or queue failure
+                            // must not fail the tool.
+                            if committed.is_ok() {
+                                if let Some(dispatch) = dispatch {
+                                    enqueue_completion_comment(
+                                        &ctx.pool,
+                                        &dispatch.issue_id,
+                                        dispatch.from_state_id.as_ref(),
+                                        Some(&dispatch.target_id),
+                                    )
+                                    .await;
+                                }
+                            }
+                            committed
                         }
                         Err(error) => {
                             let _ = tx.rollback().await;
