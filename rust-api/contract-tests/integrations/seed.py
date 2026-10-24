@@ -172,6 +172,146 @@ def github_binding(database_url: str, anchor: dict, scope: Scope, *, token: str)
     return {"account_id": account_id, "repository_id": repo_id, "binding_id": binding_id}
 
 
+def github_app_account(
+    database_url: str,
+    anchor: dict,
+    scope: Scope,
+    *,
+    installation_id: int = 424242,
+    suffix: str = "app",
+) -> str:
+    """Provider account whose credential takes the installation branch.
+
+    `auth_type` is `github_app` with an `installation_id`, so the adapter
+    mints an installation token (`GithubClient.for_installation`) instead
+    of using a PAT. The mint reads the app id/slug from
+    `instance_configurations` on Django (PIDASHCONV-1471).
+    """
+    return _insert(
+        database_url,
+        scope,
+        "git_provider_accounts",
+        ["workspace_id", "provider", "host_url", "auth_type", "external_account_id",
+         "external_account_login", "display_name", "capabilities", "credential_config",
+         "status", "last_check_error", "metadata"],
+        (
+            str(anchor["workspace"]["id"]),
+            "github",
+            "https://github.com",
+            "github_app",
+            f"ct-app-{suffix}",
+            "ct-app",
+            "contract-test github app",
+            Jsonb({}),
+            Jsonb({"installation_id": installation_id}),
+            "connected",
+            "",
+            Jsonb({}),
+        ),
+    )
+
+
+def github_app_binding(
+    database_url: str,
+    anchor: dict,
+    scope: Scope,
+    *,
+    installation_id: int = 424242,
+    suffix: str = "app",
+) -> dict:
+    """One enabled binding on a github_app account (installation credential)."""
+    account_id = github_app_account(
+        database_url, anchor, scope, installation_id=installation_id, suffix=suffix
+    )
+    repo_id = repository(database_url, scope, suffix=f"ct-app-{suffix}")
+    binding_id = binding(
+        database_url, anchor, scope, account_id=account_id, repository_id=repo_id
+    )
+    return {"account_id": account_id, "repository_id": repo_id, "binding_id": binding_id}
+
+
+def delete_binding_triple(database_url: str, seeded: dict) -> None:
+    """Delete one seeded binding + account + repo (reverse-FK order).
+
+    Only one active binding per project is allowed, so two-phase tests
+    remove the first phase's triple before seeding the second. Scope
+    teardown re-deletes the same ids harmlessly afterwards.
+    """
+    db.execute(
+        database_url,
+        "DELETE FROM git_repository_bindings WHERE id = %s",
+        (seeded["binding_id"],),
+    )
+    db.execute(
+        database_url,
+        "DELETE FROM git_provider_accounts WHERE id = %s",
+        (seeded["account_id"],),
+    )
+    db.execute(
+        database_url,
+        "DELETE FROM git_repositories WHERE id = %s",
+        (seeded["repository_id"],),
+    )
+
+
+def save_instance_config(database_url: str, keys: list[str]) -> dict:
+    """Snapshot `instance_configurations` rows so a test can restore them.
+
+    Returns `{key: row-dict | None}` (`None` = no live row; soft-deleted
+    rows count as absent, like the config readers see them).
+    """
+    rows = {
+        row["key"]: row
+        for row in db.fetchall(
+            database_url,
+            "SELECT key, value, category, is_encrypted FROM instance_configurations"
+            " WHERE key = ANY(%s) AND deleted_at IS NULL",
+            (keys,),
+        )
+    }
+    return {key: rows.get(key) for key in keys}
+
+
+def set_instance_config(database_url: str, values: dict[str, str]) -> None:
+    """Upsert `instance_configurations` rows (test values, never encrypted)."""
+    for key, value in values.items():
+        db.execute(
+            database_url,
+            "INSERT INTO instance_configurations"
+            " (id, key, value, category, is_encrypted, created_at, updated_at)"
+            " VALUES (%s, %s, %s, 'GITHUB', false, now(), now())"
+            " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,"
+            " deleted_at = NULL, updated_at = now()",
+            (db.new_uuid(), key, value),
+        )
+
+
+def clear_instance_config(database_url: str, keys: list[str]) -> None:
+    db.execute(
+        database_url,
+        "DELETE FROM instance_configurations WHERE key = ANY(%s)",
+        (keys,),
+    )
+
+
+def restore_instance_config(database_url: str, saved: dict) -> None:
+    """Undo `set_instance_config`: restore originals, drop test-only rows."""
+    for key, row in saved.items():
+        if row is None:
+            db.execute(
+                database_url,
+                "DELETE FROM instance_configurations WHERE key = %s",
+                (key,),
+            )
+        else:
+            db.execute(
+                database_url,
+                "UPDATE instance_configurations SET value = %s, category = %s,"
+                " is_encrypted = %s, updated_at = now() WHERE key = %s",
+                (row["value"], row["category"], row["is_encrypted"], key),
+            )
+
+
 def unknown_provider_binding(
     database_url: str, anchor: dict, scope: Scope, *, token: str = "contract-test-invalid-token"
 ) -> dict:
