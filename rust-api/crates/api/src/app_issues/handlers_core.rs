@@ -2787,7 +2787,10 @@ async fn project_scoped_exists(
     Ok(row.is_some())
 }
 
-async fn assistant_has_api_key(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<bool, sqlx::Error> {
+pub(crate) async fn assistant_has_api_key(
+    pool: &sqlx::PgPool,
+    user_id: &Uuid,
+) -> Result<bool, sqlx::Error> {
     let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(ASSISTANT_KEY_SQL)
         .bind(user_id)
         .fetch_optional(pool)
@@ -2809,7 +2812,7 @@ async fn fetch_project_ws(
     }))
 }
 
-async fn enrolled_runner(
+pub(crate) async fn enrolled_runner(
     pool: &sqlx::PgPool,
     user_id: &Uuid,
     project_id: &Uuid,
@@ -2824,7 +2827,7 @@ async fn enrolled_runner(
     Ok(row.is_some())
 }
 
-async fn online_runner(
+pub(crate) async fn online_runner(
     pool: &sqlx::PgPool,
     user_id: &Uuid,
     project_id: &Uuid,
@@ -2842,7 +2845,7 @@ async fn online_runner(
 }
 
 /// The paused tiebreaker (`policy.py:88-91`, `09738d222`).
-async fn paused_runner(
+pub(crate) async fn paused_runner(
     pool: &sqlx::PgPool,
     user_id: &Uuid,
     project_id: &Uuid,
