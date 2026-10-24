@@ -163,7 +163,7 @@ describe("signOutViaCommandPalette", () => {
     const palette = element({ filter: () => option, locator: () => option });
     const page = {
       getByPlaceholder: () => element({ isVisible: async () => false }),
-      getByRole: () => element(),
+      getByRole: (role: string) => (role === "progressbar" ? element({ count: async () => 0 }) : element()),
       getByLabel: () => element(),
       getByTestId: () => element({ count: async () => 0 }),
       locator: (selector: string) => {

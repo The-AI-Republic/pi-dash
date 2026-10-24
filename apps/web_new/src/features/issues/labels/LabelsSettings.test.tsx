@@ -686,7 +686,7 @@ describe("LabelsSettings drag", () => {
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 
-  it("rolls a failed drop back with no notice", async () => {
+  it("rolls a failed drop back with a notice", async () => {
     const { calls, serverRows } = setup({ labels: flat, patch: { status: 500, body: {} } });
     await waitFor(() => expect(screen.getByText("Gamma")).toBeInTheDocument());
     stubSlotRects({ [AID]: { top: 0, bottom: 40 }, [BID]: { top: 40, bottom: 80 }, [CID]: { top: 80, bottom: 120 } });
@@ -696,6 +696,6 @@ describe("LabelsSettings drag", () => {
     await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
     await waitFor(() => expect(visibleNames()).toEqual(["Alpha", "Beta", "Gamma"]));
     expect(serverRows.find((row) => row.id === CID)?.sort_order).toBe(30000);
-    expect(notifyError).not.toHaveBeenCalled();
+    expect(notifyError).toHaveBeenCalledWith(LABEL_UPDATE_FAILED_TITLE, expect.anything());
   });
 });

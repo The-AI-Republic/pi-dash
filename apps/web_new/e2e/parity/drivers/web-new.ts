@@ -5102,12 +5102,6 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async signOutViaCommandPalette(): Promise<void> {
-    // The palette belongs to the workspace shell, so enter it first when
-    // the page has none; an already signed-out page skips that and the
-    // loop below returns at once.
-    if (!(await this.isSignedOut().catch(() => false))) {
-      await this.openEntry();
-    }
     // A user with no workspace lands on workspace creation or
     // onboarding, whose chrome carries no sign-out entry; drop the
     // session there instead of hunting a shell menu that never paints
