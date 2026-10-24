@@ -16,7 +16,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { CycleRow as CycleRowData } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -143,7 +143,18 @@ beforeEach(() => {
 afterEach(() => {
   resetAppClient();
   resetCycleSearchStore();
+  vi.unstubAllGlobals();
 });
+
+/** Narrow viewports for the CYC-048 layout menu tests. */
+function stubNarrowViewport(): void {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: true,
+    media: query,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  }));
+}
 
 function renderBody(props: Partial<CyclesListBodyProps> = {}): void {
   const rootRoute = createRootRoute({ component: () => <Outlet /> });
@@ -356,5 +367,66 @@ describe("CyclesListBody", () => {
     await screen.findByText("November push");
     expect(screen.getByTestId("cycles-search-toggle")).toBeInTheDocument();
     expect(screen.getByTestId("cycles-filters")).toBeInTheDocument();
+  });
+
+  it("hides the layout menu on wide viewports", async () => {
+    renderBody();
+    await screen.findByText("November push");
+    expect(screen.queryByTestId("cycles-list-layout-menu")).not.toBeInTheDocument();
+  });
+
+  it("switches the rows to the gallery on narrow screens and back", async () => {
+    stubNarrowViewport();
+    renderBody();
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByTestId("cycles-list-layout-trigger"));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["List layout", "Gallery layout"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Gallery layout" }));
+    // Gallery keeps every row, the hero, and the groups.
+    expect(screen.getByTestId("cycles-list-layout-trigger")).toHaveTextContent("Gallery layout");
+    expect(screen.getByText("November push")).toBeInTheDocument();
+    expect(screen.getByText("Draft cycle")).toBeInTheDocument();
+    expect(screen.getByTestId("default-hero")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upcoming cycle 2" })).toBeInTheDocument();
+    expect(screen.getByTestId("cycle-group-upcoming-gallery")).toBeInTheDocument();
+    const cards = screen.getAllByTestId("cycle-row");
+    expect(cards.length).toBeGreaterThan(0);
+    for (const card of cards) expect(card.className).toContain("rounded-");
+    fireEvent.click(screen.getByTestId("cycles-list-layout-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "List layout" }));
+    expect(screen.getByTestId("cycles-list-layout-trigger")).toHaveTextContent("List layout");
+    expect(screen.queryByTestId("cycle-group-upcoming-gallery")).not.toBeInTheDocument();
+    expect(screen.getByText("November push")).toBeInTheDocument();
+  });
+
+  it("returns to list rows when a gallery choice is followed by widening the viewport", async () => {
+    const media = {
+      matches: true,
+      listeners: [] as Array<(event: { matches: boolean }) => void>,
+    };
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      get matches() {
+        return media.matches;
+      },
+      media: query,
+      addEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+        media.listeners.push(listener);
+      },
+      removeEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+        media.listeners = media.listeners.filter((entry) => entry !== listener);
+      },
+    }));
+    renderBody();
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByTestId("cycles-list-layout-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Gallery layout" }));
+    expect(screen.getByTestId("cycle-group-upcoming-gallery")).toBeInTheDocument();
+    act(() => {
+      media.matches = false;
+      for (const listener of media.listeners) listener({ matches: false });
+    });
+    expect(screen.queryByTestId("cycles-list-layout-menu")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-group-upcoming-gallery")).not.toBeInTheDocument();
+    for (const row of screen.getAllByTestId("cycle-row")) expect(row.className).not.toContain("rounded-");
   });
 });

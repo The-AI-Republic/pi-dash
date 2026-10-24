@@ -41,6 +41,7 @@ import {
   CYCLE_GROUP_HEADINGS,
   CYCLE_LINK_COPIED_TITLE,
   CYCLE_LINK_COPY_FAILED_TITLE,
+  CYCLE_LIST_LAYOUT_OPTIONS,
   CYCLE_LIST_TAB_KEY,
   CYCLE_MEMBER_DATES_LABEL,
   CYCLE_OPEN_NEW_TAB_FAILED_TITLE,
@@ -95,6 +96,7 @@ import {
   CycleGoneAway,
   CyclePaletteEntries,
   CycleGroup,
+  CycleListLayoutMenu,
   CycleMemberDates,
   CycleMemberDatesFrame,
   cycleKeys,
@@ -116,6 +118,7 @@ import {
   CycleTransferDialog,
   cycleSpanModel,
   DEFAULT_BREAKDOWN_TAB,
+  DEFAULT_CYCLE_LIST_LAYOUT,
   CyclesFeatureGate,
   cyclesFeatureHref,
   CyclesListBody,
@@ -163,6 +166,7 @@ import {
   NoActiveCycle,
   openCycleInNewTab,
   parseCycleDateEntry,
+  parseCycleListLayout,
   parseCyclesListSearch,
   pointsPairText,
   progressGrandTotal,
@@ -274,6 +278,10 @@ describe("cycles barrel", () => {
     expect(useCycleSearchStore).toBeDefined();
     expect(resetCycleSearchStore).toBeDefined();
     expect(CycleGroup).toBeDefined();
+    expect(CycleListLayoutMenu).toBeDefined();
+    expect(CYCLE_LIST_LAYOUT_OPTIONS.map((option) => option.label)).toEqual(["List layout", "Gallery layout"]);
+    expect(DEFAULT_CYCLE_LIST_LAYOUT).toBe("list");
+    expect(parseCycleListLayout("gallery")).toBe("gallery");
     expect(CyclePeekPanel).toBeDefined();
     expect(CycleProgressRing).toBeDefined();
     expect(CycleRow).toBeDefined();

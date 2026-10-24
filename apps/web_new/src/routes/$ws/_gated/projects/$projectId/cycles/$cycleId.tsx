@@ -8,8 +8,10 @@
 // { scope: "cycle" } entity with per-cycle preferences beside the
 // collapsible sidebar. The header actions are the work-item count
 // badge, the member+ add-item button (absent on finished cycles), the
-// display control and the sidebar toggle; analytics rides the shared
-// entry with the cycle scope. A missing, deleted or archived cycle
+// display control, the sidebar toggle, and the cycle quick-actions
+// menu (CYC-022 delete from detail) on live cycles for members;
+// analytics rides the shared entry with the cycle scope. A missing,
+// deleted or archived cycle
 // renders the area's gone-away view through the detail gate (CYC-013).
 // The page registers the cycle's palette entries (CYC-030) and carries
 // the finished read-only notice with the transfer action (CYC-031) on
@@ -27,6 +29,7 @@ import * as React from "react";
 import { CycleDetailCrumbs } from "../../../../../../features/cycles/components/CycleDetailCrumbs.js";
 import { CycleDetailGate } from "../../../../../../features/cycles/components/CycleDetailGate.js";
 import { CycleDetailSidebar } from "../../../../../../features/cycles/components/CycleDetailSidebar.js";
+import { CycleRowMenu } from "../../../../../../features/cycles/components/CycleRowMenu.js";
 import { CycleMemberDates } from "../../../../../../features/cycles/components/CycleMemberDates.js";
 import { CycleSidebarToggle } from "../../../../../../features/cycles/components/CycleSidebarToggle.js";
 import { CyclePaletteEntries } from "../../../../../../features/cycles/components/CyclePaletteEntries.js";
@@ -219,8 +222,11 @@ function CycleDetailContent({
   }
 
   const finished = isCompletedCycle(cycle.status);
-  const canEdit =
-    canEditInProject({ memberRole: project.member_role, archived: project.archived_at !== null }) && !finished;
+  const canMutate = canEditInProject({
+    memberRole: project.member_role,
+    archived: project.archived_at !== null,
+  });
+  const canEdit = canMutate && !finished;
   const canCreate = isProjectAuthorized(roles.data?.[projectId] ?? null) && !finished;
   const creatable: WorkItemCreateProject[] = selectCreatableProjects(
     projects.map((entry) => ({
@@ -374,7 +380,7 @@ function CycleDetailContent({
                   projectIdentifier={project.identifier}
                   entity={entity}
                   canEdit={canEdit}
-                  canAddExisting
+                  canAddExisting={canCreate}
                   membership={{ cycleId }}
                 />
               </React.Suspense>
@@ -425,6 +431,16 @@ function CycleDetailContent({
             {addWorkItem}
             {display}
             <CycleSidebarToggle collapsed={sidebarCollapsed} onToggle={flipSidebar} />
+            {canMutate && cycle.archived_at == null ? (
+              <CycleRowMenu
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                cycle={cycle}
+                canMutate={canMutate}
+                currentProject={{ id: projectId, name: project.name, identifier: project.identifier }}
+                alwaysVisible
+              />
+            ) : null}
           </>
         }
         displayControl={display}

@@ -111,6 +111,7 @@ export {
 } from "./components/CycleFilterMenu.js";
 export { CycleGoneAway, type CycleGoneAwayProps } from "./components/CycleGoneAway.js";
 export { CycleGroup, type CycleGroupProps } from "./components/CycleGroup.js";
+export { CycleListLayoutMenu, type CycleListLayoutMenuProps } from "./components/CycleListLayoutMenu.js";
 export { CyclePeekPanel, type CyclePeekPanelProps } from "./components/CyclePeekPanel.js";
 export { CycleProgressRing, type CycleProgressRingProps } from "./components/CycleProgressRing.js";
 export { CycleRow, type CycleRowProps } from "./components/CycleRow.js";
@@ -196,6 +197,15 @@ export {
   type CycleListFilters,
 } from "./lib/cycleFilters.js";
 export { parseCyclesListSearch } from "./lib/cycleListSearch.js";
+export {
+  CYCLE_LIST_LAYOUT_OPTIONS,
+  CYCLE_LIST_LAYOUTS,
+  DEFAULT_CYCLE_LIST_LAYOUT,
+  cycleListLayoutLabel,
+  isCycleListLayout,
+  parseCycleListLayout,
+  type CycleListLayout,
+} from "./lib/cycleListLayout.js";
 export {
   CYCLE_ARCHIVE_GATE_HINT,
   cycleMenuEntries,

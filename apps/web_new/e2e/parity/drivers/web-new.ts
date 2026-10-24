@@ -14996,7 +14996,11 @@ export class WebNewDriver implements ParityDriver {
    * name; the row bodies mix the name with badges, dates and counts.
    */
   private async cycleRowNames(): Promise<string[]> {
-    const triggers = this.page.locator('div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-trigger"]');
+    // Both trigger mounts carry the row name in their label; exactly
+    // one mount is in the DOM per viewport, so the union never doubles.
+    const triggers = this.page.locator(
+      'div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-trigger"], div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-inline"]'
+    );
     const total = await triggers.count();
     const names: string[] = [];
     for (let i = 0; i < total; i++) {
@@ -16640,7 +16644,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cyclesEditOpenDetailMenu(): Promise<void> {
-    return todo("cyclesEditOpenDetailMenu");
+    // The detail header mounts the row menu as its quick actions; the
+    // trigger testid follows the viewport like the rows do, and the
+    // detail carries no rows to confuse it with.
+    const desktop = this.page.getByTestId("cycle-row-menu-trigger");
+    if ((await desktop.count()) > 0) {
+      await desktop.first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await this.page.getByTestId("cycle-row-menu-inline").first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesEditDeleteDialogText(): Promise<{ heading: string; body: string } | null> {
@@ -16699,7 +16712,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cyclesEditDetailReadOnlyNotice(): Promise<string | null> {
-    return todo("cyclesEditDetailReadOnlyNotice");
+    const notice = this.page.getByText(/not editable/i).first();
+    if ((await notice.count()) === 0) return null;
+    const text = ((await notice.textContent().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
 
   // --- Intake detail (NEWFRONT-692, INT-019/024/026-029). ---
@@ -20168,8 +20184,8 @@ export class WebNewDriver implements ParityDriver {
   // --- Active-cycle hero and cycles cross-cutting (NEWFRONT-254,
   // --- CYC-040..045, CYC-047..048). Appended; existing stubs above are
   // --- untouched per the shared driver contract.
-  async cyclesHeroOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("cyclesHeroOpenList");
+  async cyclesHeroOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.openLiveCyclesSettled(workspaceSlug, projectId);
   }
   async cyclesHeroOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     // The scenario signs in first; the context already carries the
@@ -20327,7 +20343,7 @@ export class WebNewDriver implements ParityDriver {
     return todo("cyclesHeroCreateOpen");
   }
   async cyclesHeroVisibleNames(): Promise<string[]> {
-    return todo("cyclesHeroVisibleNames");
+    return this.cycleRowNames();
   }
   async cyclesHeroTransferBanner(_name: string): Promise<string | null> {
     return todo("cyclesHeroTransferBanner");
@@ -20350,11 +20366,24 @@ export class WebNewDriver implements ParityDriver {
   async cyclesHeroCreateButtonState(): Promise<"absent" | "disabled" | "enabled"> {
     return todo("cyclesHeroCreateButtonState");
   }
-  async cyclesHeroOpenRowMenu(_name: string): Promise<void> {
-    return todo("cyclesHeroOpenRowMenu");
+  async cyclesHeroOpenRowMenu(name: string): Promise<void> {
+    // One mount is in the DOM at a time: the inline trigger on
+    // narrow screens, the hover trigger on desktop.
+    const row = this.cycleRowRoot(name);
+    const inline = row.getByTestId("cycle-row-menu-inline");
+    if ((await inline.count()) > 0) {
+      await inline.first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await row.hover({ timeout: WebNewDriver.WAIT_MS });
+      await row.getByRole("button", { name: `Cycle actions for ${name}` }).click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroRowMenuEntries(): Promise<string[]> {
-    return todo("cyclesHeroRowMenuEntries");
+    // Titles render as headings with gate hints beneath; read the
+    // headings so hints never join the entry list.
+    const titles = await this.page.getByRole("menuitem").locator("h5").allTextContents();
+    return titles.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
   }
   async cyclesHeroCloseMenus(): Promise<void> {
     return todo("cyclesHeroCloseMenus");
@@ -20371,23 +20400,32 @@ export class WebNewDriver implements ParityDriver {
   async cyclesHeroFilterVisible(): Promise<boolean> {
     return todo("cyclesHeroFilterVisible");
   }
-  async cyclesHeroInlineActionsVisible(_name: string): Promise<boolean> {
-    return todo("cyclesHeroInlineActionsVisible");
+  async cyclesHeroInlineActionsVisible(name: string): Promise<boolean> {
+    return this.isShown(this.cycleRowRoot(name).getByTestId("cycle-row-menu-inline"));
   }
-  async cyclesHeroHoverActionsVisible(_name: string): Promise<boolean> {
-    return todo("cyclesHeroHoverActionsVisible");
+  async cyclesHeroHoverActionsVisible(name: string): Promise<boolean> {
+    return this.isShown(this.cycleRowRoot(name).getByTestId("cycle-row-menu-trigger"));
   }
   async cyclesHeroLayoutMenuVisible(): Promise<boolean> {
-    return todo("cyclesHeroLayoutMenuVisible");
+    return this.isShown(this.page.getByTestId("cycles-list-layout-menu"));
+  }
+  /** Open the narrow list layout menu unless it already stands open. */
+  private async cyclesListLayoutMenuOpen(): Promise<void> {
+    if ((await this.page.getByRole("menuitem").count()) > 0) return;
+    await this.page.getByTestId("cycles-list-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroLayoutOptions(): Promise<string[]> {
-    return todo("cyclesHeroLayoutOptions");
+    await this.cyclesListLayoutMenuOpen();
+    const texts = await this.page.getByRole("menuitem").allTextContents();
+    return texts.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
   }
-  async cyclesHeroPickLayout(_option: string): Promise<void> {
-    return todo("cyclesHeroPickLayout");
+  async cyclesHeroPickLayout(option: string): Promise<void> {
+    await this.cyclesListLayoutMenuOpen();
+    await this.page.getByRole("menuitem", { name: option }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroDetailLayoutMenuVisible(): Promise<boolean> {
-    return todo("cyclesHeroDetailLayoutMenuVisible");
+    return this.isShown(this.page.getByTestId("mobile-layout-trigger"));
   }
   async cyclesHeroSearchOpen(): Promise<void> {
     return todo("cyclesHeroSearchOpen");
@@ -20414,13 +20452,35 @@ export class WebNewDriver implements ParityDriver {
     return todo("cyclesHeroReadClipboard");
   }
   async cyclesHeroDismissSidebar(): Promise<void> {
-    return todo("cyclesHeroDismissSidebar");
+    // The floating sidebar covers content on narrow viewports only
+    // (SHELL-062); desktop docks it out of the way, so never act
+    // there. Narrow loads start with the drawer open until a tap —
+    // the top-bar toggle collapses it deterministically.
+    const narrow = await this.page.evaluate(
+      () => typeof matchMedia === "function" && matchMedia("(max-width: 767px)").matches
+    );
+    if (!narrow) return;
+    const sidebar = this.page.locator('aside[aria-label="Workspace navigation"]');
+    if (!(await this.isShown(sidebar))) return;
+    const toggle = this.page.getByTestId("sidebar-toggle");
+    if ((await toggle.count()) === 0) throw new Error("[parity] floating sidebar open with no sidebar toggle.");
+    await toggle.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await sidebar.first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+  /** Open the narrow detail layout menu unless it already stands open. */
+  private async cyclesDetailLayoutMenuOpen(): Promise<void> {
+    if ((await this.page.getByRole("menuitem").count()) > 0) return;
+    await this.page.getByTestId("mobile-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroDetailLayoutOptions(): Promise<string[]> {
-    return todo("cyclesHeroDetailLayoutOptions");
+    await this.cyclesDetailLayoutMenuOpen();
+    const texts = await this.page.getByRole("menuitem").allTextContents();
+    return texts.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
   }
-  async cyclesHeroDetailPickLayout(_option: string): Promise<void> {
-    return todo("cyclesHeroDetailPickLayout");
+  async cyclesHeroDetailPickLayout(option: string): Promise<void> {
+    await this.cyclesDetailLayoutMenuOpen();
+    await this.page.getByRole("menuitem", { name: option }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   // --- Estimates permissions matrix + edition split (NEWFRONT-326,

@@ -244,4 +244,27 @@ describe("CycleRow", async () => {
     await renderRow({ cycle: upcomingRow({ name: "Cycle 7" }) });
     expect(screen.getByRole("button", { name: "Cycle actions for Cycle 7" })).toBeInTheDocument();
   });
+
+  it("frames the row as a divider-separated row by default", async () => {
+    await renderRow({ cycle: upcomingRow({ name: "Cycle 7" }) });
+    const row = screen.getByTestId("cycle-row");
+    expect(row.className).toContain("border-b");
+    expect(row.className).not.toContain("rounded-");
+  });
+
+  it("frames the row as a card for the narrow-screen gallery", async () => {
+    await renderRow({ cycle: upcomingRow({ name: "Cycle 7" }), presentation: "card" });
+    const row = screen.getByTestId("cycle-row");
+    expect(row.className).toContain("rounded-");
+    expect(row.className).not.toContain("border-b");
+    expect(screen.getByRole("link")).toHaveTextContent("Cycle 7");
+  });
+
+  it("keeps the eye and the transfer action visible on narrow screens", async () => {
+    await renderRow({
+      cycle: upcomingRow({ name: "Cycle 7", status: "completed", total_issues: 3, completed_issues: 1 }),
+    });
+    expect(screen.getByRole("button", { name: "Quick look at Cycle 7" }).className).toContain("max-md:opacity-100");
+    expect(screen.getByRole("button", { name: "Transfer 2 work items" }).className).toContain("max-md:opacity-100");
+  });
 });
