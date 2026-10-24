@@ -545,7 +545,7 @@ async fn post_desktop_enroll(
             id
         }
         None => {
-            // Insert (`:121-127`): `$1..$10` in column order.
+            // Insert (`:121-127`): `$1..$11` in column order.
             let id = Uuid::new_v4();
             let label = catalog_reads::dev_machine_label(&host_label);
             if sqlx::query(&catalog_reads::dev_machine_insert_sql())
@@ -555,6 +555,7 @@ async fn post_desktop_enroll(
                 .bind(label)
                 .bind(0i16)
                 .bind(PROVISIONING_DESKTOP_BUNDLED)
+                .bind(serde_json::json!([]))
                 .bind(now_micros())
                 .bind(Option::<DateTime<Utc>>::None)
                 .bind(now_micros())

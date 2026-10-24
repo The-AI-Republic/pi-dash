@@ -228,6 +228,80 @@ def test_daemon_machine_session_lifecycle(settings, machine_flow, seeder):
     )
 
 
+def _stored_supported_agents(seeder, dev_machine_id: str):
+    return seeder.db.fetchval(
+        "SELECT supported_agents FROM dev_machine WHERE id = %s", (dev_machine_id,)
+    )
+
+
+def _open_machine_session(client, dev_machine_id: str, **kwargs):
+    opened = client.post(f"{DAEMON}/dev-machines/{dev_machine_id}/sessions/", **kwargs)
+    assert opened.status_code == 201, opened.text
+    return opened.json()
+
+
+def test_daemon_machine_session_open_persists_supported_agents(settings, machine_flow, seeder):
+    """PDASHOSS01-142: the daemon advertises the agent kinds its binary
+    understands; open persists them filtered (charset, full match,
+    dedup) and an open that advertises nothing usable leaves the stored
+    set untouched."""
+    dev_machine_id = _machine_ids(seeder, machine_flow)
+    try:
+        with bearer_client(settings.base_url, machine_flow["machine_token"]) as client:
+            # Never advertised: the insert default.
+            assert _stored_supported_agents(seeder, dev_machine_id) == []
+            _open_machine_session(
+                client,
+                dev_machine_id,
+                json={
+                    "supported_agents": [
+                        "codex", "Not Valid!", 7, "codex", "x" * 64,
+                        "claude-code", "grok\n", "muse-code",
+                    ]
+                },
+            )
+            assert _stored_supported_agents(seeder, dev_machine_id) == [
+                "codex", "claude-code", "muse-code",
+            ]
+            # Older daemon / nothing usable / not a list: no clobber.
+            for kwargs in (
+                {"json": {}},
+                {"json": {"supported_agents": ["???"]}},
+                {"json": {"supported_agents": "codex"}},
+                {"json": ["codex"]},
+            ):
+                _open_machine_session(client, dev_machine_id, **kwargs)
+                assert _stored_supported_agents(seeder, dev_machine_id) == [
+                    "codex", "claude-code", "muse-code",
+                ], kwargs
+            # A body DRF cannot parse still opens (advisory field).
+            for content, content_type in (
+                (b"{not json", "application/json"),
+                (b'{"supported_agents": ["grok"]}', "text/plain"),
+            ):
+                _open_machine_session(
+                    client,
+                    dev_machine_id,
+                    content=content,
+                    headers={"Content-Type": content_type},
+                )
+                assert _stored_supported_agents(seeder, dev_machine_id) == [
+                    "codex", "claude-code", "muse-code",
+                ], content_type
+            # A later advertisement replaces the set.
+            _open_machine_session(
+                client,
+                dev_machine_id,
+                content=b'{"supported_agents": ["grok"]}',
+                headers={"Content-Type": "application/json; charset=utf-8"},
+            )
+            assert _stored_supported_agents(seeder, dev_machine_id) == ["grok"]
+    finally:
+        seeder.db.execute(
+            "DELETE FROM machine_session WHERE dev_machine_id = %s", (dev_machine_id,)
+        )
+
+
 def test_daemon_machine_session_rejects_cross_machine(settings, machine_flow, seeder, daemon_world):
     other = seeder.create_dev_machine(daemon_world["owner"]["id"])
     with bearer_client(settings.base_url, machine_flow["machine_token"]) as client:

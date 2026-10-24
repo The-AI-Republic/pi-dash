@@ -91,8 +91,9 @@ def make_dev_machine(owner_id, *, host_label="h", label="h"):
     db.execute(
         database_url(),
         """INSERT INTO dev_machine (id, owner_id, host_label, label, visibility,
-            provisioning, last_seen_at, revoked_at, created_at, updated_at)
-            VALUES (%s,%s,%s,%s,0,'manual',now(),NULL,now(),now())""",
+            provisioning, supported_agents, last_seen_at, revoked_at, created_at,
+            updated_at)
+            VALUES (%s,%s,%s,%s,0,'manual','[]',now(),NULL,now(),now())""",
         (mid, owner_id, host_label, label),
     )
     return mid

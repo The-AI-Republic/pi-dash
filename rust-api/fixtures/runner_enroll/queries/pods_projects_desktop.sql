@@ -142,7 +142,7 @@ WHERE dm."owner_id" = $1 AND dm."host_label" = $2
 ORDER BY dm."created_at" DESC LIMIT 1
 FOR UPDATE;
 -- Miss -> INSERT (provisioning desktop_bundled, label=host_label[:128],
--- last_seen_at=now). Hit -> UPDATE last_seen_at+updated_at (touch).
+-- supported_agents='[]', last_seen_at=now). Hit -> UPDATE last_seen_at+updated_at (touch).
 -- NOTE: the machine_tokens__workspace join does NOT filter revoked_at —
 -- even a fully-revoked token row makes the machine reusable.
 

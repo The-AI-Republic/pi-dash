@@ -63,9 +63,9 @@ SELECT * FROM "dev_machine" WHERE "id" = $1 LIMIT 1 FOR UPDATE;
 -- SAVEPOINT;
 INSERT INTO "dev_machine"
     ("id", "owner_id", "host_label", "label", "visibility",
-     "provisioning", "last_seen_at", "revoked_at",
+     "provisioning", "supported_agents", "last_seen_at", "revoked_at",
      "created_at", "updated_at")
-VALUES ($1, $2, $3, substr($3, 1, 128), 0, 'manual', now(), NULL, now(), now());
+VALUES ($1, $2, $3, substr($3, 1, 128), 0, 'manual', '[]', now(), NULL, now(), now());
 -- IntegrityError (id race) -> re-lock D1; miss/foreign owner -> ownership
 -- error; else touch + return.
 

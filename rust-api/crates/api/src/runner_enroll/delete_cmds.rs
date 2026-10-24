@@ -521,11 +521,13 @@ fn can_manage_gate(runner: &RunnerGate, user_id: Uuid, role: Option<i32>) -> boo
 }
 
 /// The machine facts the scope gates need (`dm_cols::COLUMNS`
-/// positions: id 0, owner 1, visibility 4, revoked 7).
+/// positions: id 0, owner 1, visibility 4, supported_agents 6,
+/// revoked 8).
 struct MachineGate {
     id: Uuid,
     owner_id: Uuid,
     visibility: i16,
+    supported_agents: Value,
     revoked_at: Option<DateTime<Utc>>,
 }
 
@@ -534,8 +536,36 @@ fn decode_machine_gate(row: &sqlx::postgres::PgRow) -> Result<MachineGate, Respo
         id: row.try_get(0).map_err(|_| server_error())?,
         owner_id: row.try_get(1).map_err(|_| server_error())?,
         visibility: row.try_get(4).map_err(|_| server_error())?,
-        revoked_at: row.try_get(7).map_err(|_| server_error())?,
+        supported_agents: row.try_get(6).map_err(|_| server_error())?,
+        revoked_at: row.try_get(8).map_err(|_| server_error())?,
     })
+}
+
+/// `machine.supported_agents and agent not in machine.supported_agents`
+/// (`machine_commands.py`, PDASHOSS01-142): a falsy stored value (the
+/// `[]` an older daemon leaves) gates nothing. Python `in` over the
+/// JSON value: list membership, dict key, `str` substring; any other
+/// truthy value raises `TypeError` (`Err` → 500).
+fn machine_lacks_agent(supported: &Value, agent: &str) -> Result<bool, ()> {
+    if !crate::runner_enroll::enroll::py_truthy(supported) {
+        return Ok(false);
+    }
+    match supported {
+        Value::Array(items) => Ok(!items.iter().any(|item| item.as_str() == Some(agent))),
+        Value::Object(map) => Ok(!map.contains_key(agent)),
+        Value::String(text) => Ok(!text.contains(agent)),
+        _ => Err(()),
+    }
+}
+
+/// `{"error": "unsupported_agent", …}` — 400 (`machine_commands.py`,
+/// PDASHOSS01-142). `{agent!r}` renders single-quoted: `agent` already
+/// passed the [`VALID_AGENTS`] allowlist, so it is plain ASCII with no
+/// quote or backslash to escape.
+pub fn unsupported_agent_body(agent: &str) -> String {
+    format!(
+        r#"{{"error":"unsupported_agent","error_description":"the runner daemon on this machine does not support agent '{agent}'; upgrade pidash on the machine to use it"}}"#
+    )
 }
 
 /// The unlocked machine read plus the M4 scope probes
@@ -1915,6 +1945,14 @@ pub async fn machine_create_runner(
     };
     if !VALID_AGENTS.contains(&agent.as_str()) {
         return bad_request(INVALID_AGENT_BODY);
+    }
+    // Per-machine gate (PDASHOSS01-142): a daemon that advertised the
+    // agent kinds its binary understands gets a friendly rejection here
+    // instead of bouncing the command off its parser.
+    match machine_lacks_agent(&machine.supported_agents, &agent) {
+        Ok(false) => {}
+        Ok(true) => return bad_request(&unsupported_agent_body(&agent)),
+        Err(()) => return server_error(),
     }
     // `pod` is NOT validated (QUIRK-pod-passthrough).
     let pod = match or_empty_stripped(match data_get(&data, "pod") {

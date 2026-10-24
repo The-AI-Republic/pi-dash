@@ -645,6 +645,7 @@ async fn exchange_in_transaction(
                 .bind(dev_machine::label_from_host_label(&params.host_label))
                 .bind(dev_machine::VISIBILITY_PRIVATE)
                 .bind(dev_machine::PROVISIONING_MANUAL)
+                .bind(serde_json::json!([]))
                 .bind(now)
                 .bind(None::<DateTime<Utc>>)
                 .bind(now)

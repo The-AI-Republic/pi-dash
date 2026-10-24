@@ -1062,6 +1062,7 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "supported_agents",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -1568,8 +1569,9 @@ mod tests {
         assert_eq!(
             sql,
             "INSERT INTO \"dev_machine\" (\"id\", \"owner_id\", \"host_label\", \"label\", \
-             \"visibility\", \"provisioning\", \"last_seen_at\", \"revoked_at\", \
-             \"created_at\", \"updated_at\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
+             \"visibility\", \"provisioning\", \"supported_agents\", \"last_seen_at\", \
+             \"revoked_at\", \"created_at\", \"updated_at\") \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
         );
     }
 

@@ -100,8 +100,8 @@ def _mint_machine_token(conn, user_id, workspace_id, secret):
         conn,
         """INSERT INTO dev_machine
                (id, owner_id, host_label, label, visibility, provisioning,
-                created_at, updated_at)
-           VALUES (%s, %s, 'ct737', 'ct737', 0, 'manual', now(), now())""",
+                supported_agents, created_at, updated_at)
+           VALUES (%s, %s, 'ct737', 'ct737', 0, 'manual', '[]', now(), now())""",
         (machine_id, user_id),
     )
     raw = "mt_" + secrets.token_urlsafe(24)
