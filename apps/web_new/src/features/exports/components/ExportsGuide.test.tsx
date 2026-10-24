@@ -6,10 +6,12 @@
 // form above the real previous-exports history, both wired to the same
 // workspace slug.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { expectContentKeysInert, expectKeyboardReachable, pressEnter, tabTo } from "../../../testSupport/keyboard.js";
 import { ExportsGuide } from "./ExportsGuide.js";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -79,9 +81,13 @@ function answer(url: string, body: unknown) {
 }
 
 /** Stub transport answering the reads the form and history make. */
-function stubTransport(requested: string[]): void {
-  createAppClient("https://api.test", (async (url: string) => {
+function stubTransport(requested: string[], posts: Array<{ url: string; body: unknown }> = []): void {
+  createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string } = {}) => {
     requested.push(url);
+    if (url.endsWith("/export-issues/") && init.method === "POST") {
+      posts.push({ url, body: JSON.parse(init.body ?? "{}") });
+      return answer(url, { message: "queued" });
+    }
     if (url.endsWith("/auth/get-csrf-token/")) return answer(url, { csrf_token: "csrf" });
     if (url.endsWith("/projects/")) {
       return answer(url, [
@@ -121,5 +127,31 @@ describe("ExportsGuide", () => {
 
     expect(requested.some((url) => url.endsWith("/projects/"))).toBe(true);
     expect(requested.some((url) => url.includes("/api/workspaces/acme/export-issues"))).toBe(true);
+  });
+
+  it("keeps the assembled page keyboard-operable end to end", async () => {
+    const user = userEvent.setup();
+    const requested: string[] = [];
+    const posts: Array<{ url: string; body: unknown }> = [];
+    stubTransport(requested, posts);
+    renderGuide();
+    await screen.findByRole("heading", { level: 3, name: "Previous exports" });
+
+    // Both halves of the guide sit in one tab order, with visible focus.
+    const guide = screen.getByRole("heading", { level: 3, name: "Exporting project" }).parentElement?.parentElement
+      ?.parentElement as HTMLElement;
+    expectKeyboardReachable(guide);
+
+    await tabTo(user, screen.getByRole("button", { name: "All projects" }));
+    await tabTo(user, screen.getByRole("button", { name: "CSV" }));
+    const submit = screen.getByRole("button", { name: "Export" });
+    await tabTo(user, submit);
+    expect(submit).toHaveFocus();
+    await pressEnter(user);
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]?.body).toEqual({ provider: "csv", project: [], multiple: false });
+
+    await expectContentKeysInert(user, () => `${guide.textContent} ${posts.length}`);
+    expect(posts).toHaveLength(1);
   });
 });

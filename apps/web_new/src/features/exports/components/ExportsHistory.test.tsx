@@ -4,6 +4,7 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -15,6 +16,7 @@ import {
   EXPORT_HISTORY_ERROR_MESSAGE,
   EXPORT_HISTORY_LOADING_LABEL,
 } from "../exportHistory.js";
+import { expectContentKeysInert, expectKeyboardReachable, pressEnter, tabTo } from "../../../testSupport/keyboard.js";
 import { ExportsHistory } from "./ExportsHistory.js";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -372,5 +374,76 @@ describe("ExportsHistory", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh status" }));
     expect(await screen.findByRole("table")).toBeInTheDocument();
     expect(screen.queryByText(EXPORT_HISTORY_ERROR_MESSAGE)).not.toBeInTheDocument();
+  });
+
+  it("reaches refresh and paging by Tab, activates them on Enter and leaves content keys inert", async () => {
+    const user = userEvent.setup();
+    const urls: string[] = [];
+    createAppClient("https://api.test", (async (url: string) => {
+      urls.push(url);
+      const cursor = new URL(url).searchParams.get("cursor");
+      if (cursor === "10:1:0") {
+        return ok(
+          stubPage([stubRecord(11)], {
+            next_cursor: "10:2:0",
+            prev_cursor: "10:0:0",
+            next_page_results: false,
+            prev_page_results: true,
+          })
+        );
+      }
+      return ok(
+        stubPage(
+          Array.from({ length: 10 }, (_, index) => stubRecord(index + 1)),
+          {
+            next_cursor: "10:1:0",
+            prev_cursor: "10:-1:1",
+            next_page_results: true,
+            prev_page_results: false,
+          }
+        )
+      );
+    }) as never);
+    renderHistory();
+    await screen.findByRole("table");
+
+    const refresh = screen.getByRole("button", { name: "Refresh status" });
+    const next = screen.getByRole("button", { name: "Next" });
+    const prev = screen.getByRole("button", { name: "Prev" });
+    const controls = expectKeyboardReachable(screen.getByRole("region", { name: "Previous exports" }));
+    // Prev starts disabled (first page); the reachable actions are refresh,
+    // next and each row's download link.
+    expect(controls).toEqual(expect.arrayContaining([refresh, next]));
+    const downloads = screen.getAllByRole("link", { name: /^Download export from/ });
+    expect(downloads).toHaveLength(10);
+    expect(downloads[0]).toHaveAttribute("href", "https://files.test/export-1.csv");
+    for (const download of downloads) {
+      expect(download.className).toContain("focus-visible:outline-solid");
+      expect(download.tabIndex).toBe(0);
+    }
+
+    // Tab lands on each history action in document order; Enter fires it.
+    await tabTo(user, refresh);
+    expect(refresh).toHaveFocus();
+    await tabTo(user, next);
+    expect(next).toHaveFocus();
+    await pressEnter(user);
+    await waitFor(() => expect(historyRows()).toHaveLength(1));
+    expect(urls.some((url) => url.includes("cursor=10%3A1%3A0"))).toBe(true);
+
+    await tabTo(user, prev);
+    expect(prev).toHaveFocus();
+    expect(prev).toBeEnabled();
+    await pressEnter(user);
+    await waitFor(() => expect(historyRows()).toHaveLength(10));
+
+    // With no text field focused, content keys change neither the pager nor
+    // the table; no screen-level shortcut fires.
+    const before = `${screen.getByRole("table").textContent} ${document.activeElement?.tagName}`;
+    await expectContentKeysInert(
+      user,
+      () => `${screen.getByRole("table").textContent} ${document.activeElement?.tagName}`
+    );
+    expect(`${screen.getByRole("table").textContent} ${document.activeElement?.tagName}`).toBe(before);
   });
 });

@@ -10,6 +10,8 @@ import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { expectContentKeysInert, expectKeyboardReachable, pressEnter, tabTo } from "../../../testSupport/keyboard.js";
+
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
   return { ...original, notifyError: vi.fn() };
@@ -106,5 +108,22 @@ describe("ProfileActivityDownload", () => {
       expect(screen.getByTestId("profile-activity-download")).toHaveTextContent(PROFILE_DOWNLOAD_IDLE_LABEL)
     );
     resetAppClient();
+  });
+
+  it("reaches the download by Tab and saves on Enter with no custom bindings", async () => {
+    const user = userEvent.setup();
+    const run = vi.fn(async () => undefined);
+    render(<ProfileActivityDownload workspaceSlug="acme" userId="u-1" run={run} />);
+    const button = screen.getByTestId("profile-activity-download");
+    expect(expectKeyboardReachable(button.parentElement as HTMLElement)).toContain(button);
+
+    await tabTo(user, button);
+    expect(button).toHaveFocus();
+    await pressEnter(user);
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(button).toBeEnabled());
+
+    await expectContentKeysInert(user, () => button.textContent ?? "");
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });
