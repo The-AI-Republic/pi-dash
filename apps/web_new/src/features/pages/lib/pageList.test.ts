@@ -171,28 +171,50 @@ describe("sortPageRows", () => {
 });
 
 describe("creation filters", () => {
+  const localStartOfToday = new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate()).getTime();
+  const localStartDaysAgo = (days: number): number =>
+    new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate() - days).getTime();
+  /** An instant on the local calendar day `offsetDays` away from today. */
+  const atDay = (offsetDays: number, hour = 0): string =>
+    new Date(
+      new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate() + offsetDays).getTime() + hour * 3_600_000
+    ).toISOString();
+
   const cases: ReadonlyArray<[PageDatePreset, string, boolean]> = [
-    ["today", "2026-10-23T09:00:00Z", true],
-    ["yesterday", "2026-10-22T09:00:00Z", true],
-    ["yesterday", "2026-10-23T09:00:00Z", false],
-    ["last_7_days", "2026-10-17T00:00:00Z", true],
-    ["last_7_days", "2026-10-16T23:59:59Z", false],
-    ["last_30_days", "2026-09-24T00:00:00Z", true],
-    ["1_week_ago", "2026-10-16T12:00:00Z", true],
-    ["1_week_ago", "2026-10-01T12:00:00Z", true],
-    ["1_week_ago", "2026-10-22T12:00:00Z", false],
-    ["2_weeks_ago", "2026-10-09T12:00:00Z", true],
-    ["2_weeks_ago", "2026-09-01T12:00:00Z", true],
-    ["2_weeks_ago", "2026-10-15T12:00:00Z", false],
-    ["1_month_ago", "2026-09-23T12:00:00Z", true],
-    ["1_month_ago", "2026-08-01T12:00:00Z", true],
-    ["1_month_ago", "2026-10-01T12:00:00Z", false],
-    ["1_week_from_now", "2026-10-30T12:00:00Z", true],
-    ["2_weeks_from_now", "2026-11-06T12:00:00Z", true],
-    ["1_month_from_now", "2026-11-23T12:00:00Z", true],
+    ["today", atDay(0, 9), true],
+    ["today", atDay(-1, 9), false],
+    ["yesterday", atDay(-1, 9), true],
+    ["yesterday", atDay(0, 9), false],
+    ["last_7_days", atDay(-7), true],
+    ["last_7_days", new Date(Date.parse(atDay(-7)) - 1).toISOString(), false],
+    ["last_30_days", atDay(-30), true],
+    ["last_30_days", new Date(Date.parse(atDay(-30)) - 1).toISOString(), false],
+    ["1_week_ago", atDay(-7), true],
+    ["1_week_ago", atDay(-90), true],
+    ["1_week_ago", atDay(-6), false],
+    ["2_weeks_ago", atDay(-14), true],
+    ["2_weeks_ago", atDay(-90), true],
+    ["2_weeks_ago", atDay(-13), false],
+    ["1_month_ago", atDay(-30), true],
+    ["1_month_ago", atDay(-90), true],
+    ["1_month_ago", atDay(-29), false],
+    ["1_week_from_now", atDay(7), true],
+    ["1_week_from_now", new Date(Date.parse(atDay(7)) - 1).toISOString(), false],
+    ["2_weeks_from_now", atDay(14), true],
+    ["2_weeks_from_now", new Date(Date.parse(atDay(14)) - 1).toISOString(), false],
+    ["1_month_from_now", atDay(30), true],
+    ["1_month_from_now", new Date(Date.parse(atDay(30)) - 1).toISOString(), false],
   ];
   it.each(cases)("%s matches %s = %s", (preset, created, expected) => {
     expect(matchesCreationPreset(created, preset, NOW)).toBe(expected);
+  });
+
+  it("evaluates every cutoff from the local start of today", () => {
+    expect(Date.parse(atDay(0))).toBe(localStartOfToday);
+    expect(matchesCreationPreset(new Date(localStartDaysAgo(7)).toISOString(), "last_7_days", NOW)).toBe(true);
+    expect(matchesCreationPreset(new Date(localStartDaysAgo(7) - 1).toISOString(), "last_7_days", NOW)).toBe(false);
+    expect(matchesCreationPreset(new Date(localStartDaysAgo(30)).toISOString(), "last_30_days", NOW)).toBe(true);
+    expect(matchesCreationPreset(new Date(localStartDaysAgo(30) - 1).toISOString(), "last_30_days", NOW)).toBe(false);
   });
 
   it("rejects an unparseable timestamp and labels every preset", () => {
@@ -203,15 +225,23 @@ describe("creation filters", () => {
   });
 
   it("matches and labels one explicit calendar day", () => {
-    expect(matchesCreationPreset("2026-10-20T12:00:00Z", { custom: "2026-10-20" }, NOW)).toBe(true);
-    expect(matchesCreationPreset("2026-10-21T12:00:00Z", { custom: "2026-10-20" }, NOW)).toBe(false);
-    expect(matchesCreationPreset("2026-10-20T12:00:00Z", { custom: "bogus" }, NOW)).toBe(false);
+    const pickedDay = new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate() - 3);
+    const picked = `${pickedDay.getFullYear()}-${String(pickedDay.getMonth() + 1).padStart(2, "0")}-${String(
+      pickedDay.getDate()
+    ).padStart(2, "0")}`;
+    expect(
+      matchesCreationPreset(new Date(pickedDay.getTime() + 12 * 3_600_000).toISOString(), { custom: picked }, NOW)
+    ).toBe(true);
+    expect(
+      matchesCreationPreset(new Date(pickedDay.getTime() + 36 * 3_600_000).toISOString(), { custom: picked }, NOW)
+    ).toBe(false);
+    expect(matchesCreationPreset(atDay(0, 12), { custom: "bogus" }, NOW)).toBe(false);
     expect(formatCustomDate("2026-10-20")).toContain("2026");
     expect(formatCustomDate("bogus")).toBe("bogus");
   });
 
   it("combines dimensions with AND", () => {
-    const row = makePageRow({ created_at: "2026-10-23T09:00:00Z", is_favorite: true, owned_by: "user-1" });
+    const row = makePageRow({ created_at: atDay(0, 9), is_favorite: true, owned_by: "user-1" });
     expect(matchesPageFilters(row, EMPTY_PAGE_FILTERS, NOW)).toBe(true);
     expect(matchesPageFilters(row, { ...EMPTY_PAGE_FILTERS, favorites: true }, NOW)).toBe(true);
     expect(matchesPageFilters({ ...row, is_favorite: false }, { ...EMPTY_PAGE_FILTERS, favorites: true }, NOW)).toBe(
