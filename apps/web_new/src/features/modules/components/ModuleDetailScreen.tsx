@@ -21,6 +21,7 @@ import { moduleDetailTitle } from "../lib/moduleDetail.js";
 import { MODULES_CRUMB } from "../lib/moduleList.js";
 import { useDetailSidebarCollapsed } from "../lib/detailSidebarStore.js";
 import { ModuleAnalyticsSidebar } from "./sidebar/ModuleAnalyticsSidebar.js";
+import { ModuleProgressSection } from "./sidebar/ModuleProgressSection.js";
 import { moduleDetailQueryOptions } from "./sidebar/moduleSidebarQueries.js";
 import { ModuleDetailBadge } from "./ModuleDetailBadge.js";
 import { ModuleDetailCrumbs } from "./ModuleDetailCrumbs.js";
@@ -110,6 +111,9 @@ export function ModuleDetailScreen({
               workspaceSlug={workspaceSlug}
               projectId={projectId}
               moduleId={moduleId}
+              progress={
+                <ModuleProgressSection workspaceSlug={workspaceSlug} projectId={projectId} moduleId={moduleId} />
+              }
               onClose={() => setCollapsed(true)}
             />
           </aside>
