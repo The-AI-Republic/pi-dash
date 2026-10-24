@@ -1712,6 +1712,7 @@ mod tests {
             config_dir: base.join("config"),
             data_dir: base.join("data"),
             runtime_dir: base.join("runtime"),
+            machine_context_dir: base.join("config"),
         };
         RunnerInstance::new_offline(config(), &paths, DaemonConfig::default())
     }
