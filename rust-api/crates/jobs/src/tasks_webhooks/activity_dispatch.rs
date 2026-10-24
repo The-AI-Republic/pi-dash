@@ -314,11 +314,11 @@ pub const TOUCH_ISSUE_SQL: &str = r#"UPDATE issues SET updated_at = NOW() WHERE 
 
 /// `IssueReaction.objects.filter(reaction, project_id,
 /// actor_id).values_list("id", flat=True).first()` (`:1082-1090`).
-pub const FIND_ISSUE_REACTION_SQL: &str = r#"SELECT id FROM issue_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL LIMIT 1"#;
+pub const FIND_ISSUE_REACTION_SQL: &str = r#"SELECT id FROM issue_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"#;
 
 /// `CommentReaction.objects.filter(reaction, project_id,
 /// actor_id).values_list("id", "comment__id").first()` (`:1152-1160`).
-pub const FIND_COMMENT_REACTION_SQL: &str = r#"SELECT id, comment_id FROM comment_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL LIMIT 1"#;
+pub const FIND_COMMENT_REACTION_SQL: &str = r#"SELECT id, comment_id FROM comment_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"#;
 
 /// `IssueComment.objects.get(pk=..., project_id=...)`
 /// (`:1161`) and `IssueComment.objects.filter(pk=...,

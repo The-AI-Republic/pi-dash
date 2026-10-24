@@ -42,6 +42,7 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -51,6 +52,7 @@ from _harness import broker_probe, celery_wire, taskspec
 from _harness import redis as redis_helper
 from _harness import seed as seed_helpers
 from _harness.auth import api_client, login_session_cookie
+from _harness.db import insert_row
 from _harness.db import wait_for_condition as wait_for
 
 RUN_TURN = "assistant.run_turn"
@@ -69,6 +71,10 @@ SWEEP_CUTOFF_SECS = 390
 
 TIMEOUT_CODE = "turn_timeout"
 TIMEOUT_DETAIL = "The assistant took too long to respond."
+
+#: The sweep's failure detail (``tasks.py`` ``sweep_stale_turns``): distinct
+#: from the soft-limit detail above.
+SWEEP_TIMEOUT_DETAIL = "The assistant turn did not finish (worker lost)."
 
 
 # --------------------------------------------------------------------------- #
@@ -192,13 +198,17 @@ def _seed_member(db_conn, tag: str):
     return user, workspace, api_client(_base_url(), cookie)
 
 
-def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=None):
+def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=None,
+                    thread_id=None):
     """Replicate the message-POST 202 rows (``views/messages.py``).
 
     Thread (with ``active_turn`` set) + user message (seq 1, completed) +
     turn pointing at the message. Returns (thread_id, turn_id, message_id).
+    ``thread_id`` pins the thread when the caller must subscribe to its
+    channel before the rows exist (the sweep-publish test).
     """
-    thread_id, turn_id, message_id = (str(uuid.uuid4()) for _ in range(3))
+    thread_id = thread_id or str(uuid.uuid4())
+    turn_id, message_id = (str(uuid.uuid4()) for _ in range(2))
     now = _now_iso()
     # FK order (mirroring the 202 path's create order): thread first with no
     # active turn, then the turn, then the user message, then the backlinks.
@@ -307,11 +317,18 @@ class _StubProvider:
     by default) ending with ``data: [DONE]``. The slow stream lets the cancel
     test set the cancel key mid-turn: the worker only observes cancellation
     when the next event arrives, so chunks must keep coming.
+
+    ``tool_call`` (``(name, args)``) makes the *first* streaming request emit
+    a single tool call instead of text (PIDASHCONV-1250): one delta carrying
+    the complete call, closed by a ``tool_calls`` finish. Later requests
+    stream ``chunks`` as usual, so the turn completes after the tool runs.
     """
 
-    def __init__(self, chunks=("Hello", " world"), interval=1.0):
+    def __init__(self, chunks=("Hello", " world"), interval=1.0, tool_call=None):
         self.chunks = list(chunks)
         self.interval = interval
+        self.tool_call = tool_call
+        self._tool_call_sent = False
         self.requests = []
         self._server = None
         self._thread = None
@@ -337,6 +354,40 @@ class _StubProvider:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.end_headers()
+                    if stub.tool_call is not None and not stub._tool_call_sent:
+                        stub._tool_call_sent = True
+                        name, args = stub.tool_call
+                        call_delta = {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_stateless_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json.dumps(args),
+                                    },
+                                }
+                            ],
+                        }
+                        for delta, finish in ((call_delta, None), ({}, "tool_calls")):
+                            time.sleep(stub.interval)
+                            self.wfile.write(
+                                (
+                                    'data: {"id":"stub","object":"chat.completion.chunk",'
+                                    '"created":0,"model":"oracle-stub","choices":[{"index":0,'
+                                    '"delta":'
+                                    + json.dumps(delta)
+                                    + ',"finish_reason":'
+                                    + json.dumps(finish)
+                                    + "}]}\n\n"
+                                ).encode()
+                            )
+                            self.wfile.flush()
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                        return
                     for chunk in stub.chunks:
                         time.sleep(stub.interval)
                         self.wfile.write(
@@ -570,6 +621,45 @@ def test_sweep_ignores_fresh_and_terminal(db_conn, broker_url):
     assert _turn_row(db_conn, done_turn)["status"] == "completed"
 
 
+def _iso_age(age_secs: int) -> str:
+    """UTC ISO instant ``age_secs`` in the past (a turn's ``started_at``)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age_secs))
+
+
+def test_sweep_honors_configured_hard_limit(db_conn, broker_url):
+    """The sweep cuts at ASSISTANT_TURN_HARD_LIMIT + 60 (PIDASHCONV-1248).
+
+    The worker under test boots with ASSISTANT_TURN_HARD_LIMIT=900 (see the
+    worker-plane job env): a turn younger than the 960s cutoff survives the
+    sweep while a turn older than it fails with ``turn_timeout``. The ages
+    derive from the configured value, so the same test pins the default 390s
+    horizon when the override is absent.
+    """
+    limit = int(os.environ.get("ASSISTANT_TURN_HARD_LIMIT", "330"))
+    cutoff = limit + 60
+    user, workspace, _client = _seed_member(db_conn, "hardlimit")
+    _young_thread, young_turn, _m1 = _seed_turn_trio(
+        db_conn, user, workspace, status="running", started_at=_iso_age(cutoff - 30)
+    )
+    _old_thread, old_turn, _m2 = _seed_turn_trio(
+        db_conn, user, workspace, status="running", started_at=_iso_age(cutoff + 30)
+    )
+
+    celery_wire.publish(SWEEP, broker_url=broker_url)
+    row = wait_for(
+        lambda: _turn_row(db_conn, old_turn) if _turn_row(db_conn, old_turn)["status"] == "failed" else None,
+        what="over-cutoff turn swept",
+    )
+    assert row["error_code"] == "turn_timeout"
+    assert row["error_detail"] == "The assistant turn did not finish (worker lost)."
+    # Settle: the sweep may still be running when the old row flips.
+    time.sleep(2)
+    assert _turn_row(db_conn, young_turn)["status"] == "running", (
+        f"a turn younger than the configured {cutoff}s cutoff must survive the sweep"
+    )
+    assert [e for e in _turn_events(db_conn, young_turn) if e["kind"] == "turn_failed"] == []
+
+
 def test_complete_turn_streams_and_prunes(db_conn, broker_url):
     """Stub provider: deltas stream, the turn completes, deltas are pruned."""
     stub = _StubProvider()
@@ -735,3 +825,194 @@ def test_slow_stream_fails_at_soft_limit(db_conn, broker_url):
     finally:
         stub.stop()
         worker.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Stateless-issue tool visibility (PIDASHCONV-1250)
+# --------------------------------------------------------------------------- #
+
+
+def _seed_stateless_issue(db_conn, user, workspace):
+    """Project (the turn user is an admin member of) + one ``state_id`` NULL issue.
+
+    Column sets mirror ``issue_chain`` (every NOT NULL projects/issues column
+    without a database default); the issue simply carries no state.
+    """
+    project = seed_helpers.project(db_conn, workspace["id"], "Stateless Tools")
+    seed_helpers.project_member(
+        db_conn, project["id"], workspace["id"], user["id"], role=20
+    )
+    issue = insert_row(
+        db_conn,
+        "issues",
+        {
+            "workspace_id": str(workspace["id"]),
+            "project_id": str(project["id"]),
+            "state_id": None,
+            "name": "stateless tool-target issue",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 1,
+            "is_draft": False,
+            "sort_order": 65535,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    return project, issue
+
+
+def _tool_returns(model_messages, tool_name):
+    """``tool-return`` parts for ``tool_name`` across the stored messages."""
+    found = []
+    for message in model_messages or []:
+        for part in (message.get("parts") or []):
+            if part.get("part_kind") == "tool-return" and part.get("tool_name") == tool_name:
+                found.append(part)
+    return found
+
+
+def test_turn_tools_see_stateless_issue(db_conn, broker_url):
+    """A turn calling ``get_issue`` on a ``state_id`` NULL issue gets it back.
+
+    Django renders the ``issue_objects`` triage exclusion null-safely (``NOT
+    (group = 'triage' AND group IS NOT NULL)``), so stateless rows stay
+    visible to every read tool. The Rust mirror of this test lives in
+    ``tasks_assistant/test_rust_replay.py``.
+    """
+    user, workspace, client = _seed_member(db_conn, "stateless")
+    _project, issue = _seed_stateless_issue(db_conn, user, workspace)
+    stub = _StubProvider(
+        chunks=("done",),
+        interval=0.1,
+        tool_call=("get_issue", {"issue_id": str(issue["id"])}),
+    )
+    base = stub.start()
+    try:
+        _configure_llm(client, base)
+        _thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "completed"
+            else None,
+            what="stateless-issue turn completed",
+        )
+        returns = _tool_returns(row["model_messages"], "get_issue")
+        assert returns, (
+            "no get_issue tool-return in model_messages: "
+            f"{json.dumps(row['model_messages'])[:2000]}"
+        )
+        content = returns[0]["content"]
+        if isinstance(content, str):
+            content = json.loads(content)
+        assert content["id"] == str(issue["id"]), (
+            f"get_issue missed the stateless issue: {str(content)[:500]}"
+        )
+    finally:
+        stub.stop()
+
+
+def _subscribe_thread(rdb, thread_id):
+    """Subscribe to the thread channel; return the confirmed pubsub."""
+    channel = f"assistant:thread:{thread_id}"
+    pubsub = rdb.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(channel)
+    deadline = time.monotonic() + 10
+    while not pubsub.subscribed and time.monotonic() < deadline:
+        pubsub.get_message(timeout=1.0)
+    assert pubsub.subscribed, f"subscription to {channel} never confirmed"
+    return pubsub
+
+
+def _drain_channel(pubsub, timeout=30.0, silence=3.0):
+    """Collect published bodies until ``silence`` idle seconds or ``timeout``.
+
+    A missing publish fails only after the full timeout, so slow
+    assertions stay honest; the silence cut keeps the passing case fast.
+    """
+    bodies = []
+    deadline = time.monotonic() + timeout
+    quiet_until = None
+    while time.monotonic() < deadline:
+        message = pubsub.get_message(timeout=1.0)
+        if message is None:
+            if quiet_until is not None and time.monotonic() >= quiet_until:
+                break
+            continue
+        if message.get("type") != "message":
+            continue
+        bodies.append(message["data"])
+        quiet_until = time.monotonic() + silence
+    return bodies
+
+
+def _failed_event_rows(db_conn, turn_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, message_id, seq, created_at FROM assistant_event "
+            "WHERE turn_id = %s AND kind = 'turn_failed' ORDER BY id",
+            (turn_id,),
+        )
+        return cur.fetchall()
+
+
+def test_sweep_publishes_turn_failed_on_thread_channel(db_conn, broker_url):
+    """The sweep's ``turn_failed`` event is PUBLISHed on the thread channel.
+
+    Django persists the event and publishes it on commit (``_publish_by_id``);
+    the SSE live tail only reads Redis, so a silent sweep strands open
+    streams on a spinner (PIDASHCONV-1247). The subscription opens before
+    the stale turn exists, so whichever execution sweeps it — this publish
+    or the 30s beat — its frame is caught, exactly once on the solo worker.
+    """
+    user, workspace, _client = _seed_member(db_conn, "sweeppub")
+    thread_id = str(uuid.uuid4())
+    rdb = redis_helper.client()
+    pubsub = _subscribe_thread(rdb, thread_id)
+    try:
+        _trio_thread, turn_id, _msg = _seed_turn_trio(
+            db_conn, user, workspace, status="running",
+            started_at="2000-01-01T00:00:00Z", thread_id=thread_id,
+        )
+
+        celery_wire.publish(SWEEP, broker_url=broker_url)
+        wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="stale turn swept",
+        )
+        bodies = _drain_channel(pubsub)
+        assert len(bodies) == 1, f"expected one turn_failed publish, got {len(bodies)}"
+        raw = bodies[0]
+        parsed = json.loads(raw)
+        assert parsed["kind"] == "turn_failed"
+        assert parsed["thread"] == thread_id
+        assert parsed["payload"] == {
+            "turn_id": turn_id,
+            "error_code": TIMEOUT_CODE,
+            "detail": SWEEP_TIMEOUT_DETAIL,
+        }
+        assert list(parsed.keys()) == [
+            "id", "thread", "message", "seq", "kind", "payload", "created_at",
+        ]
+        assert raw == json.dumps(parsed), (
+            "publish bytes are json.dumps with default separators/escapes"
+        )
+        rows = _failed_event_rows(db_conn, turn_id)
+        assert len(rows) == 1, "exactly one turn_failed row per swept turn"
+        assert parsed["id"] == rows[0]["id"]
+        assert parsed["seq"] == rows[0]["seq"]
+        assert parsed["message"] == str(rows[0]["message_id"])
+        # The session timezone renders the stored stamp in local time;
+        # compare instants, not strings.
+        assert datetime.fromisoformat(parsed["created_at"]) == rows[0]["created_at"]
+        assert parsed["created_at"].endswith("+00:00")
+    finally:
+        pubsub.unsubscribe()
+        pubsub.close()
+        rdb.close()

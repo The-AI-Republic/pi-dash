@@ -8,6 +8,8 @@ Every action here requires a session (``BaseViewSet`` default): the
 unauthenticated cases are part of the suite's denied-permission tripwire.
 """
 
+import uuid
+
 import pytest
 
 pytestmark = pytest.mark.contract
@@ -187,3 +189,105 @@ def test_workspace_project_boards_broken_contract(anon_client, world):
     # the failure instead of silently "fixing" it; the real fix is a follow-up.
     response = anon_client.get(f"{BASE}/workspaces/{world['workspace']['slug']}/project-boards/")
     assert response.status_code >= 500
+
+
+def _link_label(db, seeder, world, issue_id, label_id):
+    row_id = uuid.uuid4().hex
+    db.execute(
+        "INSERT INTO issue_labels (id, workspace_id, project_id, issue_id, label_id, created_at, updated_at)"
+        " VALUES (%s,%s,%s,%s,%s,now(),now())",
+        (row_id, world["workspace"]["id"], world["project"]["id"], issue_id, label_id),
+    )
+    seeder.track.add("issue_labels", row_id)
+
+
+def _link_assignee(db, seeder, world, issue_id, user_id):
+    row_id = uuid.uuid4().hex
+    db.execute(
+        "INSERT INTO issue_assignees (id, workspace_id, project_id, issue_id, assignee_id, created_at, updated_at)"
+        " VALUES (%s,%s,%s,%s,%s,now(),now())",
+        (row_id, world["workspace"]["id"], world["project"]["id"], issue_id, user_id),
+    )
+    seeder.track.add("issue_assignees", row_id)
+
+
+def test_soft_deleted_label_hidden_from_intake_labels(user_client, world, seeder, db):
+    # PIDASHCONV-1263: the labels M2M is built from Label's default manager
+    # (SoftDeletionManager, db/mixins.py), so a soft-deleted label appears in
+    # neither `labels` nor `label_details`, on list or detail.
+    issue = seeder.create_issue(world["workspace"]["id"], world["project"]["id"], world["state"]["id"])
+    bridge = seeder.create_intake_issue(
+        world["workspace"]["id"], world["project"]["id"], world["intake"]["id"], issue["id"]
+    )
+    live = seeder.create_label(world["workspace"]["id"], world["project"]["id"], name="live label")
+    dead = seeder.create_label(world["workspace"]["id"], world["project"]["id"], name="deleted label")
+    db.execute("UPDATE labels SET deleted_at=now() WHERE id=%s", (dead["id"],))
+    _link_label(db, seeder, world, issue["id"], live["id"])
+    _link_label(db, seeder, world, issue["id"], dead["id"])
+
+    listed = user_client.get(_list_url(world))
+    assert listed.status_code == 200
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]["labels"] == [live["id"]]
+    assert [d["id"] for d in rows[0]["label_details"]] == [live["id"]]
+
+    got = user_client.get(_detail_url(world, bridge["id"]))
+    assert got.status_code == 200
+    assert got.json()["labels"] == [live["id"]]
+    assert [d["id"] for d in got.json()["label_details"]] == [live["id"]]
+
+
+def test_intake_labels_newest_first(user_client, world, seeder, db):
+    # Label.Meta.ordering = ("-created_at",) rides along on the prefetch
+    # queryset, so both arrays come back newest-first. created_at is pinned
+    # (not insertion order) so the expectation is deterministic.
+    issue = seeder.create_issue(world["workspace"]["id"], world["project"]["id"], world["state"]["id"])
+    bridge = seeder.create_intake_issue(
+        world["workspace"]["id"], world["project"]["id"], world["intake"]["id"], issue["id"]
+    )
+    older = seeder.create_label(world["workspace"]["id"], world["project"]["id"], name="older label")
+    newer = seeder.create_label(world["workspace"]["id"], world["project"]["id"], name="newer label")
+    db.execute("UPDATE labels SET created_at='2024-01-01T00:00:00Z' WHERE id=%s", (older["id"],))
+    db.execute("UPDATE labels SET created_at='2025-01-01T00:00:00Z' WHERE id=%s", (newer["id"],))
+    _link_label(db, seeder, world, issue["id"], older["id"])
+    _link_label(db, seeder, world, issue["id"], newer["id"])
+
+    listed = user_client.get(_list_url(world))
+    assert listed.status_code == 200
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]["labels"] == [newer["id"], older["id"]]
+    assert [d["name"] for d in rows[0]["label_details"]] == ["newer label", "older label"]
+
+    got = user_client.get(_detail_url(world, bridge["id"]))
+    assert got.status_code == 200
+    assert got.json()["labels"] == [newer["id"], older["id"]]
+    assert [d["name"] for d in got.json()["label_details"]] == ["newer label", "older label"]
+
+
+def test_intake_assignees_newest_first(user_client, world, seeder, db):
+    # User.Meta.ordering = ("-created_at",), same newest-first rule for the
+    # assignees M2M.
+    issue = seeder.create_issue(world["workspace"]["id"], world["project"]["id"], world["state"]["id"])
+    bridge = seeder.create_intake_issue(
+        world["workspace"]["id"], world["project"]["id"], world["intake"]["id"], issue["id"]
+    )
+    older = seeder.create_user()
+    newer = seeder.create_user()
+    db.execute("UPDATE users SET created_at='2024-01-01T00:00:00Z' WHERE id=%s", (older["id"],))
+    db.execute("UPDATE users SET created_at='2025-01-01T00:00:00Z' WHERE id=%s", (newer["id"],))
+    _link_assignee(db, seeder, world, issue["id"], older["id"])
+    _link_assignee(db, seeder, world, issue["id"], newer["id"])
+
+    listed = user_client.get(_list_url(world))
+    assert listed.status_code == 200
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]["assignees"] == [newer["id"], older["id"]]
+    assert [d["id"] for d in rows[0]["assignee_details"]] == [newer["id"], older["id"]]
+
+    got = user_client.get(_detail_url(world, bridge["id"]))
+    assert got.status_code == 200
+    assert got.json()["assignees"] == [newer["id"], older["id"]]
+    assert [d["id"] for d in got.json()["assignee_details"]] == [newer["id"], older["id"]]

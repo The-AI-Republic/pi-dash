@@ -66,6 +66,10 @@ jobs:
           -r apps/api/requirements/base.txt
           -r rust-api/contract-tests/requirements.txt
 
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
+
       - name: Start live Django server
         working-directory: apps/api
         run: |
@@ -164,6 +168,11 @@ jobs:
       # database; never a real secret) — the other oracles never touch BYOK.
       ASSISTANT_CRYPTO_BACKEND: fernet
       ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # PIDASHCONV-1248: the sweep honors a non-default hard limit — the
+      # oracle pins both sides of the resulting 960s cutoff. Only the
+      # assistant tasks read this key, and ancient-seeded turns stay stale
+      # under 900, so the other oracles in this job are unaffected.
+      ASSISTANT_TURN_HARD_LIMIT: "900"
       # D-08 event-tracking oracle (PIDASHCONV-1107): the Django worker
       # POSTs track_event captures to the harness PostHog sink
       # (POSTHOG_SINK_BASE default). Test-only key, ephemeral CI database.
@@ -284,7 +293,10 @@ jobs:
         # rust_job_queue table and the Rust worker, neither of which exists
         # in this Django-only job — they have their own *-rust jobs. Exclude
         # by glob so future replay suites are skipped here too.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py
+        # The S3 stall oracle (tasks_cleanup/test_s3_stall.py) needs a worker
+        # whose S3 endpoint is the test's black hole; this job's worker points
+        # at live S3, so it has its own stall job (PIDASHCONV-1291).
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py
 
       - name: Upload service logs on failure
         if: failure()

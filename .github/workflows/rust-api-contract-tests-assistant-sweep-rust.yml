@@ -90,6 +90,10 @@ jobs:
       # database; never a real secret).
       ASSISTANT_CRYPTO_BACKEND: fernet
       ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # PIDASHCONV-1248: the sweep honors a non-default hard limit — the
+      # replay pins both sides of the resulting 960s cutoff (pre-fix the
+      # worker sweeps the young turn and the test fails).
+      ASSISTANT_TURN_HARD_LIMIT: "900"
     steps:
       - uses: actions/checkout@v6
 

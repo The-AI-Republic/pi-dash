@@ -97,7 +97,8 @@ use pidash_services::auth_session::tasks::{
     MAGIC_REDIS_EXPIRY_SECS,
 };
 
-use crate::auth_session::render::render_csrf_failure;
+use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
+use crate::auth_session::throttle_ident;
 use crate::license::handlers_auth_forms::{email_is_valid, LOGIN_BACKEND};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -174,10 +175,20 @@ fn json_400(code: i32, message: &str, payload: &[(&str, ParamValue)]) -> Respons
 }
 
 /// `HttpResponseRedirect(url)`: 302 with `Location`, empty body.
+/// Django percent-encodes the URL first (`iri_to_uri`,
+/// `django/http/response.py:620`), so the raw `next_path` never reaches
+/// the wire. Past `MAX_URL_REDIRECT_LENGTH` characters the final
+/// `Location` answers 400 (`DisallowedRedirect`).
 fn redirect_302(location: String) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let too_long =
+        location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -240,6 +251,20 @@ fn parse_generate_email(content_type: &str, body: &[u8], is_json: bool) -> Optio
         let email = pairs.iter().rev().find(|(k, _)| k == "email")?;
         Some(normalise_email(&email.1))
     }
+}
+
+/// Media types with a DRF default parser on generate besides JSON:
+/// urlencoded (`FormParser`) and multipart (`MultiPartParser`). Used
+/// for the 415 branch; JSON is tested separately by the caller's
+/// `is_json` check.
+fn is_form_content_type(content_type: &str) -> bool {
+    if crate::auth_session::multipart::is_multipart(content_type) {
+        return true;
+    }
+    content_type.split(';').next().is_some_and(|mime| {
+        mime.trim()
+            .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+    })
 }
 
 /// `request.POST` as ordered pairs: multipart fields when the body is
@@ -556,19 +581,6 @@ impl Cache {
         }
         Ok(())
     }
-}
-
-/// DRF `AnonRateThrottle` ident (`throttling.py` `get_ident`): the
-/// `X-Forwarded-For` value with all whitespace stripped when present, else
-/// `REMOTE_ADDR` (which may itself be absent → the `"None"` ident Python's
-/// `%`-formatting produces).
-fn throttle_ident(headers: &axum::http::HeaderMap, peer: Option<String>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if !xff.is_empty() {
-            return xff.split_whitespace().collect();
-        }
-    }
-    peer.unwrap_or_else(|| "None".to_owned())
 }
 
 /// Evaluate the generate throttle *before* the handler body (DRF
@@ -933,15 +945,16 @@ fn generate_token() -> String {
 
 /// `set_password(uuid4().hex)` (`adapter/base.py:308-310`): PBKDF2-SHA256
 /// with a fresh 22-alphanumeric salt (`BasePasswordHasher.salt()`) at the
-/// fixture iteration count. Returns `(password_hash, raw_password)` — the
-/// raw value is discarded by the caller (it is never stored).
+/// pinned Django 4.2 iteration count. Returns `(password_hash,
+/// raw_password)` — the raw value is discarded by the caller (it is never
+/// stored).
 fn autoset_password() -> (String, String) {
     let raw = uuid::Uuid::new_v4().simple().to_string();
     let salt = django_random_string(22);
     let hash = pidash_auth::password::hash_password(
         &raw,
         &salt,
-        pidash_services::auth_session::models::PASSWORD_HASH_ITERATIONS,
+        pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
     (hash, raw)
 }
@@ -1649,6 +1662,13 @@ async fn generate(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let is_json = content_type.contains("json");
+    if !body.is_empty() && !is_json && !is_form_content_type(content_type) {
+        // DRF `_parse` (`request.py:325-355`): a non-empty body no
+        // parser handles is `UnsupportedMediaType`, echoed verbatim.
+        // Empty bodies parse to `{}` without a parser, so they keep
+        // the ported 500 quirk below (PIDASHCONV-1351).
+        return crate::auth_session::email::unsupported_media_type_response(content_type);
+    }
     let email = if is_json && !body.is_empty() {
         match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(value) => match value.as_object().and_then(|o| o.get("email")) {
@@ -2149,6 +2169,16 @@ async fn sign_up_space(
 mod tests {
     use super::*;
 
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_302(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_302("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
+
     fn test_hosts() -> (String, String, Vec<String>) {
         // Contract layout: app base http://localhost:3000, spaces base
         // http://localhost:8000/spaces/ (conftest + FX-AUTH-08 vectors).
@@ -2406,6 +2436,17 @@ mod tests {
             parse_generate_email("multipart/form-data; boundary=b", b"email=f%40x.com", false),
             Some("f@x.com".to_owned())
         );
+        // The 415 branch (PIDASHCONV-1351): only JSON-ish, urlencoded
+        // and multipart bodies parse; anything else with a non-empty
+        // body is `UnsupportedMediaType`.
+        assert!(is_form_content_type("application/x-www-form-urlencoded"));
+        assert!(is_form_content_type(
+            "application/x-www-form-urlencoded; charset=UTF-8"
+        ));
+        assert!(is_form_content_type("multipart/form-data; boundary=b"));
+        assert!(!is_form_content_type("text/plain;charset=UTF-8"));
+        assert!(!is_form_content_type("application/xml"));
+        assert!(!is_form_content_type(""));
     }
 
     #[test]

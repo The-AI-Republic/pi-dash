@@ -725,15 +725,16 @@ pub fn error_message_insert() -> String {
 
 /// `turn_failed` event row (`tasks.py:194-200`): kind, the error message id,
 /// and the turn/error payload. The event id is a `BigAutoField`, so the
-/// insert omits it. Like the message row, `created_at` is `auto_now_add`
-/// (`models.py:166`, `events.append_event`) with no database default, so `$5`
-/// binds it.
+/// insert omits it — but returns it (`RETURNING id`) for the post-commit
+/// publish, which re-reads the committed row by id like `_publish_by_id`.
+/// Like the message row, `created_at` is `auto_now_add` (`models.py:166`,
+/// `events.append_event`) with no database default, so `$5` binds it.
 pub fn turn_failed_event_insert() -> String {
     format!(
         "INSERT INTO {TABLE_EVENT} (thread_id, turn_id, seq, kind, message_id, payload, created_at) \
          VALUES ($1, $2, \
          (SELECT COALESCE(MAX(seq), 0) + 1 FROM {TABLE_EVENT} WHERE thread_id = $1), \
-         '{EVENT_TURN_FAILED}', $3, $4, $5)"
+         '{EVENT_TURN_FAILED}', $3, $4, $5) RETURNING id"
     )
 }
 
@@ -748,11 +749,14 @@ pub fn prune_turn_deltas_delete() -> String {
 // Seam boundary + turn driver (`tasks.py:299-367`)
 // --------------------------------------------------------------------------- //
 
-/// Infra failure inside the seam (DB/Redis/transport). The handler maps it
-/// to [`Verdict::Fail`]: Celery retries are disabled for the turn task
-/// (`max_retries=0`, `tasks.py:479`), so a crashed turn parks and the sweep
-/// recovers it — write tools are never re-executed by redelivery
-/// (`tasks.py:8-10`).
+/// Infra failure inside the seam (DB/Redis/transport). Outside the stream
+/// loop the handler maps it to [`Verdict::Fail`]: Celery retries are disabled
+/// for the turn task (`max_retries=0`, `tasks.py:479`), so a crashed turn
+/// parks and the sweep recovers it — write tools are never re-executed by
+/// redelivery (`tasks.py:8-10`). Inside the stream loop the driver fails the
+/// turn first (report, fail the open row, classify, fail the turn), like the
+/// `except Exception` arm (`tasks.py:356-361`); only a failure of that
+/// failure path still parks for the sweep.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeamError(pub String);
 
@@ -1048,16 +1052,58 @@ pub async fn drive_turn_with_deadline<S: TurnSeam>(
         // stream end (`tasks.py:231-233`: the `async for` body). A cancel
         // that lands after the last event — or before a stream that yields
         // nothing — is ignored and the turn completes.
-        if !matches!(item, StreamItem::End) && seam.is_cancelled(ctx.turn_id).await? {
-            report_runtime_failures(seam, &ctx, &toolsets).await?;
-            if let Some(action) = sink.fail_open(MSG_CANCELLED) {
-                perform(seam, &ctx, &mut open_row, &action).await?;
+        if !matches!(item, StreamItem::End) {
+            let cancelled = match seam.is_cancelled(ctx.turn_id).await {
+                Ok(cancelled) => cancelled,
+                // A seam failure inside the stream loop is a turn failure,
+                // not a crash (`tasks.py:356-361`): the handler raised out
+                // of `assistant.run`, so the run fails — report, fail the
+                // open row, classify, fail the turn.
+                Err(err) => {
+                    let fail_action = sink.fail_open(MSG_FAILED);
+                    return seam_failed(seam, &ctx, &toolsets, fail_action, &mut open_row, &err)
+                        .await;
+                }
+            };
+            if cancelled {
+                report_runtime_failures(seam, &ctx, &toolsets).await?;
+                if let Some(action) = sink.fail_open(MSG_CANCELLED) {
+                    perform(seam, &ctx, &mut open_row, &action).await?;
+                }
+                seam.cancel_turn(&ctx).await?;
+                return Ok(DriveResult::Cancelled);
             }
-            seam.cancel_turn(&ctx).await?;
-            return Ok(DriveResult::Cancelled);
         }
-        for action in sink.handle(&item, seam.now_ms()) {
-            perform(seam, &ctx, &mut open_row, &action).await?;
+        let actions = sink.handle(&item, seam.now_ms());
+        for (index, action) in actions.iter().enumerate() {
+            if let Err(err) = perform(seam, &ctx, &mut open_row, action).await {
+                // Same failure path as a provider error (`tasks.py:356-361`).
+                // A failed close is still open — Django clears `self.message`
+                // only after success (`tasks.py:281-286`), so `fail_open_row`
+                // retries the close as failed — hence the text of the failed
+                // close is reused for the failed one. Likewise a failed flush
+                // keeps its row text: `finalize_if_open` moves the text into
+                // the close pair up front while Django keeps `self.text`
+                // until the close succeeds, so an unperformed sibling close
+                // carries the text `fail_open_row` would close with.
+                let fail_action = match action {
+                    SinkAction::FinalizeRow { text, .. } => Some(SinkAction::FinalizeRow {
+                        text: text.clone(),
+                        status: MSG_FAILED,
+                    }),
+                    _ => actions[index + 1..]
+                        .iter()
+                        .find_map(|sibling| match sibling {
+                            SinkAction::FinalizeRow { text, .. } => Some(SinkAction::FinalizeRow {
+                                text: text.clone(),
+                                status: MSG_FAILED,
+                            }),
+                            _ => None,
+                        })
+                        .or_else(|| sink.fail_open(MSG_FAILED)),
+                };
+                return seam_failed(seam, &ctx, &toolsets, fail_action, &mut open_row, &err).await;
+            }
         }
         if matches!(item, StreamItem::End) {
             break;
@@ -1088,10 +1134,6 @@ async fn stream_failed<S: TurnSeam>(
     open_row: &mut Option<Uuid>,
     err: AgentError,
 ) -> Result<DriveResult, SeamError> {
-    report_runtime_failures(seam, ctx, toolsets).await?;
-    if let Some(action) = fail_action {
-        perform(seam, ctx, open_row, &action).await?;
-    }
     let (code, detail) = match err {
         AgentError::UsageLimit(detail) => (CODE_ITERATION_LIMIT.to_owned(), detail),
         // Typed-first (`tasks.py:443-451`): the seam already resolved the
@@ -1106,8 +1148,47 @@ async fn stream_failed<S: TurnSeam>(
             (code.to_owned(), detail.to_owned())
         }
     };
-    seam.fail_turn(ctx, &code, &detail).await?;
+    fail_open_row_and_turn(seam, ctx, toolsets, fail_action, open_row, &code, &detail).await?;
     Ok(DriveResult::Failed { code, detail })
+}
+
+/// Seam-failure exit: a DB/Redis/transport error from inside the stream loop
+/// (`_start_assistant_row` / `_emit_delta` / `_finalize_row` raising out of
+/// `streamer.handle`, `tasks.py:118-155 + 336-361`) takes the same path as a
+/// provider error — report, fail the open row, classify the seam text, fail
+/// the turn — instead of leaving the turn RUNNING for the sweep.
+async fn seam_failed<S: TurnSeam>(
+    seam: &S,
+    ctx: &TurnContext,
+    toolsets: &[ToolsetHandle],
+    fail_action: Option<SinkAction>,
+    open_row: &mut Option<Uuid>,
+    err: &SeamError,
+) -> Result<DriveResult, SeamError> {
+    let (code, detail) = classify_error(&err.0, None);
+    fail_open_row_and_turn(seam, ctx, toolsets, fail_action, open_row, code, detail).await?;
+    Ok(DriveResult::Failed {
+        code: code.to_owned(),
+        detail: detail.to_owned(),
+    })
+}
+
+/// Shared failure tail: report runtime tool failures, fail the open row
+/// (pre-computed by the caller), fail the turn with the given code/detail.
+async fn fail_open_row_and_turn<S: TurnSeam>(
+    seam: &S,
+    ctx: &TurnContext,
+    toolsets: &[ToolsetHandle],
+    fail_action: Option<SinkAction>,
+    open_row: &mut Option<Uuid>,
+    code: &str,
+    detail: &str,
+) -> Result<(), SeamError> {
+    report_runtime_failures(seam, ctx, toolsets).await?;
+    if let Some(action) = fail_action {
+        perform(seam, ctx, open_row, &action).await?;
+    }
+    seam.fail_turn(ctx, code, detail).await
 }
 
 /// Soft-limit exit (`tasks.py:486-489`, `SoftTimeLimitExceeded`): fail the
@@ -1183,8 +1264,12 @@ async fn perform<S: TurnSeam>(
             Ok(())
         }
         SinkAction::FinalizeRow { text, status } => {
-            if let Some(id) = open_row.take() {
+            // The id is released only after success: a failed close leaves
+            // the row open (Django clears `self.message` only after success,
+            // `tasks.py:281-286`), so the failure path can retry it as failed.
+            if let Some(id) = *open_row {
                 seam.finalize_row(ctx, id, text, status).await?;
+                *open_row = None;
             }
             Ok(())
         }
@@ -1524,6 +1609,10 @@ mod tests {
         assert!(ev.contains("'turn_failed'"));
         assert!(ev.contains("COALESCE(MAX(seq), 0) + 1"), "seq alloc: {ev}");
         assert!(ev.contains("created_at"), "event stamps created_at: {ev}");
+        assert!(
+            ev.contains("RETURNING id"),
+            "post-commit publish re-reads by id: {ev}"
+        );
 
         assert!(thread_lock_select().contains("FOR UPDATE"));
 
@@ -1631,6 +1720,15 @@ mod tests {
         pulls: Mutex<usize>,
         usage: Option<TurnUsage>,
         fail_emit: bool,
+        /// 1-based row-op index to fail once (`start_row`/`emit_delta`/
+        /// `finalize_row` in perform order); the failure-path writes that
+        /// follow succeed, like a transient fault that already cleared.
+        fail_row_op_at: Option<usize>,
+        row_ops: Mutex<usize>,
+        /// `is_cancelled` raises instead of answering.
+        fail_cancel_check: bool,
+        /// `fail_turn` raises (a failure path that cannot write).
+        fail_turn_write: bool,
         calls: Mutex<Vec<String>>,
     }
 
@@ -1657,8 +1755,26 @@ mod tests {
                     tool_calls: Some(0),
                 }),
                 fail_emit: false,
+                fail_row_op_at: None,
+                row_ops: Mutex::new(0),
+                fail_cancel_check: false,
+                fail_turn_write: false,
                 calls: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Next 1-based row-op index, for `fail_row_op_at` scripts.
+        fn next_row_op(&self) -> usize {
+            let mut ops = self.row_ops.lock().unwrap();
+            *ops += 1;
+            *ops
+        }
+
+        fn row_fault(&self, n: usize) -> Result<(), SeamError> {
+            if self.fail_row_op_at == Some(n) {
+                return Err(SeamError("boom: row write failed".to_owned()));
+            }
+            Ok(())
         }
 
         fn log(&self, entry: String) {
@@ -1694,6 +1810,9 @@ mod tests {
             Ok(self.claim)
         }
         async fn is_cancelled(&self, _t: Uuid) -> Result<bool, SeamError> {
+            if self.fail_cancel_check {
+                return Err(SeamError("boom: cancel read failed".to_owned()));
+            }
             match self.cancel_after {
                 Some(n) => Ok(*self.pulls.lock().unwrap() >= n),
                 None => Ok(false),
@@ -1772,6 +1891,7 @@ mod tests {
         async fn start_row(&self, _c: &TurnContext) -> Result<Uuid, SeamError> {
             let id = Uuid::new_v4();
             self.log(format!("start_row:{id}"));
+            self.row_fault(self.next_row_op())?;
             Ok(id)
         }
         async fn emit_delta(
@@ -1781,6 +1901,7 @@ mod tests {
             chunk: &str,
         ) -> Result<(), SeamError> {
             self.log(format!("emit_delta:{chunk}"));
+            self.row_fault(self.next_row_op())?;
             Ok(())
         }
         async fn finalize_row(
@@ -1791,6 +1912,7 @@ mod tests {
             status: &'static str,
         ) -> Result<(), SeamError> {
             self.log(format!("finalize_row:{status}:{text}"));
+            self.row_fault(self.next_row_op())?;
             Ok(())
         }
         async fn dump_messages(&self, _s: &FakeStream) -> Result<Value, SeamError> {
@@ -1819,6 +1941,9 @@ mod tests {
             detail: &str,
         ) -> Result<(), SeamError> {
             self.log(format!("fail_turn:{code}:{detail}"));
+            if self.fail_turn_write {
+                return Err(SeamError("boom: fail write failed".to_owned()));
+            }
             Ok(())
         }
         async fn cancel_turn(&self, _c: &TurnContext) -> Result<(), SeamError> {
@@ -2171,6 +2296,119 @@ mod tests {
         let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
         assert!(matches!(out, DriveResult::Failed { .. }));
         assert_eq!(seam.saw("emit_skipped:dead").len(), 1);
+    }
+
+    /// A seam DB error from a mid-stream row write is a turn failure, not a
+    /// crash (`tasks.py:356-361`): the open row fails, the seam text
+    /// classifies, the turn fails — the sweep never sees it (PIDASHCONV-1254).
+    #[tokio::test]
+    async fn drive_row_write_failure_fails_turn_at_once() {
+        let mut seam = FakeSeam::ok(vec![
+            StreamItem::TextDelta {
+                chunk: "hi".to_owned(),
+            },
+            StreamItem::TextDelta {
+                chunk: "yo".to_owned(),
+            },
+            StreamItem::End,
+        ]);
+        seam.fail_row_op_at = Some(2); // the delta flush after the row opened
+        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: CODE_INTERNAL.to_owned(),
+                detail: DETAIL_INTERNAL.to_owned(),
+            }
+        );
+        assert!(seam.saw("finalize_row:failed:hiyo").len() == 1);
+        assert!(seam.saw("fail_turn:internal:").len() == 1);
+        assert!(seam.saw("complete_turn").is_empty());
+        assert!(seam.saw("cancel_turn").is_empty());
+    }
+
+    /// The first row never opened, so there is nothing to close — Django's
+    /// `fail_open_row` is a no-op with `self.message is None`
+    /// (`tasks.py:289-292`).
+    #[tokio::test]
+    async fn drive_start_row_failure_fails_without_row_close() {
+        let mut seam = FakeSeam::ok(vec![StreamItem::TextDelta {
+            chunk: "hi".to_owned(),
+        }]);
+        seam.fail_row_op_at = Some(1);
+        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        assert!(matches!(out, DriveResult::Failed { .. }));
+        assert!(seam.saw("finalize_row:").is_empty());
+        assert_eq!(seam.saw("fail_turn:").len(), 1);
+    }
+
+    /// A failed flush keeps its row text: the close pair's unperformed
+    /// sibling close carries the accumulated text (`tasks.py:289-292` closes
+    /// with `self.text`, which a failed `_flush` leaves intact).
+    #[tokio::test]
+    async fn drive_close_pair_flush_failure_keeps_row_text() {
+        let mut seam = FakeSeam::ok(vec![
+            StreamItem::TextDelta {
+                chunk: "hi".to_owned(),
+            },
+            StreamItem::End,
+        ]);
+        seam.fail_row_op_at = Some(2); // the close pair's flush
+        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        assert!(matches!(out, DriveResult::Failed { .. }));
+        assert!(seam.saw("finalize_row:failed:hi").len() == 1);
+        assert!(
+            seam.saw("finalize_row:completed:").is_empty(),
+            "the sibling close never ran"
+        );
+        assert_eq!(seam.saw("fail_turn:").len(), 1);
+    }
+
+    /// A failed close is still open (`tasks.py:281-286` clears `self.message`
+    /// only after success), so the failure path retries it as failed.
+    #[tokio::test]
+    async fn drive_finalize_failure_retries_close_as_failed() {
+        let mut seam = FakeSeam::ok(vec![
+            StreamItem::TextDelta {
+                chunk: "hi".to_owned(),
+            },
+            StreamItem::End,
+        ]);
+        seam.fail_row_op_at = Some(3); // the completed close at stream end
+        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        assert!(matches!(out, DriveResult::Failed { .. }));
+        assert!(seam.saw("finalize_row:completed:hi").len() == 1);
+        assert!(seam.saw("finalize_row:failed:hi").len() == 1);
+        assert_eq!(seam.saw("fail_turn:").len(), 1);
+    }
+
+    /// The live seam swallows cancel-read errors as false; a seam that
+    /// surfaces one takes the same failure path as any other stream-loop
+    /// seam error (nothing streamed yet, so no row closes).
+    #[tokio::test]
+    async fn drive_cancel_check_failure_fails_turn() {
+        let mut seam = FakeSeam::ok(vec![StreamItem::TextDelta {
+            chunk: "hi".to_owned(),
+        }]);
+        seam.fail_cancel_check = true;
+        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        assert!(matches!(out, DriveResult::Failed { .. }));
+        assert!(seam.saw("start_row").is_empty());
+        assert_eq!(seam.saw("fail_turn:").len(), 1);
+    }
+
+    /// A failure path that cannot write is a crash, like Django's
+    /// `fail_open_row`/`_fail_turn` raising out of the `except` arm: the
+    /// driver returns the seam error and the sweep recovers the turn.
+    #[tokio::test]
+    async fn drive_seam_outage_still_parks_for_sweep() {
+        let mut seam = FakeSeam::ok(vec![StreamItem::TextDelta {
+            chunk: "hi".to_owned(),
+        }]);
+        seam.fail_row_op_at = Some(1);
+        seam.fail_turn_write = true;
+        let err = drive_turn(&seam, Uuid::new_v4()).await.unwrap_err();
+        assert_eq!(err, SeamError("boom: fail write failed".to_owned()));
     }
 
     #[test]

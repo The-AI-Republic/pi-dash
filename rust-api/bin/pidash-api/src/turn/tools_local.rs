@@ -1096,6 +1096,28 @@ pub async fn execute_create_issue<S: ToolStore>(
             &env.now,
         )
         .await?;
+    // The `Issue.save` post-save fire (`signals.py:74-108`): the
+    // receiver sees prior state None and the saved state, arms the
+    // clock and may dispatch an entry run. A stateless save (no
+    // states in the project at all) is a non-transition (`prev ==
+    // current`, `:79-80`) and drives nothing. The fire swallows
+    // handler failures with the verbatim log line — the save
+    // stands — and the tool result carries no run id (`:284`), so
+    // the outcome is dropped.
+    if let Some(state_id) = row.state_id {
+        store
+            .drive_create_transition(
+                &row.id,
+                pidash_services::orchestration::creation::StateView {
+                    id: state_id,
+                    name: row.state_name.clone().unwrap_or_default(),
+                    group: row.state_group.clone().unwrap_or_default(),
+                },
+                &actor,
+                &env.now,
+            )
+            .await?;
+    }
     let identifier = tool_identifier(&row.project_identifier, row.sequence_id);
     let link = row_link(deps, &row);
     store
@@ -2038,6 +2060,9 @@ mod tests {
         /// `drive_transition`, in call order (pins the locked-row
         /// `from_view`).
         transition_from: Mutex<Vec<Option<(Uuid, String, String)>>>,
+        /// `to_state` views received by `drive_create_transition`, in
+        /// call order (pins the saved-row target view).
+        transition_to: Mutex<Vec<(Uuid, String, String)>>,
         binding_configs: HashMap<(String, String, String), Value>,
         sync_creds: HashMap<(String, String), Value>,
         decrypt_map: HashMap<String, String>,
@@ -2308,6 +2333,7 @@ mod tests {
                 created_comments: Mutex::new(Vec::new()),
                 record_writes: Mutex::new(Vec::new()),
                 transition_from: Mutex::new(Vec::new()),
+                transition_to: Mutex::new(Vec::new()),
                 binding_configs: HashMap::new(),
                 sync_creds: HashMap::new(),
                 decrypt_map: HashMap::new(),
@@ -2864,6 +2890,22 @@ mod tests {
                 .unwrap()
                 .push(from_state.map(|state| (state.id, state.name, state.group)));
             Ok(self.transition_outcome.clone())
+        }
+
+        async fn drive_create_transition(
+            &self,
+            issue_id: &Uuid,
+            to_state: pidash_services::orchestration::creation::StateView,
+            _actor_id: &Uuid,
+            _now: &DateTime<chrono::Utc>,
+        ) -> Result<Option<TransitionOutcome>, StoreError> {
+            self.transitions.lock().unwrap().push(*issue_id);
+            self.transition_from.lock().unwrap().push(None);
+            self.transition_to
+                .lock()
+                .unwrap()
+                .push((to_state.id, to_state.name, to_state.group));
+            Ok(Some(self.transition_outcome.clone()))
         }
 
         async fn create_comment_row(
@@ -3569,6 +3611,63 @@ mod tests {
                 "url_path": format!("/acme/projects/{}/issues/{id}", uid(101)),
             })]
         );
+    }
+
+    #[tokio::test]
+    async fn create_issue_fires_post_save_transition() {
+        // `signals.py:74-108`: prior state None, the saved state, the
+        // receiver defaults. The outcome is dropped — the tool result
+        // carries no run id (`issues.py:284`).
+        let store = FixtureStore::standard();
+        let out = ok_value(
+            call(
+                &store,
+                "create_issue",
+                json!({
+                    "project_id": uid(101).to_string(),
+                    "name": "Triage me",
+                    "state_id": uid(202).to_string(),
+                }),
+            )
+            .await,
+        );
+        assert_eq!(out["created"], json!(true));
+        assert_eq!(out["state"], json!("In Progress"));
+        assert!(out.get("dispatched_run_id").is_none());
+        let id: Uuid = out["id"]
+            .as_str()
+            .expect("uuid id")
+            .parse()
+            .expect("uuid parses");
+        assert_eq!(*store.transitions.lock().unwrap(), vec![id]);
+        assert_eq!(*store.transition_from.lock().unwrap(), vec![None]);
+        assert_eq!(
+            *store.transition_to.lock().unwrap(),
+            vec![(uid(202), "In Progress".to_owned(), "started".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_issue_stateless_project_skips_transition() {
+        // No states in the project at all: a non-transition (`prev ==
+        // current`, `signals.py:79-80`) drives nothing.
+        let mut store = FixtureStore::standard();
+        store.states.insert(uid(101), Vec::new());
+        let out = ok_value(
+            call(
+                &store,
+                "create_issue",
+                json!({
+                    "project_id": uid(101).to_string(),
+                    "name": "Stateless",
+                }),
+            )
+            .await,
+        );
+        assert_eq!(out["created"], json!(true));
+        assert_eq!(out["state"], Value::Null);
+        assert!(store.transitions.lock().unwrap().is_empty());
+        assert!(store.transition_to.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -1468,6 +1468,54 @@ fn parse_body(raw: &[u8]) -> Result<Value, Response> {
     }
 }
 
+/// DRF type names for the non-object body error (`Serializer.to_internal_value`
+/// in `rest_framework/serializers.py`), as they appear in DRF's message.
+fn drf_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                "int"
+            } else {
+                "float"
+            }
+        }
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+/// Parse the request body the way DRF does for the preference serializer
+/// (`base.py:302-308`): an empty body is empty data; malformed JSON → 400
+/// `{"detail": ...}`; JSON `null` → 400 `{"non_field_errors": ["No data
+/// provided"]}` (the `errors` property's null edge case,
+/// `rest_framework/serializers.py:578-583`); any other non-object JSON value →
+/// 400 `{"non_field_errors": ["Invalid data. Expected a dictionary, but got
+/// <type>."]}`. Unlike `parse_body`, a non-object body is a client error here.
+#[allow(clippy::result_large_err)]
+fn read_serializer_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Response> {
+    if raw.is_empty() {
+        return Ok(serde_json::Map::new());
+    }
+    match serde_json::from_slice::<Value>(raw) {
+        Ok(Value::Null) => Err(Denial::BadJson(
+            serde_json::json!({ "non_field_errors": ["No data provided"] }),
+        )
+        .into_response()),
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(other) => Err(Denial::BadJson(serde_json::json!({
+            "non_field_errors": [format!(
+                "Invalid data. Expected a dictionary, but got {}.",
+                drf_type_name(&other)
+            )],
+        }))
+        .into_response()),
+        Err(error) => Err(Denial::BadDetail(format!("JSON parse error - {error}")).into_response()),
+    }
+}
+
 /// Validate `snoozed_till` like DRF's `DateTimeField` (default
 /// `iso-8601` input formats, `null=True` on the model so JSON null
 /// clears the column): null → `None`; RFC 3339 / naive
@@ -2509,12 +2557,9 @@ async fn preference_patch(
         Ok(raw) => raw,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let data = match parse_body(&raw) {
-        Ok(data) => data,
+    let fields = match read_serializer_body(&raw) {
+        Ok(fields) => fields,
         Err(response) => return response,
-    };
-    let Value::Object(fields) = data else {
-        return Denial::ServerError.into_response();
     };
     let patch = match compile_preference_patch(pool, &fields).await {
         Ok(patch) => patch,
