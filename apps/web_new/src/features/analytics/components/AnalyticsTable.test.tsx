@@ -8,6 +8,8 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { expectKeyboardReachable, pressEnter, tabTo } from "../../../testSupport/keyboard.js";
+
 import type { AnalyticsColumn } from "../lib/table.js";
 import { AnalyticsTable } from "./AnalyticsTable.js";
 
@@ -113,6 +115,27 @@ describe("AnalyticsTable", () => {
   it("omits the export action when the caller supplies no handler", () => {
     setup({ onExport: undefined });
     expect(screen.queryByRole("button", { name: "Export as csv" })).not.toBeInTheDocument();
+  });
+
+  it("reaches the export action by Tab and fires it on Enter with no content-key bindings", async () => {
+    const user = userEvent.setup();
+    const { onExport } = setup();
+    const table = screen.getByTestId("analytics-test-table");
+    const controls = expectKeyboardReachable(table);
+    const exportAction = screen.getByRole("button", { name: "Export as csv" });
+    expect(controls).toContain(exportAction);
+
+    await tabTo(user, exportAction);
+    expect(exportAction).toHaveFocus();
+    await pressEnter(user);
+    expect(onExport).toHaveBeenCalledWith(ROWS);
+
+    // Content keys with the action focused do not re-export or change rows.
+    for (const key of ["e", "x", "p", "m", "?"]) {
+      await user.keyboard(key);
+    }
+    expect(onExport).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole("row")).toHaveLength(3);
   });
 
   it("renders a custom first cell without adding it to the text content", () => {

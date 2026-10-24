@@ -9,6 +9,8 @@ import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { expectContentKeysInert, expectKeyboardReachable, pressEnter } from "../../../testSupport/keyboard.js";
+
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import type { PageExportHost } from "../lib/pageExportDialogRegistry.js";
 import type { SavedPageExport } from "../lib/savePageExport.js";
@@ -185,9 +187,26 @@ describe("PageExportDialog", () => {
     const confirm = screen.getByRole("button", { name: "Export" });
     confirm.focus();
     expect(document.activeElement).toBe(confirm);
-    await user.keyboard("{Enter}");
+    await pressEnter(user);
     await waitFor(() => expect(saveFile).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("leaves content keys inert while the dialog is open", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const saveFile = vi.fn(async () => ({ filename: "x.pdf" }));
+    render(<PageExportDialog host={HOST} open onClose={onClose} saveFile={saveFile} />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    const dialog = screen.getByRole("dialog", { name: "Export page" });
+    const snapshot = (): string => `${formatSelect().value}|${scopeSelect().value}|${sizeSelect()?.value ?? ""}`;
+    await expectContentKeysInert(user, snapshot);
+    expect(snapshot()).toBe("PDF|Everything|A4");
+    expect(saveFile).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(dialog).toBeInTheDocument();
   });
 
   it("orders every control for Tab with a visible focus ring", () => {
@@ -199,6 +218,7 @@ describe("PageExportDialog", () => {
     // several dialogs mount in one file, and NEWFRONT-773 proves live
     // keyboard order across surfaces in a real browser.
     const dialog = screen.getByRole("dialog", { name: "Export page" });
+    expectKeyboardReachable(dialog);
     const controls = [...dialog.querySelectorAll<HTMLElement>("button, select")];
     const labelOf = (control: HTMLElement): string => {
       const labelled = control.getAttribute("aria-label");

@@ -6,7 +6,7 @@
 // form: rows with states and download cells, live re-reads while work
 // runs, cursor paging, and skeleton/empty/error treatments.
 import * as React from "react";
-import { Avatar, Badge, Button, EmptyState, Skeleton } from "@pidash/kit";
+import { Avatar, Badge, Button, EmptyState, Skeleton, cn } from "@pidash/kit";
 import type { WorkspaceExport } from "@pidash/api-client";
 
 import { useExportsHistoryPage } from "../api/history.js";
@@ -38,6 +38,10 @@ function DownloadCell({ facts }: { facts: ExportHistoryRowFacts }): React.ReactE
         target="_blank"
         rel="noreferrer"
         aria-label={`Download export from ${facts.startedLabel}`}
+        className={cn(
+          "text-(--accent) underline-offset-2 hover:underline",
+          "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-(--focus-ring-color) focus-visible:outline-solid"
+        )}
       >
         {EXPORT_HISTORY_DOWNLOAD_LABEL}
       </a>

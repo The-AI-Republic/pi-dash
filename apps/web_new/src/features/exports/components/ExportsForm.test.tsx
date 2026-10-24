@@ -8,6 +8,8 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { expectContentKeysInert, expectKeyboardReachable, pressEnter, tabTo } from "../../../testSupport/keyboard.js";
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { getToastManager } from "../../../shared/shell/index.js";
 import { ExportsForm } from "./ExportsForm.js";
@@ -284,16 +286,24 @@ describe("ExportsForm", () => {
     const user = userEvent.setup();
     const { posts } = harness();
     renderForm();
+    const form = screen.getByRole("button", { name: "Export" }).closest("form") as HTMLFormElement;
+
+    // Every form control is Tab-reachable and carries the kit focus ring.
+    expectKeyboardReachable(form);
 
     await user.tab();
     expect(screen.getByRole("button", { name: "All projects" })).toHaveFocus();
     await user.tab();
     expect(screen.getByRole("button", { name: "CSV" })).toHaveFocus();
-    await user.tab();
     const submit = screen.getByRole("button", { name: "Export" });
+    await tabTo(user, submit);
     expect(submit).toHaveFocus();
-    await user.keyboard("{Enter}");
+    await pressEnter(user);
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(posts[0]?.body).toEqual({ provider: "csv", project: [], multiple: false });
+
+    // Content keys with the submit focused neither re-submit nor change the form.
+    await expectContentKeysInert(user, () => form.textContent ?? "");
+    expect(posts).toHaveLength(1);
   });
 });
