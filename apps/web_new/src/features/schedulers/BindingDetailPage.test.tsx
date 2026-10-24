@@ -274,16 +274,17 @@ describe("BindingDetailBody", () => {
   it("offers each run row as a link to the run detail", async () => {
     setup({ runs: page([runRow()]) });
     const history = await screen.findByRole("region", { name: "Run history" });
-    expect(within(history).getByRole("link", { name: "Oct 20, 2026, 9:00 AM" })).toHaveAttribute(
-      "href",
-      `/${SLUG}/projects/${PROJECT}/runners/runs/r1`
-    );
+    // The Started cell renders in the machine's own timezone, so the row is
+    // found by its timezone-independent pod cell instead of the link text.
+    const row = within(history).getByRole("row", { name: /Main pool/ });
+    expect(within(row).getByRole("link")).toHaveAttribute("href", `/${SLUG}/projects/${PROJECT}/runners/runs/r1`);
   });
 
   it("keeps the run link from firing the row navigation", async () => {
     const { user } = setup({ runs: page([runRow()]) });
     const history = await screen.findByRole("region", { name: "Run history" });
-    await user.click(within(history).getByRole("link", { name: "Oct 20, 2026, 9:00 AM" }));
+    const row = within(history).getByRole("row", { name: /Main pool/ });
+    await user.click(within(row).getByRole("link"));
     expect(navigate).not.toHaveBeenCalled();
   });
 
