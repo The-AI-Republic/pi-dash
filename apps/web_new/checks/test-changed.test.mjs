@@ -1,14 +1,24 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Self-test for the changed-tests runner: which changes are left out of the
-// run, how arguments reach vitest, and how the changed-file list is gathered.
+// Self-test for the changed-tests runner: how the selection becomes a vitest
+// run, which changes are reported as untested, and how the changed-file list
+// is gathered. test-impact.test.mjs covers the selection itself.
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { changedFilesSince, isCliEntry, main, parseArgs, planRun, skippedFiles } from "./test-changed.mjs";
+import {
+  changedFilesSince,
+  defaultReadBase,
+  isCliEntry,
+  main,
+  parseArgs,
+  planRun,
+  skippedFiles,
+} from "./test-changed.mjs";
 
 describe("skippedFiles", () => {
   it("leaves out inputs that reach tests without an import edge", () => {
@@ -63,64 +73,37 @@ describe("parseArgs", () => {
 });
 
 describe("planRun", () => {
-  it("swaps changed package files for the web_new files that use them", () => {
-    const impact = {
-      packageFiles: ["packages/kit/src/Button.tsx"],
-      consumers: ["apps/web_new/src/a.ts", "apps/web_new/src/b.ts"],
-    };
+  it("runs exactly the selected test files, as absolute paths", () => {
     expect(
-      planRun({
-        full: false,
-        vitestArgs: [],
-        changedFiles: ["packages/kit/src/Button.tsx", "apps/web_new/src/a.ts"],
-        root: "/repo",
-        impact,
-      }).args
-    ).toEqual(["related", "--run", "--passWithNoTests", "/repo/apps/web_new/src/a.ts", "/repo/apps/web_new/src/b.ts"]);
-  });
-
-  it("passes the changed files to vitest related as absolute paths", () => {
-    expect(
-      planRun({ full: false, vitestArgs: ["--coverage"], changedFiles: ["apps/web_new/src/a.ts"], root: "/repo" })
+      planRun({ full: false, vitestArgs: ["--coverage"], tests: ["apps/web_new/src/a.test.ts"], root: "/repo" })
     ).toEqual({
       mode: "changed",
       reason: null,
-      skipped: [],
-      args: ["related", "--run", "--passWithNoTests", "--coverage", "/repo/apps/web_new/src/a.ts"],
+      args: ["run", "--passWithNoTests", "--coverage", "/repo/apps/web_new/src/a.test.ts"],
     });
   });
 
-  it("runs only the source changes when a config or manifest changed too", () => {
-    expect(
-      planRun({
-        full: false,
-        vitestArgs: [],
-        changedFiles: ["apps/web_new/vitest.config.ts", "apps/web_new/src/x.ts", "pnpm-lock.yaml"],
-        root: "/repo",
-      })
-    ).toEqual({
-      mode: "changed",
+  it("runs nothing when nothing was selected", () => {
+    expect(planRun({ full: false, vitestArgs: [], tests: [], root: "/repo" })).toEqual({
+      mode: "none",
       reason: null,
-      skipped: ["apps/web_new/vitest.config.ts", "pnpm-lock.yaml"],
-      args: ["related", "--run", "--passWithNoTests", "/repo/apps/web_new/src/x.ts"],
+      args: null,
     });
   });
 
-  it("runs the whole suite when too many files changed for one command line", () => {
-    const changedFiles = Array.from({ length: 1001 }, (_, i) => `apps/web_new/src/f${i}.ts`);
-    expect(planRun({ full: false, vitestArgs: ["--coverage"], changedFiles, root: "/repo" })).toEqual({
+  it("runs the whole suite when too many test files were selected for one command line", () => {
+    const tests = Array.from({ length: 1001 }, (_, i) => `apps/web_new/src/f${i}.test.ts`);
+    expect(planRun({ full: false, vitestArgs: ["--coverage"], tests, root: "/repo" })).toEqual({
       mode: "full",
-      reason: "1001 changed files",
-      skipped: [],
+      reason: "1001 test files selected",
       args: ["run", "--coverage"],
     });
   });
 
   it("runs the whole suite on --full", () => {
-    expect(planRun({ full: true, vitestArgs: ["--coverage"], changedFiles: [], root: "" })).toEqual({
+    expect(planRun({ full: true, vitestArgs: ["--coverage"], tests: [], root: "" })).toEqual({
       mode: "full",
       reason: "--full",
-      skipped: [],
       args: ["run", "--coverage"],
     });
   });
@@ -162,117 +145,128 @@ describe("changedFilesSince", () => {
 });
 
 describe("main", () => {
-  it("narrows a package change to the web_new files that import what it affects", () => {
-    const tree = {
-      "packages/kit/src/index.ts": 'export { Button } from "./Button";\nexport { Avatar } from "./Avatar";',
-      "packages/kit/src/Button.tsx": "export const Button = 1;",
-      "packages/kit/src/Avatar.tsx": "export const Avatar = 1;",
-      "apps/web_new/src/uses-button.tsx": 'import { Button } from "@pidash/kit";',
-      "apps/web_new/src/uses-avatar.tsx": 'import { Avatar } from "@pidash/kit";',
-    };
-    const { git, calls } = fakeGit({
-      diff: "packages/kit/src/Button.tsx\npackages/kit/src/index.ts",
-      tracked: Object.keys(tree).join("\n"),
-      base: { "packages/kit/src/index.ts": tree["packages/kit/src/index.ts"] },
-    });
-    const runs = [];
-    const logs = [];
-    main([], {
-      git,
-      runVitest: (args) => (runs.push(args), 0),
-      log: (line) => logs.push(line),
-      read: (file) => tree[file] ?? null,
-    });
-    expect(calls).toContain("-C /repo show mb123:packages/kit/src/index.ts");
-    expect(runs).toEqual([["related", "--run", "--passWithNoTests", "/repo/apps/web_new/src/uses-button.tsx"]]);
-    expect(logs[1]).toBe(
-      "test:changed: 2 package file(s) changed; names affected: @pidash/kit:Button; used by 1 web_new file(s)"
-    );
-  });
+  const tree = {
+    "packages/kit/src/index.ts": 'export { Button } from "./Button";\nexport { Avatar } from "./Avatar";',
+    "packages/kit/src/Button.tsx": "export const Button = 1;",
+    "packages/kit/src/Avatar.tsx": "export const Avatar = 1;",
+    "apps/web_new/src/uses-button.test.tsx": 'import { Button } from "@pidash/kit";',
+    "apps/web_new/src/uses-avatar.test.tsx": 'import { Avatar } from "@pidash/kit";',
+  };
+  const tracked = Object.keys(tree).join("\n");
+  const read = (file) => tree[file] ?? null;
+  const baseReads = [];
+  const readBaseFiles = (root, base, files) => (
+    baseReads.push([root, base, files]), new Map(files.map((file) => [file, tree[file] ?? null]))
+  );
+  const env = {};
 
-  it("reads the working tree from disk and treats an entry file new since the base as all new names", () => {
-    const root = mkdtempSync(join(tmpdir(), "test-changed-"));
-    const tree = {
-      "packages/kit/src/index.ts": 'export { Button } from "./Button";',
-      "packages/kit/src/Button.tsx": "export const Button = 1;",
-      "apps/web_new/src/uses-button.tsx": 'import { Button } from "@pidash/kit";',
-    };
-    for (const [file, text] of Object.entries(tree)) {
-      mkdirSync(join(root, dirname(file)), { recursive: true });
-      writeFileSync(join(root, file), text);
-    }
-    const fake = fakeGit({
-      diff: "packages/kit/src/index.ts",
-      tracked: [...Object.keys(tree), "apps/web_new/src/gone.ts"].join("\n"),
-    });
-    const git = (args) => (args[0] === "rev-parse" ? root : fake.git(args));
-    const runs = [];
-    main([], { git, runVitest: (args) => (runs.push(args), 0), log: () => {} });
-    expect(runs).toEqual([["related", "--run", "--passWithNoTests", join(root, "apps/web_new/src/uses-button.tsx")]]);
-  });
-
-  it("lists at most 12 affected names and says when there are none", () => {
-    const names = Array.from({ length: 13 }, (_, i) => `N${i}`);
-    const tree = {
-      "packages/api-client/src/index.ts": `export { ${names.join(", ")} } from "./c";`,
-      "packages/api-client/src/c.ts": names.map((name) => `export const ${name} = 1;`).join("\n"),
-    };
-    const many = [];
-    main([], {
-      git: fakeGit({ diff: "packages/api-client/src/c.ts", tracked: Object.keys(tree).join("\n") }).git,
-      runVitest: () => 0,
-      log: (line) => many.push(line),
-      read: (file) => tree[file] ?? null,
-    });
-    expect(many[1]).toContain("@pidash/api-client:N8, … (13); used by 0 web_new file(s)");
-    const none = [];
-    main([], {
-      git: fakeGit({ diff: "packages/kit/src/kit.css" }).git,
-      runVitest: () => 0,
-      log: (line) => none.push(line),
-      read: () => null,
-    });
-    expect(none[1]).toBe("test:changed: 1 package file(s) changed; names affected: none; used by 0 web_new file(s)");
-  });
-
-  it("defaults the base to the merge base with origin/web-new-dev and runs affected tests", () => {
-    const { git, calls } = fakeGit({ diff: "apps/web_new/src/a.ts" });
+  it("defaults the base to the merge base, runs the tests the change reaches and returns vitest's status", () => {
+    const { git, calls } = fakeGit({ diff: "packages/kit/src/Button.tsx", tracked });
     const runs = [];
     const logs = [];
     const status = main(["--coverage"], {
       git,
-      runVitest: (args) => (runs.push(args), 0),
+      runVitest: (args) => (runs.push(args), 1),
       log: (line) => logs.push(line),
+      read,
+      readBaseFiles,
+      env,
     });
-    expect(status).toBe(0);
+    expect(status).toBe(1);
     expect(calls[0]).toBe("merge-base HEAD origin/web-new-dev");
-    expect(runs).toEqual([["related", "--run", "--passWithNoTests", "--coverage", "/repo/apps/web_new/src/a.ts"]]);
-    expect(logs).toEqual(["test:changed: tests affected by 1 file(s) changed since mb123"]);
+    expect(baseReads).toEqual([["/repo", "mb123", ["packages/kit/src/Button.tsx"]]]);
+    expect(runs).toEqual([["run", "--passWithNoTests", "--coverage", "/repo/apps/web_new/src/uses-button.test.tsx"]]);
+    expect(logs).toEqual(["test:changed: 1 file(s) changed since mb123 reach 1 test file(s)"]);
   });
 
-  it("uses an explicit base, reports the files it leaves out, and returns vitest's status", () => {
-    const { git, calls } = fakeGit({ diff: "apps/web_new/vitest.config.ts" });
+  it("uses an explicit base, reports untested inputs and runs nothing when no test is reached", () => {
+    const { git, calls } = fakeGit({ diff: "apps/web_new/vitest.config.ts", tracked });
     const runs = [];
     const logs = [];
     const status = main(["--base", "HEAD^1"], {
       git,
       runVitest: (args) => (runs.push(args), 1),
       log: (line) => logs.push(line),
+      read,
+      readBaseFiles,
+      env,
     });
-    expect(status).toBe(1);
+    expect(status).toBe(0);
     expect(calls).not.toContain("merge-base HEAD origin/web-new-dev");
-    expect(runs).toEqual([["related", "--run", "--passWithNoTests"]]);
+    expect(runs).toEqual([]);
     expect(logs).toEqual([
-      "test:changed: tests affected by 1 file(s) changed since HEAD^1",
+      "test:changed: 1 file(s) changed since HEAD^1 reach 0 test file(s)",
       "test:changed: no import edge, left to the scheduled full suite: apps/web_new/vitest.config.ts",
     ]);
   });
 
-  it("reports why it runs the whole suite for a very large diff", () => {
-    const diff = Array.from({ length: 1001 }, (_, i) => `apps/web_new/src/f${i}.ts`).join("\n");
+  it("reads the working tree from disk by default", () => {
+    const root = mkdtempSync(join(tmpdir(), "test-changed-"));
+    for (const [file, text] of Object.entries(tree)) {
+      mkdirSync(join(root, dirname(file)), { recursive: true });
+      writeFileSync(join(root, file), text);
+    }
+    const fake = fakeGit({ diff: "packages/kit/src/Avatar.tsx", tracked: `${tracked}\napps/web_new/src/gone.ts` });
+    const git = (args) => (args[0] === "rev-parse" ? root : fake.git(args));
+    const runs = [];
+    main([], { git, runVitest: (args) => (runs.push(args), 0), log: () => {}, env });
+    expect(runs).toEqual([["run", "--passWithNoTests", join(root, "apps/web_new/src/uses-avatar.test.tsx")]]);
+  });
+
+  it("reports why it runs the whole suite when too many test files are reached", () => {
+    const many = Object.fromEntries(
+      Array.from({ length: 1001 }, (_, i) => [
+        `apps/web_new/src/t${i}.test.ts`,
+        'import { Button } from "@pidash/kit";',
+      ])
+    );
+    const big = { ...tree, ...many };
     const logs = [];
-    main([], { git: fakeGit({ diff }).git, runVitest: () => 0, log: (line) => logs.push(line) });
-    expect(logs).toEqual(["test:changed: full suite (1001 changed files since mb123)"]);
+    const runs = [];
+    main([], {
+      git: fakeGit({ diff: "packages/kit/src/Button.tsx", tracked: Object.keys(big).join("\n") }).git,
+      runVitest: (args) => (runs.push(args), 0),
+      log: (line) => logs.push(line),
+      read: (file) => big[file] ?? null,
+      readBaseFiles,
+      env,
+    });
+    expect(logs).toEqual(["test:changed: full suite (1002 test files selected since mb123)"]);
+    expect(runs).toEqual([["run"]]);
+  });
+
+  it("says when the change reaches the test setup file", () => {
+    const setup = { ...tree, "apps/web_new/src/test-setup.ts": 'import { Button } from "@pidash/kit";' };
+    const logs = [];
+    main([], {
+      git: fakeGit({ diff: "packages/kit/src/Button.tsx", tracked: Object.keys(setup).join("\n") }).git,
+      runVitest: () => 0,
+      log: (line) => logs.push(line),
+      read: (file) => setup[file] ?? null,
+      readBaseFiles,
+      env,
+    });
+    expect(logs.at(-1)).toBe(
+      "test:changed: the change reaches src/test-setup.ts, which every test loads; left to the scheduled full suite"
+    );
+  });
+
+  it("resolves @pidash/edition the way vitest does", () => {
+    const edition = {
+      ...tree,
+      "apps/web_new/src/core/edition/cloud.ts": "export const edition = 2;",
+      "apps/web_new/src/edition.test.ts": 'import { edition } from "@pidash/edition";',
+    };
+    const runs = [];
+    main([], {
+      git: fakeGit({ diff: "apps/web_new/src/core/edition/cloud.ts", tracked: Object.keys(edition).join("\n") }).git,
+      runVitest: (args) => (runs.push(args), 0),
+      log: () => {},
+      read: (file) => edition[file] ?? null,
+      readBaseFiles,
+      env: { PIDASH_EDITION_MODULE: join(process.cwd(), "src/core/edition/oss.ts") },
+    });
+    expect(runs).toEqual([]);
   });
 
   it("skips the diff entirely on --full", () => {
@@ -284,12 +278,36 @@ describe("main", () => {
   });
 });
 
+describe("defaultReadBase", () => {
+  it("reads each file at the base in one batch, null where it did not exist", () => {
+    const root = mkdtempSync(join(tmpdir(), "test-changed-git-"));
+    const git = (...args) => execFileSync("git", ["-C", root, ...args], { stdio: "ignore" });
+    git("init", "-q");
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src/a.ts"), "export const a = 1;\n");
+    writeFileSync(join(root, "src/é.ts"), "export const é = 'ü';\n");
+    git("add", ".");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base");
+    expect(defaultReadBase(root, "HEAD", ["src/a.ts", "src/new.ts", "src/é.ts"])).toEqual(
+      new Map([
+        ["src/a.ts", "export const a = 1;\n"],
+        ["src/new.ts", null],
+        ["src/é.ts", "export const é = 'ü';\n"],
+      ])
+    );
+    expect(defaultReadBase(root, "HEAD", [])).toEqual(new Map());
+  });
+
+  it("returns nothing when git cannot answer", () => {
+    expect(defaultReadBase(mkdtempSync(join(tmpdir(), "not-a-repo-")), "HEAD", ["a.ts"])).toEqual(new Map());
+  });
+});
+
 describe("main with the real git", () => {
   it("diffs this checkout against an explicit base", () => {
-    const runs = [];
-    main(["--base", "HEAD"], { runVitest: (args) => (runs.push(args), 0), log: () => {} });
-    expect(runs).toHaveLength(1);
-    expect(runs[0].slice(0, 2)).toEqual(["related", "--run"]);
+    const logs = [];
+    expect(main(["--base", "HEAD"], { runVitest: () => 0, log: (line) => logs.push(line) })).toBe(0);
+    expect(logs[0]).toMatch(/^test:changed: \d+ file\(s\) changed since HEAD reach \d+ test file\(s\)$/);
   });
 });
 
