@@ -1953,7 +1953,7 @@ mod tests {
         );
         assert_eq!(entries, expected);
         assert_eq!(agent_run::COLUMNS.len(), 41);
-        assert_eq!(runner_cols::COLUMNS.len(), 30);
+        assert_eq!(runner_cols::COLUMNS.len(), 32);
     }
 
     #[test]

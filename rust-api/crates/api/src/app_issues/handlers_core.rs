@@ -126,7 +126,7 @@ use pidash_services::app_issues::serializers_engage::{
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
 use pidash_services::dispatch::admission::{
     managed_runner_availability, LlmProfile, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL,
-    HEARTBEAT_GRACE_SECS, ONLINE_MANAGED_RUNNER_SQL,
+    ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL, HEARTBEAT_GRACE_SECS, ONLINE_MANAGED_RUNNER_SQL,
 };
 use pidash_services::dispatch::policy::{
     cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
@@ -2841,6 +2841,22 @@ async fn online_runner(
     Ok(row.is_some())
 }
 
+/// The paused tiebreaker (`policy.py:88-91`, `09738d222`).
+async fn paused_runner(
+    pool: &sqlx::PgPool,
+    user_id: &Uuid,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(i32,)> = sqlx::query_as(ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.is_some())
+}
+
 // ---------------------------------------------------------------------------
 // `validate()` driver: attrs + probes + `issue_create_validate`
 // ---------------------------------------------------------------------------
@@ -3047,6 +3063,7 @@ async fn run_validate(
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
+    let mut paused_exists = false;
     let mut executor_returns = false;
     let viewer = UserFlags {
         is_active: actor.user_active,
@@ -3118,6 +3135,19 @@ async fn run_validate(
                                             )
                                             .await
                                             .map_err(|_| db_error())?;
+                                            // `09738d222`: the paused
+                                            // tiebreaker runs only when
+                                            // nothing is online.
+                                            if !online_exists {
+                                                paused_exists = paused_runner(
+                                                    pool,
+                                                    &actor.user_id,
+                                                    &project.project_id,
+                                                    &project.workspace_id,
+                                                )
+                                                .await
+                                                .map_err(|_| db_error())?;
+                                            }
                                         }
                                     }
                                 }
@@ -3127,6 +3157,7 @@ async fn run_validate(
                                     || llm_profile.clone(),
                                     enrolled_exists,
                                     online_exists,
+                                    paused_exists,
                                 );
                                 if !verdict.available
                                     && verdict.reason_code
@@ -3241,6 +3272,7 @@ async fn run_validate(
         llm_profile: &|| llm_profile.clone(),
         enrolled_exists: &|| enrolled_exists,
         online_exists: &|| online_exists,
+        paused_exists: &|| paused_exists,
     };
     let ctx = ValidateContext {
         project_id,

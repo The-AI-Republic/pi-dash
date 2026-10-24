@@ -95,7 +95,8 @@ use pidash_services::dispatch::{
     resolve_executor_kind, user_has_llm_config, AdmissionCache, CloudAgentAdmissionError,
     CloudAgentUnavailable, CloudCapabilityUnavailable, DeferredConsume, LlmProfile,
     ResolveExecutorError, UserFlags, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL,
-    GITHUB_BINDING_EXISTS_SQL, ONLINE_MANAGED_RUNNER_SQL,
+    ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL, GITHUB_BINDING_EXISTS_SQL,
+    ONLINE_MANAGED_RUNNER_SQL,
 };
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason, ManagedRunnerUnavailable};
@@ -220,8 +221,8 @@ pub fn event_cap_decision(count: i64, max_events: i64, marker_exists: bool) -> E
 /// The single `events_truncated` marker kind (`events.py:20-21`).
 pub const EVENTS_TRUNCATED_KIND: &str = "events_truncated";
 
-/// `_MANAGED_REFUSAL_DETAIL` (`creation.py:135-145`) with the
-/// `.get(reason, ...)` default (`creation.py:132`).
+/// `_MANAGED_REFUSAL_DETAIL` (`creation.py:135-147`, `09738d222` adds
+/// the paused row) with the `.get(reason, ...)` default (`creation.py:132`).
 pub fn managed_refusal_detail(reason: &str) -> &'static str {
     match reason {
         "managed_runner_disabled" => "Pi Dash Agent is not enabled on this instance.",
@@ -235,6 +236,9 @@ pub fn managed_refusal_detail(reason: &str) -> &'static str {
              Pi Dash AI and the Cloud Agent keep using your own key."
         }
         "no_managed_runner_for_project" => "This project has no Pi Dash Agent on your desktop yet.",
+        "managed_runner_paused" => {
+            "Your Pi Dash Agent for this project is paused. Resume it to run here."
+        }
         _ => "Pi Dash Agent is not available",
     }
 }
@@ -604,6 +608,22 @@ async fn online_managed_runner_id(
         .await
 }
 
+/// The paused tiebreaker (`policy.py:88-91`, `09738d222`): whether the
+/// viewer owns any paused bundled runner on the project's pod.
+async fn paused_enrolled_exists(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    project: &ProjectScope,
+    owner_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let found = sqlx::query_scalar::<_, i32>(ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+        .bind(owner_id)
+        .bind(project.project_id)
+        .bind(project.workspace_id)
+        .fetch_optional(executor)
+        .await?;
+    Ok(found.is_some())
+}
+
 async fn latest_enrolled_runner_id(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     project: &ProjectScope,
@@ -767,15 +787,16 @@ where
     let user = inputs.actor.map(|actor| &actor.flags);
     // Gate-order mirror (`managed_runner/policy.py:76-96`): the kill switch,
     // viewer-validity and profile gates return before any query, so the
-    // enrolled/online reads run only when every earlier gate passes — and the
-    // online read only when enrolled holds (`:92-95`). The stashed profile
-    // feeds the L4 call below, so the seam is still consulted exactly once,
-    // exactly when the path reaches it.
+    // enrolled/online/paused reads run only when every earlier gate passes —
+    // the online read only when enrolled holds (`:92-95`), the paused probe
+    // only when enrolled holds but nothing is online (`09738d222`). The
+    // stashed profile feeds the L4 call below, so the seam is still consulted
+    // exactly once, exactly when the path reaches it.
     let pre_gates_pass = managed_runner_is_enabled(managed)
         && matches!(user, Some(flags) if flags.is_active && !flags.is_bot);
     let profile = pre_gates_pass.then(llm_profile);
     let profile_available = profile.as_ref().is_some_and(|profile| profile.available);
-    let (enrolled, online) = match (inputs.actor, profile_available) {
+    let (enrolled, online, paused) = match (inputs.actor, profile_available) {
         (Some(actor), true) => {
             let enrolled = enrolled_exists(&mut *conn, inputs.project, actor.id).await?;
             let online = if enrolled {
@@ -786,14 +807,21 @@ where
             } else {
                 false
             };
-            (enrolled, online)
+            // `09738d222`: the paused probe runs only when a runner is
+            // enrolled but none is online.
+            let paused = if enrolled && !online {
+                paused_enrolled_exists(&mut *conn, inputs.project, actor.id).await?
+            } else {
+                false
+            };
+            (enrolled, online, paused)
         }
-        (None, _) | (Some(_), false) => (false, false),
+        (None, _) | (Some(_), false) => (false, false, false),
     };
     // The fallback profile is dead on arrival: L4 re-evaluates these same
     // gates and returns before consulting it on every path where `profile` is
     // `None`. Outcomes are identical to the un-mirrored call; only the query
-    // stream changes (0-2 reads instead of always 2).
+    // stream changes (0-3 reads instead of always 2).
     let verdict = managed_runner_availability(
         managed,
         user,
@@ -805,6 +833,7 @@ where
         },
         enrolled,
         online,
+        paused,
     );
     // The re-queries (`creation.py:117,123,125`): the available path and the
     // transient check re-read rather than reuse the verdicts.
@@ -1263,6 +1292,10 @@ mod tests {
             (
                 "no_managed_runner_for_project",
                 "This project has no Pi Dash Agent on your desktop yet.",
+            ),
+            (
+                "managed_runner_paused",
+                "Your Pi Dash Agent for this project is paused. Resume it to run here.",
             ),
         ] {
             assert_eq!(details[reason], expected, "fixture row {reason}");

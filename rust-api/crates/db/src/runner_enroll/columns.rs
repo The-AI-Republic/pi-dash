@@ -287,7 +287,8 @@ pub mod runner {
     pub const TABLE: &str = "runner";
     /// Default ordering (`Meta.ordering`, `:480`).
     pub const ORDERING: &[&str] = &["-last_heartbeat_at", "-created_at"];
-    /// Columns in Django field-definition order (`:394-476`).
+    /// Columns in Django field-definition order (`:394-476` plus the
+    /// `09738d222` operator-pause pair, migration `0031_runner_paused`).
     pub const COLUMNS: &[&str] = &[
         "id",
         "owner_id",
@@ -319,6 +320,8 @@ pub mod runner {
         "updated_at",
         "revoked_at",
         "revoked_reason",
+        "paused_at",
+        "paused_by_id",
     ];
     /// Django field defaults in [`COLUMNS`] order (`None` = no default).
     pub const DEFAULTS: &[Option<&str>] = &[
@@ -352,6 +355,8 @@ pub mod runner {
         None,            // updated_at (auto_now)
         None,            // revoked_at
         Some(""),        // revoked_reason
+        None,            // paused_at (NULL = not paused)
+        None,            // paused_by_id (SET_NULL)
     ];
     /// Enrollment cap (`MAX_PER_USER`, `:392`). Enforced outside the
     /// model by `matcher.can_register_another` (`count_active < 5`;
