@@ -37,6 +37,7 @@ beforeEach(() => {
     cycleKeys.detailedProgress("acme", PROJECT, CYCLE),
     cycleKeys.analytics("acme", PROJECT, CYCLE, "issues"),
     cycleKeys.analytics("acme", PROJECT, CYCLE, "points"),
+    cycleKeys.heroIssues("acme", PROJECT, CYCLE),
     cycleKeys.archived("acme", PROJECT),
     cycleKeys.archivedDetail("acme", PROJECT, CYCLE),
     cycleKeys.workspaceCycles("acme"),
@@ -68,6 +69,7 @@ describe("invalidateCycleReads", () => {
     expect(invalidated(cycleKeys.detailedProgress("acme", PROJECT, CYCLE))).toBe(true);
     expect(invalidated(cycleKeys.analytics("acme", PROJECT, CYCLE, "issues"))).toBe(true);
     expect(invalidated(cycleKeys.analytics("acme", PROJECT, CYCLE, "points"))).toBe(true);
+    expect(invalidated(cycleKeys.heroIssues("acme", PROJECT, CYCLE))).toBe(true);
     expect(invalidated(cycleKeys.list("acme", PROJECT))).toBe(false);
     expect(invalidated(cycleKeys.archivedDetail("acme", PROJECT, CYCLE))).toBe(false);
     expect(invalidated(cycleKeys.workspaceCycles("acme"))).toBe(false);

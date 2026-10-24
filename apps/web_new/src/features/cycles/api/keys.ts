@@ -17,6 +17,9 @@ export const cycleKeys = {
   list: (workspaceSlug: string, projectId: string) => [...cycleKeys.all(workspaceSlug), "list", projectId] as const,
   /** Hero's current-cycle read (the only cycle_view=current caller). */
   hero: (workspaceSlug: string, projectId: string) => [...cycleKeys.all(workspaceSlug), "hero", projectId] as const,
+  /** First issues page behind the hero's priority tab (CYC-041). */
+  heroIssues: (workspaceSlug: string, projectId: string, cycleId: string) =>
+    [...cycleKeys.all(workspaceSlug), "hero-issues", projectId, cycleId] as const,
   /** One live cycle (detail page and peek body share this read). */
   detail: (workspaceSlug: string, projectId: string, cycleId: string) =>
     [...cycleKeys.all(workspaceSlug), "detail", projectId, cycleId] as const,

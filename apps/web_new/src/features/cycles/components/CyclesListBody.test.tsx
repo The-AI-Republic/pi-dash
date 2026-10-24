@@ -27,6 +27,34 @@ import { resetCycleSearchStore } from "../api/searchStore.js";
 import { CYCLES_PROJECT_ID, jsonResponse, makeCycleRow, makeProjectRow } from "../testing.js";
 import { CyclesListBody, type CyclesListBodyProps } from "./CyclesListBody.js";
 
+interface HeroProbeProps {
+  workspaceSlug: string;
+  projectId: string;
+  projectTimeZone: string;
+  directory: ReadonlyMap<string, unknown>;
+  canMutate: boolean;
+  onPeek: (cycleId: string) => void;
+  currentProject: { id: string; name: string; identifier: string };
+}
+
+vi.mock("./ActiveCycleHero.js", () => ({
+  ActiveCycleHero: (props: HeroProbeProps) => (
+    <div
+      data-testid="default-hero"
+      data-workspace={props.workspaceSlug}
+      data-project={props.projectId}
+      data-timezone={props.projectTimeZone}
+      data-can-mutate={String(props.canMutate)}
+      data-current-project={JSON.stringify(props.currentProject)}
+      data-directory={JSON.stringify([...props.directory.keys()])}
+    >
+      <button type="button" onClick={() => props.onPeek("323e4567-e89b-12d3-a456-426614174101")}>
+        peek the hero row
+      </button>
+    </div>
+  ),
+}));
+
 const CURRENT_ID = "323e4567-e89b-12d3-a456-426614174101";
 const UPCOMING_ID = "323e4567-e89b-12d3-a456-426614174102";
 const DRAFT_ID = "323e4567-e89b-12d3-a456-426614174103";
@@ -296,5 +324,37 @@ describe("CyclesListBody", () => {
     expect(await screen.findByRole("button", { name: "Upcoming cycle 0" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Completed cycle 0" })).toBeInTheDocument();
     expect(screen.queryByTestId("cycles-no-match")).not.toBeInTheDocument();
+  });
+
+  it("mounts the default hero with the body's computed row values", async () => {
+    const onPeekChange = vi.fn();
+    renderBody({ onPeekChange });
+    await screen.findByText("November push");
+    const hero = screen.getByTestId("default-hero");
+    expect(hero).toHaveAttribute("data-workspace", "acme");
+    expect(hero).toHaveAttribute("data-project", CYCLES_PROJECT_ID);
+    expect(hero).toHaveAttribute("data-timezone", "UTC");
+    expect(hero).toHaveAttribute("data-can-mutate", "true");
+    expect(hero.dataset.currentProject).toBe(
+      JSON.stringify({ id: CYCLES_PROJECT_ID, name: "Website relaunch", identifier: "WEB" })
+    );
+    expect(hero.dataset.directory).toBe(JSON.stringify([CREATOR_ID]));
+    fireEvent.click(screen.getByRole("button", { name: "peek the hero row" }));
+    expect(onPeekChange).toHaveBeenCalledWith("323e4567-e89b-12d3-a456-426614174101");
+  });
+
+  it("passes a read-only hero to guests", async () => {
+    harness.roles = { [CYCLES_PROJECT_ID]: 5 };
+    renderBody();
+    await screen.findByText("November push");
+    expect(screen.getByTestId("default-hero")).toHaveAttribute("data-can-mutate", "false");
+  });
+
+  it("keeps list search and filters for guests", async () => {
+    harness.roles = { [CYCLES_PROJECT_ID]: 5 };
+    renderBody({ filterControl: <div data-testid="cycles-filters">filters</div> });
+    await screen.findByText("November push");
+    expect(screen.getByTestId("cycles-search-toggle")).toBeInTheDocument();
+    expect(screen.getByTestId("cycles-filters")).toBeInTheDocument();
   });
 });

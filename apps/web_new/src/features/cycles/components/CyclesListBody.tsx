@@ -24,6 +24,7 @@ import { useCycleSearchStore } from "../api/searchStore.js";
 import { filterCyclesByQuery } from "../lib/cycleSearch.js";
 import { groupOfCycle, type CycleListGroup } from "../lib/cycleGroups.js";
 import { selectCycleMemberDirectory } from "../lib/cycleMembers.js";
+import { ActiveCycleHero } from "./ActiveCycleHero.js";
 import { CycleGroup } from "./CycleGroup.js";
 import { CyclePeekPanel } from "./CyclePeekPanel.js";
 import { CycleRow } from "./CycleRow.js";
@@ -33,7 +34,7 @@ import { CyclesSearchBox } from "./CyclesSearchBox.js";
 export interface CyclesListBodyProps {
   workspaceSlug: string;
   projectId: string;
-  /** Active-cycle hero. Slot owner: NEWFRONT-714. */
+  /** Active-cycle hero override; unset renders the slice default. Slot owner: NEWFRONT-714. */
   hero?: React.ReactNode;
   /** Lifecycle/date filter control. Slot owner: NEWFRONT-709. */
   filterControl?: React.ReactNode;
@@ -123,7 +124,17 @@ export function CyclesListBody({
         {headerActions}
       </div>
       {chips}
-      {hero}
+      {hero ?? (
+        <ActiveCycleHero
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          projectTimeZone={projectTimeZone}
+          directory={directory}
+          canMutate={canMutate}
+          onPeek={onPeek}
+          currentProject={rowProps.currentProject}
+        />
+      )}
       {noMatch ? (
         <CyclesNoMatch
           variant={query === "" ? "filters" : "search"}

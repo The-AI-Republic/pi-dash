@@ -44,6 +44,7 @@ export function invalidateCycleReads(
     ...CYCLE_ANALYTICS_TYPES.map((type) =>
       queryClient.invalidateQueries({ queryKey: cycleKeys.analytics(workspaceSlug, projectId, cycleId, type) })
     ),
+    queryClient.invalidateQueries({ queryKey: cycleKeys.heroIssues(workspaceSlug, projectId, cycleId) }),
   ]).then(() => undefined);
 }
 
