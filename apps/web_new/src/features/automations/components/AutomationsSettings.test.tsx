@@ -27,6 +27,7 @@ import {
   ARCHIVE_ROW_DESCRIPTION,
   ARCHIVE_ROW_TITLE,
   AUTOMATIONS_INTRO,
+  AUTOMATIONS_ROWS_SLOT,
   AUTOMATIONS_UNAVAILABLE_MESSAGE,
   CLOSE_DELAY_LEAD,
   CLOSE_ROW_DESCRIPTION,
@@ -363,6 +364,14 @@ describe("AutomationsScreen", () => {
     expect(within(slot).getByText("Edition automation")).toBeInTheDocument();
     const headings = within(screen.getByRole("region", { name: "Automations" })).getAllByRole("heading", { level: 4 });
     expect(headings.map((heading) => heading.textContent)).toEqual([ARCHIVE_ROW_TITLE, CLOSE_ROW_TITLE]);
+    // The built-in rows keep their own container, so a reader scoped to it
+    // never picks up an edition's rows from the sibling slot (AGT-037).
+    const builtIn = within(screen.getByTestId(AUTOMATIONS_ROWS_SLOT));
+    expect(builtIn.getAllByRole("heading", { level: 4 }).map((heading) => heading.textContent)).toEqual([
+      ARCHIVE_ROW_TITLE,
+      CLOSE_ROW_TITLE,
+    ]);
+    expect(builtIn.queryByText("Edition automation")).toBeNull();
   });
 
   it("shows the row skeletons while the project collection loads", () => {
