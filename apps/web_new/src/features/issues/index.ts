@@ -67,6 +67,8 @@ export type { FreshPartition } from "./freshness/fresh.js";
 export { HighlightProvider, useHighlight } from "./freshness/highlight.js";
 export type { HighlightHandle, HighlightOptions } from "./freshness/highlight.js";
 export { insertTempRow, removeTempRow, tempIssueRow } from "./freshness/tempRows.js";
+export { FETCH_ON_MOUNT_FRESHNESS, fetchOnMountOptions } from "./freshness/read.js";
+export type { FetchOnMountFreshness } from "./freshness/read.js";
 export { LayoutIcon } from "./components/LayoutIcon.js";
 export type { LayoutIconProps } from "./components/LayoutIcon.js";
 export { layoutMenuItems } from "./components/layoutMenuItems.js";

@@ -11,7 +11,7 @@ import { QueryClient } from "@tanstack/react-query";
 import type { ApiClient } from "@pidash/api-client";
 import { describe, expect, it, vi } from "vitest";
 
-import { REFERENCE_STALE_TIME_MS } from "../../../core/query/index.js";
+import { LIST_STALE_TIME_MS } from "../../../core/query/index.js";
 import { makeProjectRow, MODULES_PROJECT_ID } from "../testing.js";
 import { moduleKeys } from "./keys.js";
 import {
@@ -86,12 +86,14 @@ describe("getModuleProjectFacts", () => {
 });
 
 describe("moduleProjectFactsQueryOptions", () => {
-  it("uses the modules project-facts key and reference freshness", async () => {
+  it("uses the modules project-facts key and fetch-on-mount freshness (MOD-039)", async () => {
     const api = client(JSON.stringify(makeProjectRow()));
     const options = moduleProjectFactsQueryOptions(api, "acme", MODULES_PROJECT_ID);
     expect(options.queryKey).toEqual(moduleKeys.projectFacts("acme", MODULES_PROJECT_ID));
-    expect(options.staleTime).toBe(REFERENCE_STALE_TIME_MS);
+    expect(options.staleTime).toBe(LIST_STALE_TIME_MS);
     expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.refetchInterval).toBe(false);
     const fetched = await new QueryClient().fetchQuery(options);
     expect(fetched.name).toBe("Website relaunch");
   });
