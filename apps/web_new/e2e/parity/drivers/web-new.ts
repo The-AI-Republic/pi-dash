@@ -30559,28 +30559,24 @@ export class WebNewDriver implements ParityDriver {
     const verified = section.getByText("Last verified:");
     const lastVerified =
       (await verified.count()) === 0 ? null : ((await verified.first().innerText()) ?? "").trim() || null;
+    // The kill switch narrows the section to a remove-only panel: the
+    // fields and buttons are genuinely absent then. Playwright locator
+    // reads poll for a missing element instead of rejecting, and the
+    // parity config has no actionTimeout, so each read checks for the
+    // node first rather than relying on the read to fail fast.
+    const baseUrlField = section.locator("#assistant-voice-base-url");
+    const modelField = section.locator("#assistant-voice-model");
+    const saveButton = section.getByRole("button", { name: "Save", exact: true });
+    const testButton = section.getByRole("button", { name: "Test connection", exact: true });
     return {
       sectionVisible: true,
-      // The kill switch narrows the section to a remove-only panel: the
-      // fields are genuinely absent then, so each read tolerates that.
-      baseUrl: await section
-        .locator("#assistant-voice-base-url")
-        .inputValue()
-        .catch(() => ""),
-      model: await section
-        .locator("#assistant-voice-model")
-        .inputValue()
-        .catch(() => ""),
-      keyValue: await keyField.inputValue().catch(() => ""),
-      keyPlaceholder: ((await keyField.getAttribute("placeholder").catch(() => null)) ?? "") as string,
-      saveDisabled: await section
-        .getByRole("button", { name: "Save", exact: true })
-        .isDisabled()
-        .catch(() => true),
-      testDisabled: await section
-        .getByRole("button", { name: "Test connection", exact: true })
-        .isDisabled()
-        .catch(() => true),
+      baseUrl: (await baseUrlField.count()) === 0 ? "" : await baseUrlField.first().inputValue(),
+      model: (await modelField.count()) === 0 ? "" : await modelField.first().inputValue(),
+      keyValue: (await keyField.count()) === 0 ? "" : await keyField.first().inputValue(),
+      keyPlaceholder:
+        (await keyField.count()) === 0 ? "" : (((await keyField.first().getAttribute("placeholder")) ?? "") as string),
+      saveDisabled: (await saveButton.count()) === 0 ? true : await saveButton.first().isDisabled(),
+      testDisabled: (await testButton.count()) === 0 ? true : await testButton.first().isDisabled(),
       removeVisible: await this.isShown(section.getByRole("button", { name: "Remove", exact: true })),
       lastVerified,
     };
