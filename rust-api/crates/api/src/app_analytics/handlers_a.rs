@@ -484,24 +484,27 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
-/// Join legs for the relation aliases a filter fragment references.
+/// One join leg for a relation alias a filter fragment references.
 /// `INNER` when a value predicate touches the alias, else `LEFT OUTER`
 /// (Django's `filter()` vs `__isnull` join). Through-table FK attnames are
 /// `issue_id` on every leg (Django `<model>_id` for the `issue` FK).
+fn relation_leg(fragment: &str, alias: &str, table: &str) -> String {
+    let join = if alias_nullable_only(fragment, alias) {
+        "LEFT OUTER JOIN"
+    } else {
+        "INNER JOIN"
+    };
+    format!(" {join} \"{table}\" \"{alias}\" ON (\"issues\".\"id\" = \"{alias}\".\"issue_id\")")
+}
+
+/// Join legs for the relation aliases a filter fragment references.
 pub fn relation_joins(fragment: &str) -> String {
     let mut out = String::new();
     for (alias, table) in RELATION_JOINS {
         if !fragment.contains(&format!("\"{alias}\".")) {
             continue;
         }
-        let join = if alias_nullable_only(fragment, alias) {
-            "LEFT OUTER JOIN"
-        } else {
-            "INNER JOIN"
-        };
-        out.push_str(&format!(
-            " {join} \"{table}\" \"{alias}\" ON (\"issues\".\"id\" = \"{alias}\".\"issue_id\")"
-        ));
+        out.push_str(&relation_leg(fragment, alias, table));
     }
     out
 }
@@ -773,9 +776,20 @@ pub fn scope_and_filters(query: &QueryMap, manager: bool) -> Result<(String, Bin
 /// fragment references, plus the manager scope's states leg (Django's
 /// exclude join — always `LEFT OUTER`; NULL-state rows still drop out of
 /// the `!=` test, same as Django). Legs the statement already joined are
-/// skipped (the state/cycle/module detail builders join their own tables).
+/// skipped: the state/cycle/module detail builders join their own tables,
+/// and a statement the filter-join rewrite repointed already carries the
+/// alias leg in place (joining it again is a duplicate alias).
 pub fn scope_joins(statement: &str, fragment: &str, manager: bool) -> String {
-    let mut joins = relation_joins(fragment);
+    let mut joins = String::new();
+    for (alias, table) in RELATION_JOINS {
+        if !fragment.contains(&format!("\"{alias}\".")) {
+            continue;
+        }
+        if statement.contains(&format!("\"{table}\" \"{alias}\"")) {
+            continue;
+        }
+        joins.push_str(&relation_leg(fragment, alias, table));
+    }
     let wants_states = manager || fragment.contains("\"states\".");
     if wants_states && !statement.contains("JOIN \"states\"") {
         joins.push_str(
@@ -800,6 +814,64 @@ pub fn scoped_sql(statement: &str, joins: &str) -> String {
         }
         None => statement.to_owned(),
     }
+}
+
+/// Through-table legs the Q-01 plot/detail builders join a second time,
+/// unaliased: handler-local filter alias plus SQL table. Django reuses the
+/// single join the `issue_filters` predicates already created (`base.py:63`
+/// filters first, `analytics_plot.py:60` annotates after); the builders'
+/// extra leg fans the dimension out over filtered-out and soft-deleted
+/// links instead (PIDASHCONV-1451).
+const REUSE_RELATIONS: &[(&str, &str)] = &[
+    ("label_issue", "issue_labels"),
+    ("issue_assignee", "issue_assignees"),
+    ("issue_cycle", "cycle_issues"),
+    ("issue_module", "module_issues"),
+];
+
+/// Repoint a Q-01 plot/details statement at the filter's relation joins.
+///
+/// When the filter fragment already references a relation alias, the
+/// builder's unaliased leg of that table is swapped in place for the
+/// filter's alias leg (same INNER/LEFT rule as [`relation_joins`]) and
+/// every remaining `"table".` column ref (dimension/segment expressions,
+/// detail target-table `ON` clauses, `deleted_at` guards) is rewritten to
+/// the alias, so the dimension and the details read the same single join
+/// Django uses. The swap stays in place — later legs (the detail
+/// target-table joins) reference the alias, so it must be joined before
+/// them — and [`scope_joins`] skips legs the statement already carries.
+/// Tables the filter never touches keep the builder's fresh join.
+pub fn reuse_filter_joins(statement: &str, fragment: &str) -> String {
+    let mut out = statement.to_owned();
+    for (alias, table) in REUSE_RELATIONS {
+        if !fragment.contains(&format!("\"{alias}\".")) {
+            continue;
+        }
+        // The builders spell this leg identically (`dimension_sql` and the
+        // four details builders): `LEFT OUTER JOIN "<table>" ON
+        // ("issues"."id" = "<table>"."issue_id")`.
+        let leg = format!(
+            " LEFT OUTER JOIN \"{table}\" ON (\"issues\".\"id\" = \"{table}\".\"issue_id\")"
+        );
+        out = out.replace(&leg, &relation_leg(fragment, alias, table));
+        out = out.replace(&format!("\"{table}\"."), &format!("\"{alias}\"."));
+    }
+    out
+}
+
+/// Django duplicate-kwarg crash (`base.py:83,136,150`, PIDASHCONV-1451):
+/// when the relation GET key is present, `**filters` already carries
+/// `<alias>__deleted_at__isnull` (`filter_labels` / `filter_cycle` /
+/// `filter_module` set it unconditionally), and the details branch passes
+/// the same kwarg explicitly again, so `QuerySet.filter()` raises
+/// `TypeError` and `handle_exception` answers the generic 500. The assignee
+/// branch adds no explicit guard, so it never crashes. Mirrors Django's
+/// `"labels" in request.GET` key-presence check (empty values crash too).
+pub fn duplicate_guard_crash(query: &QueryMap, x_axis: &str, segment: Option<&str>) -> bool {
+    let on_axis = |axis: &str| x_axis == axis || segment == Some(axis);
+    (on_axis("labels__id") && query.contains_key("labels"))
+        || (on_axis("issue_cycle__cycle_id") && query.contains_key("cycle"))
+        || (on_axis("issue_module__module_id") && query.contains_key("module"))
 }
 
 // ---------------------------------------------------------------------------
@@ -849,6 +921,7 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
     let distribution = if y_axis == "issue_count" {
         let sql = queries::base_plot_count_sql(&x_axis, segment.as_deref(), &fragment)
             .ok_or(Denial::ServerError)?;
+        let sql = reuse_filter_joins(&sql, &fragment);
         let joins = scope_joins(&sql, &fragment, true);
         let rows = fetch_count_plot(
             pool,
@@ -862,6 +935,7 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
     } else {
         let sql = queries::base_plot_estimate_sql(&x_axis, segment.as_deref(), &fragment)
             .ok_or(Denial::ServerError)?;
+        let sql = reuse_filter_joins(&sql, &fragment);
         let joins = scope_joins(&sql, &fragment, true);
         let rows = fetch_estimate_plot(
             pool,
@@ -873,6 +947,13 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
         .await?;
         super::render::distribution_from_estimate_rows(rows, &x_axis, segment.is_some())
     };
+
+    // Django duplicate-kwarg crash (see [`duplicate_guard_crash`]): the
+    // details branches below run after the plot (`base.py:71-159`), so the
+    // crash lands here, once the distribution is computed.
+    if duplicate_guard_crash(query, &x_axis, segment.as_deref()) {
+        return Err(Denial::ServerError);
+    }
 
     // Extras: each arm runs only for its axis (`base.py:71-159`); anything
     // else stays `{}`.
@@ -1071,6 +1152,7 @@ async fn fetch_label_details(
     binds: &Binds,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     let sql = queries::base_label_details_sql(fragment);
+    let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, false));
     let rows: Vec<(Uuid, Option<String>, Option<String>)> =
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
@@ -1116,6 +1198,7 @@ async fn fetch_assignee_details(
     binds: &Binds,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     let sql = queries::base_assignee_details_sql(fragment);
+    let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
     let rows: Vec<AssigneeDetailRow> = bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
         .fetch_all(pool)
@@ -1157,6 +1240,7 @@ async fn fetch_cycle_details(
     binds: &Binds,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     let sql = queries::base_cycle_details_sql(fragment);
+    let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
     let rows: Vec<(Uuid, Option<String>)> =
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
@@ -1190,6 +1274,7 @@ async fn fetch_module_details(
     binds: &Binds,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     let sql = queries::base_module_details_sql(fragment);
+    let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
     let rows: Vec<(Uuid, Option<String>)> =
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
@@ -2472,6 +2557,155 @@ mod tests {
         let joins = scope_joins(&sql, &fragment, true);
         assert!(joins.contains("INNER JOIN \"issue_labels\" \"label_issue\""));
         assert_eq!(binds.values().len(), 1);
+    }
+
+    #[test]
+    fn dimension_reuses_filter_join() {
+        // `?labels=<uuid>` + `x_axis=labels__id` (PIDASHCONV-1451): the
+        // builder's second `issue_labels` leg is swapped in place for the
+        // filter's `label_issue` alias leg and the dimension reads the
+        // alias — one join, Django's. The scope skips the leg the
+        // statement already carries (only the states leg is spliced in).
+        let id = Uuid::nil();
+        let (fragment, _) =
+            scope_and_filters(&query_map(&[("labels", &id.to_string())]), true).expect("scope");
+        let sql = queries::base_plot_count_sql("labels__id", None, &fragment).expect("plot");
+        assert!(sql.contains("LEFT OUTER JOIN \"issue_labels\""));
+        let reused = reuse_filter_joins(&sql, &fragment);
+        assert!(!reused.contains("LEFT OUTER JOIN \"issue_labels\""));
+        assert!(reused.contains("INNER JOIN \"issue_labels\" \"label_issue\""));
+        assert!(reused.contains("\"label_issue\".\"label_id\""));
+        assert!(!reused.contains("\"issue_labels\"."));
+        let joins = scope_joins(&reused, &fragment, true);
+        assert!(!joins.contains("issue_labels"));
+        assert!(joins.contains("LEFT OUTER JOIN \"states\""));
+    }
+
+    #[test]
+    fn reuse_skips_tables_the_filter_never_touches() {
+        // `?priority=high` + `x_axis=labels__id`: no `label_issue` ref in
+        // the fragment, so the builder's fresh join is kept verbatim.
+        let (fragment, _) =
+            scope_and_filters(&query_map(&[("priority", "high")]), true).expect("scope");
+        let sql = queries::base_plot_count_sql("labels__id", None, &fragment).expect("plot");
+        assert_eq!(reuse_filter_joins(&sql, &fragment), sql);
+    }
+
+    #[test]
+    fn reuse_repoints_segments_and_details() {
+        // Segment on a filtered relation + every details builder: the
+        // segment expression, the detail target-table `ON` and the
+        // `deleted_at` guards all move onto the filter's alias.
+        let id = Uuid::nil().to_string();
+        let (fragment, _) = scope_and_filters(
+            &query_map(&[
+                ("labels", &id),
+                ("assignees", &id),
+                ("cycle", &id),
+                ("module", &id),
+            ]),
+            true,
+        )
+        .expect("scope");
+        let sql = queries::base_plot_count_sql("priority", Some("assignees__id"), &fragment)
+            .expect("plot");
+        let reused = reuse_filter_joins(&sql, &fragment);
+        assert!(reused.contains("\"issue_assignee\".\"assignee_id\" AS \"segment\""));
+        assert!(!reused.contains("\"issue_assignees\"."));
+        for (builder, table, alias, target) in [
+            (
+                queries::base_label_details_sql(&fragment),
+                "issue_labels",
+                "label_issue",
+                "labels",
+            ),
+            (
+                queries::base_assignee_details_sql(&fragment),
+                "issue_assignees",
+                "issue_assignee",
+                "users",
+            ),
+            (
+                queries::base_cycle_details_sql(&fragment),
+                "cycle_issues",
+                "issue_cycle",
+                "cycles",
+            ),
+            (
+                queries::base_module_details_sql(&fragment),
+                "module_issues",
+                "issue_module",
+                "modules",
+            ),
+        ] {
+            assert!(builder.contains(&format!("LEFT OUTER JOIN \"{table}\"")));
+            let reused = reuse_filter_joins(&builder, &fragment);
+            assert!(
+                !reused.contains(&format!("LEFT OUTER JOIN \"{table}\"")),
+                "{table} second leg survives"
+            );
+            assert!(
+                reused.contains(&format!("\"{table}\" \"{alias}\"")),
+                "{alias} leg missing in place"
+            );
+            // The alias leg precedes the detail target-table leg that
+            // references it (a later leg cannot see a join that follows).
+            let leg_at = reused
+                .find(&format!("\"{table}\" \"{alias}\""))
+                .expect("leg");
+            let target_at = reused.find(&format!("JOIN \"{target}\"")).expect("target");
+            assert!(leg_at < target_at, "{alias} leg sorts after its use");
+            assert!(
+                !reused.contains(&format!("\"{table}\".")),
+                "{table} ref survives"
+            );
+            // The scope skips the alias leg the statement already carries.
+            let joins = scope_joins(&reused, &fragment, true);
+            assert!(
+                !joins.contains(&format!("\"{table}\" \"{alias}\"")),
+                "{alias} leg duplicated by scope"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_guard_crash_matrix() {
+        // `base.py:83,136,150` (PIDASHCONV-1451): relation key present +
+        // matching details axis crashes; anything else does not. The
+        // assignee branch adds no explicit guard, so it never crashes.
+        let id = Uuid::nil().to_string();
+        for (key, axis) in [
+            ("labels", "labels__id"),
+            ("cycle", "issue_cycle__cycle_id"),
+            ("module", "issue_module__module_id"),
+        ] {
+            let query = query_map(&[(key, id.as_str())]);
+            assert!(duplicate_guard_crash(&query, axis, None), "{key} x_axis");
+            assert!(
+                duplicate_guard_crash(&query, "priority", Some(axis)),
+                "{key} segment"
+            );
+            assert!(
+                !duplicate_guard_crash(&query, "priority", None),
+                "{key} off-axis"
+            );
+            assert!(
+                !duplicate_guard_crash(&query_map(&[]), axis, None),
+                "{key} absent"
+            );
+        }
+        // Empty values still crash: Django checks key presence.
+        let mut query: QueryMap = HashMap::new();
+        query.insert("labels".to_owned(), OneOrMany::One(String::new()));
+        assert!(duplicate_guard_crash(&query, "labels__id", None));
+        // Assignees never crash, on or off axis.
+        let query = query_map(&[("assignees", id.as_str())]);
+        assert!(!duplicate_guard_crash(&query, "assignees__id", None));
+        assert!(!duplicate_guard_crash(
+            &query,
+            "priority",
+            Some("assignees__id")
+        ));
     }
 
     #[test]
