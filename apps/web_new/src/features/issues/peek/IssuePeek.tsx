@@ -414,15 +414,15 @@ export function IssuePeek({
               onSubscriptionChanged={refreshDetail}
             />
             {linkKey === null ? (
-              <span
-                role="link"
-                aria-disabled="true"
+              <button
+                type="button"
+                disabled
                 aria-label="Open full page"
                 data-testid="peek-fullscreen-link"
                 className="text-body inline-flex rounded-(--radius-control) p-(--space-2) text-(--text-muted) opacity-50"
               >
                 <ArrowUpRight size={16} strokeWidth={1.5} aria-hidden="true" />
-              </span>
+              </button>
             ) : (
               <Link
                 to="/$ws/browse/$issueKey"

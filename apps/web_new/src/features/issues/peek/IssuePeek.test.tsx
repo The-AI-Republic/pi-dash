@@ -1005,14 +1005,14 @@ describe("IssuePeek deep links", () => {
   it("keeps the full-screen link disabled without a key or a loaded project", async () => {
     renderPeek({ details: "error", projectStatus: 500, issueKey: null, projectIdentifier: "ZZZ" });
     const link = await screen.findByTestId("peek-fullscreen-link");
-    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(link).toBeDisabled();
     expect(link).not.toHaveAttribute("href");
   });
 
   it("enables the full-screen link once the project code loads for a UUID link", async () => {
     renderPeek({ details: {}, issueKey: null });
     const link = await screen.findByTestId("peek-fullscreen-link");
-    expect(link).not.toHaveAttribute("aria-disabled");
+    expect(link).not.toBeDisabled();
     expect(link).toHaveAttribute("href", "/acme/browse/WEB-1");
   });
 });
