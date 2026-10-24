@@ -406,6 +406,46 @@ export function moduleActionsTriggerSelector(options: { visibleOnly?: boolean } 
   return `${scope} button[data-testid="module-actions-trigger"]`;
 }
 
+/**
+ * Labels of the modules dialog's selectable options that are currently
+ * marked selected (MOD-022–024). The oracle reads the same set from the
+ * open popup, so both apps answer "what is this control set to" the same
+ * way.
+ */
+export const MODULE_SELECTED_OPTION_SELECTOR = '[role="option"][aria-selected="true"]';
+
+/**
+ * Visible text of each element, skipping anything inside `aria-hidden`
+ * decoration. The option rows and picker triggers pair a decorative
+ * project mark or avatar with the label, so plain `textContent` /
+ * `innerText` reads "WWebsite relaunch" and "ROYou" — the glyph is not
+ * part of the name an assistive user or the oracle sees. This function is
+ * passed whole to Playwright's `evaluateAll`, so it must stay
+ * self-contained (no module references): the code a unit test runs over
+ * real markup is the code that runs in the browser.
+ */
+export function moduleVisibleTexts(nodes: Element[]): string[] {
+  function visibleText(root: Element): string {
+    const owner = root.ownerDocument ?? document;
+    function hiddenWithin(element: Element | null): boolean {
+      for (let current = element; current !== null; current = current.parentElement) {
+        if (current.getAttribute("aria-hidden") === "true") return true;
+        if (current === root) return false;
+      }
+      return false;
+    }
+    const walker = owner.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const parts: string[] = [];
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (parent === null || hiddenWithin(parent)) continue;
+      parts.push(node.nodeValue ?? "");
+    }
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  }
+  return nodes.map(visibleText).filter((text) => text !== "");
+}
+
 export class WebNewDriver implements ParityDriver {
   readonly target: ParityTarget = "web_new";
   readonly page: Page;
@@ -19985,6 +20025,33 @@ export class WebNewDriver implements ParityDriver {
     return this.moduleSaveDialog().getByTestId(testId).first();
   }
 
+  /**
+   * A picker control's readable text, decoration dropped: the project mark
+   * and avatar glyphs are `aria-hidden`, so they must not leak into a name
+   * asserted by a scenario.
+   */
+  private async modulesInlineControlText(testId: string): Promise<string> {
+    const texts = await this.moduleInlineControl(testId).evaluateAll(moduleVisibleTexts);
+    return texts.join(" ").trim();
+  }
+
+  /** Labels of the selected options in the open popup (none when nothing is set). */
+  private async modulesSelectedOptionLabels(): Promise<string[]> {
+    const selected = this.page.locator(MODULE_SELECTED_OPTION_SELECTOR);
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return selected.evaluateAll(moduleVisibleTexts);
+  }
+
+  /** Close the open option popup and wait for it to detach. */
+  private async modulesDismissOptionPopup(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
+  }
+
   async modulesOpenCreateFromHeader(): Promise<void> {
     await this.page.getByTestId("modules-add").first().click({ timeout: WebNewDriver.WAIT_MS });
     await this.moduleAwaitSaveDialog();
@@ -20009,16 +20076,11 @@ export class WebNewDriver implements ParityDriver {
   async modulesDialogProjectOptions(): Promise<string[]> {
     const picker = this.moduleSaveDialog().getByTestId("module-dialog-project");
     await picker.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
-    const options = this.page.getByRole("option");
-    await options.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const names = (await options.allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
-    await this.page.keyboard.press("Escape");
-    await this.page
-      .getByRole("option")
-      .first()
-      .waitFor({ state: "detached", timeout: 5_000 })
-      .catch(() => undefined);
-    return names.filter((name) => name.length > 0);
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The row's project mark is decoration; its label names the project.
+    const names = await this.page.getByRole("option").evaluateAll(moduleVisibleTexts);
+    await this.modulesDismissOptionPopup();
+    return names;
   }
 
   async modulesDialogPickProject(name: string): Promise<void> {
@@ -20029,7 +20091,9 @@ export class WebNewDriver implements ParityDriver {
       .getByRole("listbox", { name: "Projects" })
       .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
       .catch(() => undefined);
-    await expect.poll(async () => (await picker.innerText()).trim(), { timeout: WebNewDriver.WAIT_MS }).toContain(name);
+    await expect
+      .poll(async () => (await picker.evaluateAll(moduleVisibleTexts)).join(" "), { timeout: WebNewDriver.WAIT_MS })
+      .toContain(name);
   }
 
   async modulesDialogTitle(): Promise<string> {
@@ -20058,9 +20122,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesDialogStatus(): Promise<string> {
-    return (
-      (await this.moduleInlineControl("module-dialog-status").innerText({ timeout: WebNewDriver.WAIT_MS })) ?? ""
-    ).trim();
+    return this.modulesInlineControlText("module-dialog-status");
   }
 
   async modulesDialogPickStatus(label: string): Promise<void> {
@@ -20072,10 +20134,15 @@ export class WebNewDriver implements ParityDriver {
     await expect.poll(() => this.modulesDialogStatus(), { timeout: WebNewDriver.WAIT_MS }).toContain(label);
   }
 
+  /** The lead the dialog holds: the selected option's label, as the oracle reads it. */
   async modulesDialogLead(): Promise<string> {
-    return (
-      (await this.moduleInlineControl("module-dialog-lead").innerText({ timeout: WebNewDriver.WAIT_MS })) ?? ""
-    ).trim();
+    await this.moduleInlineControl("module-dialog-lead")
+      .getByRole("button")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const picked = await this.modulesSelectedOptionLabels();
+    await this.modulesDismissOptionPopup();
+    return picked[0] ?? "Lead";
   }
 
   async modulesDialogLeadOptions(): Promise<string[]> {
@@ -20083,16 +20150,10 @@ export class WebNewDriver implements ParityDriver {
       .getByRole("button")
       .first()
       .click({ timeout: WebNewDriver.WAIT_MS });
-    const options = this.page.getByRole("option");
-    await options.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const names = (await options.allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
-    await this.page.keyboard.press("Escape");
-    await this.page
-      .getByRole("option")
-      .first()
-      .waitFor({ state: "detached", timeout: 5_000 })
-      .catch(() => undefined);
-    return names.filter((name) => name.length > 0);
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const names = await this.page.getByRole("option").evaluateAll(moduleVisibleTexts);
+    await this.modulesDismissOptionPopup();
+    return names;
   }
 
   async modulesDialogPickLead(label: string): Promise<void> {
@@ -20110,9 +20171,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesDialogMembers(): Promise<string> {
-    return (
-      (await this.moduleInlineControl("module-dialog-members").innerText({ timeout: WebNewDriver.WAIT_MS })) ?? ""
-    ).trim();
+    await this.moduleInlineControl("module-dialog-members")
+      .getByRole("button")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const picked = await this.modulesSelectedOptionLabels();
+    await this.modulesDismissOptionPopup();
+    return picked.length > 0 ? picked.join(", ") : "Members";
   }
 
   async modulesDialogPickMembers(labels: string[]): Promise<void> {
@@ -20127,18 +20192,11 @@ export class WebNewDriver implements ParityDriver {
         .click({ timeout: WebNewDriver.WAIT_MS });
     }
     // Multiple-select stays open; Escape applies and dismisses.
-    await this.page.keyboard.press("Escape");
-    await this.page
-      .getByRole("option")
-      .first()
-      .waitFor({ state: "detached", timeout: 5_000 })
-      .catch(() => undefined);
+    await this.modulesDismissOptionPopup();
   }
 
   async modulesDialogDateRange(): Promise<string> {
-    return (
-      (await this.moduleInlineControl("module-dialog-date-range").innerText({ timeout: WebNewDriver.WAIT_MS })) ?? ""
-    ).trim();
+    return this.modulesInlineControlText("module-dialog-date-range");
   }
 
   async modulesDialogPickDateRange(startISO: string, endISO: string): Promise<void> {

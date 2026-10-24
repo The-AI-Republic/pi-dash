@@ -11,9 +11,9 @@
 
 import type { Locator, Page } from "@playwright/test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const routerHarness = vi.hoisted(() => ({ navigate: vi.fn() }));
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
@@ -22,14 +22,22 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../src/core/api/client.js";
+import { ModulesZeroState } from "../../../src/features/modules/components/ModulesZeroState.js";
 import { ModuleDetailActions } from "../../../src/features/modules/components/dialogs/ModuleDetailActions.js";
+import { ModuleSaveDialog } from "../../../src/features/modules/components/dialogs/ModuleSaveDialog.js";
 import {
   jsonResponse,
   makeProjectRow,
   MODULES_MODULE_ID,
   MODULES_PROJECT_ID,
+  MODULES_WS_ID,
 } from "../../../src/features/modules/testing.js";
-import { moduleActionsTriggerSelector, WebNewDriver } from "./web-new";
+import {
+  MODULE_SELECTED_OPTION_SELECTOR,
+  moduleActionsTriggerSelector,
+  moduleVisibleTexts,
+  WebNewDriver,
+} from "./web-new";
 
 interface Answer {
   count?: number;
@@ -108,7 +116,14 @@ class FakePage {
       selectOption: async () => undefined,
       waitFor: async () => undefined,
       evaluate: async () => self.answer(id).evaluated ?? {},
-      evaluateAll: async () => self.answer(id).evaluated ?? [],
+      // Reads that pass a DOM function land here; the table may answer with
+      // the list directly or with the plain text it used to return.
+      evaluateAll: async () => {
+        const answer = self.answer(id);
+        if (answer.evaluated !== undefined) return answer.evaluated;
+        if (answer.texts !== undefined) return answer.texts;
+        return answer.text === undefined ? [] : [answer.text];
+      },
     };
     Object.defineProperty(node, "__id", { value: id, enumerable: false });
     return node as unknown as Locator;
@@ -187,13 +202,17 @@ function saveDialogTable(extra: Table = {}): Table {
     [`${SAVE} testid(module-dialog-date-range)`]: { count: 1, text: "Start date End date" },
     [`${SAVE} css(textarea[name="description"])`]: { count: 1, value: "Notes" },
     [`${SAVE} role(alert,)`]: { count: 0 },
-    "page role(option,)": { count: 1, texts: ["Website relaunch", "Project B"] },
+    "page role(option,)": { count: 1, evaluated: ["Website relaunch", "Project B"] },
+    'page css([role="option"][aria-selected="true"])': { count: 0, evaluated: [] },
     "page role(listbox,Projects)": { count: 0 },
     ...extra,
   };
 }
 
 afterEach(() => {
+  // Unmount first: the dialogs portal into body, and pulling a portal
+  // container out from under React fails the unmount it is about to do.
+  cleanup();
   vi.restoreAllMocks();
   resetAppClient();
   for (const stray of document.querySelectorAll("body > div:not([data-testid])")) stray.remove();
@@ -281,9 +300,24 @@ describe("save dialog reads", () => {
     expect(await driver.modulesDialogTitle()).toBe("Delivery");
     expect(await driver.modulesDialogDescription()).toBe("Notes");
     expect(await driver.modulesDialogStatus()).toBe("Backlog");
+    // Unset lead and members answer with their placeholders, as the oracle does.
     expect(await driver.modulesDialogLead()).toBe("Lead");
     expect(await driver.modulesDialogMembers()).toBe("Members");
     expect(await driver.modulesDialogDateRange()).toBe("Start date End date");
+  });
+
+  it("reads a set lead and member set from the selected option labels", async () => {
+    const fake = new FakePage(
+      saveDialogTable({
+        'page css([role="option"][aria-selected="true"])': {
+          count: 2,
+          evaluated: ["You", "Pat Member"],
+        },
+      })
+    );
+    const driver = new WebNewDriver(fake.asPage());
+    expect(await driver.modulesDialogLead()).toBe("You");
+    expect(await driver.modulesDialogMembers()).toBe("You, Pat Member");
   });
 
   it("fills the title and description and reads the inline error", async () => {
@@ -609,5 +643,205 @@ describe("row facts and list state", () => {
       "page testid(modules-zero-state)": { count: 1, visible: true },
     });
     expect(await new WebNewDriver(fake.asPage()).modulesListEmptyKind()).toBe("zero");
+  });
+});
+
+// The fake page above answers whatever selector the driver composes, so it
+// can only show that a read asks for something. These cases render the
+// real dialog and run the exact function the driver hands to
+// `evaluateAll` over its markup: the picker rows and triggers carry a
+// decorative project mark or avatar inside `aria-hidden`, and a scenario
+// asserting a project or member name must not read that glyph.
+describe("decoration-free text on the real dialog", () => {
+  const PROJECT_B_ID = "623e4567-e89b-12d3-a456-426614174006";
+  const ME = "423e4567-e89b-12d3-a456-426614174003";
+  const TEAMMATE = "723e4567-e89b-12d3-a456-426614174007";
+  const ME_MEMBERSHIP = "823e4567-e89b-12d3-a456-426614174008";
+  const TEAMMATE_MEMBERSHIP = "923e4567-e89b-12d3-a456-426614174009";
+
+  function projectRecord(id: string, name: string, identifier: string): Record<string, unknown> {
+    return {
+      id,
+      name,
+      identifier,
+      sort_order: null,
+      logo_props: {},
+      member_role: 15,
+      intake_count: 0,
+      archived_at: null,
+      workspace: MODULES_WS_ID,
+      cycle_view: true,
+      issue_views_view: true,
+      module_view: true,
+      page_view: false,
+      inbox_view: false,
+      is_default: false,
+      guest_view_all_features: false,
+      project_lead: null,
+      network: 0,
+      created_at: "2026-01-02T03:04:05Z",
+      updated_at: "2026-02-03T04:05:06Z",
+      created_by: null,
+      updated_by: null,
+    };
+  }
+
+  function directoryEntry(id: string, first: string, last: string, membershipId: string): Record<string, unknown> {
+    return {
+      id: membershipId,
+      role: 15,
+      member: {
+        id,
+        first_name: first,
+        last_name: last,
+        avatar: "",
+        avatar_url: null,
+        display_name: `${first} ${last}`,
+        is_bot: false,
+      },
+    };
+  }
+
+  beforeEach(() => {
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
+      if (url === "https://api.test/api/workspaces/acme/projects/") {
+        return jsonResponse(url, 200, [
+          projectRecord(MODULES_PROJECT_ID, "Website relaunch", "WEB"),
+          projectRecord(PROJECT_B_ID, "Project B", "PB"),
+        ]);
+      }
+      if (url.endsWith("/api/users/me/")) {
+        return jsonResponse(url, 200, {
+          id: ME,
+          email: "owner@test.dev",
+          username: "owner",
+          first_name: "Rich",
+          last_name: "Owner",
+          display_name: "Rich Owner",
+          avatar: "",
+          avatar_url: null,
+          cover_image: null,
+          cover_image_url: null,
+          date_joined: "2026-01-02T03:04:05Z",
+          user_timezone: "UTC",
+          is_active: true,
+          is_bot: false,
+          is_email_verified: true,
+          is_password_autoset: false,
+          last_login_medium: "password",
+          last_login_time: null,
+        });
+      }
+      if (url.endsWith("/members/") && url.includes("/projects/")) {
+        return jsonResponse(url, 200, [
+          {
+            id: ME_MEMBERSHIP,
+            role: 15,
+            member: ME,
+            project: MODULES_PROJECT_ID,
+            original_role: 15,
+            created_at: "2026-01-02T03:04:05Z",
+          },
+          {
+            id: TEAMMATE_MEMBERSHIP,
+            role: 15,
+            member: TEAMMATE,
+            project: MODULES_PROJECT_ID,
+            original_role: 15,
+            created_at: "2026-01-02T03:04:05Z",
+          },
+        ]);
+      }
+      if (url.endsWith("/api/workspaces/acme/members/")) {
+        return jsonResponse(url, 200, [
+          directoryEntry(ME, "Rich", "Owner", ME_MEMBERSHIP),
+          directoryEntry(TEAMMATE, "Pat", "Member", TEAMMATE_MEMBERSHIP),
+        ]);
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }) as never);
+  });
+
+  function renderSaveDialog(): void {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <ModuleSaveDialog
+          open
+          onOpenChange={() => undefined}
+          mode="create"
+          workspaceSlug="acme"
+          currentProject={{ id: MODULES_PROJECT_ID, name: "Website relaunch", identifier: "WEB" }}
+        />
+      </QueryClientProvider>
+    );
+  }
+
+  /** What the driver's read answers for one control's markup. */
+  function controlText(testId: string): string {
+    return moduleVisibleTexts(Array.from(document.querySelectorAll(`[data-testid="${testId}"]`))).join(" ");
+  }
+
+  function openPicker(testId: string): void {
+    fireEvent.click(within(screen.getByTestId(testId)).getByRole("button"));
+  }
+
+  it("names project options without the decorative mark", async () => {
+    renderSaveDialog();
+    openPicker("module-dialog-project");
+    await screen.findAllByRole("option");
+
+    const options = Array.from(document.querySelectorAll('[role="option"]'));
+    expect(moduleVisibleTexts(options)).toEqual(["Website relaunch", "Project B"]);
+    // The raw text is what the old read returned, and why the helper exists.
+    expect(options.map((option) => option.textContent)).toEqual(["WWebsite relaunch", "PProject B"]);
+  });
+
+  it("names member options without the avatar initials", async () => {
+    renderSaveDialog();
+    openPicker("module-dialog-lead");
+    await screen.findAllByRole("option");
+
+    const options = Array.from(document.querySelectorAll('[role="option"]'));
+    expect(moduleVisibleTexts(options)).toEqual(["You", "Pat Member"]);
+    expect(options.map((option) => option.textContent)).toEqual(["ROYou", "PMPat Member"]);
+  });
+
+  it("reads a selected lead and members from the selected options", async () => {
+    renderSaveDialog();
+    openPicker("module-dialog-lead");
+    fireEvent.click(await screen.findByRole("option", { name: "You", exact: true }));
+    // A single pick closes the popup, so the read reopens it to ask the
+    // option list what is set — the same order the driver uses.
+    openPicker("module-dialog-lead");
+    await screen.findAllByRole("option");
+    expect(moduleVisibleTexts(Array.from(document.querySelectorAll(MODULE_SELECTED_OPTION_SELECTOR)))).toEqual(["You"]);
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    openPicker("module-dialog-members");
+    fireEvent.click(await screen.findByRole("option", { name: "Pat Member", exact: true }));
+    // Multi-select stays open across picks, so its selection reads in place.
+    expect(moduleVisibleTexts(Array.from(document.querySelectorAll(MODULE_SELECTED_OPTION_SELECTOR)))).toEqual([
+      "Pat Member",
+    ]);
+    // The trigger names the member without the avatar initials; it is not
+    // what the read answers, which keeps "You" an option label, as the
+    // oracle reads it.
+    expect(controlText("module-dialog-lead")).toBe("Rich Owner");
+  });
+
+  it("reads the status, the empty date range, and the unset pickers as the scenario spells them", () => {
+    renderSaveDialog();
+    expect(controlText("module-dialog-status")).toBe("Backlog");
+    expect(controlText("module-dialog-date-range")).toBe("Start date End date");
+    expect(controlText("module-dialog-lead")).toBe("Lead");
+    expect(controlText("module-dialog-members")).toBe("Members");
+  });
+
+  it("keeps the zero state's copy and action label intact", () => {
+    const onCreate = vi.fn();
+    render(<ModulesZeroState canCreate onCreate={onCreate} />);
+    const zero = screen.getByTestId("modules-zero-state");
+    expect(moduleVisibleTexts(Array.from(zero.querySelectorAll("button")))).toEqual(["Set your first module"]);
   });
 });
