@@ -60,8 +60,17 @@ use pidash_db::app_intake::queries;
 use pidash_db::issue_filters::{
     issue_filters_get, FilterValue, IssueFilterError, ISSUE_FILTER_KEYS,
 };
+use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
+use pidash_services::app_issues::serializers_create::HAS_ACTIVE_RUN_SQL;
+use pidash_services::app_issues::serializers_detail::{
+    agent_status_to_representation, agent_ticker_to_representation, serialize_iso_datetime,
+    AgentLiveStateRow, AgentRunDetailRow, AgentTickerView, ACTIVE_AGENT_RUN_SQL,
+    AGENT_RUN_COUNT_SQL, LATEST_AGENT_RUN_SQL,
+};
+use pidash_services::orchestration::clock::ProjectClockPolicy;
+use pidash_types::orchestration::StateRef;
 
 use crate::app_issues::resolve_gate;
 use crate::middleware::SessionHandle;
@@ -1299,18 +1308,14 @@ pub async fn is_synced_safe(pool: &PgPool, issue: &IssueRow) -> bool {
 }
 
 /// Whether the issue has a non-terminal agent run
-/// (`Issue.has_active_run`, `db/models/issue.py:232-250`).
+/// (`Issue.has_active_run`, `db/models/issue.py:232-250`). Shares the
+/// canonical `agent_run` existence check with the app-issues create path.
 pub async fn has_active_run(pool: &PgPool, issue_id: &Uuid) -> Result<bool, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM agent_runs WHERE work_item_id = $1 AND status IN
-           ('queued', 'assigned', 'waiting_for_worktree', 'running',
-            'cancel_requested', 'awaiting_approval', 'awaiting_reauth',
-            'paused_awaiting_input') LIMIT 1"#,
-    )
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(i32,)> = sqlx::query_as(HAS_ACTIVE_RUN_SQL)
+        .bind(issue_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -2109,41 +2114,61 @@ type BlockerEdgeRow = (
     Option<String>,
 );
 
-/// A ticker facts row: enabled, user-disabled, used, granted, waited,
-/// next-run-at, last-tick-at, disarm reason, pending entry.
-type TickerFactsRow = (
-    bool,
-    bool,
-    i32,
-    i32,
-    i32,
-    Option<DateTime<Utc>>,
-    Option<DateTime<Utc>>,
-    String,
-    bool,
-);
+/// The ticker half of the agent blocks: the `issue_agent_ticker` row, the
+/// project clock policy, and the issue's current state name/group for the
+/// stage interval and the re-tick predicate. Rendered through the shared
+/// `app_issues::serializers_detail` port, exactly like the app-issue
+/// detail handler.
+struct TickerOwned {
+    ticker: IssueAgentTicker,
+    policy: ProjectClockPolicy,
+    state_group: Option<String>,
+    state_name: Option<String>,
+}
 
-/// Project pool facts: pool size, impl/review/test interval seconds.
-type ProjectPoolRow = (Option<i32>, Option<i32>, Option<i32>, Option<i32>);
+/// One `agent_run` row off the `LATEST/ACTIVE_AGENT_RUN_SQL` projection,
+/// with pre-rendered `isoformat` datetimes (the services convention:
+/// rows carry strings, `+00:00`, never the actor zone).
+struct AgentRunOwned {
+    id: String,
+    status: String,
+    executor_kind: String,
+    queue_position: Option<i16>,
+    runner_id: Option<String>,
+    runner_name: Option<String>,
+    created_at: String,
+    assigned_at: Option<String>,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    done_payload: Option<serde_json::Value>,
+    error: String,
+    error_code: String,
+    llm_model: String,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    live: Option<AgentLiveOwned>,
+}
 
-/// Live-state facts row for the agent-status nesting.
-type LiveStateRow = (
-    Option<Uuid>,
-    Option<DateTime<Utc>>,
-    Option<String>,
-    Option<String>,
-    Option<i32>,
-    Option<bool>,
-    Option<i32>,
-    Option<i64>,
-    Option<i64>,
-    Option<i64>,
-    Option<String>,
-    Option<i32>,
-    Option<String>,
-    Option<DateTime<Utc>>,
-    Option<DateTime<Utc>>,
-);
+/// The joined `runner_live_state` row, present exactly when the `LEFT
+/// JOIN` hits (the `updated_at` column is non-null on a real row).
+/// Carries the PIDASHCONV-1315 `agent_health`/`agent_last_activity_at`
+/// columns the shared `LATEST/ACTIVE_AGENT_RUN_SQL` projection selects.
+struct AgentLiveOwned {
+    observed_run_id: Option<String>,
+    last_event_at: Option<String>,
+    last_event_kind: Option<String>,
+    last_event_summary: Option<String>,
+    agent_pid: Option<i32>,
+    agent_subprocess_alive: Option<bool>,
+    approvals_pending: Option<i32>,
+    usage: serde_json::Value,
+    llm_model: Option<String>,
+    turn_count: Option<i32>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
+    updated_at: String,
+}
 
 pub struct BlockerSummary {
     pub blocked_by: Vec<serde_json::Value>,
@@ -2277,412 +2302,270 @@ pub async fn blocker_summary(
     })
 }
 
-/// One `issue_agent_ticker` row plus the project/state facts the
-/// computed fields need.
-struct TickerRow {
-    enabled: bool,
-    user_disabled: bool,
-    used: i32,
-    granted: i32,
-    waited: i32,
-    next_run_at: Option<DateTime<Utc>>,
-    last_tick_at: Option<DateTime<Utc>>,
-    disarm_reason: String,
-    pending_entry: bool,
-    pool: i32,
-    interval: i32,
-    state_name: Option<String>,
-    state_group: Option<String>,
-}
-
-/// `get_agent_ticker` (`serializers/issue.py:1265-1316`): the reverse
+/// `get_agent_ticker` (`serializers/issue.py:1268-1318`): the reverse
 /// `agent_ticker` relation, `None` when no row exists
-/// (`ObjectDoesNotExist` → `None`).
-async fn fetch_ticker(pool: &PgPool, issue: &IssueRow) -> Result<Option<TickerRow>, Denial> {
-    let row: Option<TickerFactsRow> = sqlx::query_as(
-        r#"SELECT enabled, user_disabled, used, granted, waited,
-                  next_run_at, last_tick_at, disarm_reason, pending_entry
+/// (`ObjectDoesNotExist` → `None`). The row, project clock policy and
+/// state feed the shared `agent_ticker_to_representation` port, so the
+/// interval, pool math, re-tick predicate and `+00:00` datetimes match
+/// the app-issue detail render exactly.
+async fn fetch_ticker_owned(
+    pool: &PgPool,
+    issue: &IssueRow,
+) -> Result<Option<TickerOwned>, Denial> {
+    // Decoded positionally (20 columns exceed the `FromRow` tuple
+    // arity); order matches the `SELECT` list below.
+    let row = sqlx::query(
+        r#"SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
+                  issue_id, used, granted, waited, user_disabled, next_run_at, last_tick_at,
+                  enabled, disarm_reason, pending_entry, pending_entry_free,
+                  pending_entry_actor_id, pending_entry_trigger, resume_parent_run_id
            FROM issue_agent_ticker WHERE issue_id = $1 LIMIT 1"#,
     )
     .bind(issue.id)
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let Some((
-        enabled,
-        user_disabled,
-        used,
-        granted,
-        waited,
-        next_run_at,
-        last_tick_at,
-        disarm_reason,
-        pending_entry,
-    )) = row
-    else {
+    let Some(row) = row else {
         return Ok(None);
     };
-    // Project pool + interval columns
-    // (`db/models/project.py:157-160`, `issue_agent_ticker.py:200-214`).
-    let project: Option<ProjectPoolRow> = sqlx::query_as(
+    let id: Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
+    let created_at: DateTime<Utc> = row.try_get(1).map_err(|_| Denial::ServerError)?;
+    let updated_at: DateTime<Utc> = row.try_get(2).map_err(|_| Denial::ServerError)?;
+    let created_by_id: Option<Uuid> = row.try_get(3).map_err(|_| Denial::ServerError)?;
+    let updated_by_id: Option<Uuid> = row.try_get(4).map_err(|_| Denial::ServerError)?;
+    let deleted_at: Option<DateTime<Utc>> = row.try_get(5).map_err(|_| Denial::ServerError)?;
+    let ticker_issue_id: Uuid = row.try_get(6).map_err(|_| Denial::ServerError)?;
+    let used: i32 = row.try_get(7).map_err(|_| Denial::ServerError)?;
+    let granted: i32 = row.try_get(8).map_err(|_| Denial::ServerError)?;
+    let waited: i32 = row.try_get(9).map_err(|_| Denial::ServerError)?;
+    let user_disabled: bool = row.try_get(10).map_err(|_| Denial::ServerError)?;
+    let next_run_at: Option<DateTime<Utc>> = row.try_get(11).map_err(|_| Denial::ServerError)?;
+    let last_tick_at: Option<DateTime<Utc>> = row.try_get(12).map_err(|_| Denial::ServerError)?;
+    let enabled: bool = row.try_get(13).map_err(|_| Denial::ServerError)?;
+    let disarm_reason: String = row.try_get(14).map_err(|_| Denial::ServerError)?;
+    let pending_entry: bool = row.try_get(15).map_err(|_| Denial::ServerError)?;
+    let pending_entry_free: bool = row.try_get(16).map_err(|_| Denial::ServerError)?;
+    let pending_entry_actor_id: Option<Uuid> = row.try_get(17).map_err(|_| Denial::ServerError)?;
+    let pending_entry_trigger: String = row.try_get(18).map_err(|_| Denial::ServerError)?;
+    let resume_parent_run_id: Option<Uuid> = row.try_get(19).map_err(|_| Denial::ServerError)?;
+    // Project clock policy (`db/models/project.py:157-160`): the pool and
+    // the three per-stage interval columns, all non-null integers.
+    let policy_row: Option<(i32, i32, i32, i32, bool)> = sqlx::query_as(
         r#"SELECT agent_default_max_ticks, agent_default_interval_seconds,
-                  agent_review_default_interval_seconds, agent_test_default_interval_seconds
+                  agent_review_default_interval_seconds, agent_test_default_interval_seconds,
+                  agent_ticking_enabled
            FROM projects WHERE id = $1"#,
     )
     .bind(issue.project_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let (pool_size, impl_interval, review_interval, test_interval) = project
-        .map(|row| (row.0, row.1, row.2, row.3))
-        .unwrap_or((None, None, None, None));
-    let state: Option<(Option<String>, Option<String>)> = match issue.state_id {
+    let (pool_size, impl_interval, review_interval, test_interval, ticking_enabled) =
+        policy_row.unwrap_or((10, 10800, 10800, 10800, true));
+    let state: Option<(String, String)> = match issue.state_id {
         None => None,
-        Some(state_id) => sqlx::query_as(r#"SELECT name, "group" FROM states WHERE id = $1"#)
+        Some(state_id) => sqlx::query_as(r#"SELECT "group", name FROM states WHERE id = $1"#)
             .bind(state_id)
             .fetch_optional(pool)
             .await
             .map_err(|_| Denial::ServerError)?,
     };
-    let (state_name, state_group) = state.unwrap_or((None, None));
-    // `cadence_fields_for`: group-keyed phase config, `impl` fallback.
-    let interval = match state_group.as_deref() {
-        Some("review") => review_interval.unwrap_or(10800),
-        Some("test") => test_interval.unwrap_or(10800),
-        _ => impl_interval.unwrap_or(10800),
+    let (state_group, state_name) = match state {
+        None => (None, None),
+        Some((group, name)) => (Some(group), Some(name)),
     };
-    Ok(Some(TickerRow {
-        enabled,
-        user_disabled,
-        used,
-        granted,
-        waited,
-        next_run_at,
-        last_tick_at,
-        disarm_reason,
-        pending_entry,
-        pool: pool_size.unwrap_or(10),
-        interval,
-        state_name,
+    Ok(Some(TickerOwned {
+        ticker: IssueAgentTicker {
+            id,
+            created_at,
+            updated_at,
+            created_by_id,
+            updated_by_id,
+            deleted_at,
+            issue_id: ticker_issue_id,
+            used,
+            granted,
+            waited,
+            user_disabled,
+            next_run_at,
+            last_tick_at,
+            enabled,
+            disarm_reason,
+            pending_entry,
+            pending_entry_free,
+            pending_entry_actor_id,
+            pending_entry_trigger,
+            resume_parent_run_id,
+        },
+        policy: ProjectClockPolicy {
+            agent_ticking_enabled: Some(ticking_enabled),
+            agent_default_max_ticks: Some(pool_size),
+            agent_default_interval_seconds: Some(i64::from(impl_interval)),
+            agent_review_default_interval_seconds: Some(i64::from(review_interval)),
+            agent_test_default_interval_seconds: Some(i64::from(test_interval)),
+        },
         state_group,
+        state_name,
     }))
 }
 
-fn render_ticker(ticker: &TickerRow, timezone: chrono_tz::Tz) -> serde_json::Value {
-    // Cap = pool + granted + waited; -1 is infinite
-    // (`issue_agent_ticker.py:205-243`).
-    let infinite = ticker.pool == -1;
-    let cap = if infinite {
-        -1
-    } else {
-        ticker.pool + ticker.granted + ticker.waited
+/// One [`LATEST_AGENT_RUN_SQL`] / [`ACTIVE_AGENT_RUN_SQL`] row (the two
+/// share their projection; only the `WHERE` differs), decoded
+/// positionally — the projection selects `llm_model` twice, so name
+/// lookup would bind the wrong one. Token counts come from the
+/// `agent_run` generated columns (`usage->>'input'/'output'/'total'`);
+/// live-state tokens ride the joined `usage` JSON for the shared
+/// `flat_token_fields` port. Datetimes pre-render to `isoformat`
+/// (`+00:00`), the services convention.
+async fn fetch_agent_run(
+    pool: &PgPool,
+    sql: &str,
+    issue_id: &Uuid,
+) -> Result<Option<AgentRunOwned>, Denial> {
+    let row = sqlx::query(sql)
+        .bind(issue_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(row) = row else {
+        return Ok(None);
     };
-    let remaining = if infinite {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::from(std::cmp::max(0, cap - ticker.used))
-    };
-    let cap_reached = !infinite && ticker.used >= cap;
-    // `can_re_tick`: a ticking state (registered name in its group) or
-    // the Paused parking state, with an exhausted pool.
-    let ticking = matches!(
-        (ticker.state_group.as_deref(), ticker.state_name.as_deref()),
-        (Some("started"), Some("In Progress"))
-            | (Some("review"), Some("In Review"))
-            | (Some("test"), Some("In Test"))
-            | (_, Some("Paused"))
-    );
-    serde_json::json!({
-        "enabled": ticker.enabled,
-        "user_disabled": ticker.user_disabled,
-        "used": ticker.used,
-        "tick_count": ticker.used,
-        "granted": ticker.granted,
-        "waited": ticker.waited,
-        "max_ticks": cap,
-        "remaining": remaining,
-        "interval_seconds": ticker.interval,
-        "next_run_at": ticker.next_run_at.map(|dt| render_datetime_in(&dt, &timezone)),
-        "last_tick_at": ticker.last_tick_at.map(|dt| render_datetime_in(&dt, &timezone)),
-        "disarm_reason": ticker.disarm_reason,
-        "pending_entry": ticker.pending_entry,
-        "can_re_tick": ticking && cap_reached,
-    })
-}
-
-/// `classify_run_error` (`runner/diagnostics.py:173-244`).
-fn classify_run_error(error: &str) -> Option<serde_json::Value> {
-    let detail = error.trim();
-    if detail.is_empty() {
-        return None;
-    }
-    let lowered = detail.to_lowercase();
-    let summary = detail
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .to_string();
-    // The enriched-auth label (`AI agent: <label> auth ...`).
-    let mut agent_label = String::new();
-    for line in detail.lines() {
-        let line = line.trim();
-        if !line.to_lowercase().starts_with("ai agent:") {
-            continue;
-        }
-        let body = line.split_once(':').map(|pair| pair.1).unwrap_or("").trim();
-        if let Some(idx) = body.to_lowercase().find(" auth ") {
-            if idx > 0 {
-                agent_label = body[..idx].trim().to_string();
-            }
-        }
-    }
-    let action_agent = if agent_label.is_empty() {
-        "the agent CLI".to_string()
-    } else {
-        agent_label.clone()
-    };
-    if lowered.contains("invalid authentication credentials")
-        || lowered.contains("authentication_failed")
-        || lowered.contains("failed to authenticate")
-    {
-        return Some(serde_json::json!({
-            "source": "agent",
-            "source_label": if agent_label.is_empty() { "Agent CLI".to_string() } else { agent_label },
-            "kind": "agent_authentication",
-            "summary": summary,
-            "action": format!("Re-authenticate {action_agent} on the runner machine, then restart the Pi Dash runner."),
-        }));
-    }
-    if lowered.contains("selected model")
-        && (lowered.contains("may not exist") || lowered.contains("may not have access"))
-    {
-        return Some(serde_json::json!({
-            "source": "agent",
-            "source_label": "Agent CLI",
-            "kind": "agent_model_access",
-            "summary": summary,
-            "action": "Choose a model the agent account can access, then retry the run.",
-        }));
-    }
-    if lowered.contains("runner_not_found") || lowered.contains("run_not_owned_by_runner") {
-        return Some(serde_json::json!({
-            "source": "pidash_cloud",
-            "source_label": "Pi Dash cloud",
-            "kind": "runner_registration",
-            "summary": summary,
-            "action": "Remove or re-add the stale local runner registration.",
-        }));
-    }
-    if lowered.contains("daemon shutdown requested")
-        || lowered.contains("runner revoked")
-        || lowered.contains("session_evicted")
-    {
-        return Some(serde_json::json!({
-            "source": "pidash_runner",
-            "source_label": "Pi Dash runner",
-            "kind": "runner_lifecycle",
-            "summary": summary,
-            "action": "Check runner service status and restart the runner if it should still accept work.",
-        }));
-    }
-    if lowered.contains("agent stalled") || lowered.contains("without new agent events") {
-        return Some(serde_json::json!({
-            "source": "agent",
-            "source_label": "Agent CLI",
-            "kind": "agent_stalled",
-            "summary": summary,
-            "action": "Inspect the runner machine for a stuck agent process or long-running tool call.",
-        }));
-    }
-    Some(serde_json::json!({
-        "source": "unknown",
-        "source_label": "Unknown",
-        "kind": "unknown",
-        "summary": summary,
-        "action": "",
+    let iso = |moment: Option<DateTime<Utc>>| moment.map(serialize_iso_datetime);
+    let id: Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
+    let status: String = row.try_get(1).map_err(|_| Denial::ServerError)?;
+    let executor_kind: String = row.try_get(2).map_err(|_| Denial::ServerError)?;
+    let queue_position: Option<i16> = row.try_get(3).map_err(|_| Denial::ServerError)?;
+    let runner_id: Option<Uuid> = row.try_get(4).map_err(|_| Denial::ServerError)?;
+    let created_at: DateTime<Utc> = row.try_get(5).map_err(|_| Denial::ServerError)?;
+    let assigned_at: Option<DateTime<Utc>> = row.try_get(6).map_err(|_| Denial::ServerError)?;
+    let started_at: Option<DateTime<Utc>> = row.try_get(7).map_err(|_| Denial::ServerError)?;
+    let ended_at: Option<DateTime<Utc>> = row.try_get(8).map_err(|_| Denial::ServerError)?;
+    let done_payload: Option<serde_json::Value> =
+        row.try_get(9).map_err(|_| Denial::ServerError)?;
+    let error: String = row.try_get(10).map_err(|_| Denial::ServerError)?;
+    let error_code: String = row.try_get(11).map_err(|_| Denial::ServerError)?;
+    let llm_model: String = row.try_get(12).map_err(|_| Denial::ServerError)?;
+    let input_tokens: Option<i64> = row.try_get(13).map_err(|_| Denial::ServerError)?;
+    let output_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
+    let total_tokens: Option<i64> = row.try_get(15).map_err(|_| Denial::ServerError)?;
+    let runner_name: Option<String> = row.try_get(16).map_err(|_| Denial::ServerError)?;
+    let observed_run_id: Option<Uuid> = row.try_get(17).map_err(|_| Denial::ServerError)?;
+    let last_event_at: Option<DateTime<Utc>> = row.try_get(18).map_err(|_| Denial::ServerError)?;
+    let last_event_kind: Option<String> = row.try_get(19).map_err(|_| Denial::ServerError)?;
+    let last_event_summary: Option<String> = row.try_get(20).map_err(|_| Denial::ServerError)?;
+    let agent_pid: Option<i32> = row.try_get(21).map_err(|_| Denial::ServerError)?;
+    let agent_subprocess_alive: Option<bool> = row.try_get(22).map_err(|_| Denial::ServerError)?;
+    let approvals_pending: Option<i32> = row.try_get(23).map_err(|_| Denial::ServerError)?;
+    let usage: Option<serde_json::Value> = row.try_get(24).map_err(|_| Denial::ServerError)?;
+    let live_llm_model: Option<String> = row.try_get(25).map_err(|_| Denial::ServerError)?;
+    let turn_count: Option<i32> = row.try_get(26).map_err(|_| Denial::ServerError)?;
+    let agent_health: Option<String> = row.try_get(27).map_err(|_| Denial::ServerError)?;
+    let agent_last_activity_at: Option<DateTime<Utc>> =
+        row.try_get(28).map_err(|_| Denial::ServerError)?;
+    let live_updated_at: Option<DateTime<Utc>> =
+        row.try_get(29).map_err(|_| Denial::ServerError)?;
+    let live = live_updated_at.map(|updated_at| AgentLiveOwned {
+        observed_run_id: observed_run_id.map(|id| id.to_string()),
+        last_event_at: iso(last_event_at),
+        last_event_kind,
+        last_event_summary,
+        agent_pid,
+        agent_subprocess_alive,
+        approvals_pending,
+        usage: usage.unwrap_or(serde_json::Value::Null),
+        llm_model: live_llm_model,
+        turn_count,
+        agent_health,
+        agent_last_activity_at: iso(agent_last_activity_at),
+        updated_at: serialize_iso_datetime(updated_at),
+    });
+    Ok(Some(AgentRunOwned {
+        id: id.to_string(),
+        status,
+        executor_kind,
+        queue_position,
+        runner_id: runner_id.map(|id| id.to_string()),
+        runner_name,
+        created_at: serialize_iso_datetime(created_at),
+        assigned_at: iso(assigned_at),
+        started_at: iso(started_at),
+        ended_at: iso(ended_at),
+        done_payload,
+        error,
+        error_code,
+        llm_model,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        live,
     }))
 }
 
-fn opt_dt_string(value: &Option<DateTime<Utc>>, timezone: chrono_tz::Tz) -> serde_json::Value {
-    value.map_or(serde_json::Value::Null, |dt| {
-        serde_json::Value::String(render_datetime_in(&dt, &timezone))
-    })
+/// The services [`AgentRunDetailRow`] view over an owned run row.
+fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
+    let live_state = run.live.as_ref().map(|live| AgentLiveStateRow {
+        observed_run_id: live.observed_run_id.as_deref(),
+        last_event_at: live.last_event_at.as_deref(),
+        last_event_kind: live.last_event_kind.as_deref(),
+        last_event_summary: live.last_event_summary.as_deref(),
+        agent_pid: live.agent_pid,
+        agent_subprocess_alive: live.agent_subprocess_alive,
+        approvals_pending: live.approvals_pending,
+        usage: &live.usage,
+        llm_model: live.llm_model.as_deref(),
+        turn_count: live.turn_count,
+        agent_health: live.agent_health.as_deref(),
+        agent_last_activity_at: live.agent_last_activity_at.as_deref(),
+        updated_at: live.updated_at.as_str(),
+    });
+    AgentRunDetailRow {
+        id: run.id.as_str(),
+        status: run.status.as_str(),
+        executor_kind: run.executor_kind.as_str(),
+        queue_position: run.queue_position,
+        runner_id: run.runner_id.as_deref(),
+        runner_name: run.runner_name.as_deref(),
+        created_at: run.created_at.as_str(),
+        assigned_at: run.assigned_at.as_deref(),
+        started_at: run.started_at.as_deref(),
+        ended_at: run.ended_at.as_deref(),
+        done_payload: run.done_payload.as_ref().filter(|value| !value.is_null()),
+        error: run.error.as_str(),
+        error_code: run.error_code.as_str(),
+        llm_model: run.llm_model.as_str(),
+        input_tokens: run.input_tokens,
+        output_tokens: run.output_tokens,
+        total_tokens: run.total_tokens,
+        live_state,
+    }
 }
 
-/// One `agent_run` row with its runner facts for the status render.
-#[allow(dead_code)]
-struct AgentRunRow {
-    id: Uuid,
-    status: String,
-    executor_kind: Option<String>,
-    queue_position: Option<i32>,
-    runner_id: Option<Uuid>,
-    runner_name: Option<String>,
-    created_at: Option<DateTime<Utc>>,
-    assigned_at: Option<DateTime<Utc>>,
-    started_at: Option<DateTime<Utc>>,
-    ended_at: Option<DateTime<Utc>>,
-    done_payload: Option<serde_json::Value>,
-    error: Option<String>,
-    error_code: Option<String>,
-    llm_model: Option<String>,
-    input_tokens: Option<i64>,
-    output_tokens: Option<i64>,
-    total_tokens: Option<i64>,
-}
-
-/// `get_agent_status` (`serializers/issue.py:1373-1417`): the ticker
-/// plus the latest and active runs. `None` when neither exists.
+/// `get_agent_status` (`serializers/issue.py:1373-1412`): the ticker
+/// plus the latest and active runs. `None` when neither exists. Runs
+/// and the count come from the shared agent-run statements; the block
+/// renders through the shared `agent_status_to_representation` port,
+/// so tokens, the live-state guard, `error_diagnostic` and the
+/// `+00:00` datetimes match the app-issue detail render exactly.
 pub async fn render_agent_status(
     pool: &PgPool,
     issue: &IssueRow,
-    ticker: Option<serde_json::Value>,
-    timezone: chrono_tz::Tz,
+    ticker: Option<AgentTickerView<'_>>,
 ) -> Result<serde_json::Value, Denial> {
-    let runs: Vec<AgentRunRow> = sqlx::query(
-        r#"SELECT r.id, r.status, r.executor_kind, r.queue_position, r.runner_id,
-                  ru.name,
-                  r.created_at, r.assigned_at, r.started_at, r.ended_at,
-                  r.done_payload, r.error, r.error_code, r.llm_model,
-                  (r.usage->>'input_tokens')::bigint, (r.usage->>'output_tokens')::bigint,
-                  (r.usage->>'total_tokens')::bigint
-           FROM agent_run r LEFT JOIN runner ru ON ru.id = r.runner_id
-           WHERE r.work_item_id = $1 ORDER BY r.created_at DESC"#,
-    )
-    .bind(issue.id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?
-    .into_iter()
-    .map(|row| {
-        Ok::<_, sqlx::Error>(AgentRunRow {
-            id: row.try_get("id")?,
-            status: row.try_get("status")?,
-            executor_kind: row.try_get("executor_kind")?,
-            queue_position: row.try_get("queue_position")?,
-            runner_id: row.try_get("runner_id")?,
-            runner_name: row.try_get("name")?,
-            created_at: row.try_get("created_at")?,
-            assigned_at: row.try_get("assigned_at")?,
-            started_at: row.try_get("started_at")?,
-            ended_at: row.try_get("ended_at")?,
-            done_payload: row.try_get("done_payload")?,
-            error: row.try_get("error")?,
-            error_code: row.try_get("error_code")?,
-            llm_model: row.try_get("llm_model")?,
-            input_tokens: row.try_get("input_tokens")?,
-            output_tokens: row.try_get("output_tokens")?,
-            total_tokens: row.try_get("total_tokens")?,
-        })
-    })
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|_| Denial::ServerError)?;
-
-    if ticker.is_none() && runs.is_empty() {
-        return Ok(serde_json::Value::Null);
+    let latest = fetch_agent_run(pool, LATEST_AGENT_RUN_SQL, &issue.id).await?;
+    let active = fetch_agent_run(pool, ACTIVE_AGENT_RUN_SQL, &issue.id).await?;
+    let run_count: i64 = sqlx::query_scalar(AGENT_RUN_COUNT_SQL)
+        .bind(issue.id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let latest_row = latest.as_ref().map(agent_run_detail_row);
+    let active_row = active.as_ref().map(agent_run_detail_row);
+    let status =
+        agent_status_to_representation(ticker, active_row.as_ref(), latest_row.as_ref(), run_count);
+    match status {
+        None => Ok(serde_json::Value::Null),
+        Some(view) => serde_json::to_value(&view).map_err(|_| Denial::ServerError),
     }
-    const ACTIVE: &[&str] = &[
-        "queued",
-        "assigned",
-        "waiting_for_worktree",
-        "running",
-        "cancel_requested",
-        "awaiting_approval",
-        "awaiting_reauth",
-        "paused_awaiting_input",
-    ];
-    let latest = runs.first();
-    let active = runs
-        .iter()
-        .find(|run| ACTIVE.contains(&run.status.as_str()));
-    let latest_render = match latest {
-        None => serde_json::Value::Null,
-        Some(run) => render_agent_run(pool, run, active.is_none(), timezone).await?,
-    };
-    let active_render = match active {
-        None => serde_json::Value::Null,
-        Some(run) => render_agent_run(pool, run, true, timezone).await?,
-    };
-    Ok(serde_json::json!({
-        "ticker": ticker,
-        "active_run": active_render,
-        "latest_run": latest_render,
-        "run_count": runs.len(),
-    }))
-}
-
-/// `_serialize_agent_run` (`serializers/issue.py:1330-1371`) with the
-/// live-state nesting (`_serialize_agent_live_state`).
-async fn render_agent_run(
-    pool: &PgPool,
-    run: &AgentRunRow,
-    include_live_state: bool,
-    timezone: chrono_tz::Tz,
-) -> Result<serde_json::Value, Denial> {
-    // `runner.live_state` with the observed-run guard
-    // (`serializers/issue.py:1340-1347`).
-    let mut live_state = serde_json::Value::Null;
-    if include_live_state {
-        if let Some(runner_id) = run.runner_id {
-            let row: Option<LiveStateRow> = sqlx::query_as(
-                r#"SELECT observed_run_id, last_event_at, last_event_kind, last_event_summary,
-                          agent_pid, agent_subprocess_alive, approvals_pending,
-                          (usage->>'input_tokens')::bigint, (usage->>'output_tokens')::bigint,
-                          (usage->>'total_tokens')::bigint, llm_model, turn_count,
-                          agent_health, agent_last_activity_at, updated_at
-                   FROM runner_live_state WHERE runner_id = $1"#,
-            )
-            .bind(runner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            if let Some(state) = row {
-                let observed: Option<Uuid> = state.0;
-                let matches = observed.is_some() && observed == Some(run.id);
-                if matches {
-                    live_state = serde_json::json!({
-                        "observed_run_id": observed.map(|id| id.to_string()),
-                        "last_event_at": state.1.map(|dt| render_datetime_in(&dt, &timezone)),
-                        "last_event_kind": state.2,
-                        "last_event_summary": state.3,
-                        "agent_pid": state.4,
-                        "agent_subprocess_alive": state.5,
-                        "approvals_pending": state.6,
-                        "input_tokens": state.7,
-                        "output_tokens": state.8,
-                        "total_tokens": state.9,
-                        "llm_model": state.10,
-                        "turn_count": state.11,
-                        "agent_health": state.12,
-                        "agent_last_activity_at": state.13.map(|dt| render_datetime_in(&dt, &timezone)),
-                        "updated_at": state.14.map(|dt| render_datetime_in(&dt, &timezone)),
-                    });
-                }
-            }
-        }
-    }
-    Ok(serde_json::json!({
-        "id": run.id.to_string(),
-        "status": run.status,
-        "executor_kind": run.executor_kind,
-        "queue_position": run.queue_position,
-        "runner": run.runner_id.map(|id| id.to_string()),
-        "runner_name": run.runner_id.and(run.runner_name.clone()),
-        "created_at": opt_dt_string(&run.created_at, timezone),
-        "assigned_at": opt_dt_string(&run.assigned_at, timezone),
-        "started_at": opt_dt_string(&run.started_at, timezone),
-        "ended_at": opt_dt_string(&run.ended_at, timezone),
-        "done_payload": run.done_payload.clone(),
-        "error": run.error,
-        "error_code": run.error_code,
-        "error_diagnostic": run.error.as_deref().and_then(classify_run_error),
-        "llm_model": run.llm_model,
-        "input_tokens": run.input_tokens,
-        "output_tokens": run.output_tokens,
-        "total_tokens": run.total_tokens,
-        "live_state": live_state,
-    }))
 }
 
 /// `IssueIntakeSerializer` (`serializers/issue.py:1021-1036`): the 8
@@ -2750,11 +2633,24 @@ pub async fn render_issue_detail(
         .as_deref()
         .is_some_and(|source| !source.is_empty())
         && is_synced_safe(pool, issue).await;
-    let ticker_row = fetch_ticker(pool, issue).await?;
-    let ticker = ticker_row
-        .as_ref()
-        .map(|ticker| render_ticker(ticker, timezone));
-    let status = render_agent_status(pool, issue, ticker.clone(), timezone).await?;
+    // The agent blocks render through the shared app-issue ports
+    // (`serializers/issue.py:1268-1412`); Django calls `get_agent_ticker`
+    // once per block, so both blocks carry the same values.
+    let ticker_owned = fetch_ticker_owned(pool, issue).await?;
+    let ticker_view = ticker_owned.as_ref().map(|owned| {
+        // `None` when stateless (or the state row is gone) — the impl
+        // cadence, never ticking/paused.
+        let state = match (owned.state_group.as_deref(), owned.state_name.as_deref()) {
+            (Some(group), Some(name)) => Some(StateRef { group, name }),
+            _ => None,
+        };
+        agent_ticker_to_representation(&owned.ticker, &owned.policy, state.as_ref())
+    });
+    let ticker = match &ticker_view {
+        None => serde_json::Value::Null,
+        Some(view) => serde_json::to_value(view).map_err(|_| Denial::ServerError)?,
+    };
+    let status = render_agent_status(pool, issue, ticker_view).await?;
     let summary = blocker_summary(pool, &issue.id, &issue.workspace_id).await?;
     let mut map = serde_json::Map::with_capacity(29);
     map.insert(
@@ -2839,10 +2735,7 @@ pub async fn render_issue_detail(
         "description_html".to_owned(),
         serde_json::Value::String(issue.description_html.clone()),
     );
-    map.insert(
-        "agent_ticker".to_owned(),
-        ticker.unwrap_or(serde_json::Value::Null),
-    );
+    map.insert("agent_ticker".to_owned(), ticker);
     map.insert("agent_status".to_owned(), status);
     map.insert(
         "relations_summary".to_owned(),
@@ -3586,6 +3479,7 @@ pub async fn collection_list(
         statuses,
         issue_filters_sql: compiled.fragment.as_deref(),
         issue_filter_binds: compiled.bind_count,
+        joins: &compiled.joins,
         guest_created_by: gate.guest_scoped,
         limit: page.limit,
         offset: page.offset,

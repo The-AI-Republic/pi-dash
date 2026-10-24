@@ -13,6 +13,8 @@ vanish from the main list/retrieve and appear under archived-modules.
 
 from .conftest import module_url, modules_url
 
+from _harness.seed import estimate, estimate_point
+
 SERVER_ERROR = {"error": "Something went wrong please try again later"}
 
 # Archived list rows render a narrower .values() dict than the main
@@ -131,3 +133,71 @@ def test_unarchive(api, seed, tenant_a, project_a, auth_a):
     r = api.get(module_url(tenant_a, project_a, mid), headers=auth_a)
     assert r.status_code == 200, r.text
     assert r.json()["archived_at"] is None
+
+
+def test_archived_detail_points_estimate_labels(api, seed, db, tenant_a,
+                                                project_a, auth_a):
+    """Points estimates keep archived detail at 200 (PIDASHCONV-1420).
+
+    The project carries a points estimate, so the detail renders the
+    estimate_distribution block (archive.py:321-430). The Rust label query
+    aliased the issues table while filtering on its bare name, 500ing every
+    archived detail on such projects.
+    """
+    ws = tenant_a["workspace"]["id"]
+    est = estimate(db, project_a, ws)
+    ep = estimate_point(db, est["id"], project_a, ws, value="5")
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "update projects set estimate_id=%s where id=%s",
+                (est["id"], project_a),
+            )
+        label_id = seed.label(ws, project_a, name="ct1420-label")
+        issue_id = seed.issue(ws, project_a, name="ct1420 issue")
+        with db.cursor() as cur:
+            cur.execute(
+                "update issues set estimate_point_id=%s where id=%s",
+                (ep["id"], issue_id),
+            )
+        mid = seed.module(
+            ws, project_a, name="CT1420 archived", status="completed",
+        )
+        seed.module_issue(ws, project_a, mid, issue_id)
+        seed.issue_label(ws, project_a, issue_id, label_id)
+        r = api.post(_archive_url(tenant_a, project_a, mid), headers=auth_a)
+        assert r.status_code == 200, r.text
+        r = api.get(
+            f"{_archived_url(tenant_a, project_a)}{mid}/", headers=auth_a,
+        )
+        assert r.status_code == 200, r.text
+        labels = r.json()["estimate_distribution"]["labels"]
+        assert labels == [{
+            "label_name": "ct1420-label",
+            "color": "#ffffff",
+            "label_id": label_id,
+            "total_estimates": 5.0,
+            "completed_estimates": None,
+            "pending_estimates": 5.0,
+        }], labels
+    finally:
+        # estimates/estimate_points are untracked by Seed.cleanup, and both
+        # projects.estimate_id and issues.estimate_point_id pin them: clear
+        # the references first. Project-scoped so partial seeds still clean.
+        with db.cursor() as cur:
+            cur.execute(
+                "update issues set estimate_point_id=null"
+                " where project_id=%s",
+                (project_a,),
+            )
+            cur.execute(
+                "update projects set estimate_id=null where id=%s",
+                (project_a,),
+            )
+            cur.execute(
+                "delete from estimate_points where project_id=%s",
+                (project_a,),
+            )
+            cur.execute(
+                "delete from estimates where project_id=%s", (project_a,),
+            )

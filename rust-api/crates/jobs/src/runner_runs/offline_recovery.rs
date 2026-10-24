@@ -208,7 +208,7 @@ pub async fn release_pins_on_offline_runners(
         // back to them: one pod's failed drain must not skip the
         // others.
         if let Err(error) = seams.drain_pod(pod_id).await {
-            tracing::error!(%error, "release_pins_on_offline_runners: drain failed for pod {pod_id}");
+            tracing::error!(%error, "release pins: drain failed for pod {pod_id}");
         }
     }
     if released > 0 {

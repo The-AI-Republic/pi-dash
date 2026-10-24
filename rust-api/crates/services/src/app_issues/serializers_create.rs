@@ -697,6 +697,11 @@ pub struct ValidateProbes<'a> {
     /// [`ONLINE_MANAGED_RUNNER_SQL`](crate::dispatch::ONLINE_MANAGED_RUNNER_SQL)
     /// verdict.
     pub online_exists: &'a dyn Fn() -> bool,
+    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`](crate::dispatch::ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+    /// verdict (`09738d222`): consulted only when a runner is enrolled
+    /// but none is online, exactly as Python's `if` runs the paused
+    /// probe last.
+    pub paused_exists: &'a dyn Fn() -> bool,
 }
 
 /// The attrs `validate()` mutates, returned on success. Every other key
@@ -846,12 +851,16 @@ pub fn issue_create_validate(
                         message: Cow::Borrowed(EXECUTOR_PROJECT_REQUIRED_MESSAGE),
                     });
                 };
+                let enrolled = (probes.enrolled_exists)();
+                let online = (probes.online_exists)();
+                let paused = enrolled && !online && (probes.paused_exists)();
                 let verdict = managed_runner_availability(
                     policy.managed,
                     policy.viewer,
                     || (probes.llm_profile)(),
-                    (probes.enrolled_exists)(),
-                    (probes.online_exists)(),
+                    enrolled,
+                    online,
+                    paused,
                 );
                 if !verdict.available
                     && verdict.reason_code != ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
@@ -1306,6 +1315,7 @@ mod tests {
         llm_profile: Box<dyn Fn() -> LlmProfile>,
         enrolled_exists: Box<dyn Fn() -> bool>,
         online_exists: Box<dyn Fn() -> bool>,
+        paused_exists: Box<dyn Fn() -> bool>,
     }
 
     impl ProbeBank {
@@ -1329,6 +1339,7 @@ mod tests {
                 }),
                 enrolled_exists: Box::new(|| true),
                 online_exists: Box::new(|| true),
+                paused_exists: Box::new(|| false),
             }
         }
 
@@ -1347,6 +1358,7 @@ mod tests {
                 llm_profile: &self.llm_profile,
                 enrolled_exists: &self.enrolled_exists,
                 online_exists: &self.online_exists,
+                paused_exists: &self.paused_exists,
             }
         }
     }
@@ -2426,6 +2438,7 @@ mod tests {
                     true
                 })
             },
+            paused_exists: Box::new(|| false),
         };
         let probes = bank.probes();
         let cloud = cloud_settings(false);

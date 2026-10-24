@@ -1136,7 +1136,7 @@ async fn dispatch_assign(
 
 /// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
 /// (miss ⇒ `Ok(false)`), else the locked drain. Runner-row indices
-/// follow the 30-column projection (`id` 0, `owner_id` 1, `pod_id` 4,
+/// follow the 32-column projection (`id` 0, `owner_id` 1, `pod_id` 4,
 /// `provisioning` 7, `visibility` 8); run-row indices the 41-column
 /// image (`id` 0, `work_item_id` 7, `prompt` 19, `run_config` 23).
 async fn drain_for_runner_by_id(

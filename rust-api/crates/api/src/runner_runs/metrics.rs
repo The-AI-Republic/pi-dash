@@ -1,7 +1,7 @@
 //! Runner Prometheus metrics (D-15, stage 5, PIDASHCONV-542).
 //!
 //! Ports `apps/api/pi_dash/runner/views/metrics.py:1-105`
-//! (`GET /api/v1/runner/metrics/`, [`metrics`]): five point-in-time
+//! (`GET /api/v1/runner/metrics/`, [`metrics`]): six point-in-time
 //! gauges rendered by hand in Prometheus text format. AllowAny with no
 //! auth classes — the handler never touches the session — and the
 //! response bypasses JSON rendering (`text/plain; version=0.0.4`).
@@ -27,9 +27,12 @@ pub const ACTIVE_RUN_STATUSES: [&str; 5] = [
     "awaiting_reauth",
 ];
 
-/// Runner status counts (`values_list("status").annotate(Count)`).
+/// Runner status counts with the per-status paused count
+/// (`values("status").annotate(c=Count("id"), paused=Count("id",
+/// filter=Q(paused_at__isnull=False, revoked_at__isnull=True)))`,
+/// `09738d222` adds the `paused` arm).
 pub fn runner_status_counts_sql() -> String {
-    r#"SELECT "runner"."status", COUNT("runner"."id") FROM "runner" GROUP BY "runner"."status""#
+    r#"SELECT "runner"."status", COUNT("runner"."id") AS "c", COUNT("runner"."id") FILTER (WHERE ("runner"."paused_at" IS NOT NULL AND "runner"."revoked_at" IS NULL)) AS "paused" FROM "runner" GROUP BY "runner"."status""#
         .to_owned()
 }
 
@@ -50,16 +53,23 @@ pub fn gauge(name: &str, help: &str, value: i64) -> String {
     format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n")
 }
 
-/// The five-gauge body (`metrics.py:78-104`), in source order.
+/// The six-gauge body (`metrics.py:78-104`), in source order.
+/// `online` is already net of paused runners (`09738d222`); `paused`
+/// counts non-revoked paused runners in any connectivity state.
 pub fn metrics_body(
     online: i64,
     busy: i64,
     offline: i64,
+    paused: i64,
     active_runs: i64,
     pending_approvals: i64,
 ) -> String {
     [
-        gauge("pi_dash_runner_online", "Runners currently online.", online),
+        gauge(
+            "pi_dash_runner_online",
+            "Runners online and accepting work (excludes paused).",
+            online,
+        ),
         gauge(
             "pi_dash_runner_busy",
             "Runners currently executing a run.",
@@ -69,6 +79,11 @@ pub fn metrics_body(
             "pi_dash_runner_offline",
             "Runners that have dropped their heartbeat (excludes revoked).",
             offline,
+        ),
+        gauge(
+            "pi_dash_runner_paused",
+            "Non-revoked runners paused by an operator, in any connectivity state.",
+            paused,
         ),
         gauge(
             "pi_dash_runs_active",
@@ -84,7 +99,7 @@ pub fn metrics_body(
     .concat()
 }
 
-/// `GET /api/v1/runner/metrics/`: the five gauges as `text/plain`.
+/// `GET /api/v1/runner/metrics/`: the six gauges as `text/plain`.
 /// AllowAny — no session lookup at all (`authentication_classes = []`).
 pub async fn metrics(State(state): State<AppState>) -> Response {
     view_response(metrics_inner(State(state)).await, ALLOW_RUNNER_METRICS)
@@ -95,7 +110,7 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
         Ok(pool) => pool,
         Err(response) => return response,
     };
-    let status_rows: Vec<(String, i64)> = match sqlx::query_as(&runner_status_counts_sql())
+    let status_rows: Vec<(String, i64, i64)> = match sqlx::query_as(&runner_status_counts_sql())
         .fetch_all(pool)
         .await
     {
@@ -105,11 +120,18 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
     let mut online = 0;
     let mut busy = 0;
     let mut offline = 0;
-    for (status, count) in status_rows {
+    let mut paused = 0;
+    for (status, count, paused_count) in status_rows {
+        // The paused gauge sums every status group (`metrics.py:78`); the
+        // COUNT filter already excludes revoked runners.
+        paused += paused_count;
         // Revoked runners are retired, not a health signal: counted in
         // their own group and ignored here (`metrics.py:14-15`).
         match status.as_str() {
-            "online" => online = count,
+            // The online gauge nets out paused-ONLINE runners
+            // (`metrics.py:79-80`, `09738d222`); busy/offline keep
+            // their raw counts, as in Python.
+            "online" => online = count - paused_count,
             "busy" => busy = count,
             "offline" => offline = count,
             _ => {}
@@ -132,7 +154,14 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
         Ok(count) => count,
         Err(_) => return server_error(),
     };
-    let body = metrics_body(online, busy, offline, active_runs, pending_approvals);
+    let body = metrics_body(
+        online,
+        busy,
+        offline,
+        paused,
+        active_runs,
+        pending_approvals,
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, METRICS_CONTENT_TYPE)
@@ -163,8 +192,9 @@ mod tests {
     #[test]
     fn body_matches_fx08_byte_for_byte() {
         let fx = fx08();
-        // Fixture rows: 1 online, 1 busy, 2 offline, 8 active, 2 pending.
-        let body = metrics_body(1, 1, 2, 8, 2);
+        // Fixture rows: 1 online, 1 busy, 2 offline, 0 paused, 8 active,
+        // 2 pending.
+        let body = metrics_body(1, 1, 2, 0, 8, 2);
         assert_eq!(body, fx["metrics"]["body"].as_str().expect("body"));
         assert_eq!(
             METRICS_CONTENT_TYPE,
