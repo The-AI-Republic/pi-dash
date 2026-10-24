@@ -80,6 +80,6 @@
     "tailwindcss": "^4.1.0",
     "typescript": "catalog:",
     "vite": "catalog:",
-    "vitest": "^4.0.15"
+    "vitest": "4.0.17"
   }
 }
