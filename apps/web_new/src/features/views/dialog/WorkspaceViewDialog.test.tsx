@@ -7,7 +7,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { SavedView } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 
 const notify = vi.hoisted(() => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
 vi.mock("../../../shared/shell/index.js", () => notify);
@@ -108,11 +108,11 @@ function renderDialog(
     | { mode: "edit"; view: SavedView }
   )
 ): {
-  onOpenChange: ReturnType<typeof vi.fn>;
+  onOpenChange: Mock<(open: boolean) => void>;
   queryClient: QueryClient;
   rerenderOpen: (open: boolean) => void;
 } {
-  const onOpenChange = (options.onOpenChange ?? vi.fn()) as ReturnType<typeof vi.fn>;
+  const onOpenChange = (options.onOpenChange ?? vi.fn()) as Mock<(open: boolean) => void>;
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const ui = (open: boolean): React.ReactElement => {
     const props: WorkspaceViewDialogProps =
@@ -447,7 +447,7 @@ describe("WorkspaceViewDialog cloud access", () => {
     );
   }
 
-  function seedCloud(storeAccess: (input: unknown) => Promise<unknown>): ReturnType<typeof vi.fn> {
+  function seedCloud(storeAccess: (input: unknown) => Promise<unknown>): Mock<typeof storeAccess> {
     const store = vi.fn(storeAccess);
     harness.edition = {
       id: "cloud",
