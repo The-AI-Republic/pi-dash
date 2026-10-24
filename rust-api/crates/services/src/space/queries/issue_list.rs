@@ -78,6 +78,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::intake_assets::asset_board_first_scoped_sql;
+use crate::assistant::tools_issues::escape_icontains;
 
 // ---------------------------------------------------------------------------
 // L1 anchor lookup (views/issue.py:80-85)
@@ -457,8 +458,10 @@ pub fn compile_issue_filters(
                 }
             }
             "name" if !raw.is_empty() => {
+                // `name__icontains` (`issue_filters.py:207-208`): Django runs
+                // `prep_for_like_query`, so `\`, `%` and `_` match literally.
                 conjuncts.push(format!("\"issues\".\"name\" ILIKE ${next}"));
-                params.push(format!("%{raw}%"));
+                params.push(format!("%{}%", escape_icontains(raw)));
                 next += 1;
             }
             // `created_at__date` / `completed_at__date` compare on the date
@@ -658,9 +661,11 @@ fn date_conjuncts(
             }
             next += 1;
         } else {
+            // Bare part is `{term}__contains` (`issue_filters.py:83`): same
+            // `prep_for_like_query` escaping as `icontains`.
             out.push((
                 format!("{}::text LIKE ${next}", lhs(column)),
-                vec![format!("%{}%", parts[0])],
+                vec![format!("%{}%", escape_icontains(parts[0]))],
             ));
             next += 1;
         }
@@ -1427,6 +1432,26 @@ mod tests {
         assert!(both
             .conjuncts
             .contains(&"\"issues\".\"start_date\" IS NOT NULL".to_string()));
+    }
+
+    #[test]
+    fn filters_like_patterns_escape_wildcards() {
+        // `name__icontains` matches literally: `\`, `%`, `_` are escaped
+        // (`prep_for_like_query`), so `?name=a_b` never matches `axb`.
+        let c = compile_issue_filters(&qp(&[("name", "a_b%c\\")]), 3);
+        assert_eq!(
+            c.conjuncts,
+            vec!["\"issues\".\"name\" ILIKE $3".to_string()]
+        );
+        assert_eq!(c.params, vec!["%a\\_b\\%c\\\\%".to_string()]);
+        // The bare date part (`{term}__contains`, `issue_filters.py:83`)
+        // escapes the same way.
+        let one = compile_issue_filters(&qp(&[("created_at", "2026_01%")]), 3);
+        assert_eq!(
+            one.conjuncts,
+            vec!["\"issues\".\"created_at\"::date::text LIKE $3".to_string()]
+        );
+        assert_eq!(one.params, vec!["%2026\\_01\\%%".to_string()]);
     }
 
     #[test]

@@ -392,11 +392,13 @@ pub const PUBLIC_MEMBER_GET_SQL: &str =
 /// The CREATE half of the same `get_or_create`: `id` is `uuid4`
 /// (`BaseModel`, `db/models/base.py:18`), timestamps are automatic,
 /// `workspace_id` is forced from `project.workspace`
-/// (`ProjectBaseModel.save`, `db/models/project.py:309-311`), and
-/// `created_by/updated_by` follow the request user (NULL when anonymous).
+/// (`ProjectBaseModel.save`, `db/models/project.py:309-311`),
+/// `created_by` is the request user and `updated_by` stays NULL on
+/// create (`BaseModel.save`, `db/models/base.py:23-43`; these routes
+/// require auth, so the user is never anonymous here).
 /// `$1` = new row id, `$2` = project id, `$3` = workspace id,
-/// `$4` = member id.
-pub const PUBLIC_MEMBER_INSERT_SQL: &str = "INSERT INTO project_public_members (id, created_at, updated_at, project_id, workspace_id, member_id) VALUES ($1, now(), now(), $2, $3, $4)";
+/// `$4` = member id, `$5` = created_by (request user) id.
+pub const PUBLIC_MEMBER_INSERT_SQL: &str = "INSERT INTO project_public_members (id, created_at, updated_at, project_id, workspace_id, member_id, created_by_id) VALUES ($1, now(), now(), $2, $3, $4, $5)";
 
 #[cfg(test)]
 mod tests {

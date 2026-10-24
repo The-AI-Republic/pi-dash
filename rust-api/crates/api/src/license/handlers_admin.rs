@@ -1679,12 +1679,17 @@ fn csrf_rotate_cookie(secret: &str, ctx: &CookieCtx) -> String {
     })
 }
 
-/// The auth keys `login()` writes into the session payload.
+/// The auth keys `login()` writes into the session payload, plus the
+/// `set_expiry(ADMIN_SESSION_COOKIE_AGE)` marker (`login.py:19`) every
+/// later save reads back (`SessionBase.get_expiry_date`): without it a
+/// re-save falls back to `SESSION_COOKIE_AGE` and the 1-hour admin
+/// session silently becomes a 7-day one.
 fn auth_payload_entries(
     user_id: Uuid,
     password_field: &str,
     device_info: &serde_json::Value,
     secret_key: &[u8],
+    age_secs: i64,
 ) -> Vec<(String, serde_json::Value)> {
     vec![
         (
@@ -1698,6 +1703,10 @@ fn auth_payload_entries(
         (
             "_auth_user_hash".to_owned(),
             serde_json::Value::String(session_auth_hash(password_field, secret_key)),
+        ),
+        (
+            "_session_expiry".to_owned(),
+            serde_json::Value::from(age_secs),
         ),
         ("device_info".to_owned(), device_info.clone()),
     ]
@@ -1723,7 +1732,7 @@ async fn issue_admin_session(
     now_unix: i64,
 ) -> Result<Vec<String>, sqlx::Error> {
     let signer = Signer::new(secret_key, SESSION_SIGNING_SALT);
-    let entries = auth_payload_entries(user_id, password_field, &device_info, secret_key);
+    let entries = auth_payload_entries(user_id, password_field, &device_info, secret_key, age_secs);
     let user_id_str = user_id.to_string();
     let expire_unix = now_unix + age_secs;
     if let Some(old) = presented_key.filter(|key| session_kernel::is_plausible_session_key(key)) {

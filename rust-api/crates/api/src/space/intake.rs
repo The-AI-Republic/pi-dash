@@ -88,6 +88,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_db::app_pages::strip::{ml_strip_tags, sync_description_stripped};
 use pidash_services::space::guards::{self, AnchorLookup, ExceptionKind};
 use pidash_services::space::queries::intake_assets as queries;
 
@@ -375,6 +376,7 @@ async fn fetch_state(pool: &PgPool, state_id: &Uuid) -> Result<Option<StateLite>
 
 /// One `projects` row for the app `ProjectLite` nest (plain join, like
 /// `select_related`).
+#[derive(Debug, Clone)]
 struct ProjectRow {
     id: Uuid,
     identifier: String,
@@ -613,6 +615,322 @@ async fn fetch_bridges(
         });
     }
     Ok(map)
+}
+
+/// `IN ($1, .., $N)` placeholder list for a batched lookup.
+fn in_placeholders(count: usize) -> String {
+    (1..=count)
+        .map(|index| format!("${index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Sorted distinct ids for a batched lookup (deterministic `IN` lists).
+fn dedup_sorted(ids: impl IntoIterator<Item = Uuid>) -> Vec<Uuid> {
+    ids.into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Batched [`fetch_state`] over distinct state ids: one query for the
+/// whole list instead of one per row.
+async fn fetch_states(
+    pool: &PgPool,
+    state_ids: &[Uuid],
+) -> Result<HashMap<Uuid, StateLite>, sqlx::Error> {
+    let mut map: HashMap<Uuid, StateLite> = HashMap::new();
+    if state_ids.is_empty() {
+        return Ok(map);
+    }
+    let sql = format!(
+        "SELECT id, name, color, \"group\" FROM \"states\" WHERE \"states\".\"id\" IN ({})",
+        in_placeholders(state_ids.len())
+    );
+    let mut query = sqlx::query(&sql);
+    for state_id in state_ids {
+        query = query.bind(state_id);
+    }
+    for row in query.fetch_all(pool).await? {
+        let id: Uuid = row.try_get("id")?;
+        map.insert(
+            id,
+            StateLite {
+                id,
+                name: row.try_get("name")?,
+                color: row.try_get("color")?,
+                group: row.try_get("group")?,
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Batched [`fetch_project`] over distinct project ids (the list filter
+/// pins a single project, so this is one row in practice).
+async fn fetch_projects(
+    pool: &PgPool,
+    project_ids: &[Uuid],
+) -> Result<HashMap<Uuid, ProjectRow>, sqlx::Error> {
+    let mut map: HashMap<Uuid, ProjectRow> = HashMap::new();
+    if project_ids.is_empty() {
+        return Ok(map);
+    }
+    let sql = format!(
+        "SELECT id, identifier, name, cover_image, cover_image_asset_id, logo_props, description, is_default FROM \"projects\" WHERE \"projects\".\"id\" IN ({})",
+        in_placeholders(project_ids.len())
+    );
+    let mut query = sqlx::query(&sql);
+    for project_id in project_ids {
+        query = query.bind(project_id);
+    }
+    for row in query.fetch_all(pool).await? {
+        let id: Uuid = row.try_get("id")?;
+        map.insert(
+            id,
+            ProjectRow {
+                id,
+                identifier: row.try_get("identifier")?,
+                name: row.try_get("name")?,
+                cover_image: row.try_get("cover_image")?,
+                cover_image_asset_id: row.try_get("cover_image_asset_id")?,
+                logo_props: row.try_get("logo_props")?,
+                description: row.try_get("description")?,
+                is_default: row.try_get("is_default")?,
+            },
+        );
+    }
+    Ok(map)
+}
+
+/// Asset kinds whose URL needs the workspace slug (the same arms that do
+/// the lazy slug lookup in [`asset_url`]).
+fn asset_kind_needs_slug(entity_type: &str) -> bool {
+    matches!(
+        entity_type,
+        "ISSUE_ATTACHMENT"
+            | "ISSUE_DESCRIPTION"
+            | "COMMENT_DESCRIPTION"
+            | "PAGE_DESCRIPTION"
+            | "DRAFT_ISSUE_DESCRIPTION"
+    )
+}
+
+/// Batched [`asset_url`] over distinct asset ids: one `file_assets`
+/// query plus one `workspaces` slug query, then the same branching in
+/// memory. A missing row resolves to `None`, like the early return.
+async fn fetch_asset_urls(
+    pool: &PgPool,
+    asset_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Option<String>>, sqlx::Error> {
+    let mut urls: HashMap<Uuid, Option<String>> = HashMap::new();
+    if asset_ids.is_empty() {
+        return Ok(urls);
+    }
+    struct AssetLite {
+        entity_type: String,
+        workspace_id: Option<Uuid>,
+        project_id: Option<Uuid>,
+        issue_id: Option<Uuid>,
+    }
+    let sql = format!(
+        "SELECT id, entity_type, workspace_id, project_id, issue_id FROM \"file_assets\" WHERE \"file_assets\".\"id\" IN ({})",
+        in_placeholders(asset_ids.len())
+    );
+    let mut query = sqlx::query(&sql);
+    for asset_id in asset_ids {
+        query = query.bind(asset_id);
+    }
+    let mut assets: HashMap<Uuid, AssetLite> = HashMap::new();
+    for row in query.fetch_all(pool).await? {
+        let id: Uuid = row.try_get("id")?;
+        let entity_type: String = row.try_get("entity_type")?;
+        // `asset_url` reads `workspace_id` (nullable) only inside the
+        // slug arms: NULL errors there (500) but is never touched for
+        // static/unknown kinds. Match that arm for arm.
+        let workspace_id: Option<Uuid> = if asset_kind_needs_slug(entity_type.as_str()) {
+            Some(row.try_get("workspace_id")?)
+        } else {
+            row.try_get("workspace_id")?
+        };
+        assets.insert(
+            id,
+            AssetLite {
+                entity_type,
+                workspace_id,
+                project_id: row.try_get("project_id")?,
+                issue_id: row.try_get("issue_id")?,
+            },
+        );
+    }
+    for asset_id in asset_ids {
+        urls.insert(*asset_id, None);
+    }
+    let workspace_ids = dedup_sorted(
+        assets
+            .values()
+            .filter(|asset| asset_kind_needs_slug(asset.entity_type.as_str()))
+            .filter_map(|asset| asset.workspace_id),
+    );
+    let mut slugs: HashMap<Uuid, String> = HashMap::new();
+    if !workspace_ids.is_empty() {
+        let sql = format!(
+            "SELECT id, slug FROM \"workspaces\" WHERE \"workspaces\".\"id\" IN ({})",
+            in_placeholders(workspace_ids.len())
+        );
+        let mut query = sqlx::query(&sql);
+        for workspace_id in &workspace_ids {
+            query = query.bind(workspace_id);
+        }
+        for row in query.fetch_all(pool).await? {
+            let id: Uuid = row.try_get("id")?;
+            let slug: Option<String> = row.try_get("slug")?;
+            if let Some(slug) = slug {
+                slugs.insert(id, slug);
+            }
+        }
+    }
+    for (asset_id, asset) in &assets {
+        // Slug kinds always carry a workspace id here (a NULL errored
+        // above, like `asset_url`); other kinds never reach for a slug.
+        let slug = asset.workspace_id.as_ref().and_then(|id| slugs.get(id));
+        let url = match asset.entity_type.as_str() {
+            "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
+                Some(format!("/api/assets/v2/static/{asset_id}/"))
+            }
+            "ISSUE_ATTACHMENT" => {
+                match (slug, asset.project_id, asset.issue_id) {
+                    (Some(slug), Some(project), Some(issue)) => Some(format!(
+                        "/api/assets/v2/workspaces/{slug}/projects/{project}/issues/{issue}/attachments/{asset_id}/"
+                    )),
+                    _ => None,
+                }
+            }
+            "ISSUE_DESCRIPTION"
+            | "COMMENT_DESCRIPTION"
+            | "PAGE_DESCRIPTION"
+            | "DRAFT_ISSUE_DESCRIPTION" => match (slug, asset.project_id) {
+                (Some(slug), Some(project)) => Some(format!(
+                    "/api/assets/v2/workspaces/{slug}/projects/{project}/{asset_id}/"
+                )),
+                _ => None,
+            },
+            _ => None,
+        };
+        urls.insert(*asset_id, url);
+    }
+    Ok(urls)
+}
+
+/// Batched [`fetch_labels`] over all list rows: one join query, grouped
+/// per issue in row order (same filter and `ORDER BY` as the per-row
+/// fetch; the global newest-first order is preserved per issue).
+async fn fetch_labels_batched(
+    pool: &PgPool,
+    issue_ids: &[Uuid],
+) -> Result<HashMap<Uuid, (Vec<Uuid>, Vec<LabelRow>)>, sqlx::Error> {
+    let mut map: HashMap<Uuid, (Vec<Uuid>, Vec<LabelRow>)> = HashMap::new();
+    if issue_ids.is_empty() {
+        return Ok(map);
+    }
+    let sql = format!(
+        "SELECT \"issue_labels\".\"issue_id\", \"labels\".\"id\", \"labels\".\"name\", \"labels\".\"color\" FROM \"labels\" INNER JOIN \"issue_labels\" ON (\"labels\".\"id\" = \"issue_labels\".\"label_id\") WHERE (\"issue_labels\".\"issue_id\" IN ({}) AND \"labels\".\"deleted_at\" IS NULL) ORDER BY \"labels\".\"created_at\" DESC",
+        in_placeholders(issue_ids.len())
+    );
+    let mut query = sqlx::query(&sql);
+    for issue_id in issue_ids {
+        query = query.bind(issue_id);
+    }
+    for row in query.fetch_all(pool).await? {
+        let issue_id: Uuid = row.try_get("issue_id")?;
+        let id: Uuid = row.try_get("id")?;
+        let entry = map
+            .entry(issue_id)
+            .or_insert_with(|| (Vec::new(), Vec::new()));
+        entry.0.push(id);
+        entry.1.push(LabelRow {
+            id,
+            name: row.try_get("name")?,
+            color: row.try_get("color")?,
+        });
+    }
+    Ok(map)
+}
+
+/// One assignee row before avatar resolution (the batched half of
+/// [`fetch_assignees`]; `avatar_url` resolves from the shared asset map).
+#[derive(Debug, Clone)]
+struct AssigneeLite {
+    id: Uuid,
+    first_name: String,
+    last_name: String,
+    avatar: String,
+    avatar_asset_id: Option<Uuid>,
+    is_bot: bool,
+    display_name: String,
+}
+
+/// Batched assignee rows over all list rows: one join query, grouped per
+/// issue in row order (same `ORDER BY` as the per-row fetch; the global
+/// newest-first order is preserved per issue).
+async fn fetch_assignee_rows(
+    pool: &PgPool,
+    issue_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<AssigneeLite>>, sqlx::Error> {
+    let mut map: HashMap<Uuid, Vec<AssigneeLite>> = HashMap::new();
+    if issue_ids.is_empty() {
+        return Ok(map);
+    }
+    let sql = format!(
+        "SELECT \"issue_assignees\".\"issue_id\", \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" INNER JOIN \"issue_assignees\" ON (\"users\".\"id\" = \"issue_assignees\".\"assignee_id\") WHERE \"issue_assignees\".\"issue_id\" IN ({}) ORDER BY \"users\".\"created_at\" DESC",
+        in_placeholders(issue_ids.len())
+    );
+    let mut query = sqlx::query(&sql);
+    for issue_id in issue_ids {
+        query = query.bind(issue_id);
+    }
+    for row in query.fetch_all(pool).await? {
+        let issue_id: Uuid = row.try_get("issue_id")?;
+        map.entry(issue_id).or_default().push(AssigneeLite {
+            id: row.try_get("id")?,
+            first_name: row.try_get("first_name")?,
+            last_name: row.try_get("last_name")?,
+            avatar: row.try_get("avatar")?,
+            avatar_asset_id: row.try_get("avatar_asset_id")?,
+            is_bot: row.try_get("is_bot")?,
+            display_name: row.try_get("display_name")?,
+        });
+    }
+    Ok(map)
+}
+
+/// Pure [`cover_image_url`] over a pre-resolved asset map: the cover
+/// asset's URL, else the raw `cover_image` text, else null.
+fn cover_image_url_from_map(
+    project: &ProjectRow,
+    urls: &HashMap<Uuid, Option<String>>,
+) -> Option<String> {
+    if let Some(asset_id) = project.cover_image_asset_id {
+        if let Some(url) = urls.get(&asset_id).and_then(|url| url.clone()) {
+            return Some(url);
+        }
+    }
+    project.cover_image.clone()
+}
+
+/// Pure per-assignee `avatar_url` over a pre-resolved asset map: the
+/// avatar asset's URL, else the raw `avatar` text when non-empty, else
+/// null (the [`fetch_assignees`] fallback).
+fn avatar_url_from_map(
+    avatar: &str,
+    asset_id: Option<Uuid>,
+    urls: &HashMap<Uuid, Option<String>>,
+) -> Option<String> {
+    let mut url = asset_id.and_then(|id| urls.get(&id).and_then(|url| url.clone()));
+    if url.is_none() && !avatar.is_empty() {
+        url = Some(avatar.to_string());
+    }
+    url
 }
 
 // ---------------------------------------------------------------------------
@@ -1453,12 +1771,87 @@ async fn collection_list(
         Ok(bridges) => bridges,
         Err(_) => return Denial::ServerError.into_response(),
     };
+    // One query per lookup for the whole list (Django's `select_related`
+    // + `prefetch_related` shape): per-row `load_detail` here was an N+1
+    // on this unpaginated list (PIDASHCONV-1266). Assembly below mirrors
+    // `load_detail` field for field, so the bytes don't change.
+    let state_ids = dedup_sorted(issues.iter().filter_map(|issue| issue.state_id));
+    let states = match fetch_states(pool, &state_ids).await {
+        Ok(states) => states,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let project_ids = dedup_sorted(issues.iter().map(|issue| issue.project_id));
+    let projects = match fetch_projects(pool, &project_ids).await {
+        Ok(projects) => projects,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let labels_map = match fetch_labels_batched(pool, &issue_ids).await {
+        Ok(labels) => labels,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let assignee_map = match fetch_assignee_rows(pool, &issue_ids).await {
+        Ok(assignees) => assignees,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let asset_ids = dedup_sorted(
+        projects
+            .values()
+            .filter_map(|project| project.cover_image_asset_id)
+            .chain(
+                assignee_map
+                    .values()
+                    .flatten()
+                    .filter_map(|assignee| assignee.avatar_asset_id),
+            ),
+    );
+    let asset_urls = match fetch_asset_urls(pool, &asset_ids).await {
+        Ok(urls) => urls,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let mut rendered = Vec::with_capacity(issues.len());
     for (issue, count) in issues.into_iter().zip(counts) {
         let bridge_rows = bridges.get(&issue.id).cloned().unwrap_or_default();
-        let detail = match load_detail(pool, issue, bridge_rows).await {
-            Ok(detail) => detail,
-            Err(_) => return Denial::ServerError.into_response(),
+        let state = issue
+            .state_id
+            .and_then(|state_id| states.get(&state_id).cloned());
+        let project = projects
+            .get(&issue.project_id)
+            .cloned()
+            .unwrap_or_else(|| missing_project(issue.project_id));
+        let cover_url = cover_image_url_from_map(&project, &asset_urls);
+        let (label_ids, labels) = labels_map.get(&issue.id).cloned().unwrap_or_default();
+        let mut assignee_ids = Vec::new();
+        let mut assignees = Vec::new();
+        if let Some(rows) = assignee_map.get(&issue.id) {
+            assignee_ids.reserve(rows.len());
+            assignees.reserve(rows.len());
+            for row in rows {
+                assignee_ids.push(row.id);
+                assignees.push(AssigneeRow {
+                    id: row.id,
+                    first_name: row.first_name.clone(),
+                    last_name: row.last_name.clone(),
+                    avatar: row.avatar.clone(),
+                    avatar_url: avatar_url_from_map(
+                        row.avatar.as_str(),
+                        row.avatar_asset_id,
+                        &asset_urls,
+                    ),
+                    is_bot: row.is_bot,
+                    display_name: row.display_name.clone(),
+                });
+            }
+        }
+        let detail = Detail {
+            issue,
+            state,
+            project,
+            cover_url,
+            label_ids,
+            labels,
+            assignee_ids,
+            assignees,
+            bridges: bridge_rows,
         };
         match render_app_detail(&detail, actor.timezone, Some(count)) {
             Ok(value) => rendered.push(value),
@@ -1466,6 +1859,21 @@ async fn collection_list(
         }
     }
     raw_json_response(serde_json::Value::Array(rendered).to_string())
+}
+
+/// The missing-`projects`-row fallback [`load_detail`] degrades to (a
+/// null-shaped nest, never a 500).
+fn missing_project(project_id: Uuid) -> ProjectRow {
+    ProjectRow {
+        id: project_id,
+        identifier: String::new(),
+        name: String::new(),
+        cover_image: None,
+        cover_image_asset_id: None,
+        logo_props: serde_json::Value::Object(Default::default()),
+        description: String::new(),
+        is_default: false,
+    }
 }
 
 /// `create` (`views/intake.py:107-173`): name-required and priority
@@ -1632,14 +2040,11 @@ async fn collection_create(
         Some(serde_json::Value::String(html)) => Some(html.clone()),
         Some(_) => return Denial::ServerError.into_response(),
     };
-    // `Issue.save` (`db/models/issue.py:330-334`): `None` only when the
-    // *input* html is `""`/`None`, else `strip_tags(html)` verbatim — an
-    // empty strip (e.g. the `"<p></p>"` default) is stored as `""`, not
-    // collapsed to `None`.
-    let description_stripped: Option<String> = match description_html.as_deref() {
-        None | Some("") => None,
-        Some(html) => Some(super::sanitize::strip_tags(html)),
-    };
+    // `Issue.save` (`db/models/issue.py:330-334` over
+    // `utils/html_processor.py`): `None` only when the *input* html is
+    // `""`/`None`, else MLStripper-decoded text — an empty strip (e.g. the
+    // `"<p></p>"` default) is stored as `""`, not collapsed to `None`.
+    let description_stripped = sync_description_stripped(description_html.as_deref());
     // The advisory lock serializes sequence assignment
     // (`db/models/issue.py:336`); failure degrades to the plain path.
     let lock_key = advisory_key(&board.project_id);
@@ -2032,7 +2437,7 @@ async fn detail_partial_update(
     let description_stripped = if description_html.is_empty() {
         None
     } else {
-        let stripped = super::sanitize::strip_tags(&description_html);
+        let stripped = ml_strip_tags(&description_html);
         if stripped.is_empty() {
             None
         } else {

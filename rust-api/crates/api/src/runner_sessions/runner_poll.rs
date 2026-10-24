@@ -113,9 +113,8 @@
 
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, Request, State};
+use axum::http::StatusCode;
 use axum::response::Response;
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
@@ -146,18 +145,13 @@ use pidash_types::runner_sessions::{
 use crate::runner_enroll::auth::{authenticate_access_token, ALLOW_POST};
 use crate::runner_enroll::now_micros;
 use crate::runner_runs::run_endpoints::drain_lifecycle_effects;
-use crate::runner_runs::{json_response, pool_of, server_error, LivePorts};
+use crate::runner_runs::{is_uuid_path_segment, json_response, pool_of, server_error, LivePorts};
 use crate::state::AppState;
 
 /// Long-poll wait slice (`_POLL_SLICE_MS`, `sessions.py:42`).
 const POLL_SLICE_MS: u64 = 1000;
 /// `XREADGROUP COUNT` on every poll read (`:483-488, :525-531`).
 const POLL_READ_COUNT: i64 = 100;
-/// Django's `custom_404_view` bytes (`app/views/error_404.py`):
-/// `JsonResponse({"error": "Page not found."})`. The `<uuid:>`
-/// converter 404s non-UUID segments before any view runs; axum matches
-/// the segment, so the handlers answer those bytes on a bad id.
-const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// Lock/statement caps (`_bound_txn_waits`, `:50-71`). Neither
 /// `RUNNER_TXN_*` setting exists in the settings modules, so the
 /// `getattr` defaults always apply; the bytes replay the FX-RSES-02
@@ -188,14 +182,16 @@ fn render(response: HttpResponse) -> Response {
     json_response(status, response.body)
 }
 
-/// Resolver-404 for a non-UUID path id (see [`PAGE_NOT_FOUND_BODY`]).
-fn page_not_found() -> Response {
-    json_response(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned())
-}
-
-/// Parse a `<uuid:>` path segment, or the resolver-404.
-fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
-    raw.parse().map_err(|_| page_not_found())
+/// Parse a `<uuid:>` path segment. The converter regex is
+/// lowercase-hex-only; anything else matches no Django route, so
+/// callers proxy the request to Django, reproducing its 404
+/// byte-for-byte in every settings flavor (the `runner_open.rs`
+/// `parse_uuid` precedent).
+fn parse_uuid(raw: &str) -> Result<Uuid, ()> {
+    if !is_uuid_path_segment(raw) {
+        return Err(());
+    }
+    raw.parse().map_err(|_| ())
 }
 
 /// `timezone.now().isoformat()`: `+00:00` suffix, microseconds iff
@@ -1573,19 +1569,25 @@ async fn read_with_eviction_awareness(
 pub async fn runner_session_poll(
     State(state): State<AppState>,
     Path((raw_runner_id, raw_sid)): Path<(String, String)>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: Request,
 ) -> Response {
-    let pool = match pool_of(&state) {
-        Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database).
     let runner_id = match parse_uuid(&raw_runner_id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(()) => return crate::edge::proxy(State(state), req).await,
     };
     let sid = match parse_uuid(&raw_sid) {
         Ok(id) => id,
+        Err(()) => return crate::edge::proxy(State(state), req).await,
+    };
+    let headers = req.headers().clone();
+    let body = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return server_error(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool.clone(),
         Err(response) => return response,
     };
     // Stock settings carry no `RUNNER_ACCESS_TOKEN_KEYS`, so the ring

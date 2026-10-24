@@ -8,6 +8,7 @@ Routes (apps/api/pi_dash/app/urls/views.py):
   DELETE /api/workspaces/<slug>/projects/<project_id>/user-favorite-views/<view_id>/
 """
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -246,6 +247,30 @@ def test_view_issues_guest_sees_only_own(api, seed, tenant_a, project_a, auth_a)
     )
     assert r.status_code == 200, r.text
     assert [e["id"] for e in r.json()["results"]] == [guest_issue]
+
+
+def test_view_issues_state_id_in_filter(api, seed, tenant_a, project_a, auth_a):
+    # PIDASHCONV-1317: the global view-issues list runs the same
+    # rich-filter compiler; UUID lists must bind typed (pre-fix Rust 500d).
+    ws = tenant_a["workspace"]["id"]
+    state_a = seed.state(project_a, ws, name="View state A", group="unstarted")
+    state_b = seed.state(project_a, ws, name="View state B", group="started")
+    issue_a = seed.issue(ws, project_a, name="View filter A", state_id=state_a)
+    issue_b = seed.issue(ws, project_a, name="View filter B", state_id=state_b)
+    url = f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/"
+    r = api.get(
+        url, headers=auth_a,
+        params={"filters": json.dumps({"and": [{"state_id__in": state_a}]})},
+    )
+    assert r.status_code == 200, r.text
+    assert {e["id"] for e in r.json()["results"]} == {issue_a}
+    r = api.get(
+        url, headers=auth_a,
+        params={"filters": json.dumps(
+            {"and": [{"state_id__in": f"{state_a},{state_b}"}]})},
+    )
+    assert r.status_code == 200, r.text
+    assert {e["id"] for e in r.json()["results"]} == {issue_a, issue_b}
 
 
 def test_favorite_create_and_delete(api, seed, tenant_a, project_a, auth_a):

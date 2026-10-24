@@ -1283,8 +1283,10 @@ fn redact_key(text: &str, key: &str) -> String {
             Some((value_start, value_end, quoted)) => {
                 out.push_str(&text[cursor..value_start]);
                 out.push_str("[REDACTED]");
-                if quoted {
+                if quoted && value_end < text.len() {
                     // Keep the closing quote; the opening quote is already out.
+                    // An unterminated quote runs to the end of the text, so
+                    // there is no closing quote to keep.
                     out.push_str(&text[value_end..value_end + 1]);
                     cursor = value_end + 1;
                 } else {
@@ -1790,6 +1792,30 @@ mod tests {
             redact_secrets(r#"{"token": "v"}"#),
             r#"{"token": "[REDACTED]"}"#
         );
+    }
+
+    #[test]
+    fn redaction_redacts_unterminated_quoted_value() {
+        assert_eq!(
+            redact_secrets("note: token='abc"),
+            "note: token='[REDACTED]"
+        );
+        assert_eq!(
+            redact_secrets("note: token=\"abc"),
+            "note: token=\"[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn mismatch_with_unterminated_quoted_secret_is_recorded() {
+        let django = captured(200, "text/plain", b"note: token='abc");
+        let rust = captured(200, "text/plain", b"note: token='abd");
+        let Verdict::Mismatch { diff } = compare(&django, &rust) else {
+            panic!("bodies differ, must mismatch");
+        };
+        for leaked in ["abc", "abd"] {
+            assert!(!diff.contains(leaked), "{diff}");
+        }
     }
 
     #[test]

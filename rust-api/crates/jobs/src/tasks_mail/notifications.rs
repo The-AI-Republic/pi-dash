@@ -1382,6 +1382,17 @@ pub async fn run_notifications(
                         Some(activity.get("created_at").cloned().unwrap_or(Value::Null)),
                     )),
                 );
+                // `issue_comment` renders as stripped text or `""` (`:433-435`),
+                // like the in-app copy above.
+                if let Some(activity_block) = email_data
+                    .get_mut("issue_activity")
+                    .and_then(Value::as_object_mut)
+                {
+                    activity_block.insert(
+                        "issue_comment".to_owned(),
+                        Value::String(comment_text.clone().unwrap_or_default()),
+                    );
+                }
                 bulk_email_logs.push(NewEmailLog {
                     id: Uuid::new_v4(),
                     triggered_by_id: input.actor_id,
