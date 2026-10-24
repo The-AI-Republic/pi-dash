@@ -57,6 +57,7 @@ function renderCard(
   props: {
     measure?: HeroMeasure;
     estimatesEnabled?: boolean;
+    estimateType?: string | null;
     startDate?: string | null;
     endDate?: string | null;
     onMeasureChange?: (measure: HeroMeasure) => void;
@@ -72,6 +73,7 @@ function renderCard(
         endDate={props.endDate ?? "2026-10-31T00:00:00Z"}
         measure={props.measure ?? "issues"}
         estimatesEnabled={props.estimatesEnabled ?? true}
+        estimateType={props.estimateType ?? "points"}
         onMeasureChange={props.onMeasureChange ?? (() => undefined)}
       />
     </QueryClientProvider>
@@ -108,6 +110,22 @@ describe("HeroBurndownCard", () => {
     expect(screen.queryByRole("button", { name: "Estimates" })).not.toBeInTheDocument();
   });
 
+  it("hides the switch for a categories system even with estimates enabled", async () => {
+    reads.progress.mockResolvedValue({ ...progress(), total_estimate_points: 9 });
+    renderCard({ estimateType: "categories" });
+    expect(await screen.findByTestId("hero-burndown-pending")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Items" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Estimates" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the switch from point data while counting items when estimates are off", async () => {
+    reads.progress.mockResolvedValue({ ...progress(), total_estimate_points: 4 });
+    renderCard({ estimatesEnabled: false, estimateType: "points", measure: "points" });
+    expect(await screen.findByTestId("hero-burndown-pending")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Items" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Estimates" })).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("holds the chart placeholder for undated and future-start cycles", async () => {
     const { unmount } = render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -119,6 +137,7 @@ describe("HeroBurndownCard", () => {
           endDate={null}
           measure="issues"
           estimatesEnabled={true}
+          estimateType="points"
           onMeasureChange={() => undefined}
         />
       </QueryClientProvider>
@@ -149,6 +168,7 @@ describe("HeroBurndownCard", () => {
           endDate="2026-10-31T00:00:00Z"
           measure="issues"
           estimatesEnabled={true}
+          estimateType="points"
           onMeasureChange={() => undefined}
         />
       </QueryClientProvider>
@@ -167,6 +187,7 @@ describe("HeroBurndownCard", () => {
           endDate="2026-10-31T00:00:00Z"
           measure="issues"
           estimatesEnabled={true}
+          estimateType="points"
           onMeasureChange={() => undefined}
         />
       </QueryClientProvider>

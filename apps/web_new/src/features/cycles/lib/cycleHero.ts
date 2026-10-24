@@ -11,6 +11,22 @@ import type { CycleDistribution, CycleProgress, IssueListItem } from "@pidash/ap
 /** Issues count work items; points sum their estimates. */
 export type HeroMeasure = "issues" | "points";
 
+/**
+ * Whether the hero's measure switch renders (CYC-041, EST-019). It
+ * appears when the project enables estimates or the cycle already has
+ * point data. The categories family stores text values, not numeric
+ * totals, so it never offers the Estimates measure, even when enabled
+ * or point data is present.
+ */
+export function heroMeasureAvailable(input: {
+  estimatesEnabled: boolean;
+  estimateType: string | null | undefined;
+  totalEstimatePoints: number | null | undefined;
+}): boolean {
+  if (input.estimateType === "categories") return false;
+  return input.estimatesEnabled || (input.totalEstimatePoints ?? 0) > 0;
+}
+
 /** Progress groups in lifecycle order. */
 export type HeroProgressGroupId = "backlog" | "unstarted" | "started" | "completed" | "cancelled";
 
