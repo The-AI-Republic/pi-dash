@@ -3648,7 +3648,10 @@ pub async fn collection_list(
         let Some(issue) = nested.get(&issue_id) else {
             return Denial::ServerError.into_response();
         };
-        rendered.push(render_list_row(row, issue, gate.timezone));
+        match render_list_row(row, issue, gate.timezone) {
+            Ok(value) => rendered.push(value),
+            Err(_) => return Denial::ServerError.into_response(),
+        }
     }
     let results_json = serde_json::Value::Array(rendered).to_string();
     // `limit <= 0` never reaches here (`list_page` rejects it the way
@@ -4262,13 +4265,16 @@ async fn fetch_list_issues(
 
 /// `IntakeIssueSerializer` row (`intake.py:27-41` + `to_representation`
 /// `:86-90`): explicit `Meta.fields` order; the annotated `label_ids`
-/// ride the nested issue object.
+/// ride the nested issue object. Decode errors propagate: every column
+/// is projected by the list query, so a failure is a programmer error
+/// (a wrong column name rendered `duplicate_to` as null until
+/// PIDASHCONV-1434) and must 500, never render a default.
 fn render_list_row(
     row: &sqlx::postgres::PgRow,
     issue: &ListIssue,
     timezone: chrono_tz::Tz,
-) -> serde_json::Value {
-    let label_ids: Vec<Uuid> = row.try_get::<Vec<Uuid>, _>("label_ids").unwrap_or_default();
+) -> Result<serde_json::Value, sqlx::Error> {
+    let label_ids: Vec<Uuid> = row.try_get("label_ids")?;
     let mut nested = serde_json::Map::with_capacity(8);
     nested.insert("id".to_owned(), uuid_string(&issue.id));
     nested.insert(
@@ -4297,44 +4303,20 @@ fn render_list_row(
     );
     nested.insert("created_by".to_owned(), opt_uuid(&issue.created_by_id));
     let mut body = serde_json::Map::with_capacity(7);
-    body.insert(
-        "id".to_owned(),
-        serde_json::Value::String(
-            row.try_get::<Uuid, _>("id")
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
-        ),
-    );
-    body.insert(
-        "status".to_owned(),
-        serde_json::Value::from(row.try_get::<i32, _>("status").unwrap_or(-2)),
-    );
-    body.insert(
-        "duplicate_to".to_owned(),
-        row.try_get::<Option<Uuid>, _>("duplicate_to")
-            .map(|id| opt_uuid(&id))
-            .unwrap_or(serde_json::Value::Null),
-    );
-    body.insert(
-        "snoozed_till".to_owned(),
-        row.try_get::<Option<DateTime<Utc>>, _>("snoozed_till")
-            .map(|moment| opt_dt(&moment, timezone))
-            .unwrap_or(serde_json::Value::Null),
-    );
-    body.insert(
-        "source".to_owned(),
-        row.try_get::<Option<String>, _>("source")
-            .map(|source| opt_string(&source))
-            .unwrap_or(serde_json::Value::Null),
-    );
+    let id: Uuid = row.try_get("id")?;
+    body.insert("id".to_owned(), serde_json::Value::String(id.to_string()));
+    let status: i32 = row.try_get("status")?;
+    body.insert("status".to_owned(), serde_json::Value::from(status));
+    let duplicate_to: Option<Uuid> = row.try_get("duplicate_to_id")?;
+    body.insert("duplicate_to".to_owned(), opt_uuid(&duplicate_to));
+    let snoozed_till: Option<DateTime<Utc>> = row.try_get("snoozed_till")?;
+    body.insert("snoozed_till".to_owned(), opt_dt(&snoozed_till, timezone));
+    let source: Option<String> = row.try_get("source")?;
+    body.insert("source".to_owned(), opt_string(&source));
     body.insert("issue".to_owned(), serde_json::Value::Object(nested));
-    body.insert(
-        "created_by".to_owned(),
-        row.try_get::<Option<Uuid>, _>("created_by_id")
-            .map(|id| opt_uuid(&id))
-            .unwrap_or(serde_json::Value::Null),
-    );
-    serde_json::Value::Object(body)
+    let created_by: Option<Uuid> = row.try_get("created_by_id")?;
+    body.insert("created_by".to_owned(), opt_uuid(&created_by));
+    Ok(serde_json::Value::Object(body))
 }
 
 // ---------------------------------------------------------------------------
