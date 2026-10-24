@@ -3363,7 +3363,10 @@ mod tests {
         // building (and dropping) it inside the async test runtime panics.
         std::env::set_var("GITHUB_APP_ID", "env-decoy-id");
         std::env::set_var("GITHUB_APP_SLUG", "env-decoy-slug");
-        clear_installation_tokens();
+        // No cache clear: the probe id below is unique to this test and the
+        // fail-closed path never inserts, so there is nothing to clear —
+        // and clearing would race `installation_token_cache_short_circuits`
+        // on the process-wide cache.
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
@@ -3382,7 +3385,6 @@ mod tests {
                 .join()
                 .expect("fail-closed probe joins");
         });
-        clear_installation_tokens();
 
         for (key, value) in saved {
             match value {
@@ -3425,7 +3427,8 @@ mod tests {
     // HTTP (the adapter already branched to the installation path).
     #[test]
     fn installation_token_surfaces_stashed_resolution_error() {
-        clear_installation_tokens();
+        // No cache clear (see the fail-closed probe above): the probe id is
+        // unique to this test and the error path never inserts.
         let _scope =
             GithubAppConfigScope::stash(Err("GitHub App config missing: app_slug".to_owned()));
         let http = reqwest::blocking::Client::builder()
@@ -3438,7 +3441,6 @@ mod tests {
                 "GitHub App config missing: app_slug".to_owned()
             ))
         );
-        clear_installation_tokens();
     }
 
     // The mint gate: only the github adapter's installation branch resolves
