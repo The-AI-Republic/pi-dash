@@ -2387,3 +2387,51 @@ def test_rust_track_page_version_description_stripped(db_conn, html):
 
     row = wait_for(_version_row, what="page_version stripped by rust worker")
     assert row["description_stripped"] == _ml_strip(html)
+
+
+def test_rust_description_version_task_writes_null_audit(db_conn):
+    """Rust issue_description_version_task inserts NULL audit cols (PIDASHCONV-1295).
+
+    Replay of ``test_description_version_task_writes_null_audit``: the
+    task-path insert NULLs ``created_by_id`` and ``updated_by_id`` (the
+    crum rule, base.py:31-33) while ``owned_by_id`` keeps the acting user.
+    The sync backfill keeps the issue's audit copies (``bulk_create``
+    skips ``save()``), so only the task path is pinned here.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"1295rdesc-{tag}")
+    owner = chain["owner"]
+    issue = chain["issue"]
+    updater = seed_helpers.user(db_conn, f"rust-1295desc-{tag}-updater")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_by_id = %s::uuid,"
+            " updated_by_id = %s::uuid,"
+            " description_html = '<p>live v1</p>'"
+            " WHERE id = %s::uuid",
+            (str(owner["id"]), str(updater["id"]), str(issue["id"])),
+        )
+    rust_queue.publish(
+        f"{M}.issue_description_version_task.issue_description_version_task",
+        args=[
+            _json.dumps({"description_html": "<p>stale</p>"}),
+            str(issue["id"]),
+            str(owner["id"]),
+        ],
+        kwargs={"is_creating": True},
+    )
+
+    def _version_row():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT created_by_id, updated_by_id, owned_by_id"
+                " FROM issue_description_versions"
+                " WHERE issue_id = %s::uuid",
+                (str(issue["id"]),),
+            )
+            return cur.fetchone()
+
+    row = wait_for(_version_row, what="description version by rust worker")
+    assert row["created_by_id"] is None
+    assert row["updated_by_id"] is None
+    assert str(row["owned_by_id"]) == str(owner["id"])
