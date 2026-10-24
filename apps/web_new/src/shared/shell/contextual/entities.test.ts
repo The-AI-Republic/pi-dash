@@ -32,7 +32,7 @@ describe("selectCycleContext", () => {
     expect(copyUrl).toHaveBeenCalledTimes(1);
   });
 
-  it("flips the favorite title and hides it for guests and archived cycles", () => {
+  it("flips the favorite title and hides it for guests", () => {
     const starred = selectCycleContext({
       cycleId: "cycle-1",
       cycleName: "Sprint 1",
@@ -46,7 +46,6 @@ describe("selectCycleContext", () => {
     for (const over of [
       { standing: { memberRole: 5, archived: false }, archived: false },
       { standing: { memberRole: null, archived: false }, archived: false },
-      { standing: { memberRole: 20, archived: false }, archived: true },
       { standing: { memberRole: 20, archived: true }, archived: false },
     ] as const) {
       const commands = selectCycleContext({
@@ -59,6 +58,19 @@ describe("selectCycleContext", () => {
       });
       expect(commands.map((command) => command.title)).toEqual(["Copy URL"]);
     }
+  });
+
+  it("registers neither entry on archived cycles (CYC-030)", () => {
+    const commands = selectCycleContext({
+      cycleId: "cycle-1",
+      cycleName: "Sprint 1",
+      archived: true,
+      favorite: false,
+      standing: { memberRole: 20, archived: false },
+      toggleFavorite: () => undefined,
+      copyUrl: () => undefined,
+    });
+    expect(commands).toEqual([]);
   });
 });
 
