@@ -67,7 +67,17 @@ describe("intakeMobileMenuItems", () => {
   });
 
   it("opens empty for a viewer outside the triage gate", () => {
-    expect(intakeMobileMenuItems(input({ showTriage: false }))).toEqual([]);
+    expect(intakeMobileMenuItems(input({ showTriage: false, showDelete: false }))).toEqual([]);
+  });
+
+  it("keeps delete for a creator outside the triage gate", () => {
+    const seen: string[] = [];
+    const entries = intakeMobileMenuItems(
+      input({ showTriage: false, showDelete: true, onDelete: () => seen.push("delete") })
+    );
+    expect(labels(entries)).toEqual(["Delete"]);
+    select(entries, "Delete");
+    expect(seen).toEqual(["delete"]);
   });
 
   it("carries only the link and open entries on a resolved request", () => {

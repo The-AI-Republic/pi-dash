@@ -723,6 +723,22 @@ describe("IntakeDetail mobile header (INT-030)", () => {
     expect(screen.queryByRole("menuitem")).not.toBeInTheDocument();
   });
 
+  it("offers a guest creator delete on their open request (INT-025/030)", async () => {
+    const user = userEvent.setup();
+    const server: DetailServer = {
+      detailStatus: 200,
+      detail: detailPayload(-2, { created_by: ME }),
+      writes: [],
+    };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient, { role: 5, narrow: true, listOpen: true, onToggleList: () => undefined });
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual(["Delete"]);
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByRole("dialog", { name: "Delete work item" })).toBeInTheDocument();
+  });
+
   it("fires the snooze, duplicate and decline entries through the shared dialogs", async () => {
     const user = userEvent.setup();
     renderNarrow();

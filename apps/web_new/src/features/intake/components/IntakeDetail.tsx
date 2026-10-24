@@ -233,6 +233,12 @@ function IntakeDetailLoaded({
       ? { issueKey: duplicateKey, href: workItemPath(workspaceSlug, duplicateKey) }
       : null;
   const navigate = useNavigate();
+  const resolved = isResolvedIntakeStatus(detail.status);
+  // Mobile delete follows INT-025/INT-030 rather than the desktop overflow
+  // gate: an open request's creator may delete it even when they are a
+  // guest and therefore outside the triage group. The same controls
+  // object opens the confirmation dialog for that entry.
+  const mobileDelete = !resolved && isCreator;
   // Detail-time duplicate detection (INT-018): the shared seam reads the
   // saved title, so viewing never searches a draft. The viewed request
   // always resembles its own title; only other items count.
@@ -244,9 +250,9 @@ function IntakeDetailLoaded({
   });
   const duplicateMatches = duplicates.matches.filter((match) => match.id !== issueId);
   const mobileMenuEntries = intakeMobileMenuItems({
-    resolved: isResolvedIntakeStatus(detail.status),
+    resolved,
     showTriage: triage.visibility.showTriage,
-    showDelete: triage.visibility.showDelete,
+    showDelete: triage.visibility.showDelete || mobileDelete,
     snoozed: detail.status === INTAKE_STATUS.snoozed,
     onSnooze: () => triage.fireAction("snooze"),
     onUnsnooze: () => triage.fireAction("unsnooze"),
@@ -271,7 +277,7 @@ function IntakeDetailLoaded({
             snoozedTill={detail.snoozed_till}
             menuItems={mobileMenuEntries}
           />
-          {triage.visibility.showTriage ? (
+          {triage.visibility.showTriage || mobileDelete ? (
             <IntakeTriageDialogs
               controls={triage}
               workspaceSlug={workspaceSlug}

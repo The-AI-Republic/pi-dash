@@ -51,7 +51,12 @@ export function intakeMobileMenuItems(input: IntakeMobileMenuInput): MenuEntry[]
       { label: OPEN_WORK_ITEM_LABEL, onSelect: input.onOpenWorkItem },
     ];
   }
-  if (!input.showTriage) return [];
+  // The menu trigger is not gated like the desktop overflow (INT-030), so
+  // a creator outside the triage gate still gets the delete entry that
+  // INT-025 promises them. Everyone else outside the gate gets no entries.
+  if (!input.showTriage) {
+    return input.showDelete ? [{ label: TRIAGE_DELETE_LABEL, onSelect: input.onDelete }] : [];
+  }
   return [
     input.snoozed
       ? { label: TRIAGE_UNSNOOZE_LABEL, onSelect: input.onUnsnooze }
