@@ -97,7 +97,6 @@ export interface ListLayoutProps {
   completedCycle?: boolean | undefined;
   /** Completed module pages render read-only. */
   completedModule?: boolean | undefined;
-  /** Controlled peek key (the route owns the URL param). */
   /** Controlled peeked work-item id (the route owns the URL param). */
   peekKey?: string | null | undefined;
   onPeekChange?: ((issueId: string | null) => void) | undefined;

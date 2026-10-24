@@ -3,11 +3,11 @@
 // See the LICENSE file for details.
 // Peek target resolution (parity/specs/issues.md §14, ISS-165/167). The
 // peek param names either a list key ("PROJ-123", kept for links written
-// before opens switched to ids) or a raw issue id (what layout clicks
-// and deep links carry). Rows the opener
-// already holds resolve keys without a fetch; anything that is not
-// key-shaped reads as an id under the peeked (or route) project, while
-// an unmatched key needs the lite lookup before the detail read.
+// before opens switched to ids) or a raw issue id (what layout clicks and
+// deep links carry). Rows the opener already holds resolve both without a
+// fetch; anything else that is not key-shaped reads as an id under the
+// peeked (or route) project, while an unmatched key needs the lite lookup
+// before the detail read.
 
 import type { IssueListItem } from "@pidash/api-client";
 
