@@ -40,7 +40,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::assistant::models::has_secret;
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::tasks_ticker::jitter_seconds;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
@@ -51,6 +51,7 @@ use pidash_services::dispatch::LlmProfile;
 use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
+use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
 use super::creation_jobs::StoreDeps;
@@ -60,6 +61,7 @@ use super::fire_tick_seam::{
     maybe_apply_deferred_pause as drive_pause, save_clock_sql, DispatchJobsError,
 };
 use crate::admission::RedisAdmissionCache;
+use crate::dispatch::DispatchDecision;
 use crate::queue::enqueue;
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
 
@@ -173,13 +175,18 @@ async fn drain_terminal_effects(
 
 /// `complete_project_move_handoff(run_id)` with live inputs: the
 /// source run's creator presence, the installed assistant seam's
-/// llm-gate verdicts over it, the shared [`RedisAdmissionCache`], and
-/// `now`. Answers the replacement run id (`None` on every early-out:
-/// unknown run, non-terminal source, no marker, moved again, no pod).
+/// llm-gate verdicts over it, the shared [`RedisAdmissionCache`],
+/// and `now`. The shared Redis client and runner settings feed the
+/// replacement run's pod drain. Answers the replacement run id
+/// (`None` on every early-out: unknown run, non-terminal source, no
+/// marker, moved again, no pod).
+#[allow(clippy::too_many_arguments)]
 pub async fn complete_project_move_handoff_live(
     pool: &PgPool,
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
+    redis: Option<&redis::Client>,
+    runner: &RunnerSettings,
     run_id: Uuid,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
@@ -198,6 +205,21 @@ pub async fn complete_project_move_handoff_live(
         now_unix_secs: Utc::now().timestamp(),
     };
     let outcome = drive_handoff(pool, deps, run_id, Utc::now()).await?;
+    // The driver's `dispatch_agent_run` only *returns* the decision
+    // (`dispatch.py:61-70` drains the pod inline), so a `PodDrain`
+    // must be acted on here or the replacement stays QUEUED
+    // (PIDASHCONV-1494). The target-pod drain lands before the
+    // caller's source drains, as in `finalization.py`.
+    for (_, decision) in &outcome.dispatch_decisions {
+        if let DispatchDecision::PodDrain { pod_id } = decision {
+            drain_pod_by_id(pool, redis, runner, *pod_id)
+                .await
+                .map_err(|error| match error {
+                    DrainError::Db(db) => CreationJobsError::Db(db),
+                    other => CreationJobsError::Db(sqlx::Error::Protocol(other.to_string())),
+                })?;
+        }
+    }
     drain_terminal_effects(pool, &outcome.terminal_effects).await?;
     Ok(outcome.outcome.map(|run| run.id))
 }
@@ -591,10 +613,13 @@ mod tests {
     async fn live_handoff_unknown_run_is_none() {
         let pool = pool().await;
         let (cloud, managed) = settings();
+        let runner = pidash_db::config::Settings::test_defaults().runner;
         let replacement = complete_project_move_handoff_live(
             &pool,
             &cloud,
             &managed,
+            None,
+            &runner,
             Uuid::new_v4(),
             Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),

@@ -160,6 +160,8 @@ impl RunnerRunsSeams for RunnerSeams {
                 &self.pool,
                 &self.cloud,
                 &self.managed,
+                self.redis.as_ref(),
+                &self.runner,
                 run_id,
                 self.toolsets.clone(),
                 self.assistant_seam.clone(),

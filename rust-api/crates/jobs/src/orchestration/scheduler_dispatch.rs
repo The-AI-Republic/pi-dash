@@ -30,7 +30,7 @@ use sqlx::postgres::PgRow;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::orchestration::querysets::{
     fetch_project_has_allowed_role, fetch_project_is_member, fetch_workspace_admin_by_slug,
 };
@@ -53,6 +53,7 @@ use pidash_services::orchestration::entries::{
     SCHEDULER_POD_OVERRIDE_SQL, SCHEDULER_SELECT_SQL,
 };
 use pidash_services::prompting::{composer, context};
+use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
 
 use super::creation_jobs::{bundle_overrides, map_run_view, LiveCreationStore, StoreDeps};
 use super::fire_tick_seam::{
@@ -63,6 +64,7 @@ use super::live_inputs::{
     fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, project_leads,
 };
 use crate::admission::RedisAdmissionCache;
+use crate::dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_binding::{
     BindingForDispatch, DispatchRun, SchedulerDispatch, SchedulerDispatchResult,
 };
@@ -515,13 +517,15 @@ fn to_dispatch_result(
 /// Build the live [`SchedulerDispatch`]: each call prefetches
 /// presence for the binding's creator chain (actor, project lead,
 /// default assignee), consults the installed assistant seam for the
-/// llm-gate verdicts, runs the jobs driver, and maps the outcome. A
-/// transport-level failure outside the `(run, fail_reason)` contract
-/// is `Err` (task failure).
+/// llm-gate verdicts, runs the jobs driver, drains the produced
+/// run's pod, and maps the outcome. A transport-level failure
+/// outside the `(run, fail_reason)` contract is `Err` (task failure).
 pub fn live_scheduler_dispatch(
     pool: PgPool,
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
+    redis: Option<redis::Client>,
+    runner: RunnerSettings,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 ) -> SchedulerDispatch {
@@ -529,6 +533,8 @@ pub fn live_scheduler_dispatch(
         let pool = pool.clone();
         let cloud = cloud.clone();
         let managed = managed.clone();
+        let redis = redis.clone();
+        let runner = runner.clone();
         let toolsets = toolsets.clone();
         let assistant_seam = assistant_seam.clone();
         Box::pin(async move {
@@ -558,6 +564,18 @@ pub fn live_scheduler_dispatch(
             let outcome = dispatch_scheduler_run(&pool, deps, binding.binding_id, now)
                 .await
                 .map_err(|error| error.to_string())?;
+            // The driver's `dispatch_agent_run` only *returns* the
+            // decision (`dispatch.py:61-70` drains the pod inline), so a
+            // `PodDrain` must be acted on here or the run stays QUEUED
+            // (PIDASHCONV-1494). The status readback below then sees the
+            // drained row; its only consumer checks `FAILED`.
+            for (_, decision) in &outcome.dispatch_decisions {
+                if let DispatchDecision::PodDrain { pod_id } = decision {
+                    drain_pod_by_id(&pool, redis.as_ref(), &runner, *pod_id)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+            }
             let fetched = match outcome.outcome.run {
                 Some(id) => {
                     let row: Option<(String, String)> = sqlx::query_as(RUN_STATUS_SQL)
