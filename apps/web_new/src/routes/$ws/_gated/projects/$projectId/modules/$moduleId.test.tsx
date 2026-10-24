@@ -260,4 +260,13 @@ describe("module detail route", () => {
     render(React.createElement(ErrorView as React.ComponentType, { error: "nope", reset: vi.fn() } as never));
     expect(screen.getByText("Something went wrong.")).toBeInTheDocument();
   });
+
+  it("validates the search through the shared issue search", () => {
+    const validate = Route.options.validateSearch as (search: Record<string, unknown>) => unknown;
+    expect(validate({})).toBeDefined();
+    expect(validate({ peekIssueId: "WEB-1", layout: "compact" })).toMatchObject({
+      peekIssueId: "WEB-1",
+      layout: "compact",
+    });
+  });
 });

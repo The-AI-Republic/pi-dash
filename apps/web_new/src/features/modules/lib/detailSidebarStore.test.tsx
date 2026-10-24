@@ -50,6 +50,24 @@ describe("parseSidebarCollapsed", () => {
   });
 });
 
+describe("default storage", () => {
+  it("reads expanded when the browser refuses the storage itself", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get: () => {
+        throw new Error("storage disabled");
+      },
+    });
+    try {
+      expect(readSidebarCollapsed()).toBe(false);
+      expect(() => writeSidebarCollapsed(true)).not.toThrow();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
+    }
+  });
+});
+
 describe("readSidebarCollapsed", () => {
   it("reads the stored flag", () => {
     const storage = memoryStorage({ [MODULE_DETAIL_SIDEBAR_STORAGE_KEY]: "true" });
