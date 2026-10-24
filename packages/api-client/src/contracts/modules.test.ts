@@ -680,6 +680,22 @@ describe("module writes", () => {
     expect(JSON.parse(requests(updated.calls)[0]?.init.body ?? "{}")).toEqual({ status: "paused" });
   });
 
+  it("patches the manual rank alone for a timeline reorder", async () => {
+    const updated = client({
+      id: MODULE,
+      name: "Checkout revamp",
+      project_id: PROJECT,
+      description: "",
+      start_date: "2026-09-01",
+      target_date: null,
+      status: "paused",
+    });
+    const result = await updateModule(updated.client, SLUG, PROJECT, MODULE, { sort_order: 1000 });
+    expect(result.id).toBe(MODULE);
+    expect(requests(updated.calls)[0]?.init.method).toBe("PATCH");
+    expect(JSON.parse(requests(updated.calls)[0]?.init.body ?? "{}")).toEqual({ sort_order: 1000 });
+  });
+
   it("replaces a module with the full body and reads the write echo", async () => {
     const replaced = client(PUT_ECHO);
     const input = {

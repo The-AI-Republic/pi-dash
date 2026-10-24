@@ -50,6 +50,15 @@ export interface GanttSidebarProps {
   windowEnd?: number;
   /** Manual-sort reorder; absent outside manual order (ISS-050). */
   reorder?: ReorderBinding | null;
+  /**
+   * Fires when a row press travels without a reorder binding (NEWFRONT-801:
+   * the modules timeline reports its manual-sort gate here). A click that
+   * never travels stays a click, and the gesture's own click never opens
+   * the row. Never fires while a binding is mounted.
+   */
+  onReorderAttempt?: (() => void) | undefined;
+  /** Another entity's row vocabulary; absent keeps the issue rows. */
+  entity?: GanttTimelineEntity | undefined;
   /** Hover preview wrapper for row links (ISS-133). */
   renderPreview?:
     | ((row: GanttRow, trigger: React.ReactElement<Record<string, unknown>>) => React.ReactNode)
@@ -59,6 +68,26 @@ export interface GanttSidebarProps {
 /** The reorder seam the sidebar calls on drop. */
 export interface ReorderBinding {
   onReorder: (sourceId: string, targetId: string, placement: DropPlacement) => void;
+}
+
+/**
+ * How a non-issue entity adopts the timeline (NEWFRONT-801: the modules
+ * timeline renders module rows through this same sidebar). Every field is
+ * optional; an absent entity keeps the issue rendering exactly.
+ */
+export interface GanttTimelineEntity {
+  /** Sidebar link target; default the issue browse href. */
+  rowHref?: ((row: GanttRow) => string) | undefined;
+  /** Prefix ahead of the row name; default the short key. */
+  rowPrefix?: ((row: GanttRow) => React.ReactNode) | undefined;
+  /** Trailing duration text; default the day count. Null hides it. */
+  rowDuration?: ((row: GanttRow) => string | null) | undefined;
+  /** Sidebar column title; default "Issue". */
+  sidebarTitle?: string | undefined;
+  /** Sidebar meta column; default "Duration". Null hides it. */
+  sidebarMeta?: string | null | undefined;
+  /** Header count nouns; default work item(s). */
+  countNoun?: { one: string; many: string } | undefined;
 }
 
 interface DragState {
@@ -88,6 +117,8 @@ interface SidebarRowProps {
     | undefined;
   /** Bulk row toggle; null hides the checkbox (ISS-116). */
   selection?: GanttRowSelection | null;
+  /** Another entity's row vocabulary; absent keeps the issue row. */
+  entity?: GanttTimelineEntity | undefined;
 }
 
 export function SidebarRowItem({
@@ -103,13 +134,14 @@ export function SidebarRowItem({
   suppressClick,
   renderPreview,
   selection = null,
+  entity,
 }: SidebarRowProps): React.ReactElement {
-  const duration = durationLabel(row);
+  const duration = entity?.rowDuration === undefined ? durationLabel(row) : entity.rowDuration(row);
   const disabled = row.unconfirmed;
   const link = (
     <a
       id={`issue-${row.id}`}
-      href={`/${workspaceSlug}/browse/${row.identifier}`}
+      href={entity?.rowHref === undefined ? `/${workspaceSlug}/browse/${row.identifier}` : entity.rowHref(row)}
       aria-label={row.name}
       data-archived={row.archived ? "true" : undefined}
       data-peeked={peeked ? "true" : undefined}
@@ -127,9 +159,13 @@ export function SidebarRowItem({
         "hover:underline focus-visible:outline-none"
       )}
     >
-      <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
-        {row.identifier}
-      </span>
+      {entity?.rowPrefix === undefined ? (
+        <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
+          {row.identifier}
+        </span>
+      ) : (
+        entity.rowPrefix(row)
+      )}
       <span className="min-w-0 flex-1 truncate">{row.name}</span>
     </a>
   );
@@ -226,6 +262,8 @@ export function GanttSidebar({
   windowStart = 0,
   windowEnd = rows.length,
   reorder = null,
+  onReorderAttempt,
+  entity,
   renderPreview,
 }: GanttSidebarProps): React.ReactElement {
   const visible = rows.slice(windowStart, windowEnd);
@@ -233,23 +271,53 @@ export function GanttSidebar({
   const dragRef = React.useRef<DragState | null>(null);
   const dropped = React.useRef(false);
   const suppressClick = React.useCallback(() => dropped.current, []);
+  /** A press without a binding that may still travel into an attempt. */
+  const attemptRef = React.useRef<{ startY: number; callback: () => void } | null>(null);
 
   const updateDrag = React.useCallback((next: DragState | null) => {
     dragRef.current = next;
     setDrag(next);
   }, []);
 
+  /** Swallow the click that ends an attempt, like a drag's own click. */
+  const suppressNextClick = React.useCallback(() => {
+    dropped.current = true;
+    const reset = () => {
+      globalThis.setTimeout(() => {
+        dropped.current = false;
+      }, 0);
+    };
+    globalThis.addEventListener("click", reset, { once: true });
+  }, []);
+
   const onDragStart = React.useCallback(
     (event: React.MouseEvent, row: GanttRow) => {
-      if (reorder === null || row.unconfirmed || event.button !== 0) return;
-      event.preventDefault();
-      updateDrag({ sourceId: row.id, targetId: null, placement: "before", travelled: false, startY: event.clientY });
+      if (row.unconfirmed || event.button !== 0) return;
+      if (reorder !== null) {
+        event.preventDefault();
+        updateDrag({ sourceId: row.id, targetId: null, placement: "before", travelled: false, startY: event.clientY });
+        return;
+      }
+      // No binding: remember the press so a travelled one can report as
+      // an attempt; a click that never travels stays a click.
+      if (onReorderAttempt !== undefined) {
+        attemptRef.current = { startY: event.clientY, callback: onReorderAttempt };
+      }
     },
-    [reorder, updateDrag]
+    [onReorderAttempt, reorder, updateDrag]
   );
 
   const onDragOver = React.useCallback(
     (event: React.MouseEvent, row: GanttRow) => {
+      const attempt = attemptRef.current;
+      if (attempt !== null) {
+        if (Math.abs(event.clientY - attempt.startY) >= DRAG_THRESHOLD_PX) {
+          attemptRef.current = null;
+          suppressNextClick();
+          attempt.callback();
+        }
+        return;
+      }
       const current = dragRef.current;
       if (current === null || current.sourceId === row.id) return;
       const box = event.currentTarget.getBoundingClientRect();
@@ -260,8 +328,21 @@ export function GanttSidebar({
         updateDrag({ ...current, targetId: row.id, placement, travelled });
       }
     },
-    [updateDrag]
+    [suppressNextClick, updateDrag]
   );
+
+  // A press that never travels is a click, not an attempt: forget it on
+  // release so a later hover can never report it.
+  React.useEffect(() => {
+    if (onReorderAttempt === undefined) return;
+    const clear = () => {
+      attemptRef.current = null;
+    };
+    globalThis.addEventListener("mouseup", clear);
+    return () => {
+      globalThis.removeEventListener("mouseup", clear);
+    };
+  }, [onReorderAttempt]);
 
   // A drag only starts with a binding, so the listeners capture the one it
   // started under and never have to re-check the optional prop.
@@ -327,6 +408,7 @@ export function GanttSidebar({
           suppressClick={suppressClick}
           renderPreview={renderPreview}
           selection={selection}
+          entity={entity}
         />
       ))}
       <div style={{ height: Math.max(0, rows.length - windowEnd) * ROW_HEIGHT }} aria-hidden="true" />

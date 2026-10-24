@@ -31,7 +31,7 @@ import {
   type ResizeResult,
 } from "./drag.js";
 import { GanttHeader } from "./GanttHeader.js";
-import { GanttSidebar, type ReorderBinding } from "./GanttSidebar.js";
+import { GanttSidebar, type GanttTimelineEntity, type ReorderBinding } from "./GanttSidebar.js";
 import {
   HEADER_HEIGHT,
   ROW_HEIGHT,
@@ -89,6 +89,8 @@ export interface GanttChartProps {
   weekStart: number;
   /** Bar color per row id; rows without an entry use the accent. */
   barColors?: Readonly<Record<string, string>>;
+  /** Bar tooltip text; default the row name (NEWFRONT-801: name + dates). */
+  barTooltip?: ((row: GanttRow) => string) | undefined;
   peekedId?: string | null;
   onOpenRow: (row: GanttRow) => void;
   /** Rows still arriving from the next page. */
@@ -99,11 +101,21 @@ export interface GanttChartProps {
   selection?: GanttSelectionBinding | null;
   /** Manual-sort reorder seam; null disables row dragging (ISS-050). */
   reorder?: ReorderBinding | null;
+  /**
+   * Fires when a row press travels without a reorder binding; never while
+   * one is mounted (NEWFRONT-801: the modules timeline gates on manual sort).
+   */
+  onReorderAttempt?: (() => void) | undefined;
+  /** Another entity's row vocabulary; absent keeps the issue chart. */
+  entity?: GanttTimelineEntity | undefined;
   /** Project admin/member standing: bars drag and lanes plant (ISS-058). */
   canEdit?: boolean;
   /** Persist a moved or resized bar's dates (ISS-051–053). */
   onDatesChange?: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
-  /** Plant a block on an undated row (ISS-054). */
+  /**
+   * Plant a block on an undated row (ISS-054). Absent, undated lanes keep
+   * only their no-dates reading (NEWFRONT-801: modules add from the header).
+   */
   onPlantBlock?: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
   /** Sticky quick-add entry (ISS-055); absent hides the control. */
   quickAdd?: React.ReactNode;
@@ -211,6 +223,7 @@ function Bar({
   box,
   drag,
   colors,
+  barTooltip,
   canEdit,
   openable,
   onOpen,
@@ -224,6 +237,7 @@ function Bar({
   box: GanttBarBox;
   drag: BarDrag | null;
   colors: Readonly<Record<string, string>> | undefined;
+  barTooltip: ((row: GanttRow) => string) | undefined;
   canEdit: boolean;
   /** False for an unconfirmed create: the bar draws but never opens (ISS-055). */
   openable: boolean;
@@ -260,7 +274,7 @@ function Bar({
       data-testid="gantt-bar"
       role="button"
       aria-label={row.name}
-      title={row.name}
+      title={barTooltip === undefined ? row.name : barTooltip(row)}
       style={{
         left: boxNow.left,
         width: boxNow.width,
@@ -343,10 +357,11 @@ function UndatedLane({
   canEdit: boolean;
   rangeStartIso: string;
   zoom: GanttZoom;
-  onPlant: (dates: { startDate: string | null; endDate: string | null }) => void;
+  /** Absent, the lane keeps only its no-dates reading (no add-block). */
+  onPlant?: ((dates: { startDate: string | null; endDate: string | null }) => void) | undefined;
 }): React.ReactElement {
   const [hover, setHover] = React.useState<{ x: number; date: string } | null>(null);
-  if (!canEdit) {
+  if (!canEdit || onPlant === undefined) {
     return (
       <span className="text-caption absolute inset-y-0 left-0 flex items-center px-(--space-3) text-(--text-muted)/70">
         No dates
@@ -394,6 +409,7 @@ function GanttLanes({
   zoom,
   range,
   barColors,
+  barTooltip,
   peekedId,
   hoveredId,
   onHover,
@@ -413,6 +429,7 @@ function GanttLanes({
   zoom: GanttZoom;
   range: Parameters<typeof dayColumns>[0];
   barColors: Readonly<Record<string, string>> | undefined;
+  barTooltip: ((row: GanttRow) => string) | undefined;
   peekedId: string | null;
   hoveredId: string | null;
   onHover: (id: string | null) => void;
@@ -426,7 +443,7 @@ function GanttLanes({
   viewportWidth: number;
   canEdit: boolean;
   onDatesChange: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
-  onPlantBlock: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
+  onPlantBlock?: ((issueId: string, dates: { startDate: string | null; endDate: string | null }) => void) | undefined;
   rangeStartIso: string;
   renderPreview?: GanttChartProps["renderPreview"];
 }): React.ReactElement {
@@ -523,7 +540,7 @@ function GanttLanes({
                 canEdit={canEdit}
                 rangeStartIso={rangeStartIso}
                 zoom={zoom}
-                onPlant={(dates) => onPlantBlock(row.id, dates)}
+                onPlant={onPlantBlock === undefined ? undefined : (dates) => onPlantBlock(row.id, dates)}
               />
             ) : (
               <Bar
@@ -531,6 +548,7 @@ function GanttLanes({
                 box={box}
                 drag={drag?.issueId === row.id ? drag : null}
                 colors={barColors}
+                barTooltip={barTooltip}
                 // A quick-add bar shows immediately but stays inert until
                 // the server confirms the row (ISS-055).
                 canEdit={canEdit && !row.unconfirmed}
@@ -568,12 +586,15 @@ function GanttSurface({
   totalCount,
   weekStart,
   barColors,
+  barTooltip,
   peekedId = null,
   onOpenRow,
   loadingMore = false,
   hasMore = false,
   selection = null,
   reorder = null,
+  onReorderAttempt,
+  entity,
   canEdit = false,
   onDatesChange,
   onPlantBlock,
@@ -683,6 +704,7 @@ function GanttSurface({
         onToday={centerToday}
         fullscreen={fullscreen}
         onToggleFullscreen={onToggleFullscreen}
+        countNoun={entity?.countNoun}
       />
       <div
         id="gantt-container"
@@ -710,12 +732,14 @@ function GanttSurface({
                   />
                 ) : null}
                 <span aria-hidden="true" className="text-caption font-medium text-(--text-muted)">
-                  Issue
+                  {entity?.sidebarTitle ?? "Issue"}
                 </span>
               </span>
-              <span aria-hidden="true" className="text-caption text-(--text-muted)">
-                Duration
-              </span>
+              {entity?.sidebarMeta === null ? null : (
+                <span aria-hidden="true" className="text-caption text-(--text-muted)">
+                  {entity?.sidebarMeta ?? "Duration"}
+                </span>
+              )}
             </div>
             {empty ? (
               <div data-testid="gantt-sidebar-skeleton" className="flex flex-col gap-(--space-3) p-(--space-3)">
@@ -737,6 +761,8 @@ function GanttSurface({
                 windowStart={window.start}
                 windowEnd={window.end}
                 reorder={reorder}
+                onReorderAttempt={onReorderAttempt}
+                entity={entity}
                 renderPreview={renderPreview}
               />
             )}
@@ -779,6 +805,7 @@ function GanttSurface({
                 zoom={zoom}
                 range={range}
                 barColors={barColors}
+                barTooltip={barTooltip}
                 peekedId={peekedId}
                 hoveredId={hoveredId}
                 onHover={setHoveredId}
@@ -790,7 +817,7 @@ function GanttSurface({
                 viewportWidth={stripViewport}
                 canEdit={canEdit}
                 onDatesChange={onDatesChange ?? (() => undefined)}
-                onPlantBlock={onPlantBlock ?? (() => undefined)}
+                onPlantBlock={onPlantBlock}
                 rangeStartIso={range.startIso}
                 renderPreview={renderPreview}
               />

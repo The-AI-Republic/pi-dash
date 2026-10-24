@@ -382,3 +382,112 @@ describe("GanttSidebar bulk selection (ISS-116)", () => {
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
 });
+
+describe("GanttSidebar entity vocabulary (NEWFRONT-801)", () => {
+  it("renders another entity's rows through the vocabulary", () => {
+    renderSidebar({
+      entity: {
+        rowHref: (entry) => `/acme/projects/p/modules/${entry.id}`,
+        rowPrefix: () => (
+          <svg data-testid="entity-glyph" aria-hidden="true">
+            <circle cx="5" cy="5" r="4" />
+          </svg>
+        ),
+        rowDuration: () => null,
+      },
+    });
+    const first = screen.getAllByTestId("gantt-sidebar-row")[0]!;
+    const link = within(first).getByRole("link");
+    expect(link).toHaveAttribute("href", "/acme/projects/p/modules/row-1");
+    expect(within(first).getByTestId("entity-glyph")).toBeInTheDocument();
+    expect(within(first).queryByText("WEB-1")).toBeNull();
+    expect(within(first).queryByTestId("gantt-row-duration")).toBeNull();
+  });
+
+  it("falls back to the issue rendering per field", () => {
+    renderSidebar({ entity: { rowDuration: () => "9 days" } });
+    const rows = screen.getAllByTestId("gantt-sidebar-row");
+    expect(within(rows[0]!).getByRole("link")).toHaveAttribute("href", "/acme/browse/WEB-1");
+    expect(within(rows[0]!).getByText("WEB-1")).toBeInTheDocument();
+    expect(screen.getAllByTestId("gantt-row-duration")[0]).toHaveTextContent("9 days");
+  });
+});
+
+describe("GanttSidebar reorder attempts (NEWFRONT-801)", () => {
+  it("reports a travelled press without a binding and swallows its click", async () => {
+    vi.useFakeTimers();
+    try {
+      const onReorderAttempt = vi.fn();
+      const { onOpenRow } = renderSidebar({ onReorderAttempt });
+      const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+      fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+      fireEvent.mouseMove(second, { clientY: 22 + DRAG_THRESHOLD_PX });
+      expect(onReorderAttempt).toHaveBeenCalledTimes(1);
+      // A second travelled move reports nothing more.
+      fireEvent.mouseMove(second, { clientY: 22 + DRAG_THRESHOLD_PX + 10 });
+      expect(onReorderAttempt).toHaveBeenCalledTimes(1);
+      fireEvent.mouseUp(second);
+      const link = within(first).getByRole("link");
+      fireEvent.click(link);
+      expect(onOpenRow).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(0);
+      fireEvent.click(link);
+      expect(onOpenRow).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves a click that never travels alone", () => {
+    const onReorderAttempt = vi.fn();
+    const { onOpenRow } = renderSidebar({ onReorderAttempt });
+    const [first] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement];
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseUp(first);
+    // A later hover can never report the forgotten press.
+    fireEvent.mouseMove(first, { clientY: 22 + DRAG_THRESHOLD_PX + 40 });
+    expect(onReorderAttempt).not.toHaveBeenCalled();
+    fireEvent.click(within(first).getByRole("link"));
+    expect(onOpenRow).toHaveBeenCalledTimes(1);
+  });
+
+  it("never attempts while a binding is mounted", () => {
+    const onReorder = vi.fn();
+    const onReorderAttempt = vi.fn();
+    renderSidebar({ reorder: { onReorder }, onReorderAttempt });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 50 });
+    fireEvent.mouseUp(second);
+    expect(onReorder).toHaveBeenCalledWith("row-1", "row-2", "before");
+    expect(onReorderAttempt).not.toHaveBeenCalled();
+  });
+
+  it("ignores presses without the callback", () => {
+    const { onOpenRow } = renderSidebar();
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 80 });
+    fireEvent.mouseUp(second);
+    fireEvent.click(within(first).getByRole("link"));
+    expect(onOpenRow).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores non-left presses and unconfirmed rows", () => {
+    const onReorderAttempt = vi.fn();
+    renderSidebar({
+      rows: [row({ id: "temp-abc", name: "Draft", unconfirmed: true }), row()],
+      onReorderAttempt,
+    });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 80 });
+    fireEvent.mouseUp(second);
+    fireEvent.mouseDown(second, { button: 2, clientY: 60 });
+    fireEvent.mouseMove(first, { clientY: 22 });
+    fireEvent.mouseUp(first);
+    expect(onReorderAttempt).not.toHaveBeenCalled();
+  });
+});

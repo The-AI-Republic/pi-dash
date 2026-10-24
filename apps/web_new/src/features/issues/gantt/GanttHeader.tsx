@@ -21,6 +21,8 @@ export interface GanttHeaderProps {
   onToggleFullscreen: () => void;
   /** Rendered beside the count, e.g. later slices' bulk actions. */
   actions?: React.ReactNode;
+  /** Noun beside the row count; default work item(s) (NEWFRONT-801: modules). */
+  countNoun?: { one: string; many: string } | undefined;
 }
 
 export function GanttHeader({
@@ -31,6 +33,7 @@ export function GanttHeader({
   fullscreen,
   onToggleFullscreen,
   actions,
+  countNoun = { one: "work item", many: "work items" },
 }: GanttHeaderProps): React.ReactElement {
   return (
     <div
@@ -38,7 +41,7 @@ export function GanttHeader({
       className="flex shrink-0 flex-wrap items-center gap-(--space-2) border-b border-(--border) bg-(--surface) px-(--space-3) py-(--space-2)"
     >
       <p data-testid="gantt-count" className="text-caption text-(--text-muted)">
-        {rowCount} {rowCount === 1 ? "work item" : "work items"}
+        {rowCount} {rowCount === 1 ? countNoun.one : countNoun.many}
       </p>
       <div className="ml-auto flex flex-wrap items-center gap-(--space-2)">
         {actions}

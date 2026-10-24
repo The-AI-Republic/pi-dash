@@ -384,6 +384,8 @@ export interface ModulePatch {
   status?: ModuleStatus;
   lead_id?: string | null;
   member_ids?: string[];
+  /** Manual placement rank, written by the timeline row reorder (MOD-021). */
+  sort_order?: number;
 }
 
 /**

@@ -90,4 +90,12 @@ describe("GanttHeader", () => {
     renderHeader({ actions: <button type="button">Bulk</button> });
     expect(screen.getByRole("button", { name: "Bulk" })).toBeInTheDocument();
   });
+
+  it("counts another entity's rows with its nouns (NEWFRONT-801)", () => {
+    const { unmount } = renderHeader({ rowCount: 1, countNoun: { one: "module", many: "modules" } });
+    expect(screen.getByTestId("gantt-count")).toHaveTextContent("1 module");
+    unmount();
+    renderHeader({ rowCount: 4, countNoun: { one: "module", many: "modules" } });
+    expect(screen.getByTestId("gantt-count")).toHaveTextContent("4 modules");
+  });
 });

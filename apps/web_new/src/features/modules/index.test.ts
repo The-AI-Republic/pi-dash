@@ -39,8 +39,13 @@ import {
   ModulesListHeader,
   ModulesListScreen,
   ModulesListSkeleton,
-  ModuleTimelineRow,
+  ModulesTimeline,
+  buildModuleTimelineRows,
+  moduleTimelineTooltip,
+  normalizeModuleTimelineRanks,
   parseModuleDay,
+  useModuleTimelineMutations,
+  warnOnTimelineReorderAttempt,
   resolveModulesListBody,
   sortModulesByName,
   userZoneDiffers,
@@ -74,7 +79,12 @@ describe("modules barrel", () => {
     expect(ModuleLayoutIcon).toBeDefined();
     expect(ModuleListRow).toBeDefined();
     expect(ModuleBoardCard).toBeDefined();
-    expect(ModuleTimelineRow).toBeDefined();
+    expect(ModulesTimeline).toBeDefined();
+    expect(buildModuleTimelineRows).toBeDefined();
+    expect(moduleTimelineTooltip).toBeDefined();
+    expect(normalizeModuleTimelineRanks).toBeDefined();
+    expect(warnOnTimelineReorderAttempt).toBeDefined();
+    expect(useModuleTimelineMutations).toBeDefined();
   });
 
   it("re-exports the layout vocabulary and the shared date helpers", () => {
