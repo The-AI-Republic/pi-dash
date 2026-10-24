@@ -299,6 +299,14 @@ import { ApiError } from "@pidash/api-client";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
 import { Route } from "./$cycleId.js";
 
+// The route module starts these chunks while its data reads run, so the
+// first layout render does not suspend and mount twice (NEWFRONT-619). The
+// calls happen at import time, before `beforeEach` clears the mocks.
+const primedAtImport = {
+  leaves: mocks.primeLeaves.mock.calls.length,
+  filters: mocks.preloadFilters.mock.calls.length,
+};
+
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
 
@@ -371,6 +379,11 @@ beforeEach(() => {
 });
 
 describe("cycle detail route", () => {
+  it("starts the leaf and filter chunks with the eager route module", () => {
+    expect(primedAtImport.leaves).toBeGreaterThan(0);
+    expect(primedAtImport.filters).toBeGreaterThan(0);
+  });
+
   it("mounts the trail, the dates and the layout root for the cycle", async () => {
     renderRoute();
     const gate = await screen.findByTestId("detail-gate");

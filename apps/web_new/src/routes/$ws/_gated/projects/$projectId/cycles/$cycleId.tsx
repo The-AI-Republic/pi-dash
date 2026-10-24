@@ -13,11 +13,19 @@ import * as React from "react";
 
 import { CycleDetailGate } from "../../../../../../features/cycles/components/CycleDetailGate.js";
 import { cycleDetailQueryOptions } from "../../../../../../features/cycles/api/cycleDetail.js";
-import { loadIssueListLeaves } from "../../../../../../features/issues/components/lazyLeaves.js";
+import { loadIssueListLeaves, primeIssueListLeaves } from "../../../../../../features/issues/components/lazyLeaves.js";
 import { loadKanbanLayout } from "../../../../../../features/issues/kanban/lazy.js";
 import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
+import { preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/api/queries.js";
+
+// Start the leaf and filter chunks with the route module, beside its data
+// reads, so the first layout render does not suspend and mount twice
+// (NEWFRONT-619, NEWFRONT-669). These loaders are tiny; the chunks they
+// request stay off the initial chain.
+primeIssueListLeaves();
+preloadIssueFilters();
 
 const LazyCycleDetailContent = React.lazy(() =>
   import("./CycleDetailContent.js").then((module) => ({ default: module.CycleDetailContent }))
