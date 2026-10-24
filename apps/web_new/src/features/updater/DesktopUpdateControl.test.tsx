@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 // Sidebar update control (DESK-018): nothing while current, both versions
 // named, disabled while downloading, in-place failure with a working retry.
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -60,7 +60,10 @@ describe("DesktopUpdateControlView", () => {
     const control = screen.getByRole("button", { name: "Update to Pi Dash 2.0.0" });
     expect(control).toBeEnabled();
     expect(control).not.toHaveAttribute("aria-busy");
-    expect(control).toHaveTextContent("Update to Pi Dash 2.0.0");
+    // The sidebar action is icon-only so it cannot crowd the account row;
+    // the release stays on the accessible name rather than visible text.
+    expect(control).toHaveTextContent("");
+    expect(control).toHaveClass("size-6");
     expect(control).toHaveAccessibleDescription("You are on 1.9.4");
     await user.hover(control);
     expect(await screen.findByText(updateReadyHint("2.0.0", "1.9.4"))).toBeInTheDocument();
@@ -98,6 +101,15 @@ describe("DesktopUpdateControlView", () => {
     expect(screen.getByRole("button", { name: "Update to Pi Dash 2.0.0" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(value.install).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the failure panel out of the account row's width", () => {
+    render(view(state({ failure: "signature mismatch" })));
+    const control = screen.getByTestId("desktop-update-control");
+    const failure = within(control).getByRole("alert");
+    expect(control).toHaveClass("relative", "shrink-0");
+    expect(failure).toHaveClass("absolute", "w-48");
+    expect(failure.parentElement).toBe(control);
   });
 
   it("builds the accessible name and hints from the versions", () => {

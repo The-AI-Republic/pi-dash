@@ -47,7 +47,7 @@ export function UserMenu({
 }: UserMenuProps): React.ReactElement {
   const trigger =
     variant === "sidebar" ? (
-      <Button variant="ghost" data-testid="sidebar-user-menu" data-keep-open="true">
+      <Button variant="ghost" className="w-full min-w-0" data-testid="sidebar-user-menu" data-keep-open="true">
         <Avatar name={displayName} src={avatarSrc ?? ""} size="small" />
         <span className="flex min-w-0 flex-1 flex-col text-left">
           <span className="text-body truncate text-(--text)">{displayName}</span>
