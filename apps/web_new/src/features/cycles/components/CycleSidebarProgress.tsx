@@ -30,6 +30,7 @@ import {
   selectAssigneeRows,
   selectLabelRows,
   selectStateGroupRows,
+  showProgressMeasure,
   showPointsRow,
   toggleBreakdownCondition,
   workItemsPairText,
@@ -47,7 +48,7 @@ export interface CycleSidebarProgressProps {
   projectTimeZone: string;
   /** The project carries an estimate system (the measure picker gate). */
   estimatesEnabled: boolean;
-  /** Active estimate system type behind the Points gate, if any. */
+  /** Active estimate system type behind the Points and measure gates, if any. */
   estimateType: string | null | undefined;
   /** Resolved snapshot counts behind the rows and state entries. */
   progress: CycleProgress;
@@ -168,8 +169,10 @@ export function CycleSidebarProgress({
     totalEstimatePoints: progress.total_estimate_points,
     snapshot: { progress_snapshot: cycle.progress_snapshot ?? null },
   });
-  const analytics = measure === "points" ? pointsAnalytics : issuesAnalytics;
-  const grandTotal = progressGrandTotal(progress, measure);
+  const measureAvailable = showProgressMeasure({ estimatesEnabled, estimateType, progress });
+  const activeMeasure: CycleProgressMeasure = measureAvailable ? measure : "issues";
+  const analytics = activeMeasure === "points" ? pointsAnalytics : issuesAnalytics;
+  const grandTotal = progressGrandTotal(progress, activeMeasure);
   const stem = BREAKDOWN_FILTER_STEMS[tab];
 
   function toggleEntry(id: string): void {
@@ -177,7 +180,7 @@ export function CycleSidebarProgress({
   }
 
   function stateEntries(): React.ReactElement[] {
-    return selectStateGroupRows(progress, measure).map((row: CycleStateGroupRow) => (
+    return selectStateGroupRows(progress, activeMeasure).map((row: CycleStateGroupRow) => (
       <EntryRow
         key={row.key}
         title={row.title}
@@ -220,8 +223,8 @@ export function CycleSidebarProgress({
         ? null
         : distributionEntries(
             tab === "Labels"
-              ? selectLabelRows(analytics, measure, grandTotal)
-              : selectAssigneeRows(analytics, measure, grandTotal)
+              ? selectLabelRows(analytics, activeMeasure, grandTotal)
+              : selectAssigneeRows(analytics, activeMeasure, grandTotal)
           );
 
   return (
@@ -259,7 +262,7 @@ export function CycleSidebarProgress({
           {emptyText}
         </p>
       )}
-      {estimatesEnabled ? (
+      {measureAvailable ? (
         <Combobox
           trigger={
             <button

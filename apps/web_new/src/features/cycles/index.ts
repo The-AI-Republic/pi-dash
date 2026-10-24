@@ -244,6 +244,7 @@ export {
   selectAssigneeRows,
   selectLabelRows,
   selectStateGroupRows,
+  showProgressMeasure,
   showPointsRow,
   toggleBreakdownCondition,
   workItemsPairText,

@@ -60,6 +60,7 @@ interface Harness {
   pointsStatus: number;
   estimates: unknown[];
   estimatesStatus: number;
+  totalEstimatePoints: number | null | undefined;
 }
 
 let harness: Harness;
@@ -87,12 +88,19 @@ beforeEach(() => {
     pointsStatus: 200,
     estimates: makeEstimateList([makeEstimate()]),
     estimatesStatus: 200,
+    totalEstimatePoints: undefined,
   };
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     if (url.endsWith(PROGRESS_PATH)) {
       if (harness.progressDelayMs > 0) await sleep(harness.progressDelayMs);
       if (harness.progressStatus !== 200) return jsonResponse(url, harness.progressStatus, { detail: "boom" });
-      return jsonResponse(url, 200, makeCycleProgress());
+      return jsonResponse(
+        url,
+        200,
+        harness.totalEstimatePoints === undefined
+          ? makeCycleProgress()
+          : makeCycleProgress({ total_estimate_points: harness.totalEstimatePoints })
+      );
     }
     if (url.includes(ANALYTICS_PATH)) {
       const status = url.includes("type=points") ? harness.pointsStatus : harness.issuesStatus;
@@ -246,6 +254,7 @@ describe("CycleDetailSidebar", () => {
   });
 
   it("renders the progress section with counts and chart", async () => {
+    harness.totalEstimatePoints = 0;
     renderSidebar();
     expect(await screen.findByTestId("cycle-progress-work-items")).toHaveTextContent("1/3");
     expect(screen.getByTestId("cycle-progress-chart")).not.toBeNull();
@@ -256,6 +265,19 @@ describe("CycleDetailSidebar", () => {
     renderSidebar(fullCycle(), { estimatesEnabled: true });
     expect(await screen.findByTestId("cycle-progress-measure")).toHaveTextContent("Work items");
     expect(screen.getByTestId("cycle-progress-points")).toHaveTextContent("0/2");
+  });
+
+  it("hides the measure for a categories system", async () => {
+    harness.estimates = makeEstimateList([makeEstimate({ type: "categories" })]);
+    renderSidebar(fullCycle(), { estimatesEnabled: true });
+    expect(await screen.findByTestId("cycle-progress-work-items")).not.toBeNull();
+    expect(screen.queryByTestId("cycle-progress-measure")).toBeNull();
+  });
+
+  it("offers the measure from point data when no system is enabled", async () => {
+    harness.totalEstimatePoints = 2;
+    renderSidebar(fullCycle(), { estimatesEnabled: false });
+    expect(await screen.findByTestId("cycle-progress-measure")).toHaveTextContent("Work items");
   });
 
   it("hides Points when the estimates read fails but keeps the measure", async () => {

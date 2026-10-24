@@ -307,6 +307,24 @@ export function showPointsRow(input: {
   return distribution !== null && distribution !== undefined;
 }
 
+/**
+ * Whether the progress measure picker renders (spec §14, EST-019).
+ * Numeric point systems offer the totals measure when the project has
+ * estimates enabled or the cycle already carries point data. A
+ * categories system is text-family: the picker is absent, never rendered
+ * disabled. Other families and no active system fall back to counts.
+ */
+export function showProgressMeasure(input: {
+  estimatesEnabled: boolean;
+  estimateType: string | null | undefined;
+  progress: CycleProgress;
+}): boolean {
+  const { estimatesEnabled, estimateType, progress } = input;
+  if (estimateType !== null && estimateType !== undefined && estimateType !== "points") return false;
+  if (estimateType === "points" && estimatesEnabled) return true;
+  return (progress.total_estimate_points ?? 0) > 0;
+}
+
 /** Rich-filter stem behind each breakdown tab (spec §14). */
 export const BREAKDOWN_FILTER_STEMS: Record<CycleBreakdownTab, string> = {
   States: "state_group",

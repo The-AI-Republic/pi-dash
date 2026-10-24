@@ -62,9 +62,10 @@ export function CycleDetailSidebar({
   const client = getAppClient();
   const progress = useQuery(cycleProgressQueryOptions(client, workspaceSlug, projectId, cycle.id));
   const issues = useQuery(cycleAnalyticsQueryOptions(client, workspaceSlug, projectId, cycle.id, "issues"));
+  const pointsAvailable = estimatesEnabled || (progress.data?.total_estimate_points ?? 0) > 0;
   const points = useQuery({
     ...cycleAnalyticsQueryOptions(client, workspaceSlug, projectId, cycle.id, "points"),
-    enabled: estimatesEnabled,
+    enabled: pointsAvailable,
   });
   const estimates = useQuery({
     ...projectEstimatesQueryOptions(client, workspaceSlug, projectId),
@@ -77,9 +78,13 @@ export function CycleDetailSidebar({
   // The skeleton stands until every sidebar read lands. Disabled
   // reads stay pending (idle), so the estimates pair joins the gate
   // only while estimates are enabled.
-  const pending = [progress, issues, ...(estimatesEnabled ? [points, estimates] : []), directoryQuery].some(
-    (read) => read.isPending
-  );
+  const pending = [
+    progress,
+    issues,
+    ...(pointsAvailable ? [points] : []),
+    ...(estimatesEnabled ? [estimates] : []),
+    directoryQuery,
+  ].some((read) => read.isPending);
   if (pending) {
     return <CycleSidebarSkeleton testId="cycle-sidebar-skeleton" />;
   }

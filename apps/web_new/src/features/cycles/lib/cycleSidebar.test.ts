@@ -30,6 +30,7 @@ import {
   selectAssigneeRows,
   selectLabelRows,
   selectStateGroupRows,
+  showProgressMeasure,
   showPointsRow,
   toggleBreakdownCondition,
   workItemsPairText,
@@ -399,6 +400,51 @@ describe("points row gate", () => {
       showPointsRow({ ...base, estimateType: "points", status: "completed", snapshot: { progress_snapshot: null } })
     ).toBe(false);
     expect(showPointsRow({ ...base, estimateType: "points", status: "completed", snapshot: {} })).toBe(false);
+  });
+});
+
+describe("progress measure gate", () => {
+  it("shows for an enabled points system", () => {
+    expect(showProgressMeasure({ estimatesEnabled: true, estimateType: "points", progress: makeProgress() })).toBe(
+      true
+    );
+  });
+
+  it("shows for cycle point data even without an enabled system", () => {
+    expect(
+      showProgressMeasure({
+        estimatesEnabled: false,
+        estimateType: null,
+        progress: makeProgress({ total_estimate_points: 2 }),
+      })
+    ).toBe(true);
+  });
+
+  it("hides for a categories system even when estimates are enabled", () => {
+    expect(showProgressMeasure({ estimatesEnabled: true, estimateType: "categories", progress: makeProgress() })).toBe(
+      false
+    );
+  });
+
+  it("hides for a time system without point data", () => {
+    expect(showProgressMeasure({ estimatesEnabled: true, estimateType: "time", progress: makeProgress() })).toBe(false);
+  });
+
+  it("hides with no system and no point data", () => {
+    expect(
+      showProgressMeasure({
+        estimatesEnabled: false,
+        estimateType: null,
+        progress: makeProgress({ total_estimate_points: 0 }),
+      })
+    ).toBe(false);
+    expect(
+      showProgressMeasure({
+        estimatesEnabled: false,
+        estimateType: null,
+        progress: makeProgress({ total_estimate_points: null }),
+      })
+    ).toBe(false);
   });
 });
 
