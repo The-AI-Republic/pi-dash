@@ -57,6 +57,7 @@ describe("SidebarMoreGroup", () => {
       "AI Dev Machines",
       "Analytics",
       "Archives",
+      "Active cycles",
     ]);
     fireEvent.click(toggle());
     expect(toggle()).toHaveAttribute("aria-expanded", "false");
@@ -100,12 +101,13 @@ describe("SidebarMoreGroup", () => {
       "/acme/ai-dev-machines/",
       "/acme/analytics/",
       "/acme/projects/archives/",
+      "/acme/active-cycles/",
     ]);
   });
 
   it("shows guests the shared rows only", () => {
     setup(ROLE_GUEST);
     fireEvent.click(toggle());
-    expect(linkNames()).toEqual(["Projects", "Prompts", "Schedulers"]);
+    expect(linkNames()).toEqual(["Projects", "Prompts", "Schedulers", "Active cycles"]);
   });
 });

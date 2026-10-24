@@ -8,8 +8,28 @@
 // adds the row menu, delete/archive dialogs and mutations, the menu
 // model, and the finished read-only notice; slice F adds the detail
 // trail and its addresses; slice G adds the detail sidebar, its dates,
-// progress, toggle, skeleton, state and queries).
+// progress, toggle, skeleton, state and queries; slice H adds
+// favorites, transfer, the hero, and the workspace upsell).
 export { cycleDetailKeys, cycleDetailQueryOptions, useCycleDetail } from "./api/cycleDetail.js";
+export {
+  CYCLE_FAVORITE_ADDED_TITLE,
+  CYCLE_FAVORITE_ADDING_TITLE,
+  CYCLE_FAVORITE_FAILED_TITLE,
+  CYCLE_FAVORITE_REMOVED_TITLE,
+  CYCLE_FAVORITE_REMOVING_TITLE,
+  flipCycleFavorite,
+  flipCycleFavoriteInList,
+  useCycleFavorite,
+  type CycleFavoriteTarget,
+} from "./api/cycleFavorite.js";
+export {
+  CYCLE_TRANSFER_FAILED_TITLE,
+  CYCLE_TRANSFERRED_LINE,
+  CYCLE_TRANSFERRED_TITLE,
+  cycleTransferListsKey,
+  useTransferCycleWork,
+  type CycleTransferTarget,
+} from "./api/cycleTransfer.js";
 export {
   CYCLE_ARCHIVE_FAILED_LINE,
   CYCLE_ARCHIVE_FAILED_TITLE,
@@ -57,6 +77,29 @@ export { CycleArchiveDialog, type CycleArchiveDialogProps } from "./components/C
 export { CycleDateSpan, type CycleDateSpanProps } from "./components/CycleDateSpan.js";
 export { CycleDeleteDialog, type CycleDeleteDialogProps } from "./components/CycleDeleteDialog.js";
 export { CycleDetailCrumbs, type CycleDetailCrumbsProps } from "./components/CycleDetailCrumbs.js";
+export { CycleFavoriteStar, type CycleFavoriteStarProps } from "./components/CycleFavoriteStar.js";
+export { CyclePaletteEntries, type CyclePaletteEntriesProps } from "./components/CyclePaletteEntries.js";
+export { CycleTransferAction, type CycleTransferActionProps } from "./components/CycleTransferAction.js";
+export {
+  CYCLE_TRANSFER_NO_MATCH,
+  CYCLE_TRANSFER_NO_TARGET,
+  CYCLE_TRANSFER_SEARCH_PLACEHOLDER,
+  CYCLE_TRANSFER_TITLE,
+  CycleTransferDialog,
+  type CycleTransferDialogProps,
+} from "./components/CycleTransferDialog.js";
+export { ActiveCycleHero, type ActiveCycleHeroProps } from "./components/ActiveCycleHero.js";
+export { HeroBreakdownCard, type HeroBreakdownCardProps } from "./components/HeroBreakdownCard.js";
+export { HeroBurndownCard, type HeroBurndownCardProps } from "./components/HeroBurndownCard.js";
+export { HeroProgressCard, type HeroProgressCardProps } from "./components/HeroProgressCard.js";
+export { NoActiveCycle, type NoActiveCycleProps } from "./components/NoActiveCycle.js";
+export {
+  ACTIVES_BENEFITS,
+  ACTIVES_PRICING_HREF,
+  ACTIVES_SNAPSHOTS_HEADING,
+  ACTIVES_UPGRADE_LABEL,
+  WorkspaceActivesUpsell,
+} from "./components/WorkspaceActivesUpsell.js";
 export { CycleDetailGate, type CycleDetailGateProps } from "./components/CycleDetailGate.js";
 export { CycleDetailSidebar, type CycleDetailSidebarProps } from "./components/CycleDetailSidebar.js";
 export { CycleFilterChips, type CycleFilterChipsProps } from "./components/CycleFilterChips.js";
@@ -162,6 +205,17 @@ export {
   type CycleMenuEntryId,
 } from "./lib/cycleMenu.js";
 export { selectCycleMemberDirectory, UNKNOWN_CYCLE_MEMBER, type CycleMemberEntry } from "./lib/cycleMembers.js";
+export {
+  canTransferFromBanner,
+  canTransferFromRow,
+  isTransferableStatus,
+  isTransferArchived,
+  isTransferSnapshotEmpty,
+  transferableWorkCount,
+  transferStatusPill,
+  transferTargetOptions,
+  type TransferableCycle,
+} from "./lib/cycleTransfer.js";
 export {
   cycleProgressCounts,
   cycleProgressPercent,

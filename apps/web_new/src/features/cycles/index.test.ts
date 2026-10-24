@@ -4,6 +4,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ACTIVES_BENEFITS,
+  ACTIVES_PRICING_HREF,
+  ACTIVES_SNAPSHOTS_HEADING,
+  ACTIVES_UPGRADE_LABEL,
+  ActiveCycleHero,
   archivedCyclesQueryOptions,
   countCycleFilters,
   BREAKDOWN_FILTER_STEMS,
@@ -30,6 +35,9 @@ import {
   CYCLE_FILTER_DIMENSIONS,
   CYCLE_FILTER_SECTION_TITLES,
   CYCLE_FILTER_STATUS_VALUES,
+  CYCLE_FAVORITE_ADDED_TITLE,
+  CYCLE_FAVORITE_FAILED_TITLE,
+  CYCLE_FAVORITE_REMOVED_TITLE,
   CYCLE_GROUP_HEADINGS,
   CYCLE_LINK_COPIED_TITLE,
   CYCLE_LINK_COPY_FAILED_TITLE,
@@ -43,6 +51,13 @@ import {
   CYCLE_RESTORE_FAILED_LINE,
   CYCLE_RESTORE_FAILED_TITLE,
   CYCLE_TITLE_MAX_LENGTH,
+  CYCLE_TRANSFER_FAILED_TITLE,
+  CYCLE_TRANSFER_NO_MATCH,
+  CYCLE_TRANSFER_NO_TARGET,
+  CYCLE_TRANSFER_SEARCH_PLACEHOLDER,
+  CYCLE_TRANSFER_TITLE,
+  CYCLE_TRANSFERRED_LINE,
+  CYCLE_TRANSFERRED_TITLE,
   CYCLES_CRUMB,
   copyCycleLink,
   CreateCycleDialog,
@@ -57,6 +72,17 @@ import {
   cycleFailureMessage,
   cycleFormDays,
   cycleMenuEntries,
+  cycleTransferListsKey,
+  flipCycleFavorite,
+  flipCycleFavoriteInList,
+  canTransferFromBanner,
+  canTransferFromRow,
+  isTransferableStatus,
+  isTransferArchived,
+  isTransferSnapshotEmpty,
+  transferableWorkCount,
+  transferStatusPill,
+  transferTargetOptions,
   CycleArchiveDialog,
   CycleDateSpan,
   CycleDeleteDialog,
@@ -65,7 +91,9 @@ import {
   CycleDetailSidebar,
   CycleFilterChips,
   CycleFilterMenu,
+  CycleFavoriteStar,
   CycleGoneAway,
+  CyclePaletteEntries,
   CycleGroup,
   CycleMemberDates,
   CycleMemberDatesFrame,
@@ -84,6 +112,8 @@ import {
   CycleSidebarProgress,
   CycleSidebarSkeleton,
   CycleSidebarToggle,
+  CycleTransferAction,
+  CycleTransferDialog,
   cycleSpanModel,
   DEFAULT_BREAKDOWN_TAB,
   CyclesFeatureGate,
@@ -112,6 +142,9 @@ import {
   formatZoneDay,
   groupOfCycle,
   hasCycleFilters,
+  HeroBreakdownCard,
+  HeroBurndownCard,
+  HeroProgressCard,
   instantToProjectDate,
   instantZoneDay,
   invalidateAfterCycleTransfer,
@@ -127,6 +160,7 @@ import {
   makeCycleFilter,
   matchesCycleQuery,
   measureLabel,
+  NoActiveCycle,
   openCycleInNewTab,
   parseCycleDateEntry,
   parseCyclesListSearch,
@@ -152,7 +186,9 @@ import {
   useArchiveCycle,
   useCycleAnalyticsTab,
   useCycleDetail,
+  useCycleFavorite,
   useCycleFilterStore,
+  useTransferCycleWork,
   useCycleListFilter,
   useCycleSearchStore,
   useCycleSidebarCollapsed,
@@ -161,6 +197,7 @@ import {
   workItemsPairText,
   writeBreakdownTab,
   writeSidebarCollapsed,
+  WorkspaceActivesUpsell,
   zoneOffsetMinutes,
 } from "./index.js";
 
@@ -348,5 +385,53 @@ describe("cycles barrel", () => {
     expect(breakdownEntryActive).toBeDefined();
     expect(cycleProgressQueryOptions).toBeDefined();
     expect(cycleAnalyticsQueryOptions).toBeDefined();
+  });
+
+  it("re-exports the favorites toggle and palette mount", () => {
+    expect(CYCLE_FAVORITE_ADDED_TITLE).toBe("Added to favorites");
+    expect(CYCLE_FAVORITE_REMOVED_TITLE).toBe("Removed from favorites");
+    expect(CYCLE_FAVORITE_FAILED_TITLE).toBe("Couldn't update favorites");
+    expect(flipCycleFavorite).toBeDefined();
+    expect(flipCycleFavoriteInList).toBeDefined();
+    expect(useCycleFavorite).toBeDefined();
+    expect(CycleFavoriteStar).toBeDefined();
+    expect(CyclePaletteEntries).toBeDefined();
+  });
+
+  it("re-exports the transfer gates, write, and dialog", () => {
+    expect(CYCLE_TRANSFERRED_TITLE).toBe("Success!");
+    expect(CYCLE_TRANSFERRED_LINE).toBe("The remaining work items transferred successfully.");
+    expect(CYCLE_TRANSFER_FAILED_TITLE).toBe("Unable to transfer work items. Please try again.");
+    expect(CYCLE_TRANSFER_TITLE).toBe("Transfer work items");
+    expect(CYCLE_TRANSFER_SEARCH_PLACEHOLDER).toBe("Search for a cycle...");
+    expect(CYCLE_TRANSFER_NO_TARGET).toBe(
+      "You don't have any current cycle. Please create one to transfer the work items."
+    );
+    expect(CYCLE_TRANSFER_NO_MATCH).toBe("No cycles match your search.");
+    expect(canTransferFromRow).toBeDefined();
+    expect(canTransferFromBanner).toBeDefined();
+    expect(isTransferableStatus).toBeDefined();
+    expect(isTransferArchived).toBeDefined();
+    expect(isTransferSnapshotEmpty).toBeDefined();
+    expect(transferableWorkCount).toBeDefined();
+    expect(transferStatusPill).toBeDefined();
+    expect(transferTargetOptions).toBeDefined();
+    expect(cycleTransferListsKey).toBeDefined();
+    expect(useTransferCycleWork).toBeDefined();
+    expect(CycleTransferAction).toBeDefined();
+    expect(CycleTransferDialog).toBeDefined();
+  });
+
+  it("re-exports the active-cycle hero and the workspace actives upsell", () => {
+    expect(ActiveCycleHero).toBeDefined();
+    expect(HeroProgressCard).toBeDefined();
+    expect(HeroBurndownCard).toBeDefined();
+    expect(HeroBreakdownCard).toBeDefined();
+    expect(NoActiveCycle).toBeDefined();
+    expect(WorkspaceActivesUpsell).toBeDefined();
+    expect(ACTIVES_BENEFITS).toHaveLength(6);
+    expect(ACTIVES_SNAPSHOTS_HEADING).toContain("snapshots");
+    expect(ACTIVES_PRICING_HREF).toContain("pricing");
+    expect(ACTIVES_UPGRADE_LABEL).toBe("Upgrade");
   });
 });

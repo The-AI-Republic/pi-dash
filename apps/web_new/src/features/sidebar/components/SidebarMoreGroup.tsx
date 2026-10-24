@@ -18,6 +18,7 @@ import {
   FolderKanban,
   MessageSquare,
   Monitor,
+  Repeat,
 } from "lucide-react";
 import * as React from "react";
 
@@ -48,6 +49,7 @@ const DESTINATION_ICONS: Record<
   "ai-dev-machines": Monitor,
   analytics: ChartColumn,
   archives: Archive,
+  "active-cycles": Repeat,
 };
 
 export function SidebarMoreGroup({ workspaceSlug, role, currentPath }: SidebarMoreGroupProps): React.ReactElement {

@@ -32,23 +32,25 @@ describe("selectMoreEntries", () => {
       "AI Dev Machines",
       "Analytics",
       "Archives",
+      "Active cycles",
     ]);
     expect(entries[3]).toMatchObject({ key: "schedulers", href: "/acme/schedulers/" });
     expect(entries[6]).toMatchObject({ key: "archives", href: "/acme/projects/archives/" });
+    expect(entries[7]).toMatchObject({ key: "active-cycles", href: "/acme/active-cycles/" });
   });
 
   it("lists every destination for admins", () => {
-    expect(selectMoreEntries({ workspaceSlug: "acme", role: ROLE_ADMIN })).toHaveLength(7);
+    expect(selectMoreEntries({ workspaceSlug: "acme", role: ROLE_ADMIN })).toHaveLength(8);
   });
 
   it("shows guests the shared rows only", () => {
     const entries = selectMoreEntries({ workspaceSlug: "acme", role: ROLE_GUEST });
-    expect(entries.map((entry) => entry.name)).toEqual(["Projects", "Prompts", "Schedulers"]);
+    expect(entries.map((entry) => entry.name)).toEqual(["Projects", "Prompts", "Schedulers", "Active cycles"]);
   });
 
   it("reads a null role as guest level", () => {
     const entries = selectMoreEntries({ workspaceSlug: "acme", role: null });
-    expect(entries.map((entry) => entry.name)).toEqual(["Projects", "Prompts", "Schedulers"]);
+    expect(entries.map((entry) => entry.name)).toEqual(["Projects", "Prompts", "Schedulers", "Active cycles"]);
   });
 });
 
@@ -75,6 +77,7 @@ describe("isMoreRoute", () => {
     expect(isMoreRoute("/acme/analytics/", "acme")).toBe(true);
     expect(isMoreRoute("/acme/runners/abc/", "acme")).toBe(true);
     expect(isMoreRoute("/acme/projects/archives/", "acme")).toBe(true);
+    expect(isMoreRoute("/acme/active-cycles/", "acme")).toBe(true);
   });
 
   it("ignores the projects list and project pages", () => {
