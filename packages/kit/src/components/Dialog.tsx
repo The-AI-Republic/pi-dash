@@ -61,6 +61,7 @@ export function Dialog({
   children,
 }: DialogProps): React.ReactElement {
   const handleOpenChange = (next: boolean, details: { reason: string }): void => {
+    if (!next && nonDismissable) return;
     if (!next && ignoreEscapeKey && details.reason === "escape-key") return;
     onOpenChange?.(next, details);
   };

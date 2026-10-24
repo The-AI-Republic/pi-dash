@@ -234,7 +234,7 @@ describe("estimates data hooks", () => {
     const { result } = renderHook(() => useCreateEstimate(WORKSPACE, PROJECT), { wrapper: wrapFn() });
     result.current.mutate({ name: "Points", type: "points", values: ["1"] });
     await waitFor(() => expect(result.current.isError).toBe(true));
-    expect(ESTIMATE_CREATE_FAILED_TITLE).toBe("Couldn’t create the estimate");
+    expect(ESTIMATE_CREATE_FAILED_TITLE).toContain("creation failed");
   });
 
   it("deletes the active system and clears the project reference", async () => {

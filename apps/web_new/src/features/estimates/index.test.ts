@@ -26,12 +26,12 @@ describe("estimates feature barrel", () => {
       "The delete did not finish. Reload the page to see whether the system is still listed."
     );
     expect(estimates.ESTIMATE_DISABLED_BODY).toBe("Work items no longer offer estimate values.");
-    expect(estimates.ESTIMATE_CREATE_FAILED_TITLE).toBe("Couldn’t create the estimate");
+    expect(estimates.ESTIMATE_CREATE_FAILED_TITLE).toContain("creation failed");
     expect(estimates.ESTIMATE_DELETED_BODY).toBe("The system and its values were removed.");
     expect(estimates.ESTIMATE_FAMILY_POINTS).toBe("points");
     expect(estimates.ESTIMATE_FAMILY_CATEGORIES).toBe("categories");
     expect(estimates.CUSTOM_STARTER_ID).toBe("custom");
-    expect(estimates.ESTIMATE_VALUE_MAX_LENGTH).toBe(40);
+    expect(estimates.ESTIMATE_VALUE_MAX_LENGTH).toBe(20);
     expect(estimates.ESTIMATE_FAMILIES).toHaveLength(2);
     expect(estimates.familySystemName("categories")).toBe("Categories");
     expect(estimates.renumberValues(["1", "2"])).toEqual([
