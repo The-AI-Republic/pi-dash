@@ -30,9 +30,10 @@ on:
       - "desktop/tests/**"
 
 # A new push to a PR replaces its running CI. Pushes to web-new-dev never
-# cancel a running full suite: the next one waits, and newer merges collapse
+# cancel a running push run: the next one waits, and newer merges collapse
 # into that one pending run, so every completed run covers all merges since
-# the previous one.
+# the previous one. Push runs no longer include the web_new unit suite; the
+# NEWFRONT full-suite scheduler runs it on web-new-dev every 12 hours.
 concurrency:
   group: web-new-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -115,15 +116,13 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # A PR runs only the tests its change can affect (the whole suite when it
-      # touches test setup, configs or dependencies); web-new-dev runs them all.
+      # A PR runs only the tests its change can affect. Pushes to web-new-dev
+      # skip the web_new unit tests: the NEWFRONT full-suite scheduler runs the
+      # whole suite on web-new-dev every 12 hours and files fix issues.
       - name: unit tests affected by the PR
         if: github.event_name == 'pull_request'
         working-directory: apps/web_new
         run: node checks/test-changed.mjs --base HEAD^1
-      - name: full unit suite
-        if: github.event_name != 'pull_request'
-        run: pnpm --filter web_new test
       - run: pnpm --filter web_new test:coexistence
       - run: pnpm --filter web_new test:size-initial
       - run: pnpm --filter web_new test:parity-report
