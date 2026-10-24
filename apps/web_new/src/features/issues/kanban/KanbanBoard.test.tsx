@@ -221,6 +221,9 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
 import type { IssueListItem } from "@pidash/api-client";
 
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
+import { edition } from "../../../core/edition/index.js";
+import { WORKFLOW_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import { DROPPED_HIGHLIGHT_MS, KanbanBoard } from "./KanbanBoard.js";
@@ -396,6 +399,8 @@ beforeEach(async () => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  resetEditionIssuesProviders();
+  delete edition.flags[WORKFLOW_FLAG];
 });
 
 describe("KanbanBoard", () => {
@@ -1227,6 +1232,51 @@ describe("KanbanBoard drag and drop", () => {
     expect(screen.queryByTestId("kanban-drop-overlay")).not.toBeInTheDocument();
     fireEvent(document, pointer("pointerup", 400, 300));
     expect(mocks.moveCard).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks the workflow gate when the host supplies no seam, and blocks the refused column (ISS-233)", () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ toStateId }) => (toStateId === DONE ? { reason: "Approve the review first" } : null),
+      },
+    });
+    setup();
+    stubFlatGeometry();
+    pressCard(cardByName("Fix login"));
+    fireEvent(document, pointer("pointermove", 400, 300));
+    expect(screen.getByTestId("kanban-drop-overlay")).toHaveTextContent("Approve the review first");
+    fireEvent(document, pointer("pointerup", 400, 300));
+    expect(mocks.notifyInfo).toHaveBeenCalledWith("Cannot move the work item", "Approve the review first");
+    expect(mocks.moveCard).not.toHaveBeenCalled();
+  });
+
+  it("keeps a gate-off board open everywhere, with every quick-add showing (OSS absence)", () => {
+    registerEditionIssuesProviders({
+      workflowRules: { refusal: () => ({ reason: "no rule should be asked" }) },
+    });
+    setup();
+    stubFlatGeometry();
+    pressCard(cardByName("Fix login"));
+    fireEvent(document, pointer("pointermove", 400, 300));
+    expect(screen.queryByTestId("kanban-drop-overlay")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /New work item/ }).length).toBeGreaterThan(0);
+  });
+
+  it("closes quick-add and names the rule where creation is refused (ISS-233)", () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: () => null,
+        creationRefusal: ({ columnKey }) => (columnKey === DONE ? { reason: "Start items in Todo" } : null),
+      },
+    });
+    setup();
+    expect(within(column("Done")).queryByRole("button", { name: /New work item/ })).not.toBeInTheDocument();
+    const header = within(column("Done")).getByTestId("kanban-header-create");
+    expect(header).toHaveAttribute("aria-disabled", "true");
+    expect(header).toHaveAttribute("title", "Start items in Todo");
+    expect(within(column("Todo")).getByRole("button", { name: /New work item/ })).toBeInTheDocument();
   });
 
   it("never starts a drag on touch layouts or read-only boards", () => {

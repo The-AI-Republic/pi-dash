@@ -27,6 +27,17 @@ import { selectMemberOptions } from "../../../shared/pickers/members.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { WorkItemCreateDialog, type WorkItemCreateProject } from "../components/WorkItemCreateDialog.js";
 import { AddExistingDialog } from "./AddExistingDialog.js";
+import {
+  appliedChips,
+  emptyEditionFilters,
+  matchesIssueType,
+  matchesTeamProject,
+  toggleEditionFilter,
+  type EditionChip,
+  type EditionFilters,
+} from "../edition/filterModel.js";
+import { useIssueTypeOptions, useTeamProjectOptions } from "../edition/EditionFilterSections.js";
+import { isEditionFlagOn, ISSUE_TYPE_FILTER_FLAG, TEAM_PROJECT_FILTER_FLAG } from "../edition/flags.js";
 import { useDeleteSubIssue, usePatchSubIssue, useRemoveSubIssue } from "./mutations.js";
 import { loadedRows, latestEnvelope, useSubIssues, type SubIssueScope } from "./queries.js";
 import { SubIssueDisplayMenu } from "./SubIssueDisplayMenu.js";
@@ -200,6 +211,14 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
   const [existingOpen, setExistingOpen] = React.useState(false);
   const [pendingDelete, setPendingDelete] = React.useState<SubIssueItem | null>(null);
   const [busyRows, setBusyRows] = React.useState<readonly string[]>([]);
+  // Edition-only dimensions stay off the stored filter object: they reset
+  // with the other filters and never change the community dropdown.
+  const [editionFilters, setEditionFilters] = React.useState<EditionFilters>(emptyEditionFilters);
+  const teamProjectsOffered = isEditionFlagOn(TEAM_PROJECT_FILTER_FLAG);
+  const issueTypesOffered = isEditionFlagOn(ISSUE_TYPE_FILTER_FLAG);
+  const teamProjectOptions = useTeamProjectOptions(workspaceSlug, issue.project_id, state.open && teamProjectsOffered);
+  const issueTypeOptions = useIssueTypeOptions(workspaceSlug, issue.project_id, state.open && issueTypesOffered);
+  const editionOn = teamProjectsOffered || issueTypesOffered;
   // The read always runs: the collapsed header needs the counts, and a
   // remounted parent must render its header before it can be reopened.
   const query = useSubIssues(workspaceSlug, issue.project_id, parentId, { isEpic });
@@ -223,7 +242,15 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
 
   const envelope = latestEnvelope(query.data);
   const rows = loadedRows(query.data);
-  const filtered = React.useMemo(() => filterSubIssues(rows, state.filters, today), [rows, state.filters, today]);
+  const filtered = React.useMemo(() => {
+    const base = filterSubIssues(rows, state.filters, today);
+    if (!teamProjectsOffered && !issueTypesOffered) return base;
+    return base.filter(
+      (row) =>
+        matchesTeamProject(row.project_id, editionFilters.teamProject) &&
+        matchesIssueType(row.type_id ?? null, editionFilters.issueType)
+    );
+  }, [rows, state.filters, today, editionFilters, teamProjectsOffered, issueTypesOffered]);
   const families = React.useMemo(
     () =>
       groupSubIssues(filtered, state.display.groupBy, state.display.orderBy, {
@@ -271,6 +298,18 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
   };
 
   const title = heading ?? subIssueTitle(isEpic);
+  const editionChips = editionOn
+    ? appliedChips(editionFilters, {
+        teamProject: teamProjectOptions.data ?? [],
+        issueType: issueTypeOptions.data ?? [],
+      })
+    : [];
+  function toggleEdition(key: keyof EditionFilters, value: string): void {
+    setEditionFilters((current) => toggleEditionFilter(current, key, value));
+  }
+  function removeEditionChip(chip: EditionChip): void {
+    toggleEdition(chip.key, chip.value);
+  }
   const addEntries: MenuEntry[] = [
     {
       label: "Create new",
@@ -404,6 +443,14 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
             offered={offered}
             onToggle={(key, value) => toggleFilter(parentId, key, value)}
             onSetDate={(key, values) => setFilterValues(parentId, key, values)}
+            {...(editionOn
+              ? {
+                  editionFilters,
+                  onToggleEdition: toggleEdition,
+                  editionChips,
+                  onRemoveEditionChip: removeEditionChip,
+                }
+              : {})}
           />
           {addMenu}
         </span>

@@ -7,7 +7,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { edition } from "../../../core/edition/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { ISSUE_TYPES_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import { IDENTIFIER_COPIED_TITLE, IDENTIFIER_COPY_FAILED_TITLE, IssueIdentifier } from "./IssueIdentifier.js";
 
 vi.mock("../../../shared/shell/index.js", () => ({
@@ -17,6 +20,8 @@ vi.mock("../../../shared/shell/index.js", () => ({
 
 afterEach(() => {
   cleanup();
+  resetEditionIssuesProviders();
+  delete edition.flags[ISSUE_TYPES_FLAG];
   vi.mocked(notifyError).mockClear();
   vi.mocked(notifySuccess).mockClear();
   delete (navigator as { clipboard?: unknown }).clipboard;
@@ -49,5 +54,45 @@ describe("IssueIdentifier", () => {
     render(<IssueIdentifier projectIdentifier="WEB" sequenceId={42} />);
     fireEvent.click(screen.getByRole("button", { name: "WEB-42" }));
     await waitFor(() => expect(vi.mocked(notifyError)).toHaveBeenCalledWith(IDENTIFIER_COPY_FAILED_TITLE));
+  });
+
+  it("mounts the cloud type badge beside the key only when the edition supplies one (ISS-235)", () => {
+    registerEditionIssuesProviders({
+      issueTypeDetail: { badge: ({ editable }) => <span data-testid="type-probe">{editable ? "edit" : "read"}</span> },
+    });
+    render(
+      <IssueIdentifier
+        projectIdentifier="WEB"
+        sequenceId={42}
+        workspaceSlug="acme"
+        projectId="p"
+        issueId="i"
+        editable
+      />
+    );
+    expect(screen.queryByTestId("detail-type-badge")).toBeNull();
+    cleanup();
+    edition.flags[ISSUE_TYPES_FLAG] = true;
+    render(
+      <IssueIdentifier
+        projectIdentifier="WEB"
+        sequenceId={42}
+        workspaceSlug="acme"
+        projectId="p"
+        issueId="i"
+        editable
+      />
+    );
+    expect(screen.getByTestId("detail-type-badge")).toContainElement(screen.getByTestId("type-probe"));
+    expect(screen.getByTestId("type-probe")).toHaveTextContent("edit");
+    expect(screen.getByRole("button", { name: "WEB-42" })).toBeInTheDocument();
+  });
+
+  it("keeps the key alone when the caller passes no item to read", () => {
+    edition.flags[ISSUE_TYPES_FLAG] = true;
+    registerEditionIssuesProviders({ issueTypeDetail: { badge: () => <span data-testid="type-probe">Bug</span> } });
+    render(<IssueIdentifier projectIdentifier="WEB" sequenceId={42} />);
+    expect(screen.queryByTestId("detail-type-badge")).toBeNull();
+    expect(screen.getByRole("button", { name: "WEB-42" })).toBeInTheDocument();
   });
 });

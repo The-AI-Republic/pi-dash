@@ -43,7 +43,14 @@ export function DetailHeaderActions({
 }: DetailHeaderActionsProps): React.ReactElement {
   return (
     <div className="flex items-center gap-(--space-2)">
-      <IssueIdentifier projectIdentifier={projectIdentifier} sequenceId={issue.sequence_id} />
+      <IssueIdentifier
+        projectIdentifier={projectIdentifier}
+        sequenceId={issue.sequence_id}
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        issueId={issue.id}
+        editable={editable}
+      />
       <CopyWorkItemLinkButton workspaceSlug={workspaceSlug} issueKey={issueKey} />
       <IssueSubscribeToggle
         workspaceSlug={workspaceSlug}

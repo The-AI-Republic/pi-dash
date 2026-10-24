@@ -14,6 +14,7 @@ import { Skeleton, VirtualList, type VirtualListHandle } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { creationBlockedInColumn } from "../edition/workflow.js";
 import { usePermissions } from "../../../core/session/index.js";
 import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { isCollapsed, readCollapsedGroups, useToggleCollapsedGroup } from "./collapse.js";
@@ -329,12 +330,20 @@ export function ListLayout({
     setPeek(null);
   }
 
+  /**
+   * Creation's reason in one section. The host may name a reason for the
+   * whole list; otherwise the workflow gate answers per section, which in
+   * the community build is nothing at all (ISS-233).
+   */
+  function creationReasonFor(sectionKey: string): string | undefined {
+    if (creationBlockedReason !== undefined) return creationBlockedReason;
+    return creationBlockedInColumn({ projectId, groupDimension: prefs.groupBy, columnKey: sectionKey });
+  }
   const quickAddReason = quickAddDisabledReason({
     canEdit: editAllowed,
     completedCycle,
     completedModule,
     enableQuickAdd,
-    workflowBlockedReason: creationBlockedReason,
     groupBy: prefs.groupBy,
   });
   const quickAddDisabled = quickAddReason !== undefined;
@@ -484,7 +493,7 @@ export function ListLayout({
               dimension={prefs.groupBy}
               collapsed={sectionCollapsed}
               onToggle={() => collapse.toggleCollapsedGroup("group_by", section.key)}
-              canAdd={canAdd}
+              canAdd={canAdd && creationReasonFor(section.key) === undefined}
               menu={menu}
               onCreate={() => openCreate({ ...sectionPrefill(prefs.groupBy, section) })}
               onAddExisting={() => setAddExistingOpen(true)}
@@ -541,8 +550,8 @@ export function ListLayout({
                     prefill={sectionPrefill(prefs.groupBy, section)}
                     {...(pages.grouped ? { groupKey: section.key } : {})}
                     defaultStateId={projectDetails?.default_state ?? null}
-                    disabled={quickAddDisabled}
-                    disabledReason={quickAddReason}
+                    disabled={quickAddDisabled || creationReasonFor(section.key) !== undefined}
+                    disabledReason={quickAddReason ?? creationReasonFor(section.key)}
                   />
                 </React.Suspense>
               </>
