@@ -10,7 +10,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { IntakeIssueDetail, IntakeIssueDetailItem, IssueComment, TransportInit } from "@pidash/api-client";
+import type {
+  IntakeIssueDetail,
+  IntakeIssueDetailItem,
+  IssueActivity,
+  IssueComment,
+  TransportInit,
+} from "@pidash/api-client";
 import { ToastHost } from "@pidash/kit";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -77,6 +83,7 @@ const LABEL = "b23e4567-e89b-12d3-a456-42661417400a";
 const V1 = "c23e4567-e89b-12d3-a456-42661417400c";
 const COMMENT = "f23e4567-e89b-12d3-a456-42661417400f";
 const CREATED = "f23e4567-e89b-12d3-a456-426614174010";
+const ACTIVITY = "f23e4567-e89b-12d3-a456-426614174011";
 
 const ME_PAYLOAD = {
   id: ME,
@@ -229,6 +236,7 @@ interface DetailServer {
   detail: IntakeIssueDetail;
   writes: Array<{ url: string; body: unknown }>;
   postedComments?: IssueComment[];
+  activities?: IssueActivity[];
 }
 
 function versionsEnvelope(hourAgo: string) {
@@ -274,6 +282,36 @@ function versionDetail(hourAgo: string) {
     description_html: "<p>version one</p>",
     description_stripped: "version one",
     description_json: {},
+  };
+}
+
+function propertyRow(): IssueActivity {
+  return {
+    id: ACTIVITY,
+    issue: ISSUE,
+    project: PROJECT,
+    workspace: "b23e4567-e89b-12d3-a456-42661417400e",
+    actor: ADA,
+    actor_detail: DIRECTORY[0]!.member,
+    verb: "updated",
+    field: "state",
+    old_value: "Triage",
+    new_value: "Backlog",
+    comment: "",
+    attachments: [],
+    issue_comment: null,
+    old_identifier: null,
+    new_identifier: null,
+    epoch: null,
+    source_data: null,
+    created_at: "2026-10-01T00:00:01Z",
+    updated_at: "2026-10-01T00:00:01Z",
+    created_by: ADA,
+    updated_by: null,
+    deleted_at: null,
+    issue_detail: null,
+    project_detail: null,
+    workspace_detail: null,
   };
 }
 
@@ -348,7 +386,7 @@ function harness(server: DetailServer, options: { meStatus?: number; searchHits?
     if (url.endsWith(`/workspaces/${SLUG}/members/`)) return ok(DIRECTORY);
     if (url.endsWith(`/projects/${PROJECT}/issue-labels/`)) return ok(LABELS);
     if (url.includes("/reactions/")) return ok([]);
-    if (url.includes("activity_type=issue-property")) return ok([]);
+    if (url.includes("activity_type=issue-property")) return ok(server.activities ?? []);
     if (url.includes("activity_type=issue-comment"))
       return ok([commentRow(), ...(server.postedComments ?? []).map((comment) => ({ ...comment }))]);
     if (url.includes(`/issues/${ISSUE}/comments/`) && init.method === "POST") {
@@ -474,12 +512,18 @@ describe("IntakeDetail content (INT-019/024)", () => {
   });
 
   it("mounts the shared activity thread with comment and activity rendering (CMT-018)", async () => {
-    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const server: DetailServer = {
+      detailStatus: 200,
+      detail: detailPayload(),
+      writes: [],
+      activities: [propertyRow()],
+    };
     const { queryClient } = harness(server);
     renderDetail(queryClient);
 
     expect(await screen.findByRole("heading", { name: "Activity" })).toBeInTheDocument();
     expect(await screen.findByText("Intake thread words")).toBeInTheDocument();
+    expect(await screen.findByText(/moved the state to Backlog/)).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Add comment" })).toBeInTheDocument();
   });
 
@@ -522,10 +566,19 @@ describe("IntakeDetail content (INT-019/024)", () => {
     expect(await screen.findByText("Fresh intake words")).toBeInTheDocument();
   });
 
-  it("shows the access switch on a published intake project", async () => {
-    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
-    const { queryClient } = harness(server);
-    renderDetail(queryClient, { published: true });
+  it("shows the access switch only on a published intake project", async () => {
+    const draft: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const draftView = harness(draft);
+    renderDetail(draftView.queryClient);
+    await screen.findByText("Intake thread words");
+    expect(screen.queryByRole("radiogroup", { name: "Comment visibility" })).not.toBeInTheDocument();
+
+    document.body.innerHTML = "";
+    resetAppClient();
+
+    const published: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const publishedView = harness(published);
+    renderDetail(publishedView.queryClient, { published: true });
 
     expect(await screen.findByRole("radiogroup", { name: "Comment visibility" })).toBeInTheDocument();
     expect(await screen.findByText("Intake thread words")).toBeInTheDocument();
