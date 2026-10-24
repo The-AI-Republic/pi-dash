@@ -2,18 +2,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Workspace active cycles (parity/specs/cycles.md §16, CYC-043). The
-// paid-feature upsell: a Pro badge, an on-demand-snapshots heading,
-// six benefit cards, and the upgrade action to pricing. It issues no
-// requests — the workspace active-cycles endpoint is never read here.
-// The cloud data view is a seam: the private overlay carries no
-// active-cycles source at this head, so no slice builds a cloud list
-// and the gate proves only this upsell. A cloud view, when wanted,
-// arrives behind a new inventory row and oracle scenario first.
+// paid-feature upsell: the shared upgrade pill beside the header
+// (SHELL-101), an on-demand-snapshots heading, six benefit cards, and
+// the upgrade action to pricing. It issues no requests — the workspace
+// active-cycles endpoint is never read here. The cloud data view is a
+// seam: the private overlay carries no active-cycles source at this
+// head, so no slice builds a cloud list and the gate proves only this
+// upsell. A cloud view, when wanted, arrives behind a new inventory
+// row and oracle scenario first.
 
+import { UpgradePill } from "@pidash/kit";
 import * as React from "react";
-
-/** Paid-feature badge pinned by the oracle. */
-export const ACTIVES_PRO_BADGE = "Pro";
 
 /** Snapshots heading pinned by the oracle. */
 export const ACTIVES_SNAPSHOTS_HEADING = "On-demand snapshots of all your cycles";
@@ -69,12 +68,7 @@ export function WorkspaceActivesUpsell(): React.ReactElement {
     >
       <div className="flex items-center gap-(--space-2)">
         <h1 className="text-title text-(--text)">Active cycles</h1>
-        <span
-          data-testid="workspace-actives-badge"
-          className="text-caption rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) font-semibold text-(--text)"
-        >
-          {ACTIVES_PRO_BADGE}
-        </span>
+        <UpgradePill size="medium" />
       </div>
       <h2 className="text-heading text-(--text-muted)">{ACTIVES_SNAPSHOTS_HEADING}</h2>
       <ul data-testid="workspace-actives-benefits" className="grid gap-(--space-4) md:grid-cols-2">

@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Workspace active cycles (parity/specs/cycles.md §16, CYC-043): the
-// paid upsell's pinned shape — Pro badge, snapshots heading, six
-// benefit cards, and the pricing upgrade that opens in a new tab.
+// paid upsell's pinned shape — the shared upgrade pill (SHELL-101)
+// beside the header, snapshots heading, six benefit cards, and the
+// pricing upgrade that opens in a new tab.
 
 import { render, screen, within } from "@testing-library/react";
 import * as React from "react";
@@ -19,9 +20,10 @@ import {
 } from "./WorkspaceActivesUpsell.js";
 
 describe("WorkspaceActivesUpsell", () => {
-  it("badges the paid feature and heads the snapshots", () => {
+  it("mounts the shared upgrade pill beside the header and heads the snapshots", () => {
     render(<WorkspaceActivesUpsell />);
-    expect(screen.getByTestId("workspace-actives-badge")).toHaveTextContent("Pro");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Active cycles");
+    expect(screen.getByTestId("upgrade-pill")).toHaveTextContent("Pro");
     const heading = screen.getByRole("heading", { level: 2 });
     expect(heading).toHaveTextContent("snapshots");
     expect(heading).toHaveTextContent(ACTIVES_SNAPSHOTS_HEADING);

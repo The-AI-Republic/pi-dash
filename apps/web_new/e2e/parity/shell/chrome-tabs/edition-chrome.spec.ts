@@ -9,12 +9,20 @@
 // needing the matching cloud or desktop build is recorded as a gap in the
 // inventory. Rows: SHELL-099 (suppression half), SHELL-100, SHELL-101,
 // SHELL-102.
+import { desktopInvocations, installDesktopMock } from "../../desktop/tauri-mock";
 import { test, expect } from "../../fixtures";
-import { serverSetTourCompleted, signInSession } from "../../helpers/api";
+import { serverSetTourCompleted, sessionBrowserCookies, sessionValid, signInSession } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 
 const ROWS = ["SHELL-099", "SHELL-100", "SHELL-102"];
 const PILL = ["SHELL-101"];
+const POSITIVE = ["SHELL-102"];
+
+/** Release the mock shell holds in the desktop-positive leg; plainly fake versions. */
+const WAITING_UPDATE = { version: "9.9.9", currentVersion: "9.9.8", installing: false };
+
+/** Entry heading the desktop bundle renders for a signed-out visitor (DESK-011). Absent on web. */
+const DESKTOP_ENTRY_HEADING = "The desktop app can't sign you in yet";
 
 test(
   specTitle(ROWS, "cloud frame, edition marker, desktop update"),
@@ -50,13 +58,6 @@ test(
   specTitle(PILL, "upgrade pills mark destinations without affecting navigation"),
   { tag: specTags(PILL) },
   async ({ driver, seed }) => {
-    // Gate note (NEWFRONT-295): web_new skips — the pill mounts beside
-    // the paywalled Cycles header but the cycles route 404s until the
-    // cycles area lands it. TODO(NEWFRONT-527).
-    if (driver.target === "web_new") {
-      test.skip(true, "cycles route unlanded; pill mount unprovable");
-      return;
-    }
     await test.step("sign in through the UI", async () => {
       await driver.signInWithPassword(seed.email, seed.password);
     });
@@ -75,5 +76,61 @@ test(
     await expect.poll(() => driver.upgradePillCount(), { timeout: 15_000 }).toBeGreaterThan(0);
     await driver.openWorkspaceHome(seed.workspaceSlug);
     await expect.poll(() => driver.page.url(), { timeout: 30_000 }).toContain(`/${seed.workspaceSlug}/`);
+  }
+);
+
+test(
+  specTitle(POSITIVE, "desktop builds render the update control in the sidebar"),
+  { tag: specTags(POSITIVE) },
+  async ({ driver, seed }) => {
+    // Desktop-positive leg (NEWFRONT-527): the web-negative half lives
+    // in the first test above. The oracle project drives the old web
+    // build only, and the web bundle carries no updater capability, so
+    // this leg runs solely against the desktop bundle with the mocked
+    // shell the desktop gate staged (desktop/updater/updater.spec.ts
+    // proves the control's own lifecycle on the same rig).
+    if (driver.target === "web") {
+      test.skip(true, "the oracle project drives the old web build only; no desktop bundle to prove");
+      return;
+    }
+
+    // The entry screen differs by build target: the desktop bundle
+    // renders its own sign-in screen while the web bundle walks the
+    // email step. Probe before installing the mock bridge — the init
+    // script must land before the first mock-backed navigation.
+    await driver.visit("/");
+    let bundle: "desktop" | "web" | "pending" = "pending";
+    await expect
+      .poll(
+        async () => {
+          if ((await driver.page.getByRole("heading", { name: DESKTOP_ENTRY_HEADING }).count()) > 0) {
+            bundle = "desktop";
+          } else if ((await driver.authStep()) !== "unknown") {
+            bundle = "web";
+          }
+          return bundle;
+        },
+        { timeout: 60_000 }
+      )
+      .not.toBe("pending");
+    test.skip(bundle !== "desktop", "desktop-positive leg needs the desktop bundle (PIDASH_TARGET=desktop)");
+
+    await test.step("a waiting update mounts the control in the sidebar", async () => {
+      await installDesktopMock(driver.page, { pendingUpdate: WAITING_UPDATE });
+      const session = await signInSession(seed.email, seed.password);
+      await serverSetTourCompleted(session, true);
+      await driver.page.context().addCookies(sessionBrowserCookies(session));
+      await driver.openWorkspaceHome(seed.workspaceSlug);
+      await expect.poll(() => driver.sidebarLinkTexts(), { timeout: 60_000 }).toContain("Home");
+      // The shell owns the mount point; the control's install/retry
+      // behavior is DESK-018's, proven in the desktop suite.
+      await expect.poll(() => driver.desktopUpdatePresent(), { timeout: 30_000 }).toBe(true);
+      const pending = await desktopInvocations(driver.page, "desktop_pending_update");
+      expect(pending.length).toBeGreaterThanOrEqual(1);
+    });
+
+    await test.step("the server session stays valid throughout", async () => {
+      expect(await sessionValid(await signInSession(seed.email, seed.password))).toBe(true);
+    });
   }
 );
