@@ -120,6 +120,7 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_types::WorkspaceId;
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::paginator::{self, Cursor, PageError, PageResponse};
 use crate::serializer::render_datetime_in;
@@ -1571,9 +1572,9 @@ async fn partial_update(
         Err(denial) => return denial.into_response(),
     }
     let (_parts, body) = req.into_parts();
-    let raw = match axum::body::to_bytes(body, 1024 * 1024).await {
+    let raw = match read_request_bytes(body).await {
         Ok(raw) => raw,
-        Err(_) => return Denial::ServerError.into_response(),
+        Err(response) => return response,
     };
     let data = match parse_body(&raw) {
         Ok(data) => data,
@@ -2004,9 +2005,9 @@ async fn mark_all_read_create(
         return response;
     }
     let (_parts, body) = req.into_parts();
-    let raw = match axum::body::to_bytes(body, 1024 * 1024).await {
+    let raw = match read_request_bytes(body).await {
         Ok(raw) => raw,
-        Err(_) => return Denial::ServerError.into_response(),
+        Err(response) => return response,
     };
     let data = match parse_body(&raw) {
         Ok(data) => data,
@@ -2553,9 +2554,9 @@ async fn preference_patch(
         Err(denial) => return denial.into_response(),
     };
     let (_parts, body) = req.into_parts();
-    let raw = match axum::body::to_bytes(body, 1024 * 1024).await {
+    let raw = match read_request_bytes(body).await {
         Ok(raw) => raw,
-        Err(_) => return Denial::ServerError.into_response(),
+        Err(response) => return response,
     };
     let fields = match read_serializer_body(&raw) {
         Ok(fields) => fields,

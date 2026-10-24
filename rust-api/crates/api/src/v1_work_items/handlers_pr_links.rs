@@ -70,6 +70,7 @@ use uuid::Uuid;
 
 use pidash_auth::scope::TenantScope;
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_projects::handlers_project::{
     envelope, preamble, project_base_facts, query_last, rewrite_project_id, QueryMap,
@@ -2755,9 +2756,6 @@ impl AdapterSource for V1Adapters<'_> {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// `RequestBodySizeLimitMiddleware` answers 413 before the view runs.
-const MAX_BODY: usize = 5_242_880;
-
 /// Re-read one PR link by id for the create response (the serializer
 /// reads the saved instance, whose audit columns the store stamped).
 const PR_OWNED_SQL: &str = r#"SELECT id, issue_id, repo_owner, repo_name, pr_number, url, title, state,
@@ -2816,9 +2814,9 @@ pub async fn pr_create(
         return crate::edge::proxy(State(state), req).await;
     }
     let (parts, body) = req.into_parts();
-    let raw = match axum::body::to_bytes(body, MAX_BODY).await {
+    let raw = match read_request_bytes(body).await {
         Ok(raw) => raw,
-        Err(_) => return Denial::RequestTooLarge.into_response(),
+        Err(response) => return response,
     };
     match pr_create_inner(
         &state,
@@ -2906,9 +2904,9 @@ pub async fn review_create(
         return crate::edge::proxy(State(state), req).await;
     }
     let (parts, body) = req.into_parts();
-    let raw = match axum::body::to_bytes(body, MAX_BODY).await {
+    let raw = match read_request_bytes(body).await {
         Ok(raw) => raw,
-        Err(_) => return Denial::RequestTooLarge.into_response(),
+        Err(response) => return response,
     };
     match review_create_inner(
         &state,

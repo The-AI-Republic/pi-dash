@@ -72,6 +72,7 @@ use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use sqlx::Row;
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use pidash_db::app_pages::strip::ml_strip_tags;
@@ -243,8 +244,8 @@ pub(crate) enum Denial {
     BadJson(Value),
     /// 415, `UnsupportedMediaType` (content negotiation).
     UnsupportedMediaType(String),
-    /// 413, `RequestBodySizeLimitMiddleware` past 5 MiB.
-    RequestTooLarge,
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -295,9 +296,9 @@ impl Denial {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
-            Denial::RequestTooLarge => (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -820,10 +821,6 @@ fn render_date(date: &chrono::NaiveDate) -> String {
 // Request bodies (DRF JSON parsing)
 // ---------------------------------------------------------------------------
 
-/// Django's `DATA_UPLOAD_MAX_MEMORY_SIZE` (5 MiB): past it the
-/// `RequestBodySizeLimitMiddleware` answers 413 before the view runs.
-const MAX_BODY: usize = 5_242_880;
-
 /// Engage form semantics for the shared body negotiator: the two
 /// `ArrayField`s arrive as arrays; `access`/`speaker_type` (not
 /// required, `ChoiceField` has no `allow_blank`) skip blank form
@@ -836,7 +833,7 @@ const ENGAGE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 /// Read the request body the way DRF does: content negotiation (JSON /
 /// form / multipart, 415 otherwise), empty → `{}`, malformed JSON →
 /// `ParseError` 400, non-object JSON → the `non_field_errors` 400.
-/// Past 5 MiB → the middleware 413.
+/// Over-limit bodies never reach here (`BodyLimitLayer` 413'd them).
 ///
 /// Form notes: `comment_json` form strings are JSON-*parsed* (DRF
 /// `JSONString` — `""` → "Value must be valid JSON."); blank form
@@ -855,9 +852,9 @@ struct RequestBody {
 
 async fn read_body(req: axum::extract::Request) -> Result<RequestBody, Denial> {
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::RequestTooLarge)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     match shared_body::negotiate_body(&parts.headers, &bytes, &ENGAGE_BODY_SPEC) {
         Ok(shared_body::NegotiatedBody::Empty) => Ok(RequestBody {
             map: Map::new(),

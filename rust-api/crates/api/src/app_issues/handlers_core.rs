@@ -148,6 +148,7 @@ use super::queries_core::{
 use super::{
     actor_user_id, json_response, resolve_project_id, Denial, HandlerResult, NOT_FOUND_BODY,
 };
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
@@ -5337,15 +5338,16 @@ async fn update_m2m_leg(
     .await
 }
 
-/// Split a proxied-or-read request after the UUID guards passed (mirrors
-/// the sibling handlers' 8MB cap; overflow 500s).
+/// Split a proxied-or-read request after the UUID guards passed. The read
+/// is unbounded past the serve-wide `BodyLimitLayer`; a mid-stream
+/// transport failure fails closed with the truncated-body 502.
 async fn split_core_parts(
     req: axum::extract::Request,
 ) -> Result<(axum::http::request::Parts, Vec<u8>), Denial> {
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024)
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     Ok((parts, bytes.to_vec()))
 }
 

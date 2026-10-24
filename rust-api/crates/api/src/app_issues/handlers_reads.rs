@@ -75,6 +75,7 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 
 use super::queries_core;
@@ -433,15 +434,13 @@ fn dates_exceeded_body() -> Response {
 // ---------------------------------------------------------------------------
 
 /// Read the JSON body of a proxied-or-owned request (the cycles `detail_body`
-/// shape): same 2 MiB default limit as axum's `Json`; an empty body reads as
-/// `{}`, like DRF; a non-JSON media type is DRF's 415; a malformed document
-/// answers the extractor rejection.
+/// shape): unbounded past the serve-wide `BodyLimitLayer`; an empty body
+/// reads as `{}`, like DRF; a non-JSON media type is DRF's 415; a malformed
+/// document answers the extractor rejection.
 async fn read_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
-        .await
-        .map_err(|_| Denial::ServerError.into_response())?;
+    let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
         return Ok(Value::Object(Map::new()));
     }

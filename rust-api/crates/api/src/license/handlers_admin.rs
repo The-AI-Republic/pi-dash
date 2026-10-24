@@ -95,6 +95,7 @@ use super::handlers_auth_forms as forms;
 use super::{file_asset_url, AssetUrl};
 use crate::auth_session::render::render_csrf_failure;
 use crate::edge;
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::paginator::py_float_str;
 use crate::serializer::render_datetime_in;
@@ -2134,9 +2135,10 @@ async fn finish_login(
 async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response, Denial> {
     let (parts, body) = req.into_parts();
     let headers = &parts.headers;
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return Ok(response),
+    };
     let peer = parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
@@ -2235,9 +2237,10 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
 async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response, Denial> {
     let (parts, body) = req.into_parts();
     let headers = &parts.headers;
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return Ok(response),
+    };
     let peer = parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()

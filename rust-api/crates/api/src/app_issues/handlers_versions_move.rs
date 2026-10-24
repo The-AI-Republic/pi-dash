@@ -134,6 +134,7 @@ use super::queries_engage::{
 };
 use super::render::{v2_page, V2Page};
 use super::{query_last, Binder, QueryMap};
+use crate::middleware::body_limit::read_request_bytes;
 use crate::orchestration::{
     drain_creation_outboxes, handoff_store, split_outboxes, CreationDrainError, CreationOutboxes,
     SpanCreationDeps,
@@ -242,8 +243,8 @@ enum Denial {
     MoveRejection { status: u16, message: String },
     /// 415, `UnsupportedMediaType` (content negotiation).
     UnsupportedMediaType(String),
-    /// 413, `RequestBodySizeLimitMiddleware` past 5 MiB.
-    RequestTooLarge,
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -281,9 +282,9 @@ impl Denial {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
-            Denial::RequestTooLarge => (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1095,10 +1096,6 @@ fn render_desc_version_detail(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<St
 // Move (`move.py:17-46`)
 // ---------------------------------------------------------------------------
 
-/// Django's `DATA_UPLOAD_MAX_MEMORY_SIZE` (5 MiB): past it the
-/// `RequestBodySizeLimitMiddleware` answers 413 before the view runs.
-const MAX_BODY: usize = 5_242_880;
-
 /// Move body shape for the shared negotiator: a single scalar,
 /// last-value-wins; uploads are dropped (the view reads `request.data`
 /// only, and no contract body is multipart).
@@ -1228,9 +1225,9 @@ async fn move_issue(
 /// JSON null, which the driver blanks to the required-400).
 async fn read_move_target(req: axum::extract::Request) -> Result<Value, Denial> {
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::RequestTooLarge)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     match shared_body::negotiate_body(&parts.headers, &bytes, &MOVE_BODY_SPEC) {
         Ok(shared_body::NegotiatedBody::Empty) => Ok(Value::Null),
         Ok(shared_body::NegotiatedBody::JsonText { text, .. }) => {
@@ -2657,9 +2654,9 @@ mod tests {
         .status_and_body();
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body, r#"{"error":"Target project has no default pod"}"#);
-        let (status, body) = Denial::RequestTooLarge.status_and_body();
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(body.contains("REQUEST_BODY_TOO_LARGE"));
+        let (status, body) = Denial::TruncatedBody.status_and_body();
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body, crate::edge::BAD_GATEWAY_BODY);
         let (status, body) = Denial::UnsupportedMediaType("m".to_owned()).status_and_body();
         assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(body, r#"{"detail":"m"}"#);

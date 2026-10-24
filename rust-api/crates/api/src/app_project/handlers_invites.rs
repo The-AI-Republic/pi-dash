@@ -108,6 +108,7 @@ use crate::app_project::gates::{
     CLASS_DENIED_BODY, FORBIDDEN_BODY,
 };
 use crate::license::{resolve_actor, Actor};
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -605,10 +606,7 @@ async fn check_board_gate(
 async fn parse_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
-    // Same default limit as axum's `Json` (2 MiB).
-    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
-        .await
-        .map_err(|_| Denial::ServerError.into_response())?;
+    let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
         return Ok(Value::Object(Map::new()));
     }

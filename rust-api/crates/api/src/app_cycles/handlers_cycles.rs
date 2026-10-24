@@ -64,6 +64,7 @@ use serde_json::{Map, Value};
 use sqlx::Row;
 
 use crate::app_cycles::gates::{decide_gate, gate_for, GateOutcome};
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -143,10 +144,7 @@ pub(crate) async fn detail_body(
 ) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
-    // Same default limit as axum's `Json` (2 MiB).
-    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
-        .await
-        .map_err(|_| Denial::ServerError.into_response())?;
+    let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
         return Ok(Value::Object(Map::new()));
     }

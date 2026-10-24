@@ -178,6 +178,7 @@ use pidash_services::v1_work_items::shape_issue::{
     BlockerSummary, IssueRow as ApiIssueRow, RepresentationInput, SummaryItem,
 };
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::orchestration::{
     drain_creation_outboxes, handoff_store, split_outboxes, CreationDrainError, CreationOutboxes,
     SpanCreationDeps,
@@ -938,11 +939,6 @@ pub fn owned_move(
     owned(router, &["POST"])
 }
 
-/// Django's `DATA_UPLOAD_MAX_MEMORY_SIZE` (5 MiB,
-/// `settings/common.py:594`): past it the size middleware answers 413
-/// before the view runs.
-const MAX_BODY: usize = 5_242_880;
-
 /// Move body shape for the shared negotiator: a single scalar,
 /// last-value-wins; uploads are dropped (the view reads `request.data`
 /// only, and no contract body is multipart).
@@ -967,11 +963,12 @@ pub async fn post_move(
     }
     let pk = pk.parse::<Uuid>().expect("checked segment");
     let (parts, body) = req.into_parts();
-    // The size middleware reads before the view, so 413 precedes auth —
-    // exactly as `RequestBodySizeLimitMiddleware` 413s before DRF runs.
-    let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
+    // The serve-wide `BodyLimitLayer` already 413'd over-limit bodies
+    // before the view ran; the read below cannot re-cap. A mid-stream
+    // transport failure fails closed with the truncated-body 502.
+    let bytes = match read_request_bytes(body).await {
         Ok(bytes) => bytes,
-        Err(_) => return Denial::RequestTooLarge.into_response(),
+        Err(response) => return response,
     };
     match move_inner(&state, &parts, &bytes, &headers, &slug, &project_id, &pk).await {
         Ok(response) => response,

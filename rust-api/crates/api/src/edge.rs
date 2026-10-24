@@ -471,6 +471,11 @@ fn is_hop_by_hop(name: &header::HeaderName) -> bool {
         || *name == header::HeaderName::from_static("keep-alive")
 }
 
+/// Exact body [`bad_gateway`] renders, shared so `Denial`-typed handlers
+/// map a truncated request-body read to the same 502 bytes (PIDASHCONV-1308).
+pub(crate) const BAD_GATEWAY_BODY: &str =
+    r#"{"error":{"code":"bad_gateway","message":"bad gateway: django upstream unreachable"}}"#;
+
 /// Fail-closed 502 in the shared error shape. Also used by the F-08
 /// middleware layers when a proxied body truncates mid-read.
 pub(crate) fn bad_gateway() -> Response {
@@ -489,6 +494,26 @@ pub(crate) fn bad_gateway() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bad_gateway_renders_the_shared_body() {
+        // `BAD_GATEWAY_BODY` is the const `Denial` arms reuse for the
+        // truncated-body 502; it must stay byte-identical to this render.
+        let response = bad_gateway();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), BAD_GATEWAY_BODY.as_bytes());
+    }
 
     #[test]
     fn table_covers_every_inventory_prefix() {

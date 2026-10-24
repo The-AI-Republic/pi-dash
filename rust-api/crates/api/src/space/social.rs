@@ -101,6 +101,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::app_pages::strip::ml_strip_tags;
@@ -217,6 +218,8 @@ enum HandlerError {
     BadJson(Value),
     /// 400 `{"detail": ...}` (malformed JSON bodies).
     BadDetail(String),
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500 `{"error":"Something went wrong please try again later"}` —
     /// the fallback envelope.
     ServerError,
@@ -252,6 +255,10 @@ impl HandlerError {
             HandlerError::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            HandlerError::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             HandlerError::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -884,16 +891,14 @@ fn query_last(query: &QueryMap, key: &str) -> Option<String> {
 // Request bodies (DRF JSON parsing)
 // ---------------------------------------------------------------------------
 
-/// Django's `DATA_UPLOAD_MAX_MEMORY_SIZE` default.
-const MAX_BODY: usize = 2_621_440;
-
-/// Read the request body the way DRF does for JSON posts: empty → `{}`;
-/// malformed → `ParseError` 400; non-object JSON → the attribute errors
-/// the view code hits (500 envelope).
+/// Read the request body the way DRF does for JSON posts: unbounded past
+/// the serve-wide `BodyLimitLayer`; empty → `{}`; malformed → `ParseError`
+/// 400; non-object JSON → the attribute errors the view code hits
+/// (500 envelope).
 async fn read_body(req: Request) -> Result<Value, HandlerError> {
-    let bytes = axum::body::to_bytes(req.into_body(), MAX_BODY)
+    let bytes = read_request_bytes(req.into_body())
         .await
-        .map_err(|_| HandlerError::ServerError)?;
+        .map_err(|_| HandlerError::TruncatedBody)?;
     parse_body(&bytes)
 }
 

@@ -57,6 +57,7 @@ use crate::app_issues::{
     multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
     FilteredSet, QueryMap,
 };
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
@@ -1284,9 +1285,9 @@ async fn cycle_issue_create(
     // non-object body has no `.get` (AttributeError → 500); objects fall
     // through to the truthiness check below.
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     let data = decode_request_body(&parts.headers, &bytes)?;
     let issues_value = match data.as_object() {
         Some(_) => data.get("issues").cloned().unwrap_or(Value::Null),
