@@ -38,10 +38,19 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     let logs_dir = paths.logs_dir();
     let logs = xml_escape(super::validate_path_for_unit(&logs_dir)?);
     let config = xml_escape(super::validate_path_for_unit(&paths.config_dir)?);
-    let data = xml_escape(super::validate_path_for_unit(&paths.data_dir)?);
+    // Only bake PIDASH_DATA_DIR into the plist for a genuine override.
+    // Exporting the *default* data dir made `Paths::resolve` inside the
+    // daemon treat the install as isolated and move the IPC socket under
+    // `<data_dir>/runtime/`, away from where an override-less CLI looks
+    // (PDASHOSS01-230).
+    let data = if paths.data_dir_is_default() {
+        None
+    } else {
+        Some(xml_escape(super::validate_path_for_unit(&paths.data_dir)?))
+    };
     // See `service::capture_install_time_path` for why we bake $PATH in.
     let path_env = super::capture_install_time_path().map(|p| xml_escape(&p));
-    let body = render_plist(&exe_str, &config, &data, &logs, path_env.as_deref());
+    let body = render_plist(&exe_str, &config, data.as_deref(), &logs, path_env.as_deref());
     tokio::fs::write(&plist_path, body).await?;
     println!("installed launchd agent at {}", plist_path.display());
     Ok(())
@@ -56,7 +65,21 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
 /// `EnvironmentVariables` so the daemon (and every subprocess it forks)
 /// inherits the operator's interactive PATH instead of launchd's stripped
 /// default. See `service::capture_install_time_path` for the full rationale.
-fn render_plist(exe: &str, config: &str, data: &str, logs: &str, path_env: Option<&str>) -> String {
+fn render_plist(
+    exe: &str,
+    config: &str,
+    data: Option<&str>,
+    logs: &str,
+    path_env: Option<&str>,
+) -> String {
+    // `data` is None for a default-location install: the daemon resolves
+    // the same directory on its own, and exporting it would flip
+    // `Paths::resolve` into isolated mode and move the IPC socket
+    // (PDASHOSS01-230).
+    let data_entry = match data {
+        Some(d) => format!("\n    <key>PIDASH_DATA_DIR</key><string>{d}</string>"),
+        None => String::new(),
+    };
     let path_entry = match path_env {
         Some(p) => format!("\n    <key>PATH</key><string>{p}</string>"),
         None => String::new(),
@@ -74,8 +97,7 @@ fn render_plist(exe: &str, config: &str, data: &str, logs: &str, path_env: Optio
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PIDASH_CONFIG_DIR</key><string>{config}</string>
-    <key>PIDASH_DATA_DIR</key><string>{data}</string>{path_entry}
+    <key>PIDASH_CONFIG_DIR</key><string>{config}</string>{data_entry}{path_entry}
   </dict>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
@@ -666,7 +688,7 @@ mod tests {
         let body = render_plist(
             "/usr/local/bin/pidash",
             "/Users/user/Library/Application Support/pidash",
-            "/Users/user/Library/Application Support/pidash",
+            Some("/Users/user/Library/Application Support/pidash"),
             "/Users/user/Library/Application Support/pidash/logs",
             None,
         );
@@ -678,7 +700,7 @@ mod tests {
 
     #[test]
     fn plist_body_includes_program_args_and_logs() {
-        let body = render_plist("/bin/pidash", "/cfg", "/data", "/logs", None);
+        let body = render_plist("/bin/pidash", "/cfg", Some("/data"), "/logs", None);
         assert!(body.contains("<string>/bin/pidash</string>"));
         assert!(body.contains("<string>__run</string>"));
         assert!(body.contains("<key>PIDASH_CONFIG_DIR</key><string>/cfg</string>"));
@@ -688,11 +710,26 @@ mod tests {
     }
 
     #[test]
+    fn plist_body_omits_data_dir_for_default_install() {
+        // Regression: exporting the *default* data dir flipped
+        // `Paths::resolve` in the daemon into isolated mode, moving the
+        // IPC socket to <data>/runtime/ where the override-less CLI
+        // never looks (PDASHOSS01-230).
+        let body = render_plist("/bin/pidash", "/cfg", None, "/logs", None);
+        assert!(
+            !body.contains("PIDASH_DATA_DIR"),
+            "plist body must not export PIDASH_DATA_DIR for a default-location install; got:\n{body}"
+        );
+        // The EnvironmentVariables dict still carries the config dir.
+        assert!(body.contains("<key>PIDASH_CONFIG_DIR</key><string>/cfg</string>"));
+    }
+
+    #[test]
     fn plist_body_omits_path_when_not_captured() {
         // None means we couldn't (or shouldn't) snapshot $PATH at install
         // time. The plist must not contain a PATH key in that case — an
         // empty PATH would be worse than launchd's default.
-        let body = render_plist("/bin/pidash", "/cfg", "/data", "/logs", None);
+        let body = render_plist("/bin/pidash", "/cfg", Some("/data"), "/logs", None);
         assert!(
             !body.contains("<key>PATH</key>"),
             "plist body must not declare PATH when path_env is None; got:\n{body}"
@@ -712,9 +749,7 @@ mod tests {
         assert!(is_not_loaded_error("Service not loaded"));
         // Real failures we MUST surface, not silently absorb:
         assert!(!is_not_loaded_error("Operation not permitted"));
-        assert!(!is_not_loaded_error(
-            "Bootstrap failed: 5: Input/output error"
-        ));
+        assert!(!is_not_loaded_error("Bootstrap failed: 5: Input/output error"));
         assert!(!is_not_loaded_error(""));
     }
 
@@ -744,9 +779,7 @@ mod tests {
         assert!(!is_already_loaded_error(
             "Load failed: 2: No such file or directory"
         ));
-        assert!(!is_already_loaded_error(
-            "Path had bad ownership/permissions"
-        ));
+        assert!(!is_already_loaded_error("Path had bad ownership/permissions"));
         assert!(!is_already_loaded_error(""));
     }
 
@@ -999,7 +1032,7 @@ mod tests {
         let body = render_plist(
             "/bin/pidash",
             "/cfg",
-            "/data",
+            Some("/data"),
             "/logs",
             Some("/Users/u/.local/bin:/opt/homebrew/bin:/usr/bin"),
         );
