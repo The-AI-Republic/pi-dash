@@ -5,7 +5,8 @@
 // The detail page's module menu (MOD-024/025): Edit opens the shared
 // update dialog prefilled from the detail record, Delete confirms and the
 // landed delete returns to the modules list, and entries other slices own
-// sit between them without a second menu.
+// sit between them without a second menu. Guests get no Edit or Delete;
+// with nothing read-only supplied they get no trigger at all.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -101,6 +102,7 @@ function renderActions(props: Partial<React.ComponentProps<typeof ModuleDetailAc
         workspaceSlug="acme"
         projectId={MODULES_PROJECT_ID}
         moduleId={MODULES_MODULE_ID}
+        canEdit
         {...props}
       />
     </QueryClientProvider>
@@ -162,5 +164,28 @@ describe("ModuleDetailActions", () => {
       expect(notify.notifyError).toHaveBeenCalledWith("You don't have permission to perform this action.", "Refused.")
     );
     expect(routerHarness.navigate).not.toHaveBeenCalled();
+  });
+
+  it("hides Edit and Delete from a guest who supplies read-only entries", async () => {
+    const onSelect = vi.fn();
+    renderActions({ canEdit: false, extraEntries: [{ label: "Copy link", onSelect }] });
+    await openMenu();
+    const labels = (await screen.findAllByRole("menuitem")).map((entry) => entry.textContent?.trim());
+    expect(labels).toEqual(["Copy link"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Copy link" }));
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("heading", { name: "Update module" })).not.toBeInTheDocument();
+  });
+
+  it("renders no trigger for a guest with nothing read-only to offer", () => {
+    renderActions({ canEdit: false });
+    expect(screen.queryByRole("button", { name: "Module actions" })).not.toBeInTheDocument();
+  });
+
+  it("still lets a guest open the menu but never writes", async () => {
+    renderActions({ canEdit: false, extraEntries: [{ label: "Open in new tab", onSelect: vi.fn() }] });
+    await openMenu();
+    expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
   });
 });
