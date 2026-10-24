@@ -75,8 +75,9 @@ export function Dialog({
           className={cn(
             // Tall bodies (scheduler installs) scroll inside the panel
             // instead of clipping past the viewport with body scroll
-            // locked (PSET-056).
-            "shadow-dialog fixed top-1/2 left-1/2 max-h-[calc(100dvh-2rem)] w-full max-w-md -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-(--radius-dialog) border border-(--border) bg-(--bg) p-(--space-12)",
+            // locked (PSET-056). Plain vh: calc/dvh arbitrary values do
+            // not generate a rule in this setup.
+            "shadow-dialog fixed top-1/2 left-1/2 max-h-[90vh] w-full max-w-md -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-(--radius-dialog) border border-(--border) bg-(--bg) p-(--space-12)",
             className
           )}
         >

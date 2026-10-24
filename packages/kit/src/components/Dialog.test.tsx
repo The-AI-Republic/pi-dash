@@ -106,7 +106,7 @@ describe("Dialog", () => {
       </Dialog>
     );
     const dialog = screen.getByRole("dialog", { name: "Confirm" });
-    expect(dialog).toHaveClass("max-h-[calc(100dvh-2rem)]");
+    expect(dialog).toHaveClass("max-h-[90vh]");
     expect(dialog).toHaveClass("overflow-y-auto");
   });
 
