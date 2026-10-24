@@ -129,6 +129,23 @@ describe.skipIf(!contractEnabled)("project detail contract", () => {
     expect((failure as ApiError).message).toBe("Project does not exist");
   });
 
+  it("resolves an archived project from the rich list", async () => {
+    // PSET-010: retrieve 404s archived projects while the list keeps
+    // them, so the detail read falls back to the list row.
+    const input = lifecycleProject();
+    await cleanupLifecycleProject(client, input.identifier);
+    const created = await createProject(client, CONTRACT_WORKSPACE, input);
+    try {
+      await archiveProject(client, CONTRACT_WORKSPACE, created.id);
+      const row = await getProject(client, CONTRACT_WORKSPACE, created.id);
+      expect(row.id).toBe(created.id);
+      expect(row.archived_at).not.toBeNull();
+    } finally {
+      await unarchiveProject(client, CONTRACT_WORKSPACE, created.id).catch(() => 0);
+      await deleteProject(client, CONTRACT_WORKSPACE, created.id).catch(() => 0);
+    }
+  });
+
   it("reports non-member projects as conflict, secret ones as forbidden", async () => {
     // The probe is a workspace member but joins no new project: a public
     // project answers 409, a secret one 403. Fresh identifiers per run for

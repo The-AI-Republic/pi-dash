@@ -10,10 +10,10 @@
 import * as z from "zod/mini";
 
 import type { ApiClient } from "../client.js";
-import { ApiError } from "../errors.js";
+import { ApiError, isApiError } from "../errors.js";
 import { SignedUserAsset, type ByteUpload, type ByteUploadResponse } from "./assets.js";
 import type { ProjectUpdateInput } from "./project-management.js";
-import { ProjectDetails } from "./projects.js";
+import { findProjectDetailsRow, ProjectDetails } from "./projects.js";
 
 /**
  * The project row the General tab reads: every shared field plus the
@@ -28,15 +28,27 @@ export const ProjectSettingsDetail = z.extend(ProjectDetails, {
 });
 export type ProjectSettingsDetail = z.infer<typeof ProjectSettingsDetail>;
 
-/** GET /api/workspaces/<slug>/projects/<id>/ — the General tab's read. */
+/**
+ * GET /api/workspaces/<slug>/projects/<id>/ — the General tab's read.
+ * Archived projects 404 on retrieve but stay on the rich list, so a
+ * 404 falls back to the list row and only unknown ids stay not-found
+ * (PSET-010), mirroring getProject.
+ */
 export async function getProjectSettingsDetail(
   client: ApiClient,
   slug: string,
   projectId: string
 ): Promise<ProjectSettingsDetail> {
   const path = `/api/workspaces/${slug}/projects/${projectId}/`;
-  const body = await client.getJson<unknown>(path);
-  return client.parse(ProjectSettingsDetail, body, `GET ${path}`);
+  try {
+    const body = await client.getJson<unknown>(path);
+    return client.parse(ProjectSettingsDetail, body, `GET ${path}`);
+  } catch (error) {
+    if (!isApiError(error) || error.status !== 404) throw error;
+    const match = await findProjectDetailsRow(client, slug, projectId);
+    if (match === undefined) throw error;
+    return client.parse(ProjectSettingsDetail, match, `GET ${path} (archived fallback)`);
+  }
 }
 
 /**

@@ -12,6 +12,13 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const routerMocks = vi.hoisted(() => ({ navigate: vi.fn() }));
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useNavigate: () => routerMocks.navigate,
+}));
+
 vi.mock("../../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<Record<string, unknown>>();
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
@@ -88,17 +95,15 @@ describe("GeneralDangerZone", () => {
     expect(onNavigate).toHaveBeenCalledWith("/acme/projects");
   });
 
-  it("falls back to a full-page navigation when the host injects none", async () => {
-    const assign = vi.fn();
-    Object.defineProperty(globalThis.window, "location", {
-      value: { assign, origin: "https://app.test" },
-      writable: true,
-      configurable: true,
-    });
+  it("navigates client-side by default so the success notice survives", async () => {
+    // PSET-010: a full reload would wipe the archive notice before the
+    // operator can read it, so the default return is a router move.
     setupDefaultNavigation();
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
-    await waitFor(() => expect(assign).toHaveBeenCalledWith("/acme/projects"));
+    await waitFor(() =>
+      expect(routerMocks.navigate).toHaveBeenCalledWith({ to: "/$ws/projects", params: { ws: "acme" } })
+    );
   });
 
   it("deletes only after both exact confirmations and then returns to the list", async () => {

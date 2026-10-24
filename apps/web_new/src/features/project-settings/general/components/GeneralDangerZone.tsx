@@ -8,6 +8,7 @@
 // confirmation. Restore stays card-wired, as the oracle pins.
 
 import { Button } from "@pidash/kit";
+import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { DeleteProjectDialog, ProjectArchiveDialog } from "../../../projects/index.js";
@@ -28,12 +29,15 @@ export function GeneralDangerZone({
 }: GeneralDangerZoneProps): React.ReactElement {
   const [archiveOpen, setArchiveOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const routerNavigate = useNavigate();
   const navigate = React.useCallback(
     (href: string) => {
+      // Client-side by default: a full reload would wipe the success
+      // notice before the operator can read it (PSET-010).
       if (onNavigate !== undefined) onNavigate(href);
-      else globalThis.location.assign(href);
+      else routerNavigate({ to: "/$ws/projects", params: { ws: workspaceSlug } });
     },
-    [onNavigate]
+    [onNavigate, routerNavigate, workspaceSlug]
   );
 
   return (
