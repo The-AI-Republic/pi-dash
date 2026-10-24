@@ -4423,6 +4423,18 @@ pub async fn collection_create(
         Err(response) => return response,
     };
     let now = Utc::now();
+    // `assigned_pod`: explicit input wins, else the project default pod
+    // (`Issue.save`, `:277-286`) — resolved before the atomic block, like
+    // Django. It must not run on the pool after `begin`: the transaction
+    // holds one pool connection while the lock serializes creators, so a
+    // nested pool checkout would exhaust the pool under concurrent load.
+    let assigned_pod_id = match validated.assigned_pod_id {
+        Some(pod) => Some(pod),
+        None => match default_project_pod(pool, gate.project_id).await {
+            Ok(pod) => pod,
+            Err(response) => return response,
+        },
+    };
     // `Issue.save` (`db/models/issue.py:313-343`): the transaction-scoped
     // advisory lock is taken first, then MAX(sequence) and MAX(sort_order)
     // are read and the issue plus its sequence row are inserted — all on
@@ -4485,17 +4497,8 @@ pub async fn collection_create(
         }
         None => sort_order,
     };
-    // `assigned_pod`: explicit input wins, else the project default pod
-    // (`Issue.save`, `:277-286`) — a stable read outside the atomic block.
-    let assigned_pod_id = match validated.assigned_pod_id {
-        Some(pod) => Some(pod),
-        None => match default_project_pod(pool, gate.project_id).await {
-            Ok(pod) => pod,
-            Err(response) => return response,
-        },
-    };
     let issue_id = Uuid::new_v4();
-    // `IssueCreateSerializer.create` (`serializers/issue.py:387-462`) +
+    // `IssueCreateSerializer.create` (`serializers/issue.py:290-371`) +
     // `Issue.save` + `BaseModel.save` (crum `created_by`): the full row.
     if let Err(response) = insert_issue(
         &mut tx,
@@ -4530,7 +4533,7 @@ pub async fn collection_create(
     }
     // The M2M writes, the bridge insert and the enqueues below run after
     // the commit: Django's view is not atomic beyond `Issue.save`, so they
-    // stay outside this transaction (`serializers/issue.py:394-462`,
+    // stay outside this transaction (`serializers/issue.py:311-369`,
     // `views/intake/base.py:265-292`).
     if tx.commit().await.is_err() {
         return Denial::ServerError.into_response();
@@ -5737,7 +5740,7 @@ async fn filter_project_labels(
 // ---------------------------------------------------------------------------
 
 /// The `issues` row of `IssueCreateSerializer.create`
-/// (`serializers/issue.py:394`) with `Issue.save`
+/// (`serializers/issue.py:305`) with `Issue.save`
 /// (`db/models/issue.py:267-351`) and `BaseModel.save` (crum
 /// `created_by`, `db/models/base.py:24-46`), written on the caller's
 /// sequence transaction. Sort-order and pod resolution stay with the
@@ -5805,7 +5808,7 @@ async fn insert_issue(
     Ok(())
 }
 
-/// Assignees + labels (`create`, `:402-462`): validated ids, else the
+/// Assignees + labels (`create`, `:311-369`): validated ids, else the
 /// project default when it is an active member (`role__gte=15`).
 /// Integrity failures are swallowed like Django's `except IntegrityError:
 /// pass`. Runs after the caller's sequence transaction commits — Django
