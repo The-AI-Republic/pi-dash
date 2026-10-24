@@ -35,7 +35,7 @@ const PREFS = {
   properties: {},
 } as const;
 
-function renderTimeline(completedCycle?: boolean): void {
+function renderTimeline(completedCycle?: boolean, completedModule?: boolean): void {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
@@ -48,6 +48,7 @@ function renderTimeline(completedCycle?: boolean): void {
           totalCount={0}
           prefs={PREFS as never}
           {...(completedCycle === undefined ? {} : { completedCycle })}
+          {...(completedModule === undefined ? {} : { completedModule })}
         />
       </React.Suspense>
     </QueryClientProvider>
@@ -69,5 +70,17 @@ describe("GanttTimeline", () => {
     renderTimeline();
     expect(await screen.findByTestId("layout-stub")).toBeInTheDocument();
     expect(forwarded.props?.["completedCycle"]).toBe(false);
+  });
+
+  it("forwards the completed-module status into the layout (MOD-030)", async () => {
+    renderTimeline(undefined, true);
+    expect(await screen.findByTestId("layout-stub")).toBeInTheDocument();
+    expect(forwarded.props?.["completedModule"]).toBe(true);
+  });
+
+  it("defaults a project timeline to an unfinished module", async () => {
+    renderTimeline();
+    expect(await screen.findByTestId("layout-stub")).toBeInTheDocument();
+    expect(forwarded.props?.["completedModule"]).toBe(false);
   });
 });

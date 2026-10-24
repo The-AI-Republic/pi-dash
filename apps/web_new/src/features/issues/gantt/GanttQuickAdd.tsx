@@ -18,12 +18,15 @@ export interface GanttQuickAddProps {
   enabled: boolean;
   /** Completed cycles suppress the entry (ISS-055). */
   completedCycle?: boolean;
+  /** Completed modules suppress the entry (MOD-030). */
+  completedModule?: boolean;
 }
 
 export function GanttQuickAdd({
   onCreate,
   enabled,
   completedCycle = false,
+  completedModule = false,
 }: GanttQuickAddProps): React.ReactElement | null {
   const [open, setOpen] = React.useState(false);
   const [title, setTitle] = React.useState("");
@@ -34,7 +37,7 @@ export function GanttQuickAdd({
     if (open) field.current?.focus();
   }, [open]);
 
-  if (!enabled || completedCycle) return null;
+  if (!enabled || completedCycle || completedModule) return null;
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();

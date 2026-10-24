@@ -23,6 +23,11 @@ describe("GanttQuickAdd", () => {
     expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
   });
 
+  it("is absent in a completed module", () => {
+    render(<GanttQuickAdd enabled completedModule onCreate={vi.fn()} />);
+    expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+  });
+
   it("opens the field, submits the trimmed title and closes", async () => {
     const onCreate = vi.fn(async () => undefined);
     render(<GanttQuickAdd enabled onCreate={onCreate} />);

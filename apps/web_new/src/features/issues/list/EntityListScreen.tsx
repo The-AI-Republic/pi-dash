@@ -5,7 +5,10 @@
 // ISS-007–014, ISS-036). The cycles and modules areas own those pages;
 // the issues slice only mounts the same layout root and renderers the
 // project route uses, so grouping, creation and the inline strip behave
-// the same in every issues-bearing context.
+// the same in every issues-bearing context. The module detail (MOD-030,
+// MOD-032) offers all five layouts through this host with the module
+// analytics entry; module grouping stays hidden on a module page, and
+// the filter toggle stays desktop-only there.
 
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import * as React from "react";
@@ -15,9 +18,12 @@ import { projectsQueryOptions } from "../../projects/index.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { CalendarEntry } from "../calendar/CalendarEntry.js";
 import { resolvedKanbanLayout } from "../kanban/lazy.js";
+import { ResolvedAnalyticsEntry } from "../components/lazyLeaves.js";
 import { DisplayControl } from "../display/DisplayControl.js";
-import type { LayoutKind } from "../layouts/kinds.js";
+import { useWeekStart } from "../dropdowns/weekStart.js";
+import { LAYOUT_ORDER, resolveActiveLayout, type LayoutKind } from "../layouts/kinds.js";
 import { IssuesLayoutRoot } from "../layouts/IssuesLayoutRoot.js";
+import { ListSkeleton } from "../loaders/ListSkeleton.js";
 import { prefsQueryOptions } from "../prefs/prefsQuery.js";
 import { selectDisplayPrefs } from "../prefs/displayPrefs.js";
 import { listPageQueryOptions } from "./pages.js";
@@ -37,6 +43,19 @@ import { isConditionComplete, parseRichExpression } from "../filters/rich/expres
 import type { RichFilterBuilderParts } from "../filters/rich/RichFilterBuilder.js";
 import { LazyIssueFilters } from "../filters/rich/lazy.js";
 
+// The sheet and the timeline ride their own chunks; the stored layout
+// decides when to request them (Quality gates).
+const LazySpreadsheetLayout = React.lazy(() =>
+  import("../spreadsheet/SpreadsheetLayout.js").then((module) => ({
+    default: module.SpreadsheetLayout,
+  }))
+);
+const LazyGanttTimeline = React.lazy(() =>
+  import("../gantt/GanttTimeline.js").then((module) => ({
+    default: module.GanttTimeline,
+  }))
+);
+
 export interface EntityListScreenProps {
   workspaceSlug: string;
   projectId: string;
@@ -52,6 +71,8 @@ export interface EntityListScreenProps {
   peekKey: string | null;
   onPeekChange: (key: string | null) => void;
   compact: boolean;
+  /** Trailing desktop header controls the host appends after Display. */
+  extraHeaderActions?: React.ReactNode;
 }
 
 /** Same layout root and list renderer as the project issue screen. */
@@ -67,6 +88,7 @@ export function EntityListScreen({
   peekKey,
   onPeekChange,
   compact,
+  extraHeaderActions,
 }: EntityListScreenProps): React.ReactElement {
   const client = getAppClient();
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(client, workspaceSlug));
@@ -127,6 +149,7 @@ export function EntityListScreen({
   // The cycle/module routes await the chunk in `beforeLoad`; render the
   // resolved component directly so the layout mounts once (NEWFRONT-619).
   const ListLayout = resolvedListLayout();
+  const weekStart = useWeekStart();
   const canEdit =
     canEditInProject({
       memberRole: project.member_role,
@@ -134,17 +157,33 @@ export function EntityListScreen({
     }) &&
     !resolvedCompletedCycle &&
     !resolvedCompletedModule;
-  const offered: readonly LayoutKind[] = ["list", "kanban", "calendar"];
+  const offered: readonly LayoutKind[] = LAYOUT_ORDER;
+  // Grouping a module's own items by module is meaningless, so the
+  // module entry stays hidden on a module page whatever the flag says.
+  const hideModuleGrouping = entity.scope === "module" || !project.module_view;
   const display = (
     <DisplayControl
       workspaceSlug={workspaceSlug}
       entity={entity}
       offered={offered}
       hideCycle={!project.cycle_view}
-      hideModule={!project.module_view}
+      hideModule={hideModuleGrouping}
     />
   );
+  const flatResults = Array.isArray(firstPage.results) ? firstPage.results : [];
   const resultCount = Array.isArray(firstPage.results) ? firstPage.results.length : firstPage.count;
+  const moduleScope = entity.scope === "module" ? { id: entity.moduleId, name: resolvedTitle } : undefined;
+  const analytics =
+    moduleScope === undefined ? undefined : (
+      <ResolvedAnalyticsEntry
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        projectName={project.name}
+        rows={flatResults}
+        totalCount={firstPage.total_count}
+        module={moduleScope}
+      />
+    );
   // ISS-069/070: the cycle keys the card on its stored expression as soon
   // as it loads; the module keeps the first-run card until a condition was
   // added through the row (§8). A completed cycle reads as a record before
@@ -172,6 +211,16 @@ export function EntityListScreen({
           addedThisVisit: filters.addedThisVisit,
           visibleCount: firstPage.total_count,
         }));
+    // The module page keeps its filter toggle on the desktop header;
+    // the small-screen bar offers layouts, display and analytics only.
+    const filterControl =
+      entity.scope === "module" ? (
+        <span className="hidden md:contents" data-testid="module-filter-guard">
+          {filters?.control}
+        </span>
+      ) : (
+        filters?.control
+      );
     return (
       <IssuesLayoutRoot
         workspaceSlug={workspaceSlug}
@@ -181,7 +230,61 @@ export function EntityListScreen({
         resultCount={resultCount}
         offered={offered}
         renderLayout={(layout, prefs) => {
-          if (layout === "calendar") {
+          const active = resolveActiveLayout(layout, offered);
+          if (active === "gantt_chart") {
+            return (
+              <React.Suspense fallback={<ListSkeleton />}>
+                <LazyGanttTimeline
+                  workspaceSlug={workspaceSlug}
+                  projectId={projectId}
+                  projectIdentifier={project.identifier}
+                  issues={flatResults}
+                  totalCount={firstPage.total_count}
+                  prefs={prefs}
+                  completedModule={resolvedCompletedModule}
+                />
+              </React.Suspense>
+            );
+          }
+          if (active === "spreadsheet") {
+            return (
+              <React.Suspense fallback={<ListSkeleton />}>
+                <LazySpreadsheetLayout
+                  workspaceSlug={workspaceSlug}
+                  projectId={projectId}
+                  projectIdentifier={project.identifier}
+                  entity={entity}
+                  prefs={prefs}
+                  canEdit={canEdit}
+                  hideCycle={!project.cycle_view}
+                  hideModule={hideModuleGrouping}
+                  hideEstimate={project.estimate === null}
+                  richExpression={richFilters}
+                  weekStart={weekStart}
+                />
+              </React.Suspense>
+            );
+          }
+          if (active === "kanban") {
+            const ResolvedKanbanLayout = resolvedKanbanLayout();
+            return (
+              <ResolvedKanbanLayout
+                workspaceSlug={workspaceSlug}
+                entity={entity}
+                projectId={projectId}
+                projectIdentifier={project.identifier}
+                prefs={prefs}
+                canEdit={canEdit}
+                completedCycle={resolvedCompletedCycle}
+                richFilters={richFilters}
+                cycleId={cycleId}
+                moduleId={moduleId}
+                peekKey={peekKey}
+                onPeekChange={onPeekChange}
+              />
+            );
+          }
+          if (active === "calendar") {
             return (
               <CalendarEntry
                 workspaceSlug={workspaceSlug}
@@ -194,25 +297,6 @@ export function EntityListScreen({
                   ...(entity.scope === "cycle" ? { cycleId: entity.cycleId } : {}),
                   ...(entity.scope === "module" ? { moduleId: entity.moduleId } : {}),
                 }}
-              />
-            );
-          }
-          if (layout === "kanban") {
-            const ResolvedKanbanLayout = resolvedKanbanLayout();
-            return (
-              <ResolvedKanbanLayout
-                workspaceSlug={workspaceSlug}
-                entity={entity}
-                projectId={projectId}
-                projectIdentifier={project.identifier}
-                prefs={prefs}
-                canEdit={canEdit}
-                richFilters={richFilters}
-                cycleId={cycleId}
-                moduleId={moduleId}
-                completedCycle={resolvedCompletedCycle}
-                peekKey={peekKey}
-                onPeekChange={onPeekChange}
               />
             );
           }
@@ -238,9 +322,15 @@ export function EntityListScreen({
         }}
         emptyState={emptyCard(filteredNow, filters)}
         noMatchState={emptyCard(filteredNow, filters)}
-        headerActions={display}
+        headerActions={
+          <>
+            {display}
+            {extraHeaderActions}
+          </>
+        }
         displayControl={display}
-        filterControl={filters?.control}
+        filterControl={filterControl}
+        analyticsControl={analytics}
         filterRow={
           <>
             {completedNote ? (

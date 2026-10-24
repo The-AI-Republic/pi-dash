@@ -151,6 +151,21 @@ describe("AnalyticsEntry", () => {
     expect(await screen.findByTestId("cycle-analytics-entry")).toBeInTheDocument();
     expect(screen.getByTestId("cycle-analytics-entry-narrow")).toBeInTheDocument();
   });
+
+  it("names the module scope in the dialog for members", async () => {
+    const user = userEvent.setup();
+    render(harness(ROLE_MEMBER, { module: { id: "module-1", name: "Alpha" }, totalCount: 2 }));
+    expect(screen.queryByTestId("issues-analytics-entry")).not.toBeInTheDocument();
+    await user.click(await screen.findByTestId("module-analytics-entry"));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Analytics for Website in Alpha");
+  });
+
+  it("keeps the desktop trigger member+ under a module scope", async () => {
+    const { container } = render(harness(ROLE_GUEST, { module: { id: "module-1", name: "Alpha" } }, ROLE_GUEST));
+    await waitFor(() => expect(screen.queryByTestId("module-analytics-entry")).not.toBeInTheDocument());
+    expect(container).toBeEmptyDOMElement();
+  });
 });
 
 describe("groupCounts", () => {

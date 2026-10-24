@@ -61,6 +61,8 @@ export interface GanttLayoutProps {
   weekStart: number;
   /** True for a completed cycle: the quick-add is hidden (ISS-055). */
   completedCycle?: boolean;
+  /** True for a completed module: the quick-add is hidden (MOD-030). */
+  completedModule?: boolean;
 }
 
 /** Map ordered rows to their state color, skipping uncolored states. */
@@ -100,6 +102,7 @@ export function GanttLayout({
   prefs,
   weekStart,
   completedCycle = false,
+  completedModule = false,
 }: GanttLayoutProps): React.ReactElement {
   const rows = React.useMemo(() => orderedRows(issues, prefs, projectIdentifier), [issues, prefs, projectIdentifier]);
   const states = useGanttStates(workspaceSlug, projectId);
@@ -189,6 +192,7 @@ export function GanttLayout({
     <GanttQuickAdd
       enabled={canEdit}
       completedCycle={completedCycle}
+      completedModule={completedModule}
       onCreate={(title) =>
         create.mutateAsync({
           projectId,

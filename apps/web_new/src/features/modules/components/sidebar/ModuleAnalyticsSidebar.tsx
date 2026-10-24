@@ -11,9 +11,10 @@
 // PATCH through the shared mutation hook; the `progress` slot lets slice L
 // insert the progress section below these fields.
 
-import { Button, Skeleton } from "@pidash/kit";
+import { Button, IconButton, Skeleton } from "@pidash/kit";
 import { useQuery } from "@tanstack/react-query";
 import type { ApiClient, ModuleStatus } from "@pidash/api-client";
+import { X } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../../core/api/client.js";
@@ -73,6 +74,12 @@ export interface ModuleAnalyticsSidebarProps {
   canEdit?: boolean;
   /** Slice L's progress section, mounted below the count rows. */
   progress?: React.ReactNode;
+  /**
+   * Detail-page close control (NEWFRONT-802): the button renders only
+   * when this is set, so the peek keeps its shell close. It writes
+   * through the same persisted collapse flag as the header toggle.
+   */
+  onClose?: (() => void) | undefined;
   /** Test seam; the app client by default. */
   client?: ApiClient;
 }
@@ -94,6 +101,7 @@ export function ModuleAnalyticsSidebar({
   archived = false,
   canEdit,
   progress,
+  onClose,
   client = getAppClient(),
 }: ModuleAnalyticsSidebarProps): React.ReactElement {
   const roles = useProjectRoles(workspaceSlug);
@@ -127,6 +135,7 @@ export function ModuleAnalyticsSidebar({
       editor={editor}
       showPoints={showsModulePoints(estimates.data)}
       progress={progress}
+      onClose={onClose}
       client={client}
     />
   );
@@ -141,6 +150,7 @@ interface ModuleAnalyticsSidebarContentProps {
   editor: boolean;
   showPoints: boolean;
   progress: React.ReactNode;
+  onClose?: (() => void) | undefined;
   client: ApiClient;
 }
 
@@ -153,6 +163,7 @@ export function ModuleAnalyticsSidebarContent({
   editor,
   showPoints,
   progress,
+  onClose,
   client,
 }: ModuleAnalyticsSidebarContentProps): React.ReactElement {
   const weekStart = useWeekStart();
@@ -163,6 +174,19 @@ export function ModuleAnalyticsSidebarContent({
 
   return (
     <div className="flex flex-col gap-(--space-4)" data-testid="modules-analytics-sidebar">
+      {onClose === undefined ? null : (
+        <div className="flex items-center justify-end">
+          <IconButton
+            label="Close sidebar"
+            variant="ghost"
+            size="small"
+            data-testid="modules-sidebar-close"
+            onClick={onClose}
+          >
+            <X size={14} strokeWidth={2} aria-hidden="true" />
+          </IconButton>
+        </div>
+      )}
       <div className="flex flex-col gap-(--space-2)">
         <ModuleStatusPicker value={status} disabled={!editable} onChange={(next) => write.mutate({ status: next })} />
         <h4 className="text-h3 min-w-0 font-semibold break-words text-(--text)">

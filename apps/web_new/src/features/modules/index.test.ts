@@ -46,9 +46,27 @@ import {
   parseModuleDay,
   useModuleTimelineMutations,
   warnOnTimelineReorderAttempt,
+  isModuleGoneAway,
+  moduleBadgeTooltip,
+  moduleDetailTitle,
+  MODULE_DETAIL_SIDEBAR_STORAGE_KEY,
+  ModuleDetailBadge,
+  ModuleDetailCrumbs,
+  ModuleDetailGate,
+  ModuleDetailScreen,
+  ModuleGoneAway,
+  MODULE_SIDEBAR_COLLAPSE_LABEL,
+  MODULE_SIDEBAR_EXPAND_LABEL,
+  ModuleSidebarToggle,
+  parseSidebarCollapsed,
+  projectIssuesHref,
+  readSidebarCollapsed,
   resolveModulesListBody,
   sortModulesByName,
+  switchModuleTarget,
+  useDetailSidebarCollapsed,
   userZoneDiffers,
+  writeSidebarCollapsed,
 } from "./index.js";
 
 describe("modules barrel", () => {
@@ -110,5 +128,26 @@ describe("modules barrel", () => {
   it("re-exports the tolerant project facts read the gate uses", () => {
     expect(moduleProjectFactsQueryOptions).toBeDefined();
     expect(moduleViewEnabled).toBeDefined();
+  });
+
+  it("re-exports the detail frame and its sidebar collapse store", () => {
+    expect(ModuleDetailScreen).toBeDefined();
+    expect(ModuleDetailCrumbs).toBeDefined();
+    expect(ModuleDetailGate).toBeDefined();
+    expect(ModuleGoneAway).toBeDefined();
+    expect(ModuleDetailBadge).toBeDefined();
+    expect(ModuleSidebarToggle).toBeDefined();
+    expect(MODULE_SIDEBAR_COLLAPSE_LABEL).toBe("Collapse sidebar");
+    expect(MODULE_SIDEBAR_EXPAND_LABEL).toBe("Expand sidebar");
+    expect(moduleDetailTitle).toBeDefined();
+    expect(projectIssuesHref).toBeDefined();
+    expect(switchModuleTarget).toBeDefined();
+    expect(isModuleGoneAway).toBeDefined();
+    expect(moduleBadgeTooltip).toBeDefined();
+    expect(MODULE_DETAIL_SIDEBAR_STORAGE_KEY).toBe("module_detail_sidebar_collapsed");
+    expect(parseSidebarCollapsed).toBeDefined();
+    expect(readSidebarCollapsed).toBeDefined();
+    expect(writeSidebarCollapsed).toBeDefined();
+    expect(useDetailSidebarCollapsed).toBeDefined();
   });
 });

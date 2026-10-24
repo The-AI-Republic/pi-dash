@@ -32,6 +32,11 @@ export interface GanttTimelineProps {
    * and the cycle route passes the cycle's status when it lands.
    */
   completedCycle?: boolean;
+  /**
+   * True when the timeline belongs to a completed module; the quick-add
+   * stays hidden like a completed cycle's (MOD-030, NEWFRONT-802).
+   */
+  completedModule?: boolean;
 }
 
 /** The timeline reads the profile's week start; the layout root owns prefs. */
@@ -43,6 +48,7 @@ export function GanttTimeline({
   totalCount,
   prefs,
   completedCycle = false,
+  completedModule = false,
 }: GanttTimelineProps): React.ReactElement {
   const weekStart = useWeekStart();
   return (
@@ -56,6 +62,7 @@ export function GanttTimeline({
         prefs={prefs}
         weekStart={weekStart}
         completedCycle={completedCycle}
+        completedModule={completedModule}
       />
     </React.Suspense>
   );

@@ -9,7 +9,8 @@
 // lands this mount names the project and the server's total, plus the
 // per-group counts once the full list is loaded. The cycle detail
 // (CYC-033, NEWFRONT-712) mounts it with a cycle scope and a narrow-only
-// trigger for every role; the desktop trigger stays member+.
+// trigger for every role; the module detail (MOD-032, NEWFRONT-802)
+// mounts it with a module scope. The desktop trigger stays member+.
 
 import { Button, Dialog } from "@pidash/kit";
 import { ChartColumn } from "lucide-react";
@@ -35,6 +36,11 @@ export interface AnalyticsEntryProps {
    * `Analytics for {project} in {cycle}`. NEWFRONT-738 fills the body.
    */
   cycle?: { id: string; name: string } | undefined;
+  /**
+   * Module scope (NEWFRONT-802): the dialog reads
+   * `Analytics for {project} in {module}`. NEWFRONT-738 fills the body.
+   */
+  module?: { id: string; name: string } | undefined;
   /**
    * True also renders a narrow-only trigger for every role (the cycle
    * detail bar, CYC-033). The desktop trigger stays member+.
@@ -69,6 +75,7 @@ export function AnalyticsEntry({
   rows = [],
   totalCount = 0,
   cycle,
+  module,
   narrowGuestAccess = false,
 }: AnalyticsEntryProps): React.ReactElement | null {
   const permissions = usePermissions(workspaceSlug);
@@ -90,18 +97,20 @@ export function AnalyticsEntry({
   // list; the server total is authoritative either way.
   const groups = rows.length === totalCount ? groupCounts(rows, states.data) : [];
   const total = totalCount > 0 ? totalCount : rows.length;
-  const description =
-    cycle === undefined ? `Work items in ${projectName}` : `Analytics for ${projectName} in ${cycle.name}`;
+  let entryTestId = "issues-analytics-entry";
+  let description = `Work items in ${projectName}`;
+  if (cycle !== undefined) {
+    entryTestId = "cycle-analytics-entry";
+    description = `Analytics for ${projectName} in ${cycle.name}`;
+  } else if (module !== undefined) {
+    entryTestId = "module-analytics-entry";
+    description = `Analytics for ${projectName} in ${module.name}`;
+  }
 
   return (
     <>
       {allowed ? (
-        <Button
-          variant="ghost"
-          size="small"
-          onClick={() => setOpen(true)}
-          data-testid={cycle === undefined ? "issues-analytics-entry" : "cycle-analytics-entry"}
-        >
+        <Button variant="ghost" size="small" onClick={() => setOpen(true)} data-testid={entryTestId}>
           <ChartColumn size={14} strokeWidth={2} aria-hidden="true" />
           <span>Analytics</span>
         </Button>
