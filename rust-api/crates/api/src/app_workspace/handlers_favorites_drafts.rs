@@ -3166,8 +3166,8 @@ async fn favorite_list(
 
 /// Dispatcher order (`issue_filters.py:437-465`): presence-based, each filter
 /// inserts its predicates; shared keys keep FIRST position with the LATER
-/// value (`updated_at` overwrites `created_at`'s `created_at__date__*`;
-/// `inbox_status` overwrites `intake_status`'s `issue_intake__status__in`).
+/// value (`inbox_status` overwrites `intake_status`'s
+/// `issue_intake__status__in`).
 /// `.filter(**filters)` then builds predicates in final-dict order and the
 /// FIRST failure wins: `FieldError` → generic 500, `ValidationError` → 400
 /// `{"error": "Please provide valid detail"}`.
