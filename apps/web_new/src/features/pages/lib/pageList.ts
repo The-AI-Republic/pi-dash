@@ -187,8 +187,10 @@ function addMonths(day: number, months: number): number {
 
 /**
  * Evaluate a relative creation-date condition at a supplied instant.
- * "Before" windows include the selected day (a page created today passes
- * "last 7 days"); "from now" windows start at the selected future day.
+ * "Last N days" windows include the selected day (a page created today
+ * passes "last 7 days"); "N ago" conditions keep every calendar day up to
+ * and including the N-day boundary, and "from now" windows start at the
+ * selected future day.
  */
 export function matchesCreationPreset(createdAt: string, condition: PageDateCondition, now: Date): boolean {
   const created = Date.parse(createdAt);
@@ -205,13 +207,11 @@ export function matchesCreationPreset(createdAt: string, condition: PageDateCond
     case "last_30_days":
       return created >= addDays(today, -29);
     case "1_week_ago":
-      return created >= addDays(today, -7) && created < addDays(today, -6);
+      return created < addDays(today, -6);
     case "2_weeks_ago":
-      return created >= addDays(today, -14) && created < addDays(today, -13);
-    case "1_month_ago": {
-      const from = addMonths(today, -1);
-      return created >= from && created < addDays(from, 1);
-    }
+      return created < addDays(today, -13);
+    case "1_month_ago":
+      return created < addDays(today, -29);
     case "1_week_from_now":
       return created >= addDays(today, 7);
     case "2_weeks_from_now":

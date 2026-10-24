@@ -15,6 +15,8 @@ import { Link } from "@tanstack/react-router";
 
 import type { PageCreatorOption } from "../lib/pageList.js";
 import { pageDetailHref, pageDisplayTitle } from "../lib/pageList.js";
+import { projectMark } from "../../../shared/pickers/projectIcon.js";
+import { ProjectMarkIcon } from "../../../shared/pickers/ProjectMarkIcon.js";
 
 export interface PageRowMenuStrings {
   openInNewTab: string;
@@ -40,28 +42,31 @@ function formatCreatedOn(value: string): string {
   return `Created on ${date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`;
 }
 
+const PAGE_MARK_FALLBACK = (
+  <FileText size={16} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-(--text-muted)" />
+);
+
 function PageMark({ page }: { page: PageRowData }): React.ReactElement {
-  const emoji = page.logo_props.emoji?.value;
-  const icon = page.logo_props.icon;
-  if (page.logo_props.in_use === "emoji" && emoji !== undefined && emoji !== "") {
+  const mark = projectMark(page.logo_props);
+  if (mark.kind === "emoji") {
     return (
       <span aria-hidden="true" className="text-body inline-flex size-6 shrink-0 items-center justify-center">
-        {emoji}
+        {mark.glyph}
       </span>
     );
   }
-  if (page.logo_props.in_use === "icon" && icon !== undefined) {
+  if (mark.kind === "icon") {
     return (
       <span
         aria-hidden="true"
         className="text-body inline-flex size-6 shrink-0 items-center justify-center rounded-(--radius-control)"
-        style={icon.color === undefined ? undefined : { color: icon.color }}
+        style={mark.color === null ? undefined : { color: mark.color }}
       >
-        {icon.name.slice(0, 1).toUpperCase()}
+        <ProjectMarkIcon mark={mark} identifier={mark.name} size={16} fallback={PAGE_MARK_FALLBACK} />
       </span>
     );
   }
-  return <FileText size={16} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-(--text-muted)" />;
+  return PAGE_MARK_FALLBACK;
 }
 
 function VisibilityGlyph({ access }: { access: number }): React.ReactElement {
@@ -105,31 +110,32 @@ export function PageRow({
       data-page-id={page.id}
       className="group flex items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-3) hover:bg-(--subtle)"
     >
-      <PageMark page={page} />
       <Link
         to={pageDetailHref(workspaceSlug, projectId, page.id)}
-        className="text-body min-w-0 flex-1 truncate font-medium text-(--text) hover:underline"
+        aria-label={title}
+        className="flex min-w-0 flex-1 items-center gap-(--space-3) text-(--text)"
       >
-        {title}
+        <PageMark page={page} />
+        <span className="text-body min-w-0 flex-1 truncate font-medium hover:underline">{title}</span>
+        <Tooltip content={ownerName}>
+          <span className="inline-flex">
+            <Avatar
+              name={ownerName}
+              size="small"
+              {...(owner?.avatarUrl === null || owner?.avatarUrl === undefined ? {} : { src: owner.avatarUrl })}
+            />
+          </span>
+        </Tooltip>
+        <VisibilityGlyph access={page.access} />
+        <Tooltip content={formatCreatedOn(page.created_at)}>
+          <span
+            className="inline-flex cursor-default items-center text-(--text-muted)"
+            aria-label={formatCreatedOn(page.created_at)}
+          >
+            <CalendarDays size={14} strokeWidth={1.5} aria-hidden="true" />
+          </span>
+        </Tooltip>
       </Link>
-      <Tooltip content={ownerName}>
-        <span className="inline-flex">
-          <Avatar
-            name={ownerName}
-            size="small"
-            {...(owner?.avatarUrl === null || owner?.avatarUrl === undefined ? {} : { src: owner.avatarUrl })}
-          />
-        </span>
-      </Tooltip>
-      <VisibilityGlyph access={page.access} />
-      <Tooltip content={formatCreatedOn(page.created_at)}>
-        <span
-          className="inline-flex cursor-default items-center text-(--text-muted)"
-          aria-label={formatCreatedOn(page.created_at)}
-        >
-          <CalendarDays size={14} strokeWidth={1.5} aria-hidden="true" />
-        </span>
-      </Tooltip>
       {showStar ? (
         <span
           data-testid="page-row-star"

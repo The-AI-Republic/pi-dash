@@ -23,11 +23,23 @@ export type ProjectMark =
   | { kind: "initial" };
 
 /**
- * Decode the stored emoji form. A dash-separated decimal list is a set of
- * Unicode code points; anything that does not decode (out of range, not a
- * number) is returned untouched so a literal character still renders.
+ * Decode the stored emoji form. A dash-separated list of hexadecimal or
+ * decimal code points (the pages contract stores `1f600`) becomes the
+ * glyph; anything that does not decode (out of range, not a number) is
+ * returned untouched so a literal character still renders.
  */
 export function decodeEmojiValue(value: string): string {
+  if (/^[0-9a-f]+(-[0-9a-f]+)*$/i.test(value) && /[a-f]/i.test(value) && /\d/.test(value)) {
+    const points = value.split("-").map((part) => Number.parseInt(part, 16));
+    if (points.every((point) => isCodePoint(point))) {
+      try {
+        return String.fromCodePoint(...points);
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
   if (!/^\d+(-\d+)*$/.test(value)) return value;
   const points = value.split("-").map((part) => Number(part));
   if (points.some((point) => !isCodePoint(point))) return value;
