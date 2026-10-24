@@ -96,6 +96,63 @@ export interface StubOptions {
   peerStatus?: number;
   extraProjects?: Array<{ id: string; identifier: string }>;
   peerDelayMs?: number;
+  /** Project workflow states the pickers read. */
+  states?: Array<{ id: string; name: string; group: string; color?: string }>;
+}
+
+/** Two plain states for a picker the test opens. */
+export const PICKER_STATES = [
+  {
+    id: "923e4567-e89b-12d3-a456-426614174011",
+    project_id: "223e4567-e89b-12d3-a456-426614174001",
+    workspace_id: "623e4567-e89b-12d3-a456-426614174005",
+    name: "Todo",
+    color: "#aaa",
+    group: "unstarted",
+    default: true,
+    description: "",
+    sequence: 1,
+  },
+  {
+    id: "a23e4567-e89b-12d3-a456-426614174012",
+    project_id: "223e4567-e89b-12d3-a456-426614174001",
+    workspace_id: "623e4567-e89b-12d3-a456-426614174005",
+    name: "Done",
+    color: "#2f9e5b",
+    group: "completed",
+    default: false,
+    description: "",
+    sequence: 2,
+  },
+];
+
+/** The row the epics collection answers a create with. */
+function createdEpicRow(): Record<string, unknown> {
+  return {
+    id: "c23e4567-e89b-12d3-a456-426614174013",
+    name: "Big rock",
+    state_id: null,
+    sort_order: 1,
+    completed_at: null,
+    priority: "none",
+    sequence_id: 43,
+    project_id: PROJECT,
+    parent_id: null,
+    cycle_id: null,
+    module_ids: [],
+    label_ids: [],
+    assignee_ids: [],
+    sub_issues_count: null,
+    attachment_count: null,
+    link_count: null,
+    created_at: "2024-01-01T00:00:00Z",
+    updated_at: "2024-01-01T00:00:00Z",
+    created_by: null,
+    updated_by: null,
+    is_draft: false,
+    archived_at: null,
+    deleted_at: null,
+  };
 }
 
 /** Route the widget's reads and writes; every call is recorded. */
@@ -225,6 +282,11 @@ export function stubTransport(options: StubOptions = {}) {
               relations_summary: { blocked_by: [], blocking: [] },
               has_open_blockers: false,
             };
+    } else if (url.includes("/epics/") && method === "POST") {
+      status = options.writeStatus ?? 201;
+      payload = createdEpicRow();
+    } else if (method === "GET" && url.endsWith("/states/")) {
+      payload = options.states ?? [];
     } else if (url.includes("/issues/")) {
       status = options.writeStatus ?? (method === "DELETE" ? 204 : 204);
       payload = options.writeStatus === undefined ? "" : { detail: "boom" };

@@ -11,5 +11,5 @@ export { BULK_OPERATIONS_FLAG, isBulkOperationsEnabled } from "./edition.js";
 export { useBulkMutations } from "./useBulkMutations.js";
 export { SELECTION_ROW_ATTR, useBulkSelection } from "./useBulkSelection.js";
 export type { BulkSelection } from "./useBulkSelection.js";
-export { groupSelectionState, moveActive, visibleBulkFields } from "./model.js";
+export { groupSelectionState, moveActive, selectedStateIds, visibleBulkFields } from "./model.js";
 export type { BulkPropertyKey, GroupSelectionState, SelectionItem } from "./model.js";

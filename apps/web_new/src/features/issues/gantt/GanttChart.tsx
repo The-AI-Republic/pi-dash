@@ -30,6 +30,7 @@ import {
   type GestureDates,
   type ResizeResult,
 } from "./drag.js";
+import { DependencyChrome, showsGanttDependencies } from "./DependencyChrome.js";
 import { GanttHeader } from "./GanttHeader.js";
 import { GanttSidebar, type GanttTimelineEntity, type ReorderBinding } from "./GanttSidebar.js";
 import {
@@ -119,6 +120,11 @@ export interface GanttChartProps {
   onPlantBlock?: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
   /** Sticky quick-add entry (ISS-055); absent hides the control. */
   quickAdd?: React.ReactNode;
+  /**
+   * Project the dependency reads belong to. Absent (or the edition flag
+   * off) leaves the timeline with no dependency chrome at all (ISS-237).
+   */
+  projectId?: string | undefined;
   /**
    * Hover preview for a reference surface (ISS-133). Receives the bar or
    * sidebar link to wrap; absent leaves the surfaces plain.
@@ -516,6 +522,8 @@ function GanttLanes({
           <div
             key={row.id}
             data-lane={row.id}
+            data-gantt-lane="true"
+            data-lane-id={row.id}
             data-hovered={hoveredId === row.id ? "true" : undefined}
             data-peeked={peekedId === row.id ? "true" : undefined}
             style={{ height: ROW_HEIGHT }}
@@ -599,6 +607,7 @@ function GanttSurface({
   onDatesChange,
   onPlantBlock,
   quickAdd,
+  projectId,
   renderPreview,
   todayIso,
   viewport,
@@ -687,6 +696,11 @@ function GanttSurface({
     host.scrollTop = 0;
     setScrollTop(0);
   }, [host, zoom]);
+
+  // Dependency chrome belongs to the cloud edition (ISS-237). The flag
+  // alone decides; with it off nothing below mounts, so the community
+  // chart draws exactly the lanes it always has.
+  const dependencyProject = showsGanttDependencies(projectId) ? projectId : null;
 
   const today = windowTodaySegment(zoom, range, todayIso);
   const tiers = headerTiers(zoom, range);
@@ -820,6 +834,16 @@ function GanttSurface({
                 onPlantBlock={onPlantBlock}
                 rangeStartIso={range.startIso}
                 renderPreview={renderPreview}
+              />
+            )}
+            {dependencyProject === null ? null : (
+              <DependencyChrome
+                workspaceSlug={workspaceSlug}
+                projectId={dependencyProject}
+                rows={rows}
+                range={range}
+                zoom={zoom}
+                width={total}
               />
             )}
           </div>

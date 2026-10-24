@@ -4,16 +4,30 @@
 // See the LICENSE file for details.
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { edition } from "../../../core/edition/index.js";
+import { WORKFLOW_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import { armedBulkProperties, BulkToolbar } from "./BulkToolbar.js";
 
+const gateReadings = vi.hoisted(() => ({ optionGate: undefined as unknown, pickId: "state-1" }));
+
 vi.mock("../../../shared/pickers/index.js", () => ({
-  StatePicker: ({ onChange }: { onChange: (id: string) => void }) => (
-    <button type="button" onClick={() => onChange("state-1")}>
-      Pick state
-    </button>
-  ),
+  StatePicker: ({
+    onChange,
+    optionGate,
+  }: {
+    onChange: (id: string) => void;
+    optionGate?: (option: { id: string }) => { disabled: boolean; reason?: string } | null;
+  }) => {
+    gateReadings.optionGate = optionGate;
+    return (
+      <button type="button" onClick={() => onChange(gateReadings.pickId)}>
+        Pick state
+      </button>
+    );
+  },
   PriorityPicker: ({ onChange }: { onChange: (value: string) => void }) => (
     <button type="button" onClick={() => onChange("high")}>
       Pick priority
@@ -76,6 +90,125 @@ function setup(overrides: Partial<React.ComponentProps<typeof BulkToolbar>> = {}
   render(<BulkToolbar {...props} />);
   return props;
 }
+
+afterEach(() => {
+  resetEditionIssuesProviders();
+  delete edition.flags[WORKFLOW_FLAG];
+  gateReadings.pickId = "state-1";
+});
+
+const ORIGINS = ["623e4567-e89b-12d3-a456-426614174010", "723e4567-e89b-12d3-a456-426614174011"];
+const TARGET = "923e4567-e89b-12d3-a456-426614174012";
+
+describe("BulkToolbar workflow gate (ISS-233)", () => {
+  async function armState(): Promise<void> {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    await user.click(screen.getByRole("checkbox", { name: "State" }));
+  }
+
+  it("leaves the bulk state picker plain in the community build", async () => {
+    registerEditionIssuesProviders({
+      workflowRules: { refusal: () => ({ reason: "no rule should be asked" }) },
+    });
+    setup({ fromStateIds: ORIGINS });
+    await armState();
+    expect(gateReadings.optionGate).toBeUndefined();
+  });
+
+  it("keeps a target open only when every selected row may enter it", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ fromStateId, toStateId }) =>
+          fromStateId === ORIGINS[1] && toStateId === TARGET ? { reason: "Blocked work cannot finish" } : null,
+      },
+    });
+    setup({ fromStateIds: ORIGINS });
+    await armState();
+    const gate = gateReadings.optionGate as (option: { id: string }) => { disabled: boolean; reason?: string };
+    expect(gate({ id: TARGET })).toEqual({ disabled: true, reason: "Blocked work cannot finish" });
+    expect(gate({ id: ORIGINS[0]! })).toEqual({ disabled: false });
+  });
+
+  it("refuses a target picked before the selection grew to a row the rules deny", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ fromStateId, toStateId }) =>
+          fromStateId === ORIGINS[1] && toStateId === TARGET ? { reason: "Blocked work cannot finish" } : null,
+      },
+    });
+    gateReadings.pickId = TARGET;
+    const user = userEvent.setup();
+    const props = {
+      workspaceSlug: "acme",
+      projectId: "project-1",
+      count: 1,
+      hideCycle: false,
+      hideModule: false,
+      hideEstimate: false,
+      busy: false,
+      onClear: vi.fn(),
+      onUpdate: vi.fn(),
+      onDelete: vi.fn(),
+      onArchive: vi.fn(),
+      onSubscribe: vi.fn(),
+    };
+    const view = render(<BulkToolbar {...props} fromStateIds={[ORIGINS[0]!]} />);
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    await user.click(screen.getByRole("checkbox", { name: "State" }));
+    await user.click(screen.getByRole("button", { name: "Pick state" }));
+    // The selection widens after the target was chosen; the held value is
+    // no longer open to every row, so Apply must not post it.
+    view.rerender(<BulkToolbar {...props} count={2} fromStateIds={ORIGINS} />);
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(props.onUpdate).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Blocked work cannot finish");
+    expect(screen.getByRole("dialog", { name: "Edit selected work items" })).toBeInTheDocument();
+  });
+
+  it("clears a state refusal once the reader picks again or un-arms the field", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ fromStateId, toStateId }) =>
+          fromStateId === ORIGINS[1] && toStateId === TARGET ? { reason: "Blocked work cannot finish" } : null,
+      },
+    });
+    gateReadings.pickId = TARGET;
+    const user = userEvent.setup();
+    const props = setup({ fromStateIds: ORIGINS });
+    await armState();
+    await user.click(screen.getByRole("button", { name: "Pick state" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Blocked work cannot finish");
+    // A new pick replaces both the target and the sentence it carried.
+    gateReadings.pickId = "state-1";
+    await user.click(screen.getByRole("button", { name: "Pick state" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(props.onUpdate).toHaveBeenCalledWith({ state_id: "state-1" });
+    // Turning the field off forgets the held target, so the next arm
+    // starts from a clean slate rather than a stale sentence.
+    gateReadings.pickId = TARGET;
+    await user.click(screen.getByRole("button", { name: "Edit properties" }));
+    await user.click(screen.getByRole("button", { name: "Pick state" }));
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "State" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("reads a selection with no origins as fully open", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({ workflowRules: { refusal: () => ({ reason: "never" }) } });
+    setup();
+    await armState();
+    const gate = gateReadings.optionGate as (option: { id: string }) => { disabled: boolean };
+    expect(gate({ id: TARGET })).toEqual({ disabled: false });
+  });
+});
 
 describe("BulkToolbar", () => {
   it("calls subscribe, archive and clear directly", async () => {

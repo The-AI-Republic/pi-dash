@@ -66,6 +66,12 @@ function renderMenu(props: Partial<React.ComponentProps<typeof SubIssueFilterMen
         offered={props.offered}
         onToggle={props.onToggle ?? onToggle}
         onSetDate={props.onSetDate ?? onSetDate}
+        {...{
+          ...(props.editionFilters === undefined ? {} : { editionFilters: props.editionFilters }),
+          ...(props.onToggleEdition === undefined ? {} : { onToggleEdition: props.onToggleEdition }),
+          ...(props.editionChips === undefined ? {} : { editionChips: props.editionChips }),
+          ...(props.onRemoveEditionChip === undefined ? {} : { onRemoveEditionChip: props.onRemoveEditionChip }),
+        }}
       />
     </QueryClientProvider>
   );
@@ -110,6 +116,54 @@ describe("SubIssueFilterMenu", () => {
     // The state rows load from the project's own read.
     fireEvent.click(await within(panel).findByRole("checkbox", { name: "Todo" }));
     expect(h.onToggle).toHaveBeenCalledWith("state", "623e4567-e89b-12d3-a456-426614174009");
+  });
+
+  it("names the applied edition values and removes the picked one", () => {
+    const onRemoveEditionChip = vi.fn();
+    const chip = { key: "teamProject" as const, value: "t1", label: "Platform" };
+    renderMenu({
+      editionChips: [chip],
+      editionFilters: { teamProject: ["t1"], issueType: [] },
+      onToggleEdition: vi.fn(),
+      onRemoveEditionChip,
+    });
+    openMenu();
+    const panel = screen.getByTestId("sub-issue-filters-panel");
+    expect(within(panel).getByTestId("edition-filter-chips")).toHaveTextContent("Platform");
+    fireEvent.click(within(panel).getByRole("button", { name: "Remove Platform filter" }));
+    expect(onRemoveEditionChip).toHaveBeenCalledWith(chip);
+  });
+
+  it("leaves the chip row out without applied edition values", () => {
+    renderMenu({
+      editionChips: [],
+      editionFilters: { teamProject: [], issueType: [] },
+      onToggleEdition: vi.fn(),
+      onRemoveEditionChip: vi.fn(),
+    });
+    openMenu();
+    expect(screen.queryByTestId("edition-filter-chips")).toBeNull();
+  });
+
+  it("counts applied edition dimensions in the trigger (ISS-234)", () => {
+    renderMenu({
+      filters: { ...emptySubIssueFilters(), priority: ["high"] },
+      editionFilters: { teamProject: ["t1"], issueType: ["y1"] },
+      editionChips: [],
+      onToggleEdition: vi.fn(),
+      onRemoveEditionChip: vi.fn(),
+    });
+    expect(screen.getByTestId("sub-issue-filters-trigger")).toHaveAccessibleName("Filters, 3 applied");
+  });
+
+  it("counts an edition-only filter without a base one (ISS-234)", () => {
+    renderMenu({
+      editionFilters: { teamProject: [], issueType: ["y1"] },
+      editionChips: [],
+      onToggleEdition: vi.fn(),
+      onRemoveEditionChip: vi.fn(),
+    });
+    expect(screen.getByTestId("sub-issue-filters-trigger")).toHaveAccessibleName("Filters, 1 applied");
   });
 
   it("omits state and project when the parent does not offer them", () => {

@@ -9,10 +9,13 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
+import { EPICS_FLAG } from "../edition/flags.js";
+import { resetEditionIssuesProviders } from "../edition/providers.js";
 import { issueKeys } from "../api/keys.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { RelationsWidget } from "./RelationsWidget.js";
-import { RelationActionMenu, WidgetActionsProvider } from "./widgetActions.js";
+import { EpicCreateButton, RelationActionMenu, WidgetActionsProvider } from "./widgetActions.js";
 import {
   ISSUE,
   PEER,
@@ -57,6 +60,11 @@ vi.mock("@tanstack/react-router", () => ({
 
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 
+afterEach(() => {
+  resetEditionIssuesProviders();
+  delete edition.flags[EPICS_FLAG];
+});
+
 function renderWidget(options: Parameters<typeof stubTransport>[0] = {}, canEdit = true) {
   const { calls, transport } = stubTransport(options);
   createAppClient("https://api.test", transport as never);
@@ -65,6 +73,7 @@ function renderWidget(options: Parameters<typeof stubTransport>[0] = {}, canEdit
     <QueryClientProvider client={queryClient}>
       <WidgetActionsProvider>
         <RelationActionMenu canEdit={canEdit} />
+        <EpicCreateButton canEdit={canEdit} />
         <RelationsWidget
           workspaceSlug={WS}
           projectId={PROJECT}
@@ -362,6 +371,72 @@ describe("relations widget", () => {
   it("opens the shared work-item form from a row's Edit entry", async () => {
     const user = userEvent.setup();
     renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: /Update work item/i }, { timeout: 10_000 });
+    expect(within(dialog).getByDisplayValue("Peer work item")).toBeInTheDocument();
+  });
+
+  it("edits an epic through the edition's own dialog, not the work-item form (ISS-232)", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    const user = userEvent.setup();
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] }, peerIsEpic: true });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit epic" }, { timeout: 10_000 });
+    expect(within(dialog).getByLabelText("Epic name")).toHaveValue("Peer work item");
+    expect(screen.queryByRole("dialog", { name: /Update work item/i })).not.toBeInTheDocument();
+  });
+
+  it("closes the epic dialog from its own dismissals", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    const user = userEvent.setup();
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] }, peerIsEpic: true });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit epic" }, { timeout: 10_000 });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit epic" })).not.toBeInTheDocument());
+  });
+
+  it("creates an epic from the action row and posts it to the epics collection (ISS-232)", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    const user = userEvent.setup();
+    const { calls } = renderWidget({ relations: emptyRelations() });
+    expect(screen.queryByRole("button", { name: "Create epic" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create epic" }));
+    const dialog = await screen.findByRole("dialog", { name: "Create epic" }, { timeout: 10_000 });
+    await user.type(within(dialog).getByLabelText("Epic name"), "Big rock");
+    await user.click(within(dialog).getByRole("button", { name: "Create epic" }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.method === "POST" && call.url.includes(`/projects/${PROJECT}/epics/`))).toBe(
+        true
+      )
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create epic" })).not.toBeInTheDocument());
+    // The relations read refreshes so the new epic can be related at once.
+    await waitFor(() =>
+      expect(calls.filter((call) => call.method === "GET" && call.url.includes("/issue-relation/")).length).toBe(2)
+    );
+  });
+
+  it("refuses a blank epic name without writing, and closes on cancel", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    const user = userEvent.setup();
+    const { calls } = renderWidget({ relations: emptyRelations() });
+    await user.click(screen.getByRole("button", { name: "Create epic" }));
+    const dialog = await screen.findByRole("dialog", { name: "Create epic" }, { timeout: 10_000 });
+    await user.click(within(dialog).getByRole("button", { name: "Create epic" }));
+    expect(await within(dialog).findByText("Give the epic a name.")).toBeInTheDocument();
+    expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create epic" })).not.toBeInTheDocument());
+    expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
+  });
+
+  it("falls back to the work-item form for an epic in the community build", async () => {
+    const user = userEvent.setup();
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] }, peerIsEpic: true });
     await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
     await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
     const dialog = await screen.findByRole("dialog", { name: /Update work item/i }, { timeout: 10_000 });

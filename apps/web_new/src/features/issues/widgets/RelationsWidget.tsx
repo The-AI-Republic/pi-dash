@@ -20,6 +20,7 @@ import { projectsQueryOptions } from "../../projects/index.js";
 import { issueKeys } from "../api/keys.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
 import type { WorkItemCreateProject, WorkItemEditTarget } from "../components/WorkItemCreateDialog.js";
+import { EpicDialog, isEpicDialogEnabled } from "../edition/EpicDialog.js";
 import { AddRelationDialog } from "./AddRelationDialog.js";
 import { RelationRow } from "./RelationRow.js";
 import { useAddRelations, useIssueRelations, useRemoveRelation } from "./api.js";
@@ -58,6 +59,8 @@ export function RelationsWidget({
   const shared = useWidgetActions();
   const addKind = shared.relationKind;
   const setAddKind = shared.setRelationKind;
+  const epicCreateOpen = shared.epicCreateOpen;
+  const setEpicCreateOpen = shared.setEpicCreateOpen;
   const [pendingDelete, setPendingDelete] = React.useState<{ row: RelatedIssue; kind: RelationKind } | null>(null);
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<RelationKind>>(() => new Set());
   const [peek, setPeek] = React.useState<{ row: RelatedIssue; identifier: string } | null>(null);
@@ -220,6 +223,19 @@ export function RelationsWidget({
           }}
         />
       ) : null}
+      {epicCreateOpen && canEdit ? (
+        <EpicDialog
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          open
+          onOpenChange={(open) => {
+            if (!open) setEpicCreateOpen(false);
+          }}
+          onSaved={() => {
+            void queryClient.invalidateQueries({ queryKey: issueKeys.all(workspaceSlug) });
+          }}
+        />
+      ) : null}
       {peek === null ? null : (
         <RelationPeek
           workspaceSlug={workspaceSlug}
@@ -293,7 +309,10 @@ function RelationPeek({
 /**
  * The shared create/update modal seeded with a related row (ISS-182). The
  * row's project list supplies the form's project row; the modal reads the
- * stored description and PATCHes only the changed fields.
+ * stored description and PATCHes only the changed fields. The slim row
+ * carries no epic marker, so the detail read decides — and when it is an
+ * epic the edition's own dialog takes over (ISS-232); the community build
+ * has no such dialog and edits the row through the same form as before.
  */
 function RelationEditor({
   workspaceSlug,
@@ -313,6 +332,27 @@ function RelationEditor({
   );
   const projects = useQuery(projectsQueryOptions(getAppClient(), workspaceSlug));
   const project = projects.data?.find((entry) => entry.id === row.project_id);
+  // The epic marker read belongs to the edition dialog: the community
+  // build keeps the work-item form and never asks whether the row is one.
+  const epicOn = isEpicDialogEnabled();
+  const detail = useQuery({
+    ...issueDetailQueryOptions(getAppClient(), workspaceSlug, row.project_id, row.id),
+    enabled: epicOn,
+  });
+  if (epicOn && detail.data?.is_epic === true) {
+    return (
+      <EpicDialog
+        workspaceSlug={workspaceSlug}
+        projectId={row.project_id}
+        epic={detail.data}
+        open
+        onOpenChange={(open) => {
+          if (!open) onClose();
+        }}
+        onSaved={onClose}
+      />
+    );
+  }
   const target: WorkItemEditTarget = {
     kind: "issue",
     id: row.id,

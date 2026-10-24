@@ -167,6 +167,69 @@ describe("StatePicker", () => {
     expect(screen.getByRole("button", { name: "Pick" })).toBeInTheDocument();
   });
 
+  it("greys a refused row with the rule's sentence and still lets an open row through", async () => {
+    const { queryClient } = harness(STATES);
+    const onChange = vi.fn();
+    const optionGate = (option: { id: string; name: string }) =>
+      option.name === "Done" ? { disabled: true, reason: "Approve the review first" } : null;
+    render(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={onChange}
+          optionGate={optionGate}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select state" }));
+    const refused = await screen.findByRole("option", { name: /Done/ });
+    expect(refused).toBeDisabled();
+    expect(refused).toHaveTextContent("Approve the review first");
+    expect(screen.getByRole("option", { name: "Todo" })).toBeEnabled();
+    fireEvent.click(refused);
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("option", { name: "Todo" }));
+    expect(onChange).toHaveBeenCalledWith("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  });
+
+  it("draws a gate's allowed row without a reason line", async () => {
+    const { queryClient } = harness(STATES);
+    const onChange = vi.fn();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={onChange}
+          optionGate={() => ({ disabled: false })}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select state" }));
+    const open = await screen.findByRole("option", { name: "Done" });
+    expect(open).toBeEnabled();
+    expect(open.querySelector(":scope > span.flex")).toBeNull();
+    fireEvent.click(open);
+    expect(onChange).toHaveBeenCalledWith("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+  });
+
+  it("leaves every row open without a gate", async () => {
+    const { queryClient } = harness(STATES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker workspaceSlug="acme" projectId={PROJECT} value={null} onChange={vi.fn()} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select state" }));
+    await screen.findByRole("option", { name: "Done" });
+    for (const name of ["Todo", "In Progress", "Done"]) {
+      expect(screen.getByRole("option", { name })).toBeEnabled();
+    }
+  });
+
   it("spins while initializing and reports failures", async () => {
     const { queryClient } = harness(STATES);
     const onChange = vi.fn();

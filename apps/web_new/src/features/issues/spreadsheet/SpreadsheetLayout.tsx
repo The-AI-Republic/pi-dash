@@ -57,6 +57,7 @@ import {
   RowSelectionCheckbox,
   SELECTION_ROW_ATTR,
   isBulkOperationsEnabled,
+  selectedStateIds,
   useBulkMutations,
   useBulkSelection,
 } from "../bulk/index.js";
@@ -163,7 +164,9 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
   );
   const selectionItems = React.useMemo(
     () =>
-      rows.filter((row) => row.issue.project_id === projectId).map((row) => ({ id: row.issue.id, groupKey: "all" })),
+      rows
+        .filter((row) => row.issue.project_id === projectId)
+        .map((row) => ({ id: row.issue.id, groupKey: "all", stateId: row.issue.state_id })),
     [rows, projectId]
   );
   const selection = useBulkSelection(selectionItems, enableSelection, revealSelectionRow);
@@ -354,6 +357,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           count={selectedCount}
+          fromStateIds={selectedStateIds(selectionItems, selection.selectedIds)}
           hideCycle={hideCycle}
           hideModule={hideModule}
           hideEstimate={hideEstimate}

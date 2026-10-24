@@ -26,12 +26,15 @@ import {
   StatePicker,
 } from "../../../shared/pickers/index.js";
 import type { PriorityLevel } from "../../../shared/pickers/index.js";
+import { selectionStateGate, selectionStateRefusal } from "../edition/workflow.js";
 import { visibleBulkFields, type BulkPropertyKey } from "./model.js";
 
 export interface BulkToolbarProps {
   workspaceSlug: string;
   projectId: string;
   count: number;
+  /** The selected rows' current states, so the state picker can gate per row. */
+  fromStateIds?: readonly (string | null)[] | undefined;
   hideCycle: boolean;
   hideModule: boolean;
   hideEstimate: boolean;
@@ -127,6 +130,7 @@ export function armedBulkProperties(
 export function BulkToolbar(props: BulkToolbarProps): React.ReactElement | null {
   const [updateOpen, setUpdateOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const [stateError, setStateError] = React.useState<string | null>(null);
   const [armed, setArmed] = React.useState<ArmedProperties>(UNARMED);
   const [stateId, setStateId] = React.useState<string | null>(null);
   const [priority, setPriority] = React.useState<PriorityLevel>("none");
@@ -139,13 +143,31 @@ export function BulkToolbar(props: BulkToolbarProps): React.ReactElement | null 
   const [estimatePoint, setEstimatePoint] = React.useState<string | null>(null);
 
   const fields = visibleBulkFields(props);
+  const fromStateIds = props.fromStateIds ?? [];
+  // One target has to be open to every selected row (ISS-233); without
+  // the workflow this is undefined and the picker stays plain.
+  const stateGate = selectionStateGate(props.projectId, fromStateIds);
   const selectionLabel = props.count === 1 ? "1 selected" : `${props.count} selected`;
 
   function toggle(key: BulkPropertyKey): void {
+    // Un-arming drops the state neither the rules nor the batch knows any
+    // more; re-arming starts from a target the reader picks again.
+    if (key === "state_id") setStateError(null);
     setArmed((current) => ({ ...current, [key]: !current[key] }));
   }
 
   function submitUpdate(): void {
+    // The picker greys the rows it refuses, but a target picked before
+    // the selection changed could still be held here. Ask the rules once
+    // more against the rows that are selected now, so the batch is never
+    // posted for a row the workflow refuses (ISS-233).
+    if (armed.state_id && stateId !== null) {
+      const refusal = selectionStateRefusal(props.projectId, fromStateIds, stateId);
+      if (refusal !== null) {
+        setStateError(refusal.reason);
+        return;
+      }
+    }
     const properties = armedBulkProperties(armed, {
       stateId,
       priority,
@@ -228,13 +250,24 @@ export function BulkToolbar(props: BulkToolbarProps): React.ReactElement | null 
                 aria-hidden={armed[key] ? undefined : true}
               >
                 {key === "state_id" ? (
-                  <StatePicker
-                    workspaceSlug={props.workspaceSlug}
-                    projectId={props.projectId}
-                    value={stateId}
-                    onChange={setStateId}
-                    disabled={!armed.state_id}
-                  />
+                  <>
+                    <StatePicker
+                      workspaceSlug={props.workspaceSlug}
+                      projectId={props.projectId}
+                      value={stateId}
+                      onChange={(nextStateId) => {
+                        setStateError(null);
+                        setStateId(nextStateId);
+                      }}
+                      disabled={!armed.state_id}
+                      optionGate={stateGate}
+                    />
+                    {stateError === null ? null : (
+                      <p role="alert" className="text-meta text-(--danger)">
+                        {stateError}
+                      </p>
+                    )}
+                  </>
                 ) : null}
                 {key === "priority" ? (
                   <PriorityPicker value={priority} onChange={setPriority} disabled={!armed.priority} />

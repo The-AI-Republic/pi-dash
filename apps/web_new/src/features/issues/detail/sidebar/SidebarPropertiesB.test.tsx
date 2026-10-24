@@ -9,7 +9,10 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
+import { edition } from "../../../../core/edition/index.js";
 import { setSessionClient } from "../../../../core/session/queries.js";
+import { DETAIL_BADGES_FLAG } from "../../edition/badges.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../../edition/providers.js";
 import { IssuePropertiesSidebar, PROPERTIES_LOAD_FAILED } from "./IssuePropertiesSidebar.js";
 import { SidebarPropertiesB } from "./SidebarPropertiesB.js";
 
@@ -282,6 +285,8 @@ function renderRows(
 afterEach(() => {
   cleanup();
   resetAppClient();
+  resetEditionIssuesProviders();
+  delete edition.flags[DETAIL_BADGES_FLAG];
   vi.clearAllMocks();
 });
 
@@ -355,6 +360,57 @@ describe("SidebarPropertiesB rows", () => {
     // The date text itself carries the tone; the wrapper alone would be
     // hidden behind the trigger's own text color.
     expect(within(row).getByRole("button", { name: "Due date" })).toHaveClass("text-(--danger)");
+  });
+
+  it("adds the cloud overdue badge beside the date, and nothing in the community build (ISS-236)", () => {
+    const { client, queryClient } = harness();
+    renderRows(client, queryClient, { issue: issueFixture({ target_date: "2020-01-01" }), stateGroup: "started" });
+    expect(screen.queryByTestId("detail-overdue-badge")).toBeNull();
+    cleanup();
+    edition.flags[DETAIL_BADGES_FLAG] = true;
+    renderRows(client, queryClient, { issue: issueFixture({ target_date: "2020-01-01" }), stateGroup: "started" });
+    const badge = screen.getByTestId("detail-overdue-badge");
+    expect(badge).toHaveTextContent(/^\d+ days overdue$/);
+    expect(within(screen.getByRole("group", { name: "Due date" })).getByTestId("detail-overdue-badge")).toBe(badge);
+  });
+
+  it("keeps the cloud badge off a closed item and off a future date", () => {
+    edition.flags[DETAIL_BADGES_FLAG] = true;
+    const { client, queryClient } = harness();
+    renderRows(client, queryClient, { issue: issueFixture({ target_date: "2020-01-01" }), stateGroup: "completed" });
+    expect(screen.queryByTestId("detail-overdue-badge")).toBeNull();
+    cleanup();
+    renderRows(client, queryClient, { issue: issueFixture({ target_date: "2999-01-01" }), stateGroup: "started" });
+    expect(screen.queryByTestId("detail-overdue-badge")).toBeNull();
+  });
+
+  it("mounts the cloud transfer note under the cycle row only when the edition supplies it (ISS-236)", () => {
+    const { client, queryClient } = harness();
+    renderRows(client, queryClient, { issue: issueFixture({ cycle_id: CYCLE }) });
+    expect(screen.queryByTestId("detail-transfer-hop")).toBeNull();
+    cleanup();
+    edition.flags[DETAIL_BADGES_FLAG] = true;
+    renderRows(client, queryClient, { issue: issueFixture({ cycle_id: CYCLE }) });
+    expect(screen.queryByTestId("detail-transfer-hop")).toBeNull();
+    cleanup();
+    registerEditionIssuesProviders({
+      detailBadges: {
+        transferNote: ({ cycleId }) => (
+          <span data-testid="hop-probe">{`Moved from ${(cycleId ?? "").slice(0, 4)}`}</span>
+        ),
+      },
+    });
+    renderRows(client, queryClient, { issue: issueFixture({ cycle_id: CYCLE }) });
+    const note = within(screen.getByRole("group", { name: "Cycle" })).getByTestId("detail-transfer-hop");
+    expect(note).toContainElement(screen.getByTestId("hop-probe"));
+  });
+
+  it("keeps the transfer note off an item with no cycle", () => {
+    edition.flags[DETAIL_BADGES_FLAG] = true;
+    registerEditionIssuesProviders({ detailBadges: { transferNote: () => <span>moved</span> } });
+    const { client, queryClient } = harness();
+    renderRows(client, queryClient, { issue: issueFixture({ cycle_id: null }) });
+    expect(screen.queryByTestId("detail-transfer-hop")).toBeNull();
   });
 
   it("never flags a closed or future due date", () => {

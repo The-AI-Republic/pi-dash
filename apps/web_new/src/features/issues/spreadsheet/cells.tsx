@@ -24,6 +24,7 @@ import {
   StatePicker,
 } from "../../../shared/pickers/index.js";
 import { isCompletedCycle } from "../../../shared/pickers/cycles.js";
+import { stateOptionGate } from "../edition/workflow.js";
 import {
   usePickerCycles,
   usePickerEstimates,
@@ -152,6 +153,7 @@ function StateCell({ issue, context, onDone, disabled }: EditableCellProps): Rea
       value={issue.state_id}
       disabled={disabled}
       variant="ghost"
+      optionGate={stateOptionGate(context.projectId, issue.state_id)}
       onChange={(id) => {
         writeThenRefocus(() => context.onUpdate(issue.id, { state_id: id }), onDone);
       }}

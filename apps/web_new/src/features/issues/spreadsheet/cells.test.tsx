@@ -9,6 +9,9 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
+import { WORKFLOW_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import type { SheetCellContext } from "./cells.js";
 import { SheetPropertyCell, formatDayOrBlank, isEditableColumn, isOverdue } from "./cells.js";
 import { SHEET_COLUMNS } from "./model.js";
@@ -22,6 +25,7 @@ const MODULE = "523e4567-e89b-12d3-a456-426614174004";
 const LABEL = "623e4567-e89b-12d3-a456-426614174005";
 const MEMBER = "723e4567-e89b-12d3-a456-426614174006";
 const ESTIMATE = "823e4567-e89b-12d3-a456-426614174007";
+const DONE = "923e4567-e89b-12d3-a456-426614174008";
 
 function issue(overrides: Partial<IssueListItem> = {}): IssueListItem {
   return {
@@ -55,7 +59,7 @@ function column(key: string) {
   return SHEET_COLUMNS.find((entry) => entry.key === key)!;
 }
 
-function stubClient(stateGroup = "started", cycleStatus = "ACTIVE") {
+function stubClient(stateGroup = "started", cycleStatus = "ACTIVE", extraState = false) {
   createAppClient("https://api.test", (async (url: string) => {
     let body: unknown = {};
     if (url.endsWith("/auth/get-csrf-token/")) body = { csrf_token: "csrf" };
@@ -72,6 +76,21 @@ function stubClient(stateGroup = "started", cycleStatus = "ACTIVE") {
           description: "",
           sequence: 1,
         },
+        ...(extraState
+          ? [
+              {
+                id: DONE,
+                project_id: PROJECT,
+                workspace_id: PROJECT,
+                name: "Done",
+                color: "#2f9e5b",
+                group: "completed",
+                default: false,
+                description: "",
+                sequence: 2,
+              },
+            ]
+          : []),
       ];
     } else if (url.includes("/cycles/")) {
       body = [{ id: CYCLE, project_id: PROJECT, name: "Cycle 1", status: cycleStatus, is_favorite: false }];
@@ -180,6 +199,8 @@ function renderCell(key: string, cellContext = context(), row = issue()) {
 
 afterEach(() => {
   resetAppClient();
+  resetEditionIssuesProviders();
+  delete edition.flags[WORKFLOW_FLAG];
 });
 
 describe("SheetPropertyCell", () => {
@@ -231,6 +252,34 @@ describe("SheetPropertyCell", () => {
     fireEvent.click(screen.getByRole("option", { name: /In progress/ }));
     expect(ctx.onUpdate).toHaveBeenCalledWith(ISSUE, { state_id: STATE });
     await vi.waitFor(() => expect(ctx.focusCell).toHaveBeenCalledWith(ISSUE, "state", 1));
+  });
+
+  it("keeps every state open in the community build (ISS-233)", async () => {
+    stubClient();
+    registerEditionIssuesProviders({
+      workflowRules: { refusal: () => ({ reason: "no rule should be asked" }) },
+    });
+    renderCell("state", context());
+    fireEvent.click(screen.getByRole("button", { name: "Select state" }));
+    const option = await screen.findByRole("option", { name: /In progress/ });
+    expect(option).toBeEnabled();
+  });
+
+  it("greys a state the rules refuse from the row's own state (ISS-233)", async () => {
+    stubClient("started", "ACTIVE", true);
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ toStateId }) => (toStateId === DONE ? { reason: "Review the fix first" } : null),
+      },
+    });
+    const ctx = context();
+    renderCell("state", ctx, issue({ state_id: STATE }));
+    fireEvent.click(screen.getByRole("button", { name: "Select state" }));
+    const refused = await screen.findByRole("option", { name: /Done/ });
+    expect(refused).toBeDisabled();
+    expect(refused).toHaveTextContent("Review the fix first");
+    expect(screen.getByRole("option", { name: /In progress/ })).toBeEnabled();
   });
 
   it("keeps the due-date bound on a start-date write", async () => {

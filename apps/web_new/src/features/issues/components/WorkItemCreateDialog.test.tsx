@@ -24,6 +24,8 @@ import { FULL_RUN_TEST_TIMEOUT_MS } from "../../../testing/testBudget.js";
 import { pickerKeys } from "../../../shared/pickers/reference.js";
 import { withTimeout } from "../create/createApi.js";
 import { ISSUE_DEDUPE_FLAG } from "../create/dedupe.js";
+import { WORKFLOW_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import {
   registerIssueTypeExtension,
   resetIssueTypeExtension,
@@ -300,6 +302,8 @@ interface StubOptions {
   instanceLlm?: boolean;
   /** Answer the bootstrap as an unprovisioned instance (no envelope). */
   instanceUnprovisioned?: boolean;
+  /** Replace the project workflow states the picker lists. */
+  states?: unknown[];
 }
 
 interface Call {
@@ -521,19 +525,22 @@ function stubTransport(options: StubOptions = {}) {
       ]);
     }
     if (url.endsWith("/states/")) {
-      return json(200, [
-        {
-          id: STATE_ID,
-          project_id: PROJECT_ATLAS,
-          workspace_id: WORKSPACE_ID,
-          name: "Todo",
-          color: "#5e6ad2",
-          group: "unstarted",
-          default: true,
-          description: "",
-          sequence: 1,
-        },
-      ]);
+      return json(
+        200,
+        options.states ?? [
+          {
+            id: STATE_ID,
+            project_id: PROJECT_ATLAS,
+            workspace_id: WORKSPACE_ID,
+            name: "Todo",
+            color: "#5e6ad2",
+            group: "unstarted",
+            default: true,
+            description: "",
+            sequence: 1,
+          },
+        ]
+      );
     }
     if (url.endsWith("/runners/pods/") || /\/runners\/pods\/\?/.test(url)) {
       return json(200, [
@@ -800,6 +807,8 @@ beforeEach(() => {
 
 afterEach(() => {
   resetAppClient();
+  resetEditionIssuesProviders();
+  delete edition.flags[WORKFLOW_FLAG];
   globalThis.localStorage.clear();
   vi.useRealTimers();
 });
@@ -1613,6 +1622,99 @@ describe("WorkItemCreateDialog duplicate seam (ISS-121)", () => {
   });
 });
 
+const DONE_STATE = "923e4567-e89b-12d3-a456-426614174009";
+
+const TWO_STATES = [
+  {
+    id: STATE_ID,
+    project_id: PROJECT_ATLAS,
+    workspace_id: WORKSPACE_ID,
+    name: "Todo",
+    color: "#5e6ad2",
+    group: "unstarted",
+    default: true,
+    description: "",
+    sequence: 1,
+  },
+  {
+    id: DONE_STATE,
+    project_id: PROJECT_ATLAS,
+    workspace_id: WORKSPACE_ID,
+    name: "Done",
+    color: "#2f9e5b",
+    group: "completed",
+    default: false,
+    description: "",
+    sequence: 2,
+  },
+];
+
+describe("WorkItemCreateDialog workflow gate (ISS-233)", () => {
+  function registerClosedDone(): void {
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ toStateId }) => (toStateId === DONE_STATE ? { reason: "Finish the review first" } : null),
+      },
+    });
+  }
+
+  it("keeps every create state open in the community build", async () => {
+    const user = userEvent.setup();
+    const h = setup({ states: TWO_STATES }, { initialValues: { stateId: DONE_STATE } });
+    registerClosedDone();
+    await user.type(titleField(), "Started elsewhere");
+    await user.click(screen.getByRole("button", { name: "Select state" }));
+    const done = await screen.findByRole("option", { name: /Done/ });
+    expect(done).toBeEnabled();
+    await user.keyboard("{Escape}");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ name: "Started elsewhere", state_id: DONE_STATE });
+  });
+
+  it("greys a create state the rules refuse, on the same rules a picker uses", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerClosedDone();
+    const user = userEvent.setup();
+    setup({ states: TWO_STATES });
+    await user.type(titleField(), "New work");
+    await user.click(screen.getByRole("button", { name: "Select state" }));
+    const done = await screen.findByRole("option", { name: /Done/ });
+    expect(done).toBeDisabled();
+    expect(done).toHaveTextContent("Finish the review first");
+    expect(screen.getByRole("option", { name: /Todo/ })).toBeEnabled();
+  });
+
+  it("refuses to post a create whose chosen state the rules deny", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerClosedDone();
+    const user = userEvent.setup();
+    // A prefill can hand the form a state the picker never let through.
+    const h = setup({ states: TWO_STATES }, { initialValues: { stateId: DONE_STATE } });
+    await user.type(titleField(), "Seeded into a closed state");
+    save();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Finish the review first");
+    expect(h.calls.some((call) => call.method === "POST")).toBe(false);
+    expect(h.onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+
+  it("clears the refusal once a different state is picked", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerClosedDone();
+    const user = userEvent.setup();
+    const h = setup({ states: TWO_STATES }, { initialValues: { stateId: DONE_STATE } });
+    await user.type(titleField(), "Moved to an open state");
+    save();
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Select state" }));
+    await user.click(await screen.findByRole("option", { name: /Todo/ }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ state_id: STATE_ID });
+  });
+});
+
 describe("WorkItemCreateDialog parent picker (ISS-122)", () => {
   it("searches after the debounce, links results and sets the parent id", async () => {
     const user = userEvent.setup();
@@ -1972,6 +2074,41 @@ function detailRow(descriptionHtml: string, overrides: Record<string, unknown> =
 function patches(calls: Array<{ url: string; method: string; body: unknown }>): unknown[] {
   return calls.filter((call) => call.method === "PATCH").map((call) => call.body);
 }
+
+describe("WorkItemCreateDialog edit-mode workflow gate (ISS-233)", () => {
+  it("gates an edited row's states from the state it opened with", async () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: { refusal: ({ fromStateId }) => (fromStateId === STATE_ID ? { reason: "Locked here" } : null) },
+    });
+    const user = userEvent.setup();
+    const h = setup(
+      { states: TWO_STATES },
+      {
+        edit: {
+          kind: "issue",
+          id: "623e4567-e89b-12d3-a456-426614174099",
+          projectId: PROJECT_ATLAS,
+          snapshot: {
+            id: "623e4567-e89b-12d3-a456-426614174099",
+            name: "Existing work",
+            state_id: STATE_ID,
+            priority: "none",
+            assignee_ids: [],
+            label_ids: [],
+            parent_id: null,
+          },
+        },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await user.click(screen.getByRole("button", { name: "Select state" }));
+    const done = await screen.findByRole("option", { name: /Done/ });
+    expect(done).toBeDisabled();
+    expect(done).toHaveTextContent("Locked here");
+    expect(h.calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+});
 
 describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
   it("opens the stored row with a fixed project and the update heading", async () => {

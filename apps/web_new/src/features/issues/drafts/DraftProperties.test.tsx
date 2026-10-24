@@ -13,6 +13,9 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
+import { WORKFLOW_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import { DraftProperties, stateGroupOf } from "./DraftProperties.js";
 
 const SLUG = "acme";
@@ -137,7 +140,11 @@ beforeEach(() => {
 
 afterEach(() => {
   resetAppClient();
+  resetEditionIssuesProviders();
+  delete edition.flags[WORKFLOW_FLAG];
 });
+
+const REFUSED = "523e4567-e89b-12d3-a456-426614174004";
 
 describe("stateGroupOf", () => {
   it("finds the group of the draft's state", () => {
@@ -188,6 +195,31 @@ describe("DraftProperties", () => {
     expect(calls.find((call) => call.name === "state")?.["preload"]).toBe(true);
     expect(calls.find((call) => call.name === "member")?.["preload"]).toBe(true);
     expect(labelRead).toHaveBeenCalledWith(SLUG, PROJECT, true);
+  });
+
+  it("leaves the state picker plain in the community build (ISS-233)", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    registerEditionIssuesProviders({
+      workflowRules: { refusal: () => ({ reason: "no rule should be asked" }) },
+    });
+    const { calls } = renderStrip();
+    expect(calls.find((call) => call.name === "state")?.["optionGate"]).toBeUndefined();
+  });
+
+  it("greys the draft's refused states when the workflow is on (ISS-233)", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: { refusal: ({ toStateId }) => (toStateId === REFUSED ? { reason: "Parked here" } : null) },
+    });
+    const { calls } = renderStrip(draft({ state_id: STATE }));
+    const gate = calls.find((call) => call.name === "state")?.["optionGate"] as (option: {
+      id: string;
+    }) => { disabled: boolean; reason?: string } | undefined;
+    expect(gate({ id: REFUSED })).toEqual({ disabled: true, reason: "Parked here" });
+    expect(gate({ id: STATE })).toEqual({ disabled: false });
   });
 
   it("bounds each calendar by the stored counterpart day", () => {

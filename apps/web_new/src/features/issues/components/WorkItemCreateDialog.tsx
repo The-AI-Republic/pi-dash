@@ -42,6 +42,7 @@ import { isAssistantConfigured, useAssistantConfig } from "../../home/index.js";
 import { useAppInstanceBootstrap } from "../../instance/index.js";
 import { useCreateWorkItem } from "../api/create.js";
 import { executionTargetFieldError } from "../api/executionTarget.js";
+import { createStateRefusal, creationStateGate, stateOptionGate } from "../edition/workflow.js";
 import { DiscardDraftDialog } from "../create/DiscardDraftDialog.js";
 import {
   DRAFT_SAVE_FAILED_INLINE_TITLE,
@@ -523,6 +524,10 @@ export function WorkItemCreateDialog({
   const [baseline, setBaseline] = React.useState<EditBaseline | null>(null);
   const [fieldError, setFieldError] = React.useState<string | null>(null);
   const [executionError, setExecutionError] = React.useState<string | null>(null);
+  // A create whose chosen state the workflow refuses: the picker greys the
+  // row, and this is where a stale pick that slipped through is named
+  // before anything is posted (ISS-233).
+  const [stateError, setStateError] = React.useState<string | null>(null);
   const [createMore, setCreateMore] = React.useState(false);
   const [parentHit, setParentHit] = React.useState<IssueSearchHit | null>(seededParent);
   const [discardOpen, setDiscardOpen] = React.useState(false);
@@ -717,6 +722,15 @@ export function WorkItemCreateDialog({
       ),
     [offered]
   );
+  // The state picker carries the workflow gate: a create asks the rules
+  // about a first state, an edit about the row it opened with, and a
+  // project-less draft has nothing to ask (ISS-233).
+  const stateGate =
+    projectId === ""
+      ? undefined
+      : edit !== null
+        ? stateOptionGate(projectId, baseline?.form.stateId ?? null)
+        : creationStateGate(projectId);
   const busy =
     create.isPending ||
     writeEdit.isPending ||
@@ -760,6 +774,7 @@ export function WorkItemCreateDialog({
     setForm(seededForm(nextProjectId, form.name));
     setFieldError(null);
     setExecutionError(null);
+    setStateError(null);
     setParentHit(seededParent);
     setEditorGeneration((current) => current + 1);
     if (!editing) storeWorkItemDraft(workspaceSlug, { title: form.name, projectId: nextProjectId });
@@ -864,6 +879,15 @@ export function WorkItemCreateDialog({
     const named = { ...form, name: title };
     if (edit !== null) {
       return submitEdit(named);
+    }
+    // Creation obeys the same transition rules as an edit (ISS-233): a
+    // state the workflow refuses is reported here instead of being filed.
+    // The form only reaches here under a project (a draft never does), so
+    // there is a project to ask.
+    const refusal = createStateRefusal({ projectId, stateId: named.stateId });
+    if (refusal !== null) {
+      setStateError(refusal.reason);
+      return false;
     }
     create.mutate(
       {
@@ -1260,10 +1284,19 @@ export function WorkItemCreateDialog({
                 workspaceSlug={workspaceSlug}
                 projectId={projectId}
                 value={form.stateId}
-                onChange={(stateId) => patch({ stateId })}
+                onChange={(stateId) => {
+                  setStateError(null);
+                  patch({ stateId });
+                }}
                 disabled={busy}
                 tabIndex={MODAL_TAB_ORDER.state}
+                optionGate={stateGate}
               />
+              {stateError === null ? null : (
+                <p role="alert" className="text-meta text-(--danger)">
+                  {stateError}
+                </p>
+              )}
             </FieldSlot>
             <FieldSlot label="Runs on">
               <PodPicker

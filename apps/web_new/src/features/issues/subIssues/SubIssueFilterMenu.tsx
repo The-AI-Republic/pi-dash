@@ -22,6 +22,8 @@ import {
 } from "../filters/rich/legacyDimensions.js";
 import { selectedIds } from "../filters/rich/filterValues.js";
 import { FilterSection, type FilterSectionOption } from "../filters/shared/FilterSection.js";
+import { EditionAppliedChips, EditionFilterSections } from "../edition/EditionFilterSections.js";
+import { editionFilterCount, type EditionChip, type EditionFilters } from "../edition/filterModel.js";
 import { usePickerProjects, usePickerStates } from "../../../shared/pickers/reference.js";
 import {
   PRIORITY_ICONS,
@@ -65,6 +67,15 @@ export interface SubIssueFilterMenuProps {
   onToggle: (key: SubIssueFilterKey, value: string) => void;
   /** Replace the date dimension's entries (presets plus custom). */
   onSetDate: (key: "start_date" | "target_date", values: readonly string[]) => void;
+  /**
+   * Edition-only dimensions (team-project scoping and work-item type,
+   * ISS-234). Absent keeps the community dropdown exactly as it was: no
+   * extra section and no chip row.
+   */
+  editionFilters?: EditionFilters | undefined;
+  onToggleEdition?: ((key: keyof EditionFilters, value: string) => void) | undefined;
+  editionChips?: readonly EditionChip[] | undefined;
+  onRemoveEditionChip?: ((chip: EditionChip) => void) | undefined;
 }
 
 function priorityRows(): FilterSectionOption[] {
@@ -207,11 +218,18 @@ export function SubIssueFilterMenu({
   offered = SUB_ISSUE_FILTER_KEYS,
   onToggle,
   onSetDate,
+  editionFilters,
+  onToggleEdition,
+  editionChips,
+  onRemoveEditionChip,
 }: SubIssueFilterMenuProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const states = usePickerStates(workspaceSlug, projectId, open && offered.includes("state"));
   const projects = usePickerProjects(workspaceSlug, open && offered.includes("project"));
-  const count = appliedFilterCount(filters);
+  // The edition dimensions count towards the trigger's applied total: the
+  // old rich-filter button counted every active dimension it rendered
+  // (ISS-234). Absent edition filters leave the community total unchanged.
+  const count = appliedFilterCount(filters) + (editionFilters === undefined ? 0 : editionFilterCount(editionFilters));
 
   const stateRows: FilterSectionOption[] = (states.data ?? []).map((state) => {
     const Icon = STATE_GROUP_ICONS[state.group];
@@ -246,6 +264,11 @@ export function SubIssueFilterMenu({
       }
     >
       <div className="divide-y divide-(--border)" data-testid="sub-issue-filters-panel">
+        {editionChips === undefined || editionChips.length === 0 || onRemoveEditionChip === undefined ? null : (
+          <div className="p-(--space-2)">
+            <EditionAppliedChips chips={editionChips} onRemove={onRemoveEditionChip} />
+          </div>
+        )}
         <FilterSection
           title={SUB_ISSUE_FILTER_LABELS.priority}
           kind="multi"
@@ -305,6 +328,15 @@ export function SubIssueFilterMenu({
             className="py-(--space-2)"
           />
         ) : null}
+        {editionFilters === undefined || onToggleEdition === undefined ? null : (
+          <EditionFilterSections
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            open={open}
+            filters={editionFilters}
+            onToggle={onToggleEdition}
+          />
+        )}
         {offered.includes("start_date") ? (
           <DateSection
             dimension="start_date"
