@@ -35,6 +35,9 @@ export const analyticsKeys = {
     yAxis: AnalyticsYAxis,
     groupBy: AnalyticsXAxis | null
   ) => [...analyticsKeys.all(workspaceSlug), "charts", "custom-work-items", projectIds, xAxis, yAxis, groupBy] as const,
+  /** State breakdown under one normalized project scope. */
+  stats: (workspaceSlug: string, projectIds: readonly string[]) =>
+    [...analyticsKeys.all(workspaceSlug), "stats", "work-items", projectIds] as const,
   /** Per-project stats under one normalized project scope. */
   projectStats: (workspaceSlug: string, projectIds: readonly string[]) =>
     [...analyticsKeys.all(workspaceSlug), "project-stats", projectIds] as const,

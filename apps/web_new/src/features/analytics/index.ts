@@ -15,6 +15,7 @@ export {
 } from "./api/charts.js";
 export type { AnalyticsCustomChartSelection } from "./api/charts.js";
 export { analyticsProjectStatsQueryOptions, useAnalyticsProjectStats } from "./api/projectStats.js";
+export { analyticsStatsQueryOptions, useAnalyticsStats } from "./api/stats.js";
 export { analyticsTotalsQueryOptions, useAnalyticsTotals } from "./api/totals.js";
 export { ActiveProjectsSection } from "./components/ActiveProjectsSection.js";
 export type { ActiveProjectsSectionProps } from "./components/ActiveProjectsSection.js";
@@ -24,6 +25,10 @@ export { AnalyticsPicker } from "./components/AnalyticsPicker.js";
 export type { AnalyticsPickerProject, AnalyticsPickerProps } from "./components/AnalyticsPicker.js";
 export { AnalyticsScreen } from "./components/AnalyticsScreen.js";
 export type { AnalyticsScreenProps } from "./components/AnalyticsScreen.js";
+export { AnalyticsTable } from "./components/AnalyticsTable.js";
+export type { AnalyticsTableProps } from "./components/AnalyticsTable.js";
+export { StateBreakdownSection } from "./components/StateBreakdownSection.js";
+export type { StateBreakdownSectionProps } from "./components/StateBreakdownSection.js";
 export { AnalyticsTabStrip } from "./components/AnalyticsTabStrip.js";
 export type { AnalyticsTabStripProps } from "./components/AnalyticsTabStrip.js";
 export { CreatedResolvedSection } from "./components/CreatedResolvedSection.js";
@@ -112,3 +117,20 @@ export {
   selectAnalyticsTab,
 } from "./lib/tabs.js";
 export type { AnalyticsTabId } from "./lib/tabs.js";
+export {
+  breakdownRows,
+  breakdownTableColumns,
+  customSegmentValue,
+  customSplitKeys,
+  customTableColumns,
+  customTableRows,
+  filterByFirstColumn,
+  rowCountLabel,
+} from "./lib/table.js";
+export type {
+  AnalyticsColumn,
+  AnalyticsColumnAlign,
+  BreakdownProject,
+  BreakdownRow,
+  CustomTableRow,
+} from "./lib/table.js";

@@ -11,16 +11,25 @@ export interface FieldScaffoldProps {
   hint?: string | undefined;
   error?: string | undefined;
   fieldId: string;
+  /** Keep the label for assistive tech but hide it visually. */
+  hideLabel?: boolean;
   children: (describedBy: string | undefined) => React.ReactNode;
 }
 
-export function FieldScaffold({ label, hint, error, fieldId, children }: FieldScaffoldProps): React.ReactElement {
+export function FieldScaffold({
+  label,
+  hint,
+  error,
+  fieldId,
+  hideLabel = false,
+  children,
+}: FieldScaffoldProps): React.ReactElement {
   const hintId = `${fieldId}-hint`;
   const errorId = `${fieldId}-error`;
   const describedBy = error ? errorId : hint ? hintId : undefined;
   return (
     <div className="flex flex-col gap-(--space-2)">
-      <label htmlFor={fieldId} className="text-body font-medium text-(--text)">
+      <label htmlFor={fieldId} className={hideLabel ? "sr-only" : "text-body font-medium text-(--text)"}>
         {label}
       </label>
       {children(describedBy)}
