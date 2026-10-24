@@ -9,6 +9,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   boardColumns,
+  boardCreateInitialValues,
+  boardHasMore,
+  boardPageCursor,
   boardPrefill,
   boardQuickAddDisabledReason,
   effectiveSubGroup,
@@ -16,9 +19,11 @@ import {
   groupedBoard,
   laneKeys,
   laneTotal,
+  mergeBoardPage,
   showsGroup,
   subGroupedBoard,
   subGroupedColumns,
+  type BoardData,
 } from "./model.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -298,5 +303,375 @@ describe("showsGroup", () => {
     expect(showsGroup(0, true)).toBe(true);
     expect(showsGroup(0, false)).toBe(false);
     expect(showsGroup(2, false)).toBe(true);
+  });
+});
+
+describe("boardHasMore and boardPageCursor", () => {
+  it("compares loaded rows against the total", () => {
+    expect(boardHasMore(1, 4)).toBe(true);
+    expect(boardHasMore(4, 4)).toBe(false);
+  });
+
+  it("asks for the page starting at the loaded count", () => {
+    expect(boardPageCursor(0, 30)).toBe("30:0:0");
+    expect(boardPageCursor(30, 30)).toBe("30:1:0");
+    expect(boardPageCursor(10, 10)).toBe("10:1:0");
+  });
+});
+
+function boardData(overrides: Partial<BoardData> = {}): BoardData {
+  return {
+    columns: [{ key: STATE, title: "Todo", total: 4 }],
+    lanes: [
+      {
+        key: "",
+        title: "",
+        total: 4,
+        cells: { [STATE]: { columnKey: STATE, rows: [row()], total: 4 } },
+      },
+    ],
+    subGrouped: false,
+    total: 4,
+    ...overrides,
+  };
+}
+
+describe("mergeBoardPage", () => {
+  it("appends later rows per cell without duplicates and refreshes totals", () => {
+    const current = boardData();
+    const incoming = boardData({
+      columns: [{ key: STATE, title: "Todo", total: 5 }],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 5,
+          cells: {
+            [STATE]: {
+              columnKey: STATE,
+              rows: [row(), row({ id: "next", name: "Ship it" })],
+              total: 5,
+            },
+          },
+        },
+      ],
+      total: 5,
+    });
+    const merged = mergeBoardPage(current, incoming);
+    expect(merged.columns[0]?.total).toBe(5);
+    expect(merged.lanes[0]?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual([
+      "123e4567-e89b-12d3-a456-426614174000",
+      "next",
+    ]);
+    expect(merged.lanes[0]?.cells[STATE]?.total).toBe(5);
+    expect(merged.total).toBe(5);
+  });
+
+  it("joins cells, lanes and columns the first page never saw", () => {
+    const current = boardData();
+    const incoming = boardData({
+      columns: [
+        { key: STATE, title: "Todo", total: 4 },
+        { key: "done", title: "Done", total: 1 },
+      ],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 4,
+          cells: {
+            [STATE]: { columnKey: STATE, rows: [row()], total: 4 },
+            done: { columnKey: "done", rows: [row({ id: "d" })], total: 1 },
+          },
+        },
+        {
+          key: "bug",
+          title: "Bug",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "b" })], total: 1 } },
+        },
+      ],
+      total: 6,
+    });
+    const merged = mergeBoardPage(current, incoming);
+    expect(merged.columns.map((column) => column.key)).toEqual([STATE, "done"]);
+    expect(merged.lanes.map((lane) => lane.key)).toEqual(["", "bug"]);
+    expect(merged.lanes[0]?.cells["done"]?.rows).toHaveLength(1);
+  });
+
+  it("keeps columns and lanes the later page drops", () => {
+    const current = boardData({
+      columns: [
+        { key: STATE, title: "Todo", total: 4 },
+        { key: "done", title: "Done", total: 1 },
+      ],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 4,
+          cells: { [STATE]: { columnKey: STATE, rows: [row()], total: 4 } },
+        },
+        { key: "bug", title: "Bug", total: 1, cells: {} },
+      ],
+    });
+    const merged = mergeBoardPage(current, boardData());
+    expect(merged.columns.map((column) => column.key)).toEqual([STATE, "done"]);
+    expect(merged.lanes.map((lane) => lane.key)).toEqual(["", "bug"]);
+  });
+
+  it("merges a later grouped page into the requesting column only", () => {
+    const current = boardData({
+      columns: [
+        { key: STATE, title: "Todo", total: 4 },
+        { key: "done", title: "Done", total: 3 },
+      ],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 7,
+          cells: {
+            [STATE]: { columnKey: STATE, rows: [row(), row({ id: "a2" })], total: 4 },
+            done: { columnKey: "done", rows: [row({ id: "b1" })], total: 3 },
+          },
+        },
+      ],
+      total: 7,
+    });
+    const incoming = boardData({
+      columns: [
+        { key: STATE, title: "Todo", total: 4 },
+        { key: "done", title: "Done", total: 5 },
+        { key: "fresh", title: "Fresh", total: 1 },
+      ],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 10,
+          cells: {
+            [STATE]: { columnKey: STATE, rows: [row({ id: "a3" })], total: 4 },
+            done: { columnKey: "done", rows: [row({ id: "wrong-window" })], total: 5 },
+            fresh: { columnKey: "fresh", rows: [row({ id: "c1" })], total: 1 },
+          },
+        },
+        {
+          key: "bug",
+          title: "Bug",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "stray" })], total: 1 } },
+        },
+      ],
+      total: 11,
+    });
+    const merged = mergeBoardPage(current, incoming, { kind: "column", columnKey: STATE });
+    expect(merged.lanes[0]?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual([
+      "123e4567-e89b-12d3-a456-426614174000",
+      "a2",
+      "a3",
+    ]);
+    expect(merged.lanes[0]?.cells["done"]?.rows.map((entry) => entry.id)).toEqual(["b1"]);
+    expect(merged.lanes[0]?.cells["done"]?.total).toBe(5);
+    expect(merged.lanes[0]?.cells["fresh"]).toBeUndefined();
+    expect(merged.columns.map((column) => column.key)).toEqual([STATE, "done"]);
+    expect(merged.lanes.map((lane) => lane.key)).toEqual([""]);
+    expect(merged.total).toBe(11);
+  });
+
+  it("merges a later cell page into the requesting cell only", () => {
+    const current = boardData({
+      subGrouped: true,
+      columns: [{ key: STATE, title: "Todo", total: 2 }],
+      lanes: [
+        {
+          key: "bug",
+          title: "Bug",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row()], total: 1 } },
+        },
+        {
+          key: "None",
+          title: "None",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "n1" })], total: 1 } },
+        },
+      ],
+      total: 2,
+    });
+    const incoming = boardData({
+      subGrouped: true,
+      columns: [{ key: STATE, title: "Todo", total: 3 }],
+      lanes: [
+        {
+          key: "bug",
+          title: "",
+          total: 2,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "b2" })], total: 2 } },
+        },
+        {
+          key: "None",
+          title: "",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "wrong-window" })], total: 1 } },
+        },
+        {
+          key: "fresh",
+          title: "Fresh",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "f1" })], total: 1 } },
+        },
+      ],
+      total: 4,
+    });
+    const merged = mergeBoardPage(current, incoming, { kind: "cell", columnKey: STATE, laneKey: "bug" });
+    expect(merged.lanes[0]?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual([
+      "123e4567-e89b-12d3-a456-426614174000",
+      "b2",
+    ]);
+    expect(merged.lanes[1]?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual(["n1"]);
+    expect(merged.lanes.map((lane) => lane.key)).toEqual(["bug", "None"]);
+  });
+
+  it("joins a newly discovered owner lane with only the owner cell", () => {
+    const current = boardData({
+      subGrouped: true,
+      columns: [{ key: STATE, title: "Todo", total: 1 }],
+      lanes: [
+        {
+          key: "None",
+          title: "None",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "n1" })], total: 1 } },
+        },
+      ],
+      total: 1,
+    });
+    const incoming = boardData({
+      subGrouped: true,
+      columns: [
+        { key: STATE, title: "Todo", total: 2 },
+        { key: "done", title: "Done", total: 1 },
+      ],
+      lanes: [
+        {
+          key: "None",
+          title: "",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "wrong-window" })], total: 1 } },
+        },
+        {
+          key: "bug",
+          title: "Bug",
+          total: 2,
+          cells: {
+            [STATE]: { columnKey: STATE, rows: [row({ id: "b1" })], total: 1 },
+            done: { columnKey: "done", rows: [row({ id: "d1" })], total: 1 },
+          },
+        },
+      ],
+      total: 3,
+    });
+    const merged = mergeBoardPage(current, incoming, { kind: "cell", columnKey: STATE, laneKey: "bug" });
+    const bug = merged.lanes.find((lane) => lane.key === "bug");
+    expect(Object.keys(bug?.cells ?? {})).toEqual([STATE]);
+    expect(bug?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual(["b1"]);
+    expect(merged.columns.map((column) => column.key)).toEqual([STATE]);
+    expect(merged.lanes[0]?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual(["n1"]);
+  });
+
+  it("keeps column pages out of named lanes", () => {
+    const current = boardData({
+      subGrouped: true,
+      columns: [{ key: STATE, title: "Todo", total: 1 }],
+      lanes: [
+        {
+          key: "bug",
+          title: "Bug",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row()], total: 1 } },
+        },
+      ],
+      total: 1,
+    });
+    const incoming = boardData({
+      subGrouped: true,
+      columns: [{ key: STATE, title: "Todo", total: 2 }],
+      lanes: [
+        {
+          key: "bug",
+          title: "",
+          total: 2,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "b2" })], total: 2 } },
+        },
+      ],
+      total: 2,
+    });
+    const merged = mergeBoardPage(current, incoming, { kind: "column", columnKey: STATE });
+    expect(merged.lanes[0]?.cells[STATE]?.rows).toHaveLength(1);
+    expect(merged.lanes[0]?.cells[STATE]?.total).toBe(2);
+  });
+
+  it("joins a newly discovered owner column with its cell", () => {
+    const current = boardData({
+      columns: [{ key: STATE, title: "Todo", total: 1 }],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 1,
+          cells: { [STATE]: { columnKey: STATE, rows: [row()], total: 1 } },
+        },
+      ],
+      total: 1,
+    });
+    const incoming = boardData({
+      columns: [
+        { key: STATE, title: "Todo", total: 1 },
+        { key: "done", title: "Done", total: 1 },
+      ],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 2,
+          cells: {
+            [STATE]: { columnKey: STATE, rows: [row({ id: "wrong-window" })], total: 1 },
+            done: { columnKey: "done", rows: [row({ id: "d1" })], total: 1 },
+          },
+        },
+      ],
+      total: 2,
+    });
+    const merged = mergeBoardPage(current, incoming, { kind: "column", columnKey: "done" });
+    expect(merged.columns.map((column) => column.key)).toEqual([STATE, "done"]);
+    expect(merged.lanes[0]?.cells["done"]?.rows.map((entry) => entry.id)).toEqual(["d1"]);
+    expect(merged.lanes[0]?.cells[STATE]?.rows).toHaveLength(1);
+  });
+});
+
+describe("boardCreateInitialValues", () => {
+  it("translates the cell prefill to the dialog's values", () => {
+    expect(
+      boardCreateInitialValues({
+        state_id: STATE,
+        priority: "high",
+        assignee_ids: ["member"],
+        label_ids: [LABEL],
+        cycle_id: "cycle",
+        module_ids: ["module"],
+      })
+    ).toEqual({
+      stateId: STATE,
+      priority: "high",
+      assigneeIds: ["member"],
+      labelIds: [LABEL],
+      cycleId: "cycle",
+      moduleIds: ["module"],
+    });
+  });
+
+  it("leaves the form blank without a prefill", () => {
+    expect(boardCreateInitialValues({})).toEqual({});
   });
 });

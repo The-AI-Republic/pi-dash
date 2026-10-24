@@ -1,14 +1,17 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// One board card (parity/specs/issues.md §5, ISS-033/034). The card is a
-// real link to the work item, so middle-click and "open in a new tab"
-// keep working; a plain click hands the row to the board, which opens the
-// peek panel on a wide viewport and navigates on a narrow one. Contents
-// are the identifier, the name clamped to a single line with the full
-// name as its tooltip, a quick-action menu that stays visible on narrow
-// viewports, and the shared property strip limited to the displayed
-// properties. A create the server has not confirmed yet renders inert.
+// One board card (parity/specs/issues.md §5, ISS-033/034, ISS-037). The
+// card is a real link to the work item, so middle-click and "open in a
+// new tab" keep working; a plain click hands the row to the board, which
+// opens the peek panel on a wide viewport and navigates on a narrow one.
+// Contents are the identifier, the name clamped to a single line with
+// the full name as its tooltip, a quick-action menu that stays visible
+// on narrow viewports, and the shared property strip limited to the
+// displayed properties. A create the server has not confirmed yet
+// renders inert. A press that travels past the threshold hands the card
+// to the board's drag instead of opening it; presses starting on the
+// card's own controls never drag.
 
 import type { IssueListItem, State } from "@pidash/api-client";
 import { Menu, cn } from "@pidash/kit";
@@ -20,6 +23,7 @@ import type { DisplayFeatureFlags } from "../display/matrix.js";
 import { isPropertyShown } from "../display/matrix.js";
 import { isTempRowId } from "../freshness/fresh.js";
 import { InlinePropertyStrip } from "../list/InlinePropertyStrip.js";
+import { BOARD_DRAG_THRESHOLD_PX } from "./drag.js";
 
 /** Identifier the board prints for one row, e.g. "WEB-12". */
 export function cardKey(projectIdentifier: string, issue: Pick<IssueListItem, "sequence_id">): string {
@@ -59,7 +63,18 @@ export interface KanbanCardProps {
   onOpen: (issue: IssueListItem) => void;
   /** Copies the card's address; the shell toasts the outcome. */
   onCopyLink: (issue: IssueListItem) => void;
+  /** False on read-only boards and touch layouts; unconfirmed rows never drag. */
+  draggable?: boolean | undefined;
+  /** Hands the card to the board's drag once the press travels. */
+  onDragStart?: ((issue: IssueListItem, event: React.PointerEvent<HTMLElement>) => void) | undefined;
+  /** True while this card is the drag source. */
+  dragging?: boolean | undefined;
+  /** True briefly after the card lands from a drop. */
+  dropped?: boolean | undefined;
 }
+
+/** Card controls a drag press ignores (the card link itself may drag). */
+const DRAG_DEAD_CONTROLS = "button, [role='menuitem'], input, select, textarea";
 
 export function KanbanCard(props: KanbanCardProps): React.ReactElement {
   const { issue, projectIdentifier, groupKey, laneKey, properties, peeked } = props;
@@ -67,18 +82,93 @@ export function KanbanCard(props: KanbanCardProps): React.ReactElement {
   const unconfirmed = isTempRowId(issue.id);
   const key = cardKey(projectIdentifier, issue);
   const showKey = isPropertyShown(properties, "key");
+  const articleRef = React.useRef<HTMLElement | null>(null);
+  const pressRef = React.useRef<{ x: number; y: number } | null>(null);
+  const dragListenersRef = React.useRef<(() => void) | null>(null);
+  const draggedRef = React.useRef(false);
+  const highlighted = peeked || props.dropped === true;
+
+  React.useEffect(
+    () => () => {
+      dragListenersRef.current?.();
+    },
+    []
+  );
+
+  React.useEffect(() => {
+    // Environments without layout (tests, SSR snapshots) lack the call.
+    if (props.dropped === true) articleRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [props.dropped]);
+
+  function stopTracking(): void {
+    pressRef.current = null;
+    dragListenersRef.current?.();
+    dragListenersRef.current = null;
+  }
+
+  /**
+   * Once a press starts, watch the whole document rather than just the
+   * card. A real drag leaves the card on its way to the destination, so
+   * card-local pointermove listeners would go quiet before the movement
+   * threshold is crossed.
+   */
+  function trackPointer(): void {
+    const onDragStart = props.onDragStart;
+    if (onDragStart === undefined) return;
+    // Deliberately no pointer capture: capture keeps up events on this
+    // card, so the board would never see the release. The board resolves
+    // the drop from the document instead.
+    const onMove = (moveEvent: PointerEvent): void => {
+      const press = pressRef.current;
+      if (press === null) return;
+      const dx = moveEvent.clientX - press.x;
+      const dy = moveEvent.clientY - press.y;
+      if (Math.hypot(dx, dy) < BOARD_DRAG_THRESHOLD_PX) return;
+      pressRef.current = null;
+      draggedRef.current = true;
+      dragListenersRef.current?.();
+      dragListenersRef.current = null;
+      onDragStart(issue, moveEvent as unknown as React.PointerEvent<HTMLElement>);
+    };
+    const onEnd = (): void => stopTracking();
+    globalThis.document.addEventListener("pointermove", onMove);
+    globalThis.document.addEventListener("pointerup", onEnd);
+    globalThis.document.addEventListener("pointercancel", onEnd);
+    dragListenersRef.current = () => {
+      globalThis.document.removeEventListener("pointermove", onMove);
+      globalThis.document.removeEventListener("pointerup", onEnd);
+      globalThis.document.removeEventListener("pointercancel", onEnd);
+    };
+  }
+
   return (
     <article
+      ref={articleRef}
       data-testid="kanban-card"
       data-issue-id={issue.id}
       data-group-key={groupKey}
       data-lane-key={laneKey ?? ""}
       data-peeked={peeked ? "true" : undefined}
       data-unconfirmed={unconfirmed ? "true" : undefined}
+      data-dragging={props.dragging === true ? "true" : undefined}
+      onPointerDown={(event) => {
+        if (props.draggable !== true || unconfirmed) return;
+        if ((event.target as Element).closest(DRAG_DEAD_CONTROLS) !== null) return;
+        draggedRef.current = false;
+        pressRef.current = { x: event.clientX, y: event.clientY };
+        trackPointer();
+      }}
+      onPointerUp={() => {
+        stopTracking();
+      }}
+      onPointerCancel={() => {
+        stopTracking();
+      }}
       className={cn(
         "group/card flex flex-col gap-(--space-1) rounded-(--radius-control) border bg-(--surface) p-(--space-3) text-left",
-        peeked ? "border-(--accent) ring-1 ring-(--accent)" : "border-(--border) hover:border-(--text-muted)",
-        unconfirmed ? "animate-pulse" : ""
+        highlighted ? "border-(--accent) ring-1 ring-(--accent)" : "border-(--border) hover:border-(--text-muted)",
+        unconfirmed ? "animate-pulse" : "",
+        props.dragging === true ? "opacity-50" : ""
       )}
     >
       <div className="flex items-center gap-(--space-2)">
@@ -90,7 +180,19 @@ export function KanbanCard(props: KanbanCardProps): React.ReactElement {
           aria-label={unconfirmed ? `${issue.name}, saving` : key}
           aria-disabled={unconfirmed ? true : undefined}
           tabIndex={unconfirmed ? -1 : undefined}
+          draggable={false}
+          onDragStart={(event) => {
+            // A native link drag would swallow the pointerup that ends our
+            // drag, leaving the board's drag state armed for a later click.
+            event.preventDefault();
+            stopTracking();
+            draggedRef.current = false;
+          }}
           onClick={(event) => {
+            if (draggedRef.current) {
+              draggedRef.current = false;
+              return;
+            }
             if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
             event.preventDefault();
             if (!unconfirmed) props.onOpen(issue);
