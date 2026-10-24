@@ -110,7 +110,7 @@
       "note": "Refusal ignores run ownership: ANY active run on THIS issue named by the header refuses (see foreign_active_on_issue_refused). Malformed/unknown ids are allowed through."
     },
     "permission_matrix": {
-      "source": "app/permissions/project.py:56-143; declarations views/issue.py (Entity default, Lite :1802/:1958 comments, Member :1319/:1445 labels, IsAuthenticated :1266 yield); page/github_pr/git_code_review Entity",
+      "source": "app/permissions/project.py:56-143; declarations views/issue.py (Entity default, Lite :1802/:1958 comments, Entity :1320/:1446 labels (PDASHOSS01-239; was Member), IsAuthenticated :1266 yield); page/github_pr/git_code_review Entity",
       "matrix": {
         "anon_list": {
           "status": 401,
@@ -220,7 +220,7 @@
             "parent": null
           }
         },
-        "guest_label_create_memberperm": {
+        "guest_label_create_entity": {
           "status": 403,
           "body": {
             "detail": "You do not have permission to perform this action."
@@ -276,7 +276,6 @@
       "rules": {
         "ProjectEntityPermission": "SAFE: any active project member. Unsafe: role ADMIN/MEMBER only (guests 403).",
         "ProjectLitePermission": "ANY active project member, all methods (guests can comment).",
-        "ProjectMemberPermission": "SAFE: any active member in workspace. POST: workspace ADMIN/MEMBER. Other unsafe: project ADMIN/MEMBER.",
         "IsAuthenticated": "Any authenticated caller (agent-runs yield)."
       }
     },
