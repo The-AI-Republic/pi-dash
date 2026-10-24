@@ -8,7 +8,7 @@
 // nothing when no update waits, which is also the web bundle's whole story.
 
 import { ArrowUpCircle } from "lucide-react";
-import { Button, Spinner, Tooltip } from "@pidash/kit";
+import { Button, IconButton, Spinner, Tooltip } from "@pidash/kit";
 import * as React from "react";
 
 import { platform } from "../../core/platform/index.js";
@@ -48,27 +48,25 @@ export function DesktopUpdateControlView({ state }: DesktopUpdateControlViewProp
   const currentVersionId = React.useId();
 
   return (
-    <div data-testid="desktop-update-control" className="flex shrink-0 items-center">
+    <div data-testid="desktop-update-control" className="relative flex shrink-0 items-center">
       <Tooltip
         content={busy ? updateInstallingHint(update.version) : updateReadyHint(update.version, update.currentVersion)}
       >
-        <Button
+        <IconButton
+          label={name}
           variant="secondary"
           size="small"
-          aria-label={name}
           aria-describedby={currentVersionId}
           disabled={busy}
           aria-busy={busy || undefined}
           onClick={install}
-          className="max-w-40"
         >
           {busy ? (
             <Spinner size="small" label={updateInstallingHint(update.version)} />
           ) : (
             <ArrowUpCircle size={14} strokeWidth={1.75} aria-hidden="true" />
           )}
-          <span className="truncate">{name}</span>
-        </Button>
+        </IconButton>
       </Tooltip>
       {/* Both versions stay on the accessible surface even where the
           sidebar is too narrow to print them. */}
@@ -76,9 +74,13 @@ export function DesktopUpdateControlView({ state }: DesktopUpdateControlViewProp
         {`You are on ${update.currentVersion}`}
       </span>
       {failure === null ? null : (
-        <div role="alert" data-testid="desktop-update-failure" className="flex items-center gap-1 pl-(--space-1)">
+        <div
+          role="alert"
+          data-testid="desktop-update-failure"
+          className="shadow-popover absolute right-0 bottom-full z-50 mb-(--space-2) flex w-48 flex-col gap-(--space-2) rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-3)"
+        >
           <span className="text-meta text-(--danger)">{failure}</span>
-          <Button variant="ghost" size="small" onClick={install}>
+          <Button variant="secondary" size="small" onClick={install} className="self-end">
             {UPDATE_RETRY_LABEL}
           </Button>
         </div>

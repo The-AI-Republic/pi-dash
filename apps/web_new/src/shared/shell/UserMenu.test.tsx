@@ -33,6 +33,9 @@ describe("UserMenu", () => {
     setup();
     const trigger = screen.getByTestId("sidebar-user-menu");
     expect(trigger).toHaveAttribute("data-keep-open", "true");
+    // The trigger takes the flexible row width; adjacent controls keep
+    // their own box instead of covering its pointer target.
+    expect(trigger).toHaveClass("w-full", "min-w-0");
     expect(within(trigger).getByText("Ada Lovelace")).toBeInTheDocument();
     expect(within(trigger).getByText("ada@example.com")).toBeInTheDocument();
   });
