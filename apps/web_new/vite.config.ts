@@ -189,7 +189,11 @@ export default defineConfig(({ mode }) => {
           // barrel (NEWFRONT-870, perf budgets). The modules contract is
           // lazy-only as well: its schemas' module-scope initializers
           // otherwise pin the unused contract into the initial chunk
-          // through the api-client barrel (NEWFRONT-870, size gate).
+          // through the api-client barrel (NEWFRONT-870, size gate). The
+          // activity feed rules are pure and read only by the feed rows,
+          // its header and the pref stores, all lazy-only; listing them
+          // stops the issues barrel pinning the rules into the first-route
+          // chunk (NEWFRONT-871, size gate).
           // Every other module keeps the default: a blanket false reshapes
           // the TanStack route splits the size gate keys on.
           moduleSideEffects: (id) =>
@@ -207,6 +211,7 @@ export default defineConfig(({ mode }) => {
             id.includes("features/issues/subIssues/SubIssueDisplayMenu.") ||
             id.includes("features/issues/subIssues/AddExistingDialog.") ||
             id.includes("features/issues/layouts/ViewLayoutBody.") ||
+            id.includes("features/issues/activity/model.") ||
             id.includes("features/issues/detail/widgets/attachments/AttachmentsWidget.") ||
             id.includes("packages/api-client/src/contracts/modules.")
               ? false

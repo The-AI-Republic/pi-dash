@@ -11,7 +11,9 @@ import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import { Spinner } from "@pidash/kit";
 import * as React from "react";
 
-import { DetailMissingState } from "../../../../../../features/issues/index.js";
+// Deep import: the barrel is eager through the router tree and would
+// pin the whole issues feature here (NEWFRONT-871, size gate).
+import { DetailMissingState } from "../../../../../../features/issues/detail/DetailMissingState.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/$issueId")({
   // NOTE (NEWFRONT-852, size gate): the short-link resolve stays behind a

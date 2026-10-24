@@ -8,7 +8,7 @@
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
-import { getCycle, type ApiClient, type CycleRow } from "@pidash/api-client";
+import type { ApiClient, CycleRow } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/index.js";
 
@@ -20,7 +20,13 @@ export const cycleDetailKeys = {
 export function cycleDetailQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string, cycleId: string) {
   return queryOptions<CycleRow>({
     queryKey: cycleDetailKeys.detail(workspaceSlug, projectId, cycleId),
-    queryFn: () => getCycle(client, workspaceSlug, projectId, cycleId),
+    // The contract loads with the first read: eager route modules import
+    // this module, and a static contract import would put the whole cycles
+    // schema set on the initial chain (NEWFRONT-871, size gate).
+    queryFn: async () => {
+      const { getCycle } = await import("@pidash/api-client");
+      return getCycle(client, workspaceSlug, projectId, cycleId);
+    },
     staleTime: REFERENCE_STALE_TIME_MS,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,

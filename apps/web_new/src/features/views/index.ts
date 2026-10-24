@@ -11,6 +11,13 @@ export type { ToggleViewFavoriteInput } from "./api/viewFavorites.js";
 export { ProjectViewsListScreen } from "./components/ProjectViewsListScreen.js";
 export { loadSavedViewDetail, resolvedSavedViewDetail } from "./detail/lazy.js";
 export { loadWorkspaceViewDetail, resolvedWorkspaceViewDetail } from "./detail/lazy.js";
+// The workspace detail screen, header and switcher are reachable only
+// through loadWorkspaceViewDetail()'s dynamic import. They used to be
+// re-exported here, which pinned the whole screen — and through it the
+// issue list, create dialog and filter builder — onto every eager route
+// module that imports this barrel (NEWFRONT-729; NEWFRONT-871, size gate).
+// Import them from "./detail/WorkspaceView*.js" when a direct reference
+// is needed.
 export type { SavedViewScreenProps } from "./detail/SavedViewScreen.js";
 export { SavedViewHeader } from "./detail/SavedViewHeader.js";
 export type { SavedViewHeaderProps } from "./detail/SavedViewHeader.js";

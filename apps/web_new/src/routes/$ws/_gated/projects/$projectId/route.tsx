@@ -13,7 +13,16 @@ import * as React from "react";
 
 import { ProjectAccessGate } from "../../../../../features/auth/index.js";
 import { ProjectTabStrip } from "../../../../../features/projects/index.js";
-import { ViewsPaletteEntries } from "../../../../../features/views/index.js";
+// Deferred below the initial chain (NEWFRONT-871, size gate): the entries
+// only register palette commands and their jump page, so they can land
+// after the layout paints — the same shape the workspace entries take in
+// the gated layout. A static import here would put the views dialog and
+// its create-form chain on every project page's first load.
+const ViewsPaletteEntries = React.lazy(() =>
+  import("../../../../../features/views/palette/ViewsPaletteEntries.js").then((module) => ({
+    default: module.ViewsPaletteEntries,
+  }))
+);
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId")({
   component: ProjectLayoutComponent,

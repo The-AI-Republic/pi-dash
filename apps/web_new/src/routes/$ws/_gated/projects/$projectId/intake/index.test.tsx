@@ -448,17 +448,14 @@ describe("intake route create dialog (INT-013/INT-015)", () => {
 });
 
 describe("retired project inbox route (INT-001)", () => {
-  it("redirects the old address onto the canonical intake screen", () => {
+  it("redirects the old address onto the canonical intake screen", async () => {
     const beforeLoad = InboxRoute.options.beforeLoad as unknown as (args: {
       params: { ws: string; projectId: string };
-    }) => void;
-    expect(() => beforeLoad({ params: { ws: "acme", projectId: PROJECT_ID } })).toThrow();
-    try {
-      beforeLoad({ params: { ws: "acme", projectId: PROJECT_ID } });
-    } catch (thrown) {
-      expect(thrown).toMatchObject({
-        options: { href: `/acme/projects/${PROJECT_ID}/intake`, statusCode: 307 },
-      });
-    }
+    }) => Promise<void>;
+    // The forwarder's module rides a dynamic import (NEWFRONT-871, size
+    // gate), so the redirect now rejects the returned promise.
+    await expect(beforeLoad({ params: { ws: "acme", projectId: PROJECT_ID } })).rejects.toMatchObject({
+      options: { href: `/acme/projects/${PROJECT_ID}/intake`, statusCode: 307 },
+    });
   });
 });

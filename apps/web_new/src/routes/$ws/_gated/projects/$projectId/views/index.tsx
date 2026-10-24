@@ -8,7 +8,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ProjectViewsListScreen } from "../../../../../../features/views/index.js";
+// Deep import: this route module is eager, so the views barrel would pin
+// every dialog and screen it re-exports onto the initial chain
+// (NEWFRONT-871, size gate).
+import { ProjectViewsListScreen } from "../../../../../../features/views/components/ProjectViewsListScreen.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/")({
   component: ViewsComponent,

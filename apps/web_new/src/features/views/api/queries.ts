@@ -8,7 +8,7 @@
 // acting user's own writes only.
 
 import { queryOptions } from "@tanstack/react-query";
-import { listProjectViews, listWorkspaceViews, type ApiClient } from "@pidash/api-client";
+import type { ApiClient } from "@pidash/api-client";
 
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import { viewKeys } from "./keys.js";
@@ -21,7 +21,13 @@ import { viewKeys } from "./keys.js";
 export function projectViewsQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string) {
   return queryOptions({
     queryKey: viewKeys.projectList(workspaceSlug, projectId),
-    queryFn: () => listProjectViews(client, workspaceSlug, projectId),
+    // Contracts load with the first read: the project layout route imports
+    // this module eagerly, so a static contract import would put the whole
+    // views schema set on the initial chain (NEWFRONT-871, size gate).
+    queryFn: async () => {
+      const { listProjectViews } = await import("@pidash/api-client");
+      return listProjectViews(client, workspaceSlug, projectId);
+    },
     staleTime: LIST_STALE_TIME_MS,
   });
 }
@@ -34,7 +40,10 @@ export function projectViewsQueryOptions(client: ApiClient, workspaceSlug: strin
 export function workspaceViewsQueryOptions(client: ApiClient, workspaceSlug: string) {
   return queryOptions({
     queryKey: viewKeys.workspaceList(workspaceSlug),
-    queryFn: () => listWorkspaceViews(client, workspaceSlug, { orderBy: "-created_at" }),
+    queryFn: async () => {
+      const { listWorkspaceViews } = await import("@pidash/api-client");
+      return listWorkspaceViews(client, workspaceSlug, { orderBy: "-created_at" });
+    },
     staleTime: LIST_STALE_TIME_MS,
   });
 }

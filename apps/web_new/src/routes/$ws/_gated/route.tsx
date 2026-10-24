@@ -38,7 +38,11 @@ import {
   workspacesQueryOptions,
 } from "../../../core/session/index.js";
 import { runSignOutAction, signOutCommand, useSignOut, useUpdateProfile } from "../../../features/auth/index.js";
-import { QuickCreateButton, WorkItemCreateEntry } from "../../../features/issues/index.js";
+// Deep imports: both entries are shell-level and small, and the issues
+// barrel also pins the first route's lazy-only leaves into the shell
+// chunk (NEWFRONT-871, size gate).
+import { QuickCreateButton } from "../../../features/issues/components/QuickCreateButton.js";
+import { WorkItemCreateEntry } from "../../../features/issues/components/WorkItemCreateEntry.js";
 import { unreadNotificationsQueryOptions } from "../../../features/notifications/index.js";
 import { projectsQueryOptions, selectSidebarProjects, SidebarProjectsGroup } from "../../../features/projects/index.js";
 import {
@@ -74,7 +78,6 @@ import {
 } from "../../../shared/shell/index.js";
 import { isWorkspaceSettingsRouteId } from "../../../features/workspace-settings/lib/routeId.js";
 import { ToastHost } from "@pidash/kit";
-import { resolveSearchTarget } from "./searchTarget.js";
 
 // Deferred below the initial shell chain (Quality gates budget): the
 // palette catalogs register once their chunk lands, and the creation
@@ -226,7 +229,14 @@ export const Route = createFileRoute("/$ws/_gated")({
           onSelectProject={(projectId) =>
             navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: params.ws, projectId }, search: {} })
           }
-          onSelectSearchResult={(hit: SearchResultHit) => navigate(resolveSearchTarget(hit, params.ws))}
+          onSelectSearchResult={(hit: SearchResultHit) => {
+            // The resolver rides the palette's own chunk: it only runs once
+            // someone picks a server hit, and the route module is eager
+            // (NEWFRONT-871, size gate).
+            void import("./searchTarget.js").then((module) => {
+              void navigate(module.resolveSearchTarget(hit, params.ws));
+            });
+          }}
           onNavigateHref={(href: string) => navigate({ href })}
           onSignOut={() => {
             void runSignOutAction(

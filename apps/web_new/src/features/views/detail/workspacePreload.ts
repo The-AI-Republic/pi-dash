@@ -12,13 +12,13 @@ import type { ApiClient } from "@pidash/api-client";
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
-  globalIssuesQueryOptions,
   loadIssueFilters,
   loadRichFilterBuilder,
   loadSavedViewEmptyCard,
   orderByFromDisplayFilters,
   withRichFilters,
 } from "../../issues/index.js";
+import { globalIssuesQueryOptions } from "../../issues/global/queries.js";
 import { workspaceViewDetailQueryOptions } from "../api/detail.js";
 import { workspaceViewsQueryOptions } from "../api/queries.js";
 import { findVisibleCustomView, findWorkspaceDefaultView } from "./workspaceDetail.js";

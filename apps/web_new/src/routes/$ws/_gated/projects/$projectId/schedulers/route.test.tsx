@@ -25,7 +25,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   };
 });
 
-import { Route, ProjectSchedulersSectionComponent, schedulerSectionTabs } from "./route.js";
+import { Route, schedulerSectionTabs } from "./route.js";
 
 afterEach(() => {
   router.pathname = "/acme/projects/p1/schedulers/list";
@@ -59,6 +59,10 @@ describe("schedulerSectionTabs", () => {
     expect(schedulerSectionTabs(`${BASE}/b1`, BASE).some((tab) => tab.active)).toBe(false);
   });
 });
+
+// The section body is route-split, so it is reached through the route like
+// a visitor does rather than as a module export (NEWFRONT-871, size gate).
+const ProjectSchedulersSectionComponent = Route.options.component!;
 
 describe("ProjectSchedulersSectionComponent", () => {
   it("renders both tabs with the current one marked and the tab body below", () => {

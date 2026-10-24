@@ -7,10 +7,9 @@
 
 import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
 
-import { legacySettingsForward } from "../../../../../features/settings/lib/legacyForwards.js";
-
 export const Route = createFileRoute("/$ws/_gated/settings/account/$")({
-  beforeLoad: ({ location }) => {
+  beforeLoad: async ({ location }) => {
+    const { legacySettingsForward } = await import("../../../../../features/settings/lib/legacyForwards.js");
     const forward = legacySettingsForward(location.pathname, location.searchStr);
     if (forward === null) throw notFound();
     throw redirect({ href: forward.href });

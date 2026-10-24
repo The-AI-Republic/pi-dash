@@ -16,49 +16,51 @@ interface Redirected {
   options: { href: string };
 }
 
-function thrown(run: () => unknown): unknown {
+async function thrown(run: () => unknown): Promise<unknown> {
   try {
-    run();
+    await run();
   } catch (error) {
     return error;
   }
   return null;
 }
 
-function forwardOf(run: () => unknown): string {
-  const error = thrown(run);
+async function forwardOf(run: () => unknown): Promise<string> {
+  const error = await thrown(run);
   expect(isRedirect(error)).toBe(true);
   return (error as Redirected).options.href;
 }
 
 describe("legacy settings forwards", () => {
-  it("takes the bare settings address to the general tab", () => {
+  it("takes the bare settings address to the general tab", async () => {
     expect(
-      forwardOf(() =>
+      await forwardOf(() =>
         SettingsIndex.options.beforeLoad?.({ location: { pathname: "/settings/", searchStr: "" } } as never)
       )
     ).toBe("/settings/profile/general");
   });
 
-  it("takes bare profile and account addresses to the general tab", () => {
+  it("takes bare profile and account addresses to the general tab", async () => {
     expect(
-      forwardOf(() => Profile.options.beforeLoad?.({ location: { pathname: "/profile/", searchStr: "?a=1" } } as never))
+      await forwardOf(() =>
+        Profile.options.beforeLoad?.({ location: { pathname: "/profile/", searchStr: "?a=1" } } as never)
+      )
     ).toBe("/settings/profile/general?a=1");
     expect(
-      forwardOf(() =>
+      await forwardOf(() =>
         Account.options.beforeLoad?.({ location: { pathname: "/acme/settings/account/", searchStr: "" } } as never)
       )
     ).toBe("/settings/profile/general");
   });
 
-  it("maps legacy tab segments to the matching tab", () => {
+  it("maps legacy tab segments to the matching tab", async () => {
     expect(
-      forwardOf(() =>
+      await forwardOf(() =>
         Profile.options.beforeLoad?.({ location: { pathname: "/profile/security/", searchStr: "" } } as never)
       )
     ).toBe("/settings/profile/security");
     expect(
-      forwardOf(() =>
+      await forwardOf(() =>
         Account.options.beforeLoad?.({
           location: { pathname: "/acme/settings/account/notifications/", searchStr: "?x=1" },
         } as never)
@@ -66,9 +68,9 @@ describe("legacy settings forwards", () => {
     ).toBe("/settings/profile/notifications?x=1");
   });
 
-  it("defaults an unknown legacy tab to the general tab", () => {
+  it("defaults an unknown legacy tab to the general tab", async () => {
     expect(
-      forwardOf(() =>
+      await forwardOf(() =>
         Account.options.beforeLoad?.({
           location: { pathname: "/acme/settings/account/bogus/", searchStr: "" },
         } as never)
@@ -76,8 +78,8 @@ describe("legacy settings forwards", () => {
     ).toBe("/settings/profile/general");
   });
 
-  it("answers a deeper address with the not-found page", () => {
-    const error = thrown(() =>
+  it("answers a deeper address with the not-found page", async () => {
+    const error = await thrown(() =>
       Profile.options.beforeLoad?.({
         location: { pathname: "/profile/security/extra", searchStr: "" },
       } as never)
@@ -85,9 +87,9 @@ describe("legacy settings forwards", () => {
     expect(isNotFound(error)).toBe(true);
   });
 
-  it("maps the workspace tokens address to the tokens tab with its query", () => {
+  it("maps the workspace tokens address to the tokens tab with its query", async () => {
     expect(
-      forwardOf(() =>
+      await forwardOf(() =>
         ApiTokens.options.beforeLoad?.({
           location: { pathname: "/acme/settings/api-tokens/", searchStr: "?page=2" },
         } as never)

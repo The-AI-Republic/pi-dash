@@ -19,7 +19,6 @@ import { edition } from "../../../core/edition/index.js";
 import { useMe, usePermissions, useWorkspace } from "../../../core/session/index.js";
 import {
   DisplayControl,
-  GlobalIssuesScreen,
   isLayoutKind,
   LazyIssueFilters,
   LayoutSwitcher,
@@ -38,6 +37,7 @@ import {
   type RichExpression,
   type WorkItemCreateProject,
 } from "../../issues/index.js";
+import { GlobalIssuesScreen } from "../../issues/global/GlobalIssuesScreen.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { notifyError, useDocumentHead } from "../../../shared/shell/index.js";
 import { viewKeys } from "../api/keys.js";

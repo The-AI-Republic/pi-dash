@@ -10,7 +10,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { LabelsSettings } from "../../../../../../features/issues/index.js";
+// Deep import: the barrel is eager through the router tree and would pin
+// the whole issues feature here (NEWFRONT-871, size gate).
+import { LabelsSettings } from "../../../../../../features/issues/labels/LabelsSettings.js";
 import { ProjectSettingsScreen } from "../../../../../../features/project-settings/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/labels")({

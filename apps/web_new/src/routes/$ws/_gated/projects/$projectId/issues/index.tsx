@@ -18,19 +18,16 @@ import * as React from "react";
 
 import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js";
 import { isProjectGateError } from "../../../../../../features/auth/index.js";
-import {
-  DisplayControl,
-  IssuesLayoutRoot,
-  ListSkeleton,
-  issuesQueryOptions,
-  parseIssueSearch,
-  prefsQueryOptions,
-  resolveActiveLayout,
-  useWeekStart,
-  selectCreatableProjects,
-  type LayoutKind,
-  type WorkItemCreateProject,
-} from "../../../../../../features/issues/index.js";
+import { DisplayControl } from "../../../../../../features/issues/display/DisplayControl.js";
+import { IssuesLayoutRoot } from "../../../../../../features/issues/layouts/IssuesLayoutRoot.js";
+import { resolveActiveLayout, type LayoutKind } from "../../../../../../features/issues/layouts/kinds.js";
+import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
+import { issuesQueryOptions } from "../../../../../../features/issues/api/queries.js";
+import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
+import { prefsQueryOptions } from "../../../../../../features/issues/prefs/prefsQuery.js";
+import { useWeekStart } from "../../../../../../features/issues/dropdowns/weekStart.js";
+import { selectCreatableProjects } from "../../../../../../features/issues/create/createForm.js";
+import type { WorkItemCreateProject } from "../../../../../../features/issues/components/WorkItemCreateDialog.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { ProjectIssuesEmptyState, loadProjectEmptyState } from "../../../../../../features/issues/emptyStates/lazy.js";
 import {
@@ -59,7 +56,10 @@ import { LazyIssueFilters, preloadIssueFilters } from "../../../../../../feature
 // Start the filter chunk with the route module so the first layout render
 // does not suspend and mount the layout twice (NEWFRONT-619).
 preloadIssueFilters();
-import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
+// Deep import: the issues barrel is eager through this route, so a
+// feature barrel here would pin every project-only module into the
+// first-route chain (NEWFRONT-871, size gate).
+import { projectsQueryOptions } from "../../../../../../features/projects/api/queries.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";
 
