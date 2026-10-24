@@ -33,9 +33,12 @@
 //! text and param parsers live in
 //! `pidash_services::v1_work_items::queries_search` (Q3, PIDASHCONV-670)
 //! over `app_views_search::fts`; the advanced row assembly is
-//! `queries_search::{advanced_result, advanced_envelope}`; the success
-//! datetime rendering is `crate::serializer::render_datetime_in`;
-//! auth/preamble/rewrite/query helpers are reused from
+//! `queries_search::{advanced_result, advanced_envelope}`; the move's
+//! success datetime rendering is
+//! `crate::serializer::render_datetime_in` (the `IssueSerializer`
+//! `DateTimeField` path), while the advanced rows render UTC
+//! (`crate::serializer::render_datetime` — raw `.values()` datetimes,
+//! no `DateTimeField`); auth/preamble/rewrite/query helpers are reused from
 //! [`super::handlers_social`]. This module owns the HTTP shells: the
 //! move's `ProjectEntityPermission` POST gate, the search AuthOnly gate
 //! (both search views inherit `IsAuthenticated` from `BaseAPIView` and
@@ -192,7 +195,7 @@ use crate::orchestration::{
     drain_creation_outboxes, handoff_store, split_outboxes, CreationDrainError, CreationOutboxes,
     SpanCreationDeps,
 };
-use crate::serializer::render_datetime_in;
+use crate::serializer::{render_datetime, render_datetime_in};
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json_cpython::{
@@ -815,11 +818,13 @@ struct AdvancedDecoded {
 
 /// Decode one advanced `values()` row by POSITION (`:2860-2875` order —
 /// `name` repeats across issues/states/projects, so by-name decoding
-/// would collide). Datetimes render in the request timezone
-/// (`TimezoneMixin`); `_rank` is `ts_rank`'s `real`.
+/// would collide). Datetimes render UTC with a `Z` suffix: the view
+/// copies raw `.values()` datetimes into a plain dict (`:2912-2914`)
+/// with no DRF `DateTimeField`, so `TimezoneMixin` has no effect and
+/// DRF's `JSONEncoder` emits `isoformat()` with `+00:00` rewritten to
+/// `Z`; `_rank` is `ts_rank`'s `real`.
 fn decode_advanced_row(
     row: &sqlx::postgres::PgRow,
-    tz: &Tz,
 ) -> Result<(AdvancedDecoded, i32, Option<f32>), Denial> {
     let id: Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
     let sequence_id: i32 = row.try_get(1).map_err(|_| Denial::ServerError)?;
@@ -840,9 +845,9 @@ fn decode_advanced_row(
             id: id.to_string(),
             name,
             headline,
-            created_at: render_datetime_in(&created_at, tz),
-            updated_at: render_datetime_in(&updated_at, tz),
-            completed_at: completed_at.as_ref().map(|dt| render_datetime_in(dt, tz)),
+            created_at: render_datetime(&created_at),
+            updated_at: render_datetime(&updated_at),
+            completed_at: completed_at.as_ref().map(render_datetime),
             state_name,
             state_group,
             project_id: project_id.to_string(),
@@ -877,7 +882,9 @@ async fn search_advanced_inner(
     let pre = preamble(state, headers, slug).await?;
     // AuthOnly gate (see `search_inner`): the authenticated caller
     // reaches the handler body for any slug.
-    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    // Timezone activation still gates unknown zones (400); the decoded
+    // datetimes render UTC (see `decode_advanced_row`).
+    let _tz = activate_timezone(pre.actor.timezone.as_deref())?;
     if q::parse_advanced_query(query_last(query, "q").as_deref()).is_none() {
         return Ok(json_response(
             StatusCode::OK,
@@ -892,7 +899,7 @@ async fn search_advanced_inner(
     );
     let mut rendered = Vec::with_capacity(rows.len());
     for row in &rows {
-        let (decoded, sequence_id, rank) = decode_advanced_row(row, &tz)?;
+        let (decoded, sequence_id, rank) = decode_advanced_row(row)?;
         let url = pidash_services::v1_work_items::shape_issue::issue_url(
             web_base.as_deref(),
             Some(&decoded.workspace_slug),
