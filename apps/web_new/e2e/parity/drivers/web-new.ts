@@ -393,6 +393,19 @@ export function archivesSkeletonObserverBoot(): void {
   observer.observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
 }
 
+/**
+ * Selector for the detail header's module-actions trigger (MOD-024/025).
+ * The trigger is the menu's IconButton itself, so the selector names it by
+ * its own attribute; filtering the scope's children by a *descendant*
+ * testid would never match it. `visibleOnly` adds Playwright's
+ * `:visible` pseudo-class to the scope; without it the same composition is
+ * plain CSS a unit test can run over the real rendered markup.
+ */
+export function moduleActionsTriggerSelector(options: { visibleOnly?: boolean } = {}): string {
+  const scope = options.visibleOnly === true ? 'div[data-main-menu="true"]:visible' : 'div[data-main-menu="true"]';
+  return `${scope} button[data-testid="module-actions-trigger"]`;
+}
+
 export class WebNewDriver implements ParityDriver {
   readonly target: ParityTarget = "web_new";
   readonly page: Page;
@@ -18163,10 +18176,7 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByTestId("module-detail-crumbs").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesDetailOpenMenu(): Promise<void> {
-    const trigger = this.page
-      .locator('div[data-main-menu="true"]:visible > button')
-      .filter({ has: this.page.getByTestId("module-actions-trigger") })
-      .first();
+    const trigger = this.page.locator(moduleActionsTriggerSelector({ visibleOnly: true })).first();
     await trigger.click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }

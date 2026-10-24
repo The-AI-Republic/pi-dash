@@ -10,9 +10,26 @@
 // the hook a method reads or the control it activates; no browser runs.
 
 import type { Locator, Page } from "@playwright/test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { WebNewDriver } from "./web-new";
+const routerHarness = vi.hoisted(() => ({ navigate: vi.fn() }));
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useNavigate: () => routerHarness.navigate,
+}));
+
+import { createAppClient, resetAppClient } from "../../../src/core/api/client.js";
+import { ModuleDetailActions } from "../../../src/features/modules/components/dialogs/ModuleDetailActions.js";
+import {
+  jsonResponse,
+  makeProjectRow,
+  MODULES_MODULE_ID,
+  MODULES_PROJECT_ID,
+} from "../../../src/features/modules/testing.js";
+import { moduleActionsTriggerSelector, WebNewDriver } from "./web-new";
 
 interface Answer {
   count?: number;
@@ -178,6 +195,8 @@ function saveDialogTable(extra: Table = {}): Table {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  resetAppClient();
+  for (const stray of document.querySelectorAll("body > div:not([data-testid])")) stray.remove();
 });
 
 describe("header and zero-state creation entry points", () => {
@@ -450,25 +469,73 @@ describe("failure shaping", () => {
   });
 });
 
+function renderDetailActions(props: { canEdit: boolean } = { canEdit: true }): void {
+  createAppClient("https://api.test", (async (url: string) => {
+    if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
+    if (url.endsWith("/api/users/me/")) return jsonResponse(url, 500, {});
+    return jsonResponse(url, 200, makeProjectRow());
+  }) as never);
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <ModuleDetailActions
+        workspaceSlug="acme"
+        projectId={MODULES_PROJECT_ID}
+        moduleId={MODULES_MODULE_ID}
+        canEdit={props.canEdit}
+      />
+    </QueryClientProvider>
+  );
+}
+
 describe("detail menu and delete confirmation", () => {
-  it("opens the detail menu through the module actions trigger", async () => {
-    const fake = new FakePage({
-      'page css(div[data-main-menu="true"]:visible > button) has(page testid(module-actions-trigger),)': {
-        count: 1,
-      },
-    });
+  const triggerLocatorKey = `page css(${moduleActionsTriggerSelector({ visibleOnly: true })})`;
+
+  it("asks the page for the composed trigger selector and clicks it", async () => {
+    const fake = new FakePage({ [triggerLocatorKey]: { count: 1 }, "page role(menuitem,)": { count: 1 } });
     await new WebNewDriver(fake.asPage()).modulesDetailOpenMenu();
-    expect(fake.clicks.some((id) => id.includes("module-actions-trigger"))).toBe(true);
+    expect(fake.clicks).toEqual([triggerLocatorKey]);
   });
 
   it("delegates the long-form detail menu opener", async () => {
-    const fake = new FakePage({
-      'page css(div[data-main-menu="true"]:visible > button) has(page testid(module-actions-trigger),)': {
-        count: 1,
-      },
-    });
+    const fake = new FakePage({ [triggerLocatorKey]: { count: 1 }, "page role(menuitem,)": { count: 1 } });
     await new WebNewDriver(fake.asPage()).modulesOpenDetailMenu();
     expect(fake.clicks).toHaveLength(1);
+  });
+
+  // The fake page above answers whatever selector it is handed, so on its
+  // own it can only show that the driver clicks what it asked for. These
+  // cases run the selector over the real header markup instead: the
+  // trigger is the menu's IconButton itself, so a descendant search inside
+  // each scope child — the shape the old locator used — finds nothing.
+  it("matches exactly the module actions trigger on the rendered detail menu", async () => {
+    renderDetailActions();
+    await screen.findByTestId("module-actions-trigger");
+
+    const matches = document.querySelectorAll(moduleActionsTriggerSelector());
+    expect(matches).toHaveLength(1);
+    expect(matches[0]).toBe(screen.getByTestId("module-actions-trigger"));
+    expect(matches[0]).toHaveAccessibleName("Module actions");
+
+    const descendantMatches = Array.from(document.querySelectorAll('div[data-main-menu="true"] > button')).filter(
+      (button) => button.querySelector('[data-testid="module-actions-trigger"]') !== null
+    );
+    expect(descendantMatches).toHaveLength(0);
+  });
+
+  it("ignores a module actions trigger outside the header menu", async () => {
+    renderDetailActions();
+    await screen.findByTestId("module-actions-trigger");
+    const stray = document.createElement("div");
+    stray.innerHTML = '<button data-testid="module-actions-trigger">Elsewhere</button>';
+    document.body.append(stray);
+
+    expect(document.querySelectorAll(moduleActionsTriggerSelector())).toHaveLength(1);
+    expect(moduleActionsTriggerSelector({ visibleOnly: true })).toContain('div[data-main-menu="true"]:visible');
+  });
+
+  it("renders nothing for a guest, so the selector finds no trigger", () => {
+    renderDetailActions({ canEdit: false });
+    expect(document.querySelectorAll(moduleActionsTriggerSelector())).toHaveLength(0);
   });
 
   it("chooses a detail menu entry by title", async () => {
