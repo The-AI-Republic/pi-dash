@@ -439,11 +439,14 @@ pub const VIEW_ISSUE_ROW_COLUMNS: &str = "issue.id, issue.name, issue.state_id, 
 ///
 /// Binds: `$1` workspace slug, `$2` user id. `order_by_sql` is the fragment
 /// from [`view_issues_order_sql`]; `complex_where` / `legacy_where` are the
-/// `filter_queryset` / `issue_filters` fragments (see [`combine_filters`]).
+/// `filter_queryset` / `issue_filters` fragments (see [`combine_filters`]);
+/// `joins` is the caller's relation-join fragment (leading space when
+/// non-empty), spliced after the `pm` join, before WHERE.
 pub fn view_issues_list_sql(
     complex_where: Option<&str>,
     legacy_where: Option<&str>,
     order_by_sql: &str,
+    joins: &str,
 ) -> String {
     let mut sql = format!(
         "SELECT {rows}, {annotations} \
@@ -453,7 +456,7 @@ pub fn view_issues_list_sql(
          LEFT JOIN {state} AS state ON state.id = issue.state_id \
             AND state.deleted_at IS NULL \
          JOIN {pm} AS pm ON pm.project_id = issue.project_id \
-            AND pm.deleted_at IS NULL \
+            AND pm.deleted_at IS NULL{joins} \
          WHERE w.slug = ($1) AND {scope} AND {perm}",
         rows = VIEW_ISSUE_ROW_COLUMNS,
         annotations = view_issue_annotation_selects(),
@@ -462,6 +465,7 @@ pub fn view_issues_list_sql(
         ws = WORKSPACE_TABLE,
         state = STATE_TABLE,
         pm = PROJECT_MEMBER_TABLE,
+        joins = joins,
         scope = issue_manager_scope("issue", "p"),
         perm = project_permission_filter("$2"),
     );
@@ -474,8 +478,13 @@ pub fn view_issues_list_sql(
 
 /// Count statement for the paginator total (`base.py:235-236`): a deepcopy
 /// of the filtered queryset with `.only("id")`, i.e. `COUNT(*)` over the
-/// pre-annotation query. Same binds as [`view_issues_list_sql`].
-pub fn view_issues_count_sql(complex_where: Option<&str>, legacy_where: Option<&str>) -> String {
+/// pre-annotation query. Same binds as [`view_issues_list_sql`]; `joins` is
+/// the caller's relation-join fragment, spliced before WHERE like the list's.
+pub fn view_issues_count_sql(
+    complex_where: Option<&str>,
+    legacy_where: Option<&str>,
+    joins: &str,
+) -> String {
     let mut sql = format!(
         "SELECT COUNT(*) FROM {issue} AS issue \
          JOIN {proj} AS p ON p.id = issue.project_id AND p.deleted_at IS NULL \
@@ -483,13 +492,14 @@ pub fn view_issues_count_sql(complex_where: Option<&str>, legacy_where: Option<&
          LEFT JOIN {state} AS state ON state.id = issue.state_id \
             AND state.deleted_at IS NULL \
          JOIN {pm} AS pm ON pm.project_id = issue.project_id \
-            AND pm.deleted_at IS NULL \
+            AND pm.deleted_at IS NULL{joins} \
          WHERE w.slug = ($1) AND {scope} AND {perm}",
         issue = ISSUE_TABLE,
         proj = PROJECT_TABLE,
         ws = WORKSPACE_TABLE,
         state = STATE_TABLE,
         pm = PROJECT_MEMBER_TABLE,
+        joins = joins,
         scope = issue_manager_scope("issue", "p"),
         perm = project_permission_filter("$2"),
     );
@@ -709,6 +719,7 @@ mod tests {
             Some("complex = TRUE"),
             Some("legacy = TRUE"),
             &order.order_by_sql,
+            "",
         );
         assert!(list.contains("w.slug = ($1)"), "{list}");
         assert!(list.contains("pm.member_id = ($2)"), "{list}");
@@ -720,7 +731,7 @@ mod tests {
         assert!(list.contains("AS sub_issues_count"), "{list}");
         assert!(list.ends_with("ORDER BY -created_at"), "{list}");
 
-        let count = view_issues_count_sql(Some("complex = TRUE"), Some("legacy = TRUE"));
+        let count = view_issues_count_sql(Some("complex = TRUE"), Some("legacy = TRUE"), "");
         assert!(count.starts_with("SELECT COUNT(*)"), "{count}");
         assert!(count.contains("w.slug = ($1)"), "{count}");
         assert!(count.contains("pm.member_id = ($2)"), "{count}");
@@ -740,12 +751,44 @@ mod tests {
     #[test]
     fn permission_fragment_uses_declared_issue_alias() {
         let order = view_issues_order_sql(DEFAULT_ORDER_BY);
-        let list = view_issues_list_sql(None, None, &order.order_by_sql);
-        let count = view_issues_count_sql(None, None);
+        let list = view_issues_list_sql(None, None, &order.order_by_sql, "");
+        let count = view_issues_count_sql(None, None, "");
         for sql in [&list, &count] {
             assert!(sql.contains("issue.created_by_id = ($2)"), "{sql}");
             assert!(!sql.contains("i.created_by_id"), "{sql}");
         }
+    }
+
+    // Regression (PIDASHCONV-1446): the relation-join fragment splices
+    // after the `pm` join, before WHERE, on both statements. Splicing it
+    // after the WHERE clause (before ORDER BY, or appended at the end of
+    // the count statement) is a syntax error.
+    #[test]
+    fn filter_joins_splice_before_where_on_both_statements() {
+        let joins = " INNER JOIN issue_assignees AS issue_assignee \
+            ON issue_assignee.issue_id = issue.id";
+        let order = view_issues_order_sql(DEFAULT_ORDER_BY);
+        let list = view_issues_list_sql(
+            Some("\"issue_assignee\".\"assignee_id\" = 'x'"),
+            None,
+            &order.order_by_sql,
+            joins,
+        );
+        let join_at = list.find("INNER JOIN issue_assignees").expect("join");
+        // The annotation subqueries carry their own WHEREs; anchor on the
+        // statement-level `WHERE w.slug`.
+        let where_at = list.find("WHERE w.slug").expect("where");
+        let order_at = list.find(" ORDER BY ").expect("order by");
+        assert!(join_at < where_at && where_at < order_at, "{list}");
+        let count = view_issues_count_sql(
+            Some("\"issue_assignee\".\"assignee_id\" = 'x'"),
+            None,
+            joins,
+        );
+        let join_at = count.find("INNER JOIN issue_assignees").expect("join");
+        let where_at = count.find("WHERE w.slug").expect("where");
+        assert!(join_at < where_at, "{count}");
+        assert!(!count.contains("ORDER BY"), "{count}");
     }
 
     // Ordering reuses the D-26 kernel: default passes through, the
