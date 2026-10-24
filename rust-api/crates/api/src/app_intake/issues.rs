@@ -4459,19 +4459,41 @@ pub async fn collection_create(
         Err(response) => return response,
     };
     let now = Utc::now();
-    // Serialize sequence assignment the way `Issue.save` does
-    // (`db/models/issue.py:313-343`): transaction-level advisory lock on
-    // the project, `MAX+1` sequence, tag-stripped text, `MAX+10000` sort
-    // order. Lock failure degrades to the plain path.
-    let _ = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    // `assigned_pod`: explicit input wins, else the project default pod
+    // (`Issue.save`, `:277-286`) — resolved before the atomic block, like
+    // Django. It must not run on the pool after `begin`: the transaction
+    // holds one pool connection while the lock serializes creators, so a
+    // nested pool checkout would exhaust the pool under concurrent load.
+    let assigned_pod_id = match validated.assigned_pod_id {
+        Some(pod) => Some(pod),
+        None => match default_project_pod(pool, gate.project_id).await {
+            Ok(pod) => pod,
+            Err(response) => return response,
+        },
+    };
+    // `Issue.save` (`db/models/issue.py:313-343`): the transaction-scoped
+    // advisory lock is taken first, then MAX(sequence) and MAX(sort_order)
+    // are read and the issue plus its sequence row are inserted — all on
+    // one transaction, so concurrent creates serialize per project. The
+    // lock must live on the transaction: taken on the pool it would drop
+    // as soon as its own autocommit statement ends (PIDASHCONV-1430).
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(advisory_key(&gate.project_id))
-        .execute(pool)
-        .await;
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    {
+        return Denial::ServerError.into_response();
+    }
     let sequence_id: i32 = match sqlx::query_scalar::<_, Option<i64>>(
         "SELECT MAX(\"sequence\") FROM \"issue_sequences\" WHERE (\"issue_sequences\".\"project_id\" = $1)",
     )
     .bind(gate.project_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     {
         Ok(max) => max.map(|max| max + 1).unwrap_or(1) as i32,
@@ -4482,17 +4504,40 @@ pub async fn collection_create(
     )
     .bind(gate.project_id)
     .bind(triage_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     {
         Ok(max) => max.map(|max| max + 10000.0).unwrap_or(65535.0),
         Err(_) => return Denial::ServerError.into_response(),
     };
+    // `save` keeps an input sort order only when no max exists; the
+    // EXISTS check runs on the transaction like Django's MAX read.
+    let sort_order = match validated.sort_order {
+        Some(input) => {
+            let has_max: bool = match sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2))",
+            )
+            .bind(gate.project_id)
+            .bind(triage_id)
+            .fetch_one(&mut *tx)
+            .await
+            {
+                Ok(has_max) => has_max,
+                Err(_) => return Denial::ServerError.into_response(),
+            };
+            if has_max {
+                sort_order
+            } else {
+                input
+            }
+        }
+        None => sort_order,
+    };
     let issue_id = Uuid::new_v4();
-    // `IssueCreateSerializer.create` (`serializers/issue.py:387-462`) +
+    // `IssueCreateSerializer.create` (`serializers/issue.py:290-371`) +
     // `Issue.save` + `BaseModel.save` (crum `created_by`): the full row.
     if let Err(response) = insert_issue(
-        pool,
+        &mut tx,
         &gate,
         &validated,
         issue_id,
@@ -4500,7 +4545,7 @@ pub async fn collection_create(
         sequence_id,
         sort_order,
         now,
-        default_assignee_id,
+        assigned_pod_id,
     )
     .await
     {
@@ -4517,10 +4562,22 @@ pub async fn collection_create(
     .bind(gate.workspace_id)
     .bind(issue_id)
     .bind(i64::from(sequence_id))
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     {
         return db_error(error);
+    }
+    // The M2M writes, the bridge insert and the enqueues below run after
+    // the commit: Django's view is not atomic beyond `Issue.save`, so they
+    // stay outside this transaction (`serializers/issue.py:311-369`,
+    // `views/intake/base.py:265-292`).
+    if tx.commit().await.is_err() {
+        return Denial::ServerError.into_response();
+    }
+    if let Err(response) =
+        insert_issue_m2m(pool, &gate, &validated, issue_id, now, default_assignee_id).await
+    {
+        return response;
     }
     // `IntakeIssue.objects.create(...)` (`:265-272`): the intake id is
     // the FIRST intake row for the project (name ordering); the
@@ -5718,18 +5775,18 @@ async fn filter_project_labels(
 // create: Issue + m2m writes
 // ---------------------------------------------------------------------------
 
-/// `IssueCreateSerializer.create` (`serializers/issue.py:387-462`) with
-/// `Issue.save` (`db/models/issue.py:267-351`) and `BaseModel.save`
-/// (crum `created_by`, `db/models/base.py:24-46`): the full `issues` row
-/// plus assignee/label links. `sequence_id` input is always overridden;
-/// `sort_order` input survives only when no max exists (the caller
-/// resolved both); `description_stripped` is recomputed; assignees fall
-/// back to the project default; `IntegrityError` on the links is
-/// swallowed (`ON CONFLICT DO NOTHING` is the same final state).
+/// The `issues` row of `IssueCreateSerializer.create`
+/// (`serializers/issue.py:305`) with `Issue.save`
+/// (`db/models/issue.py:267-351`) and `BaseModel.save` (crum
+/// `created_by`, `db/models/base.py:24-46`), written on the caller's
+/// sequence transaction. Sort-order and pod resolution stay with the
+/// caller: the EXISTS check runs under the advisory lock like Django's
+/// MAX read, the pod lookup is a stable read outside the atomic block.
+/// The assignee/label links are [`insert_issue_m2m`], after the commit.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::result_large_err)]
 async fn insert_issue(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     gate: &crate::app_issues::Gate,
     validated: &ValidatedCreate,
     issue_id: Uuid,
@@ -5737,35 +5794,8 @@ async fn insert_issue(
     sequence_id: i32,
     sort_order: f64,
     now: DateTime<Utc>,
-    default_assignee_id: Option<Uuid>,
+    assigned_pod_id: Option<Uuid>,
 ) -> Result<(), Response> {
-    let sort_order = match validated.sort_order {
-        Some(input) => {
-            // `save` overrides only when a max exists; the caller already
-            // computed `MAX+10000` from the same table, so an input
-            // survives exactly when the max query found no row.
-            let has_max: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2))",
-            )
-            .bind(gate.project_id)
-            .bind(triage_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|_| Denial::ServerError.into_response())?;
-            if has_max {
-                sort_order
-            } else {
-                input
-            }
-        }
-        None => sort_order,
-    };
-    // `assigned_pod`: explicit input wins, else the project default pod
-    // (`Issue.save`, `:277-286`).
-    let assigned_pod_id = match validated.assigned_pod_id {
-        Some(pod) => Some(pod),
-        None => default_project_pod(pool, gate.project_id).await?,
-    };
     // `save`: `None` only when the html itself is `""`/`None`;
     // otherwise the stripped text, even when it strips to `""`.
     let description_stripped = match validated.description_html.as_deref() {
@@ -5806,13 +5836,28 @@ async fn insert_issue(
     .bind(validated.created_via.clone())
     .bind(assigned_pod_id)
     .bind(validated.agent_executor.clone())
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     {
         return Err(db_error(error));
     }
-    // Assignees (`create`, `:402-441`): validated ids, else the project
-    // default when it is an active member (`role__gte=15`).
+    Ok(())
+}
+
+/// Assignees + labels (`create`, `:311-369`): validated ids, else the
+/// project default when it is an active member (`role__gte=15`).
+/// Integrity failures are swallowed like Django's `except IntegrityError:
+/// pass`. Runs after the caller's sequence transaction commits — Django
+/// writes these after `Issue.objects.create` returns.
+#[allow(clippy::result_large_err)]
+async fn insert_issue_m2m(
+    pool: &PgPool,
+    gate: &crate::app_issues::Gate,
+    validated: &ValidatedCreate,
+    issue_id: Uuid,
+    now: DateTime<Utc>,
+    default_assignee_id: Option<Uuid>,
+) -> Result<(), Response> {
     let assignees = match &validated.assignee_ids {
         Some(ids) => ids.clone(),
         None => match default_assignee_id {
