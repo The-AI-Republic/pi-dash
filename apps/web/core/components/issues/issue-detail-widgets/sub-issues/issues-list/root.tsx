@@ -15,6 +15,7 @@ import { EIssueServiceType, EIssuesStoreType } from "@pi-dash/types";
 // hooks
 import { SectionEmptyState } from "@/components/empty-state/section-empty-state-root";
 import { getGroupByColumns, isWorkspaceLevel } from "@/components/issues/issue-layouts/utils";
+import { ListLoaderItemRow } from "@/components/ui/loader/layouts/list-layout-loader";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 
 import { SubIssuesListGroup } from "./list-group";
@@ -53,6 +54,8 @@ export const SubIssuesListRoot = observer(function SubIssuesListRoot(props: Prop
   const {
     subIssues: {
       subIssuesByIssueId,
+      subIssuePaginationByIssueId,
+      loader,
       filters: { getSubIssueFilters, getGroupedSubWorkItems, getFilteredSubWorkItems, resetFilters },
     },
   } = useIssueDetail(issueServiceType);
@@ -84,6 +87,9 @@ export const SubIssuesListRoot = observer(function SubIssuesListRoot(props: Prop
   );
 
   const isSubWorkItems = issueServiceType === EIssueServiceType.ISSUES;
+
+  const subIssuePagination = subIssuePaginationByIssueId(parentIssueId);
+  const isPaginating = loader === "pagination";
 
   return (
     <div className="relative">
@@ -126,6 +132,18 @@ export const SubIssuesListRoot = observer(function SubIssuesListRoot(props: Prop
           />
         ))
       )}
+      {subIssuePagination?.nextPageResults &&
+        (isPaginating ? (
+          <ListLoaderItemRow />
+        ) : (
+          <button
+            type="button"
+            className="relative flex h-11 w-full cursor-pointer items-center gap-3 p-3 pl-8 text-13 font-medium text-accent-primary hover:text-accent-secondary hover:underline"
+            onClick={() => subIssueOperations.fetchNextSubIssues(workspaceSlug, projectId, parentIssueId)}
+          >
+            {t("Load more")} &darr;
+          </button>
+        ))}
     </div>
   );
 });
