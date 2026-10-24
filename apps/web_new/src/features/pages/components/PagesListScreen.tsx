@@ -156,9 +156,14 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
               <div className="flex flex-wrap items-center gap-(--space-2)">
                 <PagesListTabs workspaceSlug={workspaceSlug} projectId={projectId} activeTab={tab} />
                 <span className="flex-1" aria-hidden="true" />
-                <PagesSearch query={client.query} onQueryChange={(query) => update({ query })} />
+                <PagesSearch
+                  key={`search-${projectId}`}
+                  query={client.query}
+                  onQueryChange={(query) => update({ query })}
+                />
                 <PagesSortMenu sort={client.sort} onSortChange={(sort) => update({ sort })} />
                 <PagesFilterMenu
+                  key={`filters-${projectId}`}
                   filters={client.filters}
                   creators={creators}
                   currentUserId={currentUserId}
