@@ -3081,6 +3081,14 @@ export interface ParityDriver {
   schedulerProjectEditSetEnabled(enabled: boolean): Promise<void>;
   /** The live recurrence sentence under the edit dialog's RRULE field. */
   schedulerProjectEditHumanizer(): Promise<string>;
+  /** Current builder state in the edit dialog; `visible: false` on a plain-textarea target. */
+  schedulerRecurrenceFacts(): Promise<SchedulerRecurrenceFacts>;
+  /** One builder interaction in the open edit dialog (target-only; throws on the oracle). */
+  schedulerRecurrenceAct(action: SchedulerRecurrenceAction): Promise<void>;
+  /** Toggle the advanced raw-rule disclosure; returns its expanded state. */
+  schedulerRecurrenceAdvanced(): Promise<boolean>;
+  /** Type into the raw rule textarea (opening it first when needed). */
+  schedulerRecurrenceRaw(rule: string): Promise<void>;
   /** Inline validation texts currently shown in the edit dialog. */
   schedulerProjectEditErrors(): Promise<string[]>;
   /** Submit the edit dialog; resolves on click (a rejected submit keeps it open). */
@@ -3696,6 +3704,21 @@ export interface ParityDriver {
   assistantClearTranscribeStubs(): Promise<void>;
   /** Transcribe uploads seen (multipart audio posts). */
   assistantTranscribeRequests(): Promise<{ contentType: string; hasFilePart: boolean; byteLength: number }[]>;
+  /** Whether the composer mic exists at all (a hidden cell reads false). */
+  assistantMicVisible(): Promise<boolean>;
+  /** Ask the page to notice a refocus after an operator-side flag change. */
+  assistantRefocus(): Promise<void>;
+  /** Number of speech-config reads the page has made so far. */
+  assistantSpeechConfigReads(): Promise<number>;
+  /** Statuses of the speech read/save/test/transcribe/remove endpoints, driven in the browser. */
+  assistantDictationApiProbe(): Promise<{
+    read: number;
+    readEnabled: boolean | null;
+    save: number;
+    test: number;
+    transcribe: number;
+    remove: number;
+  }>;
   /** Visible texts of buttons inside the assistant sidebar (negative proofs). */
   assistantSidebarButtons(): Promise<string[]>;
   /** Rename/archive/delete-ish controls in the assistant layout (negative proofs). */
@@ -10103,6 +10126,12 @@ export interface WsSettingsMemberRowFacts {
   settingsProfileDictationTest(): Promise<void>;
   /** Click Remove; resolves once the delete settles. */
   settingsProfileDictationRemove(): Promise<void>;
+  /** Make the next speech-config GET report the given kill-switch state. */
+  settingsProfileStubDictationEnabled(enabled: boolean): Promise<void>;
+  /** Make speech save/test/transcribe answer the kill-switch not-found. */
+  settingsProfileStubDictationWritesDisabled(): Promise<void>;
+  /** Remove the speech-config read/write stubs, leaving the real API. */
+  settingsProfileClearDictationStubs(): Promise<void>;
   /** Tool-server rows in display order. */
   settingsProfileToolServerRows(): Promise<
     { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[]
@@ -11284,6 +11313,59 @@ export interface SchedulerCalendarBlock {
   /** Computed block background color (past grey vs scheduler tint). */
   background: string;
 }
+
+/** One weekday chip in the recurrence builder, in Sunday-first display order. */
+export interface SchedulerRecurrenceWeekday {
+  name: string;
+  pressed: boolean;
+}
+
+/** Current state of the calendar-style recurrence builder. */
+export interface SchedulerRecurrenceFacts {
+  /** Whether the builder renders (the oracle still has a plain textarea). */
+  visible: boolean;
+  /** Repeat-every count, or null when the single-shot form hides it. */
+  interval: string | null;
+  /** Selected repeat unit value. */
+  unit: string | null;
+  /** Weekly chips with their pressed state. */
+  weekdays: SchedulerRecurrenceWeekday[];
+  /** Selected monthly form ("day" or "weekday"), or null outside monthly. */
+  monthlyPattern: string | null;
+  /** Monthly day-of-month value, or null when the day form hides. */
+  dayOfMonth: string | null;
+  /** Monthly nth-weekday ordinal, or null when the weekday form hides. */
+  ordinal: string | null;
+  /** Monthly weekday code, or null when the weekday form hides. */
+  weekdayOfMonth: string | null;
+  /** Selected ends mode ("never", "on" or "after"), or null when hidden. */
+  ends: string | null;
+  /** End-date input value, or null when that mode hides. */
+  endDate: string | null;
+  /** Occurrence-count input value, or null when that mode hides. */
+  occurrences: string | null;
+  /** Whether the raw rule textarea is visible. */
+  rawVisible: boolean;
+  /** Current raw rule text (the stored string while untouched). */
+  rawValue: string | null;
+  /** Whether the advanced disclosure control is offered. */
+  advancedVisible: boolean;
+  /** The live plain-language sentence under the builder. */
+  sentence: string;
+}
+
+/** One user-level interaction with the recurrence builder. */
+export type SchedulerRecurrenceAction =
+  | { kind: "interval"; value: number }
+  | { kind: "unit"; value: "none" | "day" | "week" | "month" | "year" }
+  | { kind: "weekday"; value: string }
+  | { kind: "monthly"; value: "day" | "weekday" }
+  | { kind: "day"; value: number }
+  | { kind: "ordinal"; value: string }
+  | { kind: "weekdayOfMonth"; value: string }
+  | { kind: "ends"; value: "never" | "on" | "after" }
+  | { kind: "endDate"; value: string }
+  | { kind: "occurrences"; value: number };
 
 /** One runners tab: label, link target, active marker. */
 export interface RunnersTab {

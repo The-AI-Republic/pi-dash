@@ -136,6 +136,9 @@ import type {
   SchedulerProjectInstallOption,
   SchedulerProjectRow,
   SchedulerScheduleValues,
+  SchedulerRecurrenceAction,
+  SchedulerRecurrenceFacts,
+  SchedulerRecurrenceWeekday,
   RunnersEditPodForm,
   RunnersPodTile,
   RunnersRail,
@@ -10976,6 +10979,150 @@ export class WebNewDriver implements ParityDriver {
     return this.schedulerHumanizer(this.schedulerDialog());
   }
 
+  private schedulerRecurrenceBuilder(dialog: Locator): Locator {
+    // The builder's unit select is the stable anchor: the weekday chips and
+    // monthly fields come and go with it, but the control itself always
+    // renders for an expressible rule.
+    return dialog.getByLabel("Repeat unit");
+  }
+
+  async schedulerRecurrenceFacts(): Promise<SchedulerRecurrenceFacts> {
+    const dialog = this.schedulerDialog();
+    const unitSelect = this.schedulerRecurrenceBuilder(dialog);
+    const visible = (await unitSelect.count()) > 0 && (await unitSelect.first().isVisible());
+    const rawField = dialog.getByLabel("Recurrence (RRULE)");
+    const rawVisible = (await rawField.count()) > 0 && (await rawField.first().isVisible());
+    // The textarea keeps the serialized rule even while the disclosure is
+    // collapsed, so its value is the current rule regardless of visibility.
+    const rawValue = (await rawField.count()) > 0 ? await rawField.first().inputValue() : null;
+    const sentence = await this.schedulerHumanizer(dialog).catch(() => "");
+    if (!visible) {
+      return {
+        visible: false,
+        interval: null,
+        unit: null,
+        weekdays: [],
+        monthlyPattern: null,
+        dayOfMonth: null,
+        ordinal: null,
+        weekdayOfMonth: null,
+        ends: null,
+        endDate: null,
+        occurrences: null,
+        rawVisible,
+        rawValue,
+        advancedVisible: false,
+        sentence,
+      };
+    }
+    const maybeValue = async (locator: Locator): Promise<string | null> => {
+      if ((await locator.count()) === 0 || !(await locator.first().isVisible())) return null;
+      return locator.first().inputValue();
+    };
+    const weekdayGroup = dialog.getByRole("group", { name: "Repeat on", exact: true });
+    const weekdays: SchedulerRecurrenceWeekday[] = [];
+    if ((await weekdayGroup.count()) > 0) {
+      const chips = weekdayGroup.getByRole("button");
+      const total = await chips.count();
+      for (let i = 0; i < total; i += 1) {
+        const chip = chips.nth(i);
+        weekdays.push({
+          name: (await chip.getAttribute("aria-label")) ?? "",
+          pressed: (await chip.getAttribute("aria-pressed")) === "true",
+        });
+      }
+    }
+    const endsGroup = dialog.getByRole("group", { name: "Ends", exact: true });
+    let ends: string | null = null;
+    if ((await endsGroup.count()) > 0) {
+      const checked = endsGroup.getByRole("radio", { checked: true });
+      if ((await checked.count()) > 0) ends = await checked.first().getAttribute("value");
+    }
+    const advanced = dialog.getByRole("button", { name: "Advanced: rule text", exact: true });
+    return {
+      visible,
+      interval: await maybeValue(dialog.getByLabel("Repeat interval")),
+      unit: await unitSelect.first().inputValue(),
+      weekdays,
+      monthlyPattern: await maybeValue(dialog.getByLabel("Monthly pattern")),
+      dayOfMonth: await maybeValue(dialog.getByLabel("Day of the month")),
+      ordinal: await maybeValue(dialog.getByLabel("Weekday ordinal")),
+      weekdayOfMonth: await maybeValue(dialog.getByLabel("Weekday of the month")),
+      ends,
+      endDate: await maybeValue(dialog.getByLabel("End date")),
+      occurrences: await maybeValue(dialog.getByLabel("Number of occurrences")),
+      rawVisible,
+      rawValue,
+      advancedVisible: (await advanced.count()) > 0 && (await advanced.first().isVisible()),
+      sentence,
+    };
+  }
+
+  async schedulerRecurrenceAct(action: SchedulerRecurrenceAction): Promise<void> {
+    const dialog = this.schedulerDialog();
+    switch (action.kind) {
+      case "interval":
+        await dialog.getByLabel("Repeat interval").fill(String(action.value));
+        return;
+      case "unit":
+        await dialog.getByLabel("Repeat unit").selectOption(action.value);
+        return;
+      case "weekday":
+        await dialog
+          .getByRole("group", { name: "Repeat on", exact: true })
+          .getByRole("button", { name: action.value, exact: true })
+          .click();
+        return;
+      case "monthly":
+        await dialog.getByLabel("Monthly pattern").selectOption(action.value);
+        return;
+      case "day":
+        await dialog.getByLabel("Day of the month").fill(String(action.value));
+        return;
+      case "ordinal":
+        await dialog.getByLabel("Weekday ordinal").selectOption(action.value);
+        return;
+      case "weekdayOfMonth":
+        await dialog.getByLabel("Weekday of the month").selectOption(action.value);
+        return;
+      case "ends": {
+        const label = action.value === "on" ? "On date" : action.value === "after" ? "After" : "Never";
+        await dialog
+          .getByRole("group", { name: "Ends", exact: true })
+          .getByRole("radio", { name: label, exact: true })
+          .click();
+        return;
+      }
+      case "endDate":
+        await dialog.getByLabel("End date").fill(action.value);
+        return;
+      case "occurrences":
+        await dialog.getByLabel("Number of occurrences").fill(String(action.value));
+        return;
+    }
+  }
+
+  async schedulerRecurrenceAdvanced(): Promise<boolean> {
+    const dialog = this.schedulerDialog();
+    const toggle = dialog.getByRole("button", { name: "Advanced: rule text", exact: true });
+    if ((await toggle.count()) === 0) {
+      // An inexpressible stored rule forces raw mode: there is no disclosure
+      // to toggle, and the textarea is already open.
+      return true;
+    }
+    await toggle.first().click();
+    // The disclosure renders its expanded state on the same node; a click is
+    // synchronous, so the attribute read right after it is the new state.
+    return (await toggle.first().getAttribute("aria-expanded")) === "true";
+  }
+
+  async schedulerRecurrenceRaw(rule: string): Promise<void> {
+    const dialog = this.schedulerDialog();
+    const rawField = dialog.getByLabel("Recurrence (RRULE)");
+    if (!(await rawField.first().isVisible())) await this.schedulerRecurrenceAdvanced();
+    await rawField.first().fill(rule);
+  }
+
   async schedulerProjectEditErrors(): Promise<string[]> {
     return this.schedulerModalErrors(this.schedulerDialog());
   }
@@ -13199,6 +13346,14 @@ export class WebNewDriver implements ParityDriver {
   private assistantTranscribeFailure: { status: number; body: Record<string, string> } | null = null;
   /** Transcribe uploads observed since the driver started. */
   private assistantTranscribeSeen: { contentType: string; hasFilePart: boolean; byteLength: number }[] = [];
+  /** Kill-switch state served on the speech-config read (AGT-064). */
+  private assistantDictationEnabledStub: boolean | null = null;
+  /** When set, speech save/test/transcribe answer the kill-switch not-found. */
+  private assistantDictationWritesDisabled = false;
+  private assistantDictationRoutesInstalled = false;
+  /** Speech-config GETs observed since the read spy was installed. */
+  private assistantSpeechConfigReadsSeen = 0;
+  private assistantSpeechConfigReadHandler: ((request: { url(): string; method(): string }) => void) | null = null;
   /** Desktop-gated endpoint calls observed since the watch started (AGT-059). */
   private assistantDesktopCalls: { method: string; url: string }[] = [];
   private assistantDesktopWatchHandler: ((request: { method(): string; url(): string }) => void) | null = null;
@@ -13736,6 +13891,92 @@ export class WebNewDriver implements ParityDriver {
         (disabled) => disabled,
         () => false
       );
+  }
+  async assistantMicVisible(): Promise<boolean> {
+    const mic = this.assistantMicControl();
+    if ((await mic.count()) === 0) return false;
+    return mic.first().isVisible();
+  }
+  async assistantRefocus(): Promise<void> {
+    // The operator flips the kill switch outside the app; the tab learns it
+    // on refocus. TanStack Query listens for a visibility change, so the
+    // driver hides the page and brings it back rather than moving the mouse.
+    await this.page.evaluate(() => {
+      const setState = (state: DocumentVisibilityState): void => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+      };
+      setState("hidden");
+      window.dispatchEvent(new Event("visibilitychange"));
+      setState("visible");
+      window.dispatchEvent(new Event("visibilitychange"));
+    });
+  }
+  async assistantSpeechConfigReads(): Promise<number> {
+    this.installSpeechConfigReadSpy();
+    return this.assistantSpeechConfigReadsSeen;
+  }
+  async assistantDictationApiProbe(): Promise<{
+    read: number;
+    readEnabled: boolean | null;
+    save: number;
+    test: number;
+    transcribe: number;
+    remove: number;
+  }> {
+    // The kill-switch refusals live on the backend the app talks to. Until
+    // that backend ships in this checkout the driver serves them at the
+    // browser boundary; this probe drives the same endpoints the UI would
+    // so the scenario can assert their statuses without a form to click
+    // (a flag-off settings panel is remove-only).
+    return this.page.evaluate(async () => {
+      const base = "/api/users/me/ai-assistant";
+      const readResponse = await fetch(`${base}/stt-config/`, { credentials: "include" });
+      let readEnabled: boolean | null = null;
+      try {
+        const body = (await readResponse.json()) as { enabled?: unknown };
+        readEnabled = typeof body.enabled === "boolean" ? body.enabled : null;
+      } catch {
+        readEnabled = null;
+      }
+      const save = await fetch(`${base}/stt-config/`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ base_url: "https://stt.test/v1", model_name: "whisper-1", api_key: "probe-key" }),
+      });
+      const test = await fetch(`${base}/stt-config/test/`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const audio = new FormData();
+      audio.append("file", new Blob([new Uint8Array([1, 2, 3])], { type: "audio/webm" }), "clip.webm");
+      const transcribe = await fetch(`${base}/transcribe/`, {
+        method: "POST",
+        credentials: "include",
+        body: audio,
+      });
+      const remove = await fetch(`${base}/stt-config/`, { method: "DELETE", credentials: "include" });
+      return {
+        read: readResponse.status,
+        readEnabled,
+        save: save.status,
+        test: test.status,
+        transcribe: transcribe.status,
+        remove: remove.status,
+      };
+    });
+  }
+  private installSpeechConfigReadSpy(): void {
+    if (this.assistantSpeechConfigReadHandler !== null) return;
+    this.assistantSpeechConfigReadHandler = (request) => {
+      if (request.method() !== "GET") return;
+      if (new URL(request.url()).pathname.endsWith("/api/users/me/ai-assistant/stt-config/")) {
+        this.assistantSpeechConfigReadsSeen += 1;
+      }
+    };
+    this.page.on("request", this.assistantSpeechConfigReadHandler as (request: never) => void);
   }
   async assistantMicHold(ms: number): Promise<void> {
     // Push-to-talk rides on pointer down/up (a click's fast up lands under
@@ -30305,12 +30546,26 @@ export class WebNewDriver implements ParityDriver {
       (await verified.count()) === 0 ? null : ((await verified.first().innerText()) ?? "").trim() || null;
     return {
       sectionVisible: true,
-      baseUrl: await section.locator("#assistant-voice-base-url").inputValue(),
-      model: await section.locator("#assistant-voice-model").inputValue(),
-      keyValue: await keyField.inputValue(),
-      keyPlaceholder: (await keyField.getAttribute("placeholder")) ?? "",
-      saveDisabled: await section.getByRole("button", { name: "Save", exact: true }).isDisabled(),
-      testDisabled: await section.getByRole("button", { name: "Test connection", exact: true }).isDisabled(),
+      // The kill switch narrows the section to a remove-only panel: the
+      // fields are genuinely absent then, so each read tolerates that.
+      baseUrl: await section
+        .locator("#assistant-voice-base-url")
+        .inputValue()
+        .catch(() => ""),
+      model: await section
+        .locator("#assistant-voice-model")
+        .inputValue()
+        .catch(() => ""),
+      keyValue: await keyField.inputValue().catch(() => ""),
+      keyPlaceholder: ((await keyField.getAttribute("placeholder").catch(() => null)) ?? "") as string,
+      saveDisabled: await section
+        .getByRole("button", { name: "Save", exact: true })
+        .isDisabled()
+        .catch(() => true),
+      testDisabled: await section
+        .getByRole("button", { name: "Test connection", exact: true })
+        .isDisabled()
+        .catch(() => true),
       removeVisible: await this.isShown(section.getByRole("button", { name: "Remove", exact: true })),
       lastVerified,
     };
@@ -30336,6 +30591,59 @@ export class WebNewDriver implements ParityDriver {
       .getByTestId("assistant-voice")
       .getByRole("button", { name: "Remove", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async settingsProfileStubDictationEnabled(enabled: boolean): Promise<void> {
+    this.assistantDictationEnabledStub = enabled;
+    await this.installDictationStubRoutes();
+  }
+  async settingsProfileStubDictationWritesDisabled(): Promise<void> {
+    this.assistantDictationWritesDisabled = true;
+    await this.installDictationStubRoutes();
+  }
+  async settingsProfileClearDictationStubs(): Promise<void> {
+    this.assistantDictationEnabledStub = null;
+    this.assistantDictationWritesDisabled = false;
+    this.assistantDictationRoutesInstalled = false;
+    await this.page.unroute("**/api/users/me/ai-assistant/stt-config/**");
+    await this.page.unroute("**/api/users/me/ai-assistant/transcribe/");
+  }
+  private async installDictationStubRoutes(): Promise<void> {
+    if (this.assistantDictationRoutesInstalled) return;
+    this.assistantDictationRoutesInstalled = true;
+    await this.page.route("**/api/users/me/ai-assistant/stt-config/**", async (route) => {
+      const request = route.request();
+      const method = request.method();
+      const enabled = this.assistantDictationEnabledStub;
+      if (method === "GET" && enabled !== null) {
+        // Read the real payload once and serve the operator's switch on it:
+        // the saved key state and last-verified stamp must stay real.
+        const live = await this.page.request.get("/api/users/me/ai-assistant/stt-config/");
+        const payload = (await live.json()) as Record<string, unknown>;
+        payload["enabled"] = enabled;
+        await route.fulfill({ status: live.status(), contentType: "application/json", json: payload });
+        return;
+      }
+      if (this.assistantDictationWritesDisabled && (method === "PUT" || method === "POST")) {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "dictation_disabled" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
+    await this.page.route("**/api/users/me/ai-assistant/transcribe/", async (route) => {
+      if (this.assistantDictationWritesDisabled && route.request().method() === "POST") {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "dictation_disabled" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
   }
   async settingsProfileToolServerRows(): Promise<
     { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[]

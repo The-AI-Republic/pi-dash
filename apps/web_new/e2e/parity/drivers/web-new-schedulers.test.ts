@@ -30,19 +30,22 @@ interface Options {
   last?: () => FakeLocator;
   or?: (other: FakeLocator) => FakeLocator;
   click?: () => Promise<void>;
+  fill?: (value: string) => Promise<void>;
+  getAttribute?: (name: string) => Promise<string | null>;
   selectOption?: (value: string) => Promise<void>;
 }
 
 class FakeLocator {
   readonly options: Options;
   readonly click: ReturnType<typeof vi.fn>;
-  readonly fill = vi.fn(async () => undefined);
+  readonly fill: ReturnType<typeof vi.fn>;
   readonly selectOption: ReturnType<typeof vi.fn>;
   readonly waitFor = vi.fn(async () => undefined);
 
   constructor(options: Options = {}) {
     this.options = options;
     this.click = vi.fn(options.click ?? (async () => undefined));
+    this.fill = vi.fn(options.fill ?? (async () => undefined));
     this.selectOption = vi.fn(options.selectOption ?? (async () => undefined));
   }
 
@@ -67,7 +70,8 @@ class FakeLocator {
   inputValue(): Promise<string> {
     return Promise.resolve(this.options.input ?? "");
   }
-  getAttribute(): Promise<string | null> {
+  getAttribute(name: string): Promise<string | null> {
+    if (this.options.getAttribute !== undefined) return this.options.getAttribute(name);
     return Promise.resolve(this.options.attribute ?? null);
   }
   first(): FakeLocator {
@@ -447,5 +451,192 @@ describe("notifications", () => {
     await expect(new WebNewDriver(page).schedulerVisibleToasts()).resolves.toEqual([
       { title: "Scheduler installed", message: "Nightly is live." },
     ]);
+  });
+});
+
+describe("recurrence builder", () => {
+  interface ChipReading {
+    label: string;
+    pressed: boolean;
+  }
+
+  function weekdayGroup(readings: ChipReading[]): FakeLocator {
+    const chips = readings.map((reading) =>
+      fake({
+        count: 1,
+        getAttribute: async (name: string) =>
+          name === "aria-label" ? reading.label : name === "aria-pressed" ? String(reading.pressed) : null,
+      })
+    );
+    return fake({ count: 1, role: (role: string) => (role === "button" ? fake({ items: chips }) : absent()) });
+  }
+
+  function endsGroup(mode: string): FakeLocator {
+    return fake({
+      count: 1,
+      role: (role: string) =>
+        role === "radio" ? fake({ count: 1, first: () => fake({ attribute: mode }) }) : absent(),
+    });
+  }
+
+  it("reads every control and the live sentence", async () => {
+    const raw = "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,FR";
+    const dialog = fake({
+      role: (role: string, options?: Record<string, unknown>) => {
+        if (role !== "group") return absent();
+        return String(options?.["name"] ?? "") === "Repeat on"
+          ? weekdayGroup([
+              { label: "Sunday", pressed: false },
+              { label: "Monday", pressed: true },
+              { label: "Friday", pressed: true },
+            ])
+          : endsGroup("after");
+      },
+      byLabel: (label: string) => {
+        const values: Record<string, string> = {
+          "Repeat unit": "week",
+          "Repeat interval": "2",
+          "Monthly pattern": "weekday",
+          "Weekday ordinal": "2",
+          "Weekday of the month": "MO",
+          "End date": "2027-01-01",
+          "Number of occurrences": "10",
+          "Recurrence (RRULE)": raw,
+        };
+        const value = values[label];
+        return value === undefined ? absent() : fake({ count: 1, visible: true, input: value });
+      },
+      locate: (selector: string) => {
+        const line = fake({ text: "every 2 weeks on Monday, Friday" });
+        line.options.locate = () => line;
+        return selector === "p" ? line : absent();
+      },
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    const facts = await new WebNewDriver(page).schedulerRecurrenceFacts();
+    expect(facts).toEqual({
+      visible: true,
+      interval: "2",
+      unit: "week",
+      weekdays: [
+        { name: "Sunday", pressed: false },
+        { name: "Monday", pressed: true },
+        { name: "Friday", pressed: true },
+      ],
+      monthlyPattern: "weekday",
+      dayOfMonth: null,
+      ordinal: "2",
+      weekdayOfMonth: "MO",
+      ends: "after",
+      endDate: "2027-01-01",
+      occurrences: "10",
+      rawVisible: true,
+      rawValue: raw,
+      advancedVisible: false,
+      sentence: "every 2 weeks on Monday, Friday",
+    });
+  });
+
+  it("reports an absent builder but still reads the raw field", async () => {
+    const dialog = fake({
+      role: () => absent(),
+      byLabel: (label: string) =>
+        label === "Recurrence (RRULE)" ? fake({ count: 1, visible: true, input: "FREQ=DAILY" }) : absent(),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerRecurrenceFacts()).resolves.toMatchObject({
+      visible: false,
+      rawVisible: true,
+      rawValue: "FREQ=DAILY",
+      weekdays: [],
+      ends: null,
+    });
+  });
+
+  it("acts on each control", async () => {
+    const fill = vi.fn(async () => undefined);
+    const selectOption = vi.fn(async () => undefined);
+    const click = vi.fn(async () => undefined);
+    const control = fake({ count: 1, fill, selectOption, click });
+    const group = fake({ role: (role: string) => (role === "button" || role === "radio" ? control : absent()) });
+    const dialog = fake({ byLabel: () => control, role: () => group, locate: () => absent() });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    const driver = new WebNewDriver(page);
+    await driver.schedulerRecurrenceAct({ kind: "interval", value: 3 });
+    await driver.schedulerRecurrenceAct({ kind: "unit", value: "month" });
+    await driver.schedulerRecurrenceAct({ kind: "weekday", value: "Friday" });
+    await driver.schedulerRecurrenceAct({ kind: "monthly", value: "weekday" });
+    await driver.schedulerRecurrenceAct({ kind: "day", value: 15 });
+    await driver.schedulerRecurrenceAct({ kind: "ordinal", value: "2" });
+    await driver.schedulerRecurrenceAct({ kind: "weekdayOfMonth", value: "MO" });
+    await driver.schedulerRecurrenceAct({ kind: "ends", value: "after" });
+    await driver.schedulerRecurrenceAct({ kind: "endDate", value: "2027-01-01" });
+    await driver.schedulerRecurrenceAct({ kind: "occurrences", value: 12 });
+    expect(fill.mock.calls.map((call) => call[0])).toEqual(["3", "15", "2027-01-01", "12"]);
+    expect(selectOption.mock.calls.map((call) => call[0])).toEqual(["month", "weekday", "2", "MO"]);
+    expect(click).toHaveBeenCalledTimes(2);
+  });
+
+  it("resolves the Never and On-date ends labels", async () => {
+    const click = vi.fn(async () => undefined);
+    const radio = fake({ count: 1, click });
+    const group = fake({ role: (role: string) => (role === "radio" ? radio : absent()) });
+    const dialog = fake({ role: () => group });
+    const driver = new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => dialog }) }));
+    await driver.schedulerRecurrenceAct({ kind: "ends", value: "never" });
+    await driver.schedulerRecurrenceAct({ kind: "ends", value: "on" });
+    expect(click).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens the raw editor through the advanced disclosure", async () => {
+    let expanded = false;
+    const toggle = fake({
+      count: 1,
+      click: async () => {
+        expanded = true;
+      },
+      getAttribute: async (name: string) => (name === "aria-expanded" && expanded ? "true" : "false"),
+    });
+    const raw = fake({ count: 1, visible: false, fill: vi.fn(async () => undefined) });
+    const dialog = fake({
+      role: (role: string) => (role === "button" ? toggle : absent()),
+      byLabel: (label: string) => (label === "Recurrence (RRULE)" ? raw : absent()),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    const driver = new WebNewDriver(page);
+    await expect(driver.schedulerRecurrenceAdvanced()).resolves.toBe(true);
+    expect(toggle.click).toHaveBeenCalledTimes(1);
+    await driver.schedulerRecurrenceRaw("FREQ=DAILY;COUNT=2");
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=DAILY;COUNT=2");
+  });
+
+  it("does not touch the disclosure when the raw field is already open", async () => {
+    const toggle = fake({ count: 1, click: vi.fn(async () => undefined) });
+    const raw = fake({ count: 1, visible: true, fill: vi.fn(async () => undefined) });
+    const dialog = fake({
+      role: (role: string) => (role === "button" ? toggle : absent()),
+      byLabel: (label: string) => (label === "Recurrence (RRULE)" ? raw : absent()),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerRecurrenceRaw("FREQ=DAILY");
+    expect(toggle.click).not.toHaveBeenCalled();
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=DAILY");
+  });
+
+  it("treats a forced raw rule as already advanced", async () => {
+    const dialog = fake({
+      role: () => absent(),
+      byLabel: (label: string) => (label === "Recurrence (RRULE)" ? fake({ count: 1, visible: true }) : absent()),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerRecurrenceAdvanced()).resolves.toBe(true);
+  });
+
+  it("leaves the oracle's builder actions target-only", async () => {
+    const { WebDriver } = await import("./web");
+    const driver = new WebDriver(pageOf({ getByRole: () => fake({ last: () => fake({ locate: () => absent() }) }) }));
+    await expect(driver.schedulerRecurrenceAct({ kind: "unit", value: "week" })).rejects.toThrow(
+      "recurrence builder is a web_new target"
+    );
   });
 });

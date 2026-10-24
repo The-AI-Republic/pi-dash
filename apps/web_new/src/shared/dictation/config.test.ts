@@ -56,6 +56,7 @@ describe("sttConfigQueryOptions", () => {
     const options = sttConfigQueryOptions(client);
     expect(options.queryKey).toEqual(sttConfigKeys.all());
     expect(options.staleTime).toBe(60_000);
+    expect(options.refetchOnWindowFocus).toBe("always");
     contracts.getSttConfig.mockResolvedValue(config());
     await options.queryFn!({} as never);
     expect(contracts.getSttConfig).toHaveBeenCalledWith(client);

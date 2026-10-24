@@ -53,3 +53,95 @@ describe("assistant error tint", () => {
     });
   });
 });
+
+describe("oracle dictation and recurrence fallbacks", () => {
+  function driverWith(page: Record<string, unknown>): WebDriver {
+    return new WebDriver(page as unknown as Page);
+  }
+
+  it("reports the mic and counts speech-config reads", async () => {
+    const handlers: ((request: { url(): string; method(): string }) => void)[] = [];
+    const node: Record<string, unknown> = {
+      count: async () => 1,
+      isVisible: async () => true,
+    };
+    node["locator"] = () => node;
+    node["first"] = () => node;
+    const page = {
+      locator: () => node,
+      on: (_event: string, handler: never) => handlers.push(handler),
+    };
+    const driver = driverWith(page);
+    expect(await driver.assistantMicVisible()).toBe(true);
+    expect(await driver.assistantSpeechConfigReads()).toBe(0);
+    handlers[0]?.({ method: () => "GET", url: () => "https://app.test/api/users/me/ai-assistant/stt-config/" });
+    expect(await driver.assistantSpeechConfigReads()).toBe(1);
+  });
+
+  it("does not count non-GET reads and reports an absent mic", async () => {
+    const handlers: ((request: { url(): string; method(): string }) => void)[] = [];
+    const absent: Record<string, unknown> = { count: async () => 0 };
+    absent["locator"] = () => absent;
+    absent["first"] = () => absent;
+    const page = {
+      locator: () => absent,
+      on: (_event: string, handler: never) => handlers.push(handler),
+    };
+    const driver = driverWith(page);
+    expect(await driver.assistantMicVisible()).toBe(false);
+    handlers[0]?.({ method: () => "PUT", url: () => "https://app.test/api/users/me/ai-assistant/stt-config/" });
+    expect(await driver.assistantSpeechConfigReads()).toBe(0);
+  });
+
+  it("flips visibility on refocus", async () => {
+    const dispatchEvent = vi.fn(() => true);
+    vi.stubGlobal("window", { dispatchEvent });
+    vi.stubGlobal("document", {});
+    try {
+      await driverWith({ evaluate: async (fn: () => void) => fn() }).assistantRefocus();
+      expect(dispatchEvent).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reads the plain recurrence field and fills it without a builder", async () => {
+    const fill = vi.fn(async () => undefined);
+    const raw = {
+      count: async () => 1,
+      isVisible: async () => true,
+      inputValue: async () => "FREQ=DAILY",
+      fill,
+      first: () => raw,
+    };
+    const line = { waitFor: async () => undefined, innerText: async () => "every day" };
+    const lineNode: Record<string, unknown> = { ...line };
+    lineNode["locator"] = () => lineNode;
+    lineNode["first"] = () => lineNode;
+    const dialog = {
+      getByLabel: (label: string) => (label === "Recurrence (RRULE)" ? raw : { count: async () => 0 }),
+      locator: () => lineNode,
+    };
+    const page = { getByRole: () => ({ last: () => dialog }), locator: () => ({ last: () => dialog }) };
+    const driver = driverWith(page);
+    const facts = await driver.schedulerRecurrenceFacts();
+    expect(facts).toMatchObject({ visible: false, rawVisible: true, rawValue: "FREQ=DAILY", sentence: "every day" });
+    await expect(driver.schedulerRecurrenceAdvanced()).resolves.toBe(true);
+    await driver.schedulerRecurrenceRaw("FREQ=WEEKLY");
+    expect(fill).toHaveBeenCalledWith("FREQ=WEEKLY");
+  });
+
+  it("answers the unflagged endpoint statuses", async () => {
+    const fetchMock = vi.fn(async (_input: string, init?: { method?: string }) => ({
+      status: init?.method === "DELETE" ? 204 : 200,
+      json: async () => ({ has_api_key: true }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const probe = await driverWith({ evaluate: async (fn: () => unknown) => fn() }).assistantDictationApiProbe();
+      expect(probe).toEqual({ read: 200, readEnabled: null, save: 200, test: 200, transcribe: 200, remove: 204 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
