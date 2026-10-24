@@ -587,8 +587,10 @@ impl GithubRestClient {
     /// `get_file` (`:167-189`): contents API, `type == "file"` guard,
     /// forgiving base64 (non-alphabet chars discarded, as
     /// `validate=False` does), the 64 KiB cap, UTF-8-or-binary shape.
-    /// `path` interpolates raw and `ref` is `quote_plus`-encoded,
-    /// exactly as Python builds the URL.
+    /// `path` interpolates raw except ASCII controls (encoded as
+    /// requests sends them, so the `url` crate cannot strip them and
+    /// resolve the resulting dot segments out of the bound repo) and
+    /// `ref` is `quote_plus`-encoded, exactly as Python builds the URL.
     pub async fn get_file(
         &self,
         owner: &str,
@@ -596,6 +598,7 @@ impl GithubRestClient {
         path: &str,
         git_ref: &str,
     ) -> Result<Value, GithubFailure> {
+        let path = encode_path_controls(path);
         let mut url = format!("{}/repos/{owner}/{name}/contents/{path}", self.api_base);
         if !git_ref.is_empty() {
             url = format!("{url}?ref={}", quote_plus(git_ref));
@@ -768,6 +771,28 @@ impl GithubRestClient {
     }
 }
 
+/// Percent-encode ASCII control bytes in a contents `path`
+/// (`github_client.py:170`, PIDASHCONV-1486): requests/urllib3 sends
+/// them `%XX` (uppercase) and never resolves dot segments, while the
+/// `url` crate strips tab/LF/CR and then resolves the resulting
+/// `..` segments out of the bound repository. Only bytes below
+/// `0x20` and `0x7f` change; `/`, `.` and everything else
+/// interpolate raw, exactly as before.
+fn encode_path_controls(path: &str) -> String {
+    if !path.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return path.to_owned();
+    }
+    let mut out = Vec::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte < 0x20 || byte == 0x7f {
+            out.extend_from_slice(format!("%{byte:02X}").as_bytes());
+        } else {
+            out.push(byte);
+        }
+    }
+    String::from_utf8(out).expect("control-encoded path stays UTF-8")
+}
+
 /// `urllib.parse.quote_plus`, for the contents `ref` param: letters,
 /// digits and `_.-~` pass, space becomes `+`, anything else is
 /// percent-encoded uppercase over UTF-8 bytes.
@@ -929,6 +954,56 @@ mod tests {
         let urls = state.urls.lock().unwrap();
         assert!(urls[0].ends_with("?ref=feature%2Fx+y"), "{urls:?}");
         assert!(!urls[1].contains('?'), "{urls:?}");
+    }
+
+    #[tokio::test]
+    async fn get_file_control_dot_path_stays_bound() {
+        // PIDASHCONV-1486: each `.\n.` / `.\t.` segment passes the
+        // `..` guard, but the `url` crate strips tab/LF/CR and then
+        // resolves the resulting `..` segments out of the bound
+        // repo. requests/urllib3 instead percent-encodes the controls
+        // and never creates dot segments, so the request stays under
+        // `/repos/{owner}/{name}/contents/` (GitHub answers 404).
+        let (base, state) = mock_server(vec![
+            json_reply(r#"{"type": "file", "path": "p", "sha": "s", "content": ""}"#),
+            json_reply(r#"{"type": "file", "path": "p", "sha": "s", "content": ""}"#),
+            json_reply(r#"{"type": "file", "path": "p", "sha": "s", "content": ""}"#),
+        ])
+        .await;
+        let client = client_for(&base);
+        client
+            .get_file(
+                "o",
+                "r",
+                ".\n./.\n./.\n./.\n./repos/o2/r2/contents/secret",
+                "",
+            )
+            .await
+            .expect("file");
+        client
+            .get_file("o", "r", ".\t./.\t./.\t./.\t./orgs/x", "")
+            .await
+            .expect("file");
+        client
+            .get_file("o", "r", "a\x01b\x7fc\r", "")
+            .await
+            .expect("file");
+        let urls = state.urls.lock().unwrap();
+        for url in urls.iter() {
+            assert!(
+                url.starts_with("/repos/o/r/contents/"),
+                "escaped the bound repo: {urls:?}"
+            );
+        }
+        assert_eq!(
+            urls[0], "/repos/o/r/contents/.%0A./.%0A./.%0A./.%0A./repos/o2/r2/contents/secret",
+            "{urls:?}"
+        );
+        assert!(urls[1].contains("%09"), "{urls:?}");
+        assert!(
+            urls[2].contains("%01") && urls[2].contains("%7F") && urls[2].contains("%0D"),
+            "{urls:?}"
+        );
     }
 
     #[tokio::test]
