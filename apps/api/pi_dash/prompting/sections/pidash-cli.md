@@ -20,7 +20,7 @@ The CLI reads the following from the process environment — never pass them as 
 {% endif %}
 ### Working context files (`context.md`)
 
-Two `context.md` files on the dev machine describe the Pi Dash projects available to you. Both carry a `generated_at` RFC 3339 UTC stamp so you can judge staleness, and each project entry carries a `repo_url` you can match against a local checkout.
+Two `context.md` files on the dev machine describe the Pi Dash projects available to you. Both carry a `generated_at` RFC 3339 UTC stamp so you can judge staleness, and each project entry carries a `repo_url` you can match against your working directory.
 
 - **Working-dir** `<working_dir>/.pidash/context.md` (`scope: "project"`) — the single project this working directory belongs to. This is **authoritative for "which project am I working in"**.
 - **Machine-level** `~/.pidash/context.md` (`scope: "machine"`) — every project in every workspace this machine is bound to, grouped under a `workspaces:` list keyed by slug. This is the **lookup table for "what else exists in this workspace"** — use it to find a related issue's project or file a follow-up in a different project — and the **fallback** when there is no working-dir file.
