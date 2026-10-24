@@ -168,56 +168,43 @@ export function hasPageFilters(filters: PageFilters): boolean {
   return filters.favorites || filters.created !== null || filters.creator !== null;
 }
 
-/** One day in milliseconds. */
-const DAY_MS = 86_400_000;
-
-/** Start of the current day in the local calendar. */
-function startOfDay(now: Date): number {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-}
-
-function addDays(day: number, days: number): number {
-  return day + days * DAY_MS;
-}
-
-function addMonths(day: number, months: number): number {
-  const date = new Date(day);
-  return new Date(date.getFullYear(), date.getMonth() + months, date.getDate()).getTime();
+/** Start of the local calendar day `offsetDays` away from `now`. */
+function dayStart(now: Date, offsetDays = 0): number {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays).getTime();
 }
 
 /**
  * Evaluate a relative creation-date condition at a supplied instant.
- * "Last N days" windows include the selected day (a page created today
- * passes "last 7 days"); "N ago" conditions keep every calendar day up to
- * and including the N-day boundary, and "from now" windows start at the
- * selected future day.
+ * Every preset is a whole-calendar-day offset from the local start of today,
+ * matching the server expression the old app sent: "last N days" keeps N days
+ * back inclusive, "N ago" keeps everything older than that boundary, and
+ * "N from now" starts N days ahead.
  */
 export function matchesCreationPreset(createdAt: string, condition: PageDateCondition, now: Date): boolean {
   const created = Date.parse(createdAt);
   if (Number.isNaN(created)) return false;
   if (typeof condition === "object") return sameLocalDay(new Date(created), condition.custom);
-  const today = startOfDay(now);
   switch (condition) {
     case "today":
-      return created >= today;
+      return created >= dayStart(now);
     case "yesterday":
-      return created >= addDays(today, -1) && created < today;
+      return created >= dayStart(now, -1) && created < dayStart(now);
     case "last_7_days":
-      return created >= addDays(today, -6);
+      return created >= dayStart(now, -7);
     case "last_30_days":
-      return created >= addDays(today, -29);
+      return created >= dayStart(now, -30);
     case "1_week_ago":
-      return created < addDays(today, -6);
+      return created < dayStart(now, -6);
     case "2_weeks_ago":
-      return created < addDays(today, -13);
+      return created < dayStart(now, -13);
     case "1_month_ago":
-      return created < addDays(today, -29);
+      return created < dayStart(now, -29);
     case "1_week_from_now":
-      return created >= addDays(today, 7);
+      return created >= dayStart(now, 7);
     case "2_weeks_from_now":
-      return created >= addDays(today, 14);
+      return created >= dayStart(now, 14);
     case "1_month_from_now":
-      return created >= addMonths(today, 1);
+      return created >= dayStart(now, 30);
   }
 }
 
