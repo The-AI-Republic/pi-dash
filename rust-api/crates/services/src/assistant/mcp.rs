@@ -291,10 +291,23 @@ pub struct ToolsetSpec {
 
 /// Build one toolset descriptor (`build_toolset`, `mcp.py:175-209`).
 ///
-/// `include_instructions` forwards the server's `instructions` to the model
-/// (default false in pydantic-ai; on when the server describes a discovery
-/// protocol). Streamable HTTP is the transport for http URLs (the
-/// deprecated `MCPServerStreamableHTTP` is not used).
+/// `include_instructions` forwards the server's `instructions` to the model.
+/// It is left at pydantic-ai's default of false and stays there: the turn
+/// path (`build_toolsets`, `turn/live.rs`) always passes false and there is
+/// no user-facing setting or per-server column that could flip it, so in
+/// production it is always false. That is deliberate. Instructions are
+/// free-form text supplied by a third-party server, and the assistant
+/// already treats tool *results* as untrusted; a server's instructions would
+/// enter the model's context as untrusted content too, so turning them on
+/// globally is a prompt-injection surface we do not accept without a
+/// per-server opt-in that puts the trust decision with the person who added
+/// the server. Until that opt-in exists, servers that rely on instructions to
+/// advertise a discovery protocol are unsupported: the model never sees
+/// those instructions. The parameter is kept for that future opt-in and for
+/// tests. (See PDASHOSS01-124 for the product discussion.)
+///
+/// Streamable HTTP is the transport for http URLs (the deprecated
+/// `MCPServerStreamableHTTP` is not used).
 pub fn build_toolset_spec(
     url: &str,
     auth_header: Option<&str>,

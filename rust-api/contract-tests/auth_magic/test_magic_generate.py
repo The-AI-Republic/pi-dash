@@ -89,6 +89,23 @@ class TestMagicGenerate:
         assert body["error_message"] == "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN"
         assert body["email"] == user["email"]
 
+    @pytest.mark.parametrize(
+        "content_type", ["text/plain;charset=UTF-8", "application/xml"]
+    )
+    def test_generate_unsupported_media_type_is_415(self, path, content_type):
+        # DRF has no parser for these types: UnsupportedMediaType, with the
+        # request's content type echoed verbatim (PIDASHCONV-1351).
+        client = csrf_client()
+        resp = client.post(
+            path,
+            content=b"email=a@example.com",
+            headers={"Content-Type": content_type},
+        )
+        assert resp.status_code == 415, resp.text
+        assert resp.text == (
+            '{"detail":"Unsupported media type \\"%s\\" in request."}' % content_type
+        )
+
     def test_generate_instance_not_configured(self, path, db):
         client = csrf_client()
         with db.cursor() as cur:

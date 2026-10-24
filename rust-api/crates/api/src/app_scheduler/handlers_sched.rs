@@ -321,13 +321,13 @@ fn char_field(
         Value::Number(number) => number.to_string(),
         _ => return Err(vec![INVALID_STRING_MESSAGE.to_owned()]),
     };
-    if raw.is_empty() || raw.trim().is_empty() {
+    if raw.is_empty() || raw.trim_matches(super::is_py_strip_ws).is_empty() {
         if !allow_blank {
             return Err(vec![BLANK_MESSAGE.to_owned()]);
         }
         return Ok(String::new());
     }
-    let stripped = raw.trim().to_owned();
+    let stripped = raw.trim_matches(super::is_py_strip_ws).to_owned();
     let mut errors = Vec::new();
     if let Some(max) = max_length {
         if stripped.chars().count() > max {
@@ -1911,5 +1911,27 @@ mod tests {
         );
         assert_eq!(message.kwargs.len(), 1);
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn char_field_strips_python_whitespace() {
+        // DRF `CharField` strips with Python `str.strip()`, which also removes
+        // U+001C-U+001F (FS/GS/RS/US); Rust `char::is_whitespace` does not
+        // (PIDASHCONV-1203). Both the blank check and the stripped value must
+        // use the ported predicate so create/PATCH match Django.
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = Value::String(format!("{sep}dup{sep}"));
+            assert_eq!(
+                char_field(&padded, false, Some(64)).unwrap(),
+                "dup",
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // A lone control character strips to empty: DRF blank error.
+        assert_eq!(
+            char_field(&Value::String("\u{1f}".to_owned()), false, Some(255)),
+            Err(vec![BLANK_MESSAGE.to_owned()])
+        );
     }
 }

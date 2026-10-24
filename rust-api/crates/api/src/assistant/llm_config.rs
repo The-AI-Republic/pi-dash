@@ -32,11 +32,9 @@
 //! Throttle scopes (`assistant_llm_test` 6/minute,
 //! `assistant_llm_generate_title` 20/minute,
 //! [`super::throttles::LLM_TEST_THROTTLE`]/[`GENERATE_TITLE_THROTTLE`])
-//! are recorded but not enforced here: no merged Rust handler enforces
-//! DRF throttles yet and no contract test pins a 429 shape (the harness
-//! retries 429s), so enforcement follows the same precedent as every
-//! other ported surface. DRF checks throttles before the handler body,
-//! hence before the member gate.
+//! are enforced here via [`super::governor::throttle_check`] right after
+//! actor resolution (the transcribe precedent): DRF checks throttles
+//! before the handler body, hence before the member gate.
 //!
 //! Ported bugs (translate, don't redesign):
 //!
@@ -621,6 +619,12 @@ async fn post_test(
         Ok(actor) => actor,
         Err(failure) => return failure.into_response(),
     };
+    // DRF `initial()` runs `check_throttles` before the handler body, so
+    // a throttled caller answers 429 without touching the provider probe.
+    if !super::governor::throttle_check(super::throttles::LLM_TEST_THROTTLE, &actor.id.to_string())
+    {
+        return super::Denial::throttled().into_response();
+    }
     let row = match fetch_row(&pool, &actor.id).await {
         Ok(row) => row,
         Err(failure) => return failure.into_response(),
@@ -705,6 +709,15 @@ async fn post_generate_title(
         Ok(actor) => actor,
         Err(failure) => return failure.into_response(),
     };
+    // DRF `initial()` runs `check_throttles` before the handler body, so
+    // a throttled caller answers 429 even when the member gate below
+    // would also deny it.
+    if !super::governor::throttle_check(
+        super::throttles::GENERATE_TITLE_THROTTLE,
+        &actor.id.to_string(),
+    ) {
+        return super::Denial::throttled().into_response();
+    }
     let role = match workspace_role(&pool, &actor.id, &slug).await {
         Ok(role) => role,
         Err(failure) => return failure.into_response(),

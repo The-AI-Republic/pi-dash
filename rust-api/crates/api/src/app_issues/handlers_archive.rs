@@ -464,7 +464,7 @@ fn archive_filtered_set(
     }
     let mut fragments: Vec<String> = vec![preamble];
     let mut complex_sql = String::new();
-    if let Some(cond) = complex_filter(query)? {
+    if let Some(cond) = complex_filter(query, &gate.timezone)? {
         let (fragment, values) = render_condition(&cond);
         complex_sql = binder.splice(&fragment, values);
     }

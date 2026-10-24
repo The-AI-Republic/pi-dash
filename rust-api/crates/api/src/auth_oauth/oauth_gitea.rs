@@ -66,6 +66,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Router;
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -136,11 +137,23 @@ pub fn urlencode_pairs(pairs: &[(String, String)]) -> String {
 
 /// Ordered error params: `exc.get_error_dict()` (`error.py:88-92`) plus an
 /// optional `next_path` echo appended last (`app/gitea.py`, `space/gitea.py`).
-pub fn error_params(code: i32, name: &str, next_path: Option<&str>) -> Vec<(String, String)> {
-    let mut out = vec![
-        ("error_code".to_owned(), code.to_string()),
-        ("error_message".to_owned(), name.to_owned()),
-    ];
+pub fn error_params(
+    exc: &AuthenticationException,
+    next_path: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = exc
+        .get_error_dict()
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key,
+                match value {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                },
+            )
+        })
+        .collect();
     if let Some(next) = next_path {
         out.push(("next_path".to_owned(), next.to_owned()));
     }
@@ -346,43 +359,33 @@ pub fn request_is_secure(headers: &HeaderMap) -> bool {
         .is_some_and(|proto| proto.split(',').next().unwrap_or("").trim() == "https")
 }
 
+/// `HostSettings` view over the boot-resolved `Settings`
+/// (`authentication/utils/host.py:19-67` over D-16's kernel).
+fn host_settings(
+    settings: &pidash_db::config::Settings,
+) -> pidash_services::auth_session::shapes::HostSettings<'_> {
+    let urls = &settings.urls;
+    pidash_services::auth_session::shapes::HostSettings {
+        web_url: urls.web_url.as_deref(),
+        app_base_url: urls.app_base_url.as_deref(),
+        admin_base_url: urls.admin_base_url.as_deref(),
+        space_base_url: urls.space_base_url.as_deref(),
+        admin_base_path: Some(urls.admin_base_path.as_str()),
+        space_base_path: Some(urls.space_base_path.as_str()),
+    }
+}
+
 /// App/space base hosts from settings (`authentication/utils/host.py:19-67`
 /// via the D-16 `base_host` kernel). `is_app` returns `APP_BASE_URL` when
 /// set, else the `WEB_URL or APP_BASE_URL` origin; `is_space` appends the
 /// space base path to `SPACE_BASE_URL` when set, else to the origin.
 pub fn app_base(settings: &pidash_db::config::Settings) -> String {
-    let urls = &settings.urls;
-    pidash_services::auth_session::shapes::base_host(
-        &pidash_services::auth_session::shapes::HostSettings {
-            web_url: urls.web_url.as_deref(),
-            app_base_url: urls.app_base_url.as_deref(),
-            admin_base_url: urls.admin_base_url.as_deref(),
-            space_base_url: urls.space_base_url.as_deref(),
-            admin_base_path: Some(urls.admin_base_path.as_str()),
-            space_base_path: Some(urls.space_base_path.as_str()),
-        },
-        false,
-        false,
-        true,
-    )
+    pidash_services::auth_session::shapes::base_host(&host_settings(settings), false, false, true)
 }
 
 /// Space base host from settings (same kernel, `is_space=True`).
 pub fn space_base(settings: &pidash_db::config::Settings) -> String {
-    let urls = &settings.urls;
-    pidash_services::auth_session::shapes::base_host(
-        &pidash_services::auth_session::shapes::HostSettings {
-            web_url: urls.web_url.as_deref(),
-            app_base_url: urls.app_base_url.as_deref(),
-            admin_base_url: urls.admin_base_url.as_deref(),
-            space_base_url: urls.space_base_url.as_deref(),
-            admin_base_path: Some(urls.admin_base_path.as_str()),
-            space_base_path: Some(urls.space_base_path.as_str()),
-        },
-        false,
-        true,
-        false,
-    )
+    pidash_services::auth_session::shapes::base_host(&host_settings(settings), false, true, false)
 }
 
 /// Handler failure with its exact status + body.
@@ -409,10 +412,22 @@ impl Denial {
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         match self {
-            Denial::Redirect(location) => match crate::response_headers::header_value(&location) {
-                Some(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
-                None => Denial::ServerError.into_response(),
-            },
+            // `HttpResponseRedirect(url)`: Django percent-encodes the URL
+            // first (`iri_to_uri`, `django/http/response.py:620`). Past
+            // `MAX_URL_REDIRECT_LENGTH` characters the final `Location`
+            // answers 400 (`DisallowedRedirect`).
+            Denial::Redirect(location) => {
+                let too_long = location.chars().count()
+                    > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
+                let encoded = crate::response_headers::iri_to_uri(&location);
+                match crate::response_headers::header_value(&encoded) {
+                    Some(value) if !too_long => {
+                        (StatusCode::FOUND, [(header::LOCATION, value)]).into_response()
+                    }
+                    Some(_) => disallowed_redirect(),
+                    None => Denial::ServerError.into_response(),
+                }
+            }
             denial => {
                 let (status, body) = denial.status_and_body();
                 (status, body.unwrap_or_default()).into_response()
@@ -421,10 +436,19 @@ impl IntoResponse for Denial {
     }
 }
 
-/// 302 `Location` response.
+/// 302 `Location` response (`HttpResponseRedirect(url)`: Django
+/// percent-encodes the URL first via `iri_to_uri`). Past
+/// `MAX_URL_REDIRECT_LENGTH` characters the final `Location` answers
+/// 400 (`DisallowedRedirect`).
 pub fn redirect(location: String) -> Response {
-    match crate::response_headers::header_value(&location) {
-        Some(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
+    let too_long =
+        location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    match crate::response_headers::header_value(&encoded) {
+        Some(value) if !too_long => {
+            (StatusCode::FOUND, [(header::LOCATION, value)]).into_response()
+        }
+        Some(_) => disallowed_redirect(),
         None => Denial::ServerError.into_response(),
     }
 }
@@ -747,8 +771,9 @@ pub async fn find_user_by_email(
 }
 
 /// `Adapter.__check_signup` (`base.py:103-121`): when `ENABLE_SIGNUP` is
-/// `"0"` and no `WorkspaceMemberInvite` row carries the email, signup
-/// raises `SIGNUP_DISABLED` (5015) with the email as payload.
+/// `"0"` and no live `WorkspaceMemberInvite` row carries the email,
+/// signup raises `SIGNUP_DISABLED` (5015) with the email as payload. The
+/// default manager excludes soft-deleted invites.
 pub async fn check_signup(
     pool: &sqlx::PgPool,
     secret_key: &str,
@@ -775,21 +800,22 @@ pub async fn check_signup(
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspace_member_invites WHERE email = $1 LIMIT 1"#)
-            .bind(email)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| {
-                AuthenticationException::new(
-                    5015,
-                    "SIGNUP_DISABLED",
-                    vec![(
-                        "email".to_owned(),
-                        serde_json::Value::String(email.to_owned()),
-                    )],
-                )
-            })?;
+    let invited: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT id FROM workspace_member_invites WHERE email = $1 AND deleted_at IS NULL LIMIT 1"#,
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| {
+        AuthenticationException::new(
+            5015,
+            "SIGNUP_DISABLED",
+            vec![(
+                "email".to_owned(),
+                serde_json::Value::String(email.to_owned()),
+            )],
+        )
+    })?;
     if invited.is_none() {
         return Err(AuthenticationException::new(
             5015,
@@ -889,9 +915,12 @@ pub async fn insert_user(
 /// `save_user_data` (`base.py:220-234`): login enrichment plus the
 /// activation branch. The UPDATE writes the D-16 `SAVE_USER_DATA_FIELDS`
 /// plus the avatar pair the signup block assigned in memory (persisted only
-/// by this save) and the rotated `token` (`User.save()` rotates whenever
-/// `token_updated_at` is set — always, here). Returns whether the
-/// activation email must fire (`not user.is_active` before the save).
+/// by this save), the rotated `token` (`User.save()` rotates whenever
+/// `token_updated_at` is set — always, here), the refreshed `updated_at`,
+/// the blank-`display_name` backfill from the email local part, and the
+/// `is_staff`-from-`is_superuser` sync (`user.py:169-187`; PIDASHCONV-1364,
+/// the github twin is PIDASHCONV-1081). Returns whether the activation
+/// email must fire (`not user.is_active` before the save).
 #[allow(clippy::too_many_arguments)]
 pub async fn save_user_data(
     pool: &sqlx::PgPool,
@@ -911,7 +940,9 @@ pub async fn save_user_data(
              token = $3,
              last_login_ip = $4, last_login_uagent = $5,
              avatar = $6, avatar_asset_id = $7,
-             is_active = TRUE
+             is_active = TRUE, updated_at = $2,
+             display_name = CASE WHEN display_name = '' THEN split_part(email, '@', 1) ELSE display_name END,
+             is_staff = is_staff OR is_superuser
            WHERE id = $1"#,
     )
     .bind(user_id)
@@ -1669,6 +1700,11 @@ pub async fn process_invitations(
     .bind(email)
     .fetch_all(pool)
     .await?;
+    // Two phases, not one loop: Django commits every project-arm
+    // `workspace_members` row before the `project_members` bulk below
+    // raises (PIDASHCONV-1359 — a per-invite loop aborts on `?` after
+    // the first workspace, so a user invited in several workspaces only
+    // ever joins the first).
     if !project_invites.is_empty() {
         let props = default_props_json();
         let prefs = default_preferences_json();
@@ -1700,6 +1736,13 @@ pub async fn process_invitations(
             .bind(invite.created_by_id)
             .execute(pool)
             .await?;
+        }
+        for invite in &project_invites {
+            let role = if invite.role == 5 || invite.role == 15 {
+                i32::from(invite.role)
+            } else {
+                15
+            };
             // Ported bug: `project_id` is missing here, so this raises
             // `IntegrityError` on Postgres (`project_members.project_id`
             // is NOT NULL) — every app-callback success with accepted
@@ -1919,62 +1962,49 @@ pub async fn redirection_path(
 // §10 `user_login` session (`authentication/utils/login.py:10-27`)
 // ---------------------------------------------------------------------------
 
-/// `user.get_session_auth_hash()`: `salted_hmac` over the password field
-/// with the Django session-auth salt (same construction the D-01
+/// `user.get_session_auth_hash()`: the shared construction
+/// ([`super::login::session_auth_hash`], same `salted_hmac` the D-01
 /// `verify_session_hash` checks against).
 pub fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    const SALT: &str = "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let key = Sha256::digest([SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
-    mac.update(password_field.as_bytes());
-    let mut out = String::with_capacity(64);
-    for b in mac.finalize().into_bytes() {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
+    super::login::session_auth_hash(password_field, secret_key)
 }
 
-/// `user_login` (`login.py:10-27`): Django `login()` (session `_auth_*`
-/// trio) + `device_info` + save. One documented divergence: Django
-/// `login()` cycles the session key (fresh key; old row deleted; data
-/// preserved on cycle, wiped on flush), but the session middleware exposes
-/// no cycle API and the crate is read-only for this issue, so the keys are
-/// written onto the live session and the middleware persists them. Fresh
-/// sessions — the only contract-relevant case — behave identically (fresh
-/// key + `Set-Cookie`); a pre-existing key is reused instead of rotated.
-pub fn user_login_session(
+/// `user_login` (`login.py:10-27`): the shared `login()` half first
+/// (rotation, the `_auth_*` trio, `last_login`, the CSRF cookie — see
+/// [`super::login::login_session_keys`]), then the `device_info` dict.
+/// Returns the rotated `csrftoken` `Set-Cookie` value (`None` when no
+/// session extension is installed, in which case nothing is written).
+#[allow(clippy::too_many_arguments)]
+pub async fn user_login_session(
     handle: &Option<Extension<SessionHandle>>,
+    pool: &sqlx::PgPool,
+    settings: &pidash_db::config::Settings,
+    now: chrono::DateTime<chrono::Utc>,
     user_id: &uuid::Uuid,
     password_field: &str,
-    secret_key: &[u8],
     user_agent: Option<&str>,
     ip: Option<&str>,
     domain: &str,
-) {
+) -> Result<Option<String>, sqlx::Error> {
     let Some(Extension(handle)) = handle else {
-        return;
+        return Ok(None);
     };
+    let csrf_cookie = super::login::login_session_keys(
+        handle,
+        pool,
+        *user_id,
+        password_field,
+        settings.secret_key.as_bytes(),
+        settings,
+        now,
+    )
+    .await?;
     let mut session = handle.lock();
-    session.set(
-        "_auth_user_id".to_owned(),
-        serde_json::Value::String(user_id.to_string()),
-    );
-    session.set(
-        "_auth_user_backend".to_owned(),
-        serde_json::Value::String(crate::license::MODEL_BACKEND.to_owned()),
-    );
-    session.set(
-        "_auth_user_hash".to_owned(),
-        serde_json::Value::String(session_auth_hash(password_field, secret_key)),
-    );
     session.set(
         "device_info".to_owned(),
         device_info_value(user_agent, ip, domain),
     );
+    Ok(Some(csrf_cookie))
 }
 
 // ---------------------------------------------------------------------------
@@ -2089,6 +2119,7 @@ pub async fn authenticate_user(
     inputs: &RequestInputs,
     code: &str,
     redirect_uri: &str,
+    site: &str,
     with_callback: bool,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<AuthenticatedUser, AuthError> {
@@ -2305,12 +2336,7 @@ pub async fn authenticate_user(
     .await
     .map_err(|_| AuthError::Server(Denial::ServerError))?;
     if !row.is_active {
-        let site = if inputs.is_secure {
-            format!("https://{}", inputs.host)
-        } else {
-            format!("http://{}", inputs.host)
-        };
-        enqueue_activation_email(pool, &site, user_id)
+        enqueue_activation_email(pool, site, user_id)
             .await
             .map_err(|_| AuthError::Server(Denial::ServerError))?;
     }
@@ -2360,10 +2386,37 @@ async fn finish_authenticated(
         refresh_token_expired_at: tokens.refresh_token_expired_at,
         id_token: to_opt_string(&tokens.id_token),
     };
+    // The looked-up row's `created_at`/`metadata` ride into the update
+    // side (Django's `.save()` rewrites them unchanged); absent, the
+    // ported defaults apply (PIDASHCONV-1363, as `oauth_google.rs`).
+    let provider_id =
+        pidash_db::auth_oauth::queries::account::lookup_provider_id(user_json).unwrap_or("");
+    let prior: Option<(chrono::DateTime<chrono::Utc>, serde_json::Value)> = if provider_id
+        .is_empty()
+    {
+        None
+    } else {
+        sqlx::query_as(
+                "SELECT \"created_at\", \"metadata\" FROM \"accounts\" \
+                 WHERE \"user_id\" = $1 AND \"provider\" = $2 AND \"provider_account_id\" = $3 LIMIT 1",
+            )
+            .bind(user_id)
+            .bind(PROVIDER)
+            .bind(provider_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| AuthError::Server(Denial::ServerError))?
+    };
     let mut conn = pool
         .acquire()
         .await
         .map_err(|_| AuthError::Server(Denial::ServerError))?;
+    let existing = prior.map(|(created_at, metadata)| {
+        pidash_db::auth_oauth::queries::account::ExistingAccount {
+            created_at,
+            metadata,
+        }
+    });
     pidash_db::auth_oauth::queries::account::create_update_account(
         &mut conn,
         user_id,
@@ -2372,7 +2425,7 @@ async fn finish_authenticated(
         &fields,
         now,
         uuid::Uuid::new_v4(),
-        None,
+        existing,
     )
     .await
     .map_err(|_| AuthError::Server(Denial::ServerError))?;
@@ -2471,7 +2524,7 @@ async fn app_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(exc.error_code, &exc.error_message, echo_raw);
+        let params = error_params(&exc, echo_raw);
         return redirect(app_callback_error_location(
             session.host.as_deref(),
             &params,
@@ -2485,11 +2538,7 @@ async fn app_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(
-            exc.error_code,
-            &exc.error_message,
-            validated_echo.as_deref(),
-        );
+        let params = error_params(&exc, validated_echo.as_deref());
         return redirect(app_callback_error_location(
             session.host.as_deref(),
             &params,
@@ -2500,6 +2549,14 @@ async fn app_callback(
         Err(response) => return response,
     };
     let inputs = request_inputs(&headers);
+    // `current_site` for the activation mail (`base_host(request)`,
+    // `base.py:230`).
+    let site = pidash_services::auth_session::shapes::base_host(
+        &host_settings(&settings),
+        false,
+        false,
+        false,
+    );
     let redirect_uri = redirect_uri_for(inputs.is_secure, &inputs.host);
     let now = chrono::Utc::now();
     let authenticated = authenticate_user(
@@ -2511,6 +2568,7 @@ async fn app_callback(
         &inputs,
         &code,
         &redirect_uri,
+        &site,
         true,
         now,
     )
@@ -2518,11 +2576,7 @@ async fn app_callback(
     let user = match authenticated {
         Ok(user) => user,
         Err(AuthError::Provider(exc)) => {
-            let params = error_params(
-                exc.error_code,
-                &exc.error_message,
-                validated_echo.as_deref(),
-            );
+            let params = error_params(&exc, validated_echo.as_deref());
             return redirect(app_callback_error_location(
                 session.host.as_deref(),
                 &params,
@@ -2531,15 +2585,22 @@ async fn app_callback(
         Err(AuthError::Server(denial)) => return denial.into_response(),
     };
     let base = app_base(&settings);
-    user_login_session(
+    let csrf_cookie = match user_login_session(
         &extension,
+        &pool,
+        &settings,
+        now,
         &user.id,
         &user.password_field,
-        settings.secret_key.as_bytes(),
         inputs.user_agent.as_deref(),
         inputs.ip.as_deref(),
         &base,
-    );
+    )
+    .await
+    {
+        Ok(cookie) => cookie,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     // `if next_path: validate else: get_redirection_path` — a present
     // but invalid next_path validates to `""` and stays `""` (it does NOT
     // fall back to the redirection path); only an absent/empty one does.
@@ -2554,7 +2615,11 @@ async fn app_callback(
             }
         }
     };
-    redirect(app_success_location(session.host.as_deref(), &path))
+    let mut response = redirect(app_success_location(session.host.as_deref(), &path));
+    if let Some(cookie) = csrf_cookie {
+        super::login::push_cookie(&mut response, cookie);
+    }
+    response
 }
 
 async fn user_email(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> String {
@@ -2643,11 +2708,7 @@ async fn space_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(
-            exc.error_code,
-            &exc.error_message,
-            validated_next.as_deref(),
-        );
+        let params = error_params(&exc, validated_next.as_deref());
         return redirect(space_error_location(&base, &params));
     }
     let Some(code) = code else {
@@ -2656,11 +2717,7 @@ async fn space_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(
-            exc.error_code,
-            &exc.error_message,
-            validated_next.as_deref(),
-        );
+        let params = error_params(&exc, validated_next.as_deref());
         return redirect(space_error_location(&base, &params));
     };
     let pool = match pool_or_500(&state) {
@@ -2668,6 +2725,14 @@ async fn space_callback(
         Err(response) => return response,
     };
     let inputs = request_inputs(&headers);
+    // `current_site` for the activation mail (`base_host(request)`,
+    // `base.py:230`).
+    let site = pidash_services::auth_session::shapes::base_host(
+        &host_settings(&settings),
+        false,
+        false,
+        false,
+    );
     let redirect_uri = redirect_uri_for(inputs.is_secure, &inputs.host);
     let now = chrono::Utc::now();
     let authenticated = authenticate_user(
@@ -2679,6 +2744,7 @@ async fn space_callback(
         &inputs,
         &code,
         &redirect_uri,
+        &site,
         false,
         now,
     )
@@ -2686,26 +2752,33 @@ async fn space_callback(
     let user = match authenticated {
         Ok(user) => user,
         Err(AuthError::Provider(exc)) => {
-            let params = error_params(
-                exc.error_code,
-                &exc.error_message,
-                validated_next.as_deref(),
-            );
+            let params = error_params(&exc, validated_next.as_deref());
             return redirect(space_error_location(&base, &params));
         }
         Err(AuthError::Server(denial)) => return denial.into_response(),
     };
-    user_login_session(
+    let csrf_cookie = match user_login_session(
         &extension,
+        &pool,
+        &settings,
+        now,
         &user.id,
         &user.password_field,
-        settings.secret_key.as_bytes(),
         inputs.user_agent.as_deref(),
         inputs.ip.as_deref(),
         &base,
-    );
+    )
+    .await
+    {
+        Ok(cookie) => cookie,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let next = validated_next.unwrap_or_default();
-    redirect(space_success_location(&base, &next))
+    let mut response = redirect(space_success_location(&base, &next));
+    if let Some(cookie) = csrf_cookie {
+        super::login::push_cookie(&mut response, cookie);
+    }
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -2752,6 +2825,20 @@ fn owned(
 mod tests {
     use super::*;
 
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect(long.clone()).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            Denial::Redirect(long).into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            redirect("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
+
     fn fixture(name: &str) -> serde_json::Value {
         let path = format!(
             "{}/../../fixtures/auth_oauth/{name}",
@@ -2766,7 +2853,10 @@ mod tests {
         // F11 app-gitea quirk: `urljoin(None, "?error...")` is the bare ref.
         let location = app_callback_error_location(
             None,
-            &error_params(5123, "GITEA_OAUTH_PROVIDER_ERROR", None),
+            &error_params(
+                &AuthenticationException::new(5123, "GITEA_OAUTH_PROVIDER_ERROR", Vec::new()),
+                None,
+            ),
         );
         assert!(location.starts_with("?error_code=5123"), "{location}");
         assert!(location.contains("error_message=GITEA_OAUTH_PROVIDER_ERROR"));
@@ -2778,7 +2868,10 @@ mod tests {
         // empty path — the golden pins `""`, not `"/"`.
         let location = app_error_location(
             "http://app.example",
-            &error_params(5112, "GITEA_NOT_CONFIGURED", Some("/x")),
+            &error_params(
+                &AuthenticationException::new(5112, "GITEA_NOT_CONFIGURED", Vec::new()),
+                Some("/x"),
+            ),
         );
         assert_eq!(
             location,
@@ -2790,7 +2883,10 @@ mod tests {
     fn urljoin_keeps_trailing_slash_base_path() {
         let location = app_error_location(
             "http://app.example/",
-            &error_params(5000, "INSTANCE_NOT_CONFIGURED", None),
+            &error_params(
+                &AuthenticationException::new(5000, "INSTANCE_NOT_CONFIGURED", Vec::new()),
+                None,
+            ),
         );
         assert_eq!(
             location,
@@ -2816,7 +2912,10 @@ mod tests {
         // Space twin never urljoins: the base path survives verbatim.
         let location = space_error_location(
             "http://space.example/spaces/",
-            &error_params(5112, "GITEA_NOT_CONFIGURED", Some("/x")),
+            &error_params(
+                &AuthenticationException::new(5112, "GITEA_NOT_CONFIGURED", Vec::new()),
+                Some("/x"),
+            ),
         );
         assert_eq!(
             location,
@@ -2838,12 +2937,22 @@ mod tests {
 
     #[test]
     fn error_params_order_matches_get_error_dict() {
-        let params = error_params(5000, "INSTANCE_NOT_CONFIGURED", Some("/x"));
+        let params = error_params(
+            &AuthenticationException::new(
+                5015,
+                "SIGNUP_DISABLED",
+                vec![(
+                    "email".to_owned(),
+                    serde_json::Value::String("new@example.test".to_owned()),
+                )],
+            ),
+            Some("/x"),
+        );
         let keys: Vec<&str> = params.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["error_code", "error_message", "next_path"]);
+        assert_eq!(keys, ["error_code", "error_message", "email", "next_path"]);
         assert_eq!(
             urlencode_pairs(&params),
-            "error_code=5000&error_message=INSTANCE_NOT_CONFIGURED&next_path=%2Fx"
+            "error_code=5015&error_message=SIGNUP_DISABLED&email=new%40example.test&next_path=%2Fx"
         );
     }
 
@@ -3274,5 +3383,229 @@ mod tests {
             }
         }
         assert_eq!(project_rows, 0, "no project invites seeded");
+    }
+
+    /// Seed an active user + two workspaces, each with a project and an
+    /// accepted project invite for the email (roles 5 and 20 — the
+    /// latter clamps to 15). Column lists mirror
+    /// `_harness.db.Database.make_user/make_workspace/make_project` plus
+    /// the `project_member_invites` seed in
+    /// `test_github_project_invite_join.py`.
+    async fn seed_active_user_two_project_invites(
+        pool: &sqlx::PgPool,
+        email: &str,
+        slug: &str,
+    ) -> (uuid::Uuid, Vec<uuid::Uuid>) {
+        let user_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        let mut workspace_ids = Vec::new();
+        for (index, role) in [(1, 5), (2, 20)] {
+            let workspace_id = uuid::Uuid::new_v4();
+            let project_id = uuid::Uuid::new_v4();
+            let ws_slug = format!("{slug}-w{index}");
+            sqlx::query(
+                r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                    "owner_id", "timezone", "background_color")
+                   VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+            )
+            .bind(now)
+            .bind(workspace_id)
+            .bind(format!("kernel ws {ws_slug}"))
+            .bind(&ws_slug)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("seed workspace");
+            sqlx::query(
+                r#"INSERT INTO "projects"
+                   ("created_at", "updated_at", "id", "name", "description", "network",
+                    "identifier", "workspace_id", "cycle_view", "module_view",
+                    "issue_views_view", "page_view", "intake_view", "archive_in",
+                    "close_in", "logo_props", "is_time_tracking_enabled",
+                    "is_issue_type_enabled", "guest_view_all_features", "timezone",
+                    "members_can_edit_states", "repo_url", "base_branch",
+                    "agent_default_interval_seconds", "agent_default_max_ticks",
+                    "agent_ticking_enabled", "is_default",
+                    "agent_review_default_interval_seconds",
+                    "default_agent_executor",
+                    "agent_test_default_interval_seconds")
+                   VALUES ($1,$1,$2,$3,'',0,$4,$5,true,true,true,true,true,
+                           365,365,'{}',true,false,false,'UTC',true,'','',
+                           10800,10,true,false,10800,'local_runner',10800)"#,
+            )
+            .bind(now)
+            .bind(project_id)
+            .bind(format!("kernel proj {ws_slug}"))
+            .bind(format!(
+                "k9{index}{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..6]
+            ))
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("seed project");
+            sqlx::query(
+                r#"INSERT INTO "project_member_invites" ("id", "created_at", "updated_at",
+                    "project_id", "workspace_id", "email", "accepted", "token", "role")
+                   VALUES ($1, $2, $2, $3, $4, $5, TRUE, $6, $7)"#,
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(now)
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(email)
+            .bind(format!(
+                "tok-1359-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ))
+            .bind(role)
+            .execute(pool)
+            .await
+            .expect("seed project invite");
+            workspace_ids.push(workspace_id);
+        }
+        (user_id, workspace_ids)
+    }
+
+    async fn cleanup_project_kernel_world(
+        pool: &sqlx::PgPool,
+        email: &str,
+        workspace_ids: &[uuid::Uuid],
+    ) {
+        let user_ids: Vec<uuid::Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(email)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        for user_id in &user_ids {
+            for (table, column) in [
+                ("workspace_members", "member_id"),
+                ("project_members", "member_id"),
+            ] {
+                sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "{column}" = $1"#))
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .ok();
+            }
+        }
+        sqlx::query(r#"DELETE FROM "project_member_invites" WHERE "email" = $1"#)
+            .bind(email)
+            .execute(pool)
+            .await
+            .ok();
+        for workspace_id in workspace_ids {
+            sqlx::query(r#"DELETE FROM "projects" WHERE "workspace_id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query(r#"DELETE FROM "workspaces" WHERE "id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+        for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+    }
+
+    /// Two accepted project invites in two workspaces: `process_invitations`
+    /// fails with the ported PB-1008 NOT NULL violation only AFTER
+    /// committing both workspace-member rows (PIDASHCONV-1359 — the
+    /// pre-fix per-invite loop aborted on `?` after the first workspace,
+    /// so the user never joined the second). Zero project-member rows,
+    /// both invites intact.
+    #[tokio::test]
+    async fn gitea_kernel_two_project_invites_join_both_workspaces() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("ge1359-{tag}@example.test");
+        let slug = format!("ge1359-{tag}");
+        let (user_id, workspace_ids) =
+            seed_active_user_two_project_invites(&pool, &email, &slug).await;
+
+        // No workspace invites: no cache handle is needed and none is touched.
+        let outcome = process_invitations(&pool, None, user_id, &email, chrono::Utc::now()).await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let members: Vec<(uuid::Uuid, i16)> = sqlx::query_as(
+            r#"SELECT "workspace_id", "role" FROM "workspace_members"
+               WHERE "member_id" = $1"#,
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read members");
+        let project_rows: i64 =
+            sqlx::query_scalar(r#"SELECT COUNT(*) FROM "project_members" WHERE "member_id" = $1"#)
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count project members");
+        let invites: Vec<(bool, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            r#"SELECT "accepted", "deleted_at" FROM "project_member_invites"
+               WHERE "email" = $1"#,
+        )
+        .bind(&email)
+        .fetch_all(&pool)
+        .await
+        .expect("read invites");
+        cleanup_project_kernel_world(&pool, &email, &workspace_ids).await;
+
+        let err = outcome.expect_err("kernel fails into the ported 500");
+        assert!(
+            err.to_string().contains("project_id"),
+            "ported PB-1008 NOT NULL violation, got: {err}"
+        );
+        let mut got = members;
+        got.sort();
+        let mut want = vec![(workspace_ids[0], 5), (workspace_ids[1], 15)];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "both invite workspaces joined (role 20 clamps to 15)"
+        );
+        assert_eq!(
+            project_rows, 0,
+            "project bulk raised before writing anything"
+        );
+        assert_eq!(invites.len(), 2, "both invites survive");
+        assert!(
+            invites.iter().all(|(accepted, _)| *accepted),
+            "invites stay accepted"
+        );
+        assert!(
+            invites.iter().all(|(_, deleted_at)| deleted_at.is_none()),
+            "invites stay live"
+        );
     }
 }

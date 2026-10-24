@@ -12,6 +12,7 @@ pidash-jobs = { path = "../jobs" }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+rpassword = "7.5"
 serde_json = { version = "1", features = ["preserve_order"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
 # Only `tokio::time::timeout` is used (instance SMTP probe); the runtime

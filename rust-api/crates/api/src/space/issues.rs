@@ -736,7 +736,7 @@ fn list_where_sql(filter_conjuncts: &[String], group_by: &str, sub_group_by: &st
 /// annotation is unguarded — plain joins, no `deleted_at` filter), or a
 /// plain column. Returns `(expression, descending)` for
 /// `ORDER BY {expr} {DIR} NULLS LAST`.
-fn order_key_expr(mapped: &str) -> (String, bool) {
+fn order_key_expr(mapped: &str) -> Result<(String, bool), HandlerError> {
     let (key, desc) = match mapped.strip_prefix('-') {
         Some(rest) => (rest, true),
         None => (mapped, false),
@@ -779,34 +779,182 @@ fn order_key_expr(mapped: &str) -> (String, bool) {
             // replaced with the concrete subquery via `min_values_sql`.
             "MIN_VALUES".to_owned()
         }
-        other => related_order_expr(other),
+        other => related_order_expr(other).ok_or(HandlerError::ServerError)?,
     };
-    (expr, desc)
+    Ok((expr, desc))
 }
 
 /// Plain-column ordering for the `else` branch of `order_issue_queryset`
 /// (`order_queryset.py:49-57`): local columns read off `issues`, while a
 /// one-level FK traversal (`state__name`, `project__identifier`, …)
 /// resolves through the fixed single-row joins — the same `LEFT OUTER`
-/// shape Django's `order_by` uses. Deeper or m2m traversals render an
-/// invalid column and fail closed (500), like Django's `FieldError`.
-fn related_order_expr(field: &str) -> String {
+/// shape Django's `order_by` uses. Names are resolved against fixed column
+/// allowlists: anything unknown or containing SQL syntax fails closed (500),
+/// like Django's `FieldError`, and never reaches the statement text.
+fn related_order_expr(field: &str) -> Option<String> {
     if let Some((head, column)) = field.split_once("__") {
-        let table = match head {
-            "state" => Some("\"states\""),
-            "project" => Some("\"projects\""),
-            "parent" => Some("T_parent"),
-            "workspace" => Some("\"workspaces\""),
-            _ => None,
+        let (table, columns) = match head {
+            "state" => ("\"states\"", STATE_ORDER_COLUMNS),
+            "project" => ("\"projects\"", PROJECT_ORDER_COLUMNS),
+            "parent" => ("T_parent", ISSUE_ORDER_COLUMNS),
+            "workspace" => ("\"workspaces\"", WORKSPACE_ORDER_COLUMNS),
+            _ => return None,
         };
-        if let Some(table) = table {
-            if !column.contains("__") {
-                return format!("{table}.\"{column}\"");
-            }
+        if column.contains("__") {
+            return None;
         }
+        let column = order_column(columns, column)?;
+        Some(format!("{table}.\"{column}\""))
+    } else {
+        let column = order_column(ISSUE_ORDER_COLUMNS, field)?;
+        Some(format!("\"issues\".\"{column}\""))
     }
-    format!("\"issues\".\"{field}\"")
 }
+
+/// Resolve a Django model field name against a fixed column allowlist. Django's
+/// `order_by` accepts both field names and attnames (`state` / `state_id`,
+/// `default_assignee` / `default_assignee_id`, `pk` / `id`); the SQL projection
+/// has one column for each pair. Unknown names fail closed.
+fn order_column(columns: &'static [&'static str], field: &str) -> Option<&'static str> {
+    if field == "pk" {
+        return columns.iter().copied().find(|known| *known == "id");
+    }
+    if let Some(column) = columns.iter().copied().find(|known| *known == field) {
+        return Some(column);
+    }
+    let attname = format!("{field}_id");
+    columns.iter().copied().find(|known| *known == attname)
+}
+
+/// Fixed allowlists for `order_by`. Django resolves the name against model
+/// fields/annotations and raises `FieldError` (a 500 here) for anything else;
+/// the port must never format the query parameter into SQL
+/// (`utils/order_queryset.py:49-57`). The lists are the columns of the tables
+/// the list query joins (`db/models/issue.py`,
+/// `db/models/{state,project,workspace}.py`).
+const ISSUE_ORDER_COLUMNS: &[&str] = &[
+    "created_at",
+    "updated_at",
+    "created_by_id",
+    "updated_by_id",
+    "deleted_at",
+    "id",
+    "project_id",
+    "workspace_id",
+    "parent_id",
+    "state_id",
+    "point",
+    "estimate_point_id",
+    "name",
+    "description_json",
+    "description_html",
+    "description_stripped",
+    "description_binary",
+    "priority",
+    "complexity_score",
+    "start_date",
+    "target_date",
+    "sequence_id",
+    "sort_order",
+    "completed_at",
+    "archived_at",
+    "is_draft",
+    "external_source",
+    "external_id",
+    "type_id",
+    "git_work_branch",
+    "workpad",
+    "created_via",
+    "assigned_pod_id",
+    "agent_executor",
+];
+
+const STATE_ORDER_COLUMNS: &[&str] = &[
+    "created_at",
+    "updated_at",
+    "created_by_id",
+    "updated_by_id",
+    "deleted_at",
+    "id",
+    "project_id",
+    "workspace_id",
+    "name",
+    "description",
+    "color",
+    "slug",
+    "sequence",
+    "group",
+    "is_triage",
+    "default",
+    "external_source",
+    "external_id",
+];
+
+const PROJECT_ORDER_COLUMNS: &[&str] = &[
+    "created_at",
+    "updated_at",
+    "created_by_id",
+    "updated_by_id",
+    "deleted_at",
+    "id",
+    "name",
+    "description",
+    "description_text",
+    "description_html",
+    "network",
+    "workspace_id",
+    "identifier",
+    "default_assignee_id",
+    "project_lead_id",
+    "emoji",
+    "icon_prop",
+    "module_view",
+    "cycle_view",
+    "issue_views_view",
+    "page_view",
+    "intake_view",
+    "is_time_tracking_enabled",
+    "is_issue_type_enabled",
+    "is_default",
+    "guest_view_all_features",
+    "members_can_edit_states",
+    "cover_image",
+    "cover_image_asset_id",
+    "estimate_id",
+    "archive_in",
+    "close_in",
+    "logo_props",
+    "default_state_id",
+    "archived_at",
+    "timezone",
+    "external_source",
+    "external_id",
+    "repo_url",
+    "base_branch",
+    "agent_default_interval_seconds",
+    "agent_default_max_ticks",
+    "agent_review_default_interval_seconds",
+    "agent_test_default_interval_seconds",
+    "agent_ticking_enabled",
+    "default_agent_executor",
+];
+
+const WORKSPACE_ORDER_COLUMNS: &[&str] = &[
+    "created_at",
+    "updated_at",
+    "created_by_id",
+    "updated_by_id",
+    "deleted_at",
+    "id",
+    "name",
+    "logo",
+    "logo_asset_id",
+    "owner_id",
+    "slug",
+    "organization_size",
+    "timezone",
+    "background_color",
+];
 
 /// `min_values` per-issue subquery for m2m-name orderings
 /// (`order_queryset.py:36-47`): `Min(...)` over plain (unguarded) joins.
@@ -1407,6 +1555,18 @@ async fn list_issues_inner(
     let _tz = request_tz(pool, extension).await?;
     let board = load_list_board(pool, anchor).await?;
 
+    // `order_issue_queryset` runs before `group_by`/`paginate`
+    // (`views/issue.py:78,124-130`), so an invalid order raises its 500
+    // before a group mismatch (400) or malformed pagination (400). Resolve it
+    // against the fixed allowlists before anything reaches SQL.
+    let order_input = multi_last(&multi, "order_by").unwrap_or_else(|| "-created_at".to_owned());
+    let mapped = list_q::order_key(&order_input).to_owned();
+    let (mut key_expr, descending) = order_key_expr(&mapped)?;
+    if key_expr == "MIN_VALUES" {
+        key_expr = min_values_sql(&order_input).ok_or(HandlerError::ServerError)?;
+    }
+    let direction = if descending { "DESC" } else { "ASC" };
+
     let group_by = multi_last(&multi, "group_by").unwrap_or_default();
     let sub_group_by = multi_last(&multi, "sub_group_by").unwrap_or_default();
     // Mismatch before pagination parsing (`views/issue.py:141-146`).
@@ -1437,14 +1597,6 @@ async fn list_issues_inner(
             return Err(HandlerError::ServerError);
         }
     }
-
-    let order_input = multi_last(&multi, "order_by").unwrap_or_else(|| "-created_at".to_owned());
-    let mapped = list_q::order_key(&order_input).to_owned();
-    let (mut key_expr, descending) = order_key_expr(&mapped);
-    if key_expr == "MIN_VALUES" {
-        key_expr = min_values_sql(&order_input).ok_or(HandlerError::ServerError)?;
-    }
-    let direction = if descending { "DESC" } else { "ASC" };
 
     // Filters (`issue_filters(request.query_params, "GET")`, `:77`) with
     // relative dates expanded against UTC today. Sorted by key so the
@@ -1535,6 +1687,15 @@ fn base_selects(
             "cycle_id" => group.push("\"cycle_id\"".to_owned()),
             _ => {}
         }
+    }
+    // The order key projects a joined-table column (`state__name`,
+    // `project__identifier`, …) for every row; Postgres only allows that
+    // unaggregated when the same expression is grouped. `issues.id` is the
+    // primary key, so bare `issues` columns need no extra key. The
+    // `min_values` scalar subquery is already self-contained (and PostgreSQL
+    // rejects it in GROUP BY), so leave it to the SELECT/ORDER BY alias.
+    if !key_expr.starts_with("(SELECT ") {
+        group.push(format!("({key_expr})"));
     }
     Ok((selects, group))
 }
@@ -2128,13 +2289,13 @@ mod tests {
 
     #[test]
     fn order_key_shapes() {
-        let (expr, desc) = order_key_expr("-priority_order");
+        let (expr, desc) = order_key_expr("-priority_order").unwrap();
         assert!(desc);
         assert!(expr.starts_with("CASE"));
-        let (expr, desc) = order_key_expr("state_order");
+        let (expr, desc) = order_key_expr("state_order").unwrap();
         assert!(!desc);
         assert!(expr.contains("\"states\".\"group\""));
-        let (expr, desc) = order_key_expr("-created_at");
+        let (expr, desc) = order_key_expr("-created_at").unwrap();
         assert!(desc);
         assert_eq!(expr, "\"issues\".\"created_at\"");
         assert!(min_values_sql("labels__name").is_some());
@@ -2143,10 +2304,50 @@ mod tests {
     }
 
     #[test]
+    fn order_key_expr_rejects_unvalidated_names() {
+        for bad in [
+            "id\",(SELECT 1 FROM pg_sleep(3)),\"issues\".\"id",
+            "bogus",
+            "+created_at",
+            "",
+            "name__bogus",
+            "state__bogus",
+            "project__workspace__slug",
+            "cycle_id",
+        ] {
+            assert!(
+                order_key_expr(bad).is_err(),
+                "order_by {bad:?} must fail closed"
+            );
+        }
+        assert_eq!(
+            order_key_expr("state__name").unwrap().0,
+            "\"states\".\"name\""
+        );
+        assert_eq!(
+            order_key_expr("project__identifier").unwrap().0,
+            "\"projects\".\"identifier\""
+        );
+        assert_eq!(
+            order_key_expr("parent__sequence_id").unwrap().0,
+            "T_parent.\"sequence_id\""
+        );
+        assert_eq!(
+            order_key_expr("workspace__slug").unwrap().0,
+            "\"workspaces\".\"slug\""
+        );
+        assert_eq!(
+            order_key_expr("state").unwrap().0,
+            "\"issues\".\"state_id\""
+        );
+        assert_eq!(order_key_expr("pk").unwrap().0, "\"issues\".\"id\"");
+    }
+
+    #[test]
     fn state_order_case_reverses_for_descending() {
         // `order_queryset.py:26`: ascending keeps `STATE_ORDER` as-is,
         // `-state__group` reverses it (the direction applies on top).
-        let (asc_expr, asc_desc) = order_key_expr("state_order");
+        let (asc_expr, asc_desc) = order_key_expr("state_order").unwrap();
         assert!(!asc_desc);
         let backlog = asc_expr
             .find("WHEN \"states\".\"group\" = 'backlog'")
@@ -2155,7 +2356,7 @@ mod tests {
             .find("WHEN \"states\".\"group\" = 'cancelled'")
             .expect("cancelled arm");
         assert!(backlog < cancelled);
-        let (desc_expr, desc_desc) = order_key_expr("-state_order");
+        let (desc_expr, desc_desc) = order_key_expr("-state_order").unwrap();
         assert!(desc_desc);
         let backlog = desc_expr
             .find("WHEN \"states\".\"group\" = 'backlog'")

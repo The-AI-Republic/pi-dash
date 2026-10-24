@@ -6,6 +6,7 @@
 # standalone-Rust task-port issue appends its own modules here.
 pi_dash.bgtasks.forgot_password_task
 pi_dash.bgtasks.magic_link_code_task
+pi_dash.bgtasks.page_version_task
 pi_dash.bgtasks.project_add_user_email_task
 pi_dash.bgtasks.project_invitation_task
 pi_dash.bgtasks.user_activation_email_task

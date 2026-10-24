@@ -326,49 +326,6 @@ fn request_scheme(headers: &HeaderMap) -> &'static str {
     }
 }
 
-/// `django.utils.encoding.iri_to_uri` (`quote(iri,
-/// safe="/#%[]=:;$&()+,!?*@'~")`, Django 4.2 `utils/encoding.py:110-138`):
-/// `quote` always spares ASCII alphanumerics plus `-_.~`; the safe set
-/// spares the RFC 3986 reserved marks and `%`. Every other byte — UTF-8
-/// multibyte included — becomes uppercase `%XX`.
-fn iri_to_uri(joined: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(joined.len());
-    for byte in joined.bytes() {
-        let keep = byte.is_ascii_alphanumeric()
-            || matches!(byte, b'-' | b'_' | b'.' | b'~')
-            || matches!(
-                byte,
-                b'/' | b'#'
-                    | b'%'
-                    | b'['
-                    | b']'
-                    | b'='
-                    | b':'
-                    | b';'
-                    | b'$'
-                    | b'&'
-                    | b'('
-                    | b')'
-                    | b'+'
-                    | b','
-                    | b'!'
-                    | b'?'
-                    | b'*'
-                    | b'@'
-                    | b'\''
-            );
-        if keep {
-            out.push(byte as char);
-        } else {
-            out.push('%');
-            out.push(HEX[(byte >> 4) as usize] as char);
-            out.push(HEX[(byte & 15) as usize] as char);
-        }
-    }
-    out
-}
-
 /// Absolute `asset` leaf for the workspace GET, mirroring
 /// `FileAssetSerializer` over `S3Storage` (DRF `FileField` `use_url`
 /// default + `S3Storage.url` returning the bare name,
@@ -387,7 +344,7 @@ fn absolute_asset_url(base: &str, stored: &str) -> String {
     let mut joined = String::with_capacity(base.len() + stored.len());
     joined.push_str(base);
     joined.push_str(stored);
-    iri_to_uri(&joined)
+    crate::response_headers::iri_to_uri(&joined)
 }
 
 /// Map one `SELECT *` row onto the 24-key serializer shape. Datetimes
@@ -933,25 +890,6 @@ mod tests {
             absolute_asset_url(&base, &stored),
             format!("http://127.0.0.1:18223/api/workspaces/file-assets/{ws}/{leaf}/{ws}/{leaf}")
         );
-    }
-
-    #[test]
-    fn iri_to_uri_matches_django_vectors() {
-        // Oracle: `django.utils.encoding.iri_to_uri` on the venv Django.
-        for (raw, expected) in [
-            ("http://h/p/a b", "http://h/p/a%20b"),
-            ("http://h/p/caf\u{e9}", "http://h/p/caf%C3%A9"),
-            ("http://h/p/100%25x", "http://h/p/100%25x"),
-            ("http://h/p/a?b#c", "http://h/p/a?b#c"),
-            ("http://h/p/a+b", "http://h/p/a+b"),
-            ("http://h/p/a\"b<c>d", "http://h/p/a%22b%3Cc%3Ed"),
-            (
-                "http://h/p/\u{4e2d}\u{6587}",
-                "http://h/p/%E4%B8%AD%E6%96%87",
-            ),
-        ] {
-            assert_eq!(iri_to_uri(raw), expected, "iri_to_uri({raw:?})");
-        }
     }
 
     #[test]

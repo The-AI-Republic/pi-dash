@@ -991,6 +991,7 @@ async fn render_cloud_issue_prompt<'a>(
         comments_section: prompting_context::comments_section(&bundle.comments),
         parent_done_payload: parent_done_payload(
             bundle.direct_parent_payload.as_ref(),
+            bundle.has_parent_run,
             bundle.ticker_parent_payload.as_ref(),
         ),
         workpad_body: issue.workpad.clone().unwrap_or_default(),

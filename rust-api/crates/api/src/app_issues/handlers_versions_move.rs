@@ -86,7 +86,7 @@ use uuid::Uuid;
 use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_db::app_project::models::project::ProjectLookup;
 use pidash_db::config::RunnerSettings;
-use pidash_db::dispatch::{AgentRunStatus, AgentRunTrigger};
+use pidash_db::dispatch::AgentRunStatus;
 use pidash_db::orchestration::workpad::AgentUserCollisionError;
 use pidash_db::runner_sessions::machine_outbox::{self, MachineOutboxError};
 use pidash_db::runner_sessions::models::runner_session;
@@ -1537,9 +1537,12 @@ fn map_source_row(
     })
 }
 
-/// Map one `HANDOFF_RUNS_LOCK_SQL` row. Unknown stored `status` /
-/// `trigger` values are store failures (loud 500s, never silent
-/// coercions — the 731 tolerance lives jobs-side).
+/// Map one `HANDOFF_RUNS_LOCK_SQL` row. An unknown stored `status`
+/// is a store failure (loud 500, never a silent coercion); `trigger`
+/// crosses verbatim — `agent_run.trigger` is a plain varchar and
+/// migration 0029 keeps `blocker_completed` rows readable as an
+/// unknown trigger (the 731 tolerance: unknown is neither human nor
+/// automatic).
 fn map_handoff_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<HandoffRunRow, pidash_services::app_issues::issue_move::StoreError> {
@@ -1549,8 +1552,6 @@ fn map_handoff_row(
     let status = AgentRunStatus::from_value(&status)
         .ok_or_else(|| StoreError(format!("move store: unknown agent_run.status {status:?}")))?;
     let trigger: String = row.try_get("trigger").map_err(fail)?;
-    let trigger = AgentRunTrigger::from_value(&trigger)
-        .ok_or_else(|| StoreError(format!("move store: unknown agent_run.trigger {trigger:?}")))?;
     let run_config: Option<Value> = row.try_get("run_config").map_err(fail)?;
     Ok(HandoffRunRow {
         id: row.try_get("id").map_err(fail)?,

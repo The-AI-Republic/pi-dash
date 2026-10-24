@@ -18,9 +18,10 @@
 //! - `cycle_id` is a `<uuid:>` converter: a non-UUID tail never reaches
 //!   the view (Django routing 404). Axum captures any segment, so the
 //!   handler proxies those tails to Django instead of inventing a 400.
-//! - The cycle lookup uses the plain `Cycle.objects` manager
-//!   (`base.py:661`): no `deleted_at` predicate — a soft-deleted cycle
-//!   still answers 200 rather than 404. Ported as-is.
+//! - The cycle lookup uses `Cycle.objects` (`base.py:661`), the
+//!   soft-deletion manager (`mixins.py:61-67`), so a soft-deleted cycle
+//!   reads as missing and the view answers 404 `{"error":"Cycle not
+//!   found"}` like an unknown id.
 //! - Estimate aggregates (`:664-711`) scope to issues whose
 //!   `estimate_point.estimate.type` is `"points"` with a live bridge
 //!   row, plus the `IssueManager` base excludes (not triage, not
@@ -44,8 +45,9 @@
 //! branch against that file so transcription drift fails the build.
 //!
 //! Ported bugs (translation, don't redesign; also listed in the PR):
-//! - B1: no `deleted_at` guard on the cycle lookup (plain manager) —
-//!   soft-deleted cycles answer 200 with live-computed data.
+//! - B1 (refuted): the lookup was ported with no `deleted_at` guard on a
+//!   false "plain manager" premise; Django's `Cycle.objects` soft-deletion
+//!   manager makes a soft-deleted cycle answer 404, not 200.
 //! - B2: the estimate aggregate and the live counts carry no
 //!   archived/is-draft guards beyond the manager excludes (differs from
 //!   the list endpoint, which counts drafts/archived differently).
@@ -430,8 +432,8 @@ async fn progress_get(
     // `<uuid:cycle_id>` never matches a non-UUID tail in Django: proxy
     // so the routing 404 comes from Django byte-for-byte.
     let cycle_id: uuid::Uuid = match cycle_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&cycle_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
@@ -449,12 +451,15 @@ async fn progress_get(
         GateOutcome::Unauthenticated => return Err(Denial::Unauthorized),
     }
 
-    // Plain `Cycle.objects` manager: no `deleted_at` predicate (B1).
-    // `NULL` snapshot decodes as `None` and reads falsy, like Python.
+    // `Cycle.objects` is the soft-deletion manager (`mixins.py:61-67`), so
+    // a soft-deleted cycle reads as missing: `.first()` returns None and the
+    // view answers 404 (`base.py:661-663`). `NULL` snapshot decodes as `None`
+    // and reads falsy, like Python.
     let cycle: Option<(uuid::Uuid, Option<Value>)> = sqlx::query_as(
         r#"SELECT c.id, c.progress_snapshot FROM cycles c
            JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1
-           WHERE c.project_id = $2 AND c.id = $3"#,
+           WHERE c.project_id = $2 AND c.id = $3
+             AND c.deleted_at IS NULL"#,
     )
     .bind(&slug)
     .bind(project_id)
