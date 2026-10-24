@@ -93,6 +93,12 @@ export const DEDICATED_RUNNER_LOST_FALL_BACK = "fall_back";
 export const ProjectDetail = z.object({
   ...projectDetailShape,
   /**
+   * Public-board anchor on a published project. The list projection omits
+   * it, so the full retrieve row is the only project read that carries
+   * the publication state surfaces use for access affordances.
+   */
+  anchor: z.optional(z.nullable(z.string())),
+  /**
    * Project timezone (the retrieve serializer answers every model field).
    * The cycles rows render their date spans in this zone (CYC-002); the
    * server defaults it to UTC. Optional so older fixtures still parse.
