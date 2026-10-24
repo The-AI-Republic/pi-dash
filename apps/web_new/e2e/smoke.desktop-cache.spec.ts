@@ -8,6 +8,8 @@
 // without PIDASH_E2E_BASE_URL (same contract seed as smoke.signin-issues).
 import { expect, test } from "@playwright/test";
 
+import { cachedIssueListRows, desktopCachePayload } from "./helpers/desktopCache.js";
+
 const API_BASE_URL = process.env["PIDASH_E2E_BASE_URL"] ?? "";
 const DESKTOP_URL = process.env["PIDASH_E2E_DESKTOP_APP_URL"] ?? "http://localhost:3011";
 const EMAIL = process.env["PIDASH_E2E_EMAIL"] ?? "";
@@ -19,39 +21,6 @@ const enabled =
   API_BASE_URL.length > 0 && EMAIL.length > 0 && PASSWORD.length > 0 && WORKSPACE.length > 0 && PROJECT_ID.length > 0;
 
 const ISSUES_PATH = `/api/workspaces/${WORKSPACE}/projects/${PROJECT_ID}/issues/`;
-
-/** Bytes stored under the desktop query-cache key (IndexedDB, `pidash.desktop` namespace). */
-function desktopCacheBytes(): Promise<number> {
-  return new Promise((resolve) => {
-    try {
-      const open = globalThis.indexedDB.open("pidash-web-new", 1);
-      open.onsuccess = () => {
-        const db = open.result;
-        if (!db.objectStoreNames.contains("keyvalue")) {
-          db.close();
-          resolve(0);
-          return;
-        }
-        const request = db
-          .transaction("keyvalue", "readonly")
-          .objectStore("keyvalue")
-          .get("pidash.desktop:tanstack-query-cache");
-        request.onsuccess = () => {
-          const value: unknown = request.result;
-          db.close();
-          resolve(typeof value === "string" ? value.length : 0);
-        };
-        request.onerror = () => {
-          db.close();
-          resolve(0);
-        };
-      };
-      open.onerror = () => resolve(0);
-    } catch {
-      resolve(0);
-    }
-  });
-}
 
 test.describe("desktop launch to cached relaunch", () => {
   test.skip(!enabled, "needs PIDASH_E2E_BASE_URL/EMAIL/PASSWORD/WORKSPACE/PROJECT_ID");
@@ -77,9 +46,14 @@ test.describe("desktop launch to cached relaunch", () => {
     await expect(page.locator("header[data-tauri-drag-region]")).toBeVisible();
     await expect.poll(() => page.title(), { timeout: 15_000 }).toContain("Pi Dash");
 
-    // Wait for the debounced cache write before simulating the relaunch:
-    // without a persisted payload the reload below proves nothing.
-    await expect.poll(() => page.evaluate(desktopCacheBytes), { timeout: 15_000 }).toBeGreaterThan(0);
+    // Wait for the debounced cache write before simulating the relaunch, and
+    // for it to hold this project's issue-list rows. The persistor waits a
+    // second after the last cache change and writes settled queries only, so
+    // an early payload can carry the bootstrap queries alone; reloading on it
+    // would paint the blocked-API error state and prove nothing (NEWFRONT-894).
+    await expect
+      .poll(async () => cachedIssueListRows(await page.evaluate(desktopCachePayload), PROJECT_ID), { timeout: 15_000 })
+      .toBeGreaterThan(0);
 
     // Relaunch with the network gone for the issue list. Session and
     // reference data may still load live; the rows must come from cache.

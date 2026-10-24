@@ -1,12 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// The warm-start gate must recognise exactly the payload the measured
-// relaunch can paint from. Each case below is a real shape the persistor
-// can leave behind (NEWFRONT-886).
-import { describe, expect, it } from "vitest";
+// The desktop gates must recognise exactly the payload the reload can paint
+// from (NEWFRONT-886, NEWFRONT-894). Each row-count case below is a real
+// shape the persistor can leave behind; the reader cases exercise the
+// storage read both specs take before parsing.
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { cachedIssueListRows } from "./cachedIssues.js";
+import { cachedIssueListRows, desktopCachePayload } from "./desktopCache.js";
 
 const SLUG = "perf-ws";
 const PROJECT = "123e4567-e89b-42d3-a456-426614174001";
@@ -116,5 +118,105 @@ describe("cachedIssueListRows", () => {
       },
     ];
     expect(cachedIssueListRows(payload(entries), PROJECT)).toBe(0);
+  });
+});
+
+type FakeHandler = () => void;
+
+interface FakeRequest {
+  result: unknown;
+  onsuccess: FakeHandler | null;
+  onerror: FakeHandler | null;
+}
+
+/** A browser-style request whose handler fires once, after the caller attached it. */
+function fakeRequest(fire: (request: FakeRequest) => void): FakeRequest {
+  const request: FakeRequest = { result: undefined, onsuccess: null, onerror: null };
+  queueMicrotask(() => fire(request));
+  return request;
+}
+
+function succeed(request: FakeRequest, result: unknown): void {
+  request.result = result;
+  request.onsuccess?.();
+}
+
+/** A page IndexedDB whose `open` succeeds into the given store. */
+function fakeIndexedDb(options: {
+  hasStore?: boolean;
+  read?: (key: string) => FakeRequest;
+  openFails?: boolean;
+  close?: () => void;
+}): unknown {
+  const close = options.close ?? (() => undefined);
+  return {
+    open: () => {
+      if (options.openFails === true) return fakeRequest((request) => request.onerror?.());
+      return fakeRequest((request) => {
+        request.result = {
+          objectStoreNames: { contains: () => options.hasStore ?? true },
+          transaction: () => ({
+            objectStore: () => ({ get: options.read ?? (() => fakeRequest(() => undefined)) }),
+          }),
+          close,
+        };
+        request.onsuccess?.();
+      });
+    },
+  };
+}
+
+const STORED = '{"version":1,"state":{"queries":[]}}';
+
+describe("desktopCachePayload", () => {
+  const originalIndexedDb = (globalThis as { indexedDB?: unknown }).indexedDB;
+  const setIndexedDb = (value: unknown): void => {
+    (globalThis as { indexedDB?: unknown }).indexedDB = value;
+  };
+
+  afterEach(() => {
+    (globalThis as { indexedDB?: unknown }).indexedDB = originalIndexedDb;
+    vi.restoreAllMocks();
+  });
+
+  it("returns the string stored under the desktop cache key", async () => {
+    const get = vi.fn((_key: string) => fakeRequest((request) => succeed(request, STORED)));
+    setIndexedDb(fakeIndexedDb({ read: get }));
+
+    expect(await desktopCachePayload()).toBe(STORED);
+    expect(get).toHaveBeenCalledWith("pidash.desktop:tanstack-query-cache");
+  });
+
+  it("reads nothing when the store holds a non-string value", async () => {
+    setIndexedDb(fakeIndexedDb({ read: () => fakeRequest((request) => succeed(request, { rows: [] })) }));
+
+    expect(await desktopCachePayload()).toBeNull();
+  });
+
+  it("reads nothing when the database has no key-value store", async () => {
+    const close = vi.fn();
+    setIndexedDb(fakeIndexedDb({ hasStore: false, close }));
+
+    expect(await desktopCachePayload()).toBeNull();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads nothing when the database cannot be opened", async () => {
+    setIndexedDb(fakeIndexedDb({ openFails: true }));
+
+    expect(await desktopCachePayload()).toBeNull();
+  });
+
+  it("reads nothing when the read request fails", async () => {
+    const close = vi.fn();
+    setIndexedDb(fakeIndexedDb({ close, read: () => fakeRequest((request) => request.onerror?.()) }));
+
+    expect(await desktopCachePayload()).toBeNull();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads nothing where the page has no IndexedDB", async () => {
+    delete (globalThis as { indexedDB?: unknown }).indexedDB;
+    expect(await desktopCachePayload()).toBeNull();
   });
 });

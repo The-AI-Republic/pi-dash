@@ -15,44 +15,11 @@
 // such a payload would only paint the blocked-API error state.
 import { expect, test } from "@playwright/test";
 
-import { cachedIssueListRows } from "./cachedIssues.js";
+import { cachedIssueListRows, desktopCachePayload } from "../helpers/desktopCache.js";
 import { installApiMocks, PERF_PROJECT_ID, perfIssuesUrl } from "./mocks";
 
 const DESKTOP_URL = process.env["PERF_DESKTOP_URL"] ?? "http://localhost:3022";
 const WARM_START_BUDGET_MS = 500;
-
-/** The stored desktop query-cache payload, or null while there is none. Runs in the page. */
-function desktopCachePayload(): Promise<string | null> {
-  return new Promise((resolve) => {
-    try {
-      const open = globalThis.indexedDB.open("pidash-web-new", 1);
-      open.onsuccess = () => {
-        const db = open.result;
-        if (!db.objectStoreNames.contains("keyvalue")) {
-          db.close();
-          resolve(null);
-          return;
-        }
-        const request = db
-          .transaction("keyvalue", "readonly")
-          .objectStore("keyvalue")
-          .get("pidash.desktop:tanstack-query-cache");
-        request.onsuccess = () => {
-          const value: unknown = request.result;
-          db.close();
-          resolve(typeof value === "string" ? value : null);
-        };
-        request.onerror = () => {
-          db.close();
-          resolve(null);
-        };
-      };
-      open.onerror = () => resolve(null);
-    } catch {
-      resolve(null);
-    }
-  });
-}
 
 test("desktop warm start renders cached rows within 500 ms", async ({ page }) => {
   await installApiMocks(page, { issueCount: 3 });
