@@ -888,11 +888,11 @@ fn coerce_provider_id(user_data: &mut Value) {
 ///   provider: `is_password_autoset` is hardcoded `true` in
 ///   `github_user_data` (`github.py:179`), so creation always takes the
 ///   autoset arm (`set_password(uuid4hex)`, verified + autoset flags).
-/// * Avatar upload (`download_and_upload_avatar`, `base.py`) needs the S3
-///   storage domain, which has no Rust facility in this crate: the
-///   provider URL is stored as `avatar` with no `FileAsset` row — the
-///   same value Python stores in `user.avatar` on every path, including
-///   its upload-failure fallback.
+/// * Avatar upload (`download_and_upload_avatar`, `base.py`) runs through
+///   the shared `auth_oauth` helper (SigV4 PUT + `FileAsset` row, exact
+///   content-type match, `FILE_SIZE_LIMIT` cap): success sets
+///   `avatar_asset_id`, any failure keeps the provider URL. The sync arm
+///   deletes the old asset first (`delete_old_avatar`), like Python.
 /// * `user_activation_email.delay` fires before the active flip for
 ///   pre-existing inactive users, and `track_event.delay` fires per
 ///   joined workspace next to its cache invalidation — real Postgres
@@ -909,6 +909,11 @@ async fn complete_login_or_signup(
     email: &str,
     site: &str,
     redis: Option<&RedisHandle>,
+    client: &reqwest::Client,
+    storage: &pidash_db::config::StorageSettings,
+    scheme: &str,
+    host: &str,
+    max_bytes: u64,
 ) -> Result<ResolvedUser, CallbackFailure> {
     let now = chrono::Utc::now();
     let user_data = &auth.user_data;
@@ -927,60 +932,75 @@ async fn complete_login_or_signup(
     .map_err(|_| CallbackFailure::Server)?;
     let is_signup = existing.is_some();
 
-    let (user_id, password_field, was_active, mut display_name, is_superuser, is_staff) =
-        if let Some((id, active, password, display_name, is_superuser, is_staff)) = existing {
-            (id, password, active, display_name, is_superuser, is_staff)
-        } else {
-            // `__check_signup`: `ENABLE_SIGNUP == "0"` with no invite → 5030.
-            let enable_signup = config_value(
-                pool,
-                secret_key,
-                "ENABLE_SIGNUP",
-                std::env::var("ENABLE_SIGNUP").ok(),
-            )
-            .await
-            .map_err(|_| CallbackFailure::Server)?;
-            if enable_signup.as_deref() == Some("0") {
-                let invited: Option<(i64,)> = sqlx::query_as(
+    let (
+        user_id,
+        password_field,
+        was_active,
+        mut display_name,
+        is_superuser,
+        is_staff,
+        signup_asset,
+    ) = if let Some((id, active, password, display_name, is_superuser, is_staff)) = existing {
+        (
+            id,
+            password,
+            active,
+            display_name,
+            is_superuser,
+            is_staff,
+            None,
+        )
+    } else {
+        // `__check_signup`: `ENABLE_SIGNUP == "0"` with no invite → 5030.
+        let enable_signup = config_value(
+            pool,
+            secret_key,
+            "ENABLE_SIGNUP",
+            std::env::var("ENABLE_SIGNUP").ok(),
+        )
+        .await
+        .map_err(|_| CallbackFailure::Server)?;
+        if enable_signup.as_deref() == Some("0") {
+            let invited: Option<(i64,)> = sqlx::query_as(
                 "SELECT 1 FROM workspace_member_invites WHERE email = $1 AND deleted_at IS NULL LIMIT 1",
             )
             .bind(email)
             .fetch_optional(pool)
             .await
             .map_err(|_| CallbackFailure::Server)?;
-                if invited.is_none() {
-                    return Err(CallbackFailure::Auth(
-                        oauth_error::AuthenticationException::new(
-                            pidash_services::auth_session::shapes::error_code("SIGNUP_DISABLED")
-                                .unwrap_or(5035),
-                            "SIGNUP_DISABLED".to_owned(),
-                            vec![("email".to_owned(), Value::String(email.to_owned()))],
-                        ),
-                    ));
-                }
+            if invited.is_none() {
+                return Err(CallbackFailure::Auth(
+                    oauth_error::AuthenticationException::new(
+                        pidash_services::auth_session::shapes::error_code("SIGNUP_DISABLED")
+                            .unwrap_or(5035),
+                        "SIGNUP_DISABLED".to_owned(),
+                        vec![("email".to_owned(), Value::String(email.to_owned()))],
+                    ),
+                ));
             }
+        }
 
-            // Autoset arm (`base.py:complete_login_or_signup` new-user branch):
-            // `username = uuid4().hex`, `set_password(uuid4().hex)`.
-            let id = Uuid::new_v4();
-            let username = Uuid::new_v4().simple().to_string();
-            let password = encode_password(&Uuid::new_v4().simple().to_string());
-            let first_name = user_obj
-                .first_name
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_default();
-            let last_name = user_obj
-                .last_name
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_default();
-            let avatar = user_obj.avatar.as_str().unwrap_or("").to_owned();
-            // `User.save()` (`user.py:177-182`) backfills the blank
-            // `display_name` from the email local part on the create save
-            // (`base.py:328`); the row is inserted already backfilled.
-            let display_name = backfill_display_name(email);
-            sqlx::query(
+        // Autoset arm (`base.py:complete_login_or_signup` new-user branch):
+        // `username = uuid4().hex`, `set_password(uuid4().hex)`.
+        let id = Uuid::new_v4();
+        let username = Uuid::new_v4().simple().to_string();
+        let password = encode_password(&Uuid::new_v4().simple().to_string());
+        let first_name = user_obj
+            .first_name
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        let last_name = user_obj
+            .last_name
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        let avatar = user_obj.avatar.as_str().unwrap_or("").to_owned();
+        // `User.save()` (`user.py:177-182`) backfills the blank
+        // `display_name` from the email local part on the create save
+        // (`base.py:328`); the row is inserted already backfilled.
+        let display_name = backfill_display_name(email);
+        sqlx::query(
             r#"INSERT INTO "users" ("id", "password", "last_login", "username", "mobile_number", "email",
                 "display_name", "first_name", "last_name", "avatar", "avatar_asset_id",
                 "cover_image", "cover_image_asset_id", "date_joined", "created_at", "updated_at",
@@ -1006,17 +1026,37 @@ async fn complete_login_or_signup(
         .await
         .map_err(|_| CallbackFailure::Server)?;
 
-            // `Profile.objects.create(user=user)` (`user.py:200-275` defaults).
-            let background = format!(
-                "#{}",
-                Uuid::new_v4()
-                    .simple()
-                    .to_string()
-                    .chars()
-                    .take(6)
-                    .collect::<String>()
-            );
-            sqlx::query(
+        // `avatar_asset = download_and_upload_avatar(...)` (`base.py:330-339`):
+        // success sets the FK too, failure keeps the provider URL the
+        // INSERT already stored. No old avatar exists to delete.
+        let mut created_asset = None;
+        if !avatar.is_empty() {
+            if let Some(asset_id) = super::download_and_upload_avatar(
+                client, pool, storage, scheme, host, "github", &avatar, id, max_bytes, now,
+            )
+            .await
+            {
+                sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
+                    .bind(asset_id)
+                    .bind(id)
+                    .execute(pool)
+                    .await
+                    .map_err(|_| CallbackFailure::Server)?;
+                created_asset = Some(asset_id);
+            }
+        }
+
+        // `Profile.objects.create(user=user)` (`user.py:200-275` defaults).
+        let background = format!(
+            "#{}",
+            Uuid::new_v4()
+                .simple()
+                .to_string()
+                .chars()
+                .take(6)
+                .collect::<String>()
+        );
+        sqlx::query(
             r#"INSERT INTO "profiles" ("id", "created_at", "updated_at", "user_id", "theme",
                 "is_app_rail_docked", "is_tour_completed", "onboarding_step", "use_case", "role",
                 "is_onboarded", "last_workspace_id", "billing_address_country", "billing_address",
@@ -1037,10 +1077,18 @@ async fn complete_login_or_signup(
         .execute(pool)
         .await
         .map_err(|_| CallbackFailure::Server)?;
-            // Created active (`is_active` defaults True, `user.py`), so the
-            // activation branch below never fires for new users — as in Python.
-            (id, password, true, display_name, false, false)
-        };
+        // Created active (`is_active` defaults True, `user.py`), so the
+        // activation branch below never fires for new users — as in Python.
+        (
+            id,
+            password,
+            true,
+            display_name,
+            false,
+            false,
+            created_asset,
+        )
+    };
 
     // IDP sync (`base.py:sync_user_data`): `check_sync_enabled() and not
     // is_signup` — with the inverted flag this runs for NEW users.
@@ -1068,19 +1116,58 @@ async fn complete_login_or_signup(
         // `get_display_name`; its `is_staff` arm no-ops (only new,
         // never-superuser rows reach this branch).
         display_name = display_name_for_email(email);
-        sqlx::query(
-            r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
-               "avatar" = $4, "updated_at" = $5 WHERE "id" = $6"#,
+        // `delete_old_avatar` + `download_and_upload_avatar`
+        // (`base.py:278-284`): the just-uploaded signup asset is the old
+        // avatar here. On success only the FK moves — `avatar` keeps the
+        // `''` the delete wrote; the provider URL lands only when the
+        // upload fails.
+        super::delete_old_avatar(
+            client,
+            pool,
+            storage,
+            scheme,
+            host,
+            user_id,
+            signup_asset,
+            now,
         )
-        .bind(&first_name)
-        .bind(&last_name)
-        .bind(&display_name)
-        .bind(&avatar)
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
+        .await;
+        match super::download_and_upload_avatar(
+            client, pool, storage, scheme, host, "github", &avatar, user_id, max_bytes, now,
+        )
         .await
-        .map_err(|_| CallbackFailure::Server)?;
+        {
+            Some(asset_id) => {
+                sqlx::query(
+                    r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
+                       "avatar_asset_id" = $4, "updated_at" = $5 WHERE "id" = $6"#,
+                )
+                .bind(&first_name)
+                .bind(&last_name)
+                .bind(&display_name)
+                .bind(asset_id)
+                .bind(now)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map_err(|_| CallbackFailure::Server)?;
+            }
+            None => {
+                sqlx::query(
+                    r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
+                       "avatar" = $4, "updated_at" = $5 WHERE "id" = $6"#,
+                )
+                .bind(&first_name)
+                .bind(&last_name)
+                .bind(&display_name)
+                .bind(&avatar)
+                .bind(now)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .map_err(|_| CallbackFailure::Server)?;
+            }
+        }
     }
 
     // `save_user_data` (`base.py:220-234`): login stamps; inactive users
@@ -1573,6 +1660,16 @@ async fn app_callback(
         )
         .await?;
         let email = sanitize_email(&auth.user_data.email).map_err(CallbackFailure::Auth)?;
+        // Avatar I/O inputs (`S3Storage(request)`, `base.py:198` —
+        // `is_server=False` signs the public host; the cap is
+        // `DATA_UPLOAD_MAX_MEMORY_SIZE`, i.e. `FILE_SIZE_LIMIT`).
+        let avatar_http = reqwest::Client::new();
+        let avatar_scheme = if is_secure_request(&headers, settings) {
+            "https"
+        } else {
+            "http"
+        };
+        let avatar_host = request_host(&headers);
         let user = complete_login_or_signup(
             &pool,
             &secret,
@@ -1582,6 +1679,11 @@ async fn app_callback(
             &email,
             &site,
             redis,
+            &avatar_http,
+            &settings.storage,
+            avatar_scheme,
+            &avatar_host,
+            settings.file_size_limit.max(0) as u64,
         )
         .await?;
         // `user_login(is_app=True)`: the shared `login()` half first
@@ -2006,6 +2108,21 @@ mod tests {
         pidash_db::redis::RedisHandle::from_url(&url).expect("redis url parses")
     }
 
+    /// Storage with no backend: avatar uploads fall back to the provider
+    /// URL, pinning the non-avatar behavior of the older kernels.
+    fn kernel_storage() -> pidash_db::config::StorageSettings {
+        pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            bucket_name: String::new(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: None,
+            signed_url_expiration_secs: 3600,
+        }
+    }
+
     fn kernel_auth(email: &str) -> GithubAuth {
         GithubAuth {
             tokens: providers::TokenData {
@@ -2191,6 +2308,11 @@ mod tests {
             &email,
             "http://kernel.test",
             Some(&redis),
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
         )
         .await;
 
@@ -2291,6 +2413,11 @@ mod tests {
             &email,
             "http://kernel.test",
             None,
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
         )
         .await;
 
@@ -2507,6 +2634,11 @@ mod tests {
             &email,
             "http://kernel.test",
             None,
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
         )
         .await;
 
@@ -2631,6 +2763,11 @@ mod tests {
             &email,
             "http://kernel.test",
             None,
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
         )
         .await;
 
@@ -2651,5 +2788,303 @@ mod tests {
         assert_eq!(created_at, old_created, "created_at preserved");
         assert_eq!(metadata, old_metadata, "metadata preserved");
         assert_eq!(access_token, "kernel-access-token", "token fields update");
+    }
+
+    // -- live kernel tests: avatar upload (PIDASHCONV-1323) ---------------
+    // GitHub's HTTP success path is sealed on both backends (hardcoded
+    // `https` provider endpoints), so these drive
+    // `complete_login_or_signup` directly with a fabricated `GithubAuth`
+    // (the PIDASHCONV-1083 seam), a loopback avatar stub serving a tiny
+    // PNG, and a loopback S3 stub answering 200 to PUT/HEAD/DELETE.
+
+    /// Loopback avatar stub: serves `body` as `image/png` for every
+    /// request. Returns the base URL plus a hit counter.
+    fn avatar_stub_png() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        // 1x1 transparent PNG (accepted by Content-Type alone; never decoded).
+        const PNG: &[u8] = &[
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 100, 248,
+            207, 208, 15, 0, 3, 134, 0, 128, 90, 55, 125, 108, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
+            96, 130,
+        ];
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind avatar stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    PNG.len()
+                );
+                let _ = socket.write_all(header.as_bytes());
+                let _ = socket.write_all(PNG);
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// Loopback S3 stub: answers `200` with an empty body to every
+    /// request (PUT/HEAD/DELETE). Returns the base URL plus a hit counter.
+    fn s3_stub_200() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind s3 stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(16) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// `kernel_auth` with the avatar URL pointed at the caller's stub.
+    fn kernel_auth_with_avatar(email: &str, avatar_url: &str) -> GithubAuth {
+        let mut auth = kernel_auth(email);
+        auth.user_data.user.avatar = Value::String(avatar_url.to_owned());
+        auth
+    }
+
+    /// World teardown for the avatar kernels: `file_assets` first (its
+    /// user FK has no DB-level cascade), then the login rows, the user,
+    /// and this run's queue emits.
+    async fn cleanup_avatar_world(pool: &sqlx::PgPool, email: &str) {
+        let user_ids: Vec<Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(email)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        for user_id in &user_ids {
+            for table in ["file_assets", "accounts", "profiles"] {
+                sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "user_id" = $1"#))
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .ok();
+            }
+            sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query(
+                r#"DELETE FROM "rust_job_queue"
+                   WHERE "args"::text LIKE $1 OR "kwargs"::text LIKE $1"#,
+            )
+            .bind(format!("%{user_id}%"))
+            .execute(pool)
+            .await
+            .ok();
+        }
+        sqlx::query(r#"DELETE FROM "instance_configurations" WHERE "key" = 'ENABLE_GITHUB_SYNC'"#)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    /// Signup uploads the provider avatar: one live `USER_AVATAR` row, the
+    /// FK set, the S3 object stored. Pre-fix the callback keeps only the
+    /// provider URL (no row, FK NULL).
+    #[tokio::test]
+    async fn github_kernel_signup_uploads_avatar() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let (avatar_base, avatar_hits) = avatar_stub_png();
+        let (s3_base, s3_hits) = s3_stub_200();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let client = reqwest::Client::new();
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1323-{tag}@example.test");
+        let avatar_url = format!("{avatar_base}/avatar.png");
+        let auth = kernel_auth_with_avatar(&email, &avatar_url);
+        let headers = kernel_headers();
+        let outcome = complete_login_or_signup(
+            &pool,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+            &client,
+            &storage,
+            "http",
+            "kernel.test",
+            5_242_880,
+        )
+        .await;
+
+        let user_row: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+            r#"SELECT "id", "avatar", "avatar_asset_id" FROM "users" WHERE "email" = $1"#,
+        )
+        .bind(&email)
+        .fetch_optional(&pool)
+        .await
+        .expect("read user");
+        let asset_rows: Vec<(Uuid, String, String, bool, Value)> = sqlx::query_as(
+            r#"SELECT "id", "asset", "entity_type", "is_uploaded", "attributes"
+               FROM "file_assets" WHERE "user_id" = (SELECT "id" FROM "users" WHERE "email" = $1)"#,
+        )
+        .bind(&email)
+        .fetch_all(&pool)
+        .await
+        .expect("read assets");
+        cleanup_avatar_world(&pool, &email).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        assert_eq!(
+            avatar_hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "avatar downloaded exactly once"
+        );
+        let (user_id, avatar, asset_id) = user_row.expect("user row created");
+        assert_eq!(avatar, avatar_url, "avatar keeps the provider URL");
+        assert_eq!(asset_rows.len(), 1, "one USER_AVATAR row lands");
+        let (row_id, key, entity, uploaded, attributes) = &asset_rows[0];
+        assert_eq!(entity, "USER_AVATAR");
+        assert!(uploaded, "row is uploaded");
+        assert_eq!(Some(*row_id), asset_id, "FK points at the row");
+        assert_eq!(
+            attributes.get("name"),
+            Some(&Value::String("github-avatar.png".to_owned())),
+            "attributes name carries the provider"
+        );
+        assert!(key.ends_with("-user-avatar.png"), "key shape: {key}");
+        assert_eq!(
+            s3_hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "S3 PUT + HEAD"
+        );
+        let _ = user_id;
+    }
+
+    /// Signup with sync on: the signup asset is replaced — the old row
+    /// soft-deletes, the user points at the live replacement with a blank
+    /// avatar string. Pre-fix no row ever lands and the FK stays NULL.
+    #[tokio::test]
+    async fn github_kernel_signup_sync_replaces_avatar() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let (avatar_base, avatar_hits) = avatar_stub_png();
+        let (s3_base, s3_hits) = s3_stub_200();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let client = reqwest::Client::new();
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1323s-{tag}@example.test");
+        sqlx::query(
+            r#"INSERT INTO "instance_configurations"
+               ("id", "key", "value", "category", "is_encrypted", "created_at", "updated_at")
+               VALUES ($1, 'ENABLE_GITHUB_SYNC', '1', 'general', false, now(), now())
+               ON CONFLICT ("key") DO UPDATE SET "value" = '1',
+                 "is_encrypted" = false, "deleted_at" = NULL, "updated_at" = now()"#,
+        )
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed sync flag");
+        let avatar_url = format!("{avatar_base}/avatar.png");
+        let auth = kernel_auth_with_avatar(&email, &avatar_url);
+        let headers = kernel_headers();
+        let outcome = complete_login_or_signup(
+            &pool,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+            &client,
+            &storage,
+            "http",
+            "kernel.test",
+            5_242_880,
+        )
+        .await;
+
+        let user_row: Option<(String, Option<Uuid>)> =
+            sqlx::query_as(r#"SELECT "avatar", "avatar_asset_id" FROM "users" WHERE "email" = $1"#)
+                .bind(&email)
+                .fetch_optional(&pool)
+                .await
+                .expect("read user");
+        let asset_rows: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            r#"SELECT "id", "deleted_at" FROM "file_assets"
+               WHERE "user_id" = (SELECT "id" FROM "users" WHERE "email" = $1)
+               ORDER BY "created_at""#,
+        )
+        .bind(&email)
+        .fetch_all(&pool)
+        .await
+        .expect("read assets");
+        cleanup_avatar_world(&pool, &email).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        assert_eq!(
+            avatar_hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "signup + sync each download the avatar"
+        );
+        let (avatar, asset_id) = user_row.expect("user row created");
+        assert_eq!(asset_rows.len(), 2, "signup asset + sync replacement");
+        assert!(
+            asset_rows[0].1.is_some(),
+            "replaced avatar asset soft-deletes"
+        );
+        assert!(asset_rows[1].1.is_none(), "replacement asset stays live");
+        assert_eq!(
+            Some(asset_rows[1].0),
+            asset_id,
+            "user points at the replacement"
+        );
+        assert_eq!(avatar, "", "avatar string blank after sync upload");
+        // Signup PUT + HEAD, sync DELETE + PUT + HEAD.
+        assert_eq!(
+            s3_hits.load(std::sync::atomic::Ordering::SeqCst),
+            5,
+            "S3 traffic shape"
+        );
+        let _ = avatar_url;
     }
 }
