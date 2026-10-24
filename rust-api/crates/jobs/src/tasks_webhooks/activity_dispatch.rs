@@ -345,8 +345,9 @@ pub const FIND_USER_SQL: &str = r#"SELECT id, display_name FROM users WHERE id =
 pub const FIND_PARENT_SQL: &str = r#"SELECT i.id, p.identifier, i.sequence_id FROM issues i JOIN projects p ON p.id = i.project_id WHERE i.id = $1 AND i.deleted_at IS NULL"#;
 
 /// `State.objects.filter(pk=..., project_id=...).first()` (`:208-209`).
-pub const FIND_STATE_SQL: &str =
-    r#"SELECT id, name FROM states WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL"#;
+/// The default `StateManager` excludes `group="triage"`
+/// (`db/models/state.py:79-83`), so the lookup does too.
+pub const FIND_STATE_SQL: &str = r#"SELECT id, name FROM states WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL AND "group" <> 'triage'"#;
 
 /// `Label.objects.filter(...)` for `track_labels` (`activity_tracks`;
 /// `db_table = "labels"`).
@@ -973,7 +974,8 @@ async fn fetch_update_snapshots(
         );
     }
     // State ids are project-scoped (`State.objects.filter(pk=...,
-    // project_id=...)`).
+    // project_id=...)`), and the default `StateManager` excludes
+    // `group="triage"` (`db/models/state.py:79-83`).
     let mut state_ids: HashSet<String> = HashSet::new();
     for payload in [requested, current] {
         for key in ["state_id", "state"] {
@@ -993,7 +995,7 @@ async fn fetch_update_snapshots(
     let mut states = HashMap::new();
     if !state_list.is_empty() {
         for row in sqlx::query(
-            "SELECT id::text AS sid, name FROM states WHERE id::text = ANY($1) AND project_id = $2 AND deleted_at IS NULL",
+            "SELECT id::text AS sid, name FROM states WHERE id::text = ANY($1) AND project_id = $2 AND deleted_at IS NULL AND \"group\" <> 'triage'",
         )
         .bind(&state_list)
         .bind(project_uuid)
@@ -2204,6 +2206,16 @@ mod tests {
         }
         // The custom user manager has no soft-delete scope.
         assert!(!FIND_USER_SQL.contains("deleted_at"));
+    }
+
+    // PIDASHCONV-1278 · the default `StateManager` excludes triage-group
+    // states (`db/models/state.py:79-83`); the lookup renders the same.
+    #[test]
+    fn state_lookup_excludes_triage() {
+        assert!(
+            FIND_STATE_SQL.contains("\"group\" <> 'triage'"),
+            "missing triage exclusion: {FIND_STATE_SQL}"
+        );
     }
 
     // FX-ACT-03 · DRF datetime rendering.
