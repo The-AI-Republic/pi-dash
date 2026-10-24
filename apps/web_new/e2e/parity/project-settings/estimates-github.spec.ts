@@ -88,7 +88,11 @@ test(
         expect(systems[0]?.name ?? "").not.toBe("");
         createdId = systems[0]?.id ?? "";
         expect(createdId).not.toBe("");
-        expect(await driver.estimatesActiveSystemName()).toContain(systems[0]?.name ?? "");
+        // The list refetch lands after the dialog closes (same as the
+        // states create in PSET-029), so poll for the active row.
+        await expect
+          .poll(() => driver.estimatesActiveSystemName(), { timeout: 20_000 })
+          .toContain(systems[0]?.name ?? "");
         // OSS shape per the estimates area (EST-014): the active row
         // carries a single delete control and no edit affordance.
         expect(await driver.estimatesActiveRowButtonCount()).toBe(1);
