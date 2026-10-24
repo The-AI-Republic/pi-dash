@@ -139,3 +139,65 @@ export { EditInstallDialog, installDraftFromBinding, installUpdatePayload } from
 export type { EditInstallDialogProps, InstallDraft } from "./EditInstallDialog.js";
 export { UninstallInstallDialog, uninstallConsequence } from "./UninstallInstallDialog.js";
 export type { UninstallInstallDialogProps } from "./UninstallInstallDialog.js";
+
+// Firing calendar, visibility rail and occurrence panel (AGT-015–017, 062).
+export {
+  MAX_WINDOW_DAYS,
+  TRUNCATION_NOTICE,
+  clampWindow,
+  occurrenceKeys,
+  occurrencesQueryOptions,
+  useSchedulerOccurrences,
+} from "./occurrences.js";
+export {
+  DAY_HEIGHT,
+  HOUR_HEIGHT,
+  MONTH_BLOCKS_PER_DAY,
+  addDays,
+  dayKey,
+  daysBetween,
+  formatBlockTime,
+  formatDayLabel,
+  formatMonthYear,
+  monthCells,
+  assignWeekLanes,
+  monthWindow,
+  nextMonth,
+  occurrenceTop,
+  occurrencesByDay,
+  planMonthDay,
+  previousMonth,
+  rollupDay,
+  startOfMonth,
+  startOfNextDay,
+  startOfWeek,
+  timeLineTop,
+  weekDays,
+  weekWindow,
+} from "./calendarModel.js";
+export type { MonthCell, MonthDayPlan, MonthRollup } from "./calendarModel.js";
+export {
+  formatOccurrenceInstant,
+  occurrenceContext,
+  occurrenceRecurrence,
+  occurrenceRunHref,
+  occurrenceStatus,
+} from "./calendarText.js";
+export {
+  readHiddenSchedulers,
+  useSchedulerVisibility,
+  visibilityStorageKey,
+  writeHiddenSchedulers,
+} from "./visibility.js";
+export type { VisibilityState } from "./visibility.js";
+export { VisibilityRail, railCalendars } from "./VisibilityRail.js";
+export type { RailCalendar, VisibilityRailProps } from "./VisibilityRail.js";
+export type { OccurrenceWindow } from "./occurrences.js";
+export { CalendarWeekView } from "./CalendarWeekView.js";
+export type { CalendarWeekViewProps } from "./CalendarWeekView.js";
+export { CalendarMonthView } from "./CalendarMonthView.js";
+export type { CalendarMonthViewProps } from "./CalendarMonthView.js";
+export { OccurrencePanel } from "./OccurrencePanel.js";
+export type { OccurrencePanelProps } from "./OccurrencePanel.js";
+export { CLOCK_TICK_MS, FiringCalendar } from "./FiringCalendar.js";
+export type { CalendarView, FiringCalendarProps } from "./FiringCalendar.js";

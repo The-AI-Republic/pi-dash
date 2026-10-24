@@ -117,6 +117,7 @@ import { Route as WsGatedProjectsProjectIdRunnersIndexRouteImport } from './rout
 import { Route as WsGatedProjectsProjectIdRunnersApprovalsRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/approvals'
 import { Route as WsGatedProjectsProjectIdSchedulersIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/index'
 import { Route as WsGatedProjectsProjectIdSchedulersBindingIdRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/$bindingId'
+import { Route as WsGatedProjectsProjectIdSchedulersCalendarRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/calendar'
 import { Route as WsGatedProjectsProjectIdSchedulersListRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/list'
 import { Route as WsGatedProjectsProjectIdSettingsSplatRouteImport } from './routes/$ws/_gated/projects/$projectId/settings/$'
 import { Route as WsGatedProjectsProjectIdViewsIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/views/index'
@@ -737,6 +738,12 @@ const WsGatedProjectsProjectIdSchedulersBindingIdRoute =
     path: '/$bindingId',
     getParentRoute: () => WsGatedProjectsProjectIdSchedulersRouteRoute,
   } as any)
+const WsGatedProjectsProjectIdSchedulersCalendarRoute =
+  WsGatedProjectsProjectIdSchedulersCalendarRouteImport.update({
+    id: '/calendar',
+    path: '/calendar',
+    getParentRoute: () => WsGatedProjectsProjectIdSchedulersRouteRoute,
+  } as any)
 const WsGatedProjectsProjectIdSchedulersListRoute =
   WsGatedProjectsProjectIdSchedulersListRouteImport.update({
     id: '/list',
@@ -1028,6 +1035,7 @@ export interface FileRoutesByFullPath {
   '/$ws/projects/$projectId/modules/$moduleId': typeof WsGatedProjectsProjectIdModulesModuleIdRoute
   '/$ws/projects/$projectId/runners/approvals': typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
   '/$ws/projects/$projectId/schedulers/$bindingId': typeof WsGatedProjectsProjectIdSchedulersBindingIdRoute
+  '/$ws/projects/$projectId/schedulers/calendar': typeof WsGatedProjectsProjectIdSchedulersCalendarRoute
   '/$ws/projects/$projectId/schedulers/list': typeof WsGatedProjectsProjectIdSchedulersListRoute
   '/$ws/projects/$projectId/settings/$': typeof WsGatedProjectsProjectIdSettingsSplatRoute
   '/$ws/settings/webhooks/$webhookId': typeof WsGatedSettingsWorkspaceWebhooksWebhookIdRoute
@@ -1153,6 +1161,7 @@ export interface FileRoutesByTo {
   '/$ws/projects/$projectId/modules/$moduleId': typeof WsGatedProjectsProjectIdModulesModuleIdRoute
   '/$ws/projects/$projectId/runners/approvals': typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
   '/$ws/projects/$projectId/schedulers/$bindingId': typeof WsGatedProjectsProjectIdSchedulersBindingIdRoute
+  '/$ws/projects/$projectId/schedulers/calendar': typeof WsGatedProjectsProjectIdSchedulersCalendarRoute
   '/$ws/projects/$projectId/schedulers/list': typeof WsGatedProjectsProjectIdSchedulersListRoute
   '/$ws/projects/$projectId/settings/$': typeof WsGatedProjectsProjectIdSettingsSplatRoute
   '/$ws/settings/webhooks/$webhookId': typeof WsGatedSettingsWorkspaceWebhooksWebhookIdRoute
@@ -1296,6 +1305,7 @@ export interface FileRoutesById {
   '/$ws/_gated/projects/$projectId/modules/$moduleId': typeof WsGatedProjectsProjectIdModulesModuleIdRoute
   '/$ws/_gated/projects/$projectId/runners/approvals': typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
   '/$ws/_gated/projects/$projectId/schedulers/$bindingId': typeof WsGatedProjectsProjectIdSchedulersBindingIdRoute
+  '/$ws/_gated/projects/$projectId/schedulers/calendar': typeof WsGatedProjectsProjectIdSchedulersCalendarRoute
   '/$ws/_gated/projects/$projectId/schedulers/list': typeof WsGatedProjectsProjectIdSchedulersListRoute
   '/$ws/_gated/projects/$projectId/settings/$': typeof WsGatedProjectsProjectIdSettingsSplatRoute
   '/$ws/_gated/settings/_workspace/webhooks/$webhookId': typeof WsGatedSettingsWorkspaceWebhooksWebhookIdRoute
@@ -1437,6 +1447,7 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/modules/$moduleId'
     | '/$ws/projects/$projectId/runners/approvals'
     | '/$ws/projects/$projectId/schedulers/$bindingId'
+    | '/$ws/projects/$projectId/schedulers/calendar'
     | '/$ws/projects/$projectId/schedulers/list'
     | '/$ws/projects/$projectId/settings/$'
     | '/$ws/settings/webhooks/$webhookId'
@@ -1562,6 +1573,7 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/modules/$moduleId'
     | '/$ws/projects/$projectId/runners/approvals'
     | '/$ws/projects/$projectId/schedulers/$bindingId'
+    | '/$ws/projects/$projectId/schedulers/calendar'
     | '/$ws/projects/$projectId/schedulers/list'
     | '/$ws/projects/$projectId/settings/$'
     | '/$ws/settings/webhooks/$webhookId'
@@ -1704,6 +1716,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/projects/$projectId/modules/$moduleId'
     | '/$ws/_gated/projects/$projectId/runners/approvals'
     | '/$ws/_gated/projects/$projectId/schedulers/$bindingId'
+    | '/$ws/_gated/projects/$projectId/schedulers/calendar'
     | '/$ws/_gated/projects/$projectId/schedulers/list'
     | '/$ws/_gated/projects/$projectId/settings/$'
     | '/$ws/_gated/settings/_workspace/webhooks/$webhookId'
@@ -2530,6 +2543,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedProjectsProjectIdSchedulersBindingIdRouteImport
       parentRoute: typeof WsGatedProjectsProjectIdSchedulersRouteRoute
     }
+    '/$ws/_gated/projects/$projectId/schedulers/calendar': {
+      id: '/$ws/_gated/projects/$projectId/schedulers/calendar'
+      path: '/calendar'
+      fullPath: '/$ws/projects/$projectId/schedulers/calendar'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdSchedulersCalendarRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdSchedulersRouteRoute
+    }
     '/$ws/_gated/projects/$projectId/schedulers/list': {
       id: '/$ws/_gated/projects/$projectId/schedulers/list'
       path: '/list'
@@ -2855,6 +2875,7 @@ const WsGatedProjectsProjectIdRunnersRouteRouteWithChildren =
 
 interface WsGatedProjectsProjectIdSchedulersRouteRouteChildren {
   WsGatedProjectsProjectIdSchedulersBindingIdRoute: typeof WsGatedProjectsProjectIdSchedulersBindingIdRoute
+  WsGatedProjectsProjectIdSchedulersCalendarRoute: typeof WsGatedProjectsProjectIdSchedulersCalendarRoute
   WsGatedProjectsProjectIdSchedulersListRoute: typeof WsGatedProjectsProjectIdSchedulersListRoute
   WsGatedProjectsProjectIdSchedulersIndexRoute: typeof WsGatedProjectsProjectIdSchedulersIndexRoute
 }
@@ -2863,6 +2884,8 @@ const WsGatedProjectsProjectIdSchedulersRouteRouteChildren: WsGatedProjectsProje
   {
     WsGatedProjectsProjectIdSchedulersBindingIdRoute:
       WsGatedProjectsProjectIdSchedulersBindingIdRoute,
+    WsGatedProjectsProjectIdSchedulersCalendarRoute:
+      WsGatedProjectsProjectIdSchedulersCalendarRoute,
     WsGatedProjectsProjectIdSchedulersListRoute:
       WsGatedProjectsProjectIdSchedulersListRoute,
     WsGatedProjectsProjectIdSchedulersIndexRoute:
