@@ -12473,62 +12473,263 @@ export class WebNewDriver implements ParityDriver {
   async promptsDraftPreviewResult(): Promise<{ prompt: string | null; error: string | null }> {
     return this.promptsPreviewOutcome(this.promptsOpenEditorRoot().first(), "draft-preview");
   }
-  async automationsOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("automationsOpen");
+  // --- Automations oracle (NEWFRONT-890, AGT-034–037). The page is the
+  // --- project-settings automations tab in apps/web_new: an admin sees the
+  // --- two built-in idle rows (archive, then close) plus an empty extension
+  // --- slot; everyone else sees the refusal view. Each row is a level-4
+  // --- heading with a switch named by that heading, and a switch on reveals
+  // --- its delay picker — a listbox trigger reading the current month count,
+  // --- with presets and a custom entry — plus, on the close row, a cancelled
+  // --- state picker. Both rows share one custom-month dialog and one failed
+  // --- update notice.
+
+  /** The not-authorized view non-admins land on (AGT-037). */
+  private automationsRefusalHeading(): Locator {
+    return this.page.getByRole("heading", {
+      name: "Oops! You are not authorized to view this page",
+      exact: true,
+    });
   }
+
+  /** One built-in automation row, chosen by its heading text. */
+  private automationRow(title: string): Locator {
+    return this.page.locator("[data-automation-row]").filter({ hasText: title }).first();
+  }
+
+  /** One row's delay picker trigger (the listbox button reading "N months"). */
+  private automationDelayTrigger(title: string): Locator {
+    return this.automationRow(title).getByRole("button", { name: WebNewDriver.DELAY_TRIGGER_NAME }).first();
+  }
+
+  /** A row's toggle: kit Switch, its accessible name is the row title. */
+  private automationRowSwitch(title: string): Locator {
+    return this.automationRow(title).getByRole("switch", { name: title, exact: true }).first();
+  }
+
+  /** The shared custom-month dialog, keyed by its title. */
+  private automationMonthDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: "Customize time range", exact: true }) })
+      .first();
+  }
+
+  /** The dialog's month field. */
+  private automationMonthInput(): Locator {
+    return this.automationMonthDialog().getByPlaceholder("Enter Months").first();
+  }
+
+  /**
+   * Read one row: toggle state, picker visibility and its whole-month
+   * label. Every read is defensive, so a row caught mid-write (the panel
+   * mounting) reads as off or hidden rather than throwing.
+   */
+  private async automationReadRow(title: string): Promise<AutomationRow> {
+    const toggle = this.automationRowSwitch(title);
+    const checked = ((await toggle.getAttribute("aria-checked").catch(() => null)) ?? "") === "true";
+    const toggleDisabled = await toggle.isDisabled().catch(() => true);
+    const trigger = this.automationDelayTrigger(title);
+    const pickerVisible = await this.isShown(trigger);
+    const pickerLabel = pickerVisible ? WebNewDriver.automationText(await trigger.innerText().catch(() => "")) : "";
+    return { toggleOn: checked, toggleDisabled, pickerVisible, pickerLabel };
+  }
+
+  /** Open the row's delay listbox, choose a preset by its label. */
+  private async automationChoosePreset(title: string, months: number): Promise<void> {
+    await this.automationDelayTrigger(title).click();
+    await this.page.getByRole("option", { name: WebNewDriver.automationDelayLabel(months), exact: true }).click();
+  }
+
+  /** Open the row's delay listbox, then its custom entry. */
+  private async automationOpenCustom(title: string): Promise<void> {
+    await this.automationDelayTrigger(title).click();
+    await this.page.getByRole("button", { name: "Customize time range", exact: true }).first().click();
+    await this.automationMonthInput().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** "1 month" / "N months", as the picker and presets spell it. */
+  private static automationDelayLabel(months: number): string {
+    return months === 1 ? "1 month" : `${months} months`;
+  }
+
+  /** Rendered text with runs of whitespace collapsed, for labels read back. */
+  private static automationText(raw: string): string {
+    return raw.replace(/\s+/g, " ").trim();
+  }
+
+  async automationsOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/automations`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByRole("heading", { name: WebNewDriver.AUTOMATION_ARCHIVE_TITLE, exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.automationsRefusalHeading()
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] automations page settled on neither the rows nor the refusal view.");
+  }
+
   async automationsNotAuthorizedVisible(): Promise<boolean> {
-    return todo("automationsNotAuthorizedVisible");
+    return this.isShown(this.automationsRefusalHeading());
   }
+
   async automationsArchiveRow(): Promise<AutomationRow> {
-    return todo("automationsArchiveRow");
+    return this.automationReadRow(WebNewDriver.AUTOMATION_ARCHIVE_TITLE);
   }
+
   async automationsArchiveToggle(): Promise<void> {
-    return todo("automationsArchiveToggle");
+    await this.automationRowSwitch(WebNewDriver.AUTOMATION_ARCHIVE_TITLE).click();
   }
-  async automationsArchiveSetPreset(_months: number): Promise<void> {
-    return todo("automationsArchiveSetPreset");
+
+  async automationsArchiveSetPreset(months: number): Promise<void> {
+    await this.automationChoosePreset(WebNewDriver.AUTOMATION_ARCHIVE_TITLE, months);
   }
+
   async automationsArchiveOpenCustom(): Promise<void> {
-    return todo("automationsArchiveOpenCustom");
+    await this.automationOpenCustom(WebNewDriver.AUTOMATION_ARCHIVE_TITLE);
   }
+
   async automationsCloseRow(): Promise<AutomationCloseRow> {
-    return todo("automationsCloseRow");
+    const base = await this.automationReadRow(WebNewDriver.AUTOMATION_CLOSE_TITLE);
+    const trigger = this.closeStateTrigger();
+    const shown = await this.isShown(trigger);
+    return {
+      ...base,
+      stateLabel: shown ? WebNewDriver.automationText(await trigger.innerText().catch(() => "")) : "",
+      // A hidden panel has no picker at all, so it reads as unavailable.
+      statePickerDisabled: shown ? await trigger.isDisabled().catch(() => true) : true,
+    };
   }
+
   async automationsCloseToggle(): Promise<void> {
-    return todo("automationsCloseToggle");
+    await this.automationRowSwitch(WebNewDriver.AUTOMATION_CLOSE_TITLE).click();
   }
-  async automationsCloseSetPreset(_months: number): Promise<void> {
-    return todo("automationsCloseSetPreset");
+
+  async automationsCloseSetPreset(months: number): Promise<void> {
+    await this.automationChoosePreset(WebNewDriver.AUTOMATION_CLOSE_TITLE, months);
   }
-  async automationsCloseSetState(_name: string): Promise<void> {
-    return todo("automationsCloseSetState");
+
+  async automationsCloseSetState(name: string): Promise<void> {
+    await this.closeStateTrigger().click();
+    await this.page.getByRole("option", { name, exact: true }).click();
   }
+
+  /** The cancelled-state option names in list order; closes the picker after. */
   async automationsCloseStateOptions(): Promise<string[]> {
-    return todo("automationsCloseStateOptions");
+    const trigger = this.closeStateTrigger();
+    await trigger.click();
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const total = await options.count();
+    const names: string[] = [];
+    for (let index = 0; index < total; index++) {
+      names.push(
+        WebNewDriver.automationText(
+          await options
+            .nth(index)
+            .innerText()
+            .catch(() => "")
+        )
+      );
+    }
+    await trigger.click();
+    return names;
   }
+
   async automationsCloseOpenCustom(): Promise<void> {
-    return todo("automationsCloseOpenCustom");
+    await this.automationOpenCustom(WebNewDriver.AUTOMATION_CLOSE_TITLE);
   }
+
   async automationsMonthModal(): Promise<AutomationMonthModal | null> {
-    return todo("automationsMonthModal");
+    const dialog = this.automationMonthDialog();
+    if (!(await this.isShown(dialog))) return null;
+    // A field torn down mid-read reports as empty, like the seeded check.
+    const inputValue = await this.automationMonthInput()
+      .inputValue()
+      .catch(() => "");
+    const errorBox = dialog.getByText(WebNewDriver.MONTH_RANGE_MESSAGE, { exact: true });
+    const error = (await this.isShown(errorBox)) ? WebNewDriver.MONTH_RANGE_MESSAGE : null;
+    return { title: "Customize time range", inputValue, error };
   }
-  async automationsMonthFill(_value: string): Promise<void> {
-    return todo("automationsMonthFill");
+
+  async automationsMonthFill(value: string): Promise<void> {
+    await this.automationMonthInput().fill(value);
   }
+
   async automationsMonthSubmit(): Promise<void> {
-    return todo("automationsMonthSubmit");
+    await this.automationMonthDialog().getByRole("button", { name: "Submit", exact: true }).click();
   }
+
   async automationsMonthCancel(): Promise<void> {
-    return todo("automationsMonthCancel");
+    const heading = this.page.getByRole("heading", { name: "Customize time range", exact: true });
+    await this.automationMonthDialog().getByRole("button", { name: "Cancel", exact: true }).click();
+    await heading.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
+  /**
+   * Fail the next project PATCH once with a server error, so the shared
+   * failure notice can be observed. Later writes pass through untouched.
+   */
   async automationsFailUpdateOnce(): Promise<void> {
-    return todo("automationsFailUpdateOnce");
+    let armed = true;
+    await this.page.route("**/api/workspaces/*/projects/*/", async (route) => {
+      if (!armed || route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      armed = false;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "parity automations update failure" }),
+      });
+    });
   }
+
+  /** The row headings inside the automations section, in display order. */
   async automationsBuiltInRows(): Promise<string[]> {
-    return todo("automationsBuiltInRows");
+    const headings = this.page
+      .getByTestId("automations-settings")
+      .locator("[data-automation-row]")
+      .getByRole("heading", { level: 4 });
+    const total = await headings.count();
+    const titles: string[] = [];
+    for (let index = 0; index < total; index++) {
+      titles.push(
+        WebNewDriver.automationText(
+          await headings
+            .nth(index)
+            .innerText()
+            .catch(() => "")
+        )
+      );
+    }
+    return titles;
   }
+
+  /**
+   * Whether the edition extension slot contributes rows. The community
+   * build mounts nothing there, so this stays false until an edition adds
+   * its own automation rows to the slot.
+   */
   async automationsHasExtensionRows(): Promise<boolean> {
-    return todo("automationsHasExtensionRows");
+    const slot = this.page.getByTestId("automations-extension");
+    if ((await slot.count()) === 0) return false;
+    return (await slot.locator("[data-automation-row]").count()) > 0;
   }
 
   // --- Add-runner modal + creation (NEWFRONT-543, RUN-006–009, RUN-049).
