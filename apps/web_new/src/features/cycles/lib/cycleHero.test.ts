@@ -14,6 +14,7 @@ import {
   heroChartAvailable,
   heroClosedSummary,
   heroLabelEntries,
+  heroMeasureAvailable,
   heroPendingCount,
   heroPriorityEntries,
   heroProgressGroups,
@@ -72,6 +73,35 @@ describe("heroPendingCount", () => {
     expect(heroPendingCount(progress())).toBe("Pending work items - 12");
     expect(heroPendingCount(progress({ backlog_issues: 0, unstarted_issues: 0, started_issues: 0 }))).toBe(
       "Pending work items - 0"
+    );
+  });
+});
+
+describe("heroMeasureAvailable", () => {
+  it("shows for an enabled non-categories system", () => {
+    expect(heroMeasureAvailable({ estimatesEnabled: true, estimateType: "points", totalEstimatePoints: 0 })).toBe(true);
+    expect(heroMeasureAvailable({ estimatesEnabled: true, estimateType: "time", totalEstimatePoints: 0 })).toBe(true);
+  });
+
+  it("hides for a categories system even when enabled or carrying point data", () => {
+    expect(heroMeasureAvailable({ estimatesEnabled: true, estimateType: "categories", totalEstimatePoints: 0 })).toBe(
+      false
+    );
+    expect(heroMeasureAvailable({ estimatesEnabled: true, estimateType: "categories", totalEstimatePoints: 9 })).toBe(
+      false
+    );
+  });
+
+  it("shows from cycle point data when estimates are disabled", () => {
+    expect(heroMeasureAvailable({ estimatesEnabled: false, estimateType: null, totalEstimatePoints: 2 })).toBe(true);
+    expect(heroMeasureAvailable({ estimatesEnabled: false, estimateType: "points", totalEstimatePoints: 0 })).toBe(
+      false
+    );
+  });
+
+  it("hides with no enabled system, no active family, and no point data", () => {
+    expect(heroMeasureAvailable({ estimatesEnabled: false, estimateType: null, totalEstimatePoints: null })).toBe(
+      false
     );
   });
 });

@@ -11,16 +11,18 @@
 // filters narrow the groups below without touching it.
 
 import { useQuery } from "@tanstack/react-query";
+import { selectActiveEstimate } from "@pidash/api-client";
 import { ChevronDown } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { useProjectRow } from "../../auth/index.js";
+import { projectEstimatesQueryOptions } from "../../estimates/index.js";
 import { useApplyBreakdownFilter } from "../api/heroBreakdown.js";
-import { heroQueryOptions } from "../api/heroQueries.js";
+import { heroProgressQueryOptions, heroQueryOptions } from "../api/heroQueries.js";
 import type { BreakdownDimension } from "../lib/cycleBreakdownFilter.js";
 import type { CycleMemberEntry } from "../lib/cycleMembers.js";
-import type { HeroMeasure, HeroProgressGroupId } from "../lib/cycleHero.js";
+import { heroMeasureAvailable, type HeroMeasure, type HeroProgressGroupId } from "../lib/cycleHero.js";
 import type { CycleProjectRef } from "../dialog/CycleDialog.js";
 import { CycleRow } from "./CycleRow.js";
 import { HeroBreakdownCard } from "./HeroBreakdownCard.js";
@@ -62,6 +64,25 @@ export function ActiveCycleHero({
   const current = hero.data?.[0];
   const breakdown = useApplyBreakdownFilter({ workspaceSlug, projectId, cycleId: current?.id ?? "" });
   const estimatesEnabled = project.data?.estimate !== null && project.data?.estimate !== undefined;
+  const progress = useQuery({
+    ...heroProgressQueryOptions(getAppClient(), workspaceSlug, projectId, current?.id ?? ""),
+    enabled: current !== undefined,
+  });
+  const pointData = (progress.data?.total_estimate_points ?? 0) > 0;
+  // The family decides whether categories hide the switch, so it is
+  // needed whenever the switch could otherwise appear -- including a
+  // disabled estimates setting that still carries point data.
+  const estimates = useQuery({
+    ...projectEstimatesQueryOptions(getAppClient(), workspaceSlug, projectId),
+    enabled: estimatesEnabled || pointData,
+  });
+  const estimateType = selectActiveEstimate(estimates.data ?? [])?.type ?? null;
+  const measureAvailable = heroMeasureAvailable({
+    estimatesEnabled,
+    estimateType,
+    totalEstimatePoints: progress.data?.total_estimate_points,
+  });
+  const activeMeasure: HeroMeasure = estimatesEnabled && measureAvailable ? measure : "issues";
 
   function onGroupClick(group: HeroProgressGroupId): void {
     void breakdown.apply("state_group", group);
@@ -118,15 +139,16 @@ export function ActiveCycleHero({
               cycleId={current.id}
               startDate={current.start_date}
               endDate={current.end_date}
-              measure={measure}
+              measure={activeMeasure}
               estimatesEnabled={estimatesEnabled}
+              estimateType={estimateType}
               onMeasureChange={setMeasure}
             />
             <HeroBreakdownCard
               workspaceSlug={workspaceSlug}
               projectId={projectId}
               cycleId={current.id}
-              measure={measure}
+              measure={activeMeasure}
               onEntryClick={onEntryClick}
               disabled={breakdown.pending}
             />

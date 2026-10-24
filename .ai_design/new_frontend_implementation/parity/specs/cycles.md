@@ -936,6 +936,10 @@ cancelled}/{total - cancelled} Work items closed`, matching the
 2. **"Work item burndown"** — the `Pending work items - {n}` line, the
    chart, and the
    same measure picker as the sidebar (items, estimates when enabled);
+   that picker follows the sidebar's categories rule: where the
+   project's active estimate system is the categories (text) family,
+   the hero hides the picker entirely and keeps counting items, even
+   if the cycle carries point data;
    an undated or future-start cycle shows the chart's empty
    placeholder.
 3. **Breakdown** — tabs labelled exactly **"Priority work items"**,

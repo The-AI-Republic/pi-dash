@@ -14,7 +14,13 @@ import { getAppClient } from "../../../core/api/client.js";
 import { useResolvedScheme } from "../../../core/theme/index.js";
 import { AreaChart, chartSlotColor, resolveChartScheme } from "../../../shared/charts/index.js";
 import { heroAnalyticsQueryOptions, heroProgressQueryOptions } from "../api/heroQueries.js";
-import { heroBurndownPoints, heroChartAvailable, heroPendingCount, type HeroMeasure } from "../lib/cycleHero.js";
+import {
+  heroBurndownPoints,
+  heroChartAvailable,
+  heroMeasureAvailable,
+  heroPendingCount,
+  type HeroMeasure,
+} from "../lib/cycleHero.js";
 
 /** Card heading. */
 export const HERO_BURNDOWN_TITLE = "Work item burndown";
@@ -32,6 +38,8 @@ export interface HeroBurndownCardProps {
   measure: HeroMeasure;
   /** Estimates ride the switch only where the project enables them. */
   estimatesEnabled: boolean;
+  /** Active estimate family; categories never offers a numeric measure. */
+  estimateType: string | null | undefined;
   onMeasureChange: (measure: HeroMeasure) => void;
 }
 
@@ -43,11 +51,20 @@ export function HeroBurndownCard({
   endDate,
   measure,
   estimatesEnabled,
+  estimateType,
   onMeasureChange,
 }: HeroBurndownCardProps): React.ReactElement {
   const client = getAppClient();
   const progress = useQuery(heroProgressQueryOptions(client, workspaceSlug, projectId, cycleId));
-  const analytics = useQuery(heroAnalyticsQueryOptions(client, workspaceSlug, projectId, cycleId, measure));
+  const measureAvailable = heroMeasureAvailable({
+    estimatesEnabled,
+    estimateType,
+    totalEstimatePoints: progress.data?.total_estimate_points,
+  });
+  // Estimates-off projects read back as counts even when point data
+  // keeps the switch visible.
+  const activeMeasure: HeroMeasure = estimatesEnabled && measureAvailable ? measure : "issues";
+  const analytics = useQuery(heroAnalyticsQueryOptions(client, workspaceSlug, projectId, cycleId, activeMeasure));
   const { scheme, customDark } = useResolvedScheme();
   const data = progress.data;
   const chart = analytics.data?.completion_chart;
@@ -75,7 +92,7 @@ export function HeroBurndownCard({
       </div>
     );
   } else {
-    const points = heroBurndownPoints(chart, measure).map((point) => ({
+    const points = heroBurndownPoints(chart, activeMeasure).map((point) => ({
       label: point.day,
       values: { remaining: point.remaining },
     }));
@@ -86,23 +103,23 @@ export function HeroBurndownCard({
           <span data-testid="hero-burndown-pending" className="text-body text-(--text)">
             {heroPendingCount(data)}
           </span>
-          {estimatesEnabled ? (
+          {measureAvailable ? (
             <div role="group" aria-label="Measure" className="flex items-center gap-(--space-1)">
               <button
                 type="button"
-                aria-pressed={measure === "issues"}
+                aria-pressed={activeMeasure === "issues"}
                 onClick={() => onMeasureChange("issues")}
                 className="text-meta cursor-pointer rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) data-[active=true]:bg-(--subtle) data-[active=true]:text-(--text)"
-                data-active={measure === "issues"}
+                data-active={activeMeasure === "issues"}
               >
                 Items
               </button>
               <button
                 type="button"
-                aria-pressed={measure === "points"}
+                aria-pressed={activeMeasure === "points"}
                 onClick={() => onMeasureChange("points")}
                 className="text-meta cursor-pointer rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) data-[active=true]:bg-(--subtle) data-[active=true]:text-(--text)"
-                data-active={measure === "points"}
+                data-active={activeMeasure === "points"}
               >
                 Estimates
               </button>
