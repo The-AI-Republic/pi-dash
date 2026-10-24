@@ -48,14 +48,14 @@ function AssigneeIdentity({ row }: { row: AssigneeRow }): React.ReactElement {
         >
           <UserRound aria-hidden="true" className="size-3.5" />
         </span>
-        <span>{assigneeCellText(row)}</span>
+        <span data-testid="assignee-name">{assigneeCellText(row)}</span>
       </span>
     );
   }
   return (
     <span className="inline-flex items-center gap-(--space-2)">
       <Avatar size="small" name={row.name} {...(row.avatarUrl === null ? {} : { src: row.avatarUrl })} />
-      <span>{row.name}</span>
+      <span data-testid="assignee-name">{row.name}</span>
     </span>
   );
 }

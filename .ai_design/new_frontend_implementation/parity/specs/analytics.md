@@ -461,6 +461,12 @@ picker state. The workspace page's picker selection must remain whatever it
 was before the dialog opened. Reopening starts fresh with the newly supplied
 scope.
 
+By the time this slice shipped, both narrowing triggers existed in the new
+build: the cycle header (CYC-033, NEWFRONT-712) and the module detail page
+(MOD-032, NEWFRONT-802), which mounts the same entry with the module's id and
+name. The dialog content's three legs — project, cycle, module — are therefore
+reachable and are proven here; nothing is deferred to a later trigger slice.
+
 Guest visibility of the dialog is governed by each trigger's owner. On desktop
 issues, cycles and modules surfaces the old trigger is gated on
 issue-creation rights, so guests see no trigger. Analytics does not add a

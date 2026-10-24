@@ -1451,7 +1451,12 @@ describe("analytics scoped dialog", () => {
     await expect(new WebNewDriver(recorder.page()).analyticsDialogTitle()).resolves.toBe(
       "Analytics for Website in Sprint 3"
     );
-    expectTrace(recorder.trace(), ['waitFor page.getByRole("dialog").locator("h2")', "textContent"]);
+    // One title node is resolved before the wait: the settled panel has
+    // several `h2` headings, so an unsettled locator fails strict mode.
+    expectTrace(recorder.trace(), [
+      'waitFor page.getByRole("dialog").locator("h2").first()',
+      'textContent page.getByRole("dialog").locator("h2").first()',
+    ]);
   });
 
   it("reports whether the pre-content spinner was seen", async () => {

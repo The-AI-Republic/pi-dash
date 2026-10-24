@@ -26078,9 +26078,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async analyticsDialogTitle(): Promise<string> {
-    const heading = this.page.getByRole("dialog").locator("h2");
+    // Resolve one node before waiting. The panel's other sections render
+    // their own `h2` once the scope settles, so an unsettled `h2` locator
+    // is ambiguous by the time `waitFor` re-checks it (strict mode), which
+    // read as a race against the spinner. The title is the panel's first
+    // heading in document order.
+    const heading = this.page.getByRole("dialog").locator("h2").first();
     await heading.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    return ((await heading.first().textContent()) ?? "").trim();
+    return ((await heading.textContent()) ?? "").trim();
   }
 
   async analyticsDialogSpinnerSeen(): Promise<boolean> {
@@ -26155,9 +26160,10 @@ export class WebNewDriver implements ParityDriver {
       return [...table.querySelectorAll("tbody tr")].map((row) => {
         const cell = row.querySelector("td");
         const avatar = (cell?.querySelector("img")?.getAttribute("src") ?? "") !== "";
-        // The person's name is the last span in the identity cell; the
-        // avatar's own inner text is a glyph, so the last span is the label.
-        const nameSpan = cell?.querySelector("span:last-child");
+        // The identity cell marks its label explicitly: the avatar's own
+        // glyph is nested a level deeper, so a `span:last-child` walk
+        // returns the initials, not the name.
+        const nameSpan = cell?.querySelector('[data-testid="assignee-name"]');
         const text = ((nameSpan?.textContent ?? cell?.textContent ?? "") as string).trim();
         const unassigned = text === "Unassigned";
         return { text, avatar, initial: !avatar && !unassigned, unassigned };
