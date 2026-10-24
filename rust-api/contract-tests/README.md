@@ -248,7 +248,7 @@ SECRET_KEY=<same SECRET_KEY as the server> \
 
 The suite stays under Django's default brakes so a clean checkout passes
 in one go: ~15 `device/start` calls (20/minute/IP), ~11 anonymous token
-polls (30/minute/IP), a handful of requests per API key (60/minute/key).
+polls (30/minute/IP), a handful of requests per API key (120/minute/key).
 Do not add start/token-poll calls casually; share fixtures instead.
 Re-running within the same minute can 429 — wait for the window to slide.
 
