@@ -189,7 +189,8 @@ class Seed:
         self._rows.clear()
 
     # -- identity ------------------------------------------------------
-    def user(self, *, email=None, password="contract-pw-80", suffix=None):
+    def user(self, *, email=None, password="contract-pw-80", suffix=None,
+             user_timezone="UTC"):
         sfx = suffix or uuid.uuid4().hex[:8]
         email = email or f"ct80-{sfx}@example.com"
         return {
@@ -214,7 +215,7 @@ class Seed:
                 is_email_verified=True,
                 is_password_autoset=False,
                 token=uuid.uuid4().hex,
-                user_timezone="UTC",
+                user_timezone=user_timezone,
                 last_login_ip="127.0.0.1",
                 last_logout_ip="",
                 last_login_medium="",
@@ -489,10 +490,10 @@ class Seed:
         )
 
     def issue(self, workspace_id, project_id, *, name=None,
-              description="", sequence_id=None, state_id=None):
+              description="", sequence_id=None, state_id=None,
+              completed_at=None, archived_at=None):
         """A minimal issue row with FTS-visible text columns set."""
-        return self._insert(
-            "issues",
+        cols = dict(
             name=name or f"CT87 issue {uuid.uuid4().hex[:6]}",
             description_json="{}",
             description_html=f"<p>{description}</p>" if description else "<p></p>",
@@ -510,6 +511,11 @@ class Seed:
             created_at=_now(),
             updated_at=_now(),
         )
+        if completed_at is not None:
+            cols["completed_at"] = completed_at
+        if archived_at is not None:
+            cols["archived_at"] = archived_at
+        return self._insert("issues", **cols)
 
     def favorite_view(self, workspace_id, user_id, view_id, *,
                       project_id=None):
