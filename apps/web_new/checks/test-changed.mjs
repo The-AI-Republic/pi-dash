@@ -3,8 +3,10 @@
 // See the LICENSE file for details.
 // Runs the web_new unit tests a change can affect, not the whole suite.
 // `vitest related` follows the import graph from the files that differ from
-// the base (including @pidash/kit and @pidash/api-client sources, which
-// vitest.config.ts aliases in). Configs, package manifests and the test setup
+// the base. Changed @pidash/kit and @pidash/api-client sources are not passed
+// as they are: through the package entry file they would reach almost every
+// test. package-impact.mjs swaps them for the web_new files that import the
+// names they affect (it logs those names). Configs, package manifests and the test setup
 // file reach every test without an import edge; vitest would answer a change
 // to one of them by running the whole suite, so they are left out of the list
 // and do not widen the run. The NEWFRONT full-suite scheduler runs the whole
@@ -20,8 +22,11 @@
 // Past MAX_RELATED_FILES changed files (a stale base, a mass rename) the
 // file list could outgrow the OS argument limit, so the whole suite runs.
 import { execFileSync, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { packageImpact } from "./package-impact.mjs";
 
 const webNewDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_BASE_BRANCH = "origin/web-new-dev";
@@ -66,10 +71,13 @@ function parseArgs(argv) {
 
 // Decide what to run. Pure, so the self-test covers every branch. Paths are
 // repo-relative; vitest gets them absolute, as its import graph holds them.
-function planRun({ full, vitestArgs, changedFiles, root }) {
+// `impact` (from packageImpact) replaces changed package files with the
+// web_new files that use what they export.
+function planRun({ full, vitestArgs, changedFiles, root, impact = { packageFiles: [], consumers: [] } }) {
   if (full) return { mode: "full", reason: "--full", skipped: [], args: ["run", ...vitestArgs] };
   const skipped = skippedFiles(changedFiles);
-  const related = changedFiles.filter((file) => !skipped.includes(file)).map((file) => resolve(root, file));
+  const kept = changedFiles.filter((file) => !skipped.includes(file) && !impact.packageFiles.includes(file));
+  const related = [...new Set([...kept, ...impact.consumers])].map((file) => resolve(root, file));
   if (related.length > MAX_RELATED_FILES)
     return { mode: "full", reason: `${related.length} changed files`, skipped, args: ["run", ...vitestArgs] };
   return {
@@ -81,7 +89,51 @@ function planRun({ full, vitestArgs, changedFiles, root }) {
 }
 
 function defaultGit(args) {
-  return execFileSync("git", args, { cwd: webNewDir, encoding: "utf8" }).trim();
+  return execFileSync("git", args, {
+    cwd: webNewDir,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 64 * 1024 * 1024,
+  }).trim();
+}
+
+function defaultRead(root) {
+  return (file) => {
+    try {
+      return readFileSync(resolve(root, file), "utf8");
+    } catch {
+      return null;
+    }
+  };
+}
+
+// The package analysis needs the tree's files and the base's entry files;
+// skipped entirely when no package source changed.
+function impactFor(changedFiles, { base, root, git, read }) {
+  if (!changedFiles.some((file) => /^packages\/(kit|api-client)\/src\//.test(file)))
+    return { packageFiles: [], names: [], consumers: [] };
+  const files = git([
+    "-C",
+    root,
+    "ls-files",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+    "--",
+    "apps/web_new",
+    "packages/kit/src",
+    "packages/api-client/src",
+  ])
+    .split("\n")
+    .filter(Boolean);
+  const readBase = (file) => {
+    try {
+      return git(["-C", root, "show", `${base}:${file}`]);
+    } catch {
+      return null;
+    }
+  };
+  return packageImpact({ changedFiles, read, files, readBase });
 }
 
 /* v8 ignore next 3 -- spawns vitest itself; the self-test injects a fake */
@@ -98,7 +150,7 @@ function changedFilesSince(base, git, root = git(["rev-parse", "--show-toplevel"
 
 function main(
   argv = process.argv.slice(2),
-  { git = defaultGit, runVitest = defaultRunVitest, log = console.log } = {}
+  { git = defaultGit, runVitest = defaultRunVitest, log = console.log, read = null } = {}
 ) {
   const opts = parseArgs(argv);
   if (opts.full) {
@@ -108,9 +160,17 @@ function main(
   const base = opts.base ?? git(["merge-base", "HEAD", DEFAULT_BASE_BRANCH]);
   const root = git(["rev-parse", "--show-toplevel"]);
   const changedFiles = changedFilesSince(base, git, root);
-  const plan = planRun({ ...opts, changedFiles, root });
+  const impact = impactFor(changedFiles, { base, root, git, read: read ?? defaultRead(root) });
+  const plan = planRun({ ...opts, changedFiles, root, impact });
   if (plan.mode === "full") log(`test:changed: full suite (${plan.reason} since ${base})`);
   else log(`test:changed: tests affected by ${changedFiles.length} file(s) changed since ${base}`);
+  if (impact.packageFiles.length > 0) {
+    const shown =
+      impact.names.slice(0, 12).join(", ") + (impact.names.length > 12 ? `, … (${impact.names.length})` : "");
+    log(
+      `test:changed: ${impact.packageFiles.length} package file(s) changed; names affected: ${shown || "none"}; used by ${impact.consumers.length} web_new file(s)`
+    );
+  }
   if (plan.skipped.length > 0)
     log(`test:changed: no import edge, left to the scheduled full suite: ${plan.skipped.join(", ")}`);
   return runVitest(plan.args);

@@ -53,6 +53,7 @@ export default defineConfig({
       "checks/check-boundaries.test.mjs",
       "checks/check-tokens.test.mjs",
       "checks/test-changed.test.mjs",
+      "checks/package-impact.test.mjs",
       "checks/full-suite.test.mjs",
       "e2e/**/*.test.ts",
       "e2e/**/*.test.tsx",
