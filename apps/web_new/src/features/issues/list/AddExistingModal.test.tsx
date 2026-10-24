@@ -142,6 +142,20 @@ describe("AddExistingModal", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("lets a host name the search hint while keeping the field's label", () => {
+    mocks.search.mockResolvedValue([]);
+    setup({ searchPlaceholder: "Type to search" });
+    const input = screen.getByRole("textbox", { name: "Search work items" });
+    expect(input).toHaveAttribute("placeholder", "Type to search");
+  });
+
+  it("defaults the search hint to the issues wording", () => {
+    mocks.search.mockResolvedValue([]);
+    setup();
+    const input = screen.getByRole("textbox", { name: "Search work items" });
+    expect(input).toHaveAttribute("placeholder", "Search work items");
+  });
+
   it("keeps the add action disabled without a selection", () => {
     mocks.search.mockResolvedValue([]);
     setup();

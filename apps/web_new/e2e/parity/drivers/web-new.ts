@@ -22210,19 +22210,46 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesDetailHeaderAddVisible(): Promise<boolean> {
-    return todo("modulesDetailHeaderAddVisible");
+    // Scoped to the desktop header: the empty card's create entry carries
+    // different wording, so the name match cannot pick it up.
+    const button = this.page.getByTestId("issues-header").getByTestId("module-add-work-item");
+    return (
+      (await button.count()) > 0 &&
+      (await button
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
 
   async modulesDetailHeaderAddClick(): Promise<void> {
-    return todo("modulesDetailHeaderAddClick");
+    await this.page
+      .getByTestId("issues-header")
+      .getByTestId("module-add-work-item")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailFailNextIssuesAdd(): Promise<void> {
-    return todo("modulesDetailFailNextIssuesAdd");
+    // Page-scoped (the fixture page dies with the scenario): refuse the
+    // module-issues add write and pass every other request through. The
+    // reads of the same collection stay untouched, so only the attach
+    // path answers with an error.
+    await this.page.route("**/modules/*/issues/", async (route) => {
+      if (route.request().method() === "POST") {
+        await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+        return;
+      }
+      await route.continue();
+    });
   }
 
-  async modulesDetailPickerSearch(_text: string): Promise<void> {
-    return todo("modulesDetailPickerSearch");
+  async modulesDetailPickerSearch(text: string): Promise<void> {
+    // The module picker is the shared add-existing dialog opened from the
+    // module page; its search box hints "Type to search" and lands with
+    // the dialog. The caller polls the row list for the answer.
+    const input = this.page.getByPlaceholder("Type to search").first();
+    await input.fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailAnalyticsVisible(): Promise<boolean> {

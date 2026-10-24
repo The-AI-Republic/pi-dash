@@ -73,6 +73,20 @@ export interface EntityListScreenProps {
   compact: boolean;
   /** Trailing desktop header controls the host appends after Display. */
   extraHeaderActions?: React.ReactNode;
+  /**
+   * Entries the empty card offers instead of the layout's own overlays
+   * (the module page hands its single create dialog and picker here so
+   * the header and the card open the same pair). Absent, the card uses
+   * the overlays the mounted layout registered.
+   */
+  emptyStateActions?: EmptyStateActions | undefined;
+}
+
+/** What the zero-total card does when the host owns the entries. */
+export interface EmptyStateActions {
+  canAct: boolean;
+  onCreate: () => void;
+  onAddExisting: () => void;
 }
 
 /** Same layout root and list renderer as the project issue screen. */
@@ -89,6 +103,7 @@ export function EntityListScreen({
   onPeekChange,
   compact,
   extraHeaderActions,
+  emptyStateActions,
 }: EntityListScreenProps): React.ReactElement {
   const client = getAppClient();
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(client, workspaceSlug));
@@ -366,31 +381,23 @@ export function EntityListScreen({
         />
       );
     }
+    // A host that owns the entries hands them here; otherwise the card
+    // opens the overlays the mounted layout registered.
+    const hostOwnsEntries = emptyStateActions !== undefined;
+    const cardCanAct = hostOwnsEntries ? emptyStateActions.canAct : canEdit;
+    const openCreate = hostOwnsEntries ? emptyStateActions.onCreate : () => overlays?.openCreate();
+    const openAddExisting = hostOwnsEntries ? emptyStateActions.onAddExisting : () => overlays?.openAddExisting();
     if (entity.scope === "cycle") {
       return (
         <CycleIssuesEmpty
           completed={resolvedCompletedCycle}
-          canAct={canEdit}
-          onCreate={() => {
-            overlays?.openCreate();
-          }}
-          onAddExisting={() => {
-            overlays?.openAddExisting();
-          }}
+          canAct={cardCanAct}
+          onCreate={openCreate}
+          onAddExisting={openAddExisting}
         />
       );
     }
-    return (
-      <ModuleIssuesEmpty
-        canAct={canEdit}
-        onCreate={() => {
-          overlays?.openCreate();
-        }}
-        onAddExisting={() => {
-          overlays?.openAddExisting();
-        }}
-      />
-    );
+    return <ModuleIssuesEmpty canAct={cardCanAct} onCreate={openCreate} onAddExisting={openAddExisting} />;
   }
 
   return (
