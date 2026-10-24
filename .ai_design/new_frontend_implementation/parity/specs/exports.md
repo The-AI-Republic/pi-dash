@@ -86,11 +86,13 @@ table's export headers; null/undefined/NaN and other unreadable cells become
 starts with a UTF-8 BOM, quotes text cells (comma, quote, CRLF or edge
 whitespace), leaves finite numbers bare, and records end in CRLF. Header and
 cell values come from each table's export-column metadata, not from rendered
-DOM. All three analytics tables call it — the chart drill-down
-(`CustomInsightsSection`), the insight/state-breakdown table
-(`StateBreakdownSection`) and the scoped dialog table (ANALYTICS slice E). The
-two singles are proven through the tables by `local-file-exports.spec.ts`
-EXP-014/015 (`analyticsExportRowCells("chart" | "insight")`,
+DOM. Every analytics export calls it: the workspace chart drill-down
+(`CustomInsightsSection`) and the workspace insight/state-breakdown table
+(`StateBreakdownSection`) ship with NEWFRONT-735/769, and the scoped dialog's
+chart and assignee tables (analytics spec §15, NEWFRONT-738) add the other two,
+so there are four exports and still one serializer. The two workspace singles
+are proven through the tables by `local-file-exports.spec.ts` EXP-014/015
+(`analyticsExportRowCells("chart" | "insight")`,
 `analyticsExportButtonCount() === 2`). Evidence:
 `apps/web/core/components/analytics/export.ts` (builder and filename) and its
 call sites `insight-table/root.tsx` (filtered row model),
