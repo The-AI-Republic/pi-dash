@@ -10,6 +10,8 @@
 
 import * as React from "react";
 
+import type { SpaceBoardIssue, SpaceBoardLabel } from "@pidash/api-client";
+
 import type { SpaceIssueGroup } from "./model.js";
 import { groupHasNextPage } from "./model.js";
 import type { SpaceGroupsState } from "./useSpaceGroups.js";
@@ -22,6 +24,10 @@ export interface SpaceListLayoutProps {
   failed: ReadonlySet<string>;
   onLoadMore: SpaceGroupsState["loadMore"];
   projectIdentifier: string;
+  labels: readonly SpaceBoardLabel[];
+  issueHref: (issue: SpaceBoardIssue) => string;
+  openIssueId?: string | undefined;
+  onOpenIssue?: ((issue: SpaceBoardIssue) => void) | undefined;
 }
 
 export function SpaceListLayout({
@@ -30,6 +36,10 @@ export function SpaceListLayout({
   failed,
   onLoadMore,
   projectIdentifier,
+  labels,
+  issueHref,
+  openIssueId,
+  onOpenIssue,
 }: SpaceListLayoutProps): React.ReactElement {
   return (
     <div data-testid="space-list-layout" className="flex flex-col gap-(--space-4) p-(--space-4)">
@@ -41,6 +51,10 @@ export function SpaceListLayout({
           failed={failed.has(group.stateId)}
           onLoadMore={() => onLoadMore(group.stateId)}
           projectIdentifier={projectIdentifier}
+          labels={labels}
+          issueHref={issueHref}
+          openIssueId={openIssueId}
+          onOpenIssue={onOpenIssue}
         />
       ))}
     </div>
@@ -53,9 +67,23 @@ interface ListGroupProps {
   failed: boolean;
   onLoadMore: () => void;
   projectIdentifier: string;
+  labels: readonly SpaceBoardLabel[];
+  issueHref: (issue: SpaceBoardIssue) => string;
+  openIssueId: string | undefined;
+  onOpenIssue: ((issue: SpaceBoardIssue) => void) | undefined;
 }
 
-function ListGroup({ group, paging, failed, onLoadMore, projectIdentifier }: ListGroupProps): React.ReactElement {
+function ListGroup({
+  group,
+  paging,
+  failed,
+  onLoadMore,
+  projectIdentifier,
+  labels,
+  issueHref,
+  openIssueId,
+  onOpenIssue,
+}: ListGroupProps): React.ReactElement {
   const [expanded, setExpanded] = React.useState(true);
   const hasNext = groupHasNextPage(group);
   return (
@@ -69,7 +97,16 @@ function ListGroup({ group, paging, failed, onLoadMore, projectIdentifier }: Lis
       {expanded ? (
         <div data-testid="space-list-group-body" className="flex flex-col gap-(--space-1) pt-(--space-1)">
           {group.issues.map((issue) => (
-            <SpaceIssueRow key={issue.id} issue={issue} projectIdentifier={projectIdentifier} />
+            <SpaceIssueRow
+              key={issue.id}
+              issue={issue}
+              state={group.state}
+              labels={labels}
+              projectIdentifier={projectIdentifier}
+              issueHref={issueHref(issue)}
+              selected={issue.id === openIssueId}
+              onOpenIssue={onOpenIssue}
+            />
           ))}
           {paging ? <PlaceholderRows /> : null}
           {hasNext && !paging ? (

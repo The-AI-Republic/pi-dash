@@ -13,11 +13,13 @@ import {
   getSpaceBoardMeta,
   getSpaceBoardSettings,
   listSpaceBoardIssues,
+  listSpaceBoardLabels,
   listSpaceBoardStates,
   resolveSpaceBoardAnchor,
   type ApiClient,
   type Me,
   type SpaceBoardIssuePage,
+  type SpaceBoardLabel,
   type SpaceBoardMeta,
   type SpaceBoardSettings,
   type SpaceBoardState,
@@ -53,6 +55,8 @@ export function spaceViewerQueryOptions(client: ApiClient) {
     queryKey: [...spaceKeys.all, "viewer"] as const,
     queryFn: () => readSpaceViewer(client),
     staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: false,
   });
 }
@@ -62,6 +66,8 @@ export function spaceSettingsQueryOptions(client: ApiClient, anchor: string) {
     queryKey: spaceKeys.settings(anchor),
     queryFn: () => getSpaceBoardSettings(client, anchor),
     enabled: isValidAnchor(anchor),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: false,
   });
 }
@@ -76,6 +82,8 @@ export function spaceIssuesQueryOptions(client: ApiClient, anchor: string, filte
   return queryOptions({
     queryKey: spaceKeys.issues(anchor, signature),
     queryFn: () => listSpaceBoardIssues(client, anchor, spaceBoardQuery(filters)),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: false,
   });
 }
@@ -96,6 +104,8 @@ export function spaceGroupQueryOptions(
   return queryOptions({
     queryKey: [...spaceKeys.group(anchor, stateId, signature), cursor] as const,
     queryFn: () => listSpaceBoardIssues(client, anchor, spaceBoardQuery(filters, cursor, stateId)),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: false,
     staleTime: Number.POSITIVE_INFINITY,
   });
@@ -106,6 +116,24 @@ export function spaceStatesQueryOptions(client: ApiClient, anchor: string) {
     queryKey: spaceKeys.states(anchor),
     queryFn: () => listSpaceBoardStates(client, anchor),
     staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  });
+}
+
+/**
+ * Label names and colours for the cards' chips (SPC-028). Display data is
+ * read once per visit; the board never polls or revalidates it on focus.
+ */
+export function spaceLabelsQueryOptions(client: ApiClient, anchor: string) {
+  return queryOptions({
+    queryKey: spaceKeys.labels(anchor),
+    queryFn: () => listSpaceBoardLabels(client, anchor),
+    enabled: isValidAnchor(anchor),
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: false,
   });
 }
@@ -121,6 +149,8 @@ export function spaceMetaQueryOptions(client: ApiClient, anchor: string) {
     queryFn: () => getSpaceBoardMeta(client, anchor),
     enabled: isValidAnchor(anchor),
     staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: false,
   });
 }
@@ -145,4 +175,4 @@ export async function resolveLegacySpaceAnchor(
   }
 }
 
-export type { Me, SpaceBoardIssuePage, SpaceBoardMeta, SpaceBoardSettings, SpaceBoardState };
+export type { Me, SpaceBoardIssuePage, SpaceBoardLabel, SpaceBoardMeta, SpaceBoardSettings, SpaceBoardState };

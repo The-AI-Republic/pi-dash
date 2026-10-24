@@ -10,6 +10,7 @@ import {
   spaceGroupQueryOptions,
   spaceInstanceQueryOptions,
   spaceIssuesQueryOptions,
+  spaceLabelsQueryOptions,
   spaceMetaQueryOptions,
   spaceSettingsQueryOptions,
   spaceStatesQueryOptions,
@@ -53,6 +54,46 @@ describe("space query options", () => {
       "||",
     ]);
     expect(spaceStatesQueryOptions(client, "anchor-1").queryKey).toEqual(["spaces", "anchor", "anchor-1", "states"]);
+    expect(spaceLabelsQueryOptions(client, "anchor-1").queryKey).toEqual(["spaces", "anchor", "anchor-1", "labels"]);
+  });
+
+  it("never revalidates a board read on focus or reconnect (SPC-033)", () => {
+    const client = clientWith(transportOf(200, {}));
+    const options = [
+      spaceInstanceQueryOptions(client),
+      spaceSettingsQueryOptions(client, "anchor-1"),
+      spaceIssuesQueryOptions(client, "anchor-1"),
+      spaceGroupQueryOptions(client, "anchor-1", {}, UUID, "50:1:0"),
+      spaceStatesQueryOptions(client, "anchor-1"),
+      spaceLabelsQueryOptions(client, "anchor-1"),
+      spaceMetaQueryOptions(client, "anchor-1"),
+      spaceViewerQueryOptions(client),
+    ];
+    for (const option of options) {
+      expect(option.refetchOnWindowFocus).toBe(false);
+      expect(option.refetchOnReconnect).toBe(false);
+    }
+  });
+
+  it("reads labels once per visit through the public anchor endpoint (SPC-028)", async () => {
+    const urls: string[] = [];
+    const client = clientWith(async (url) => {
+      urls.push(url);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: () => Promise.resolve(JSON.stringify([{ id: UUID, name: "Bug", color: "#e11d48", parent: null }])),
+      };
+    });
+    const options = spaceLabelsQueryOptions(client, "anchor-1");
+    expect(options.enabled).toBe(true);
+    expect(options.staleTime).toBe(5 * 60_000);
+    await expect(options.queryFn!({} as never)).resolves.toEqual([
+      { id: UUID, name: "Bug", color: "#e11d48", parent: null },
+    ]);
+    expect(new URL(urls[0] ?? "", "https://api.test").pathname).toBe("/api/public/anchor/anchor-1/labels/");
+    expect(spaceLabelsQueryOptions(client, "bad anchor").enabled).toBe(false);
   });
 
   it("keys board metadata by anchor and never requests a malformed one", async () => {

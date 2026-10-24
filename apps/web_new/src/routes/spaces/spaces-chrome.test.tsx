@@ -139,6 +139,7 @@ function renderChrome(
       });
     }
     if (url.includes("/states/")) return reply(200, []);
+    if (url.includes("/labels/")) return reply(200, []);
     if (url.includes("/api/users/me/")) return viewer();
     if (url.includes("/anchor/")) return await legacy();
     throw new Error(`unexpected request ${url}`);
