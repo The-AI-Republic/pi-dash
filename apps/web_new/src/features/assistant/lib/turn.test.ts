@@ -7,12 +7,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   EMPTY_TRANSCRIPT,
+  addNotice,
   applyAssistantEvent,
   mergeMessage,
   mergeTranscript,
   replySettled,
   EMPTY_REPLY_PLACEHOLDER,
   terminalRow,
+  transcriptEntries,
   transcriptRows,
 } from "./turn.js";
 
@@ -230,6 +232,66 @@ describe("transcriptRows", () => {
     state = mergeMessage(state, message({ id: "a", seq: 1, role: "user", content: "one" }));
     state = mergeMessage(state, message({ id: "c", seq: 3, role: "tool_result", content: "three" }));
     expect(transcriptRows(state).map((row) => row.id)).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("addNotice", () => {
+  const AT = "2026-01-01T00:00:00Z";
+
+  it("anchors just after the highest row sequence on screen", () => {
+    let state = mergeMessage(EMPTY_TRANSCRIPT, message({ id: "u", role: "user", status: "completed", seq: 1 }));
+    state = addNotice(state, 701, [{ name: "dead", reason: "RuntimeError" }], AT);
+    const notice = state.notices["notice:701"];
+    expect(notice?.seq).toBe(1.5);
+    expect(notice?.servers).toEqual([{ name: "dead", reason: "RuntimeError" }]);
+    expect(notice?.createdAt).toBe(AT);
+  });
+
+  it("anchors at the top of an empty transcript", () => {
+    const state = addNotice(EMPTY_TRANSCRIPT, 701, [{ name: "dead", reason: "RuntimeError" }], AT);
+    expect(state.notices["notice:701"]?.seq).toBe(0.5);
+  });
+
+  it("ignores a replayed event instead of re-anchoring", () => {
+    let state = mergeMessage(EMPTY_TRANSCRIPT, message({ id: "u", role: "user", status: "completed", seq: 1 }));
+    state = addNotice(state, 701, [{ name: "dead", reason: "RuntimeError" }], AT);
+    const replayed = addNotice(state, 701, [{ name: "dead", reason: "RuntimeError" }], AT);
+    expect(replayed).toBe(state);
+    expect(replayed.notices["notice:701"]?.seq).toBe(1.5);
+  });
+});
+
+describe("transcriptEntries", () => {
+  const AT = "2026-01-01T00:00:00Z";
+
+  it("interleaves notices in the turn they belong to", () => {
+    let state = mergeMessage(
+      EMPTY_TRANSCRIPT,
+      message({ id: "u", role: "user", status: "completed", content: "ask", seq: 1 })
+    );
+    state = addNotice(state, 701, [{ name: "dead", reason: "RuntimeError" }], AT);
+    state = mergeMessage(state, message({ id: "e", role: "error", status: "failed", content: "down", seq: 2 }));
+    const entries = transcriptEntries(state);
+    expect(entries.map((entry) => entry.kind)).toEqual(["message", "notice", "message"]);
+    expect(entries[1]).toMatchObject({ kind: "notice", seq: 1.5, eventSeq: 701 });
+  });
+
+  it("keeps co-anchored notices in event order", () => {
+    let state = mergeMessage(EMPTY_TRANSCRIPT, message({ id: "u", role: "user", status: "completed", seq: 1 }));
+    state = addNotice(state, 702, [{ name: "b", reason: "RuntimeError" }], AT);
+    state = addNotice(state, 701, [{ name: "a", reason: "RuntimeError" }], AT);
+    const notices = transcriptEntries(state).filter((entry) => entry.kind === "notice");
+    expect(notices.map((entry) => entry.eventSeq)).toEqual([701, 702]);
+  });
+});
+
+describe("applyAssistantEvent notices", () => {
+  it("keeps notices when a delta lands", () => {
+    let state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "" }));
+    state = addNotice(state, 701, [{ name: "dead", reason: "RuntimeError" }], "2026-01-01T00:00:00Z");
+    const next = applyAssistantEvent(state, delta("m1", 2, "Hel"));
+    expect(next.rows.m1?.content).toBe("Hel");
+    expect(next.notices["notice:701"]?.seq).toBe(1.5);
   });
 });
 

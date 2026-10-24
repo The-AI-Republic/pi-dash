@@ -2,9 +2,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Conversation transcript (AGT-042/043/047/049/053/054): rows render by
-// role, markdown replies, an ellipsis while streaming, tinted error rows,
-// the empty hint, sending/stop, inline failures and the one-shot handoff.
+// Conversation transcript (AGT-042/043/046/047/049/053/054): rows render
+// by role, markdown replies, an ellipsis while streaming, tinted error
+// rows, tool rows with deep links, inline skipped-server notices, the empty
+// hint, sending/stop, inline failures and the one-shot handoff.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -243,6 +244,58 @@ describe("ThreadView transcript", () => {
     });
     expect(await screen.findByText("Search issues")).toBeInTheDocument();
     expect(screen.getByText("3 results")).toBeInTheDocument();
+  });
+
+  it("renders tool-result deep links with their labels", async () => {
+    renderThread({
+      messages: [
+        row({
+          id: "r",
+          role: "tool_result",
+          content: "Found it",
+          seq: 2,
+          payload: {
+            links: [
+              { url_path: "/acme/assistant/t1", label: "Open thread" },
+              { url_path: "/acme/projects/p/1/issues/i/2" },
+            ],
+          },
+        }),
+      ],
+    });
+    const labelled = await screen.findByRole("link", { name: "Open thread" });
+    expect(labelled).toHaveAttribute("href", "/acme/assistant/t1");
+    const fallback = screen.getByRole("link", { name: "View" });
+    expect(fallback).toHaveAttribute("href", "/acme/projects/p/1/issues/i/2");
+    // The activity text stays its own node, without the link labels.
+    expect(screen.getByTestId("assistant-tool-text")).toHaveTextContent("Found it");
+  });
+
+  it("renders dropped servers as one inline line per server, never a toast", async () => {
+    renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })] });
+    await screen.findByTestId("assistant-transcript");
+    act(() =>
+      stream.subscriptions.at(-1)?.handlers.onEvent({
+        id: 301,
+        thread: THREAD_ID,
+        message: null,
+        seq: 301,
+        kind: "tool_servers_skipped",
+        payload: {
+          servers: [
+            { name: "closed", reason: "url_blocked" },
+            { name: "dead", reason: "RuntimeError" },
+          ],
+        },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    const lines = await screen.findAllByTestId("assistant-notice-line");
+    expect(lines.map((line) => line.textContent)).toEqual([
+      "Tool server closed was unavailable for this reply (its URL is not allowed).",
+      "Tool server dead was unavailable for this reply (RuntimeError).",
+    ]);
+    expect(screen.queryByTestId("toast-notification")).not.toBeInTheDocument();
   });
 
   it("keeps the scrollport on the newest row without a scrollIntoView host", () => {

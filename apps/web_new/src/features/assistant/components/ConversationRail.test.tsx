@@ -109,6 +109,19 @@ describe("ConversationRail", () => {
     expect(screen.queryByText("No conversations yet.")).not.toBeInTheDocument();
   });
 
+  it("brands its own link rail and keeps thread management out of it", async () => {
+    renderRail({ threads: [makeThread("b", { title: "Beta" })] });
+    expect(await screen.findByTestId("assistant-rail-header")).toHaveTextContent("Pi Dash AI");
+    // The rail is links only: no buttons, and no rename/archive/delete
+    // affordance anywhere in the chat surface (AGT-058/AGT-061).
+    const rail = screen.getByTestId("assistant-rail");
+    expect(rail.querySelectorAll("button")).toHaveLength(0);
+    for (const link of Array.from(rail.querySelectorAll("a"))) {
+      expect(link.textContent ?? "").not.toMatch(/rename|archive|delete/i);
+    }
+    expect(rail.querySelector("a")?.tagName).toBe("A");
+  });
+
   it("shows the placeholder only for a resolved empty list", async () => {
     renderRail({ threads: [] });
     expect(await screen.findByText("No conversations yet.")).toBeInTheDocument();
