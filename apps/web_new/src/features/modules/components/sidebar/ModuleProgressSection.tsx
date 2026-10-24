@@ -193,6 +193,22 @@ export function ModuleProgressSectionContent({
   const [open, setOpen] = React.useState(() => dateState === "active");
   const [measure, setMeasure] = React.useState<ModuleProgressMeasure>("issues");
   const [tab, setTab] = React.useState<ModuleBreakdownTab>(() => readModuleProgressTab(moduleId));
+  // A host can swap modules or edit dates into a new window without
+  // remounting: re-sync the per-module state on change. An explicit
+  // collapse survives same-module date edits; only a module swap or a
+  // move into the active window reopens the section.
+  const [syncedModuleId, setSyncedModuleId] = React.useState(moduleId);
+  const [syncedDateState, setSyncedDateState] = React.useState(dateState);
+  if (syncedModuleId !== moduleId) {
+    setSyncedModuleId(moduleId);
+    setSyncedDateState(dateState);
+    setOpen(dateState === "active");
+    setMeasure("issues");
+    setTab(readModuleProgressTab(moduleId));
+  } else if (syncedDateState !== dateState) {
+    setSyncedDateState(dateState);
+    if (dateState === "active") setOpen(true);
+  }
   const entity = React.useMemo(() => ({ scope: "module", projectId, moduleId }) as const, [projectId, moduleId]);
   const editable = moduleSidebarEditable({
     readOnly,

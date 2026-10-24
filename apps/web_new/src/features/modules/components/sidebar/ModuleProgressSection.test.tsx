@@ -316,6 +316,35 @@ function chartRows(): unknown {
   return JSON.parse((within(chart).getByTestId("mock-area-chart").dataset["rows"] ?? "null") as string);
 }
 
+const OTHER_MODULE = "423e4567-e89b-12d3-a456-426614174003";
+
+function renderSwitchable(initial: Partial<React.ComponentProps<typeof ModuleProgressSectionContent>> = {}) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const element = (overrides: Partial<React.ComponentProps<typeof ModuleProgressSectionContent>> = {}) => (
+    <QueryClientProvider client={client}>
+      <ModuleProgressSectionContent
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        moduleId={MODULE}
+        record={detailFixture()}
+        readOnly={false}
+        archived={false}
+        editor
+        showPoints={false}
+        onRefetchDetails={() => undefined}
+        {...initial}
+        {...overrides}
+      />
+    </QueryClientProvider>
+  );
+  const view = render(element());
+  return {
+    ...view,
+    show: (overrides: Partial<React.ComponentProps<typeof ModuleProgressSectionContent>>) =>
+      view.rerender(element(overrides)),
+  };
+}
+
 describe("ModuleProgressSection", () => {
   it("stays empty until the detail lands", () => {
     harness.detailStatus = 500;
@@ -656,5 +685,63 @@ describe("ModuleProgressSectionContent filtering", () => {
     await screen.findByTestId("module-progress-section");
     await user.click(screen.getByTestId("module-progress-tab-States"));
     expect(screen.getByTestId("module-progress-entry-backlog").tagName).toBe("DIV");
+  });
+});
+
+describe("ModuleProgressSectionContent module switches and date edits", () => {
+  it("re-syncs the tab and measure when the module changes in place", async () => {
+    const user = userEvent.setup();
+    const view = renderSwitchable({ showPoints: true });
+    await screen.findByTestId("module-progress-measure");
+    await user.click(screen.getByTestId("module-progress-measure"));
+    await user.click(await screen.findByRole("option", { name: "Points" }));
+    await waitFor(() => expect(screen.getByTestId("module-progress-measure").textContent).toBe("Points"));
+    await user.click(screen.getByTestId("module-progress-tab-Labels"));
+    expect(screen.getByTestId("module-progress-tab-Labels").getAttribute("aria-selected")).toBe("true");
+    view.show({ moduleId: OTHER_MODULE });
+    expect(screen.getByTestId("module-progress-tab-Assignees").getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("module-progress-measure").textContent).toBe("Work items");
+    expect(screen.getByTestId("module-progress-toggle").getAttribute("aria-expanded")).toBe("true");
+    expect(JSON.parse(localStorage.getItem(MODULE_PROGRESS_TABS_STORAGE_KEY) ?? "{}")).toEqual({ [MODULE]: "Labels" });
+  });
+
+  it("restores the next module's own stored tab on an in-place switch", async () => {
+    localStorage.setItem(MODULE_PROGRESS_TABS_STORAGE_KEY, JSON.stringify({ [OTHER_MODULE]: "States" }));
+    const user = userEvent.setup();
+    const view = renderSwitchable();
+    await screen.findByTestId("module-progress-section");
+    await user.click(screen.getByTestId("module-progress-tab-Labels"));
+    view.show({ moduleId: OTHER_MODULE });
+    expect(screen.getByTestId("module-progress-tab-States").getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("opens when an edit moves the module into its window", () => {
+    const view = renderSwitchable({
+      record: detailFixture({ start_date: "2999-01-01", target_date: "2999-01-31" }),
+    });
+    expect(screen.getByTestId("module-progress-notice").textContent).toBe("This module isn't active yet.");
+    view.show({ record: detailFixture() });
+    expect(screen.getByTestId("module-progress-toggle").getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByTestId("module-progress-chart")).toBeInTheDocument();
+    expect(screen.getByTestId("module-progress-tabs")).toBeInTheDocument();
+  });
+
+  it("explains when an edit moves the module out of its window", async () => {
+    const view = renderSwitchable();
+    await screen.findByTestId("module-progress-toggle");
+    view.show({ record: detailFixture({ start_date: null, target_date: null }) });
+    expect(screen.getByTestId("module-progress-notice").textContent).toBe("Invalid date. Please enter valid date.");
+    expect(screen.queryByTestId("module-progress-toggle")).toBeNull();
+  });
+
+  it("keeps an explicit collapse across same-module date edits", async () => {
+    const user = userEvent.setup();
+    const view = renderSwitchable();
+    const toggle = await screen.findByTestId("module-progress-toggle");
+    await user.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    view.show({ record: detailFixture({ target_date: "2026-11-30" }) });
+    expect(screen.getByTestId("module-progress-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("module-progress-tabs")).toBeNull();
   });
 });
