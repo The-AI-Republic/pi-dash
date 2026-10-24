@@ -77,6 +77,7 @@ vi.mock("../kanban/lazy.js", () => ({
     <div
       data-testid="kanban-layout"
       data-project={String(props.projectId)}
+      data-entity={JSON.stringify(props.entity)}
       data-can-edit={String(props.canEdit ?? "unset")}
       data-cycle={String(props.cycleId ?? "")}
       data-module={String(props.moduleId ?? "")}
@@ -93,6 +94,40 @@ vi.mock("../display/DisplayControl.js", () => ({
   ),
 }));
 
+vi.mock("../spreadsheet/SpreadsheetLayout.js", () => ({
+  SpreadsheetLayout: (props: Record<string, unknown>) => (
+    <div
+      data-testid="spreadsheet-layout"
+      data-entity={JSON.stringify(props.entity)}
+      data-can-edit={String(props.canEdit)}
+      data-cycle={String(props.hideCycle)}
+      data-module={String(props.hideModule)}
+      data-estimate={String(props.hideEstimate)}
+      data-week-start={String(props.weekStart)}
+    />
+  ),
+}));
+
+vi.mock("../gantt/GanttTimeline.js", () => ({
+  GanttTimeline: (props: Record<string, unknown>) => (
+    <div
+      data-testid="gantt-layout"
+      data-total={String(props.totalCount)}
+      data-module-completed={String(props.completedModule ?? false)}
+    />
+  ),
+}));
+
+vi.mock("../components/lazyLeaves.js", () => ({
+  ResolvedAnalyticsEntry: (props: Record<string, unknown>) => (
+    <div
+      data-testid="analytics-entry"
+      data-module={JSON.stringify(props.module ?? null)}
+      data-total={String(props.totalCount)}
+    />
+  ),
+}));
+
 vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
   IssuesLayoutRoot: (props: {
     title: string;
@@ -104,6 +139,8 @@ vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
     noMatchState: React.ReactNode;
     headerActions: React.ReactNode;
     displayControl: React.ReactNode;
+    filterControl?: React.ReactNode;
+    analyticsControl?: React.ReactNode;
     filterRow?: React.ReactNode;
   }) => (
     <div
@@ -116,11 +153,19 @@ vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
       <div data-testid="header-actions">{props.headerActions}</div>
       <div data-testid="banner">{props.filterRow}</div>
       <div data-testid="display-slot">{props.displayControl}</div>
+      <div data-testid="filter-slot">{props.filterControl}</div>
+      <div data-testid="analytics-slot">{props.analyticsControl}</div>
       <div data-testid="empty-state">{props.emptyState}</div>
       <div data-testid="no-match-state">{props.noMatchState}</div>
       <div data-testid="layout">{props.renderLayout("list", { layout: "list", groupBy: null })}</div>
       <div data-testid="calendar-layout">{props.renderLayout("calendar", { layout: "calendar", groupBy: null })}</div>
       <div data-testid="kanban-layout-slot">{props.renderLayout("kanban", { layout: "kanban", groupBy: null })}</div>
+      <div data-testid="spreadsheet-layout-slot">
+        {props.renderLayout("spreadsheet", { layout: "spreadsheet", groupBy: null })}
+      </div>
+      <div data-testid="gantt-layout-slot">
+        {props.renderLayout("gantt_chart", { layout: "gantt_chart", groupBy: null })}
+      </div>
     </div>
   ),
 }));
@@ -257,13 +302,13 @@ beforeEach(() => {
 });
 
 describe("EntityListScreen", () => {
-  it("mounts the shared layout root with counts, list-only and the entity", async () => {
+  it("mounts the shared layout root with counts, every layout and the entity", async () => {
     setup();
     const root = await screen.findByTestId("layout-root");
     expect(root).toHaveAttribute("data-title", "Sprint 1");
     expect(root).toHaveAttribute("data-total", "7");
     expect(root).toHaveAttribute("data-results", "2");
-    expect(root).toHaveAttribute("data-offered", "list,kanban,calendar");
+    expect(root).toHaveAttribute("data-offered", "list,kanban,calendar,spreadsheet,gantt_chart");
     expect(await screen.findByTestId("list-layout")).toHaveTextContent("WEB");
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-cycle", CYCLE);
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-compact", "true");
@@ -668,5 +713,97 @@ describe("EntityListScreen", () => {
       "data-entity",
       JSON.stringify({ scope: "module", projectId: PROJECT, moduleId: MODULE })
     );
+  });
+
+  it("mounts the board with the entity, standing and membership", () => {
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" });
+    const board = within(screen.getByTestId("kanban-layout-slot")).getByTestId("kanban-layout");
+    expect(board).toHaveAttribute(
+      "data-entity",
+      JSON.stringify({ scope: "module", projectId: PROJECT, moduleId: MODULE })
+    );
+    expect(board).toHaveAttribute("data-can-edit", "true");
+    expect(board).toHaveAttribute("data-completed", "false");
+    expect(board).toHaveAttribute("data-module", MODULE);
+  });
+
+  it("mounts the sheet with the entity, flags and week start", async () => {
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" }, [
+      project({ cycle_view: false, module_view: true, estimate: null }),
+    ]);
+    const sheet = await within(screen.getByTestId("spreadsheet-layout-slot")).findByTestId("spreadsheet-layout");
+    expect(sheet).toHaveAttribute(
+      "data-entity",
+      JSON.stringify({ scope: "module", projectId: PROJECT, moduleId: MODULE })
+    );
+    expect(sheet).toHaveAttribute("data-can-edit", "true");
+    expect(sheet).toHaveAttribute("data-cycle", "true");
+    expect(sheet).toHaveAttribute("data-module", "true");
+    expect(sheet).toHaveAttribute("data-estimate", "true");
+    expect(sheet).toHaveAttribute("data-week-start", "0");
+  });
+
+  it("mounts the timeline with the total and the completed-module status", async () => {
+    setup({
+      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+      moduleId: MODULE,
+      title: "Auth",
+      completedModule: true,
+    });
+    const timeline = await within(screen.getByTestId("gantt-layout-slot")).findByTestId("gantt-layout");
+    expect(timeline).toHaveAttribute("data-total", "7");
+    expect(timeline).toHaveAttribute("data-module-completed", "true");
+  });
+
+  it("mounts the module analytics entry with the module scope and total", () => {
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" });
+    const entry = within(screen.getByTestId("analytics-slot")).getByTestId("analytics-entry");
+    expect(entry).toHaveAttribute("data-module", JSON.stringify({ id: MODULE, name: "Auth" }));
+    expect(entry).toHaveAttribute("data-total", "7");
+  });
+
+  it("mounts no analytics entry for a cycle scope", () => {
+    setup();
+    expect(within(screen.getByTestId("analytics-slot")).queryByTestId("analytics-entry")).not.toBeInTheDocument();
+  });
+
+  it("always hides module grouping on a module page, flag or not", () => {
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" }, [
+      project({ cycle_view: true, module_view: true }),
+    ]);
+    const controls = screen.getAllByTestId("display-control");
+    expect(controls).toHaveLength(2);
+    for (const control of controls) {
+      expect(control).toHaveAttribute("data-cycle", "false");
+      expect(control).toHaveAttribute("data-module", "true");
+    }
+  });
+
+  it("keeps the module filter toggle behind the desktop-only guard", () => {
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" });
+    const guard = within(screen.getByTestId("filter-slot")).getByTestId("module-filter-guard");
+    expect(guard).toHaveClass("hidden");
+    expect(within(guard).getByTestId("filter-control")).toBeInTheDocument();
+  });
+
+  it("passes the cycle filter toggle through unguarded", () => {
+    setup();
+    expect(screen.queryByTestId("module-filter-guard")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("filter-slot")).getByTestId("filter-control")).toBeInTheDocument();
+  });
+
+  it("appends extra header actions after the display control", () => {
+    setup(
+      {
+        entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+        moduleId: MODULE,
+        title: "Auth",
+        extraHeaderActions: <span data-testid="extra-action">extra</span>,
+      },
+      [project()]
+    );
+    const actions = screen.getByTestId("header-actions");
+    expect(within(actions).getByTestId("display-control")).toBeInTheDocument();
+    expect(within(actions).getByTestId("extra-action")).toBeInTheDocument();
   });
 });

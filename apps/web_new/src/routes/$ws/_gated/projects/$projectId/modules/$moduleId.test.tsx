@@ -2,8 +2,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+// Module detail route (MOD-029, MOD-030, MOD-032): the gone-away gate
+// around the lazy screen, peek and compact search wiring, the search
+// validation, and the data and chunk prefetch with its 404 tolerance.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { ApiError } from "@pidash/api-client";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,6 +15,12 @@ const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   page: vi.fn(),
   prefs: vi.fn(),
+  projects: vi.fn(),
+  detail: vi.fn(),
+  loadKanban: vi.fn(async () => ({ default: () => null })),
+  loadLeaves: vi.fn(async () => undefined),
+  primeLeaves: vi.fn(),
+  preloadFilters: vi.fn(),
 }));
 
 vi.mock("../../../../../../core/api/client.js", () => ({ getAppClient: () => ({ stub: true }) }));
@@ -20,16 +30,40 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 vi.mock("../../../../../../features/issues/prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.prefs }));
 vi.mock("../../../../../../features/issues/list/pages.js", () => ({ listPageQueryOptions: mocks.page }));
+vi.mock("../../../../../../features/projects/index.js", () => ({ projectsQueryOptions: mocks.projects }));
+vi.mock("../../../../../../features/modules/components/sidebar/moduleSidebarQueries.js", () => ({
+  moduleDetailQueryOptions: mocks.detail,
+}));
+vi.mock("../../../../../../features/issues/kanban/lazy.js", () => ({ loadKanbanLayout: mocks.loadKanban }));
+vi.mock("../../../../../../features/issues/components/lazyLeaves.js", () => ({
+  loadIssueListLeaves: mocks.loadLeaves,
+  primeIssueListLeaves: mocks.primeLeaves,
+}));
+vi.mock("../../../../../../features/issues/filters/rich/lazy.js", () => ({
+  preloadIssueFilters: mocks.preloadFilters,
+}));
 vi.mock("../../../../../../features/issues/list/lazy.js", () => ({
   loadListLayout: async () => ({ default: () => null }),
 }));
-vi.mock("../../../../../../features/issues/list/EntityListScreen.js", () => ({
-  EntityListScreen: (props: Record<string, unknown>) => (
+vi.mock("../../../../../../features/modules/components/ModuleDetailGate.js", () => ({
+  ModuleDetailGate: (props: Record<string, unknown>) => (
     <div
-      data-testid="entity-screen"
+      data-testid="detail-gate"
+      data-workspace={String(props.workspaceSlug ?? "")}
+      data-project={String(props.projectId ?? "")}
       data-module={String(props.moduleId ?? "")}
-      data-completed={String(props.completedCycle ?? false)}
-      data-module-completed={String(props.completedModule ?? false)}
+    >
+      {props.children as never}
+    </div>
+  ),
+}));
+vi.mock("../../../../../../features/modules/components/ModuleDetailScreen.js", () => ({
+  ModuleDetailScreen: (props: Record<string, unknown>) => (
+    <div
+      data-testid="detail-screen"
+      data-workspace={String(props.workspaceSlug ?? "")}
+      data-project={String(props.projectId ?? "")}
+      data-module={String(props.moduleId ?? "")}
       data-peek={String(props.peekKey ?? "")}
       data-compact={String(props.compact ?? false)}
     >
@@ -81,28 +115,28 @@ beforeEach(() => {
     queryKey: ["prefs"],
     queryFn: async () => ({ filters: {}, display_filters: {}, display_properties: {}, rich_filters: {} }),
   });
+  mocks.projects.mockReturnValue({ queryKey: ["projects"], queryFn: async () => [] });
+  mocks.detail.mockReturnValue({ queryKey: ["detail"], queryFn: async () => ({ id: MODULE }) });
 });
 
-describe("module issues route", () => {
-  it("mounts the shared list for the module", async () => {
+describe("module detail route", () => {
+  it("mounts the screen behind the gone-away gate", async () => {
     renderRoute();
-    const node = await screen.findByTestId("entity-screen");
+    const gate = await screen.findByTestId("detail-gate");
+    expect(gate).toHaveAttribute("data-workspace", "acme");
+    expect(gate).toHaveAttribute("data-project", PROJECT);
+    expect(gate).toHaveAttribute("data-module", MODULE);
+    const node = await screen.findByTestId("detail-screen");
+    expect(node).toHaveAttribute("data-workspace", "acme");
+    expect(node).toHaveAttribute("data-project", PROJECT);
     expect(node).toHaveAttribute("data-module", MODULE);
-    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
-    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-peek", "");
-    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
-  });
-
-  it("renders a live module without a completed flag", async () => {
-    renderRoute();
-    const node = await screen.findByTestId("entity-screen");
-    expect(node).toHaveAttribute("data-completed", "false");
-    expect(node).toHaveAttribute("data-module-completed", "false");
+    expect(node).toHaveAttribute("data-peek", "");
+    expect(node).toHaveAttribute("data-compact", "false");
   });
 
   it("passes peek and compact from the search state", async () => {
     renderRoute({ peekIssueId: "WEB-7", layout: "compact" });
-    const screenNode = await screen.findByTestId("entity-screen");
+    const screenNode = await screen.findByTestId("detail-screen");
     expect(screenNode).toHaveAttribute("data-peek", "WEB-7");
     expect(screenNode).toHaveAttribute("data-compact", "true");
   });
@@ -146,10 +180,95 @@ describe("module issues route", () => {
     });
   }, 20000);
 
+  it("ensures the project list and the module detail with the layout chunks", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await beforeLoad({
+      context: { queryClient, apiClient: { stub: true } },
+      params: { ws: "acme", projectId: PROJECT, moduleId: MODULE },
+    } as never);
+    expect(mocks.projects).toHaveBeenCalledWith(expect.anything(), "acme");
+    expect(mocks.detail).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, MODULE);
+    // The shared prefetch starts the board chunk too (NEWFRONT-623), so
+    // the route asserts requested, not once — the loader dedupes.
+    expect(mocks.loadKanban).toHaveBeenCalled();
+    expect(mocks.loadLeaves).toHaveBeenCalledTimes(1);
+  }, 20000);
+
+  it("lets a 404 fall through to the gone-away gate", async () => {
+    mocks.prefs.mockReturnValue({
+      queryKey: ["prefs"],
+      queryFn: async () => {
+        throw new ApiError({ status: 404, code: "http", message: "missing" });
+      },
+    });
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await expect(
+      beforeLoad({
+        context: { queryClient, apiClient: { stub: true } },
+        params: { ws: "acme", projectId: PROJECT, moduleId: MODULE },
+      } as never)
+    ).resolves.toBe(undefined);
+  }, 20000);
+
+  it("rethrows a non-404 prefetch failure", async () => {
+    mocks.prefs.mockReturnValue({
+      queryKey: ["prefs"],
+      queryFn: async () => {
+        throw new ApiError({ status: 500, code: "http", message: "boom" });
+      },
+    });
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await expect(
+      beforeLoad({
+        context: { queryClient, apiClient: { stub: true } },
+        params: { ws: "acme", projectId: PROJECT, moduleId: MODULE },
+      } as never)
+    ).rejects.toThrow("boom");
+  }, 20000);
+
   it("renders the list skeleton while pending", () => {
     const Pending = Route.options.pendingComponent;
     if (!Pending) throw new Error("missing pendingComponent");
     render(React.createElement(Pending));
     expect(screen.getByTestId("issues-skeleton-list")).toBeInTheDocument();
+  });
+
+  it("renders the load error with a retry entry", () => {
+    const ErrorView = Route.options.errorComponent;
+    if (!ErrorView) throw new Error("missing errorComponent");
+    const reset = vi.fn();
+    render(React.createElement(ErrorView as React.ComponentType, { error: new Error("gone"), reset } as never));
+    expect(screen.getByRole("heading", { name: "Could not load module details" })).toBeInTheDocument();
+    expect(screen.getByText("gone")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(reset).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to a generic message for a non-error failure", () => {
+    const ErrorView = Route.options.errorComponent;
+    if (!ErrorView) throw new Error("missing errorComponent");
+    render(React.createElement(ErrorView as React.ComponentType, { error: "nope", reset: vi.fn() } as never));
+    expect(screen.getByText("Something went wrong.")).toBeInTheDocument();
+  });
+
+  it("validates the search through the shared issue search", () => {
+    const validate = Route.options.validateSearch as (search: Record<string, unknown>) => unknown;
+    expect(validate({})).toBeDefined();
+    expect(validate({ peekIssueId: "WEB-1", layout: "compact" })).toMatchObject({
+      peekIssueId: "WEB-1",
+      layout: "compact",
+    });
   });
 });

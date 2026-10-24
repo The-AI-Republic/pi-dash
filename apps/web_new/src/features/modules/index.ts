@@ -74,6 +74,32 @@ export { ModulesListBody, type ModulesListBodyProps } from "./components/Modules
 export { ModulesListHeader, type ModulesListHeaderProps } from "./components/ModulesListHeader.js";
 export { ModulesListScreen, type ModulesListScreenProps } from "./components/ModulesListScreen.js";
 export { ModulesListSkeleton, type ModulesListSkeletonProps } from "./components/ModulesListSkeleton.js";
+export { ModuleDetailBadge, type ModuleDetailBadgeProps } from "./components/ModuleDetailBadge.js";
+export { ModuleDetailCrumbs, type ModuleDetailCrumbsProps } from "./components/ModuleDetailCrumbs.js";
+export { ModuleDetailGate, type ModuleDetailGateProps } from "./components/ModuleDetailGate.js";
+export { ModuleDetailScreen, type ModuleDetailScreenProps } from "./components/ModuleDetailScreen.js";
+export { ModuleGoneAway, type ModuleGoneAwayProps } from "./components/ModuleGoneAway.js";
+export {
+  MODULE_SIDEBAR_COLLAPSE_LABEL,
+  MODULE_SIDEBAR_EXPAND_LABEL,
+  ModuleSidebarToggle,
+  type ModuleSidebarToggleProps,
+} from "./components/ModuleSidebarToggle.js";
+export {
+  isModuleGoneAway,
+  moduleBadgeTooltip,
+  moduleDetailTitle,
+  projectIssuesHref,
+  switchModuleTarget,
+} from "./lib/moduleDetail.js";
+export {
+  MODULE_DETAIL_SIDEBAR_STORAGE_KEY,
+  parseSidebarCollapsed,
+  readSidebarCollapsed,
+  useDetailSidebarCollapsed,
+  writeSidebarCollapsed,
+  type DetailSidebarHandle,
+} from "./lib/detailSidebarStore.js";
 export {
   MODULE_SIDEBAR_LOAD_FAILED,
   MODULE_STATUS_LABELS,

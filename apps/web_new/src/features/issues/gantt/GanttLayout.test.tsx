@@ -154,6 +154,7 @@ function renderLayout(
     projectRole?: number | null;
     workspaceRole?: number;
     completedCycle?: boolean;
+    completedModule?: boolean;
     /** Seed the project list with an archived project (ISS-222). */
     archived?: boolean;
     /** Feature flags on the seeded project row (ISS-116 toolbar fields). */
@@ -228,6 +229,7 @@ function renderLayout(
           prefs={prefs({ orderBy: options.orderBy ?? "sort_order" })}
           weekStart={0}
           {...(options.completedCycle === undefined ? {} : { completedCycle: options.completedCycle })}
+          {...(options.completedModule === undefined ? {} : { completedModule: options.completedModule })}
         />
       </React.Suspense>
     </QueryClientProvider>
@@ -420,6 +422,11 @@ describe("GanttLayout edit standing (ISS-050–055)", () => {
 
   it("hides the quick-add in a completed cycle", () => {
     renderLayout({ projectRole: 15, completedCycle: true });
+    expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+  });
+
+  it("hides the quick-add in a completed module", () => {
+    renderLayout({ projectRole: 15, completedModule: true });
     expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
   });
 

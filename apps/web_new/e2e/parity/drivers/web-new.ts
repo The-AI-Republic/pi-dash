@@ -6981,6 +6981,15 @@ export class WebNewDriver implements ParityDriver {
     gantt_chart: "Timeline",
   };
 
+  /** Module detail layout names as the mobile menu reads them (MOD-030). */
+  private static readonly MODULE_LAYOUT_LABELS: Record<LayoutsLayoutKey, string> = {
+    list: "List",
+    kanban: "Board",
+    calendar: "Calendar",
+    spreadsheet: "Spreadsheet",
+    gantt_chart: "Timeline",
+  };
+
   private async layoutsWaitForProfileLayout(layout: LayoutsLayoutKey): Promise<void> {
     const target = layout === "kanban" ? this.page.getByTestId("profile-board") : this.page.getByTestId("profile-list");
     await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
@@ -18125,12 +18134,13 @@ export class WebNewDriver implements ParityDriver {
     return todo("modulesReadClipboard");
   }
   async modulesOpenDetail(
-    _workspaceSlug: string,
-    _projectId: string,
-    _moduleId: string,
-    _cookies: ParityBrowserCookie[]
+    workspaceSlug: string,
+    projectId: string,
+    moduleId: string,
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("modulesOpenDetail");
+    await this.openAuthenticated(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, cookies);
+    await this.page.getByTestId("module-detail-crumbs").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesDetailOpenMenu(): Promise<void> {
     return todo("modulesDetailOpenMenu");
@@ -22013,79 +22023,190 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesDetailBadgeText(): Promise<string | null> {
-    return todo("modulesDetailBadgeText");
+    const badge = this.page.getByTestId("module-detail-badge");
+    if ((await badge.count()) === 0) return null;
+    if (
+      !(await badge
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    const text = (
+      (await badge
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return text === "" ? null : text;
   }
 
   async modulesDetailBadgeTooltip(): Promise<string | null> {
-    return todo("modulesDetailBadgeTooltip");
+    const badge = this.page.getByTestId("module-detail-badge");
+    if ((await badge.count()) === 0) return null;
+    await badge.first().hover({ timeout: WebNewDriver.WAIT_MS });
+    const tip = this.page.getByRole("tooltip").first();
+    try {
+      await tip.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      return null;
+    }
+    return ((await tip.innerText().catch(() => "")) ?? "").trim() || null;
   }
 
   async modulesDetailPageTitle(): Promise<string> {
-    return todo("modulesDetailPageTitle");
+    return this.page.title();
   }
 
   async modulesDetailCrumbs(): Promise<string[]> {
-    return todo("modulesDetailCrumbs");
+    const trail = this.page.getByTestId("module-detail-crumbs");
+    await trail.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const text = ((await trail.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    // "project Modules module": the middle crumb is fixed, so it splits
+    // the trail into its three labels.
+    const middle = " Modules ";
+    const at = text.indexOf(middle);
+    if (at < 0) return text === "" ? [] : [text];
+    return [text.slice(0, at).trim(), "Modules", text.slice(at + middle.length).trim()].filter((part) => part !== "");
   }
 
   async modulesDetailClickModulesCrumb(): Promise<void> {
-    return todo("modulesDetailClickModulesCrumb");
+    await this.page.getByTestId("module-crumb-modules").click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailClickProjectCrumb(_projectName: string): Promise<void> {
-    return todo("modulesDetailClickProjectCrumb");
+    await this.page.getByTestId("module-crumb-project").click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailSwitcherOpen(): Promise<void> {
-    return todo("modulesDetailSwitcherOpen");
+    await this.page.getByTestId("module-switcher-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailSwitcherOptions(): Promise<string[]> {
-    return todo("modulesDetailSwitcherOptions");
+    const texts = await this.page.getByRole("option").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text !== "");
   }
 
-  async modulesDetailSwitcherSearch(_text: string): Promise<void> {
-    return todo("modulesDetailSwitcherSearch");
+  async modulesDetailSwitcherSearch(text: string): Promise<void> {
+    await this.page.getByRole("combobox", { name: "Search modules" }).fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDetailSwitcherPick(_name: string): Promise<void> {
-    return todo("modulesDetailSwitcherPick");
+  async modulesDetailSwitcherPick(name: string): Promise<void> {
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailUnknownTitle(): Promise<string | null> {
-    return todo("modulesDetailUnknownTitle");
+    const scope = this.page.getByTestId("modules-gone-away");
+    if ((await scope.count()) === 0) return null;
+    // The empty-state heading carries the title and the explanation, so
+    // the title is its first span, not the whole heading text.
+    const title = scope.locator("h3 span").first();
+    if ((await title.count()) === 0) return null;
+    const text = ((await title.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
 
   async modulesDetailUnknownBack(): Promise<void> {
-    return todo("modulesDetailUnknownBack");
+    await this.page
+      .getByTestId("modules-gone-away")
+      .getByRole("button", { name: "Back to modules" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDetailSwitchLayout(_layout: LayoutsLayoutKey): Promise<void> {
-    return todo("modulesDetailSwitchLayout");
+  async modulesDetailSwitchLayout(layout: LayoutsLayoutKey): Promise<void> {
+    // The module page shares the segmented header switcher the project
+    // and cycle pages use; the shared switch waits for the layout.
+    return this.layoutsSwitchTo(layout);
   }
 
   async modulesDetailFilterToggleVisible(): Promise<boolean> {
-    return todo("modulesDetailFilterToggleVisible");
+    // With conditions the control is the Filters toggle; with none it is
+    // the Add filter button. Either one inside the desktop header counts.
+    const header = this.page.getByTestId("issues-header");
+    const toggle = header.getByTestId("rich-filter-toggle");
+    if (
+      (await toggle.count()) > 0 &&
+      (await toggle
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return true;
+    const add = header.getByTestId("rich-filter-add");
+    return (
+      (await add.count()) > 0 &&
+      (await add
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
 
   async modulesDetailDisplayGroupedOptions(): Promise<ModulesDetailGroupedOption[]> {
-    return todo("modulesDetailDisplayGroupedOptions");
+    const section = this.page.getByTestId("display-section-group");
+    await section.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const buttons = section.getByRole("button");
+    const total = await buttons.count();
+    const out: ModulesDetailGroupedOption[] = [];
+    for (let i = 0; i < total; i++) {
+      const button = buttons.nth(i);
+      const label = ((await button.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      if (label === "") continue;
+      out.push({ label, disabled: await button.isDisabled().catch(() => false) });
+    }
+    return out;
   }
 
   async modulesDetailMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
-    return todo("modulesDetailMobileOfferedLayouts");
+    const names = WebNewDriver.MODULE_LAYOUT_LABELS;
+    const keys = Object.keys(names) as LayoutsLayoutKey[];
+    await this.page.getByTestId("mobile-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await this.page.getByRole("menuitem").allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return texts
+      .map((text) => text.trim())
+      .map((text) => keys.find((key) => names[key] === text))
+      .filter((key): key is LayoutsLayoutKey => key !== undefined);
   }
 
-  async modulesDetailMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
-    return todo("modulesDetailMobileSwitchTo");
+  async modulesDetailMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    await this.page.getByTestId("mobile-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    const label = WebNewDriver.MODULE_LAYOUT_LABELS[layout];
+    await this.page.getByRole("menuitem", { name: label }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailMobileDisplayVisible(): Promise<boolean> {
-    return todo("modulesDetailMobileDisplayVisible");
+    const trigger = this.page.getByTestId("issues-mobile-header").getByTestId("display-options-trigger");
+    return (
+      (await trigger.count()) > 0 &&
+      (await trigger
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
 
   async modulesDetailMobileFilterToggleVisible(): Promise<boolean> {
-    return todo("modulesDetailMobileFilterToggleVisible");
+    const bar = this.page.getByTestId("issues-mobile-header");
+    const toggle = bar.getByTestId("rich-filter-toggle");
+    if (
+      (await toggle.count()) > 0 &&
+      (await toggle
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return true;
+    const add = bar.getByTestId("rich-filter-add");
+    return (
+      (await add.count()) > 0 &&
+      (await add
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
 
   async modulesDetailHeaderAddVisible(): Promise<boolean> {
@@ -22105,39 +22226,86 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesDetailAnalyticsVisible(): Promise<boolean> {
-    return todo("modulesDetailAnalyticsVisible");
+    // Scoped to the desktop header: the entry also mounts in the narrow
+    // header, so the bare testid matches twice.
+    const entry = this.page.getByTestId("issues-header").getByTestId("module-analytics-entry");
+    return (
+      (await entry.count()) > 0 &&
+      (await entry
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
 
   async modulesDetailOpenAnalytics(): Promise<void> {
-    return todo("modulesDetailOpenAnalytics");
+    await this.page
+      .getByTestId("issues-header")
+      .getByTestId("module-analytics-entry")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("issues-analytics-body").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailAnalyticsDialogVisible(): Promise<boolean> {
-    return todo("modulesDetailAnalyticsDialogVisible");
+    const body = this.page.getByTestId("issues-analytics-body");
+    return (
+      (await body.count()) > 0 &&
+      (await body
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
 
   async modulesDetailDismissAnalytics(): Promise<void> {
-    return todo("modulesDetailDismissAnalytics");
+    await this.page.keyboard.press("Escape");
+    await this.page.getByTestId("issues-analytics-body").waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailToggleSidebar(): Promise<void> {
-    return todo("modulesDetailToggleSidebar");
+    await this.page.getByTestId("module-detail-sidebar-toggle").click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailSidebarVisible(): Promise<boolean> {
-    return todo("modulesDetailSidebarVisible");
+    const panel = this.page.getByTestId("modules-analytics-sidebar");
+    return (
+      (await panel.count()) > 0 &&
+      (await panel
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
 
   async modulesDetailSidebarCollapsedStored(): Promise<boolean> {
-    return todo("modulesDetailSidebarCollapsedStored");
+    // The key is owned by features/modules/lib/detailSidebarStore.ts
+    // (MODULE_DETAIL_SIDEBAR_STORAGE_KEY); the store JSON-encodes a
+    // boolean, with a bare "true" accepted for robustness.
+    return this.page.evaluate(() => {
+      try {
+        const raw = window.localStorage.getItem("module_detail_sidebar_collapsed");
+        if (raw === null) return false;
+        try {
+          return JSON.parse(raw) === true;
+        } catch {
+          return raw === "true";
+        }
+      } catch {
+        return false;
+      }
+    });
   }
 
   async modulesDetailCloseSidebarViaPanel(): Promise<void> {
-    return todo("modulesDetailCloseSidebarViaPanel");
+    await this.page.getByTestId("modules-sidebar-close").click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailMobileOpenAnalytics(): Promise<void> {
-    return todo("modulesDetailMobileOpenAnalytics");
+    await this.page
+      .getByTestId("issues-mobile-header")
+      .getByTestId("module-analytics-entry")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("issues-analytics-body").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailSidebarStatus(): Promise<string | null> {

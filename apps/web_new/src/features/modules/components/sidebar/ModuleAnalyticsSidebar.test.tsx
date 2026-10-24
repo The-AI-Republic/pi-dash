@@ -279,6 +279,46 @@ describe("ModuleAnalyticsSidebarContent", () => {
     expect(screen.getByText("1/3")).toBeInTheDocument();
   });
 
+  it("offers the close control only to hosts that pass one", () => {
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <ModuleAnalyticsSidebarContent
+          workspaceSlug={SLUG}
+          projectId={PROJECT}
+          record={detailFixture()}
+          readOnly={false}
+          archived={false}
+          editor
+          showPoints={false}
+          progress={null}
+          onClose={onClose}
+          client={getAppClient()}
+        />
+      </QueryClientProvider>
+    );
+    const close = screen.getByTestId("modules-sidebar-close");
+    expect(close).toHaveAccessibleName("Close sidebar");
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    rerender(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <ModuleAnalyticsSidebarContent
+          workspaceSlug={SLUG}
+          projectId={PROJECT}
+          record={detailFixture()}
+          readOnly={false}
+          archived={false}
+          editor
+          showPoints={false}
+          progress={null}
+          client={getAppClient()}
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.queryByTestId("modules-sidebar-close")).not.toBeInTheDocument();
+  });
+
   it("keeps the pinned placeholders for a missing side of the range", () => {
     renderContent({ record: detailFixture({ start_date: null }) });
     const trigger = screen.getByTestId("modules-sidebar-dates-trigger");
