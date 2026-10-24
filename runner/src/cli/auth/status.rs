@@ -24,9 +24,7 @@ struct UserMe {
 
 pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
     let token = runner_ops::load_cli_token(paths)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "not logged in — run `pidash auth login` to authenticate this host"
-        )
+        anyhow::anyhow!("not logged in — run `pidash auth login` to authenticate this host")
     })?;
 
     let cfg = file::load_config(paths).ok();

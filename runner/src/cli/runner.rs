@@ -58,7 +58,10 @@ fn use_package(args: UsePackageArgs, paths: &Paths) -> Result<()> {
             .with_context(|| format!("no configured runner named {:?}", args.name))?;
         package.apply_to_runner(runner)
     })?;
-    println!("Agent package configured for {:?}. No package was installed or started. Restart the owning daemon when idle to apply the change.", args.name);
+    println!(
+        "Agent package configured for {:?}. No package was installed or started. Restart the owning daemon when idle to apply the change.",
+        args.name
+    );
     Ok(())
 }
 
@@ -292,7 +295,9 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             );
         }
     } else {
-        println!("Workspace context will be written when this runner resolves its working directory on the first run.");
+        println!(
+            "Workspace context will be written when this runner resolves its working directory on the first run."
+        );
     }
     if applied.is_first_runner {
         println!(

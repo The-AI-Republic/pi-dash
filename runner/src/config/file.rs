@@ -289,7 +289,7 @@ mod tests {
                 auto_update: true,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
         let loaded = load_config(&paths).unwrap();
@@ -521,7 +521,7 @@ model_default = "o4-mini"
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 
@@ -604,7 +604,7 @@ model_default = "o4-mini"
                 auto_update: true,
             },
             runners: vec![sample_runner("keep", tmp.path().join("wd"))],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 

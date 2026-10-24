@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Map, Value};
 
-use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_SERVER, EXIT_UNKNOWN, report_error};
+use crate::api_client::{
+    ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_SERVER, EXIT_UNKNOWN, report_error,
+};
 
 use super::issue::build_query_string;
 use super::resolve::looks_like_uuid;
@@ -252,7 +254,10 @@ pub async fn cmd_update(client: &ApiClient, args: UpdateArgs) -> Result<(), CliE
     let page_id = validated_page_id(&args.page_id)?;
     let payload = update_payload(&args, std::io::stdin())?;
     let resp = client
-        .patch(&page_path(client, project_ref, page_id), &Value::Object(payload))
+        .patch(
+            &page_path(client, project_ref, page_id),
+            &Value::Object(payload),
+        )
         .await?;
     print_json(&resp);
     Ok(())
@@ -348,7 +353,10 @@ fn load_body(args: &PageBodyArgs, mut stdin: impl Read) -> Result<Option<String>
         (None, Some(path)) if path == Path::new("-") => {
             let mut buf = String::new();
             stdin.read_to_string(&mut buf).map_err(|e| {
-                CliError::new(EXIT_UNKNOWN, format!("failed reading page body from stdin: {e}"))
+                CliError::new(
+                    EXIT_UNKNOWN,
+                    format!("failed reading page body from stdin: {e}"),
+                )
             })?;
             Ok(Some(buf))
         }
@@ -581,7 +589,10 @@ mod tests {
     fn body_only_prints_just_the_markdown() {
         let resp = json!({"id": PAGE_UUID, "name": "Conventions", "description_markdown": "# Title\n\nbody"});
 
-        assert_eq!(render_get(&resp, true).expect("rendered"), "# Title\n\nbody");
+        assert_eq!(
+            render_get(&resp, true).expect("rendered"),
+            "# Title\n\nbody"
+        );
     }
 
     fn no_body() -> PageBodyArgs {
@@ -619,7 +630,10 @@ mod tests {
     fn create_sends_only_the_title_by_default() {
         let payload = create_payload(&create_args(), NO_STDIN).expect("payload");
 
-        assert_eq!(serde_json::Value::Object(payload), json!({"name": "Conventions"}));
+        assert_eq!(
+            serde_json::Value::Object(payload),
+            json!({"name": "Conventions"})
+        );
     }
 
     #[test]
@@ -756,7 +770,10 @@ mod tests {
 
         let payload = update_payload(&args, NO_STDIN).expect("payload");
 
-        assert_eq!(serde_json::Value::Object(payload), json!({"description_markdown": ""}));
+        assert_eq!(
+            serde_json::Value::Object(payload),
+            json!({"description_markdown": ""})
+        );
     }
 
     /// `UpdateArgs` derives `Args`, not `Parser`; wrap it to exercise the
@@ -771,7 +788,14 @@ mod tests {
     fn body_and_body_file_conflict() {
         use clap::Parser;
         let err = UpdateHarness::try_parse_from([
-            "update", PAGE_UUID, "--project", "ENG", "--body", "x", "--body-file", "-",
+            "update",
+            PAGE_UUID,
+            "--project",
+            "ENG",
+            "--body",
+            "x",
+            "--body-file",
+            "-",
         ])
         .expect_err("--body and --body-file are mutually exclusive");
 
@@ -782,7 +806,13 @@ mod tests {
     fn parent_and_clear_parent_conflict() {
         use clap::Parser;
         let err = UpdateHarness::try_parse_from([
-            "update", PAGE_UUID, "--project", "ENG", "--parent", PAGE_UUID, "--clear-parent",
+            "update",
+            PAGE_UUID,
+            "--project",
+            "ENG",
+            "--parent",
+            PAGE_UUID,
+            "--clear-parent",
         ])
         .expect_err("--parent and --clear-parent are mutually exclusive");
 
@@ -793,7 +823,12 @@ mod tests {
     fn access_parses_by_name() {
         use clap::Parser;
         let parsed = UpdateHarness::try_parse_from([
-            "update", PAGE_UUID, "--project", "ENG", "--access", "private",
+            "update",
+            PAGE_UUID,
+            "--project",
+            "ENG",
+            "--access",
+            "private",
         ])
         .expect("parse");
 

@@ -1153,8 +1153,12 @@ struct ChatWarm {
 enum ChatCommand {
     Warm(ChatWarm),
     Message(ChatTurn),
-    Cancel { reason: Option<String> },
-    Close { reason: Option<String> },
+    Cancel {
+        reason: Option<String>,
+    },
+    Close {
+        reason: Option<String>,
+    },
     /// Tear down this runtime to make room for another session (or to free the
     /// runner's working dir for an assign) WITHOUT closing the
     /// cloud session: it stays open and a later warm/message revives it via
@@ -3673,7 +3677,11 @@ impl AssignWorker {
                 reason,
             } => {
                 run_events.flush_before_lifecycle(&self.out).await;
-                let policy = Policy::new(&self.runner_config.approval_policy, workspace_root, crate::cloud::protocol::ApprovalMode::Ask);
+                let policy = Policy::new(
+                    &self.runner_config.approval_policy,
+                    workspace_root,
+                    crate::cloud::protocol::ApprovalMode::Ask,
+                );
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
                     bridge.send_approval(&approval_id, auto).await.ok();
@@ -3951,7 +3959,11 @@ mod tests {
             let mut config = runner_config("general-tasks", "TEST", wd.clone());
             config.project_slug = None; // no cloud context lookup in this test
             config.agent.kind = kind;
-            let missing_binary = tmp.path().join("missing-agent").to_string_lossy().into_owned();
+            let missing_binary = tmp
+                .path()
+                .join("missing-agent")
+                .to_string_lossy()
+                .into_owned();
             config.codex.binary = missing_binary.clone();
             config.claude_code.binary = missing_binary;
             let runner_paths = paths.for_runner(config.runner_id);

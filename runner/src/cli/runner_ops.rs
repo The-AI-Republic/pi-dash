@@ -802,7 +802,10 @@ mod tests {
         .await
         .unwrap();
         let wd = &applied.runner.workspace.working_dir;
-        assert!(wd.starts_with(paths.data_dir.join("workspaces")), "wd: {wd:?}");
+        assert!(
+            wd.starts_with(paths.data_dir.join("workspaces")),
+            "wd: {wd:?}"
+        );
         // The persisted config validates (exclusive dir, no collision).
         file::load_config(&paths).unwrap().validate().unwrap();
     }

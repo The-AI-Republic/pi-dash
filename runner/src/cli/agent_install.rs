@@ -55,9 +55,7 @@ pub async fn ensure_agent_installed(
     let name = agent.display_name();
     println!();
     println!("⚠ Pi Dash could not run the {name} CLI (`{binary}`) on this machine.");
-    println!(
-        "  This runner drives {name}, so its runs will fail until `{binary}` is installed."
-    );
+    println!("  This runner drives {name}, so its runs will fail until `{binary}` is installed.");
 
     if skip_install {
         println!("  --skip-agent-install was set, so Pi Dash won't install it for you.");
@@ -370,7 +368,11 @@ mod tests {
             "expected to resolve a present binary {binary:?}"
         );
         let p = resolved.unwrap();
-        assert!(p.is_absolute(), "resolved path not absolute: {}", p.display());
+        assert!(
+            p.is_absolute(),
+            "resolved path not absolute: {}",
+            p.display()
+        );
     }
 
     #[tokio::test]

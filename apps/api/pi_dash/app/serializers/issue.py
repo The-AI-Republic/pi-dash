@@ -320,6 +320,20 @@ class IssueCreateSerializer(BaseSerializer):
                     {"agent_executor": "cannot change the execution target while the issue has an active run"}
                 )
 
+        # ``work_type`` is the per-issue work-type override; NULL inherits the
+        # project's ``default_work_type``. Validated against the code-owned
+        # registry (PDASHOSS01-234).
+        if "work_type" in attrs:
+            if not attrs["work_type"]:
+                attrs["work_type"] = None  # normalize "" to the inherit state
+            else:
+                from pi_dash.prompting.work_types import WORK_TYPES
+
+                if attrs["work_type"] not in WORK_TYPES:
+                    raise serializers.ValidationError(
+                        {"work_type": f"unknown work type; expected one of {sorted(WORK_TYPES)}"}
+                    )
+
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
             is_valid, error_msg, sanitized_html = validate_html_content(attrs["description_html"])
@@ -1077,6 +1091,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "cycle_id",
             "assigned_pod_id",
             "agent_executor",
+            "work_type",
             "module_ids",
             "label_ids",
             "assignee_ids",
