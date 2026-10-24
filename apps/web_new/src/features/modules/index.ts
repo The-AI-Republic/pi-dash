@@ -32,6 +32,17 @@ export { ModulesListHeader, type ModulesListHeaderProps } from "./components/Mod
 export { ModulesListScreen, type ModulesListScreenProps } from "./components/ModulesListScreen.js";
 export { ModulesListSkeleton, type ModulesListSkeletonProps } from "./components/ModulesListSkeleton.js";
 export {
+  MODULE_SIDEBAR_LOAD_FAILED,
+  MODULE_STATUS_LABELS,
+  ModuleAnalyticsSidebar,
+  ModuleAnalyticsSidebarContent,
+  ModuleAnalyticsSidebarSkeleton,
+  moduleCountText,
+  moduleSidebarEditable,
+  showsModulePoints,
+  type ModuleAnalyticsSidebarProps,
+} from "./components/sidebar/index.js";
+export {
   MODULES_LIST_PREFS_STORAGE_KEY,
   parseLayoutRecord,
   readLayoutRecord,
