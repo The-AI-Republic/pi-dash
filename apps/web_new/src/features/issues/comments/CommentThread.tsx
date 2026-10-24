@@ -13,10 +13,13 @@
 
 import { cn } from "@pidash/kit";
 import type { IssueComment } from "@pidash/api-client";
+import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { useMe } from "../../../core/session/index.js";
+import { useTriggerAgentRun } from "../../runners/index.js";
 import { ActivityFeed } from "../activity/ActivityFeed.js";
+import { issueKeys } from "../api/keys.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { canLogWorklog } from "../detail/widgets/worklog/eligibility.js";
 import { WorklogHeaderButton } from "../detail/widgets/worklog/WorklogHeaderButton.js";
@@ -32,7 +35,7 @@ import {
   useUpdateComment,
 } from "./api.js";
 import { CommentCard, COMMENT_HIGHLIGHT_MS, commentDomId } from "./CommentCard.js";
-import { CommentComposer } from "./CommentComposer.js";
+import { CommentComposer, type ComposerPost } from "./CommentComposer.js";
 import { commentDeepLink, isCommentFolded, type CommentMenuFlags } from "./model.js";
 
 export const COMMENTS_HEADING = "Activity";
@@ -75,6 +78,12 @@ export interface CommentThreadProps {
   assigneeIds?: readonly string[];
   /** Project role (20 admin, 15 member, 5 guest); null when unknown. */
   memberRole?: number | null;
+  /**
+   * Comment & Run (ISS-193): post the draft, then dispatch a continuation
+   * run. Undefined hides the action; a null workspace id (the workspace
+   * read still landing) hides it too.
+   */
+  commentAndRun?: { workspaceId: string | null; disabled: boolean } | undefined;
 }
 
 function useCommentHighlight(comments: IssueComment[]): string | null {
@@ -112,9 +121,16 @@ export function CommentThread({
   viewerId: viewerOverride,
   assigneeIds = [],
   memberRole = null,
+  commentAndRun,
 }: CommentThreadProps): React.ReactElement {
   const scope = { workspaceSlug, projectId, issueId };
   const me = useMe();
+  const queryClient = useQueryClient();
+  const { triggerRun } = useTriggerAgentRun({
+    onSettledRefresh: async () => {
+      await queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) });
+    },
+  });
   const viewerId = viewerOverride !== undefined ? viewerOverride : (me.data?.id ?? null);
   const worklogEnabled = isWorklogEnabled();
   const worklogLeading =
@@ -127,6 +143,22 @@ export function CommentThread({
   const update = useUpdateComment(scope, "Couldn't update the comment", "Comment updated successfully");
   const highlighted = useCommentHighlight(comments.data ?? []);
   const flags: CommentMenuFlags = { viewerId, accessToggle: published, copyLink: !isIntake };
+
+  // The typed comment becomes the run's prompt: post it first, and only a
+  // landed post dispatches (a refused post throws before the dispatch).
+  const postCommentAndRun = async (workspaceId: string, input: ComposerPost): Promise<void> => {
+    await create.mutateAsync(input);
+    await triggerRun({ workspaceId, workspaceSlug, projectId, issueId, mode: "comment_and_run" });
+  };
+  const runWorkspaceId = commentAndRun?.workspaceId ?? null;
+  const runDisabled = commentAndRun?.disabled ?? true;
+  const runAction =
+    runWorkspaceId === null
+      ? undefined
+      : {
+          submit: (input: ComposerPost) => postCommentAndRun(runWorkspaceId, input),
+          disabled: runDisabled,
+        };
 
   const copyLink = async (comment: IssueComment): Promise<void> => {
     try {
@@ -182,6 +214,7 @@ export function CommentThread({
           projectId={projectId}
           showAccess={published}
           onCreate={(input) => create.mutateAsync(input)}
+          {...(runAction === undefined ? {} : { commentAndRun: runAction })}
         />
       }
       renderComment={renderComment}

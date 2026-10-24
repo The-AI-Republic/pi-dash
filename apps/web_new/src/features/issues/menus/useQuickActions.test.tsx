@@ -647,6 +647,29 @@ describe("quick-action overlays", () => {
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
     expect(dialogOf(result.current as ReturnType<typeof useQuickActions>)).toBeNull();
   });
+
+  it("runs the detail follow-ups after a landed archive or delete (ISS-162)", async () => {
+    transport();
+    const onArchived = vi.fn();
+    const onDeleted = vi.fn();
+    const { result } = renderMenu({
+      workspaceSlug: SLUG,
+      target: target(),
+      context: "detail",
+      onArchived,
+      onDeleted,
+    });
+    await act(async () => result.current?.handlers.run("archive"));
+    await act(async () =>
+      (mountedDialog(result.current as ReturnType<typeof useQuickActions>).props["onArchived"] as () => void)()
+    );
+    expect(onArchived).toHaveBeenCalledTimes(1);
+    await act(async () => result.current?.handlers.run("delete"));
+    await act(async () =>
+      (mountedDialog(result.current as ReturnType<typeof useQuickActions>).props["onDeleted"] as () => void)()
+    );
+    expect(onDeleted).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("useMenuStateGroup", () => {
