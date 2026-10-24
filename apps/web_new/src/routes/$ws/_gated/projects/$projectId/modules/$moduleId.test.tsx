@@ -2,9 +2,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Module detail route (MOD-029, MOD-030, MOD-032): the gone-away gate
+// Module detail route (MOD-029, MOD-030, MOD-032, MOD-038): the detail gate
 // around the lazy screen, peek and compact search wiring, the search
-// validation, and the data and chunk prefetch with its 404 tolerance.
+// validation, and the data and chunk prefetch with its gate tolerant
+// error path (404 missing, 403/409 access refusal).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { ApiError } from "@pidash/api-client";
@@ -198,27 +199,33 @@ describe("module detail route", () => {
     expect(mocks.loadLeaves).toHaveBeenCalledTimes(1);
   }, 20000);
 
-  it("lets a 404 fall through to the gone-away gate", async () => {
-    mocks.prefs.mockReturnValue({
-      queryKey: ["prefs"],
-      queryFn: async () => {
-        throw new ApiError({ status: 404, code: "http", message: "missing" });
-      },
-    });
-    const beforeLoad = Route.options.beforeLoad;
-    if (!beforeLoad) throw new Error("missing beforeLoad");
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
-    });
-    await expect(
-      beforeLoad({
-        context: { queryClient, apiClient: { stub: true } },
-        params: { ws: "acme", projectId: PROJECT, moduleId: MODULE },
-      } as never)
-    ).resolves.toBe(undefined);
-  }, 20000);
+  it.each([404, 403, 409])(
+    "lets a %i fall through to the detail gate",
+    async (status) => {
+      // 404 is the missing-module split; 403/409 are the project refusal the
+      // gate turns into the shared access wall, never a route error (MOD-038).
+      mocks.prefs.mockReturnValue({
+        queryKey: ["prefs"],
+        queryFn: async () => {
+          throw new ApiError({ status, code: "http", message: "refused" });
+        },
+      });
+      const beforeLoad = Route.options.beforeLoad;
+      if (!beforeLoad) throw new Error("missing beforeLoad");
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+      });
+      await expect(
+        beforeLoad({
+          context: { queryClient, apiClient: { stub: true } },
+          params: { ws: "acme", projectId: PROJECT, moduleId: MODULE },
+        } as never)
+      ).resolves.toBe(undefined);
+    },
+    20000
+  );
 
-  it("rethrows a non-404 prefetch failure", async () => {
+  it("rethrows a failure no gate owns", async () => {
     mocks.prefs.mockReturnValue({
       queryKey: ["prefs"],
       queryFn: async () => {

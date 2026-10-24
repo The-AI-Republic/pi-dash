@@ -231,6 +231,8 @@ export type { DesktopSignInScreenProps } from "./components/DesktopSignInScreen.
 export { DesktopUnavailableCard } from "./components/DesktopUnavailableCard.js";
 export { ProjectAccessGate } from "./components/ProjectAccessGate.js";
 export type { ProjectAccessGateProps } from "./components/ProjectAccessGate.js";
+export { ProjectAccessWall } from "./components/ProjectAccessWall.js";
+export type { ProjectAccessWallKind, ProjectAccessWallProps } from "./components/ProjectAccessWall.js";
 export { WorkspaceNotFoundScreen } from "./components/WorkspaceNotFoundScreen.js";
 export type { WorkspaceNotFoundScreenProps } from "./components/WorkspaceNotFoundScreen.js";
 export { WorkspaceNotMemberScreen } from "./components/WorkspaceNotMemberScreen.js";

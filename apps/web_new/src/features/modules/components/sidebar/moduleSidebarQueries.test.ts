@@ -21,7 +21,7 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 });
 
 import { LIST_STALE_TIME_MS } from "../../../../core/query/client.js";
-import { estimatesKeys } from "../../../estimates/index.js";
+import { estimatesKeys, projectEstimatesQueryOptions } from "../../../estimates/index.js";
 import { moduleKeys } from "../../api/keys.js";
 import {
   archivedModuleDetailQueryOptions,
@@ -43,6 +43,8 @@ describe("moduleSidebarQueries", () => {
     expect(options.queryKey).toEqual(moduleKeys.detail("acme", PROJECT, MODULE));
     expect(options.staleTime).toBe(LIST_STALE_TIME_MS);
     expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.refetchInterval).toBe(false);
     await expect(options.queryFn?.({} as never)).resolves.toBe(detail);
     expect(mocks.getModule).toHaveBeenCalledWith(client, "acme", PROJECT, MODULE);
   });
@@ -69,10 +71,15 @@ describe("moduleSidebarQueries", () => {
     expect(mocks.getArchivedModule).toHaveBeenCalled();
   });
 
-  it("reuses the estimates feature read for the points gate", async () => {
+  it("keeps the estimates key but quiets its live triggers for the points gate", async () => {
+    // The estimates screen refetches on focus; the modules sidebar must
+    // not inherit that (MOD-039), even though both share one cache entry.
+    expect(projectEstimatesQueryOptions({} as never, "acme", PROJECT).refetchOnWindowFocus).toBe(true);
     const options = moduleSidebarEstimatesQueryOptions({} as never, "acme", PROJECT);
     expect(options.queryKey).toEqual(estimatesKeys.project("acme", PROJECT));
-    expect(options.staleTime).toBe(0);
-    expect(options.refetchOnWindowFocus).toBe(true);
+    expect(options.staleTime).toBe(LIST_STALE_TIME_MS);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.refetchInterval).toBe(false);
   });
 });

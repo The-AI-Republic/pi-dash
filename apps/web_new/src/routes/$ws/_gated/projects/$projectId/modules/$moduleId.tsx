@@ -8,13 +8,13 @@
 // prefetch, layout — with the composition in the feature.
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { isApiError } from "@pidash/api-client";
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
 // Direct module imports: this route definition is eager, and the feature
 // barrels would pull the list body, dialogs and picker parts into the
 // initial bundle (NEWFRONT-619, size gate).
+import { isProjectGateError } from "../../../../../../features/auth/index.js";
 import { ModuleDetailGate } from "../../../../../../features/modules/components/ModuleDetailGate.js";
 import { moduleDetailQueryOptions } from "../../../../../../features/modules/components/sidebar/moduleSidebarQueries.js";
 import { loadKanbanLayout } from "../../../../../../features/issues/kanban/lazy.js";
@@ -53,9 +53,12 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
       // await them with the data so the first commit is the screen.
       await Promise.all([loadKanbanLayout(), loadIssueListLeaves()]);
     } catch (error) {
-      // A missing module 404s the prefetch: let the gone-away gate own it
-      // instead of failing the load (MOD-029).
-      if (!isApiError(error) || error.status !== 404) throw error;
+      // A missing module 404s the prefetch, and a reader without project
+      // access is refused with 403/409: both belong to a gate, not to the
+      // route's error screen. The module gate splits them — missing state
+      // for the id, the shared project access wall for the refusal
+      // (MOD-029, MOD-038) — so the load completes and that gate renders.
+      if (!isProjectGateError(error)) throw error;
     }
   },
   pendingComponent: function ModuleDetailPending() {

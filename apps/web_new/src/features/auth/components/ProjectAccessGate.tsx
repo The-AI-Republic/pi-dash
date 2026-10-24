@@ -6,17 +6,18 @@
 // nothing renders; members render children; everyone else gets the join,
 // no-access, or not-found screen keyed off the details-fetch status plus
 // admin standing. Joining refreshes the workspace subtree so the gate
-// renders the project once the join lands.
+// renders the project once the join lands. The wall itself is
+// `ProjectAccessWall`, shared with areas that meet a refusal below the
+// project shell (the modules detail gate).
 
 import { isApiError } from "@pidash/api-client";
-import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import { ROLE_ADMIN } from "../../../core/session/permissions.js";
 import { useJoinProject } from "../api.js";
 import { decideProjectDenial } from "../denials.js";
-import { authStepInputProps } from "../focus.js";
 import { useProjectRow, useWorkspaceMembership } from "../queries.js";
+import { ProjectAccessWall } from "./ProjectAccessWall.js";
 
 export interface ProjectAccessGateProps {
   slug: string;
@@ -35,52 +36,7 @@ export function ProjectAccessGate({ slug, projectId, children }: ProjectAccessGa
   const status = isApiError(project.error) ? project.error.status : undefined;
   const denial = decideProjectDenial({ status, isAdmin: (membership.data?.role ?? 0) >= ROLE_ADMIN });
   if (denial === "join") {
-    return (
-      <DenialShell
-        heading="You haven't joined this project yet"
-        body="Join it to see its work."
-        action={
-          <Button
-            variant="primary"
-            loading={join.isPending}
-            disabled={join.isPending}
-            {...authStepInputProps()}
-            onClick={() => join.mutate({ slug, projectId })}
-          >
-            {join.isPending ? "Joining…" : "Join project"}
-          </Button>
-        }
-      />
-    );
+    return <ProjectAccessWall kind="join" joining={join.isPending} onJoin={() => join.mutate({ slug, projectId })} />;
   }
-  if (denial === "no-access") {
-    return (
-      <DenialShell
-        heading="You can't open this project"
-        body="This project is private. Ask a workspace admin for access to continue."
-      />
-    );
-  }
-  return <DenialShell heading="Project not found" body="It may have been deleted, or the address is wrong." />;
-}
-
-function DenialShell({
-  heading,
-  body,
-  action,
-}: {
-  heading: string;
-  body: string;
-  action?: React.ReactNode | undefined;
-}): React.ReactElement {
-  return (
-    <section
-      aria-label={heading}
-      className="flex h-full w-full flex-col items-center justify-center gap-(--space-2) p-(--space-12) text-center"
-    >
-      <h2 className="text-h3 text-(--text)">{heading}</h2>
-      <p className="text-body max-w-md text-(--text-muted)">{body}</p>
-      {action === undefined ? null : <div className="pt-(--space-2)">{action}</div>}
-    </section>
-  );
+  return <ProjectAccessWall kind={denial} />;
 }

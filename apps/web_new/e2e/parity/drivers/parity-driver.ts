@@ -5863,7 +5863,10 @@ export interface ParityDriver {
   modulesXRowMenuEntries(name: string): Promise<string[]>;
 
   // --- desktop + edition negatives (MOD-042/043) ---
-  /** API paths the modules list entry fetches (traffic-allowlist spy). */
+  /**
+   * Every API path the modules list entry fetches, unfiltered (the scenario
+   * applies its own endpoint and edition/desktop rules to the whole set).
+   */
   modulesXEntryRequestPaths(workspaceSlug: string, projectId: string): Promise<string[]>;
   /** Whether the first list row shows a favorite toggle. */
   modulesXRowFavoriteToggleVisible(): Promise<boolean>;
