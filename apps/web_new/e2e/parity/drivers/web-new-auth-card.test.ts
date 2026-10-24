@@ -248,6 +248,51 @@ describe("signOutViaCommandPalette", () => {
   });
 });
 
+describe("openEntry", () => {
+  it("returns when a slow bounce lands mid-wait", async () => {
+    // The workspaceless newcomer's fall to /create-workspace can land
+    // after the first URL check but before the card wait gives up; the
+    // bounced landing is the entry working, not a failure (PSET-003).
+    const seen: string[] = [];
+    const page = {
+      goto: vi.fn(async () => undefined),
+      reload: vi.fn(async () => undefined),
+      url: () => {
+        seen.push("url");
+        return seen.length > 1 ? "https://parity.test/create-workspace" : "https://parity.test/";
+      },
+      locator: () =>
+        element({
+          waitFor: vi.fn(async () => {
+            throw new Error("timeout");
+          }),
+        }),
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+
+    await driver.openEntry();
+
+    expect(seen).toHaveLength(2);
+  });
+
+  it("fails when the card never paints on /", async () => {
+    const page = {
+      goto: vi.fn(async () => undefined),
+      reload: vi.fn(async () => undefined),
+      url: () => "https://parity.test/",
+      locator: () =>
+        element({
+          waitFor: vi.fn(async () => {
+            throw new Error("timeout");
+          }),
+        }),
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.openEntry()).rejects.toThrow("timeout");
+  });
+});
+
 describe("reloadPage", () => {
   it("reloads a document whose mount point stayed empty", async () => {
     const reload = vi.fn(async () => undefined);

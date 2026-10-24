@@ -708,7 +708,16 @@ export class WebNewDriver implements ParityDriver {
       // stale session, so it returns as-is (user switches reset first).
       // A slow first paint just falls through to the retry.
       if (new URL(this.page.url()).pathname !== "/") return;
-      await this.waitForCard();
+      try {
+        await this.waitForCard();
+      } catch (error) {
+        // A slow bounce can land mid-wait (PSET-003's workspaceless
+        // newcomer falls to /create-workspace after the check above);
+        // off-entry is still the entry working, so only a cardless "/"
+        // fails.
+        if (new URL(this.page.url()).pathname !== "/") return;
+        throw error;
+      }
     }
   }
 
@@ -27711,6 +27720,11 @@ export class WebNewDriver implements ParityDriver {
       };
       const denial = document.querySelector('[data-testid="project-settings-denied"]');
       if (visible(denial)) return "denied";
+      // Body-owned refusals (automations, schedulers) carry no generic
+      // testid by slice contract, so their h1 counts too, like the
+      // oracle probe. Restriction headings never contain this phrase.
+      const headings = Array.from(document.querySelectorAll("h1"));
+      if (headings.some((h) => visible(h) && /not authorized/i.test(h.textContent ?? ""))) return "denied";
       const restriction = document.querySelector('[data-testid="project-settings-restriction"]');
       if (visible(restriction)) return "restriction";
       const guidance = document.querySelector('[data-testid="project-settings-guidance"]');
