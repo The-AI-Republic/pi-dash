@@ -32,7 +32,12 @@ function ProjectLayoutComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   return (
     <ProjectAccessGate slug={ws} projectId={projectId}>
-      <ViewsPaletteEntries workspaceSlug={ws} projectId={projectId} />
+      {/* The entries carry their own boundary: they register nothing visible,
+          so the tab strip and the page must not wait for (or blank behind)
+          the chunk's first load (NEWFRONT-871, size gate). */}
+      <React.Suspense fallback={null}>
+        <ViewsPaletteEntries workspaceSlug={ws} projectId={projectId} />
+      </React.Suspense>
       <ProjectTabStrip workspaceSlug={ws} projectId={projectId} />
       <Outlet />
     </ProjectAccessGate>
