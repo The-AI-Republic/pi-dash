@@ -1363,6 +1363,8 @@ mod tests {
             usage: &usage,
             llm_model: None,
             turn_count: None,
+            agent_health: None,
+            agent_last_activity_at: None,
             updated_at: "2026-10-02T23:03:54.579295Z",
         };
         let machine = DevMachineMiniRow {

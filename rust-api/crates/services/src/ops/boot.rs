@@ -254,7 +254,7 @@ pub async fn clear_cache(redis_url: Option<&str>, key: Option<&str>) -> String {
 
 async fn clear_cache_inner(redis_url: Option<&str>, key: Option<&str>) -> Result<String, ()> {
     let url = redis_url.filter(|url| !url.is_empty()).ok_or(())?;
-    let client = redis::Client::open(url).map_err(|_| ())?;
+    let client = pidash_db::redis::open_client(url).map_err(|_| ())?;
     // Deliberate CLI bounds (2s connect, 5s command): django-redis
     // itself runs with blocking sockets here — `REDIS_SOCKET_*`
     // (`settings/common.py:238-239`) feed `redis_instance()`, not the

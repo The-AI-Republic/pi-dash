@@ -27,9 +27,12 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # `tokio-comp`: without the rustls runtime glue the crate does not compile
 # once any `tls-*` feature is on) with bundled Mozilla roots
 # (`tls-rustls-webpki-roots`) because production `REDIS_URL` values are
-# `rediss://`. Command-group defaults stay off (SET/GET/SUBSCRIBE are core
-# commands); extend the feature list if a consumer needs more.
-redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
+# `rediss://`. `tls-rustls-insecure` serves the `#insecure` fragment
+# `open_client` appends (PIDASHCONV-1269: Django's `ssl_cert_reqs=None`
+# parity — without it insecure clients fail to build). Command-group
+# defaults stay off (SET/GET/SUBSCRIBE are core commands); extend the
+# feature list if a consumer needs more.
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "tls-rustls-insecure"] }
 futures-util = "0.3"
 mongodb = "3"
 tracing = "0.1"

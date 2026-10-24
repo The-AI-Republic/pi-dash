@@ -57,3 +57,61 @@ pub use guards::{
 pub fn routes() -> axum::Router<crate::state::AppState> {
     device_flow::routes().merge(device_session::routes())
 }
+
+/// Shared `delete_old_avatar` row write (`adapter/base.py:244-248`,
+/// PIDASHCONV-1321): soft-delete the asset the way
+/// `SoftDeleteModel.delete(soft=True)` does (`db/mixins.py:72-78` —
+/// `deleted_at` stamp through a full `save()`, so `updated_at` moves and,
+/// with the anonymous callback user, both audit columns NULL), enqueue
+/// `soft_delete_related_objects("db", "fileasset", pk, using=None)`
+/// best-effort (the intake-handler precedent), then clear the user's FK +
+/// avatar string. Django order (asset delete — stamp AND enqueue — before
+/// the user save) is safe here because the row write is an UPDATE, not a
+/// DELETE: no deferred FK can fire. A failed asset write returns with the
+/// user untouched (Django's `except` around the whole body).
+pub(crate) async fn soft_delete_avatar_asset(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    asset_id: uuid::Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    if sqlx::query(
+        r#"UPDATE "file_assets"
+           SET "deleted_at" = $1, "updated_at" = $1,
+               "created_by_id" = NULL, "updated_by_id" = NULL
+           WHERE "id" = $2"#,
+    )
+    .bind(now)
+    .bind(asset_id)
+    .execute(pool)
+    .await
+    .is_err()
+    {
+        return;
+    }
+    let mut kwargs = serde_json::Map::new();
+    kwargs.insert("using".to_owned(), serde_json::Value::Null);
+    let message = pidash_jobs::TaskMessage::new(
+        pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
+        vec![
+            serde_json::Value::String("db".to_owned()),
+            serde_json::Value::String("fileasset".to_owned()),
+            serde_json::Value::String(asset_id.to_string()),
+        ],
+        kwargs,
+    );
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        serde_json::Value::Array(message.args.clone()),
+        serde_json::Value::Object(message.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = message.task.as_str(), "avatar soft-delete enqueue failed; response stands");
+    }
+    let _ = sqlx::query(
+        r#"UPDATE "users" SET "avatar_asset_id" = NULL, "avatar" = '' WHERE "id" = $1"#,
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await;
+}
