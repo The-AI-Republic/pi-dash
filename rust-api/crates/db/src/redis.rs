@@ -34,10 +34,30 @@
 //! (warn-logged), so `serve` boots without a cache exactly like the interim
 //! replay-only behavior.
 //!
-//! TLS: production `REDIS_URL` values are `rediss://`, so the crate is built
-//! with `tls-rustls-webpki-roots` (Mozilla roots, no system store needed).
+//! TLS: production `REDIS_URL` values are `rediss://`, and Django connects
+//! to them without certificate verification (`ssl_cert_reqs=None` in
+//! `pi_dash/settings/redis.py`, `ssl_cert_reqs: False` in the `CACHES`
+//! pool kwargs), so self-signed and private-CA servers are reachable.
+//! Every `REDIS_URL`-derived client in the workspace builds through
+//! [`open_client`], which mirrors that policy via redis-rs `#insecure`
+//! (needs the crate's `tls-rustls-insecure` feature).
 
 use redis::AsyncCommands;
+
+/// Open a [`redis::Client`] with Django's TLS policy: `rediss://` (and
+/// `valkeys://`) URLs connect without certificate verification, exactly
+/// like Django's `ssl_cert_reqs=None`. Plain `redis://` URLs pass
+/// through untouched, as does any URL that already carries a `#fragment`
+/// (redis-rs rejects non-`insecure` fragments with a clear error).
+/// Parsing only; no connection is opened until the first operation.
+pub fn open_client(url: &str) -> Result<redis::Client, redis::RedisError> {
+    let scheme = url.split("://").next().unwrap_or("");
+    let is_tls = scheme.eq_ignore_ascii_case("rediss") || scheme.eq_ignore_ascii_case("valkeys");
+    if is_tls && !url.contains('#') {
+        return redis::Client::open(format!("{url}#insecure"));
+    }
+    redis::Client::open(url)
+}
 
 /// Timeout-free shared Redis client. `Clone` shares the underlying client
 /// (each operation multiplexes a connection from it); store one in
@@ -49,10 +69,12 @@ pub struct RedisHandle {
 
 impl RedisHandle {
     /// Build from an explicit URL (`redis://` or `rediss://`). Parsing only;
-    /// no connection is opened until the first operation.
+    /// no connection is opened until the first operation. `rediss://`
+    /// URLs skip certificate verification via [`open_client`], matching
+    /// Django's `ssl_cert_reqs=None`.
     pub fn from_url(url: &str) -> Result<Self, redis::RedisError> {
         Ok(Self {
-            client: redis::Client::open(url)?,
+            client: open_client(url)?,
         })
     }
 
@@ -170,6 +192,41 @@ mod tests {
         let mut settings = Settings::test_defaults();
         settings.redis.url = Some(":// not a url".to_owned());
         assert!(RedisHandle::from_settings(&settings).is_none());
+    }
+
+    #[test]
+    fn rediss_url_builds_insecure_client_like_django() {
+        // Django passes `ssl_cert_reqs=None` for every `rediss://`
+        // connection (`pi_dash/settings/redis.py`, sync and async
+        // `redis_instance`), so self-signed servers are reachable. The
+        // `#insecure` fragment redis-rs parses is the same policy; no
+        // connection is opened here, so no server or TLS provider is
+        // needed to pin the mode.
+        let client = open_client("rediss://127.0.0.1:6390/0").expect("rediss url parses");
+        match client.get_connection_info().addr() {
+            redis::ConnectionAddr::TcpTls { insecure, .. } => {
+                assert!(*insecure, "rediss:// must skip verification like Django");
+            }
+            other => panic!("expected TcpTls for rediss://, got {other:?}"),
+        }
+        // The shared handle builds from it (parse-only, no I/O).
+        assert!(RedisHandle::from_url("rediss://127.0.0.1:6390/0").is_ok());
+        // An explicit fragment is left alone, never doubled.
+        let client =
+            open_client("rediss://127.0.0.1:6390/0#insecure").expect("fragment url parses");
+        match client.get_connection_info().addr() {
+            redis::ConnectionAddr::TcpTls { insecure, .. } => assert!(*insecure),
+            other => panic!("expected TcpTls for rediss://, got {other:?}"),
+        }
+        // Plain `redis://` stays non-TLS.
+        let client = open_client("redis://127.0.0.1:6379/0").expect("redis url parses");
+        assert!(
+            matches!(
+                client.get_connection_info().addr(),
+                redis::ConnectionAddr::Tcp(..)
+            ),
+            "redis:// must stay plaintext"
+        );
     }
 
     #[test]
