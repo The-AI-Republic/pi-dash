@@ -31,6 +31,7 @@ const CHAIN = [
 const ACTIONS = [
   "count",
   "click",
+  "isVisible",
   "waitFor",
   "textContent",
   "allTextContents",
@@ -68,10 +69,12 @@ class Recorder {
   readonly listeners: Array<{ event: string; handler: (...args: never[]) => void }> = [];
   evaluateImpl: (...args: never[]) => unknown = () => undefined;
   waitForFunctionImpl: (...args: never[]) => Promise<void> = async () => undefined;
+  eventImpl: (event: string) => Promise<unknown> = async () => undefined;
   // Unstated paths answer with their type's quiet value, so a test only
   // has to describe the paths it cares about.
   respond: Respond = ({ method }) => {
     if (method === "count") return 0;
+    if (method === "isVisible") return false;
     if (method === "allTextContents") return [];
     if (method === "textContent" || method === "inputValue" || method === "innerText") return "";
     if (method === "getAttribute") return null;
@@ -110,6 +113,10 @@ class Recorder {
     node.waitForFunction = async (...args: never[]) => {
       this.calls.push({ path: "page.waitForFunction", method: "waitForFunction", args });
       return this.waitForFunctionImpl(...args);
+    };
+    node.waitForEvent = async (event: string) => {
+      this.calls.push({ path: "page.waitForEvent", method: "waitForEvent", args: [event] });
+      return this.eventImpl(event);
     };
     node.evaluate = async (...args: never[]) => {
       this.calls.push({ path: "page.evaluate", method: "evaluate", args });
@@ -1098,5 +1105,261 @@ describe("analytics custom chart", () => {
     };
     recorder.evaluateImpl = () => [];
     await expect(new WebNewDriver(recorder.page()).analyticsCustomTooltipSegments(0)).resolves.toEqual([]);
+  });
+});
+
+describe("analytics export tables", () => {
+  const CUSTOM = `page.getByTestId("analytics-custom-table")`;
+  const INSIGHT = `page.getByTestId("analytics-breakdown-table")`;
+
+  it("opens the work-items tab and settles both table sections", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).analyticsExportOpen("acme", COOKIES);
+    expect(recorder.gotos()).toEqual(["/acme/analytics/work-items"]);
+    expectTrace(recorder.trace(), [
+      "addCookies page.context.addCookies",
+      'waitFor page.getByTestId("analytics-custom-table")',
+      'waitFor page.getByTestId("analytics-breakdown-table")',
+    ]);
+  });
+
+  it("counts the export actions across both tables", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 2 : undefined);
+    await expect(new WebNewDriver(recorder.page()).analyticsExportButtonCount()).resolves.toBe(2);
+    expect(recorder.trace()).toContain('count page.getByRole("button",{"name":"Export as csv"})');
+  });
+
+  it("addresses the chart table for chart facts and the insight table otherwise", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 3 : undefined);
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.analyticsExportRowCount("chart")).resolves.toBe(3);
+    await expect(driver.analyticsExportRowCount("insight")).resolves.toBe(3);
+    expectTrace(recorder.trace(), [`count ${CUSTOM}.locator("tbody tr")`, `count ${INSIGHT}.locator("tbody tr")`]);
+  });
+
+  it("trims display headers", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "allTextContents" ? [" Project ", "Backlog"] : undefined);
+    await expect(new WebNewDriver(recorder.page()).analyticsExportHeaders("insight")).resolves.toEqual([
+      "Project",
+      "Backlog",
+    ]);
+    expect(recorder.trace()).toContain(`allTextContents ${INSIGHT}.locator("thead th")`);
+  });
+
+  it("trims the row-count label, answering empty when the label is missing", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "textContent" ? "  2 Projects  " : undefined);
+    await expect(new WebNewDriver(recorder.page()).analyticsExportCountLabel("insight")).resolves.toBe("2 Projects");
+    const nullLabel = new Recorder();
+    nullLabel.respond = ({ method }) => (method === "textContent" ? null : undefined);
+    await expect(new WebNewDriver(nullLabel.page()).analyticsExportCountLabel("insight")).resolves.toBe("");
+  });
+
+  it("reports whether the search box is open", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "isVisible" ? true : undefined);
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.analyticsExportSearchExpanded("chart")).resolves.toBe(true);
+    const closed = new WebNewDriver(new Recorder().page());
+    await expect(closed.analyticsExportSearchExpanded("insight")).resolves.toBe(false);
+  });
+
+  it("expands a collapsed search box before filling it", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "isVisible" ? false : undefined);
+    await new WebNewDriver(recorder.page()).analyticsExportSearch("insight", "alpha");
+    expectTrace(recorder.trace(), [
+      `isVisible ${INSIGHT}.getByPlaceholder("Search")`,
+      `click ${INSIGHT}.getByRole("button",{"name":"Search","exact":true})`,
+      `waitFor ${INSIGHT}.getByPlaceholder("Search")`,
+      `fill ${INSIGHT}.getByPlaceholder("Search")`,
+    ]);
+    expect(recorder.calls.find((call) => call.method === "fill")?.args).toEqual(["alpha", { timeout: 30_000 }]);
+  });
+
+  it("fills an already-open search box without clicking", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "isVisible" ? true : undefined);
+    await new WebNewDriver(recorder.page()).analyticsExportClearSearch("chart");
+    expect(recorder.trace().filter((line) => line.startsWith("click"))).toEqual([]);
+    expect(recorder.trace()).toContain(`fill ${CUSTOM}.getByPlaceholder("Search")`);
+  });
+
+  it("closes the search box and waits for it to hide", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "isVisible" ? true : undefined);
+    await new WebNewDriver(recorder.page()).analyticsExportSearchClose("chart");
+    expectTrace(recorder.trace(), [
+      `isVisible ${CUSTOM}.getByPlaceholder("Search")`,
+      `click ${CUSTOM}.getByRole("button",{"name":"Close search","exact":true})`,
+      `waitFor ${CUSTOM}.getByPlaceholder("Search")`,
+    ]);
+    const waits = recorder.calls.filter((call) => call.method === "waitFor");
+    expect(waits[0]?.args).toEqual([{ state: "hidden", timeout: 30_000 }]);
+  });
+
+  it("refuses to close an already-closed search box", async () => {
+    const recorder = new Recorder();
+    await expect(new WebNewDriver(recorder.page()).analyticsExportSearchClose("insight")).rejects.toThrow(
+      "search box is already closed"
+    );
+  });
+
+  it("reads collapsed guidance only from a one-row, one-cell body", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && path.endsWith(`locator("tbody tr")`)) return 1;
+      if (method === "count") return 1;
+      if (method === "textContent") return "  Create projects with work items.  ";
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsExportEmptyText("insight")).resolves.toBe(
+      "Create projects with work items."
+    );
+    expectTrace(recorder.trace(), [
+      `count ${INSIGHT}.locator("tbody tr")`,
+      `count ${INSIGHT}.locator("tbody tr").first().locator("td")`,
+      `textContent ${INSIGHT}.locator("tbody tr").first().locator("td").first()`,
+    ]);
+  });
+
+  it("answers no guidance for a data table, a multi-cell row, or a short note", async () => {
+    const data = new Recorder();
+    data.respond = ({ method, path }) => (method === "count" && path.endsWith(`locator("tbody tr")`) ? 2 : undefined);
+    await expect(new WebNewDriver(data.page()).analyticsExportEmptyText("insight")).resolves.toBeNull();
+
+    const manyCells = new Recorder();
+    manyCells.respond = ({ method, path }) => {
+      if (method !== "count") return undefined;
+      return path.endsWith(`locator("tbody tr")`) ? 1 : 2;
+    };
+    await expect(new WebNewDriver(manyCells.page()).analyticsExportEmptyText("insight")).resolves.toBeNull();
+
+    const short = new Recorder();
+    short.respond = ({ method }) => {
+      if (method === "count") return 1;
+      if (method === "textContent") return "Short";
+      return undefined;
+    };
+    await expect(new WebNewDriver(short.page()).analyticsExportEmptyText("chart")).resolves.toBeNull();
+
+    const nullText = new Recorder();
+    nullText.respond = ({ method }) => {
+      if (method === "count") return 1;
+      if (method === "textContent") return null;
+      return undefined;
+    };
+    await expect(new WebNewDriver(nullText.page()).analyticsExportEmptyText("chart")).resolves.toBeNull();
+  });
+
+  it("counts the insight skeleton cells", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 30 : undefined);
+    await expect(new WebNewDriver(recorder.page()).analyticsInsightSkeletonCells()).resolves.toBe(30);
+    expect(recorder.trace()).toContain(`count ${INSIGHT}.locator("td > span[style*='height'][style*='20px']")`);
+  });
+
+  it("stalls and releases the insight stats read through the shared hook", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.analyticsInsightTableStall();
+    expect(recorder.routes).toHaveLength(1);
+    let fellThrough = false;
+    const route = {
+      request: () => ({
+        method: () => "GET",
+        url: () => "https://app.test/api/workspaces/acme/advance-analytics-stats/",
+      }),
+      fallback: async () => {
+        fellThrough = true;
+      },
+    };
+    let settled = false;
+    const pending = recorder.routes[0]!.handler(route).then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    await driver.analyticsInsightTableRelease();
+    await pending;
+    expect(settled).toBe(true);
+    expect(fellThrough).toBe(true);
+
+    // Both accepted spellings address the same insight stats path.
+    await driver.analyticsInsightTableStall();
+    const withoutSlash = {
+      request: () => ({
+        method: () => "GET",
+        url: () => "https://app.test/api/workspaces/acme/advance-analytics-stats",
+      }),
+      fallback: async () => undefined,
+    };
+    let secondSettled = false;
+    const second = recorder.routes[0]!.handler(withoutSlash).then(() => {
+      secondSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(secondSettled).toBe(false);
+    await driver.analyticsInsightTableRelease();
+    await second;
+    expect(secondSettled).toBe(true);
+  });
+
+  it("reads every row's cells, trimming each", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && path.endsWith('.locator("tbody tr")')) return 2;
+      if (method === "allTextContents") {
+        return path.includes(".nth(0)") ? [" Alpha ", "2"] : ["Beta", "4"];
+      }
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsExportRowCells("insight")).resolves.toEqual([
+      ["Alpha", "2"],
+      ["Beta", "4"],
+    ]);
+  });
+
+  it("captures a download with its name and contents", async () => {
+    const recorder = new Recorder();
+    recorder.eventImpl = async () => ({
+      path: async () => "/tmp/acme-analytics.csv",
+      suggestedFilename: () => "acme-analytics.csv",
+    });
+    const driver = new WebNewDriver(recorder.page());
+    const reads: string[] = [];
+    (driver as unknown as { readDownload: (path: string) => string }).readDownload = (path) => {
+      reads.push(path);
+      return "\uFEFFPriority,Count\r\nUrgent,1\r\n";
+    };
+    await expect(driver.analyticsExportDownload("chart")).resolves.toEqual({
+      fileName: "acme-analytics.csv",
+      content: "\uFEFFPriority,Count\r\nUrgent,1\r\n",
+    });
+    expect(reads).toEqual(["/tmp/acme-analytics.csv"]);
+    expectTrace(recorder.trace(), [`click ${CUSTOM}.getByRole("button",{"name":"Export as csv"})`]);
+  });
+
+  it("rejects a download that arrived without a path", async () => {
+    const recorder = new Recorder();
+    recorder.eventImpl = async () => ({ path: async () => null, suggestedFilename: () => "x.csv" });
+    await expect(new WebNewDriver(recorder.page()).analyticsExportDownload("insight")).rejects.toThrow(
+      "landed without a path"
+    );
+  });
+
+  it("reports no download when the filter suppressed it", async () => {
+    const quiet = new Recorder();
+    quiet.eventImpl = async () => {
+      throw new Error("timeout");
+    };
+    await expect(new WebNewDriver(quiet.page()).analyticsExportYieldsNoDownload("insight")).resolves.toBe(true);
+
+    const fired = new Recorder();
+    fired.eventImpl = async () => ({});
+    await expect(new WebNewDriver(fired.page()).analyticsExportYieldsNoDownload("chart")).resolves.toBe(false);
   });
 });
