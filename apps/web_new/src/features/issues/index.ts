@@ -197,11 +197,8 @@ export {
 export type { ReactionScope } from "./reactions/api.js";
 
 export type { LiteResolution } from "./api/browse.js";
-export {
-  descriptionVersionQueryOptions,
-  descriptionVersionsQueryOptions,
-  issueDetailQueryOptions,
-} from "./api/queries.js";
+export { issueDetailQueryOptions } from "./api/queries.js";
+export { descriptionVersionQueryOptions, descriptionVersionsQueryOptions } from "./api/descriptionVersions.js";
 export {
   DESCRIPTION_SAVE_FAILED_TITLE,
   TITLE_SAVE_FAILED_TITLE,
@@ -541,9 +538,9 @@ export type { ViewSnapshot } from "./filters/rich/views.js";
 // it only adds the date bridge over the already-eager legacy dimensions
 // (the expression import is type-only), so the size gate is unaffected.
 export { withRichFilters } from "./filters/rich/query.js";
-export type { IssueFiltersProps } from "./filters/rich/IssueFilters.js";
 export { GlobalIssuesScreen } from "./global/GlobalIssuesScreen.js";
 export type { GlobalIssuesScreenProps } from "./global/GlobalIssuesScreen.js";
 export { GLOBAL_ISSUES_PAGE_SIZE, globalIssuesQueryOptions } from "./global/queries.js";
+export type { IssueFiltersProps } from "./filters/rich/IssueFilters.js";
 export { EntityListScreen } from "./list/EntityListScreen.js";
 export type { EntityListScreenProps } from "./list/EntityListScreen.js";

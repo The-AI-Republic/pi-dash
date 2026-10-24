@@ -17,17 +17,18 @@ import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import { useMe, useWorkspace } from "../../../../core/session/index.js";
-import {
-  CommentThread,
-  DetailMissingState,
-  DetailSkeleton,
-  IssueDetailRoot,
-  IssuePropertiesSidebar,
-  SubIssuesWidget,
-  issueDetailQueryOptions,
-  issueKeys,
-  liteIssueQueryOptions,
-} from "../../../../features/issues/index.js";
+// Deep imports: this route module is eager in the router tree, so the
+// issues barrel here would put every export it re-exports on the initial
+// chain (NEWFRONT-732; NEWFRONT-871, size gate).
+import { issueKeys } from "../../../../features/issues/api/keys.js";
+import { liteIssueQueryOptions } from "../../../../features/issues/api/browse.js";
+import { issueDetailQueryOptions } from "../../../../features/issues/api/queries.js";
+import { CommentThread } from "../../../../features/issues/comments/CommentThread.js";
+import { DetailMissingState } from "../../../../features/issues/detail/DetailMissingState.js";
+import { DetailSkeleton } from "../../../../features/issues/detail/DetailSkeleton.js";
+import { IssueDetailRoot } from "../../../../features/issues/detail/IssueDetailRoot.js";
+import { IssuePropertiesSidebar } from "../../../../features/issues/detail/sidebar/index.js";
+import { SubIssuesWidget } from "../../../../features/issues/subIssues/SubIssuesWidget.js";
 import { IssueRunAIAction } from "../../../../features/issues/detail/IssueAgentActions.js";
 import { AgentStatusPanel } from "../../../../features/issues/detail/agent/AgentStatusPanel.js";
 import { DetailHeaderActions } from "../../../../features/issues/detail/DetailHeaderActions.js";

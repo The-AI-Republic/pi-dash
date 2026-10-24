@@ -18,7 +18,7 @@
 
 import type { IssueListQuery } from "@pidash/api-client";
 
-import { customDateMode, customRange, dateValueParts } from "./legacyDimensions.js";
+import { customDateMode, customRange, dateValueParts } from "./dateValue.js";
 import type { RichExpression } from "./expression.js";
 
 /** Date fields forwarded as bare list parameters rather than JSON leaves. */

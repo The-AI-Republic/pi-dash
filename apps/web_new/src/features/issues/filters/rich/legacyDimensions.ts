@@ -15,6 +15,31 @@
 // `start_date` / `target_date` parameters and keeps them out of the JSON
 // filter tree, whose filter set accepts calendar days only.
 
+import {
+  DATE_PRESET_VALUES,
+  customDateMode,
+  customRange,
+  dateEntries,
+  dateValueParts,
+  isCustomDateEntry,
+  isDatePreset,
+  type CustomDateMode,
+} from "./dateValue.js";
+
+export {
+  customDateEntries,
+  customDateMode,
+  customRange,
+  dateEntries,
+  dateValueParts,
+  isCustomDateEntry,
+  isDatePreset,
+  type CustomDateMode,
+} from "./dateValue.js";
+
+/** A calendar day in the ISO form the calendar and the server share. */
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
 /** Cycle lifecycles the dimension marks. */
 export type CycleLifecycle = "draft" | "upcoming" | "current" | "completed";
 
@@ -44,26 +69,23 @@ export interface DatePreset {
   label: string;
 }
 
+/** Labels for the tokens the shared date grammar defines. */
+const PRESET_LABELS: Record<string, string> = {
+  "1_weeks;after;fromnow": "1 week from now",
+  "2_weeks;after;fromnow": "2 weeks from now",
+  "1_months;after;fromnow": "1 month from now",
+  "2_months;after;fromnow": "2 months from now",
+};
+
 /**
- * The relative windows both date dimensions offer. They mirror the
- * server's accepted token grammar (`<n>_<unit>s;after;fromnow`) and read
- * as forward-looking windows, so a preset is "in this span from now".
+ * The relative windows both date dimensions offer, in display order. The
+ * tokens are the shared grammar's presets, so this list and the parser that
+ * reads stored values cannot drift apart.
  */
-export const DATE_PRESETS: readonly DatePreset[] = [
-  { value: "1_weeks;after;fromnow", label: "1 week from now" },
-  { value: "2_weeks;after;fromnow", label: "2 weeks from now" },
-  { value: "1_months;after;fromnow", label: "1 month from now" },
-  { value: "2_months;after;fromnow", label: "2 months from now" },
-];
-
-const PRESET_VALUES = new Set(DATE_PRESETS.map((preset) => preset.value));
-
-export function isDatePreset(entry: string): boolean {
-  return PRESET_VALUES.has(entry);
-}
-
-/** Which shape the custom half of a date value holds. */
-export type CustomDateMode = "exact" | "after" | "before" | "range";
+export const DATE_PRESETS: readonly DatePreset[] = DATE_PRESET_VALUES.map((value) => ({
+  value,
+  label: PRESET_LABELS[value]!,
+}));
 
 /** A custom day's lower bound. */
 export function customStartEntry(day: string): string {
@@ -73,59 +95,6 @@ export function customStartEntry(day: string): string {
 /** A custom day's upper bound. */
 export function customEndEntry(day: string): string {
   return `${day};before`;
-}
-
-/** A calendar day in the ISO form the calendar and the server share. */
-const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
-
-/**
- * Custom entries carry their direction, so they are the ones with a
- * hyphenated day; presets carry none. This is also how a stored value
- * tells the two apart.
- */
-export function isCustomDateEntry(entry: string): boolean {
-  const [day] = entry.split(";");
-  return day !== undefined && ISO_DAY.test(day) && !isDatePreset(entry);
-}
-
-/** Applied entries of a stored date value, in stored order. */
-export function dateEntries(value: unknown): string[] {
-  const raw = typeof value === "string" ? value.split(",") : Array.isArray(value) ? value : [];
-  return raw
-    .filter((entry): entry is string => typeof entry === "string")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== "");
-}
-
-/** Presets and custom entries of a stored value, in stored order. */
-export function dateValueParts(value: unknown): { presets: string[]; custom: string[] } {
-  const parts = { presets: [] as string[], custom: [] as string[] };
-  for (const entry of dateEntries(value)) {
-    if (isDatePreset(entry)) parts.presets.push(entry);
-    else if (isCustomDateEntry(entry)) parts.custom.push(entry);
-  }
-  return parts;
-}
-
-/**
- * The shape of a stored custom half: one exact day, one open bound in a
- * direction, or two ends. Nothing custom reads as null. The old custom
- * dialog offered After, Before and Range, so a stored value tells the
- * editor which mode to reopen in.
- */
-export function customDateMode(value: unknown): CustomDateMode | null {
-  const entries = dateValueParts(value).custom;
-  if (entries.length === 0) return null;
-  if (entries.length > 1) return "range";
-  const [, direction] = entries[0]!.split(";");
-  if (direction === "after") return "after";
-  if (direction === "before") return "before";
-  return "exact";
-}
-
-/** The custom entries a date value stores, directions included. */
-export function customDateEntries(value: unknown): string[] {
-  return dateValueParts(value).custom;
 }
 
 /** Whether a custom day is set (used to tick the Custom row). */
@@ -186,31 +155,6 @@ export function composeCustomDate(
           : [start];
   // Nothing picked leaves no custom entry; the presets stay.
   return joinDateValue([...presets, ...custom.filter((entry): entry is string => entry !== null)]);
-}
-
-/** Both custom ends, read back for the calendar. */
-export function customRange(value: unknown): { start: string | null; end: string | null } {
-  const entries = dateEntries(value).filter((entry) => !isDatePreset(entry));
-  let start: string | null = null;
-  let end: string | null = null;
-  const undirected: string[] = [];
-  for (const entry of entries) {
-    const [day, direction] = entry.split(";");
-    if (day === undefined || !ISO_DAY.test(day)) continue;
-    if (direction === "before") {
-      if (end === null) end = day;
-    } else if (direction === "after") {
-      if (start === null) start = day;
-    } else {
-      // A bare day (how a stored range or one-day lookup is written) takes
-      // its place by position: first the lower bound, then the upper.
-      undirected.push(day);
-    }
-  }
-  const [first, second] = undirected;
-  if (start === null && first !== undefined) start = first;
-  if (end === null && second !== undefined) end = second;
-  return { start, end };
 }
 
 /** Trigger text and chip label: preset names, then the custom range. */

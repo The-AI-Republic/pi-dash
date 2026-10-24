@@ -19,11 +19,12 @@ import { createFileRoute } from "@tanstack/react-router";
 import type { SavedView } from "@pidash/api-client";
 import * as React from "react";
 
-import {
-  DeleteWorkspaceViewDialog,
-  WorkspaceViewDialog,
-  WorkspaceViewsListScreen,
-} from "../../../../features/views/index.js";
+// Deep imports: this route module is eager, so the views barrel would pin
+// every dialog and screen it re-exports onto the initial chain
+// (NEWFRONT-871, size gate).
+import { WorkspaceViewsListScreen } from "../../../../features/views/components/WorkspaceViewsListScreen.js";
+import { DeleteWorkspaceViewDialog } from "../../../../features/views/dialog/DeleteWorkspaceViewDialog.js";
+import { WorkspaceViewDialog } from "../../../../features/views/dialog/WorkspaceViewDialog.js";
 
 export const Route = createFileRoute("/$ws/_gated/workspace-views/")({
   component: WorkspaceViewsComponent,

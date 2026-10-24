@@ -8,10 +8,9 @@
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { intakeHref } from "../../../../../features/intake/lib/paths.js";
-
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/inbox")({
-  beforeLoad: ({ params }) => {
+  beforeLoad: async ({ params }) => {
+    const { intakeHref } = await import("../../../../../features/intake/lib/paths.js");
     throw redirect({ href: intakeHref(params.ws, params.projectId) });
   },
 });

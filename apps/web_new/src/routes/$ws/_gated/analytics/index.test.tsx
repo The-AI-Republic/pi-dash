@@ -9,9 +9,9 @@ import { describe, expect, it } from "vitest";
 
 import { Route } from "./index.js";
 
-function thrownFrom(run: () => unknown): unknown {
+async function thrownFrom(run: () => unknown): Promise<unknown> {
   try {
-    run();
+    await run();
   } catch (error) {
     return error;
   }
@@ -19,16 +19,16 @@ function thrownFrom(run: () => unknown): unknown {
 }
 
 describe("bare analytics address", () => {
-  it("redirects to the overview tab", () => {
-    const thrown = thrownFrom(() =>
+  it("redirects to the overview tab", async () => {
+    const thrown = await thrownFrom(() =>
       Route.options.beforeLoad?.({ location: { searchStr: "" }, params: { ws: "acme" } } as never)
     );
     expect(isRedirect(thrown)).toBe(true);
     expect((thrown as { options: { href: string } }).options.href).toBe("/acme/analytics/overview");
   });
 
-  it("keeps the query string across the redirect", () => {
-    const thrown = thrownFrom(() =>
+  it("keeps the query string across the redirect", async () => {
+    const thrown = await thrownFrom(() =>
       Route.options.beforeLoad?.({
         location: { searchStr: "?project_ids=a%2Cb" },
         params: { ws: "acme" },

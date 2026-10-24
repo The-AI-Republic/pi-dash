@@ -2,28 +2,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Analytics project scope (parity/specs/analytics.md §4, ANL-004).
-// Pure: scope normalization, the selectable-project rule, search
-// parsing/serialization for the project_ids address parameter, and
-// the picker summary wording. Components and routes build on these;
-// nothing here touches React, the router, or the network.
+// Pure: the selectable-project rule, the request scope and the picker
+// summary wording. The address parsing lives in search.ts, which the tab
+// route imports directly so this module's users stay off its chunk
+// (NEWFRONT-871). Nothing here touches React, the router, or the network.
 
 import type { Project } from "@pidash/api-client";
 
+import { normalizeAnalyticsScope } from "./search.js";
+
+export { analyticsScopeSearch, normalizeAnalyticsScope, parseAnalyticsSearch, type AnalyticsSearch } from "./search.js";
+
 /** Project fields the scope rules read. */
 export type ScopeProject = Pick<Project, "id" | "name" | "member_role" | "archived_at">;
-
-/** Query key + request scope: blank ids dropped, duplicates removed, order kept. */
-export function normalizeAnalyticsScope(ids: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const normalized: string[] = [];
-  for (const id of ids) {
-    const trimmed = id.trim();
-    if (trimmed === "" || seen.has(trimmed)) continue;
-    seen.add(trimmed);
-    normalized.push(trimmed);
-  }
-  return normalized;
-}
 
 /**
  * Projects the analytics screen may scope to: joined by the caller
@@ -44,34 +35,6 @@ export function selectAnalyticsProjects<P extends ScopeProject>(projects: readon
 export function resolveAnalyticsScope(ids: readonly string[], projects: readonly ScopeProject[]): string[] {
   const selectable = new Set(selectAnalyticsProjects(projects).map((project) => project.id));
   return normalizeAnalyticsScope(ids).filter((id) => selectable.has(id));
-}
-
-/** Validated analytics search: the project id list, when present. */
-export interface AnalyticsSearch {
-  project_ids?: string[] | undefined;
-}
-
-/**
- * Validate the tab addresses' search. Accepts one comma-separated
- * value or a repeated parameter; anything else is ignored so a
- * hand-edited address degrades to the full workspace.
- */
-export function parseAnalyticsSearch(search: Record<string, unknown>): AnalyticsSearch {
-  const raw = search["project_ids"];
-  const ids =
-    typeof raw === "string"
-      ? raw.split(",")
-      : Array.isArray(raw)
-        ? raw.filter((entry): entry is string => typeof entry === "string").flatMap((entry) => entry.split(","))
-        : [];
-  const normalized = normalizeAnalyticsScope(ids);
-  return normalized.length === 0 ? {} : { project_ids: normalized };
-}
-
-/** The search update a picker change navigates to; empty clears the parameter. */
-export function analyticsScopeSearch(ids: readonly string[]): AnalyticsSearch {
-  const normalized = normalizeAnalyticsScope(ids);
-  return normalized.length === 0 ? {} : { project_ids: normalized };
 }
 
 /** Picker trigger text when nothing is selected. */

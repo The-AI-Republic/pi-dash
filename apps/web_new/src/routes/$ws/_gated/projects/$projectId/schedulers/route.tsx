@@ -45,7 +45,7 @@ export function schedulerSectionTabs(pathname: string, base: string): SchedulerS
   ];
 }
 
-export function ProjectSchedulersSectionComponent(): React.ReactElement {
+function ProjectSchedulersSectionComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   const { pathname } = useLocation();
   const tabs = schedulerSectionTabs(pathname, `/${ws}/projects/${projectId}/schedulers`);

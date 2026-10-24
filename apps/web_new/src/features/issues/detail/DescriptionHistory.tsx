@@ -17,7 +17,7 @@ import { getAppClient } from "../../../core/api/client.js";
 import { descriptionAssetSrc, RichTextView } from "../../../shared/editor/index.js";
 import { timeAgo } from "../../../shared/lib/timeAgo.js";
 import { usePaletteWorkspaceMembers } from "../../../shared/shell/contextual/api.js";
-import { descriptionVersionQueryOptions, descriptionVersionsQueryOptions } from "../api/queries.js";
+import { descriptionVersionQueryOptions, descriptionVersionsQueryOptions } from "../api/descriptionVersions.js";
 
 export interface DescriptionHistoryProps {
   workspaceSlug: string;

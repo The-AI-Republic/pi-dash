@@ -1091,10 +1091,12 @@ describe("gated layout shell wiring", () => {
     expect(harness.searchBoxScope).toEqual({ workspaceSlug: "acme", projectId: "p1" });
   });
 
-  it("navigates palette server hits through the shared resolver", () => {
+  it("navigates palette server hits through the shared resolver", async () => {
     renderShell();
     const select = harness.onSelectSearchResult;
     if (!select) throw new Error("expected the search-result handler");
+    // The resolver rides a dynamic import off the shell chunk
+    // (NEWFRONT-871, size gate), so the navigate lands a tick later.
     select({
       key: "issue:x",
       entity: "issue",
@@ -1102,10 +1104,12 @@ describe("gated layout shell wiring", () => {
       path: "ATL-12",
       raw: { sequence_id: 12, project__identifier: "ATL", project_id: "p1" },
     });
-    expect(navigate).toHaveBeenCalledWith({
-      to: "/$ws/browse/$issueKey",
-      params: { ws: "acme", issueKey: "ATL-12" },
-    });
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/$ws/browse/$issueKey",
+        params: { ws: "acme", issueKey: "ATL-12" },
+      })
+    );
   });
 
   it("wires the top bar with zero counts while the inbox loads", () => {
@@ -1735,10 +1739,13 @@ describe("gated layout shell wiring", () => {
         },
       });
       expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
-      expect(navigate).toHaveBeenCalledWith({
-        to: "/$ws/browse/$issueKey",
-        params: { ws: "acme", issueKey: "ATL-12" },
-      });
+      // The resolver chunk loads before the navigate (NEWFRONT-871).
+      await waitFor(() =>
+        expect(navigate).toHaveBeenCalledWith({
+          to: "/$ws/browse/$issueKey",
+          params: { ws: "acme", issueKey: "ATL-12" },
+        })
+      );
     });
 
     it("leaves the sidebar open navigating while wide", () => {

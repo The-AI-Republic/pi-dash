@@ -6,14 +6,7 @@
 // revalidates on window focus: detail does not live-update (ISS-221).
 
 import { queryOptions } from "@tanstack/react-query";
-import {
-  getDescriptionVersion,
-  getIssue,
-  listDescriptionVersions,
-  listIssues,
-  listSubIssues,
-  type ApiClient,
-} from "@pidash/api-client";
+import { getIssue, listIssues, type ApiClient } from "@pidash/api-client";
 
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import type { RichExpression } from "../filters/rich/expression.js";
@@ -68,45 +61,7 @@ export function issueDetailQueryOptions(client: ApiClient, workspaceSlug: string
   });
 }
 
-/** Stored description versions, newest first (ISS-147). */
-export function descriptionVersionsQueryOptions(
-  client: ApiClient,
-  workspaceSlug: string,
-  projectId: string,
-  issueId: string
-) {
-  return queryOptions({
-    queryKey: issueKeys.descriptionVersions(workspaceSlug, projectId, issueId),
-    queryFn: () => listDescriptionVersions(client, workspaceSlug, projectId, issueId),
-    staleTime: LIST_STALE_TIME_MS,
-  });
-}
-
-/** One stored version with the HTML a restore writes back (ISS-147). */
-export function descriptionVersionQueryOptions(
-  client: ApiClient,
-  workspaceSlug: string,
-  projectId: string,
-  issueId: string,
-  versionId: string
-) {
-  return queryOptions({
-    queryKey: issueKeys.descriptionVersion(workspaceSlug, projectId, issueId, versionId),
-    queryFn: () => getDescriptionVersion(client, workspaceSlug, projectId, issueId, versionId),
-    staleTime: LIST_STALE_TIME_MS,
-  });
-}
-
 /** Flat list page size (spec §2: one hundred per page when ungrouped). */
 export const FLAT_PAGE_SIZE = 100;
 /** Grouped page size (fifty per group). */
 export const GROUPED_PAGE_SIZE = 50;
-
-/** Children of one work item, loaded lazily by the row expander. */
-export function subIssuesQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string, issueId: string) {
-  return queryOptions({
-    queryKey: [...issueKeys.all(workspaceSlug), "sub-issues", projectId, issueId] as const,
-    queryFn: () => listSubIssues(client, workspaceSlug, projectId, issueId, { perPage: 50 }),
-    staleTime: LIST_STALE_TIME_MS,
-  });
-}

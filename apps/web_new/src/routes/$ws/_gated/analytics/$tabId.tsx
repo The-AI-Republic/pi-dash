@@ -19,7 +19,7 @@ import { AnalyticsScreen } from "../../../../features/analytics/index.js";
 // barrel import here would drag the whole feature back into it
 // (NEWFRONT-732). The screen import above belongs to the split
 // component chunk.
-import { analyticsScopeSearch, parseAnalyticsSearch } from "../../../../features/analytics/lib/scope.js";
+import { analyticsScopeSearch, parseAnalyticsSearch } from "../../../../features/analytics/lib/search.js";
 import { projectsQueryOptions } from "../../../../features/projects/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/analytics/$tabId")({

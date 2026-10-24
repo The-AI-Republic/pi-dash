@@ -20,7 +20,7 @@ export const Route = createFileRoute("/$ws/_gated/drafts/$")({
   component: DraftUnknownAddress,
 });
 
-export function DraftUnknownAddress(): React.ReactElement {
+function DraftUnknownAddress(): React.ReactElement {
   useDocumentHead({ title: NOT_FOUND_TITLE, robots: NOT_FOUND_ROBOTS });
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-(--space-4) bg-(--bg) p-(--space-8) text-center">

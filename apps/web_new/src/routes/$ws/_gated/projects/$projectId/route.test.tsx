@@ -17,11 +17,32 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../../core/api/client.js";
 import type { RouterContext } from "../../../../__root.js";
 import { Route } from "./route.js";
+
+// The views palette entries load on their own chunk. The import is held
+// open until the last test releases it, so every earlier render sees the
+// layout with the chunk still in flight: the page must not wait for it
+// (NEWFRONT-871, size gate). The last test releases it to prove the
+// deferred entries still mount once their chunk arrives.
+const paletteChunk = vi.hoisted(() => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { gate, release: () => release() };
+});
+
+vi.mock("../../../../../features/views/palette/ViewsPaletteEntries.js", async () => {
+  const ReactModule = await import("react");
+  await paletteChunk.gate;
+  return {
+    ViewsPaletteEntries: () => ReactModule.createElement("div", { "data-testid": "views-palette-entries" }),
+  };
+});
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
@@ -174,6 +195,12 @@ afterEach(() => {
 });
 
 describe("project layout", () => {
+  it("renders the tab strip and page while the views palette chunk is still loading", async () => {
+    renderLayout(200);
+    await screen.findByTestId("project-tab-strip");
+    expect(screen.getByText("Issues page")).toBeInTheDocument();
+  });
+
   it("renders the page through the gate for members", async () => {
     renderLayout(200);
     await screen.findByText("Issues page");
@@ -197,5 +224,14 @@ describe("project layout", () => {
   it("renders not-found for unknown projects", async () => {
     renderLayout(404);
     await screen.findByRole("heading", { name: "Project not found" });
+  });
+
+  // Runs last: once the chunk settles, React.lazy caches it for the rest
+  // of the file, so earlier tests must see it in flight.
+  it("mounts the views palette entries once their chunk arrives", async () => {
+    paletteChunk.release();
+    renderLayout(200);
+    await screen.findByTestId("views-palette-entries");
+    expect(screen.getByText("Issues page")).toBeInTheDocument();
   });
 });

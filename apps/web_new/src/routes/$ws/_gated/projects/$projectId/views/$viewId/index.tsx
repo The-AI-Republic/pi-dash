@@ -11,7 +11,10 @@ import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
 import { isProjectGateError } from "../../../../../../../features/auth/index.js";
-import { ListSkeleton, parseIssueSearch } from "../../../../../../../features/issues/index.js";
+// Deep imports, so the eager route module does not take the issues barrel
+// with it (NEWFRONT-871, size gate).
+import { parseIssueSearch } from "../../../../../../../features/issues/filters/search.js";
+import { ListSkeleton } from "../../../../../../../features/issues/loaders/ListSkeleton.js";
 import { projectsQueryOptions } from "../../../../../../../features/projects/index.js";
 // Deep import, not the views barrel: this route file is eager (the router
 // imports every route), and the barrel re-exports modules with module-level
