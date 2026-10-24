@@ -15,7 +15,12 @@ import type { SpaceBoardIssuePage, SpaceBoardSettings } from "@pidash/api-client
 import * as React from "react";
 
 import { spaceRuntime } from "../api/client.js";
-import { spaceIssuesQueryOptions, spaceSettingsQueryOptions, spaceStatesQueryOptions } from "../api/queries.js";
+import {
+  spaceIssuesQueryOptions,
+  spaceLabelsQueryOptions,
+  spaceSettingsQueryOptions,
+  spaceStatesQueryOptions,
+} from "../api/queries.js";
 import { BoardLayouts } from "../layouts/BoardLayouts.js";
 import { LayoutSwitcher } from "../layouts/LayoutSwitcher.js";
 import { useSettledSpaceLayout } from "../layouts/useSettledSpaceLayout.js";
@@ -23,6 +28,7 @@ import { classifySpaceFailure } from "../lib/errors.js";
 import {
   isValidAnchor,
   parseSpaceBoardSearch,
+  spaceIssueHref,
   type SpaceBoardFilters,
   type SpaceBoardSearch,
   type SpaceLayout,
@@ -114,6 +120,7 @@ function ResolvedBoard({
   const filters = boardFiltersOf(search);
   const issues = useQuery(spaceIssuesQueryOptions(spaceRuntime.client, anchor, filters));
   const states = useQuery(spaceStatesQueryOptions(spaceRuntime.client, anchor));
+  const labels = useQuery(spaceLabelsQueryOptions(spaceRuntime.client, anchor));
   const { offered, active, select } = useSettledSpaceLayout(anchor, search, settings.view_props);
   const identifier = settings.project_details?.identifier ?? "";
   return (
@@ -127,9 +134,9 @@ function ResolvedBoard({
         <LayoutSwitcher offered={offered} active={active} onSelect={select} />
         <SpaceThemeSwitch />
       </BoardNavbar>
-      {issues.isError || states.isError ? (
+      {issues.isError || states.isError || labels.isError ? (
         <SpaceBoardError />
-      ) : issues.data === undefined || states.data === undefined ? (
+      ) : issues.data === undefined || states.data === undefined || labels.data === undefined ? (
         <BoardLoading />
       ) : (
         <>
@@ -139,7 +146,11 @@ function ResolvedBoard({
             filters={filters}
             page={issues.data}
             states={states.data}
+            labels={labels.data}
+            search={search}
             projectIdentifier={identifier}
+            votesEnabled={settings.is_votes_enabled}
+            reactionsEnabled={settings.is_reactions_enabled}
           />
           <SpaceProductBadge />
         </>
@@ -154,14 +165,22 @@ function BoardContent({
   filters,
   page,
   states,
+  labels,
+  search,
   projectIdentifier,
+  votesEnabled,
+  reactionsEnabled,
 }: {
   anchor: string;
   layout: SpaceLayout;
   filters: SpaceBoardFilters;
   page: SpaceBoardIssuePage;
   states: React.ComponentProps<typeof BoardLayouts>["states"];
+  labels: React.ComponentProps<typeof BoardLayouts>["labels"];
+  search: SpaceBoardSearch;
   projectIdentifier: string;
+  votesEnabled: boolean;
+  reactionsEnabled: boolean;
 }): React.ReactElement {
   return (
     <BoardLayouts
@@ -172,6 +191,11 @@ function BoardContent({
       states={states}
       page={page}
       projectIdentifier={projectIdentifier}
+      labels={labels}
+      openIssueId={search.peekId}
+      issueHref={(issue) => spaceIssueHref(anchor, search, issue.id)}
+      votesEnabled={votesEnabled}
+      reactionsEnabled={reactionsEnabled}
     />
   );
 }

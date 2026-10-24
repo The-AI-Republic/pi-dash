@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { firstPageGroups, type SpaceIssueGroup } from "./model.js";
 import { SpaceListLayout } from "./SpaceListLayout.js";
-import { boardIssue, DONE_ID, EMPTY_ID, firstPage, STATES, TODO_ID } from "./testFixtures.js";
+import { boardIssue, DONE_ID, EMPTY_ID, firstPage, issueHref, LABELS, STATES, TODO_ID } from "./testFixtures.js";
 
 function groupsOf(page: SpaceBoardIssuePage, states = STATES): SpaceIssueGroup[] {
   return firstPageGroups(states, page);
@@ -28,6 +28,8 @@ function renderList(
       failed={new Set(overrides.failed ?? [])}
       onLoadMore={onLoadMore}
       projectIdentifier="SPC"
+      labels={LABELS}
+      issueHref={issueHref}
     />
   );
   return onLoadMore;

@@ -10,6 +10,7 @@ export {
   resolveLegacySpaceAnchor,
   spaceInstanceQueryOptions,
   spaceIssuesQueryOptions,
+  spaceLabelsQueryOptions,
   spaceSettingsQueryOptions,
   spaceStatesQueryOptions,
   spaceViewerQueryOptions,
