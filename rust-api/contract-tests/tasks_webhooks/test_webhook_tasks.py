@@ -496,6 +496,60 @@ def test_activity_chain_fans_out_to_sink(db_conn, broker_url, webhook_sink):
     assert chained[0]["event_type"] == "issue"
 
 
+def test_project_chain_fans_out_with_network_and_description_html(db_conn, broker_url, webhook_sink):
+    """Project created chain carries stored network + description JSON (PIDASHCONV-1388).
+
+    Oracle half: ``model_activity`` on the created path fans out to
+    ``webhook_activity`` with ``event="project"``, which serializes the
+    row via ``get_model_data`` (``ProjectSerializer``). The send POST's
+    wire body is empty (the spaced-headers bug pinned in
+    ``test_webhook_send_success``), so the payload is asserted on the
+    logged ``request_body`` (``str(payload)``): ``data.network`` is the
+    stored smallint and ``data.description_text`` /
+    ``data.description_html`` are the stored JSON documents.
+    """
+    owner = seed_helpers.user(db_conn, "projchain-owner")
+    workspace = seed_helpers.workspace(db_conn, "projchain", owner["id"])
+    project = seed_helpers.project(
+        db_conn,
+        workspace["id"],
+        network=2,
+        description_text={"ops": "text"},
+        description_html={"a": 1},
+    )
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    seed_helpers.webhook(db_conn, workspace["id"], url, project=True)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+
+    celery_wire.publish(
+        f"{M}.webhook_task.model_activity",
+        args=[
+            "project",
+            str(project["id"]),
+            {},
+            None,
+            str(owner["id"]),
+            workspace["slug"],
+            "example.com",
+        ],
+    )
+    deliveries = webhook_sink.wait_for_count(1, what="project chained webhook POST")
+    assert deliveries[0]["body"] == ""
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="project chained webhook_logs row",
+    )
+    assert row["event_type"] == "project"
+    # The chain passes verb="created" as the action, which the send task's
+    # POST/PATCH/PUT/DELETE map leaves untouched (unlike a direct send with
+    # action="POST", which logs "create").
+    assert row["request_method"] == "created"
+    assert "'network': 2" in row["request_body"]
+    assert "'description_text': {'ops': 'text'}" in row["request_body"]
+    assert "'description_html': {'a': 1}" in row["request_body"]
+
+
 def _soft_delete_row(conn, table, row_id):
     """Stamp ``deleted_at`` on one seeded row.
 
