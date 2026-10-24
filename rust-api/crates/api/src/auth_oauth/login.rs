@@ -141,11 +141,9 @@ pub async fn login_session_keys(
         .execute(pool)
         .await?;
     // `rotate_token` half (QUIRK-csrf-rotate): a fresh 32-char secret as
-    // the cookie value — Django 4.2 `_add_new_csrf_cookie` stores the
-    // masked token only when `CSRF_COOKIE_MASKED` is set, which this
-    // project never sets, so the pinned Django emits the raw secret (the
-    // `auth_session/email.rs` login port does the same; `magic.rs` masks,
-    // a deviation this helper does not repeat). Attributes follow
+    // the cookie value — `_add_new_csrf_cookie` stores the raw secret
+    // (the `auth_session/email.rs` and `auth_session/magic.rs` login
+    // ports do the same). Attributes follow
     // Django's cookie writer (secure/domain from settings, httponly per
     // the project override, `/` + `Lax` defaults).
     let secret = pidash_auth::csrf::new_secret();
