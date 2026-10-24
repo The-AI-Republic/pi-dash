@@ -60,6 +60,7 @@ interface Harness {
   pointsStatus: number;
   estimates: unknown[];
   estimatesStatus: number;
+  patchBodies: unknown[];
 }
 
 let harness: Harness;
@@ -87,6 +88,7 @@ beforeEach(() => {
     pointsStatus: 200,
     estimates: makeEstimateList([makeEstimate()]),
     estimatesStatus: 200,
+    patchBodies: [],
   };
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     if (url.endsWith(PROGRESS_PATH)) {
@@ -109,6 +111,7 @@ beforeEach(() => {
     if (url.endsWith(PREFS_PATH)) {
       if ((init.method ?? "GET") === "PATCH") {
         const body = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
+        harness.patchBodies.push(body);
         return jsonResponse(
           url,
           201,
@@ -295,5 +298,19 @@ describe("CycleDetailSidebar", () => {
   it("disables dates for read-only viewers", async () => {
     renderSidebar(fullCycle(), { editable: false });
     expect(await screen.findByTestId("cycle-sidebar-dates-trigger")).toHaveAttribute("disabled");
+  });
+
+  it("lets a read-only viewer filter the breakdown and writes the rich expression", async () => {
+    renderSidebar(fullCycle(), { editable: false });
+    await screen.findByTestId("cycle-progress-work-items");
+    await userEvent.click(screen.getByTestId("cycle-progress-tab-States"));
+    const backlog = screen.getByTestId("cycle-progress-entry-backlog");
+    expect(backlog.tagName).toBe("BUTTON");
+    await userEvent.click(backlog);
+    await waitFor(() => expect(harness.patchBodies).toHaveLength(1));
+    expect(harness.patchBodies[0]).toEqual({ rich_filters: { state_group__in: "backlog" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("cycle-progress-entry-backlog")).toHaveAttribute("aria-pressed", "true")
+    );
   });
 });

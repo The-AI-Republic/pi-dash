@@ -33,8 +33,10 @@ const share = vi.hoisted(() => ({ copyCycleLink: vi.fn(), openCycleInNewTab: vi.
 vi.mock("../lib/cycleShare.js", () => share);
 
 const viewportHarness = vi.hoisted(() => ({ narrow: false }));
+const pointerHarness = vi.hoisted(() => ({ touch: false }));
 vi.mock("../../../shared/shell/index.js", () => ({
   useNarrowViewport: () => viewportHarness.narrow,
+  useTouchInput: () => pointerHarness.touch,
 }));
 
 vi.mock("../dialog/CycleDialog.js", () => ({
@@ -178,6 +180,7 @@ function pickEntry(title: string): void {
 beforeEach(() => {
   harness = { deleteStatus: 204, archiveStatus: 200, restoreStatus: 204, deletes: 0, archives: 0, restores: 0 };
   viewportHarness.narrow = false;
+  pointerHarness.touch = false;
   createAppClient("https://api.test", transport as never);
   Object.defineProperty(window, "scrollTo", { value: () => undefined, writable: true });
 });
@@ -342,6 +345,16 @@ describe("CycleRowMenu", () => {
 
   it("mounts the menu trigger inline on narrow viewports with the same entries", async () => {
     viewportHarness.narrow = true;
+    await renderMenu(makeCycleRow({ name: "Draft 1", status: "draft" }), true);
+    expect(screen.getByTestId("cycle-row-menu-inline")).toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Cycle actions for Draft 1" })).toHaveLength(1);
+    await openMenu("Draft 1");
+    expect(menuTitles()).toEqual(["Edit", "Open in new tab", "Copy link", "Archive", "Delete"]);
+  });
+
+  it("mounts the menu trigger inline on a wide touch device", async () => {
+    pointerHarness.touch = true;
     await renderMenu(makeCycleRow({ name: "Draft 1", status: "draft" }), true);
     expect(screen.getByTestId("cycle-row-menu-inline")).toBeInTheDocument();
     expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();

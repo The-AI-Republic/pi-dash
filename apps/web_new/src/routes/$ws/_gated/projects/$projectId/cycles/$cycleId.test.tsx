@@ -570,39 +570,67 @@ describe("cycle detail route", () => {
     expect(await screen.findByRole("heading", { name: "Delete cycle" })).toBeInTheDocument();
   });
 
-  it("hides the detail quick-actions menu from guests and on finished cycles", async () => {
+  it("hides the detail quick-actions menu from guests", async () => {
     mocks.roles.current = { data: { [PROJECT]: 5 }, isPending: false };
     mocks.projects.mockReturnValue({
       queryKey: ["projects"],
       queryFn: async () => [projectSeed({ member_role: 5 })],
     });
-    const first = renderRoute();
-    expect(await screen.findByTestId("list-layout")).toBeInTheDocument();
-    expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
-    first.unmount();
-    mocks.roles.current = { data: { [PROJECT]: 15 }, isPending: false };
-    mocks.projects.mockReturnValue({ queryKey: ["projects"], queryFn: async () => [projectSeed()] });
-    mocks.cycle.mockReturnValue({ queryKey: ["cycle"], queryFn: async () => cycleSeed({ status: "COMPLETED" }) });
     renderRoute();
     expect(await screen.findByTestId("list-layout")).toBeInTheDocument();
     expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
   });
 
-  it("shows guests the items and badge read-only with no mutation affordances", async () => {
+  it("keeps the link and archive actions for members on finished cycles", async () => {
+    mocks.cycle.mockReturnValue({ queryKey: ["cycle"], queryFn: async () => cycleSeed({ status: "COMPLETED" }) });
+    renderRoute();
+    expect(await screen.findByTestId("list-layout")).toBeInTheDocument();
+    const trigger = screen.getByTestId("cycle-row-menu-trigger");
+    fireEvent.click(trigger);
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual(["Open in new tab", "Copy link", "Archive"]);
+    expect(screen.queryByRole("menuitem", { name: /Delete/ })).not.toBeInTheDocument();
+  });
+
+  it("drops the detail quick-actions menu on an archived cycle", async () => {
+    mocks.cycle.mockReturnValue({
+      queryKey: ["cycle"],
+      queryFn: async () => cycleSeed({ archived_at: "2026-03-01T00:00:00Z" }),
+    });
+    renderRoute();
+    expect(await screen.findByTestId("list-layout")).toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
+  });
+
+  it("shows guests every layout and the badge read-only with no mutation affordances", async () => {
     mocks.roles.current = { data: { [PROJECT]: 5 }, isPending: false };
     mocks.projects.mockReturnValue({
       queryKey: ["projects"],
       queryFn: async () => [projectSeed({ member_role: 5 })],
     });
+    const layouts = [
+      { kind: "list", testId: "list-layout", editable: true },
+      { kind: "kanban", testId: "kanban-layout", editable: true },
+      { kind: "calendar", testId: "calendar-layout", editable: true },
+      { kind: "spreadsheet", testId: "spreadsheet-layout", editable: false },
+      { kind: "gantt_chart", testId: "gantt-layout", editable: false },
+    ] as const;
+    for (const layout of layouts) {
+      mocks.layout.current = layout.kind;
+      const view = renderRoute();
+      const rendered = await screen.findByTestId(layout.testId);
+      if (layout.editable) expect(rendered).toHaveAttribute("data-can-edit", "false");
+      expect(screen.getByTestId("cycle-detail-badge")).toHaveTextContent("2");
+      expect(screen.getByTestId("analytics-entry")).toHaveAttribute("data-total", "2");
+      expect(screen.getByTestId("detail-sidebar")).toHaveAttribute("data-editable", "false");
+      expect(screen.queryByRole("button", { name: "Add work item" })).not.toBeInTheDocument();
+      expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Transfer \d+ work items/ })).not.toBeInTheDocument();
+      view.unmount();
+    }
+    mocks.layout.current = "calendar";
     renderRoute();
-    expect(await screen.findByTestId("list-layout")).toHaveAttribute("data-can-edit", "false");
-    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-cycle", CYCLE);
-    expect(screen.getByTestId("cycle-detail-badge")).toHaveTextContent("2");
-    expect(screen.getByTestId("analytics-entry")).toHaveAttribute("data-total", "2");
-    expect(screen.getByTestId("detail-sidebar")).toHaveAttribute("data-editable", "false");
-    expect(screen.queryByRole("button", { name: "Add work item" })).not.toBeInTheDocument();
-    expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Transfer \d+ work items/ })).not.toBeInTheDocument();
+    expect(await screen.findByTestId("calendar-layout")).toHaveAttribute("data-add", "false");
   });
 
   it("registers the cycle palette entries for the page", async () => {
