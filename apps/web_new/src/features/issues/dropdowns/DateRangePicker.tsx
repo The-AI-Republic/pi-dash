@@ -176,6 +176,11 @@ export interface DateRangePickerProps {
   /** Hover clear resetting both ends. Defaults to false. */
   clearable?: boolean | undefined;
   testId?: string | undefined;
+  /**
+   * Keyboard position for the default trigger, so a host dialog can pin
+   * the control in its own sequence (modules §7.1, bug NEWFRONT-330).
+   */
+  tabIndex?: number | undefined;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>> | undefined;
   /** Controlled popup state; omit for the picker's own state. */
@@ -210,6 +215,7 @@ export function DateRangePicker({
   disabled = false,
   clearable = false,
   testId = "date-range-picker",
+  tabIndex,
   trigger,
   open: controlledOpen,
   onOpenChange,
@@ -236,6 +242,7 @@ export function DateRangePicker({
               aria-label={label}
               disabled={disabled}
               data-testid={`${testId}-trigger`}
+              {...(tabIndex === undefined ? {} : { tabIndex })}
               className={
                 empty
                   ? "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"

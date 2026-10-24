@@ -18,6 +18,7 @@ import {
   getModuleProjectFacts,
   ModuleProjectFacts,
   moduleProjectFactsQueryOptions,
+  moduleProjectIdentifier,
   moduleProjectTimeZone,
   moduleViewEnabled,
 } from "./projectFacts.js";
@@ -73,6 +74,15 @@ describe("moduleProjectTimeZone", () => {
     expect(moduleProjectTimeZone({ name: "P", timezone: "  " })).toBeNull();
     expect(moduleProjectTimeZone({ name: "P", timezone: 5 })).toBeNull();
     expect(moduleProjectTimeZone(undefined)).toBeNull();
+  });
+});
+
+describe("moduleProjectIdentifier", () => {
+  it("reads the short identifier and falls back to an empty string", () => {
+    expect(moduleProjectIdentifier({ name: "P", identifier: "WEB" } as never)).toBe("WEB");
+    expect(moduleProjectIdentifier({ name: "P" } as never)).toBe("");
+    expect(moduleProjectIdentifier({ name: "P", identifier: 5 } as never)).toBe("");
+    expect(moduleProjectIdentifier(undefined)).toBe("");
   });
 });
 

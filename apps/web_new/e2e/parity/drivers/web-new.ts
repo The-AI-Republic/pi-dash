@@ -18140,11 +18140,15 @@ export class WebNewDriver implements ParityDriver {
   async modulesMenuChooseOpenTab(_titlePart: string): Promise<{ url: string; title: string }> {
     return todo("modulesMenuChooseOpenTab");
   }
-  async modulesDialogVisible(_kind: "edit" | "archive" | "delete"): Promise<boolean> {
-    return todo("modulesDialogVisible");
+  async modulesDialogVisible(kind: "edit" | "archive" | "delete"): Promise<boolean> {
+    const heading = kind === "edit" ? "Update module" : kind === "archive" ? /^Archive module/ : "Delete module";
+    return this.isShown(this.page.getByRole("heading", { name: heading }).first());
   }
   async modulesDialogHeading(): Promise<string | null> {
-    return todo("modulesDialogHeading");
+    const heading = this.page.locator('[role="dialog"]').getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    return text === "" ? null : text;
   }
   async modulesReadClipboard(): Promise<string> {
     return todo("modulesReadClipboard");
@@ -18159,7 +18163,12 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByTestId("module-detail-crumbs").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesDetailOpenMenu(): Promise<void> {
-    return todo("modulesDetailOpenMenu");
+    const trigger = this.page
+      .locator('div[data-main-menu="true"]:visible > button')
+      .filter({ has: this.page.getByTestId("module-actions-trigger") })
+      .first();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesTogglePeek(_name: string): Promise<void> {
     return todo("modulesTogglePeek");
@@ -19931,151 +19940,422 @@ export class WebNewDriver implements ParityDriver {
     return region.getByRole("checkbox").count();
   }
 
-  // Modules dialogs, archive and archived screen (NEWFRONT-309, MOD-022..028).
-  // Oracle-only drivers; the new app has no modules surface yet.
+  // Modules dialogs and delete confirmation (NEWFRONT-798, MOD-003/009/
+  // 022–025). The new app renders the save form under one heading
+  // ("Create module" / "Update module") with the project picker only in
+  // creation, the title/description fields by name, and the four inline
+  // controls by testid; the delete confirmation names the module in its
+  // body. The pinned keyboard sequence carries the date control third
+  // (NEWFRONT-330), so the tab-order reader walks the same eight stops.
+
+  /** The open save dialog (create or update), scoped by its title field. */
+  private moduleSaveDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.locator('input[name="name"]') })
+      .first();
+  }
+
+  /** The open delete confirmation. */
+  private moduleDeleteDialogRoot(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByTestId("module-delete-body") })
+      .first();
+  }
+
+  /** Wait for the save dialog's content; the root can stay zero-sized. */
+  private async moduleAwaitSaveDialog(): Promise<Locator> {
+    const dialog = this.moduleSaveDialog();
+    await dialog.locator('input[name="name"]').waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return dialog;
+  }
+
+  private moduleInlineControl(testId: string): Locator {
+    return this.moduleSaveDialog().getByTestId(testId).first();
+  }
 
   async modulesOpenCreateFromHeader(): Promise<void> {
-    return todo("modulesOpenCreateFromHeader");
+    await this.page.getByTestId("modules-add").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.moduleAwaitSaveDialog();
   }
 
   async modulesOpenCreateFromEmpty(): Promise<void> {
-    return todo("modulesOpenCreateFromEmpty");
+    await this.page
+      .getByRole("button", { name: "Set your first module", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.moduleAwaitSaveDialog();
   }
 
   async modulesDialogOpen(): Promise<boolean> {
-    return todo("modulesDialogOpen");
+    return (await this.moduleSaveDialog().count()) > 0;
   }
 
   async modulesDialogHasProjectPicker(): Promise<boolean> {
-    return todo("modulesDialogHasProjectPicker");
+    return (await this.moduleSaveDialog().getByTestId("module-dialog-project").count()) > 0;
   }
 
   async modulesDialogProjectOptions(): Promise<string[]> {
-    return todo("modulesDialogProjectOptions");
+    const picker = this.moduleSaveDialog().getByTestId("module-dialog-project");
+    await picker.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const names = (await options.allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
+    return names.filter((name) => name.length > 0);
   }
 
-  async modulesDialogPickProject(_name: string): Promise<void> {
-    return todo("modulesDialogPickProject");
+  async modulesDialogPickProject(name: string): Promise<void> {
+    const picker = this.moduleSaveDialog().getByTestId("module-dialog-project");
+    await picker.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name, exact: false }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("listbox", { name: "Projects" })
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    await expect.poll(async () => (await picker.innerText()).trim(), { timeout: WebNewDriver.WAIT_MS }).toContain(name);
   }
 
   async modulesDialogTitle(): Promise<string> {
-    return todo("modulesDialogTitle");
+    return this.moduleSaveDialog().locator('input[name="name"]').inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDialogFillTitle(_text: string): Promise<void> {
-    return todo("modulesDialogFillTitle");
+  async modulesDialogFillTitle(text: string): Promise<void> {
+    await this.moduleSaveDialog().locator('input[name="name"]').fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDialogTitleError(): Promise<string | null> {
-    return todo("modulesDialogTitleError");
+    const error = this.moduleSaveDialog().getByRole("alert").first();
+    if ((await error.count()) === 0) return null;
+    const text = ((await error.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
 
   async modulesDialogDescription(): Promise<string> {
-    return todo("modulesDialogDescription");
+    return this.moduleSaveDialog()
+      .locator('textarea[name="description"]')
+      .inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDialogFillDescription(_text: string): Promise<void> {
-    return todo("modulesDialogFillDescription");
+  async modulesDialogFillDescription(text: string): Promise<void> {
+    await this.moduleSaveDialog().locator('textarea[name="description"]').fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDialogStatus(): Promise<string> {
-    return todo("modulesDialogStatus");
+    return (
+      (await this.moduleInlineControl("module-dialog-status").innerText({ timeout: WebNewDriver.WAIT_MS })) ?? ""
+    ).trim();
   }
 
-  async modulesDialogPickStatus(_label: string): Promise<void> {
-    return todo("modulesDialogPickStatus");
+  async modulesDialogPickStatus(label: string): Promise<void> {
+    await this.moduleInlineControl("module-dialog-status")
+      .getByRole("button")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: label, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.modulesDialogStatus(), { timeout: WebNewDriver.WAIT_MS }).toContain(label);
   }
 
   async modulesDialogLead(): Promise<string> {
-    return todo("modulesDialogLead");
+    return (
+      (await this.moduleInlineControl("module-dialog-lead").innerText({ timeout: WebNewDriver.WAIT_MS })) ?? ""
+    ).trim();
   }
 
   async modulesDialogLeadOptions(): Promise<string[]> {
-    return todo("modulesDialogLeadOptions");
+    await this.moduleInlineControl("module-dialog-lead")
+      .getByRole("button")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const names = (await options.allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
+    return names.filter((name) => name.length > 0);
   }
 
-  async modulesDialogPickLead(_label: string): Promise<void> {
-    return todo("modulesDialogPickLead");
+  async modulesDialogPickLead(label: string): Promise<void> {
+    await this.moduleInlineControl("module-dialog-lead")
+      .getByRole("button")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: label, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
+    await expect.poll(() => this.modulesDialogLead(), { timeout: WebNewDriver.WAIT_MS }).toContain(label);
   }
 
   async modulesDialogMembers(): Promise<string> {
-    return todo("modulesDialogMembers");
+    return (
+      (await this.moduleInlineControl("module-dialog-members").innerText({ timeout: WebNewDriver.WAIT_MS })) ?? ""
+    ).trim();
   }
 
-  async modulesDialogPickMembers(_labels: string[]): Promise<void> {
-    return todo("modulesDialogPickMembers");
+  async modulesDialogPickMembers(labels: string[]): Promise<void> {
+    await this.moduleInlineControl("module-dialog-members")
+      .getByRole("button")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    for (const label of labels) {
+      await this.page
+        .getByRole("option", { name: label, exact: true })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    // Multiple-select stays open; Escape applies and dismisses.
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
   }
 
   async modulesDialogDateRange(): Promise<string> {
-    return todo("modulesDialogDateRange");
+    return (
+      (await this.moduleInlineControl("module-dialog-date-range").innerText({ timeout: WebNewDriver.WAIT_MS })) ?? ""
+    ).trim();
   }
 
-  async modulesDialogPickDateRange(_startISO: string, _endISO: string): Promise<void> {
-    return todo("modulesDialogPickDateRange");
+  async modulesDialogPickDateRange(startISO: string, endISO: string): Promise<void> {
+    await this.moduleInlineControl("module-dialog-date-range")
+      .getByTestId("module-dialog-date-range-trigger")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const calendar = this.page.getByTestId("module-dialog-date-range-calendar").last();
+    await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    for (const iso of [startISO, endISO]) {
+      const target = new Date(`${iso}T12:00:00`);
+      await calendar
+        .getByLabel("Month", { exact: true })
+        .selectOption({ label: target.toLocaleString("en-US", { month: "long" }) }, { timeout: WebNewDriver.WAIT_MS });
+      await calendar
+        .getByLabel("Year", { exact: true })
+        .selectOption({ label: String(target.getFullYear()) }, { timeout: WebNewDriver.WAIT_MS });
+      await calendar.locator(`button[data-day="${iso}"]`).click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.keyboard.press("Escape");
   }
 
   async modulesDialogTabOrder(): Promise<(number | null)[]> {
-    return todo("modulesDialogTabOrder");
+    return this.moduleSaveDialog().evaluate((dialog) => {
+      const asInt = (raw: string | null | undefined): number | null => {
+        if (raw === null || raw === undefined) return null;
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isNaN(parsed) ? null : parsed;
+      };
+      const at = (selector: string): number | null => asInt(dialog.querySelector(selector)?.getAttribute("tabindex"));
+      const controlTab = (testId: string): number | null => {
+        const control = dialog.querySelector(`[data-testid="${testId}"]`);
+        for (const element of [...(control?.querySelectorAll("[tabindex]") ?? [])]) {
+          const value = asInt(element.getAttribute("tabindex"));
+          if (value !== null && value >= 0) return value;
+        }
+        return null;
+      };
+      const cancel = [...dialog.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Cancel");
+      const submit = [...dialog.querySelectorAll('button[type="submit"]')][0];
+      return [
+        at('input[name="name"]'),
+        at('textarea[name="description"]'),
+        controlTab("module-dialog-date-range"),
+        controlTab("module-dialog-status"),
+        controlTab("module-dialog-lead"),
+        controlTab("module-dialog-members"),
+        asInt(cancel?.getAttribute("tabindex")),
+        asInt(submit?.getAttribute("tabindex")),
+      ];
+    });
   }
 
   async modulesDialogProjectPickerTabIndex(): Promise<number | null> {
-    return todo("modulesDialogProjectPickerTabIndex");
+    const raw = await this.moduleSaveDialog()
+      .getByTestId("module-dialog-project")
+      .getByRole("button")
+      .first()
+      .getAttribute("tabindex")
+      .catch(() => null);
+    if (raw === null) return null;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isNaN(parsed) ? null : parsed;
   }
 
   async modulesDialogCancel(): Promise<void> {
-    return todo("modulesDialogCancel");
+    await this.moduleSaveDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.moduleSaveDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDialogEscape(): Promise<void> {
-    return todo("modulesDialogEscape");
+    await this.page.keyboard.press("Escape");
+    await this.moduleSaveDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private async modulesSubmit(label: "Create Module" | "Update Module"): Promise<void> {
+    await this.moduleSaveDialog()
+      .getByRole("button", { name: label, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // Settle on whichever outcome the submit takes: the dialog closing
+    // (saved), a toast (saved or refused), or an inline title error.
+    await expect
+      .poll(
+        async () =>
+          !(await this.modulesDialogOpen()) ||
+          (await this.rulesLastToast()) !== null ||
+          (await this.modulesDialogTitleError()) !== null,
+        { timeout: 60_000 }
+      )
+      .toBe(true);
   }
 
   async modulesDialogSubmitCreate(): Promise<void> {
-    return todo("modulesDialogSubmitCreate");
+    await this.modulesSubmit("Create Module");
   }
 
   async modulesDialogSubmitUpdate(): Promise<void> {
-    return todo("modulesDialogSubmitUpdate");
+    await this.modulesSubmit("Update Module");
   }
 
   async modulesFailNextCreate(): Promise<void> {
-    return todo("modulesFailNextCreate");
+    // Closure-armed, not a call budget: list reads share this path.
+    let armed = true;
+    await this.page.route(
+      (url) => url.pathname.endsWith("/modules/") && url.pathname.includes("/projects/"),
+      (route) => {
+        if (armed && route.request().method() === "POST") {
+          armed = false;
+          return route.abort();
+        }
+        return route.continue();
+      }
+    );
   }
 
   async modulesFailNextUpdate(): Promise<void> {
-    return todo("modulesFailNextUpdate");
+    // Closure-armed: detail GETs share this path.
+    let armed = true;
+    await this.page.route(
+      (url) => /\/modules\/[0-9a-fA-F-]{36}\/$/.test(url.pathname),
+      (route) => {
+        const write = route.request().method() === "PATCH" || route.request().method() === "PUT";
+        if (armed && write) {
+          armed = false;
+          return route.abort();
+        }
+        return route.continue();
+      }
+    );
   }
 
   async modulesOpenDetailMenu(): Promise<void> {
-    return todo("modulesOpenDetailMenu");
+    await this.modulesDetailOpenMenu();
   }
 
-  async modulesChooseDetailMenuEntry(_title: string): Promise<void> {
-    return todo("modulesChooseDetailMenuEntry");
+  async modulesChooseDetailMenuEntry(title: string): Promise<void> {
+    const item = this.page.getByRole("menuitem", { name: title, exact: true }).first();
+    await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDeleteDialog(): Promise<ModulesDeleteDialog | null> {
-    return todo("modulesDeleteDialog");
+    const dialog = this.moduleDeleteDialogRoot();
+    // The modal mounts a beat after the menu click; wait briefly so a
+    // genuine dialog is never missed, then report absence honestly.
+    await dialog.waitFor({ timeout: 3_000 }).catch(() => undefined);
+    if ((await dialog.count()) === 0) return null;
+    const heading = (
+      (await dialog
+        .getByRole("heading")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    if (heading === "") return null;
+    const body = (
+      (await dialog
+        .getByTestId("module-delete-body")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { heading, body };
   }
 
   async modulesDeleteConfirm(): Promise<void> {
-    return todo("modulesDeleteConfirm");
+    const dialog = this.moduleDeleteDialogRoot();
+    // Attach before clicking: an instantly-fulfilled write (failure
+    // shaping) would otherwise finish before the wait exists.
+    const responded = this.page
+      .waitForResponse((response) => response.request().method() === "DELETE" && response.url().includes("/modules/"), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .catch(() => null);
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await responded;
   }
 
   async modulesDeleteCancel(): Promise<void> {
-    return todo("modulesDeleteCancel");
+    await this.moduleDeleteDialogRoot()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.moduleDeleteDialogRoot().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesFailDeletePermission(): Promise<void> {
-    return todo("modulesFailDeletePermission");
+    await this.page.route(
+      (url) => url.pathname.endsWith("/modules/") === false && /\/modules\/[0-9a-fA-F-]{36}\/$/.test(url.pathname),
+      async (route) => {
+        if (route.request().method() === "DELETE") {
+          await route.fulfill({
+            status: 403,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "You don't have the required permissions." }),
+          });
+        } else {
+          await route.continue();
+        }
+      }
+    );
   }
 
   async modulesFailNextDelete(): Promise<void> {
-    return todo("modulesFailNextDelete");
+    // Closure-armed: detail reads share this path.
+    let armed = true;
+    await this.page.route(
+      (url) => /\/modules\/[0-9a-fA-F-]{36}\/$/.test(url.pathname),
+      async (route) => {
+        if (armed && route.request().method() === "DELETE") {
+          armed = false;
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: "Something broke." }),
+          });
+        } else {
+          await route.continue();
+        }
+      }
+    );
   }
 
-  async modulesRowFacts(_name: string): Promise<ModulesRowFacts> {
-    return todo("modulesRowFacts");
+  async modulesRowFacts(name: string): Promise<ModulesRowFacts> {
+    const row = this.page.getByTestId("modules-row").filter({ hasText: name }).first();
+    if ((await row.count()) === 0) throw new Error(`[parity] module row never rendered ${JSON.stringify(name)}.`);
+    const nameHref = await row.getByTestId("modules-row-link").first().getAttribute("href");
+    return { nameHref, hasPeek: (await row.getByTestId("modules-row-peek").count()) > 0 };
   }
 
   // --- Intake list content (NEWFRONT-256, INT-006/007/009/010/011).
@@ -21129,15 +21409,19 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesAddLabel(): Promise<string | null> {
-    return todo("modulesAddLabel");
+    const button = this.page.getByTestId("modules-add").first();
+    if ((await button.count()) === 0 || !(await this.isShown(button))) return null;
+    const label = ((await button.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    return label === "" ? null : label;
   }
 
   async modulesClickAdd(): Promise<void> {
-    return todo("modulesClickAdd");
+    await this.page.getByTestId("modules-add").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.moduleAwaitSaveDialog();
   }
 
   async modulesCreateDialogOpen(): Promise<boolean> {
-    return todo("modulesCreateDialogOpen");
+    return this.isShown(this.page.getByRole("heading", { name: "Create module", exact: true }).first());
   }
 
   async modulesSearchVisible(): Promise<boolean> {
@@ -21922,6 +22206,16 @@ export class WebNewDriver implements ParityDriver {
     return this.page.getByTestId("modules-no-match").last();
   }
 
+  /** The onboarding state for a project without modules (MOD-009). */
+  private modulesZeroState(): Locator {
+    return this.page.getByTestId("modules-zero-state").last();
+  }
+
+  /** Its one creation action. */
+  private modulesZeroStateCreateButton(): Locator {
+    return this.modulesZeroState().getByRole("button", { name: "Set your first module", exact: true });
+  }
+
   /**
    * The wide layout switcher. The compact menu is a different control, so
    * a small screen reads this as absent (MOD-011).
@@ -22021,9 +22315,8 @@ export class WebNewDriver implements ParityDriver {
       (await this.modulesListBoardCardNames()).length +
       (await this.modulesListTimelineNames()).length;
     if (rendered > 0) return "rows";
-    // Slice B (MOD-010) proves the narrowed-to-nothing state; the zero
-    // state (MOD-009) is slice F and still settles as an empty row set.
     if (await this.isShown(this.modulesNoMatch())) return "nomatch";
+    if (await this.isShown(this.modulesZeroState())) return "zero";
     return "rows";
   }
 
@@ -22115,27 +22408,34 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesListZeroStateVisible(): Promise<boolean> {
-    return todo("modulesListZeroStateVisible");
+    return this.isShown(this.modulesZeroState());
   }
 
   async modulesListZeroStateArtVisible(): Promise<boolean> {
-    return todo("modulesListZeroStateArtVisible");
+    const root = this.modulesZeroState();
+    if (!(await this.isShown(root))) return false;
+    return this.isShown(root.locator("img").first());
   }
 
   async modulesListZeroStateCopy(): Promise<ModulesListZeroStateCopy> {
-    return todo("modulesListZeroStateCopy");
+    const root = this.modulesZeroState();
+    const spans = root.locator("h3 > span");
+    const title = ((await spans.nth(0).innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    const description = ((await spans.nth(1).innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    return { title, description };
   }
 
   async modulesListZeroStateCreateDisabled(): Promise<boolean> {
-    return todo("modulesListZeroStateCreateDisabled");
+    return this.modulesZeroStateCreateButton().first().isDisabled();
   }
 
   async modulesListZeroStateCreateOpen(): Promise<void> {
-    return todo("modulesListZeroStateCreateOpen");
+    await this.modulesZeroStateCreateButton().first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.moduleAwaitSaveDialog();
   }
 
   async modulesListCreateDialogVisible(): Promise<boolean> {
-    return todo("modulesListCreateDialogVisible");
+    return this.modulesCreateDialogOpen();
   }
 
   async modulesListNoMatchShowViaSearch(text: string): Promise<void> {
