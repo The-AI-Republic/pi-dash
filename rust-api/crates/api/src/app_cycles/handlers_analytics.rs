@@ -724,7 +724,17 @@ async fn analytics_get(
     // `if cycle.progress_snapshot:` — truthiness of the stored dict.
     if let Value::Object(map) = &snapshot {
         if !map.is_empty() {
-            return Ok(json_response(StatusCode::OK, snapshot_envelope(map)));
+            // `distribution = cycle.progress_snapshot.get("distribution", {})`
+            // (`base.py:821-822`): the servable envelope is the snapshot's
+            // nested `distribution`, not the snapshot itself.
+            let distribution = match map.get("distribution") {
+                Some(Value::Object(inner)) => inner.clone(),
+                _ => Map::new(),
+            };
+            return Ok(json_response(
+                StatusCode::OK,
+                snapshot_envelope(&distribution),
+            ));
         }
     }
 
