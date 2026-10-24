@@ -213,6 +213,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![],
@@ -487,6 +488,7 @@ pub async fn apply_enroll_response(
                 log_level: "info".to_string(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![],
@@ -707,6 +709,7 @@ mod tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
         }
     }
 

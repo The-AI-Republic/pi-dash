@@ -674,6 +674,7 @@ mod tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
         }
     }
 
@@ -707,6 +708,7 @@ mod tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners,

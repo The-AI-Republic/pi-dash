@@ -20,7 +20,7 @@ import { Tooltip } from "@pi-dash/propel/tooltip";
 import type { IProject } from "@pi-dash/types";
 import type { TContextMenuItem } from "@pi-dash/ui";
 import { Avatar, AvatarGroup, ContextMenu, FavoriteStar } from "@pi-dash/ui";
-import { copyUrlToClipboard, cn, getFileURL, renderFormattedDate } from "@pi-dash/utils";
+import { cn, getFileURL, renderFormattedDate } from "@pi-dash/utils";
 // components
 // hooks
 import { useMember } from "@/hooks/store/use-member";
@@ -30,6 +30,7 @@ import { useAppRouter } from "@/hooks/use-app-router";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // local imports
 import { CoverImage } from "@/components/common/cover-image";
+import { copyShareUrl } from "@/utils/share-url";
 import { DeleteProjectModal } from "./delete-project-modal";
 import { JoinProjectModal } from "./join-project-modal";
 import { ArchiveRestoreProjectModal } from "./archive-restore-modal";
@@ -113,7 +114,7 @@ export const ProjectCard = observer(function ProjectCard(props: Props) {
 
   const projectLink = `${workspaceSlug}/projects/${project.id}/issues`;
   const handleCopyText = () =>
-    copyUrlToClipboard(projectLink).then(() =>
+    copyShareUrl(projectLink).then(() =>
       setToast({
         type: TOAST_TYPE.INFO,
         title: "Link Copied!",

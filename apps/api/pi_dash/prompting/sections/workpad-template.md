@@ -43,7 +43,7 @@ Use this exact structure for the workpad body (the document you write via `pidas
 - Safe to continue: true
 - Reason: <why this assessment is appropriate>
 - Awaiting human reply: <`null`, or a one-line reminder of the question you posted as a comment and when>
-- Waiting on: <`none`, or the open blocker IDs you chose to wait for, comma-separated>
+- Waiting on: <`none`, or the open blocker IDs you chose to wait for, and why>
 
 ### Analysis
 
@@ -83,5 +83,5 @@ Notes on the structure:
 
 - `### Path to done` is shared by every stage — review and test runs edit *only* that block and carry the rest forward; an In Progress run **consumes** `Open items` (checks off / removes what it addressed) and **appends** to `History`, never regenerating the block from scratch or dropping items it did not address.
 - The body has **no** outer `## Agent Workpad` heading — that was needed when the workpad was an in-thread comment; it isn't anymore.
-- `Waiting on` is the one line Pi Dash reads back: when you decide to wait for open blockers, list their identifiers there (e.g. `Waiting on: PROJ-12, PROJ-13`) and yield `waiting_on_external`. Pi Dash then skips the timed ticks while those items stay open and wakes the issue as soon as one of them is completed or cancelled — so keep the line current, list only issues this one is recorded as blocked by, and set it back to `none` once you stop waiting.
+- `Waiting on` is a note to your own future self, not an instruction to Pi Dash — nothing on the platform reads it. When you decide to wait for open blockers, write down which ones and *why* (e.g. `Waiting on: PROJ-12 — needs its response shape settled before this endpoint can be written`), call `pidash issue wait {{ issue.identifier }}` so the wait costs no budget, and yield `waiting_on_external`. The next tick shows you those blockers and their states again; the line is there so you remember what you were actually waiting for rather than re-deriving it. Set it back to `none` once you stop waiting.
 - `Awaiting human reply` replaces the old `Question for human` field. The actual question text now lives in the comment you posted to the human; the workpad just records that you're waiting on a reply so the next run knows not to re-ask.

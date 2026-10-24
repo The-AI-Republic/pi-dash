@@ -44,7 +44,7 @@ use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use super::protocol::Response;
-use crate::agent::{AgentBridge, BridgeEvent, RunPayload};
+use crate::agent::{AgentBridge, BridgeEvent, RunPayload, within_startup_deadline};
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, ApprovalMode};
@@ -257,7 +257,32 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         .bridge
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("chat bridge missing after spawn"))?;
-    let warmed_thread_id = bridge.warm(&workspace).await?;
+    // Race the warm against ChatCancel/ChatClose so a hung engine does not
+    // hold the session's runtime lock for the whole startup budget.
+    let cancelled = session.cancel.notified();
+    let warmed = tokio::select! {
+        biased;
+        _ = cancelled => Err(anyhow::anyhow!("chat warm cancelled")),
+        r = within_startup_deadline(bridge.warm(&workspace)) => r,
+    };
+    let warmed_thread_id = match warmed {
+        Ok(id) => id,
+        Err(e) => {
+            // Mid-handshake bridge: discard it so the next warm/send respawns.
+            if let Some(bridge) = rt.bridge.take() {
+                bridge.shutdown(Duration::from_secs(5)).await.ok();
+            }
+            rt.started_sent = false;
+            sink.emit(Response::ChatEvent {
+                chat_session_id,
+                bridge_seq: rt.bridge_seq,
+                kind: "chat_warm_failed".into(),
+                payload: serde_json::json!({ "detail": format!("{e:#}") }),
+            })
+            .await?;
+            return Ok(Response::Ack);
+        }
+    };
     if let Some(thread_id) = warmed_thread_id.clone()
         && !rt.started_sent
     {
@@ -374,11 +399,22 @@ pub(crate) async fn handle_send<S: ChatSink>(
                 bridge.shutdown(Duration::from_secs(5)).await.ok();
             }
             rt.started_sent = false;
-            Response::ChatFailed {
-                chat_session_id,
-                code: "internal".into(),
-                detail: Some(format!("{e:#}")),
-                failed_at: Utc::now(),
+            if e.is::<StartupCancelled>() {
+                Response::ChatMessageCompleted {
+                    chat_session_id,
+                    message_id: args.message_id,
+                    turn_id: None,
+                    assistant_message: None,
+                    status: "cancelled".into(),
+                    completed_at: Utc::now(),
+                }
+            } else {
+                Response::ChatFailed {
+                    chat_session_id,
+                    code: "internal".into(),
+                    detail: Some(format!("{e:#}")),
+                    failed_at: Utc::now(),
+                }
             }
         }
     };
@@ -488,6 +524,20 @@ async fn ensure_bridge(
     Ok(workspace)
 }
 
+/// `drive_turn` was cancelled before the engine finished starting. The bridge
+/// is left mid-handshake, so the caller discards it like any failed turn but
+/// reports the turn as cancelled rather than failed.
+#[derive(Debug)]
+struct StartupCancelled;
+
+impl std::fmt::Display for StartupCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("chat turn cancelled during engine startup")
+    }
+}
+
+impl std::error::Error for StartupCancelled {}
+
 struct DriveCtx<'a> {
     chat_session_id: Uuid,
     message_id: Uuid,
@@ -530,7 +580,17 @@ async fn drive_turn<S: ChatSink>(
         prompt: content,
         model: model.clone(),
     };
-    let mut cursor = bridge.run(&payload, workspace).await?;
+    // A single pinned cancel future, created before startup: `notify_waiters()`
+    // stores no permit, so a cancel that lands while the engine is still
+    // starting (or mid-poll later) must already have a registered waiter.
+    let cancelled = cancel.notified();
+    tokio::pin!(cancelled);
+
+    let mut cursor = tokio::select! {
+        biased;
+        _ = cancelled.as_mut() => return Err(StartupCancelled.into()),
+        r = within_startup_deadline(bridge.run(&payload, workspace)) => r?,
+    };
     let turn_id = cursor.thread_id().to_string();
     if !*started_sent {
         sink.emit(Response::ChatStarted {
@@ -552,11 +612,6 @@ async fn drive_turn<S: ChatSink>(
 
     let mut final_status = "completed".to_string();
     let mut assistant_message: Option<String> = None;
-
-    // A single pinned cancel future: `notify_waiters()` stores no permit, so a
-    // fresh future per iteration would miss a cancel that landed mid-poll.
-    let cancelled = cancel.notified();
-    tokio::pin!(cancelled);
 
     'turn: loop {
         tokio::select! {
@@ -580,6 +635,22 @@ async fn drive_turn<S: ChatSink>(
                     *bridge_seq = bridge_seq.saturating_add(1);
                     match ev {
                         BridgeEvent::Raw { method, params, .. } => {
+                            if let Some((code, detail)) = gateway_refusal(&method, &params) {
+                                // The engine files a 402/401 under "stream
+                                // disconnected" and is about to re-send the
+                                // whole request, five times over. Its first
+                                // retry is ~200ms out, so the turn is stopped
+                                // here rather than by a round trip through the
+                                // client, and the retry notice is not
+                                // forwarded.
+                                bridge.interrupt().await.ok();
+                                return Ok(Response::ChatFailed {
+                                    chat_session_id,
+                                    code: code.into(),
+                                    detail: Some(detail),
+                                    failed_at: Utc::now(),
+                                });
+                            }
                             let kind = if is_assistant_text_delta(&method, &params) {
                                 "assistant_delta"
                             } else {
@@ -630,9 +701,20 @@ async fn drive_turn<S: ChatSink>(
                             break;
                         }
                         BridgeEvent::Failed { detail, .. } => {
+                            // An engine that gave up on its own (no retries
+                            // left, or none configured) reports the same
+                            // refusal as a bare string.
+                            let refusal = detail
+                                .as_deref()
+                                .and_then(gateway_status_text)
+                                .and_then(|(status, text)| Some((gateway_refusal_code(status)?, text)));
+                            let (code, detail) = match refusal {
+                                Some((code, text)) => (code, Some(text)),
+                                None => (CHAT_AGENT_FAILED, detail),
+                            };
                             return Ok(Response::ChatFailed {
                                 chat_session_id,
-                                code: "agent_failed".into(),
+                                code: code.into(),
                                 detail,
                                 failed_at: Utc::now(),
                             });
@@ -898,6 +980,60 @@ fn is_assistant_text_delta(method: &str, params: &serde_json::Value) -> bool {
             .is_some()
 }
 
+const CHAT_AGENT_FAILED: &str = "agent_failed";
+/// `ChatFailed.code` for a model gateway that answered 402: the account has
+/// no credit left. The detail is the gateway's own sentence.
+const CHAT_MODEL_CREDIT_EXHAUSTED: &str = "model_credit_exhausted";
+/// `ChatFailed.code` for a model gateway that answered 401: the credential
+/// the engine holds is not accepted.
+const CHAT_MODEL_AUTH_FAILED: &str = "model_auth_failed";
+
+/// The `ChatFailed.code` for a gateway status that repeating the request
+/// cannot change, or `None` for one worth retrying.
+fn gateway_refusal_code(status: u64) -> Option<&'static str> {
+    match status {
+        401 => Some(CHAT_MODEL_AUTH_FAILED),
+        402 => Some(CHAT_MODEL_CREDIT_EXHAUSTED),
+        _ => None,
+    }
+}
+
+/// Split the engine's `unexpected status 402 Payment Required: <text>, url:
+/// <endpoint>, request id: <id>` into the status and the gateway's text.
+fn gateway_status_text(raw: &str) -> Option<(u64, String)> {
+    let rest = raw.split_once("unexpected status ")?.1;
+    let status = rest.get(..3)?.parse().ok()?;
+    let text = rest.split_once(": ").map_or("", |(_, text)| text);
+    let text = text.rsplit_once(", url: ").map_or(text, |(text, _)| text);
+    Some((status, text.trim().to_string()))
+}
+
+/// Recognise the engine's "I will retry" notice for a gateway answer that no
+/// retry can change, as `(ChatFailed code, gateway text)`.
+///
+/// The engine reports the HTTP status under `codexErrorInfo` (for example
+/// `{"responseStreamDisconnected": {"httpStatusCode": 402}}`) and the body in
+/// `additionalDetails`; `message` is only `Reconnecting... 1/5`.
+fn gateway_refusal(method: &str, params: &serde_json::Value) -> Option<(&'static str, String)> {
+    if method != "error" || params.get("willRetry").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let error = params.get("error")?;
+    let status = error
+        .get("codexErrorInfo")?
+        .as_object()?
+        .values()
+        .find_map(|info| info.get("httpStatusCode")?.as_u64())?;
+    let code = gateway_refusal_code(status)?;
+    let text = error
+        .get("additionalDetails")
+        .and_then(|v| v.as_str())
+        .and_then(gateway_status_text)
+        .map(|(_, text)| text)
+        .unwrap_or_default();
+    Some((code, text))
+}
+
 fn assistant_text_from_done_payload(payload: &serde_json::Value) -> Option<String> {
     if let Some(text) = payload.as_str() {
         return Some(text.to_string());
@@ -982,6 +1118,49 @@ mod tests {
             printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","summary":"done"}}}'
             sleep 0.3
         "#
+    }
+
+    #[tokio::test]
+    async fn drive_turn_cancel_during_engine_startup_is_not_lost() {
+        // An engine that never answers its handshake. Before the startup race
+        // the cancel fired with no registered waiter and was dropped, so the
+        // turn sat out the whole startup budget.
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Notify::new();
+        let mut bridge = fake_bridge("while read _; do :; done").await;
+        let mut sink = VecSink::default();
+        let (mut seq, mut started) = (0u64, false);
+        let begin = std::time::Instant::now();
+        let (result, ()) = tokio::join!(
+            drive_turn(
+                DriveCtx {
+                    chat_session_id: Uuid::new_v4(),
+                    message_id: Uuid::new_v4(),
+                    content: "hi".into(),
+                    model: None,
+                    mode: ApprovalMode::Ask,
+                    runner_id: cfg.runner_id,
+                    config: &cfg,
+                    approvals: &approvals,
+                    workspace: &cfg.workspace.working_dir,
+                    cancel: &cancel,
+                },
+                &mut bridge,
+                &mut seq,
+                &mut started,
+                &mut sink,
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                cancel.notify_waiters();
+            },
+        );
+        let err = result.expect_err("cancelled startup must not produce a turn");
+        assert!(err.is::<StartupCancelled>(), "unexpected error: {err:#}");
+        assert!(begin.elapsed() < Duration::from_secs(5));
+        assert!(!started, "no ChatStarted before the engine came up");
+        bridge.shutdown(Duration::from_secs(1)).await.ok();
     }
 
     #[tokio::test]
@@ -1108,6 +1287,342 @@ mod tests {
         }
     }
 
+    /// A fake app-server that treats `turn/interrupt` the way the bundled
+    /// engine does: it needs the thread and turn ids, and answers anything
+    /// else with an error while the turn keeps running. A turn that was not
+    /// interrupted delivers its reply (`OLD`) when the next one starts.
+    fn interrupt_script() -> &'static str {
+        r#"
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read -r _
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_stop"}}'
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"turn":{"id":"turn_1"}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"th_stop","turn":{"id":"turn_1"}}}'
+            read -r interrupt
+            case "$interrupt" in
+                *'"threadId":"th_stop"'*'"turnId":"turn_1"'*)
+                    printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{}}'
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_stop","turn":{"id":"turn_1","status":"interrupted"}}}'
+                    read -r _
+                    ;;
+                *)
+                    printf '%s\n' '{"jsonrpc":"2.0","id":4,"error":{"code":-32600,"message":"Invalid request: missing field `threadId`"}}'
+                    read -r _
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"OLD"}}'
+                    printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_stop","turn":{"id":"turn_1","status":"completed"}}}'
+                    ;;
+            esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"turn":{"id":"turn_2"}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"NEW"}}'
+            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_stop","turn":{"id":"turn_2","status":"completed"}}}'
+            sleep 0.3
+        "#
+    }
+
+    #[tokio::test]
+    async fn stopped_turn_does_not_leak_into_the_next_one() {
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Arc::new(Notify::new());
+        let mut bridge = fake_bridge(interrupt_script()).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+        let (mut seq, mut started) = (0u64, false);
+
+        let cancel2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            cancel2.notify_waiters();
+        });
+
+        let mut statuses = Vec::new();
+        let mut sink = VecSink::default();
+        for content in ["slow", "next"] {
+            sink.frames.clear();
+            let terminal = tokio::time::timeout(
+                Duration::from_secs(3),
+                drive_turn(
+                    DriveCtx {
+                        chat_session_id: Uuid::new_v4(),
+                        message_id: Uuid::new_v4(),
+                        content: content.into(),
+                        model: None,
+                        mode: ApprovalMode::Ask,
+                        runner_id: cfg.runner_id,
+                        config: &cfg,
+                        approvals: &approvals,
+                        workspace: &cfg.workspace.working_dir,
+                        cancel: &cancel,
+                    },
+                    &mut bridge,
+                    &mut seq,
+                    &mut started,
+                    &mut sink,
+                ),
+            )
+            .await
+            .expect("turn should not hang")
+            .expect("drive turn");
+            match terminal {
+                Response::ChatMessageCompleted { status, .. } => statuses.push(status),
+                other => panic!("expected ChatMessageCompleted, got {other:?}"),
+            }
+        }
+        assert_eq!(statuses, ["cancelled", "completed"]);
+
+        // Only the second turn's own reply may reach its stream.
+        let deltas: Vec<&str> = sink
+            .frames
+            .iter()
+            .filter_map(|f| match f {
+                Response::ChatEvent { kind, payload, .. } if kind == "assistant_delta" => {
+                    payload["params"]["text"].as_str()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, ["NEW"], "frames: {:?}", sink.frames);
+    }
+
+    /// A fake app-server whose gateway answers `status` to the first turn: it
+    /// announces a retry the way the bundled engine does and, unless it is
+    /// interrupted first, goes on to announce a second one (`2/5`).
+    fn gateway_refusal_script(status: u16, body: &str) -> String {
+        let retry = |attempt: u8| {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "error",
+                "params": {
+                    "error": {
+                        "message": format!("Reconnecting... {attempt}/5"),
+                        "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": status}},
+                        "additionalDetails": format!(
+                            "unexpected status {status} {body}, url: https://gateway.test/v1/responses, request id: req_1"
+                        ),
+                    },
+                    "willRetry": true,
+                    "threadId": "th_refused",
+                    "turnId": "turn_1",
+                },
+            })
+        };
+        format!(
+            r#"
+            read -r _
+            printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+            read -r _
+            read -r _
+            printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"threadId":"th_refused"}}}}'
+            read -r _
+            printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"turn":{{"id":"turn_1"}}}}}}'
+            printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/started","params":{{"threadId":"th_refused","turn":{{"id":"turn_1"}}}}}}'
+            printf '%s\n' '{first}'
+            read -r interrupt
+            case "$interrupt" in
+                *'"method":"turn/interrupt"'*'"turnId":"turn_1"'*)
+                    printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{}}}}'
+                    printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_refused","turn":{{"id":"turn_1","status":"interrupted"}}}}}}'
+                    read -r _
+                    printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{{"turn":{{"id":"turn_2"}}}}}}'
+                    printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"NEW"}}}}'
+                    printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_refused","turn":{{"id":"turn_2","status":"completed"}}}}}}'
+                    ;;
+                *)
+                    printf '%s\n' '{second}'
+                    ;;
+            esac
+            sleep 0.3
+        "#,
+            first = retry(1),
+            second = retry(2),
+        )
+    }
+
+    /// Drive one turn against `bridge` and return its terminal frame plus
+    /// everything streamed before it.
+    async fn run_turn(bridge: &mut AgentBridge, content: &str) -> (Response, Vec<Response>) {
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Notify::new();
+        let mut sink = VecSink::default();
+        let (mut seq, mut started) = (0u64, true);
+        let terminal = tokio::time::timeout(
+            Duration::from_secs(3),
+            drive_turn(
+                DriveCtx {
+                    chat_session_id: Uuid::new_v4(),
+                    message_id: Uuid::new_v4(),
+                    content: content.into(),
+                    model: None,
+                    mode: ApprovalMode::Ask,
+                    runner_id: cfg.runner_id,
+                    config: &cfg,
+                    approvals: &approvals,
+                    workspace: &cfg.workspace.working_dir,
+                    cancel: &cancel,
+                },
+                bridge,
+                &mut seq,
+                &mut started,
+                &mut sink,
+            ),
+        )
+        .await
+        .expect("turn should not hang")
+        .expect("drive turn");
+        (terminal, sink.frames)
+    }
+
+    fn raw_methods(frames: &[Response]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Response::ChatEvent { payload, .. } => {
+                    payload["method"].as_str().map(str::to_owned)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn out_of_credit_stops_the_turn_before_the_engine_retries() {
+        let cfg = config();
+        let body = "Payment Required: Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan.";
+        let mut bridge = fake_bridge(&gateway_refusal_script(402, body)).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+
+        let (terminal, frames) = run_turn(&mut bridge, "hello").await;
+        match terminal {
+            Response::ChatFailed { code, detail, .. } => {
+                assert_eq!(code, CHAT_MODEL_CREDIT_EXHAUSTED);
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan."
+                    ),
+                );
+            }
+            other => panic!("expected ChatFailed, got {other:?}"),
+        }
+        // Neither the retry notice nor its URL / request id reaches the client.
+        assert!(
+            !raw_methods(&frames).contains(&"error".to_string()),
+            "frames: {frames:?}"
+        );
+
+        // The engine was interrupted (the fake only answers a second turn if
+        // it was), and the stopped turn does not leak into the next one.
+        let (terminal, frames) = run_turn(&mut bridge, "again").await;
+        assert!(
+            matches!(&terminal, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+            "second turn: {terminal:?} frames: {frames:?}"
+        );
+        assert!(
+            !raw_methods(&frames).contains(&"error".to_string()),
+            "frames: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_credential_stops_the_turn_as_an_auth_failure() {
+        let cfg = config();
+        let mut bridge =
+            fake_bridge(&gateway_refusal_script(401, "Unauthorized: Invalid JWT")).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+
+        let (terminal, frames) = run_turn(&mut bridge, "hello").await;
+        match terminal {
+            Response::ChatFailed { code, detail, .. } => {
+                assert_eq!(code, CHAT_MODEL_AUTH_FAILED);
+                assert_eq!(detail.as_deref(), Some("Invalid JWT"));
+            }
+            other => panic!("expected ChatFailed, got {other:?}"),
+        }
+        assert!(
+            !raw_methods(&frames).contains(&"error".to_string()),
+            "frames: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn only_refusals_the_engine_would_retry_in_vain_are_recognised() {
+        let notice = |status: u64, will_retry: bool| {
+            serde_json::json!({
+                "error": {
+                    "message": "Reconnecting... 1/5",
+                    "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": status}},
+                    "additionalDetails": format!("unexpected status {status} Whatever: body text, url: http://x/v1/responses"),
+                },
+                "willRetry": will_retry,
+            })
+        };
+        assert_eq!(
+            gateway_refusal("error", &notice(402, true)),
+            Some((CHAT_MODEL_CREDIT_EXHAUSTED, "body text".to_string()))
+        );
+        assert_eq!(
+            gateway_refusal("error", &notice(401, true)),
+            Some((CHAT_MODEL_AUTH_FAILED, "body text".to_string()))
+        );
+        // A server error or a rate limit may well succeed on retry.
+        assert_eq!(gateway_refusal("error", &notice(503, true)), None);
+        assert_eq!(gateway_refusal("error", &notice(429, true)), None);
+        // The terminal notice is the bridge's to turn into a failure.
+        assert_eq!(gateway_refusal("error", &notice(402, false)), None);
+        // A dropped stream carries no HTTP status at all.
+        let dropped = serde_json::json!({
+            "error": {
+                "message": "Reconnecting... 1/5",
+                "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": null}},
+                "additionalDetails": "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens",
+            },
+            "willRetry": true,
+        });
+        assert_eq!(gateway_refusal("error", &dropped), None);
+        assert_eq!(gateway_refusal("warning", &notice(402, true)), None);
+
+        assert_eq!(
+            gateway_status_text(
+                "unexpected status 402 Payment Required: add credit, url: https://g/v1/responses, request id: r1"
+            ),
+            Some((402, "add credit".to_string()))
+        );
+        assert_eq!(
+            gateway_status_text("stream disconnected before completion"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_the_engine_gave_up_on_keeps_its_code() {
+        // No retry notice at all: the engine fails the turn itself, as it does
+        // once its retries are spent.
+        let script = r#"
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read -r _
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_final"}}'
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","method":"error","params":{"error":{"message":"unexpected status 402 Payment Required: add credit, url: https://g/v1/responses","codexErrorInfo":"other"},"willRetry":false}}'
+            sleep 0.3
+        "#;
+        let cfg = config();
+        let mut bridge = fake_bridge(script).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+        let (terminal, _) = run_turn(&mut bridge, "hello").await;
+        match terminal {
+            Response::ChatFailed { code, detail, .. } => {
+                assert_eq!(code, CHAT_MODEL_CREDIT_EXHAUSTED);
+                assert_eq!(detail.as_deref(), Some("add credit"));
+            }
+            other => panic!("expected ChatFailed, got {other:?}"),
+        }
+    }
+
     /// A fake app-server that warms, starts a turn, then requests a command
     /// approval and hangs — the turn can only end via the approval wait's
     /// cancel arm or its TTL backstop, never on its own.
@@ -1192,6 +1707,7 @@ mod tests {
             config_dir: base.join("config"),
             data_dir: base.join("data"),
             runtime_dir: base.join("runtime"),
+            machine_context_dir: base.join("config"),
         };
         RunnerInstance::new_offline(config(), &paths, DaemonConfig::default())
     }

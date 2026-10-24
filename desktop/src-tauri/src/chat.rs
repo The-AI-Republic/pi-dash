@@ -63,8 +63,39 @@ pub struct ChatError {
 /// once the daemon has torn the session down. Managed as Tauri state.
 #[derive(Default)]
 pub struct ChatState {
-    streams: Arc<Mutex<HashMap<Uuid, JoinHandle<()>>>>,
+    streams: Arc<Mutex<StreamRegistry>>,
 }
+
+/// What a session's reader is pumping. A turn's reader carries the reply, so it
+/// is never replaced; a warm's reader carries nothing the next send won't
+/// produce again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamKind {
+    Warm,
+    Turn,
+}
+
+struct ActiveStream {
+    handle: JoinHandle<()>,
+    kind: StreamKind,
+    /// Distinguishes this reader from a later one registered under the same
+    /// session, so a finishing reader only ever deregisters itself.
+    generation: u64,
+}
+
+/// The live reader of each session. A reader deregisters itself when its
+/// stream ends, so an entry means the stream is still being pumped.
+#[derive(Default)]
+struct StreamRegistry {
+    active: HashMap<Uuid, ActiveStream>,
+    next_generation: u64,
+}
+
+/// Returned by [`chat_send`] when the session's previous turn is still
+/// streaming. The daemon would refuse the turn as `runner_busy` anyway; what
+/// matters here is that the in-flight turn's reader is left alone.
+const TURN_IN_PROGRESS: &str =
+    "a response is still in progress for this chat; wait for it to finish or stop it first";
 
 /// Where streamed frames go. The production sink emits Tauri events; tests use
 /// an in-memory collector so the streaming/translation loop is exercised
@@ -214,21 +245,71 @@ fn spawn_stream<R: Runtime>(
     app: AppHandle<R>,
     socket: PathBuf,
     chat_session_id: Uuid,
+    kind: StreamKind,
     req: Request,
-) {
+) -> Result<(), String> {
     let streams = app.state::<ChatState>().streams.clone();
     let sink = Arc::new(TauriSink { app });
+    start_stream(&streams, sink, socket, chat_session_id, kind, req)
+}
+
+/// The registry half of [`spawn_stream`], split from the Tauri handle so it can
+/// be driven with an in-memory sink in tests.
+///
+/// A session whose turn is still streaming keeps its reader: aborting it drops
+/// the rest of the turn's frames — the reply and its `ChatMessageCompleted` —
+/// without any error reaching the webview, and the dropped connection makes
+/// the daemon tear the turn down. So a second send is refused, and a warm is
+/// skipped (the engine is evidently up).
+fn start_stream<S: ChatSink>(
+    streams: &Arc<Mutex<StreamRegistry>>,
+    sink: Arc<S>,
+    socket: PathBuf,
+    chat_session_id: Uuid,
+    kind: StreamKind,
+    req: Request,
+) -> Result<(), String> {
+    // Held until the new reader is registered, so a reader that finishes
+    // straight away cannot deregister before its own entry exists.
+    let mut registry = streams.lock().unwrap();
+    if registry
+        .active
+        .get(&chat_session_id)
+        .is_some_and(|stream| stream.kind == StreamKind::Turn)
+    {
+        return match kind {
+            StreamKind::Turn => Err(TURN_IN_PROGRESS.to_string()),
+            StreamKind::Warm => Ok(()),
+        };
+    }
+    registry.next_generation += 1;
+    let generation = registry.next_generation;
+    let task_streams = streams.clone();
     let handle = tauri::async_runtime::spawn(async move {
         if let Err(e) = stream_session(&socket, req, sink.as_ref()).await {
             sink.error(chat_session_id, &e);
         }
+        let mut registry = task_streams.lock().unwrap();
+        if registry
+            .active
+            .get(&chat_session_id)
+            .is_some_and(|stream| stream.generation == generation)
+        {
+            registry.active.remove(&chat_session_id);
+        }
     });
-    // Replacing a session's reader (a warm followed by a send) must abort the
-    // old task: dropping a `JoinHandle` detaches it, leaving the previous
-    // connection's reader alive and unreachable.
-    if let Some(previous) = streams.lock().unwrap().insert(chat_session_id, handle) {
-        previous.abort();
+    // Replacing a session's warm reader with a send's must abort the old task:
+    // dropping a `JoinHandle` detaches it, leaving the previous connection's
+    // reader alive and unreachable.
+    let stream = ActiveStream {
+        handle,
+        kind,
+        generation,
+    };
+    if let Some(previous) = registry.active.insert(chat_session_id, stream) {
+        previous.handle.abort();
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -260,12 +341,12 @@ pub async fn chat_warm<R: Runtime>(
         local_thread_id,
         local_session_id,
     };
-    spawn_stream(app, socket, chat_session_id, req);
-    Ok(())
+    spawn_stream(app, socket, chat_session_id, StreamKind::Warm, req)
 }
 
 /// Submit a user turn. Streams the turn's `Chat*` frames to the webview until a
-/// terminal `ChatMessageCompleted` / `ChatFailed`.
+/// terminal `ChatMessageCompleted` / `ChatFailed`. Refused while the session's
+/// previous turn is still streaming.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_send<R: Runtime>(
@@ -293,8 +374,7 @@ pub async fn chat_send<R: Runtime>(
         local_thread_id,
         local_session_id,
     };
-    spawn_stream(app, socket, chat_session_id, req);
-    Ok(())
+    spawn_stream(app, socket, chat_session_id, StreamKind::Turn, req)
 }
 
 /// Interrupt the in-flight turn of a local chat session.
@@ -340,14 +420,15 @@ pub async fn chat_close<R: Runtime>(
     .await;
     // The daemon closes the stream on `ChatClose`, which ends the reader on its
     // own; abort defensively in case the socket lingers, and drop the handle.
-    if let Some(handle) = app
+    if let Some(stream) = app
         .state::<ChatState>()
         .streams
         .lock()
         .unwrap()
+        .active
         .remove(&chat_session_id)
     {
-        handle.abort();
+        stream.handle.abort();
     }
     result
 }
@@ -630,6 +711,242 @@ mod tests {
         .await
         .unwrap();
         server.await.unwrap();
+    }
+
+    /// Poll until `cond` holds, failing the test after two seconds.
+    async fn wait_for(what: &str, cond: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// PIDESKAPP-32: a second `chat_send` (or a warm) for a session whose turn is
+    /// still streaming must not abort that turn's reader. The stub mirrors the real
+    /// daemon: the first connection streams a turn that completes only once
+    /// released, and a send arriving meanwhile is refused with `runner_busy`.
+    #[tokio::test]
+    async fn second_send_does_not_abort_the_in_flight_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let first_message = Uuid::new_v4();
+        let socket = socket_path(dir.path());
+        let listener = UnixListener::bind(&socket).unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let server_release = release.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let first_turn = tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let started = Response::ChatMessageStarted {
+                    chat_session_id: id,
+                    message_id: first_message,
+                    turn_id: None,
+                    started_at: chrono_now(),
+                };
+                let mut bytes = serde_json::to_vec(&started).unwrap();
+                bytes.push(b'\n');
+                reader.get_mut().write_all(&bytes).await.unwrap();
+                server_release.notified().await;
+                let completed = Response::ChatMessageCompleted {
+                    chat_session_id: id,
+                    message_id: first_message,
+                    turn_id: None,
+                    assistant_message: Some("first reply".into()),
+                    status: "completed".into(),
+                    completed_at: chrono_now(),
+                };
+                let mut bytes = serde_json::to_vec(&completed).unwrap();
+                bytes.push(b'\n');
+                // The peer may already be gone; that is the bug under test.
+                let _ = reader.get_mut().write_all(&bytes).await;
+            });
+            // Any further connection is a send racing the in-flight turn.
+            let busy = tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let failed = Response::ChatFailed {
+                        chat_session_id: id,
+                        code: "runner_busy".into(),
+                        detail: None,
+                        failed_at: chrono_now(),
+                    };
+                    let mut bytes = serde_json::to_vec(&failed).unwrap();
+                    bytes.push(b'\n');
+                    let _ = reader.get_mut().write_all(&bytes).await;
+                }
+            });
+            first_turn.await.unwrap();
+            busy.abort();
+        });
+
+        let send = |message_id: Uuid| Request::ChatSend {
+            chat_session_id: id,
+            message_id,
+            content: "hi".into(),
+            runner: None,
+            cwd: None,
+            model: None,
+            mode: None,
+            local_thread_id: None,
+            local_session_id: None,
+        };
+        let state = ChatState::default();
+        let sink = Arc::new(CollectSink::default());
+
+        start_stream(
+            &state.streams,
+            sink.clone(),
+            socket.clone(),
+            id,
+            StreamKind::Turn,
+            send(first_message),
+        )
+        .expect("first send starts a turn");
+        wait_for("the first turn to start streaming", || {
+            !sink.frames.lock().unwrap().is_empty()
+        })
+        .await;
+
+        let second = start_stream(
+            &state.streams,
+            sink.clone(),
+            socket.clone(),
+            id,
+            StreamKind::Turn,
+            send(Uuid::new_v4()),
+        );
+        let warm = Request::ChatWarm {
+            chat_session_id: id,
+            runner: None,
+            cwd: None,
+            model: None,
+            mode: None,
+            local_thread_id: None,
+            local_session_id: None,
+        };
+        start_stream(
+            &state.streams,
+            sink.clone(),
+            socket.clone(),
+            id,
+            StreamKind::Warm,
+            warm,
+        )
+        .expect("a warm during a live turn is skipped, not an error");
+        // Give a wrongly-spawned second reader time to reach the daemon.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        release.notify_one();
+        server.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let completed = sink.frames.lock().unwrap().iter().any(|f| {
+            matches!(f, Response::ChatMessageCompleted { message_id, .. } if *message_id == first_message)
+        });
+        assert!(
+            completed,
+            "the in-flight turn's reply was dropped; frames: {:?}, errors: {:?}",
+            sink.frames.lock().unwrap(),
+            sink.errors.lock().unwrap()
+        );
+        let err = second.expect_err("a send during a live turn is refused");
+        assert!(err.contains("still in progress"), "unexpected error: {err}");
+        // Nothing but the one turn ever reached the daemon or the webview.
+        assert_eq!(sink.frames.lock().unwrap().len(), 2);
+        assert!(sink.errors.lock().unwrap().is_empty());
+    }
+
+    /// A finished turn releases its session: the reader deregisters itself on
+    /// the terminal frame, so the next send is accepted rather than refused.
+    #[tokio::test]
+    async fn send_is_accepted_again_once_the_turn_has_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let frames = vec![Response::ChatMessageCompleted {
+            chat_session_id: id,
+            message_id: Uuid::nil(),
+            turn_id: None,
+            assistant_message: Some("done".into()),
+            status: "completed".into(),
+            completed_at: chrono_now(),
+        }];
+        let (socket, server) = write_frames(dir.path(), frames);
+        let state = ChatState::default();
+        let sink = Arc::new(CollectSink::default());
+
+        start_stream(
+            &state.streams,
+            sink.clone(),
+            socket.clone(),
+            id,
+            StreamKind::Turn,
+            sample_send(),
+        )
+        .unwrap();
+        server.await.unwrap();
+        wait_for("the finished reader to deregister", || {
+            !state.streams.lock().unwrap().active.contains_key(&id)
+        })
+        .await;
+
+        start_stream(
+            &state.streams,
+            sink.clone(),
+            socket,
+            id,
+            StreamKind::Turn,
+            sample_send(),
+        )
+        .expect("a send after the turn ended is accepted");
+    }
+
+    /// A send still replaces a warm's reader, as it always has.
+    #[tokio::test]
+    async fn send_replaces_a_warm_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let socket = socket_path(dir.path()); // never bound: both readers fail fast
+        let state = ChatState::default();
+        let sink = Arc::new(CollectSink::default());
+        // Register a warm reader that is still pumping when the send arrives.
+        {
+            let mut registry = state.streams.lock().unwrap();
+            registry.next_generation += 1;
+            let generation = registry.next_generation;
+            let handle = tauri::async_runtime::spawn(std::future::pending::<()>());
+            registry.active.insert(
+                id,
+                ActiveStream {
+                    handle,
+                    kind: StreamKind::Warm,
+                    generation,
+                },
+            );
+        }
+        start_stream(
+            &state.streams,
+            sink.clone(),
+            socket,
+            id,
+            StreamKind::Turn,
+            sample_send(),
+        )
+        .expect("a send during a warm is accepted");
+        let registry = state.streams.lock().unwrap();
+        assert!(
+            registry
+                .active
+                .get(&id)
+                .is_none_or(|stream| stream.kind == StreamKind::Turn),
+            "the warm reader was replaced"
+        );
     }
 
     fn chrono_now() -> chrono::DateTime<chrono::Utc> {

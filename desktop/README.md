@@ -113,7 +113,7 @@ PIDASH_SKIP_DEV_PREP=1 \
 | `PIDASH_DESKTOP_DEV_TREE`                        | Where the merged web tree is built (dev-prep.sh, test-overlay.sh).                                                                                                           | `desktop/.dev-tree`                                                          |
 | `PIDASH_DESKTOP_VERIFY_HOOK`                     | Script dev-prep.sh runs with the built client directory after its own checks.                                                                                                | unset                                                                        |
 | `PIDASH_DESKTOP_EXTERNAL_SIGNIN`                 | `=1` makes the release `build.rs` require that the bundled sign-in screen hands off to the system browser (`open_in_browser`).                                               | unset                                                                        |
-| `PIDASH_RUNNER_PROFILE` / `CODEX_BUNDLE_VERSION` | Cargo profile for the locally built runner / pinned agent-engine release staged by prepare-agent.sh.                                                                         | `dev` / `rust-v0.153.4`                                                      |
+| `PIDASH_RUNNER_PROFILE` / `CODEX_BUNDLE_VERSION` | Cargo profile for the locally built runner / pinned agent-engine release staged by prepare-agent.sh.                                                                         | `release` in a release `cargo tauri build`, else `dev` / `rust-v0.153.4`     |
 
 Set both together for non-default targets. A release build with
 `VITE_API_BASE_URL` unset does not silently fall back to a default — `build.rs`
