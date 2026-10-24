@@ -231,7 +231,8 @@ describe("archived-cycles rows and groups", () => {
     const labels = ["Cycle actions for Archived alpha", "Cycle actions for Archived beta", null];
     const { page } = stubPage({
       locatorFor: (selector) =>
-        selector === 'div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-trigger"]'
+        selector ===
+        'div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-trigger"], div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-inline"]'
           ? loc({
               count: async () => labels.length,
               nth: (index) =>
@@ -250,7 +251,8 @@ describe("archived-cycles rows and groups", () => {
   it("reads no names when no rows render", async () => {
     const { page } = stubPage({
       locatorFor: (selector) =>
-        selector === 'div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-trigger"]'
+        selector ===
+        'div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-trigger"], div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-inline"]'
           ? loc({ count: async () => 0 })
           : loc(),
     });

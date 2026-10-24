@@ -238,6 +238,27 @@ describe("CycleSidebarDates", () => {
     expect(screen.queryByTestId("cycle-sidebar-dates-error")).toBeNull();
   });
 
+  it("delivers the overlap rejection when a second pick lands on a live success toast", async () => {
+    const today = todayUtc();
+    const start = shiftDay(today, 10);
+    renderDates(storedCycle(start, shiftDay(today, 30)));
+    const calendar = await openCalendar();
+    // First pick saves cleanly while the toast for it is still up.
+    await pickDay(calendar, shiftDay(today, 20));
+    await waitFor(() => expect(patchCalls).toHaveLength(1));
+    expect(vi.mocked(notifySuccess)).toHaveBeenCalledWith(CYCLE_DATES_UPDATED_TITLE);
+    // The second pick overlaps; the rejection must render inline and
+    // by toast even though the success toast never dismissed.
+    checkStatus = false;
+    await pickDay(calendar, shiftDay(today, 25));
+    const alert = await screen.findByTestId("cycle-sidebar-dates-error");
+    expect(alert.textContent ?? "").toContain("you already have a cycle");
+    expect(vi.mocked(notifyError)).toHaveBeenCalledWith("Error!", expect.stringContaining("you already have a cycle"));
+    expect(checkCalls).toHaveLength(2);
+    expect(patchCalls).toHaveLength(1);
+    expect(vi.mocked(notifySuccess)).toHaveBeenCalledTimes(1);
+  });
+
   it("reports a failed overlap check inline without saving", async () => {
     checkThrows = true;
     const today = todayUtc();

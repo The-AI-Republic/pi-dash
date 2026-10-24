@@ -143,7 +143,18 @@ beforeEach(() => {
 afterEach(() => {
   resetAppClient();
   resetCycleSearchStore();
+  vi.unstubAllGlobals();
 });
+
+/** Narrow viewports for the CYC-048 layout menu tests. */
+function stubNarrowViewport(): void {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: true,
+    media: query,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  }));
+}
 
 function renderBody(props: Partial<CyclesListBodyProps> = {}): void {
   const rootRoute = createRootRoute({ component: () => <Outlet /> });
@@ -356,5 +367,35 @@ describe("CyclesListBody", () => {
     await screen.findByText("November push");
     expect(screen.getByTestId("cycles-search-toggle")).toBeInTheDocument();
     expect(screen.getByTestId("cycles-filters")).toBeInTheDocument();
+  });
+
+  it("hides the layout menu on wide viewports", async () => {
+    renderBody();
+    await screen.findByText("November push");
+    expect(screen.queryByTestId("cycles-list-layout-menu")).not.toBeInTheDocument();
+  });
+
+  it("switches the rows to the gallery on narrow screens and back", async () => {
+    stubNarrowViewport();
+    renderBody();
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByTestId("cycles-list-layout-trigger"));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["List layout", "Gallery layout"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Gallery layout" }));
+    // Gallery keeps every row, the hero, and the groups.
+    expect(screen.getByTestId("cycles-list-layout-trigger")).toHaveTextContent("Gallery layout");
+    expect(screen.getByText("November push")).toBeInTheDocument();
+    expect(screen.getByText("Draft cycle")).toBeInTheDocument();
+    expect(screen.getByTestId("default-hero")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upcoming cycle 2" })).toBeInTheDocument();
+    expect(screen.getByTestId("cycle-group-upcoming-gallery")).toBeInTheDocument();
+    const cards = screen.getAllByTestId("cycle-row");
+    expect(cards.length).toBeGreaterThan(0);
+    for (const card of cards) expect(card.className).toContain("rounded-");
+    fireEvent.click(screen.getByTestId("cycles-list-layout-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "List layout" }));
+    expect(screen.getByTestId("cycles-list-layout-trigger")).toHaveTextContent("List layout");
+    expect(screen.queryByTestId("cycle-group-upcoming-gallery")).not.toBeInTheDocument();
+    expect(screen.getByText("November push")).toBeInTheDocument();
   });
 });
