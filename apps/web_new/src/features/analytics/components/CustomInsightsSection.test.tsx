@@ -359,6 +359,15 @@ describe("CustomInsightsSection table (ANL-012, ANL-016, ANL-017)", () => {
     });
   }
 
+  function readBlobBytes(blob: Blob): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
   it("repeats the plotted rows under the x-axis and Count headers", async () => {
     contractMocks.getAnalyticsChart.mockResolvedValue({ data: PRIORITY_ROWS, schema: {} });
     renderSection(["a"]);
@@ -426,6 +435,40 @@ describe("CustomInsightsSection table (ANL-012, ANL-016, ANL-017)", () => {
     await user.click(within(table).getByRole("button", { name: "Export as csv" }));
     const blob = createObjectUrl.mock.calls[0]?.[0] as Blob;
     expect(await readBlob(blob)).toBe("Priority,Count\r\nUrgent,1\r\n");
+  });
+
+  it("exports the drill-down with the workspace file name, split columns and shared byte rules", async () => {
+    contractMocks.getAnalyticsChart.mockResolvedValue({
+      data: [{ key: "urgent", name: 'say "hi", now', count: 2, s1: 1, s2: 1 }],
+      schema: { s1: "Backlog", s2: "Done" },
+    });
+    const user = userEvent.setup();
+    const createObjectUrl = vi.fn((_blob: Blob) => "blob:csv");
+    Object.assign(URL, { createObjectURL: createObjectUrl, revokeObjectURL: vi.fn() });
+    const downloads: { name: string; href: string }[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push({ name: this.download, href: this.href });
+    });
+    renderSection(["a"]);
+    await screen.findByTestId("mock-chart-bar");
+    await selectOption(user, 2, "State name");
+    const table = screen.getByTestId("analytics-custom-table");
+    await waitFor(() =>
+      expect(
+        within(table)
+          .getAllByRole("columnheader")
+          .map((cell) => cell.textContent)
+      ).toEqual(["Priority", "Count", "Backlog", "Done"])
+    );
+    const readsBefore = contractMocks.getAnalyticsChart.mock.calls.length;
+
+    await user.click(within(table).getByRole("button", { name: "Export as csv" }));
+
+    expect(downloads[0]).toEqual({ name: "acme-analytics.csv", href: "blob:csv" });
+    const bytes = await readBlobBytes(createObjectUrl.mock.calls[0]?.[0] as Blob);
+    expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    expect(new TextDecoder().decode(bytes.slice(3))).toBe('Priority,Count,Backlog,Done\r\n"Say ""hi"", now",2,1,1\r\n');
+    expect(contractMocks.getAnalyticsChart).toHaveBeenCalledTimes(readsBefore);
   });
 
   it("does not download when the filter leaves no rows", async () => {
