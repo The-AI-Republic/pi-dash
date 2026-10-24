@@ -21,7 +21,7 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 chrono-tz = "0.10"
 uuid = { version = "1", features = ["serde"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 # Shared async Redis handle (`redis.rs`, PIDASHCONV-265): tokio-native
 # multiplexed connections plus pubsub; `tokio-rustls-comp` (not bare
 # `tokio-comp`: without the rustls runtime glue the crate does not compile
