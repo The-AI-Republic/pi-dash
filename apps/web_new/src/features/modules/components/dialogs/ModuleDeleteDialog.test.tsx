@@ -10,6 +10,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -75,6 +76,14 @@ function renderDialog(overrides: Partial<React.ComponentProps<typeof ModuleDelet
 }
 
 describe("ModuleDeleteDialog", () => {
+  it("closes on a backdrop press without writing", async () => {
+    const { onOpenChange } = renderDialog();
+    const backdrop = document.querySelector("[data-base-ui-backdrop]") ?? document.body;
+    await userEvent.click(backdrop);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(harness.calls).toHaveLength(0);
+  });
+
   it("names the module and states that the deletion is permanent", () => {
     renderDialog();
     expect(screen.getByRole("heading", { name: "Delete module" })).toBeInTheDocument();
