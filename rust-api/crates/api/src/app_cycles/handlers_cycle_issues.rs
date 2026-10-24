@@ -897,7 +897,11 @@ async fn cycle_issue_retrieve(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw, issue_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) || super::is_noncanonical_uuid(&issue_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
     let (pool, user_id, project_id) =
         cycle_issue_context(&state, &slug, &project_raw, gate_for_retrieve(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
