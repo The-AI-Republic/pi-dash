@@ -1235,10 +1235,6 @@ pub async fn google_sync_enabled(pool: &sqlx::PgPool, secret: &str) -> Result<bo
     Ok(config_display(&values[0]) == "1")
 }
 
-/// `settings.DATA_UPLOAD_MAX_MEMORY_SIZE` (`settings/common.py:594`):
-/// `int(get_config("FILE_SIZE_LIMIT", 5242880))`.
-pub const AVATAR_MAX_BYTES: u64 = 5_242_880;
-
 /// `sync_user_data` (`adapter/base.py:256-287`): names, display name
 /// (`get_display_name` — google payloads carry no `display_name`, so the
 /// email prefix always wins), then the avatar pair: `delete_old_avatar`
@@ -1246,6 +1242,7 @@ pub const AVATAR_MAX_BYTES: u64 = 5_242_880;
 /// On success only the new FK is set (the avatar string keeps the `""` the
 /// delete wrote); on failure the provider URL is stored — `base.py:278-284`
 /// verbatim. The FK stays untouched when no asset was linked.
+/// `max_bytes` is `settings.DATA_UPLOAD_MAX_MEMORY_SIZE`.
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_user_data(
     client: &reqwest::Client,
@@ -1258,6 +1255,7 @@ pub async fn sync_user_data(
     first_name: &str,
     last_name: &str,
     avatar_url: &str,
+    max_bytes: u64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), CallbackError> {
     sqlx::query(
@@ -1291,7 +1289,7 @@ pub async fn sync_user_data(
     )
     .await;
     match download_and_upload_avatar(
-        client, pool, storage, scheme, host, avatar_url, user.id, now,
+        client, pool, storage, scheme, host, avatar_url, user.id, max_bytes, now,
     )
     .await
     {
@@ -1322,7 +1320,8 @@ pub async fn sync_user_data(
 /// `None` so the caller falls back to the provider URL
 /// (`except Exception: log_exception; return None`). `storage` /
 /// `scheme` / `host` mirror the `S3Storage(request)` server-side call the
-/// avatar flow makes (`base.py:198`, `is_server=False`).
+/// avatar flow makes (`base.py:198`, `is_server=False`). `max_bytes` is
+/// `settings.DATA_UPLOAD_MAX_MEMORY_SIZE`.
 #[allow(clippy::too_many_arguments)]
 pub async fn download_and_upload_avatar(
     client: &reqwest::Client,
@@ -1332,6 +1331,7 @@ pub async fn download_and_upload_avatar(
     host: &str,
     avatar_url: &str,
     user_id: uuid::Uuid,
+    max_bytes: u64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<uuid::Uuid> {
     if avatar_url.is_empty() {
@@ -1375,10 +1375,7 @@ pub async fn download_and_upload_avatar(
         None | Some("") => {}
         Some(raw) => match raw.parse::<i64>() {
             Ok(length)
-                if pidash_storage::content_length_allowed(
-                    Some(length),
-                    AVATAR_MAX_BYTES as i64,
-                ) => {}
+                if pidash_storage::content_length_allowed(Some(length), max_bytes as i64) => {}
             _ => {
                 tracing::warn!(
                     "avatar over size limit or bad length; falling back to provider URL"
@@ -1419,7 +1416,7 @@ pub async fn download_and_upload_avatar(
                 return None;
             }
         };
-        if !pidash_storage::chunk_fits(content.len() as u64, chunk.len() as u64, AVATAR_MAX_BYTES) {
+        if !pidash_storage::chunk_fits(content.len() as u64, chunk.len() as u64, max_bytes) {
             tracing::warn!("avatar over size limit; falling back to provider URL");
             return None;
         }
@@ -2227,12 +2224,14 @@ pub struct AuthedUser {
 /// avatar upload attempt with provider-URL fallback, then IDP sync for
 /// the new user when enabled — `not is_signup`, never for existing
 /// users), stamps, post-auth workflow on the app side (`with_callback`),
-/// account upsert.
+/// account upsert. `file_size_max` is `settings.file_size_limit.max(0)`
+/// for the avatar size guards.
 pub async fn authenticate_google(
     ctx: &RequestContext<'_>,
     secret: &str,
     code: &str,
     with_callback: bool,
+    file_size_max: u64,
 ) -> Result<AuthedUser, CallbackError> {
     let now = chrono::Utc::now();
     let (client_id, client_secret) = google_config(&ctx.pool, secret).await?;
@@ -2293,6 +2292,7 @@ pub async fn authenticate_google(
                     &ctx.host,
                     avatar_url,
                     row.id,
+                    file_size_max,
                     now,
                 )
                 .await
@@ -2319,6 +2319,7 @@ pub async fn authenticate_google(
                     first_name,
                     last_name,
                     avatar_url,
+                    file_size_max,
                     now,
                 )
                 .await?;
@@ -2395,7 +2396,8 @@ pub async fn app_callback(
         }
     };
     let secret = state.settings().secret_key.clone();
-    match authenticate_google(&ctx, &secret, &code, true).await {
+    let file_size_max = state.settings().file_size_limit.max(0) as u64;
+    match authenticate_google(&ctx, &secret, &code, true, file_size_max).await {
         Err(CallbackError::Auth(exception)) => {
             let url = error_redirect(
                 &ctx.app_base,
@@ -2481,7 +2483,8 @@ pub async fn space_callback(
     let secret = state.settings().secret_key.clone();
     // Valid path: `authenticate()` + `user_login()` side effects run
     // first (Python `:85-90`), then the f-string `base_host(...)` raises.
-    if let Ok(authed) = authenticate_google(&ctx, &secret, &code, false).await {
+    let file_size_max = state.settings().file_size_limit.max(0) as u64;
+    if let Ok(authed) = authenticate_google(&ctx, &secret, &code, false, file_size_max).await {
         let _ = login_user(
             &ctx,
             state.settings(),
@@ -2758,13 +2761,6 @@ mod tests {
             workspace_members_cache_pattern("ai-republic"),
             "*/api/workspaces/ai-republic/members/*"
         );
-    }
-
-    #[test]
-    fn avatar_size_limit_matches_settings_default() {
-        // `FILE_SIZE_LIMIT` / `DATA_UPLOAD_MAX_MEMORY_SIZE`
-        // (`settings/common.py:428,594`): `int(get_config(..., 5242880))`.
-        assert_eq!(AVATAR_MAX_BYTES, 5_242_880);
     }
 
     // -- live kernel tests (env-gated, PIDASHCONV-1089) ------------------
@@ -3332,5 +3328,218 @@ mod tests {
         );
         assert_eq!(user.0, Some(asset_id), "user FK untouched");
         assert_eq!(jobs, 0, "no enqueue for a soft-deleted asset");
+    }
+
+    // -- live kernel tests: download_and_upload_avatar (PIDASHCONV-1324) --
+    // The HTTP success path is sealed (hardcoded https googleapis URLs),
+    // so these drive `download_and_upload_avatar` directly against the
+    // scratch DB with a loopback avatar stub + a draining S3 stub.
+    // Loopback avatar stub: serves `body_len` bytes as image/png, with an
+    // explicit Content-Length unless `with_length` is false (then the
+    // streaming guard alone decides, like a chunked provider response).
+    fn avatar_stub_bytes(body_len: usize, with_length: bool) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind avatar stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        std::thread::spawn(move || {
+            let mut body = vec![0u8; body_len];
+            body[..8].copy_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+            for stream in listener.incoming().take(8) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    match socket.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            req.extend_from_slice(&buf[..n]);
+                            if req.windows(4).any(|w| w == b"\r\n\r\n") || req.len() > 65536 {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let head = if with_length {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nConnection: close\r\n\r\n"
+                        .to_owned()
+                };
+                let _ = socket.write_all(head.as_bytes());
+                let _ = socket.write_all(&body);
+            }
+        });
+        format!("http://127.0.0.1:{port}/avatar.png")
+    }
+
+    /// Loopback S3 stub that drains request bodies (the avatar PUT ships
+    /// megabytes; an early-close stub would RST the upload): answers
+    /// `200` with an empty body to every request.
+    fn s3_stub_drain() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind s3 stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(16) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+                let mut req = Vec::new();
+                let mut buf = [0u8; 65536];
+                let mut content_length: usize = 0;
+                let mut header_end: Option<usize> = None;
+                loop {
+                    match socket.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            req.extend_from_slice(&buf[..n]);
+                            if header_end.is_none() {
+                                if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    header_end = Some(pos + 4);
+                                    let head = String::from_utf8_lossy(&req[..pos + 4]);
+                                    for line in head.lines() {
+                                        if let Some(v) = line
+                                            .strip_prefix("Content-Length:")
+                                            .or_else(|| line.strip_prefix("content-length:"))
+                                        {
+                                            content_length = v.trim().parse::<usize>().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(end) = header_end {
+                                if req.len() >= end + content_length {
+                                    break;
+                                }
+                            }
+                            if req.len() > 64 * 1024 * 1024 {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    async fn seed_download_user(pool: &sqlx::PgPool, email: &str) -> uuid::Uuid {
+        let user_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        user_id
+    }
+
+    /// The avatar size guards follow the configured limit
+    /// (`settings.DATA_UPLOAD_MAX_MEMORY_SIZE`, i.e. `FILE_SIZE_LIMIT`),
+    /// not a hard-coded 5 MiB: a 6 MB avatar uploads at a 10 MB limit and
+    /// a 3 MB avatar falls back at a 1 MB limit — the Django decisions
+    /// (`base.py:155-158,177-182`). The boundary pins Python's strict
+    /// `>`: exactly-at-limit uploads via the pre-check, one-over falls
+    /// back via the streaming guard (no Content-Length served). Fails on
+    /// the pre-fix code (constant 5 MiB: the 6 MB case falls back).
+    #[tokio::test]
+    async fn google_kernel_download_avatar_follows_file_size_limit() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let s3_base = s3_stub_drain();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let client = reqwest::Client::new();
+        // (`max_bytes`, body bytes, Content-Length served?, uploads?)
+        let cases: [(u64, usize, bool, bool); 4] = [
+            (10 * 1024 * 1024, 6 * 1024 * 1024, true, true),
+            (1024 * 1024, 3 * 1024 * 1024, true, false),
+            (5 * 1024 * 1024, 5 * 1024 * 1024, true, true),
+            (5 * 1024 * 1024, 5 * 1024 * 1024 + 1, false, false),
+        ];
+        for (case_no, (max_bytes, body_len, with_length, uploads)) in cases.into_iter().enumerate()
+        {
+            let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+            let email = format!("go1324-{case_no}-{tag}@example.test");
+            let user_id = seed_download_user(&pool, &email).await;
+            let outcome = download_and_upload_avatar(
+                &client,
+                &pool,
+                &storage,
+                "http",
+                "127.0.0.1",
+                &avatar_stub_bytes(body_len, with_length),
+                user_id,
+                max_bytes,
+                chrono::Utc::now(),
+            )
+            .await;
+            let rows: Vec<(uuid::Uuid, f64)> =
+                sqlx::query_as(r#"SELECT "id", "size" FROM "file_assets" WHERE "user_id" = $1"#)
+                    .bind(user_id)
+                    .fetch_all(&pool)
+                    .await
+                    .expect("read assets");
+            cleanup_avatar_world(&pool, user_id).await;
+
+            assert_eq!(
+                outcome.is_some(),
+                uploads,
+                "case {case_no}: {body_len} bytes at a {max_bytes} limit",
+            );
+            if uploads {
+                assert_eq!(rows.len(), 1, "case {case_no}: one FileAsset row lands");
+                assert_eq!(
+                    rows[0].0,
+                    outcome.unwrap(),
+                    "case {case_no}: row id returned"
+                );
+                assert_eq!(
+                    rows[0].1, body_len as f64,
+                    "case {case_no}: stored size is the body length",
+                );
+            } else {
+                assert!(
+                    rows.is_empty(),
+                    "case {case_no}: fallback leaves no FileAsset row",
+                );
+            }
+        }
     }
 }
