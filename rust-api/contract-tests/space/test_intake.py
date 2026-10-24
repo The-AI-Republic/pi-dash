@@ -136,6 +136,32 @@ def test_retrieve_patch_delete_by_creator(user_client, world, seeder, db):
     assert deleted.status_code == 204
 
 
+def test_patch_textless_html_stores_empty_stripped(user_client, world, seeder, db):
+    # PIDASHCONV-1264: PATCHing description_html with no text (the editor's
+    # normal "cleared" value "<p></p>") stores "" — not NULL — in
+    # issues.description_stripped (Issue.save update branch,
+    # db/models/issue.py:344-349: None only when the input html itself is
+    # ""/None, else strip_tags verbatim).
+    issue = seeder.create_issue(world["workspace"]["id"], world["project"]["id"], world["state"]["id"])
+    db.execute("UPDATE issues SET created_by_id=%s WHERE id=%s", (world["owner"]["id"], issue["id"]))
+    bridge = seeder.create_intake_issue(
+        world["workspace"]["id"], world["project"]["id"], world["intake"]["id"], issue["id"]
+    )
+    db.execute(
+        "UPDATE intake_issues SET created_by_id=%s WHERE id=%s", (world["owner"]["id"], bridge["id"])
+    )
+    patched = user_client.patch(
+        _detail_url(world, bridge["id"]),
+        json={"issue": {"description_html": "<p></p>"}},
+    )
+    assert patched.status_code == 200
+    body = patched.json()
+    assert body["description_html"] == "<p></p>"
+    assert body["description_stripped"] == ""
+    row = db.fetchone("SELECT description_stripped FROM issues WHERE id=%s", (body["id"],))
+    assert row["description_stripped"] == ""
+
+
 def test_patch_by_other_user_is_rejected(other_client, world, seeder, db):
     issue = seeder.create_issue(world["workspace"]["id"], world["project"]["id"], world["state"]["id"])
     bridge = seeder.create_intake_issue(
