@@ -50,8 +50,9 @@
 //!   project-invite `IntegrityError` (missing `project_id`, kept) still
 //!   500s *after* the workspace-member writes commit.
 //! * QUIRK-csrf-rotate: `login()` rotates the CSRF secret, so success sets
-//!   a fresh masked `csrftoken` cookie (Django defaults: 1-year age,
-//!   `/`, `Lax`; secure/domain/httponly from settings).
+//!   a fresh 32-char `csrftoken` cookie (`rotate_token` stores the raw
+//!   secret; Django defaults: 1-year age, `/`, `Lax`;
+//!   secure/domain/httponly from settings).
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
@@ -404,9 +405,8 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 /// Django's `_get_secret` (`csrf.py:230-256`) over the cookie value:
 /// the cookie must pass the format gate, and a 64-char cookie is
 /// unmasked first ("Django versions before 4.0 masked the secret before
-/// storing" — and this module's own `login_user` rotation still mints
-/// masked cookies, QUIRK-csrf-rotate, so without this step a client
-/// sending its rotated cookie back as the header would never verify).
+/// storing", so without this step a client sending such a cookie back
+/// as the header would never verify).
 fn csrf_cookie_secret(cookie: &str) -> Result<String, String> {
     if let Err(error) = csrf_kernel::check_token_format(cookie) {
         return Err(format!("CSRF cookie {}.", error.reason()));
@@ -1488,7 +1488,7 @@ struct LoginRequest<'a> {
 /// on the session, i.e. `flush()` + `cycle_key()`), the `user_logged_in`
 /// signal stamps `users.last_login`, and `device_info` lands in the
 /// session. The tower layer persists the mutated session and sets the
-/// `session-id` cookie; the fresh masked `csrftoken` cookie below mirrors
+/// `session-id` cookie; the fresh 32-char `csrftoken` cookie below mirrors
 /// the `rotate_token` half of `login()`.
 async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
     let LoginRequest {
@@ -1566,14 +1566,14 @@ async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
     {
         return Err(server_error());
     }
-    // `rotate_token` half: a fresh secret, masked, with Django's cookie
-    // attributes (secure/domain from settings, httponly per the project
-    // override, `/` + `Lax` defaults).
+    // `rotate_token` half: a fresh secret with Django's cookie attributes
+    // (secure/domain from settings, httponly per the project override,
+    // `/` + `Lax` defaults). The cookie carries the raw 32-char secret
+    // (`_add_new_csrf_cookie`); only bodies and headers carry masked tokens.
     let secret = pidash_auth::csrf::new_secret();
-    let masked = pidash_auth::csrf::mask_secret(&secret).map_err(|_| server_error())?;
     let set_cookie = pidash_auth::session::render_set_cookie(&pidash_auth::session::SetCookie {
         name: CSRF_COOKIE_NAME.to_owned(),
-        value: masked,
+        value: secret,
         expires: Some(pidash_auth::session::http_date(
             now.timestamp() + CSRF_COOKIE_MAX_AGE,
         )),

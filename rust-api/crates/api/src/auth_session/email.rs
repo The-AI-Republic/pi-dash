@@ -326,17 +326,23 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 
 /// Mirror `CsrfViewMiddleware.process_view` for these endpoints: the
 /// `csrftoken` cookie must be present and the request token must
-/// check out. A malformed cookie secret can never match (Django
-/// would mint a fresh secret and then fail the compare the same
-/// way); the failure page never renders the reason either way.
+/// check out. A 64-char cookie unmasks first (`_get_secret`); a
+/// malformed cookie secret can never match (Django would mint a fresh
+/// secret and then fail the compare the same way); the failure page
+/// never renders the reason either way.
 fn csrf_gate(prov: &Provenance, pairs: &[(String, String)]) -> Result<(), CsrfDenial> {
-    let Some(secret) = prov.csrf_cookie.as_deref() else {
+    let Some(cookie) = prov.csrf_cookie.as_deref() else {
         return Err(CsrfDenial::NoCookie);
+    };
+    let secret = if cookie.len() == csrf_kernel::CSRF_TOKEN_LENGTH {
+        csrf_kernel::unmask_token(cookie).map_err(|_| CsrfDenial::BadToken)?
+    } else {
+        cookie.to_owned()
     };
     let Some((token, source)) = csrf_token_source(pairs, prov.header_token.as_deref()) else {
         return Err(CsrfDenial::BadToken);
     };
-    csrf_check_token(secret, &token, source).map_err(|_| CsrfDenial::BadToken)
+    csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
 }
 
 /// DRF `SessionAuthentication.enforce_csrf` denial
@@ -2386,6 +2392,35 @@ mod tests {
                 &form
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn csrf_gate_unmasks_a_64_char_cookie() {
+        // `_get_secret`: a masked cookie unmasks before the compare, so the
+        // cookie value itself and any other masking of the secret pass.
+        let secret = "abcdefghijklmnopqrstuvwxyz012345";
+        let cookie = csrf_kernel::mask_secret(secret).expect("masks");
+        let other = csrf_kernel::mask_secret(secret).expect("masks");
+        let pairs: Vec<(String, String)> = vec![];
+        assert_eq!(
+            csrf_gate(&prov_with(Some(&cookie), Some(&cookie)), &pairs),
+            Ok(())
+        );
+        assert_eq!(
+            csrf_gate(&prov_with(Some(&cookie), Some(&other)), &pairs),
+            Ok(())
+        );
+        // A token for a different secret still fails.
+        let wrong = csrf_kernel::mask_secret(&csrf_kernel::new_secret()).expect("masks");
+        assert_eq!(
+            csrf_gate(&prov_with(Some(&cookie), Some(&wrong)), &pairs),
+            Err(CsrfDenial::BadToken)
+        );
+        // A 64-char cookie with invalid characters fails closed.
+        assert_eq!(
+            csrf_gate(&prov_with(Some(&"!".repeat(64)), Some(&other)), &pairs),
+            Err(CsrfDenial::BadToken)
         );
     }
 

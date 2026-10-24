@@ -1483,16 +1483,22 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 }
 
 /// Mirror `CsrfViewMiddleware.process_view`: the `csrftoken` cookie must be
-/// present and the request token must check out. A malformed cookie secret
-/// can never match (Django would mint a fresh secret and then fail the
-/// compare the same way).
+/// present and the request token must check out. A 64-char cookie unmasks
+/// first (`_get_secret`); a malformed cookie secret can never match
+/// (Django would mint a fresh secret and then fail the compare the same
+/// way).
 fn csrf_gate(headers: &HeaderMap, pairs: &[(String, String)]) -> Result<(), CsrfDenial> {
     let cookie_header = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let secret = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME)
+    let cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME)
         .ok_or(CsrfDenial::NoCookie)?;
+    let secret = if cookie.len() == csrf_kernel::CSRF_TOKEN_LENGTH {
+        csrf_kernel::unmask_token(&cookie).map_err(|_| CsrfDenial::BadToken)?
+    } else {
+        cookie
+    };
     let header_token = headers.get("x-csrftoken").and_then(|v| v.to_str().ok());
     let (token, source) = csrf_token_source(pairs, header_token).ok_or(CsrfDenial::BadToken)?;
     csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
@@ -2462,6 +2468,28 @@ mod tests {
         // Cookie but no token anywhere → BadToken.
         let empty: Vec<(String, String)> = Vec::new();
         assert_eq!(csrf_gate(&headers, &empty), Err(CsrfDenial::BadToken));
+    }
+
+    #[test]
+    fn csrf_gate_unmasks_a_64_char_cookie() {
+        // `_get_secret`: a masked cookie unmasks before the compare, so the
+        // cookie value itself and any other masking of the secret pass.
+        let secret = csrf_kernel::new_secret();
+        let cookie = csrf_kernel::mask_secret(&secret).expect("mask");
+        let other = csrf_kernel::mask_secret(&secret).expect("mask");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("csrftoken={cookie}").parse().expect("cookie"),
+        );
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), cookie.clone())];
+        assert_eq!(csrf_gate(&headers, &pairs), Ok(()));
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), other)];
+        assert_eq!(csrf_gate(&headers, &pairs), Ok(()));
+        // A token for a different secret still fails.
+        let wrong = csrf_kernel::mask_secret(&csrf_kernel::new_secret()).expect("mask");
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), wrong)];
+        assert_eq!(csrf_gate(&headers, &pairs), Err(CsrfDenial::BadToken));
     }
 
     #[test]
