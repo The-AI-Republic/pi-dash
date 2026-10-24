@@ -156,7 +156,7 @@ export function SpaceFilterPanel({ layout, filters, states, onToggle }: SpaceFil
       <div data-testid="space-filters-panel" className="flex flex-col gap-(--space-4)">
         <input
           data-testid="space-filter-search"
-          type="search"
+          type="text"
           aria-label={spaceMessage("filters.search")}
           placeholder={spaceMessage("filters.search")}
           value={query}

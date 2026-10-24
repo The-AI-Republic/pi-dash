@@ -79,6 +79,17 @@ describe("SpaceFilterPanel (SPC-034)", () => {
     expect(screen.getAllByTestId("space-filter-facet")).toHaveLength(2);
   });
 
+  it("exposes its option search as the board's only textbox role (SPC-039)", async () => {
+    const { user } = renderPanel();
+    expect(screen.queryAllByRole("textbox")).toEqual([]);
+    await openPanel(user);
+    const boxes = screen.getAllByRole("textbox");
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]).toBe(screen.getByTestId("space-filter-search"));
+    expect(boxes[0]).toHaveAttribute("placeholder", "Search");
+    expect(screen.queryAllByRole("searchbox")).toEqual([]);
+  });
+
   it("lists the five priorities highest first, all unchecked", async () => {
     const { user } = renderPanel();
     await openPanel(user);
