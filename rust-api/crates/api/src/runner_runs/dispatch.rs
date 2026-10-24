@@ -41,8 +41,8 @@ use pidash_db::runner_runs::pod::Pod;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_jobs::dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
-    execution_fields as resolve_execution_fields, ActorScope, ExecutionFieldsError,
-    ExecutionInputs, ExecutionSeams, ProjectScope,
+    execution_fields as resolve_execution_fields, ActorScope, DispatchDecision,
+    ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 use pidash_jobs::orchestration::LiveCreationStore;
 use pidash_services::assistant::seams as assistant_seams;
@@ -519,10 +519,14 @@ async fn rollback_then(tx: DbTransaction<'_>, response: Response) -> Response {
 /// one `dispatch_agent_run` per collected run — Django's `on_commit`
 /// registration order (the creation-rate consumes register inside
 /// `execution_fields`, before the `dispatch_after_commit` hook at
-/// `runs.py:309`). A drain failure is a 500 with the rows committed,
-/// exactly like an `on_commit` raise.
+/// `runs.py:309`). A [`DispatchDecision::PodDrain`] drains through
+/// `drain_pod_by_id` — Python drains the pod inline
+/// (`dispatch.py:61-70`), so the decision is acted on, never dropped.
+/// A drain failure is a 500 with the rows committed, exactly like an
+/// `on_commit` raise.
 async fn drain_direct_dispatch(
     pool: &PgPool,
+    state: &AppState,
     cloud: &pidash_db::config::CloudAgentSettings,
     cache: &RedisAdmissionCache,
     dispatches: Vec<Uuid>,
@@ -533,8 +537,17 @@ async fn drain_direct_dispatch(
         consume_admission_token(cache, consume);
     }
     for run_id in dispatches {
-        if dispatch_agent_run(pool, cloud, run_id, now).await.is_err() {
-            return Err(server_error());
+        match dispatch_agent_run(pool, cloud, run_id, now).await {
+            Ok(DispatchDecision::PodDrain { pod_id }) => {
+                if crate::runner_enroll::teardown::drain_pod_by_id(pool, state, pod_id)
+                    .await
+                    .is_err()
+                {
+                    return Err(server_error());
+                }
+            }
+            Ok(_) => {}
+            Err(_) => return Err(server_error()),
         }
     }
     Ok(())
@@ -1409,7 +1422,7 @@ pub async fn post_direct(
         return server_error();
     }
     if let Err(response) =
-        drain_direct_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await
+        drain_direct_dispatch(pool, state, &cloud, &cache, dispatches, deferred, now).await
     {
         return response;
     }
@@ -1704,7 +1717,7 @@ async fn post_issue_dispatch(
         return server_error();
     }
     if let Err(response) =
-        drain_direct_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await
+        drain_direct_dispatch(pool, state, &cloud, &cache, dispatches, deferred, now).await
     {
         return response;
     }
