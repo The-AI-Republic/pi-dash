@@ -4,9 +4,10 @@
 // SPC-024/026: the sideways board. One fixed-width column per workflow state
 // in board order, laid out in a horizontally scrolling strip; each column
 // scrolls its own cards vertically under a sticky header and keeps its empty
-// shape when it has none. Reaching a column's end asks for its next page
-// once — the trigger is debounced so a scroll burst fires one request — and
-// placeholder cards hold the place while the page is in flight.
+// shape when it has none. A column asks for its next page when it is bottomed
+// out — either its tripwire comes into view or a scroll gesture ends there —
+// once per gesture, thanks to the debounce, and placeholder cards hold the
+// place while the page is in flight.
 
 import * as React from "react";
 
@@ -19,6 +20,9 @@ import { useLoadMoreOnIntersect } from "./useLoadMoreOnIntersect.js";
 
 /** Quiet window a scroll burst must pass before the next page is requested. */
 export const SPACE_BOARD_SCROLL_DEBOUNCE_MS = 250;
+
+/** How close to the column's end a scroll gesture counts as reaching it. */
+export const SPACE_BOARD_END_REACH_PX = 48;
 
 export interface SpaceBoardLayoutProps {
   groups: readonly SpaceIssueGroup[];
@@ -79,7 +83,10 @@ function BoardColumn({ group, paging, failed, onLoadMore, projectIdentifier }: B
     root: scroller,
     // A column watches its own scroller, so it waits for one: observing the
     // page instead would page whichever column happened to be near the fold.
-    enabled: hasNext && !paging && scroller !== null,
+    // After a failed page the tripwire stays disarmed while the sentinel is
+    // still in view; the visitor's next scroll gesture to the end retries,
+    // so a broken request cannot spin by itself.
+    enabled: hasNext && !paging && !failed && scroller !== null,
     onLoadMore: request,
   });
 
@@ -96,10 +103,14 @@ function BoardColumn({ group, paging, failed, onLoadMore, projectIdentifier }: B
       <div
         ref={setScroller}
         data-testid="space-board-column-scroll"
-        onScroll={() => {
-          // A scroll that lands at the end of a paged column asks for more;
-          // the debounce folds the whole gesture into one request.
-          if (hasNext && !paging) request();
+        onScroll={(event) => {
+          // Only a gesture that reaches the column's end asks for more, so
+          // scrolling back up (or around a short column that is not paged
+          // out) never fetches; the debounce folds the gesture into one
+          // request.
+          if (!hasNext || paging) return;
+          if (!isAtEnd(event.currentTarget)) return;
+          request();
         }}
         className="flex min-h-0 flex-1 flex-col gap-(--space-1) overflow-y-auto p-(--space-1)"
       >
@@ -111,6 +122,11 @@ function BoardColumn({ group, paging, failed, onLoadMore, projectIdentifier }: B
       </div>
     </div>
   );
+}
+
+/** Whether the scroller is at (or within reach of) its bottom edge. */
+function isAtEnd(node: HTMLElement): boolean {
+  return node.scrollTop + node.clientHeight >= node.scrollHeight - SPACE_BOARD_END_REACH_PX;
 }
 
 /** Two pulsing cards that hold the column while its next page loads. */

@@ -10,6 +10,8 @@ export const ANCHOR_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 export const SPACE_BASE = "/spaces";
 export const SPACE_BOARD_PREFIX = `${SPACE_BASE}/issues`;
+/** The public board landing, the way back from a board. */
+export const SPACE_LANDING_HREF = `${SPACE_BASE}/`;
 export const SPACE_GENERIC_NOT_FOUND = "/404";
 
 /**

@@ -7,7 +7,7 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { firstPageGroups } from "./model.js";
-import { SPACE_BOARD_SCROLL_DEBOUNCE_MS, SpaceBoardLayout } from "./SpaceBoardLayout.js";
+import { SPACE_BOARD_END_REACH_PX, SPACE_BOARD_SCROLL_DEBOUNCE_MS, SpaceBoardLayout } from "./SpaceBoardLayout.js";
 import { boardIssue, DONE_ID, EMPTY_ID, firstPage, STATES, TODO_ID } from "./testFixtures.js";
 
 interface ObserverRecord {
@@ -44,6 +44,23 @@ function renderBoard(
     />
   );
   return onLoadMore;
+}
+
+/**
+ * jsdom performs no layout, so the scroller's geometry is stated here: a
+ * tall column whose viewport shows only the top of its content until the
+ * test scrolls it.
+ */
+function setGeometry(node: HTMLElement, scrollTop: number, { scrollHeight = 900, clientHeight = 400 } = {}): void {
+  Object.defineProperty(node, "scrollHeight", { configurable: true, value: scrollHeight });
+  Object.defineProperty(node, "clientHeight", { configurable: true, value: clientHeight });
+  Object.defineProperty(node, "scrollTop", { configurable: true, value: scrollTop });
+}
+
+/** Scroll a column scroller to `scrollTop` and fire the matching event. */
+function scrollColumnTo(node: HTMLElement, scrollTop: number, geometry?: Parameters<typeof setGeometry>[2]): void {
+  setGeometry(node, scrollTop, geometry);
+  fireEvent.scroll(node);
 }
 
 function column(stateId: string): HTMLElement {
@@ -156,7 +173,7 @@ describe("SpaceBoardLayout paging (SPC-026)", () => {
     );
     const scroller = within(column(TODO_ID)).getByTestId("space-board-column-scroll");
     for (let index = 0; index < 5; index += 1) {
-      fireEvent.scroll(scroller);
+      scrollColumnTo(scroller, 520);
       act(() => {
         vi.advanceTimersByTime(60);
       });
@@ -172,7 +189,7 @@ describe("SpaceBoardLayout paging (SPC-026)", () => {
   it("ignores scroll on a column with nothing left to load", () => {
     const onLoadMore = renderBoard(firstPage({ [TODO_ID]: { results: [boardIssue(1)], total_results: 1 } }));
     const scroller = within(column(TODO_ID)).getByTestId("space-board-column-scroll");
-    fireEvent.scroll(scroller);
+    scrollColumnTo(scroller, 520);
     act(() => {
       vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS);
     });
@@ -191,7 +208,7 @@ describe("SpaceBoardLayout paging (SPC-026)", () => {
       { paging: [TODO_ID] }
     );
     expect(observers).toHaveLength(0);
-    fireEvent.scroll(within(column(TODO_ID)).getByTestId("space-board-column-scroll"));
+    scrollColumnTo(within(column(TODO_ID)).getByTestId("space-board-column-scroll"), 520);
     act(() => {
       vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS);
     });
@@ -234,7 +251,7 @@ describe("SpaceBoardLayout paging (SPC-026)", () => {
         projectIdentifier="SPC"
       />
     );
-    fireEvent.scroll(within(column(TODO_ID)).getByTestId("space-board-column-scroll"));
+    scrollColumnTo(within(column(TODO_ID)).getByTestId("space-board-column-scroll"), 520);
     view.unmount();
     act(() => {
       vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS);
@@ -260,7 +277,7 @@ describe("SpaceBoardLayout paging (SPC-026)", () => {
         projectIdentifier="SPC"
       />
     );
-    fireEvent.scroll(within(column(TODO_ID)).getByTestId("space-board-column-scroll"));
+    scrollColumnTo(within(column(TODO_ID)).getByTestId("space-board-column-scroll"), 520);
     view.rerender(
       <SpaceBoardLayout
         groups={firstPageGroups(STATES, page)}
@@ -274,6 +291,100 @@ describe("SpaceBoardLayout paging (SPC-026)", () => {
       vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS);
     });
     expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a scroll gesture that has not reached the column's end", () => {
+    const onLoadMore = renderBoard(
+      firstPage(
+        { [TODO_ID]: { results: [boardIssue(1)], total_results: 60 } },
+        {
+          next_cursor: "50:1:0",
+          next_page_results: true,
+        }
+      )
+    );
+    const scroller = within(column(TODO_ID)).getByTestId("space-board-column-scroll");
+    // Mid-column, then back to the top: neither gesture is a request, even
+    // though the column has another page and nothing is in flight.
+    scrollColumnTo(scroller, 120);
+    scrollColumnTo(scroller, 0);
+    act(() => {
+      vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS);
+    });
+    expect(onLoadMore).not.toHaveBeenCalled();
+  });
+
+  it("loads a column on a scroll gesture that lands at its end", () => {
+    const onLoadMore = renderBoard(
+      firstPage(
+        { [TODO_ID]: { results: [boardIssue(1)], total_results: 60 } },
+        {
+          next_cursor: "50:1:0",
+          next_page_results: true,
+        }
+      )
+    );
+    const scroller = within(column(TODO_ID)).getByTestId("space-board-column-scroll");
+    // One pixel above the reach line is not the end; at the line it is.
+    scrollColumnTo(scroller, 900 - 400 - SPACE_BOARD_END_REACH_PX - 1);
+    act(() => {
+      vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS);
+    });
+    expect(onLoadMore).not.toHaveBeenCalled();
+    scrollColumnTo(scroller, 900 - 400 - SPACE_BOARD_END_REACH_PX);
+    act(() => {
+      vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS);
+    });
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+    expect(onLoadMore).toHaveBeenCalledWith(TODO_ID);
+  });
+
+  it("loads only the column that was scrolled to its end", () => {
+    const onLoadMore = renderBoard(
+      firstPage(
+        {
+          [TODO_ID]: { results: [boardIssue(1)], total_results: 60 },
+          [DONE_ID]: { results: [boardIssue(2, DONE_ID)], total_results: 60 },
+        },
+        {
+          next_cursor: "50:1:0",
+          next_page_results: true,
+        }
+      )
+    );
+    scrollColumnTo(within(column(DONE_ID)).getByTestId("space-board-column-scroll"), 520);
+    act(() => {
+      vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS);
+    });
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+    expect(onLoadMore).toHaveBeenCalledWith(DONE_ID);
+  });
+
+  it("leaves the tripwire disarmed after a failed page until the visitor scrolls again", () => {
+    const onLoadMore = renderBoard(
+      firstPage(
+        { [TODO_ID]: { results: [boardIssue(1)], total_results: 60 } },
+        {
+          next_cursor: "50:1:0",
+          next_page_results: true,
+        }
+      ),
+      { failed: [TODO_ID] }
+    );
+    // The sentinel is still in view after the failure, but the observer must
+    // not be installed: an auto-retry would loop on its own.
+    expect(observers).toHaveLength(0);
+    act(() => {
+      vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS * 4);
+    });
+    expect(onLoadMore).not.toHaveBeenCalled();
+    // A deliberate scroll gesture to the column's end is the retry.
+    scrollColumnTo(within(column(TODO_ID)).getByTestId("space-board-column-scroll"), 520);
+    act(() => {
+      vi.advanceTimersByTime(SPACE_BOARD_SCROLL_DEBOUNCE_MS);
+    });
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+    expect(onLoadMore).toHaveBeenCalledWith(TODO_ID);
   });
 
   it("marks a column whose page failed so a later scroll can retry", () => {

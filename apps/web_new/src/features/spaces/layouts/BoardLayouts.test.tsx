@@ -5,9 +5,8 @@
 import { createClient, type Transport } from "@pidash/api-client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { SpaceLayout } from "../lib/address.js";
 import { BoardLayouts, EmptyBoardNotice, SPACE_BOARD_EMPTY_TEXT } from "./BoardLayouts.js";
@@ -20,8 +19,7 @@ const client = createClient({
 
 function renderLayouts(
   layout: SpaceLayout,
-  page = firstPage({ [TODO_ID]: { results: [boardIssue(1)], total_results: 1 } }),
-  onGoHome?: () => void
+  page = firstPage({ [TODO_ID]: { results: [boardIssue(1)], total_results: 1 } })
 ) {
   render(
     <QueryClientProvider client={new QueryClient()}>
@@ -33,7 +31,6 @@ function renderLayouts(
         states={STATES}
         page={page}
         projectIdentifier="SPC"
-        onGoHome={onGoHome}
       />
     </QueryClientProvider>
   );
@@ -81,19 +78,16 @@ describe("BoardLayouts (SPC-025)", () => {
     expect(screen.getAllByTestId("space-board-empty")).toHaveLength(1);
   });
 
-  it("uses the board's own empty line", () => {
-    expect(SPACE_BOARD_EMPTY_TEXT).toBe("No work items found");
+  it("does not reuse the retired frontend's empty sentence", () => {
+    expect(SPACE_BOARD_EMPTY_TEXT).toBe("No published work items to show");
+    expect(SPACE_BOARD_EMPTY_TEXT).not.toMatch(/no work items found/i);
   });
 });
 
 describe("EmptyBoardNotice", () => {
-  it("offers a way back only when the caller provides one", async () => {
-    const onGoHome = vi.fn();
-    const { unmount } = render(<EmptyBoardNotice onGoHome={onGoHome} />);
-    await userEvent.click(screen.getByRole("button", { name: "Back to all boards" }));
-    expect(onGoHome).toHaveBeenCalledTimes(1);
-    unmount();
+  it("links back to the public board landing", () => {
     render(<EmptyBoardNotice />);
-    expect(screen.queryByRole("button", { name: "Back to all boards" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Back to all public boards" })).toHaveAttribute("href", "/spaces/");
+    expect(screen.getByRole("status")).toHaveTextContent(SPACE_BOARD_EMPTY_TEXT);
   });
 });
