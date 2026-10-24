@@ -2922,26 +2922,74 @@ const FILTER_JOINS: &[(&str, &str)] = &[
     ("issue_subscribers", "issue_subscribers"),
 ];
 
-/// True when every `"alias".` reference in the filter SQL is an
-/// `IS NULL` / `IS NOT NULL` test (the `__isnull` predicates): Django
-/// LEFT-joins those, INNER-joins everything else.
-fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
-    let marker = format!("\"{alias}\".");
+/// True when the column right after an `alias.` reference is followed by
+/// an `IS NULL` / `IS NOT NULL` test (a `__isnull` predicate).
+fn ref_is_null_test(after: &str) -> bool {
+    let ident_len = after
+        .chars()
+        .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
+        .map(|char| char.len_utf8())
+        .sum::<usize>();
+    let tail = after[ident_len..].trim_start();
+    tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")
+}
+
+/// Byte offsets of every `alias.` reference in the filter SQL, in either
+/// fragment spelling: quoted (`"alias".`, the sea-query filterset kernel)
+/// or unquoted (`alias.`, `legacy_sql` columns). The unquoted spelling
+/// needs a word boundary before the alias: without it the `issue_mentions`
+/// table name would match the `issue_mention` alias (and `issue_assignees`
+/// the `issue_assignee` one).
+fn alias_ref_starts(where_sql: &str, alias: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let quoted = format!("\"{alias}\".");
     let mut rest = where_sql;
-    while let Some(start) = rest.find(&marker) {
-        let after = &rest[start + marker.len()..];
-        let ident_len = after
-            .chars()
-            .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
-            .map(|char| char.len_utf8())
-            .sum::<usize>();
-        let tail = after[ident_len..].trim_start();
-        if !(tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")) {
-            return false;
-        }
-        rest = &after[ident_len..];
+    let mut offset = 0;
+    while let Some(start) = rest.find(&quoted) {
+        starts.push(offset + start);
+        let consumed = start + quoted.len();
+        rest = &rest[consumed..];
+        offset += consumed;
     }
-    true
+    let bare = format!("{alias}.");
+    let mut rest = where_sql;
+    let mut offset = 0;
+    while let Some(start) = rest.find(&bare) {
+        let absolute = offset + start;
+        let boundary = absolute == 0
+            || !matches!(
+                where_sql[..absolute].chars().next_back(),
+                Some(char) if char.is_alphanumeric() || char == '_'
+            );
+        if boundary {
+            starts.push(absolute);
+        }
+        let consumed = start + bare.len();
+        rest = &rest[consumed..];
+        offset += consumed;
+    }
+    starts
+}
+
+/// True when the filter SQL references `alias.` in either spelling
+/// (see [`alias_ref_starts`]).
+fn alias_referenced(where_sql: &str, alias: &str) -> bool {
+    !alias_ref_starts(where_sql, alias).is_empty()
+}
+
+/// True when every `alias.` reference in the filter SQL is an
+/// `IS NULL` / `IS NOT NULL` test (the `__isnull` predicates): Django
+/// LEFT-joins those, INNER-joins everything else. Both spellings count
+/// (see [`alias_ref_starts`]).
+fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
+    alias_ref_starts(where_sql, alias).iter().all(|start| {
+        let marker_len = if where_sql[*start..].starts_with('"') {
+            alias.len() + 3
+        } else {
+            alias.len() + 1
+        };
+        ref_is_null_test(&where_sql[start + marker_len..])
+    })
 }
 
 /// Shape one view-issues row in `ViewIssueListSerializer` source order
@@ -3119,9 +3167,11 @@ async fn view_issues_list(
         complex_where.as_deref().unwrap_or(""),
         legacy_where.as_deref().unwrap_or(""),
     );
-    let cycle_bridge = filter_sql
-        .contains("\"issue_cycle\".")
-        .then_some("issue_cycle");
+    // Both alias spellings count: legacy predicates spell the bridge
+    // unquoted (`issue_cycle.`), and the traversal must reuse the
+    // filter's scoped join for those too — a cycle filter's `issue_cycle`
+    // join wins over joining fresh (see [`alias_referenced`]).
+    let cycle_bridge = alias_referenced(&filter_sql, "issue_cycle").then_some("issue_cycle");
     let key = crate::app_issues::order_key(&spec.out_param, &order_param, cycle_bridge, false)
         .map_err(|_| Denial::ServerError)?;
     let direction = if key.descending { "DESC" } else { "ASC" };
@@ -3130,10 +3180,47 @@ async fn view_issues_list(
         expr = key.expr,
     );
 
+    // Relation joins for filter references (Django's `filter()` joins):
+    // INNER when referenced positively, LEFT when only `__isnull`-tested.
+    // The probe is the filter fragments only: the base statement never
+    // mentions these aliases, and the ORDER BY key resolves to `issue.*`,
+    // `state.*`, self-contained subqueries, or the cycle-name traversal
+    // over the filter's own bridge join (`order_key`) — never a new
+    // alias of its own. The builders splice the fragment after the `pm`
+    // join, before WHERE — appending it after the WHERE clause is a
+    // syntax error.
+    let mut filter_probe = String::new();
+    if let Some(complex) = complex_where.as_deref() {
+        filter_probe.push_str(complex);
+        filter_probe.push(' ');
+    }
+    if let Some(legacy) = legacy_where.as_deref() {
+        filter_probe.push_str(legacy);
+    }
+    let mut joins = String::new();
+    for (table, alias) in FILTER_JOINS {
+        if !alias_referenced(&filter_probe, alias) {
+            continue;
+        }
+        let kind = if alias_nullable_only(&filter_probe, alias) {
+            "LEFT JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
+        ));
+    }
+    if alias_referenced(&filter_probe, "issue_intake") {
+        joins.push_str(
+            " INNER JOIN intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
+        );
+    }
     let mut list_sql = queries_views::view_issues_list_sql(
         complex_where.as_deref(),
         legacy_where.as_deref(),
         &order_by_sql,
+        &joins,
     );
     // The cycle-name traversal joins ride on the row query only, ahead of
     // the top-level `WHERE` (anchored on the builder's slug predicate —
@@ -3147,35 +3234,11 @@ async fn view_issues_list(
             1,
         );
     }
-    let mut count_sql =
-        queries_views::view_issues_count_sql(complex_where.as_deref(), legacy_where.as_deref());
-    // Relation joins for filter references (Django's `filter()` joins):
-    // INNER when referenced positively, LEFT when only `__isnull`-tested.
-    let where_probe = format!("{list_sql} {count_sql}");
-    let mut joins = String::new();
-    for (table, alias) in FILTER_JOINS {
-        let marker = format!("\"{alias}\".");
-        if !where_probe.contains(&marker) {
-            continue;
-        }
-        let kind = if alias_nullable_only(&where_probe, alias) {
-            "LEFT JOIN"
-        } else {
-            "INNER JOIN"
-        };
-        joins.push_str(&format!(
-            " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
-        ));
-    }
-    if where_probe.contains("\"issue_intake\".") {
-        joins.push_str(
-            " INNER JOIN intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
-        );
-    }
-    if !joins.is_empty() {
-        list_sql = list_sql.replacen(" ORDER BY ", &format!("{joins} ORDER BY "), 1);
-        count_sql = format!("{count_sql}{joins}");
-    }
+    let count_sql = queries_views::view_issues_count_sql(
+        complex_where.as_deref(),
+        legacy_where.as_deref(),
+        &joins,
+    );
     // The queries layer's `project_permission_filter` names the issue
     // alias `i`, but every statement it composes into aliases the table
     // `issue` — the fragment as shipped references a missing alias and no
@@ -3517,5 +3580,68 @@ mod pidashconv_923_tests {
         );
         assert_eq!(message.kwargs.len(), 1);
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_1446_tests {
+    use super::{alias_nullable_only, alias_referenced};
+
+    #[test]
+    fn alias_detection_covers_quoted_and_unquoted_spellings() {
+        // Rich `filters=` fragments quote the alias (sea-query);
+        // `legacy_sql` columns spell it bare. Both must trigger the join.
+        assert!(alias_referenced(
+            "\"issue_assignee\".\"assignee_id\" = 'x'",
+            "issue_assignee"
+        ));
+        assert!(alias_referenced(
+            "issue_assignee.assignee_id IN ($3)",
+            "issue_assignee"
+        ));
+        assert!(alias_referenced(
+            "(issue_subscribers.subscriber_id IN ($3))",
+            "issue_subscribers"
+        ));
+        assert!(!alias_referenced(
+            "issue.state_id IN ($3)",
+            "issue_assignee"
+        ));
+        // Table names must not match their alias prefix: `issue_mentions`
+        // / `issue_assignees` carry no dot after the alias text.
+        assert!(!alias_referenced(
+            "SELECT 1 FROM issue_mentions WHERE issue_id = $1",
+            "issue_mention"
+        ));
+        assert!(!alias_referenced(
+            "x_issue_assignee.assignee_id IN ($3)",
+            "issue_assignee"
+        ));
+    }
+
+    #[test]
+    fn nullable_only_covers_both_spellings() {
+        // `__isnull` predicates LEFT-join; anything else INNER-joins.
+        assert!(alias_nullable_only(
+            "issue_assignee.assignee_id IS NULL",
+            "issue_assignee"
+        ));
+        assert!(alias_nullable_only(
+            "\"issue_assignee\".\"deleted_at\" IS NOT NULL",
+            "issue_assignee"
+        ));
+        assert!(!alias_nullable_only(
+            "issue_assignee.assignee_id IN ($3)",
+            "issue_assignee"
+        ));
+        assert!(!alias_nullable_only(
+            "\"issue_assignee\".\"assignee_id\" = 'x'",
+            "issue_assignee"
+        ));
+        // One positive reference anywhere forces INNER.
+        assert!(!alias_nullable_only(
+            "issue_assignee.assignee_id IS NULL AND issue_assignee.assignee_id IN ($3)",
+            "issue_assignee"
+        ));
     }
 }

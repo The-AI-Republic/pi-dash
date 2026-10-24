@@ -12,6 +12,8 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 
+from _harness.seed import issue_subscriber
+
 from .conftest import session_headers
 
 GLOBAL_VIEW_KEYS = {
@@ -271,6 +273,75 @@ def test_view_issues_state_id_in_filter(api, seed, tenant_a, project_a, auth_a):
     )
     assert r.status_code == 200, r.text
     assert {e["id"] for e in r.json()["results"]} == {issue_a, issue_b}
+
+
+def test_view_issues_assignees_relation_filter(api, seed, tenant_a, project_a, auth_a):
+    # PIDASHCONV-1446: legacy ?assignees= needs the issue_assignee join;
+    # pre-fix Rust emitted no JOIN (unquoted alias missed the quoted
+    # marker) and 500d on both the list and the count query.
+    ws = tenant_a["workspace"]["id"]
+    member = tenant_a["user"]["id"]
+    assigned = seed.issue(ws, project_a, name="1446 assigned")
+    seed.issue(ws, project_a, name="1446 unassigned")
+    seed.issue_assignee(ws, project_a, assigned, member)
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/",
+        headers=auth_a, params={"assignees": member},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [e["id"] for e in body["results"]] == [assigned]
+    assert body["total_count"] == 1
+
+
+def test_view_issues_subscriber_relation_filter(
+    api, seed, db, tenant_a, project_a, auth_a
+):
+    # PIDASHCONV-1446: legacy ?subscriber= needs the issue_subscribers
+    # join (same missing-JOIN 500 as ?assignees=). The subscriber row is
+    # deleted explicitly: Seed.cleanup does not sweep issue_subscribers.
+    ws = tenant_a["workspace"]["id"]
+    member = tenant_a["user"]["id"]
+    subbed = seed.issue(ws, project_a, name="1446 subscribed")
+    seed.issue(ws, project_a, name="1446 not subscribed")
+    issue_subscriber(db, project_a, ws, subbed, member)
+    try:
+        r = api.get(
+            f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/",
+            headers=auth_a, params={"subscriber": member},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [e["id"] for e in body["results"]] == [subbed]
+        assert body["total_count"] == 1
+    finally:
+        with db.cursor() as cur:
+            cur.execute(
+                "DELETE FROM issue_subscribers WHERE issue_id = %s",
+                (subbed,),
+            )
+
+
+def test_view_issues_filters_assignee_id_relation_filter(
+    api, seed, tenant_a, project_a, auth_a
+):
+    # PIDASHCONV-1446: rich ?filters={"assignee_id": ...} quotes the
+    # alias so the join was detected but spliced after WHERE (a syntax
+    # error); pre-fix Rust 500d.
+    ws = tenant_a["workspace"]["id"]
+    member = tenant_a["user"]["id"]
+    assigned = seed.issue(ws, project_a, name="1446 rich assigned")
+    seed.issue(ws, project_a, name="1446 rich unassigned")
+    seed.issue_assignee(ws, project_a, assigned, member)
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/",
+        headers=auth_a,
+        params={"filters": json.dumps({"assignee_id": member})},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [e["id"] for e in body["results"]] == [assigned]
+    assert body["total_count"] == 1
 
 
 def test_favorite_create_and_delete(api, seed, tenant_a, project_a, auth_a):
