@@ -11,6 +11,9 @@
 // display control and the sidebar toggle; analytics rides the shared
 // entry with the cycle scope. A missing, deleted or archived cycle
 // renders the area's gone-away view through the detail gate (CYC-013).
+// The page registers the cycle's palette entries (CYC-030) and carries
+// the finished read-only notice with the transfer action (CYC-031) on
+// completed cycles.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -26,6 +29,11 @@ import { CycleDetailGate } from "../../../../../../features/cycles/components/Cy
 import { CycleDetailSidebar } from "../../../../../../features/cycles/components/CycleDetailSidebar.js";
 import { CycleMemberDates } from "../../../../../../features/cycles/components/CycleMemberDates.js";
 import { CycleSidebarToggle } from "../../../../../../features/cycles/components/CycleSidebarToggle.js";
+import { CyclePaletteEntries } from "../../../../../../features/cycles/components/CyclePaletteEntries.js";
+import { CYCLE_TRANSFER_TITLE } from "../../../../../../features/cycles/components/CycleTransferDialog.js";
+import { CycleTransferAction } from "../../../../../../features/cycles/components/CycleTransferAction.js";
+import { FinishedCycleNotice } from "../../../../../../features/cycles/components/FinishedCycleNotice.js";
+import { canTransferFromBanner } from "../../../../../../features/cycles/lib/cycleTransfer.js";
 import { cycleDetailQueryOptions } from "../../../../../../features/cycles/api/cycleDetail.js";
 import { useCycleSidebarCollapsed } from "../../../../../../features/cycles/api/cycleSidebarState.js";
 import { getAppClient } from "../../../../../../core/api/client.js";
@@ -53,10 +61,6 @@ import { isConditionComplete, parseRichExpression } from "../../../../../../feat
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { LazyIssueFilters, preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
-import { useCycleProgress } from "../../../../../../features/issues/transfer/api.js";
-import { canTransferCycleIssues, showsCompletedCycleNote } from "../../../../../../features/issues/transfer/rules.js";
-import { TransferIssuesDialog } from "../../../../../../features/issues/transfer/TransferIssuesDialog.js";
-import { TransferIssuesPrompt } from "../../../../../../features/issues/transfer/TransferIssuesPrompt.js";
 import type { ListLayoutOverlays } from "../../../../../../features/issues/list/ListLayout.js";
 import { selectCreatableProjects } from "../../../../../../features/issues/create/createProjects.js";
 import type { WorkItemCreateProject } from "../../../../../../features/issues/components/WorkItemCreateDialog.js";
@@ -201,8 +205,6 @@ function CycleDetailContent({
       showSubIssues,
     })
   );
-  const progress = useCycleProgress(workspaceSlug, projectId, cycleId, true);
-  const [transferOpen, setTransferOpen] = React.useState(false);
   const [overlays, setOverlays] = React.useState<ListLayoutOverlays | null>(null);
   const [createOpen, setCreateOpen] = React.useState(false);
   const weekStart = useWeekStart();
@@ -285,11 +287,6 @@ function CycleDetailContent({
       addedThisVisit: false,
       visibleCount: firstPage.total_count,
     });
-  // The transfer prompt pairs the cycle's completed status with the
-  // progress endpoint's unfinished counts (ISS-224).
-  const transferCycle = { status: cycle.status, ...(progress.data ?? {}) };
-  const completedNote = showsCompletedCycleNote(transferCycle);
-  const canTransfer = canTransferCycleIssues(transferCycle);
   const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => {
     const filteredNow =
       filtered ||
@@ -432,23 +429,7 @@ function CycleDetailContent({
         }
         displayControl={display}
         filterControl={richFilter?.control}
-        filterRow={
-          <>
-            {completedNote ? (
-              <>
-                <TransferIssuesPrompt canTransfer={canTransfer} onOpen={() => setTransferOpen(true)} />
-                <TransferIssuesDialog
-                  workspaceSlug={workspaceSlug}
-                  projectId={projectId}
-                  cycleId={cycleId}
-                  open={transferOpen}
-                  onClose={() => setTransferOpen(false)}
-                />
-              </>
-            ) : null}
-            {richFilter?.row}
-          </>
-        }
+        filterRow={<>{richFilter?.row}</>}
         analyticsControl={analytics}
       />
     );
@@ -466,8 +447,16 @@ function CycleDetailContent({
       />
     </React.Suspense>
   ) : null;
+  const canTransferCycleWork = isProjectAuthorized(roles.data?.[projectId] ?? null) && canTransferFromBanner(cycle);
   return (
     <>
+      <CyclePaletteEntries
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        cycle={cycle}
+        memberRole={project.member_role}
+        projectArchived={project.archived_at !== null}
+      />
       <CycleDetailCrumbs
         workspaceSlug={workspaceSlug}
         projectId={projectId}
@@ -484,6 +473,18 @@ function CycleDetailContent({
         }
       />
       <CycleMemberDates workspaceSlug={workspaceSlug} projectId={projectId} cycleId={cycleId} />
+      {finished ? (
+        <FinishedCycleNotice>
+          {canTransferCycleWork ? (
+            <CycleTransferAction
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              sourceCycleId={cycle.id}
+              label={CYCLE_TRANSFER_TITLE}
+            />
+          ) : null}
+        </FinishedCycleNotice>
+      ) : null}
       <div className="flex min-h-0 flex-1 items-start gap-(--space-4)">
         <div className="min-w-0 flex-1">
           <React.Suspense fallback={renderWithFilters(null)}>
