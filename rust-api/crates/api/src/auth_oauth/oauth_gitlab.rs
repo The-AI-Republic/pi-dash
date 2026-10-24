@@ -1344,9 +1344,10 @@ async fn gitlab_sync_enabled(pool: &PgPool, secret_key: &str) -> Result<bool, De
 
 /// `sync_user_data` (`base.py:256-287`, new user + sync enabled): names,
 /// `display_name` (stored or derived), then the avatar pair the call site
-/// resolved: on upload success `avatar` is `""` (what `delete_old_avatar`
-/// wrote) and `asset` carries the new FK; on failure `avatar` is the
-/// provider URL and `asset` is `None` (`base.py:278-284`).
+/// resolved: on upload success `asset` carries the new FK and `avatar` is
+/// `""` when a signup asset existed (what `delete_old_avatar` wrote) or
+/// the provider URL otherwise (the delete was a no-op); on failure
+/// `avatar` is the provider URL and `asset` is `None` (`base.py:278-284`).
 #[allow(clippy::too_many_arguments)]
 async fn sync_user_data(
     pool: &PgPool,
