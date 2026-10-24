@@ -1477,7 +1477,12 @@ pub async fn run_description_task(
                 .map_err(|e| e.to_string())?;
         }
         _ => {
-            let version = v::build_description_version(&snapshot, user, now, Uuid::new_v4());
+            let mut version = v::build_description_version(&snapshot, user, now, Uuid::new_v4());
+            // Django's `create()` passes the audit columns as
+            // constructor fields, then `BaseModel.save` NULLs both
+            // with no crum user in the worker (base.py:31-33).
+            version.created_by = None;
+            version.updated_by = None;
             insert_description_version_rows(&mut tx, &ctx, &[version])
                 .await
                 .map_err(|e| e.to_string())?;
