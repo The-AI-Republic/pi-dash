@@ -164,7 +164,15 @@ describe("estimate delete dialog", () => {
     renderScreen();
     const dialog = await openDelete(user);
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Couldn’t delete the estimate",
+        expect.stringContaining("unable to delete")
+      )
+    );
+    // The failure title names the deletion, never the old creation-failure
+    // title (NEWFRONT-344); the oracle pins the body, not the title.
+    expect(notifyError).not.toHaveBeenCalledWith("Estimate creation failed", expect.anything());
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 });

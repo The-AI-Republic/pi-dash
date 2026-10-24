@@ -14,6 +14,19 @@ import { formatEstimatePoint } from "../../shared/shell/contextual/workItems.js"
 /** Edition capability that makes the time family available (EST-009). */
 export const ESTIMATE_TIME_FAMILY_FLAG = "estimate-time-family";
 
+/**
+ * Edition capability that unlocks saved-system editing and single-value
+ * deletion (EST-014, EST-015, EST-029). The community edition leaves it
+ * absent, so its rows stay delete-only and the update dialog is never
+ * mounted; the cloud edition sets it.
+ */
+export const ESTIMATE_SAVED_EDIT_FLAG = "estimate-saved-edit";
+
+/** True when the edition offers the saved-system update dialog. */
+export function estimateSavedEditEnabled(flags: Readonly<Record<string, boolean>> = {}): boolean {
+  return flags[ESTIMATE_SAVED_EDIT_FLAG] === true;
+}
+
 /** Measurement families the creation dialog can offer. */
 export const ESTIMATE_FAMILY_POINTS = "points";
 export const ESTIMATE_FAMILY_CATEGORIES = "categories";
@@ -219,13 +232,15 @@ export function renumberValues(values: readonly string[]): { key: number; value:
  * (EST-011). `position` follows the pointer: dropping on the upper half of a
  * row inserts before it, the lower half after it, so the list's final slot is
  * reachable. Out-of-range or same-row requests return an unchanged copy.
+ * Generic over the row so the creation dialog (plain values) and the update
+ * dialog (id-carrying rows) share the one reorder rule.
  */
-export function moveValueTo(
-  values: readonly string[],
+export function moveValueTo<T>(
+  values: readonly T[],
   sourceIndex: number,
   targetIndex: number,
   position: "before" | "after"
-): string[] {
+): T[] {
   if (
     sourceIndex === targetIndex ||
     sourceIndex < 0 ||
@@ -236,7 +251,7 @@ export function moveValueTo(
     return [...values];
   }
   const next = [...values];
-  const moved = next.splice(sourceIndex, 1)[0] as string;
+  const moved = next.splice(sourceIndex, 1)[0] as T;
   let insertAt = targetIndex + (position === "after" ? 1 : 0);
   if (sourceIndex < targetIndex) insertAt -= 1;
   next.splice(insertAt, 0, moved);
@@ -244,6 +259,61 @@ export function moveValueTo(
 }
 
 /** Move a value before the target row. */
-export function moveValueBefore(values: readonly string[], sourceIndex: number, targetIndex: number): string[] {
+export function moveValueBefore<T>(values: readonly T[], sourceIndex: number, targetIndex: number): T[] {
   return moveValueTo(values, sourceIndex, targetIndex, "before");
+}
+
+/**
+ * The validation family for a stored system type (EST-014). The family of
+ * a saved system is fixed, so the update dialog reads it instead of
+ * offering a choice; a type outside the catalogue reads as text, matching
+ * the row's raw rendering for unknown families.
+ */
+export function estimateFamilyOfType(type: string): EstimateFamily {
+  if (type === ESTIMATE_FAMILY_POINTS || type === ESTIMATE_FAMILY_TIME) return type;
+  return ESTIMATE_FAMILY_CATEGORIES;
+}
+
+/** One arranged row in the update dialog: a surviving id or a not-yet-saved null. */
+export interface ArrangedEstimateValue {
+  id: string | null;
+  value: string;
+}
+
+/**
+ * A saved-system save split across the three API shapes (spec §4.1): the
+ * PATCH carries surviving rows with their final keys, new rows go through
+ * single-point creates, and gone rows go through single-point deletes.
+ * Keys are final display positions (1..n), so the trailing PATCH writes
+ * the arrangement the user sees.
+ */
+export interface EstimateUpdatePlan {
+  survivors: { id: string; key: number; value: string }[];
+  adds: { key: number; value: string }[];
+  /** Point ids gone from the arrangement, in original key order. */
+  removals: string[];
+}
+
+/**
+ * Split an arrangement into its PATCH rows, point creates and point
+ * deletes. Id-less rows are always adds — the PATCH never receives a row
+ * without an id, since the server would silently ignore it.
+ */
+export function planEstimateUpdate(
+  before: readonly { id: string; key: number }[],
+  after: readonly ArrangedEstimateValue[]
+): EstimateUpdatePlan {
+  const survivors: EstimateUpdatePlan["survivors"] = [];
+  const adds: EstimateUpdatePlan["adds"] = [];
+  after.forEach((row, index) => {
+    if (row.id === null) adds.push({ key: index + 1, value: row.value });
+    else survivors.push({ id: row.id, key: index + 1, value: row.value });
+  });
+  const kept = new Set(after.map((row) => row.id));
+  const removals = before
+    .filter((point) => !kept.has(point.id))
+    .slice()
+    .sort((left, right) => left.key - right.key || left.id.localeCompare(right.id))
+    .map((point) => point.id);
+  return { survivors, adds, removals };
 }
