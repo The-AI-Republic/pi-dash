@@ -1,16 +1,19 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Sub-issues widget UI state (parity/specs/issues.md §15, ISS-173/178).
-// Every parent keeps its own filters, display settings and open flag, and
-// every expanded row keeps its own state: the section's open toggle
-// persists per widget, and one parent's filtering never touches another
-// parent's list. Sign-out resets the whole map through the session
-// registry.
+// Sub-issues widget UI state (parity/specs/issues.md §15, ISS-173/178, and
+// §23 ISS-234). Every parent keeps its own filters, display settings and
+// open flag, and every expanded row keeps its own state: the section's
+// open toggle persists per widget, and one parent's filtering never
+// touches another parent's list. The edition-only dimensions belong to
+// the same record as the base filters, so they survive navigation, feed
+// the empty state and the trigger count, and clear with the rest.
+// Sign-out resets the whole map through the session registry.
 
 import { create } from "zustand";
 
 import { registerStoreReset } from "../../../core/session/index.js";
+import { emptyEditionFilters, toggleEditionFilter, type EditionFilters } from "../edition/filterModel.js";
 import {
   defaultSubIssueDisplay,
   defaultDisplayProperties,
@@ -29,6 +32,8 @@ export interface ParentSubIssueState {
   /** The collapsible is open by default; the flag persists per widget. */
   open: boolean;
   filters: SubIssueFilters;
+  /** Team-project and work-item-type values (ISS-234); empty in the community build. */
+  editionFilters: EditionFilters;
   display: SubIssueDisplay;
 }
 
@@ -39,6 +44,7 @@ interface SubIssuesUiState {
   toggleOpen: (parentId: string) => void;
   toggleFilter: (parentId: string, key: SubIssueFilterKey, value: string) => void;
   setFilterValues: (parentId: string, key: SubIssueFilterKey, values: readonly string[]) => void;
+  toggleEditionFilter: (parentId: string, key: keyof EditionFilters, value: string) => void;
   resetFilters: (parentId: string) => void;
   setGroupBy: (parentId: string, groupBy: SubIssueGroupBy) => void;
   setOrderBy: (parentId: string, orderBy: SubIssueOrderBy) => void;
@@ -48,6 +54,7 @@ interface SubIssuesUiState {
 const INITIAL_PARENT: ParentSubIssueState = {
   open: true,
   filters: emptySubIssueFilters(),
+  editionFilters: emptyEditionFilters(),
   display: defaultSubIssueDisplay(),
 };
 
@@ -56,6 +63,7 @@ export function createParentState(): ParentSubIssueState {
   return {
     open: INITIAL_PARENT.open,
     filters: emptySubIssueFilters(),
+    editionFilters: emptyEditionFilters(),
     display: { groupBy: null, orderBy: "-created_at", properties: defaultDisplayProperties() },
   };
 }
@@ -93,9 +101,20 @@ export const useSubIssuesUiStore = create<SubIssuesUiState>()((set, get) => ({
         filters: { ...row.filters, [key]: [...values] },
       })),
     })),
+  toggleEditionFilter: (parentId, key, value) =>
+    set((state) => ({
+      parents: patchParent(state.parents, parentId, (row) => ({
+        ...row,
+        editionFilters: toggleEditionFilter(row.editionFilters, key, value),
+      })),
+    })),
   resetFilters: (parentId) =>
     set((state) => ({
-      parents: patchParent(state.parents, parentId, (row) => ({ ...row, filters: emptySubIssueFilters() })),
+      parents: patchParent(state.parents, parentId, (row) => ({
+        ...row,
+        filters: emptySubIssueFilters(),
+        editionFilters: emptyEditionFilters(),
+      })),
     })),
   setGroupBy: (parentId, groupBy) =>
     set((state) => ({

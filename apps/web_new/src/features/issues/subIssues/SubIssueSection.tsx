@@ -29,10 +29,9 @@ import { WorkItemCreateDialog, type WorkItemCreateProject } from "../components/
 import { AddExistingDialog } from "./AddExistingDialog.js";
 import {
   appliedChips,
-  emptyEditionFilters,
+  editionFilterCount,
   matchesIssueType,
   matchesTeamProject,
-  toggleEditionFilter,
   type EditionChip,
   type EditionFilters,
 } from "../edition/filterModel.js";
@@ -202,6 +201,7 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
   const setOpen = useSubIssuesUiStore((store) => store.setOpen);
   const toggleFilter = useSubIssuesUiStore((store) => store.toggleFilter);
   const setFilterValues = useSubIssuesUiStore((store) => store.setFilterValues);
+  const toggleEditionFilter = useSubIssuesUiStore((store) => store.toggleEditionFilter);
   const resetFilters = useSubIssuesUiStore((store) => store.resetFilters);
   const setGroupBy = useSubIssuesUiStore((store) => store.setGroupBy);
   const setOrderBy = useSubIssuesUiStore((store) => store.setOrderBy);
@@ -211,9 +211,10 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
   const [existingOpen, setExistingOpen] = React.useState(false);
   const [pendingDelete, setPendingDelete] = React.useState<SubIssueItem | null>(null);
   const [busyRows, setBusyRows] = React.useState<readonly string[]>([]);
-  // Edition-only dimensions stay off the stored filter object: they reset
-  // with the other filters and never change the community dropdown.
-  const [editionFilters, setEditionFilters] = React.useState<EditionFilters>(emptyEditionFilters);
+  // The edition-only dimensions live in the same per-parent record as the
+  // base filters, so they survive navigation, feed the empty state and the
+  // trigger count, and clear with "Clear filters" (ISS-234, spec §15/§23).
+  const editionFilters = state.editionFilters;
   const teamProjectsOffered = isEditionFlagOn(TEAM_PROJECT_FILTER_FLAG);
   const issueTypesOffered = isEditionFlagOn(ISSUE_TYPE_FILTER_FLAG);
   const teamProjectOptions = useTeamProjectOptions(workspaceSlug, issue.project_id, state.open && teamProjectsOffered);
@@ -242,6 +243,8 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
 
   const envelope = latestEnvelope(query.data);
   const rows = loadedRows(query.data);
+  const editionFiltersApplied = editionOn && editionFilterCount(editionFilters) > 0;
+  const filtersApplied = hasActiveFilters(state.filters) || editionFiltersApplied;
   const filtered = React.useMemo(() => {
     const base = filterSubIssues(rows, state.filters, today);
     if (!teamProjectsOffered && !issueTypesOffered) return base;
@@ -305,7 +308,7 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
       })
     : [];
   function toggleEdition(key: keyof EditionFilters, value: string): void {
-    setEditionFilters((current) => toggleEditionFilter(current, key, value));
+    toggleEditionFilter(parentId, key, value);
   }
   function removeEditionChip(chip: EditionChip): void {
     toggleEdition(chip.key, chip.value);
@@ -469,7 +472,7 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
                   Try again
                 </Button>
               </div>
-            ) : filtered.length === 0 && hasActiveFilters(state.filters) ? (
+            ) : filtered.length === 0 && filtersApplied ? (
               <div className="flex flex-col items-start gap-(--space-2) rounded-(--radius-control) border border-(--border) px-(--space-4) py-(--space-3)">
                 <span className="flex items-center gap-(--space-2) text-(--text-muted)">
                   <ListFilter size={14} strokeWidth={1.5} aria-hidden="true" />

@@ -62,6 +62,30 @@ describe("sub-issues UI store", () => {
     expect(useSubIssuesUiStore.getState().stateFor(A).filters.start_date).toEqual([]);
   });
 
+  it("keeps the edition dimensions in the same per-parent record", () => {
+    const store = useSubIssuesUiStore.getState();
+    store.toggleEditionFilter(A, "teamProject", "team-a");
+    store.toggleEditionFilter(A, "issueType", "type-a");
+    store.toggleEditionFilter(A, "teamProject", "team-b");
+    expect(useSubIssuesUiStore.getState().stateFor(A).editionFilters).toEqual({
+      teamProject: ["team-a", "team-b"],
+      issueType: ["type-a"],
+    });
+    expect(useSubIssuesUiStore.getState().stateFor(B).editionFilters).toEqual({ teamProject: [], issueType: [] });
+    store.toggleEditionFilter(A, "teamProject", "team-a");
+    expect(useSubIssuesUiStore.getState().stateFor(A).editionFilters.teamProject).toEqual(["team-b"]);
+  });
+
+  it("clears the edition dimensions with the base filters", () => {
+    const store = useSubIssuesUiStore.getState();
+    store.toggleFilter(A, "priority", "high");
+    store.toggleEditionFilter(A, "issueType", "type-a");
+    store.resetFilters(A);
+    const stateA = useSubIssuesUiStore.getState().stateFor(A);
+    expect(stateA.filters.priority).toEqual([]);
+    expect(stateA.editionFilters).toEqual({ teamProject: [], issueType: [] });
+  });
+
   it("keeps grouping, ordering and property choices per parent", () => {
     const store = useSubIssuesUiStore.getState();
     store.setGroupBy(A, "state");

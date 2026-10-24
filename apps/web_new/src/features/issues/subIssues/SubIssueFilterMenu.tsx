@@ -23,7 +23,7 @@ import {
 import { selectedIds } from "../filters/rich/filterValues.js";
 import { FilterSection, type FilterSectionOption } from "../filters/shared/FilterSection.js";
 import { EditionAppliedChips, EditionFilterSections } from "../edition/EditionFilterSections.js";
-import type { EditionChip, EditionFilters } from "../edition/filterModel.js";
+import { editionFilterCount, type EditionChip, type EditionFilters } from "../edition/filterModel.js";
 import { usePickerProjects, usePickerStates } from "../../../shared/pickers/reference.js";
 import {
   PRIORITY_ICONS,
@@ -226,7 +226,10 @@ export function SubIssueFilterMenu({
   const [open, setOpen] = React.useState(false);
   const states = usePickerStates(workspaceSlug, projectId, open && offered.includes("state"));
   const projects = usePickerProjects(workspaceSlug, open && offered.includes("project"));
-  const count = appliedFilterCount(filters);
+  // The edition dimensions count towards the trigger's applied total: the
+  // old rich-filter button counted every active dimension it rendered
+  // (ISS-234). Absent edition filters leave the community total unchanged.
+  const count = appliedFilterCount(filters) + (editionFilters === undefined ? 0 : editionFilterCount(editionFilters));
 
   const stateRows: FilterSectionOption[] = (states.data ?? []).map((state) => {
     const Icon = STATE_GROUP_ICONS[state.group];

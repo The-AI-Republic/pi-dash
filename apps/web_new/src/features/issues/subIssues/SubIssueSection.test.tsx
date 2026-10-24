@@ -571,6 +571,71 @@ describe("SubIssueSection filters and display", () => {
     expect(screen.getByText("Typed")).toBeInTheDocument();
   });
 
+  it(
+    "offers clearing when only an edition filter is applied, and clears it (ISS-234)",
+    { timeout: 15_000 },
+    async () => {
+      edition.flags[TEAM_PROJECT_FILTER_FLAG] = true;
+      registerEditionIssuesProviders({
+        teamProjects: async () => [
+          { id: PROJECT, name: "Atlas", identifier: "ATL" },
+          { id: "a23e4567-e89b-12d3-a456-42661417400c", name: "Cyan", identifier: "CYN" },
+        ],
+      });
+      stubApi({ pages: [many()] });
+      const user = userEvent.setup();
+      renderSection();
+      await screen.findByText("Alpha");
+      await user.click(screen.getByTestId("sub-issue-filters-trigger"));
+      const section = await screen.findByTestId("sub-issue-filter-team-project");
+      await user.click(await within(section).findByRole("checkbox", { name: "Cyan" }));
+      // No child sits in Cyan, so the section says so and offers the way out.
+      expect(await screen.findByText("No sub-work items match the filters you've applied.")).toBeInTheDocument();
+      expect(screen.getByTestId("sub-issue-filters-trigger")).toHaveAccessibleName("Filters, 1 applied");
+      expect(useSubIssuesUiStore.getState().stateFor(PARENT).editionFilters.teamProject).toEqual([
+        "a23e4567-e89b-12d3-a456-42661417400c",
+      ]);
+      await user.click(screen.getByRole("button", { name: "Clear filters" }));
+      expect(await screen.findByText("Alpha")).toBeInTheDocument();
+      expect(useSubIssuesUiStore.getState().stateFor(PARENT).editionFilters).toEqual({
+        teamProject: [],
+        issueType: [],
+      });
+      expect(screen.getByTestId("sub-issue-filters-trigger")).toHaveAccessibleName("Filters");
+    }
+  );
+
+  it("keeps an applied edition filter with its parent across a remount (ISS-234)", { timeout: 15_000 }, async () => {
+    edition.flags[ISSUE_TYPE_FILTER_FLAG] = true;
+    const typeId = "c23e4567-e89b-12d3-a456-42661417401c";
+    registerEditionIssuesProviders({ workItemTypes: async () => [{ id: typeId, name: "Bug" }] });
+    stubApi({
+      pages: [
+        page({
+          sub_issues: [
+            row({ id: CHILD, name: "Typed", type_id: typeId }),
+            row({ id: SECOND, name: "Untyped", sequence_id: 8, type_id: null }),
+          ],
+          state_distribution: { started: [CHILD, SECOND], completed: [] },
+          total_count: 2,
+        }),
+      ],
+    });
+    const user = userEvent.setup();
+    const first = renderSection();
+    await screen.findByText("Typed");
+    await user.click(screen.getByTestId("sub-issue-filters-trigger"));
+    const section = await screen.findByTestId("sub-issue-filter-type");
+    await user.click(await within(section).findByRole("checkbox", { name: "Bug" }));
+    await waitFor(() => expect(screen.queryByText("Untyped")).not.toBeInTheDocument());
+    first.unmount();
+    renderSection();
+    await screen.findByText("Typed");
+    expect(screen.queryByText("Untyped")).not.toBeInTheDocument();
+    expect(screen.getByTestId("sub-issue-filters-trigger")).toHaveAccessibleName("Filters, 1 applied");
+    expect(useSubIssuesUiStore.getState().stateFor(PARENT).editionFilters.issueType).toEqual([typeId]);
+  });
+
   it("keeps filters apart between parents", async () => {
     stubApi({ pages: [many()] });
     const user = userEvent.setup();

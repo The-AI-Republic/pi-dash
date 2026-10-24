@@ -145,6 +145,27 @@ describe("SubIssueFilterMenu", () => {
     expect(screen.queryByTestId("edition-filter-chips")).toBeNull();
   });
 
+  it("counts applied edition dimensions in the trigger (ISS-234)", () => {
+    renderMenu({
+      filters: { ...emptySubIssueFilters(), priority: ["high"] },
+      editionFilters: { teamProject: ["t1"], issueType: ["y1"] },
+      editionChips: [],
+      onToggleEdition: vi.fn(),
+      onRemoveEditionChip: vi.fn(),
+    });
+    expect(screen.getByTestId("sub-issue-filters-trigger")).toHaveAccessibleName("Filters, 3 applied");
+  });
+
+  it("counts an edition-only filter without a base one (ISS-234)", () => {
+    renderMenu({
+      editionFilters: { teamProject: [], issueType: ["y1"] },
+      editionChips: [],
+      onToggleEdition: vi.fn(),
+      onRemoveEditionChip: vi.fn(),
+    });
+    expect(screen.getByTestId("sub-issue-filters-trigger")).toHaveAccessibleName("Filters, 1 applied");
+  });
+
   it("omits state and project when the parent does not offer them", () => {
     renderMenu({ offered: ["priority", "state_group"] });
     openMenu();
