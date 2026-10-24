@@ -50,9 +50,12 @@
 //!
 //! * BUG stale comment (`github.py:1021-1029`): the rebind comment cites
 //!   a `OneToOneField` uniqueness on `repository`, but the model is a
-//!   plain `ForeignKey` with only the conditional unique on `project`.
-//!   The BEHAVIOUR (synchronous hard delete of the existing sync, FK
-//!   cascades hard-deleting dependent rows) is ported, not the comment.
+//!   plain `ForeignKey` with only the conditional unique on `project`,
+//!   and its "Postgres FK cascade" claim is wrong too — the FKs are plain
+//!   `DEFERRABLE INITIALLY DEFERRED` constraints with no `ON DELETE
+//!   CASCADE`. The BEHAVIOUR (synchronous hard delete of the existing
+//!   sync plus the ORM Collector's Python-side cascade over the issue and
+//!   comment syncs) is ported, not the comment.
 //! * `int(verified.get("id") or 0)` (`:1014`) runs outside the `try`, so
 //!   a truthy non-numeric id is an unhandled `ValueError`/`TypeError`
 //!   (500), while a falsy one answers the 502. [`python_repo_id`]
@@ -1548,6 +1551,13 @@ async fn upsert_git_binding(
     .await
     .map_err(txn_error)?;
     if let Some((id,)) = existing {
+        // `existing.delete(soft=False)` (`github.py:404-406`): the Collector
+        // takes the issue/comment syncs first — the FKs have no
+        // `ON DELETE CASCADE`, so the bare parent DELETE would 23503 at
+        // COMMIT once anything synced.
+        super::handlers_git_repo::delete_git_binding_children(tx, &[id])
+            .await
+            .map_err(txn_error)?;
         sqlx::query("DELETE FROM git_repository_bindings WHERE id = $1")
             .bind(id)
             .execute(&mut **tx)
@@ -1773,6 +1783,12 @@ async fn bind_transaction(
     .await
     .map_err(txn_error)?;
     if let Some((id,)) = existing {
+        // Rebind (`github.py:1026-1032`): Collector-cascade the issue and
+        // comment syncs first — the FKs have no `ON DELETE CASCADE`, so
+        // the bare parent DELETE would 23503 at COMMIT once anything synced.
+        super::handlers_git_repo::delete_github_sync_children(tx, &[id])
+            .await
+            .map_err(txn_error)?;
         sqlx::query("DELETE FROM github_repository_syncs WHERE id = $1")
             .bind(id)
             .execute(&mut **tx)
