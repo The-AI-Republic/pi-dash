@@ -54,14 +54,14 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 rust_decimal = { version = "1", features = ["serde"] }
-sea-query = { version = "0.32", default-features = false, features = ["backend-postgres"] }
+sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid", "with-chrono"] }
 thiserror = "2"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 uuid = { version = "1", features = ["v4"] }
 # Gitea OAuth handlers (D-17): workspace-members cache invalidation
 # (`KEYS` + `DEL`). Same 1.x line and feature set the db crate builds on,
 # so the lockfile gains no new downloads.
-redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "tls-rustls-insecure"] }
 # License console handlers (D-01): session-auth-hash verification
 # (`django.contrib.auth` `salted_hmac`) and the `email-credentials-check`
 # SMTP conversation (implicit TLS + STARTTLS). All five were already in

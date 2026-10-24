@@ -69,9 +69,8 @@
 
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
-use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{Path, Request, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
@@ -91,7 +90,7 @@ use pidash_types::runner_sessions::{
 use crate::runner_enroll::auth::{
     authenticate_machine_token, MachineAuth, ALLOW_DELETE, ALLOW_POST, AUTHENTICATE_HEADER_BEARER,
 };
-use crate::runner_runs::{json_response, pool_of, server_error};
+use crate::runner_runs::{is_uuid_path_segment, json_response, pool_of, server_error};
 use crate::state::AppState;
 
 /// Long-poll wait slice (`_POLL_SLICE_MS`, `machine_sessions.py:49`).
@@ -103,11 +102,6 @@ const POLL_READ_COUNT: i64 = 100;
 /// here — verified against the FX-RSES-02 machine SQL captures).
 const DEV_MACHINE_TOUCH_SQL: &str =
     "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1 WHERE \"dev_machine\".\"id\" = $2";
-/// Django's `custom_404_view` bytes (`app/views/error_404.py`):
-/// `JsonResponse({"error": "Page not found."})`. The `<uuid:>`
-/// converter 404s non-UUID segments before any view runs; axum matches
-/// the segment, so the handlers answer those bytes on a bad id.
-const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// Revoke reason stamped on the prior session at open (`:97`).
 const REASON_EVICTED_BY_NEW_SESSION: &str = "evicted_by_new_session";
 /// Revoke reason stamped at delete (`:156`).
@@ -123,14 +117,16 @@ fn render(response: HttpResponse) -> Response {
     json_response(status, response.body)
 }
 
-/// Resolver-404 for a non-UUID path id (see [`PAGE_NOT_FOUND_BODY`]).
-fn page_not_found() -> Response {
-    json_response(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned())
-}
-
-/// Parse a `<uuid:>` path segment, or the resolver-404.
-fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
-    raw.parse().map_err(|_| page_not_found())
+/// Parse a `<uuid:>` path segment. The converter regex is
+/// lowercase-hex-only; anything else matches no Django route, so
+/// callers proxy the request to Django, reproducing its 404
+/// byte-for-byte in every settings flavor (the `runner_open.rs`
+/// `parse_uuid` precedent).
+fn parse_uuid(raw: &str) -> Result<Uuid, ()> {
+    if !is_uuid_path_segment(raw) {
+        return Err(());
+    }
+    raw.parse().map_err(|_| ())
 }
 
 /// `timezone.now().isoformat()`: `+00:00` suffix, microseconds iff
@@ -153,7 +149,7 @@ fn redis_client(state: &AppState) -> Option<redis::Client> {
         .url
         .as_deref()
         .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
+        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 /// `_auth_dev_machine` (`machine_sessions.py:54-67`) as data: the URL
@@ -364,14 +360,17 @@ async fn poll_denial(response: Response) -> Response {
 pub async fn machine_session_open(
     State(state): State<AppState>,
     Path(raw_mid): Path<String>,
-    headers: HeaderMap,
+    req: Request,
 ) -> Response {
-    let pool = match pool_of(&state) {
-        Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database).
     let dev_machine_id = match parse_uuid(&raw_mid) {
         Ok(id) => id,
+        Err(()) => return crate::edge::proxy(State(state), req).await,
+    };
+    let headers = req.headers().clone();
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool.clone(),
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
@@ -503,18 +502,17 @@ pub async fn machine_session_open(
 pub async fn machine_session_delete(
     State(state): State<AppState>,
     Path((raw_mid, raw_sid)): Path<(String, String)>,
-    headers: HeaderMap,
+    req: Request,
 ) -> Response {
+    // Either segment off-converter matches no Django route (proxied,
+    // like the open path above).
+    let (dev_machine_id, sid) = match (parse_uuid(&raw_mid), parse_uuid(&raw_sid)) {
+        (Ok(dev_machine_id), Ok(sid)) => (dev_machine_id, sid),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let headers = req.headers().clone();
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
-    let dev_machine_id = match parse_uuid(&raw_mid) {
-        Ok(id) => id,
-        Err(response) => return response,
-    };
-    let sid = match parse_uuid(&raw_sid) {
-        Ok(id) => id,
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();
@@ -725,19 +723,21 @@ async fn read_with_eviction_awareness(
 pub async fn machine_session_poll(
     State(state): State<AppState>,
     Path((raw_mid, raw_sid)): Path<(String, String)>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: Request,
 ) -> Response {
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database).
+    let (dev_machine_id, sid) = match (parse_uuid(&raw_mid), parse_uuid(&raw_sid)) {
+        (Ok(dev_machine_id), Ok(sid)) => (dev_machine_id, sid),
+        _ => return crate::edge::proxy(State(state), req).await,
+    };
+    let headers = req.headers().clone();
+    let body = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return server_error(),
+    };
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
-    let dev_machine_id = match parse_uuid(&raw_mid) {
-        Ok(id) => id,
-        Err(response) => return response,
-    };
-    let sid = match parse_uuid(&raw_sid) {
-        Ok(id) => id,
         Err(response) => return response,
     };
     let secret = state.settings().secret_key.clone();

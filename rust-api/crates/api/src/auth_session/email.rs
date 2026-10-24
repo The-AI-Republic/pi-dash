@@ -233,19 +233,23 @@ fn provenance(headers: &HeaderMap, peer_ip: Option<String>, cookie_name: &str) -
     }
 }
 
-/// `request.POST` as last-wins pairs, only for form content types
-/// (any other content type leaves `POST` empty in Django).
+/// `request.POST` as ordered pairs: multipart fields when the body is
+/// framed multipart, else the urlencoded parse for form posts
+/// (PIDASHCONV-1349; same shape as `magic.rs::form_pairs` from
+/// PIDASHCONV-1079). Any other content type leaves `POST` empty in
+/// Django, so the pairs are empty there.
 fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> {
-    let is_form = content_type.is_some_and(|ct| {
-        ct.split(';').next().is_some_and(|mime| {
-            mime.trim()
-                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
-        })
-    });
+    let content_type = content_type.unwrap_or("");
+    if let Some(pairs) = crate::auth_session::multipart::parse_fields(content_type, body) {
+        return pairs;
+    }
+    let mime = content_type.split(';').next().map(str::trim).unwrap_or("");
+    let is_form = mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || mime.eq_ignore_ascii_case("multipart/form-data");
     if !is_form {
         return Vec::new();
     }
-    serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).unwrap_or_default()
+    serde_urlencoded::from_bytes(body).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -1902,7 +1906,11 @@ fn check_request_email(content_type: &str, body: &[u8]) -> Result<Option<String>
             parsed.as_ref().ok().and_then(|v| v.get("email")),
         ));
     }
-    if mime == "application/x-www-form-urlencoded" {
+    if mime == "application/x-www-form-urlencoded" || mime == "multipart/form-data" {
+        // Both form media types read through `form_pairs` (the DRF
+        // default parsers include `MultiPartParser`; PIDASHCONV-1349):
+        // missing or empty stays missing (`request.data.get("email",
+        // False)` is falsy either way).
         return Ok(
             match kernel::form_field(&form_pairs(Some(content_type), body), "email") {
                 kernel::FormField::Missing => None,
@@ -1910,12 +1918,6 @@ fn check_request_email(content_type: &str, body: &[u8]) -> Result<Option<String>
                 kernel::FormField::Present(value) => Some(value.to_owned()),
             },
         );
-    }
-    if mime == "multipart/form-data" {
-        // Django's multipart parser would read the fields; there is
-        // no multipart reader here, so the member stays missing
-        // (recorded approximation, like malformed JSON).
-        return Ok(None);
     }
     Err(content_type.to_owned())
 }
@@ -2457,6 +2459,18 @@ mod tests {
             check_request_email("application/x-www-form-urlencoded", b"email="),
             Ok(None)
         );
+        // Multipart reads the last field; missing or empty stays missing.
+        let framed = b"--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nh@x.com\r\n--abc--\r\n";
+        assert_eq!(
+            check_request_email("multipart/form-data; boundary=abc", framed),
+            Ok(Some("h@x.com".to_owned()))
+        );
+        let framed_empty =
+            b"--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\n\r\n--abc--\r\n";
+        assert_eq!(
+            check_request_email("multipart/form-data; boundary=abc", framed_empty),
+            Ok(None)
+        );
         // Anything else is the content type back (DRF 415).
         assert_eq!(
             check_request_email("text/plain", b"h@x.com"),
@@ -2497,6 +2511,13 @@ mod tests {
         );
         assert!(form_pairs(Some("application/json"), b"email=a%40x.com").is_empty());
         assert!(form_pairs(None, b"email=a%40x.com").is_empty());
+        // Framed multipart reads fields in order (last wins downstream).
+        let framed = b"--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\na@x.com\r\n--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nb@x.com\r\n--abc--\r\n";
+        let pairs = form_pairs(Some("multipart/form-data; boundary=abc"), framed);
+        assert_eq!(
+            kernel::form_field(&pairs, "email"),
+            kernel::FormField::Present("b@x.com")
+        );
     }
 
     #[test]

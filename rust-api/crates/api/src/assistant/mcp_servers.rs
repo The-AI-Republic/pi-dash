@@ -867,7 +867,8 @@ fn validation_error_response(errors: &Map<String, Value>) -> Response {
 /// crypto `AssistantError` renders as its code/detail/status; an
 /// operational failure propagates to the generic 500.
 #[allow(clippy::result_large_err)]
-fn apply_auth_header(
+async fn apply_auth_header(
+    state: &AppState,
     encrypted: &mut Option<Vec<u8>>,
     auth_header: Option<&str>,
 ) -> Result<(), Response> {
@@ -878,13 +879,15 @@ fn apply_auth_header(
         *encrypted = None;
         return Ok(());
     }
-    match super::encrypt_secret(header) {
+    let config = super::common::crypto_config(state);
+    match super::common::encrypt_api_key(&config, header).await {
         Ok(token) => {
             *encrypted = Some(token);
             Ok(())
         }
-        Err(super::SecretError::Assistant(error)) => Err(super::assistant_error_response(&error)),
-        Err(super::SecretError::Transport(_)) => Err(Denial::ServerError.into_response()),
+        Err(err) => Err(super::common::crypto_failure(err, |error| {
+            super::assistant_error_response(error)
+        })),
     }
 }
 
@@ -1016,7 +1019,9 @@ async fn create_server(
         Err(denial) => return denial.into_response(),
     }
     let mut encrypted: Option<Vec<u8>> = None;
-    if let Err(response) = apply_auth_header(&mut encrypted, attrs.auth_header.as_deref()) {
+    if let Err(response) =
+        apply_auth_header(&state, &mut encrypted, attrs.auth_header.as_deref()).await
+    {
         return response;
     }
     let id = uuid::Uuid::new_v4();
@@ -1126,8 +1131,12 @@ async fn patch_server(
     if let Some(is_enabled) = attrs.is_enabled {
         row.is_enabled = is_enabled;
     }
-    if let Err(response) =
-        apply_auth_header(&mut row.auth_header_encrypted, attrs.auth_header.as_deref())
+    if let Err(response) = apply_auth_header(
+        &state,
+        &mut row.auth_header_encrypted,
+        attrs.auth_header.as_deref(),
+    )
+    .await
     {
         return response;
     }

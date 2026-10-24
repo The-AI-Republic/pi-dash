@@ -260,7 +260,7 @@ fn redis_client(state: &AppState) -> Option<redis::Client> {
         .url
         .as_deref()
         .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
+        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 /// Quote an L2 column list for a `SELECT` projection (`"a", "b"`),
@@ -799,6 +799,17 @@ impl RunnerPorts for SessionPorts<'_> {
 
     async fn post_run_orchestration(&self, run_id: Uuid) -> Result<(), PortError> {
         self.live.post_run_orchestration(run_id).await
+    }
+
+    async fn post_run_orchestration_in_tx<'t>(
+        &self,
+        tx: pidash_db::tx::Transaction<'t>,
+        pool: &'t PgPool,
+        run_id: Uuid,
+    ) -> Result<pidash_db::tx::Transaction<'t>, PortError> {
+        self.live
+            .post_run_orchestration_in_tx(tx, pool, run_id)
+            .await
     }
 
     async fn complete_project_move_handoff(&self, run_id: Uuid) -> Result<(), PortError> {

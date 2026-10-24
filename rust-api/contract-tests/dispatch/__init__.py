@@ -20,4 +20,9 @@ Required environment (see ``../README.md``): ``BASE_URL`` (unused by these
 tests beyond the session fixture), ``DATABASE_URL``,
 ``CELERY_BROKER_URL`` (or ``AMQP_URL``), and the server running with
 ``CLOUD_AGENT_ENABLED=true``.
+
+One HTTP test lives here too: ``test_creation_rate_admission.py``
+(PIDASHCONV-1487) POSTs direct runs against ``BASE_URL`` under the same
+``CLOUD_AGENT_ENABLED=true`` regime and reads the admission buckets over
+``CONTRACT_REDIS_URL``. It needs no broker or worker.
 """

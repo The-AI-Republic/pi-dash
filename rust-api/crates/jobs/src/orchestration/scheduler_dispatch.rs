@@ -60,8 +60,9 @@ use super::fire_tick_seam::{
     DispatchJobsError, DispatchOutcome,
 };
 use super::live_inputs::{
-    fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, project_leads, CallCache,
+    fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, project_leads,
 };
+use crate::admission::RedisAdmissionCache;
 use crate::tasks_ticker::fire_binding::{
     BindingForDispatch, DispatchRun, SchedulerDispatch, SchedulerDispatchResult,
 };
@@ -548,7 +549,7 @@ pub fn live_scheduler_dispatch(
             let deps = StoreDeps {
                 cloud,
                 managed,
-                cache: CallCache::default(),
+                cache: RedisAdmissionCache::from_env(),
                 has_usable_llm_config: gate_fn(verdicts),
                 toolsets,
                 llm_profile: profile_fn(presence),

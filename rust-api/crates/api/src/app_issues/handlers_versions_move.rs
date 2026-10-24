@@ -1355,7 +1355,7 @@ fn redis_client(state: &AppState) -> Option<redis::Client> {
         .url
         .as_deref()
         .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
+        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 /// Fire the state-transition handler after the move's save: the state

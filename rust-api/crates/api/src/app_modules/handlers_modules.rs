@@ -16,8 +16,11 @@
 //! - `create` (`:294-351`): ADMIN/MEMBER gate, write validation, duplicate
 //!   name check, annotated-row re-read, `model_activity` enqueue.
 //! - `list` (`:353-393`): ADMIN/MEMBER/GUEST gate, archived excluded, bare
-//!   JSON array (NOT paginated — `Response(modules)` directly), `fields=`
-//!   accepted-but-discarded (ported bug, `DYNAMIC_FIELDS_KWARG_HONORED`).
+//!   JSON array (NOT paginated — `Response(modules)` directly). A non-empty
+//!   `?fields=` selects the `ModuleSerializer` branch (`:356-357`): the
+//!   projection itself is discarded (ported quirk, `DYNAMIC_FIELDS_KWARG_HONORED`)
+//!   but the row renders the full 29-key `ModuleSerializer.Meta.fields`
+//!   shape; otherwise the annotated 28-key `.values()` row renders.
 //! - `retrieve` (`:395-649`): ADMIN/MEMBER gate, archived excluded,
 //!   `ModuleDetailSerializer` + `estimate_distribution` +
 //!   `distribution`, `recent_visited_task` deferred publish.
@@ -50,8 +53,10 @@
 //!   (`WRITE_RESPONSE_ORDER`, incl `created_by`/`updated_by`/
 //!   `project`/`workspace`/`lead`/`members`/`member_ids`), never the
 //!   annotated row.
-//! * `list` ignores `fields=` (the constructor kwarg is overwritten with
-//!   `expand`); the full 28-key row always renders.
+//! * `list` ignores `fields=` for the projection (the constructor kwarg is
+//!   overwritten with `expand`); a non-empty `?fields=` still flips the row
+//!   to the 29-key `ModuleSerializer.Meta.fields` shape, an empty/absent
+//!   one renders the 28-key annotated `.values()` row.
 //! * `validate` only sees input dates: a partial update carrying a single
 //!   date skips the start/target check.
 //! * Duplicate-name checks race outside a transaction (check-then-insert).
@@ -65,7 +70,9 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use axum::extract::{Path, State};
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::Router;
@@ -1228,21 +1235,39 @@ async fn module_context(
 }
 
 /// `ModuleViewSet.list` (`base.py:353-393`): archived excluded, bare JSON
-/// array, `fields=` accepted-but-discarded.
+/// array. `fields = [f for f in request.GET.get("fields", "").split(",")
+/// if f]` (`base.py:180-183`): a non-empty list renders the
+/// `ModuleSerializer` branch (`:356-357`) — the projection is discarded,
+/// but the row is the full 29-key `Meta.fields` shape; otherwise the
+/// annotated 28-key `.values()` row renders. `Query<HashMap<String, String>>`
+/// keeps the last duplicate exactly like `QueryDict.get`.
 async fn module_list(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
     let (pool, user_id, project_id, timezone) =
         module_context(&state, &slug, &project_raw, extension, gate_for_list()).await?;
+    let fields: Vec<&str> = query
+        .get("fields")
+        .map(String::as_str)
+        .unwrap_or("")
+        .split(',')
+        .filter(|field| !field.is_empty())
+        .collect();
+    let row_order = if fields.is_empty() {
+        SHARED_ROW_ORDER
+    } else {
+        shape::MODULE_LIST_FIELD_ORDER
+    };
     let rows = fetch_module_rows(&pool, &project_id, &slug, &user_id, None, true).await?;
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        out.push_str(&shape_row(row, SHARED_ROW_ORDER, &timezone));
+        out.push_str(&shape_row(row, row_order, &timezone));
     }
     out.push(']');
     Ok(json_response(StatusCode::OK, out))

@@ -56,8 +56,9 @@ use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{append_event, dispatch_agent_run};
-use crate::orchestration::{LiveCreationStore, RunnerSeamCache, StoreDeps};
+use crate::orchestration::{LiveCreationStore, StoreDeps};
 use crate::queue::{enqueue_in, NewJob};
 use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
@@ -1454,7 +1455,7 @@ async fn drive_transition<'a>(
     let deps = StoreDeps {
         cloud: ctx.cloud.clone(),
         managed: ctx.managed.clone(),
-        cache: RunnerSeamCache::default(),
+        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: move |user: Uuid| user == creator && has_key,
         toolsets: ctx.toolsets.clone(),
         llm_profile: move |user: Option<Uuid>| {

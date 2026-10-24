@@ -88,6 +88,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_db::app_pages::strip::{ml_strip_tags, sync_description_stripped};
 use pidash_services::space::guards::{self, AnchorLookup, ExceptionKind};
 use pidash_services::space::queries::intake_assets as queries;
 
@@ -1986,14 +1987,11 @@ async fn collection_create(
         Some(serde_json::Value::String(html)) => Some(html.clone()),
         Some(_) => return Denial::ServerError.into_response(),
     };
-    // `Issue.save` (`db/models/issue.py:330-334`): `None` only when the
-    // *input* html is `""`/`None`, else `strip_tags(html)` verbatim — an
-    // empty strip (e.g. the `"<p></p>"` default) is stored as `""`, not
-    // collapsed to `None`.
-    let description_stripped: Option<String> = match description_html.as_deref() {
-        None | Some("") => None,
-        Some(html) => Some(super::sanitize::strip_tags(html)),
-    };
+    // `Issue.save` (`db/models/issue.py:330-334` over
+    // `utils/html_processor.py`): `None` only when the *input* html is
+    // `""`/`None`, else MLStripper-decoded text — an empty strip (e.g. the
+    // `"<p></p>"` default) is stored as `""`, not collapsed to `None`.
+    let description_stripped = sync_description_stripped(description_html.as_deref());
     // The advisory lock serializes sequence assignment
     // (`db/models/issue.py:336`); failure degrades to the plain path.
     let lock_key = advisory_key(&board.project_id);
@@ -2386,7 +2384,7 @@ async fn detail_partial_update(
     let description_stripped = if description_html.is_empty() {
         None
     } else {
-        let stripped = super::sanitize::strip_tags(&description_html);
+        let stripped = ml_strip_tags(&description_html);
         if stripped.is_empty() {
             None
         } else {

@@ -592,7 +592,7 @@ pub fn ticket_redis_client(state: &AppState) -> Option<redis::Client> {
         .url
         .as_deref()
         .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
+        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 /// Consume a ticket blob (`:876-884`): atomic `GETDEL`, falling back to

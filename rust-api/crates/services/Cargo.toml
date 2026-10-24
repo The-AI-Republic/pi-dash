@@ -60,7 +60,7 @@ chrono-tz = "0.10"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 # D-37 clear_cache: DEL + FLUSHDB against REDIS_URL (same locked redis 1.x
 # and the same feature set as pidash-db, no lock churn).
-redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "tls-rustls-insecure"] }
 # D-37 bucket commands: async S3 client (same locked reqwest 0.12.x as
 # pidash-api, minus `stream` which the ops client does not need).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }

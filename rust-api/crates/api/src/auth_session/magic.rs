@@ -522,7 +522,7 @@ impl Cache {
     fn from_state(state: &AppState) -> Option<Self> {
         let redis = &state.settings().redis;
         let url = redis.url.as_deref().filter(|u| !u.is_empty())?;
-        redis::Client::open(url).ok().map(|client| Self {
+        pidash_db::redis::open_client(url).ok().map(|client| Self {
             client,
             connect_timeout: timeout_duration(
                 redis.socket_connect_timeout_secs,

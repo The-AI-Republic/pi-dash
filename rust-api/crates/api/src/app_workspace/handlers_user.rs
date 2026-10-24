@@ -1878,7 +1878,9 @@ impl Cache {
             .url
             .as_deref()
             .filter(|u| !u.is_empty())?;
-        redis::Client::open(url).ok().map(|client| Self { client })
+        pidash_db::redis::open_client(url)
+            .ok()
+            .map(|client| Self { client })
     }
 
     async fn get(&self, key: &str) -> Result<Option<String>, redis::RedisError> {

@@ -216,7 +216,10 @@ class RoutingStub:
     (``GITEA_HOST`` points at :attr:`url`). ``routes`` maps
     ``(METHOD, path)`` (path without query string) to
     ``(status, body)``; ``body`` may be bytes, str, or a JSON-serializable
-    value (dict/list, served as ``application/json``). Unmapped paths
+    value (dict/list, served as ``application/json``). A route may also be
+    a ``(status, body, content_type)`` triple to override the served
+    ``Content-Type`` (PIDASHCONV-1321: the stubbed avatar bytes must read
+    as an image or both backends reject the download). Unmapped paths
     answer 404. Every hit records ``{method, path, headers, body}`` in
     :attr:`requests` (full path, query string included).
     """
@@ -225,13 +228,21 @@ class RoutingStub:
         outer = self
         self.requests: list[dict] = []
         normalized: dict[tuple[str, str], tuple[int, bytes, str]] = {}
-        for (method, path), (status, body) in routes.items():
-            if isinstance(body, (dict, list)):
-                payload, content_type = json.dumps(body).encode(), "application/json"
-            elif isinstance(body, str):
-                payload, content_type = body.encode(), "application/json"
+        for (method, path), route in routes.items():
+            if len(route) == 3:
+                status, body, content_type = route
             else:
-                payload, content_type = bytes(body), "application/json"
+                status, body = route
+                content_type = None
+            if isinstance(body, (dict, list)):
+                payload = json.dumps(body).encode()
+                content_type = content_type or "application/json"
+            elif isinstance(body, str):
+                payload = body.encode()
+                content_type = content_type or "application/json"
+            else:
+                payload = bytes(body)
+                content_type = content_type or "application/json"
             normalized[(method, path)] = (status, payload, content_type)
 
         class Handler(BaseHTTPRequestHandler):

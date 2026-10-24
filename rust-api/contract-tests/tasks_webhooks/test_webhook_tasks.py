@@ -381,6 +381,54 @@ def test_webhook_send_hostile_content_length_logs_failure_and_retries(
     assert str(alive[0]["response_status"]) == "200"
 
 
+def test_webhook_send_query_on_bare_host_posts_to_root_with_query(
+    db_conn, broker_url, webhook_sink
+):
+    """Query-string URL with no path: sink gets POST /?token=... (PIDASHCONV-1275).
+
+    Django accepts webhook URLs like ``http://host:port?token=abc``
+    (URLField plus validate_schema/validate_domain) and delivers
+    them: requests/urllib3 ends the authority at the first of '/',
+    '?' or '#', so the POST goes to the bare host with
+    '/?token=abc' as the request target. The Rust port split the
+    authority at the first '/' only and folded '?token=abc' into
+    the host, so every delivery failed with a transport error.
+    """
+    owner = seed_helpers.user(db_conn, "contract-query-host-owner")
+    workspace = seed_helpers.workspace(db_conn, "contractqueryhost", owner["id"])
+    token = uuid.uuid4().hex
+    hook = seed_helpers.webhook(
+        db_conn,
+        workspace["id"],
+        f"{config.WEBHOOK_SINK_BASE}?token={token}",
+        issue=True,
+    )
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": workspace["slug"],
+            "event": "issue",
+            "event_data": {"id": "contract-query-host"},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+    )
+    (delivery,) = webhook_sink.wait_for_count(1, what="query-host webhook POST")
+    assert delivery["path"] == f"/?token={token}"
+
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="query-host webhook_logs row",
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["retry_count"] == 0
+
+
 def test_webhook_redelivery_posts_twice_with_identical_bodies(
     db_conn, broker_url, webhook_sink
 ):
