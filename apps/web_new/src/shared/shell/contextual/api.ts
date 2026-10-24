@@ -288,12 +288,19 @@ export function useCycleModuleMutations(scope: EntityScope) {
   }
 
   const toggleFavorite = useMutation({
-    mutationFn: async (input: { entityType: "cycle" | "module"; entityId: string; favoriteId: string | null }) =>
+    mutationFn: async (input: {
+      entityType: "cycle" | "module";
+      entityId: string;
+      favoriteId: string | null;
+      /** Sent as entity_data.name so the sidebar titles the entry (cycles). */
+      entityName?: string | undefined;
+    }) =>
       input.favoriteId === null
         ? createFavorite(client, scope.workspaceSlug, {
             entity_type: input.entityType,
             entity_identifier: input.entityId,
             project_id: scope.projectId,
+            ...(input.entityName === undefined ? {} : { entity_data: { name: input.entityName } }),
           })
         : deleteFavorite(client, scope.workspaceSlug, input.favoriteId),
     onSuccess: () => {

@@ -38,6 +38,7 @@ export const MORE_DESTINATIONS: readonly MoreDestinationDef[] = [
   { key: "ai-dev-machines", name: "AI Dev Machines", segment: "ai-dev-machines", memberPlus: true, autoOpen: true },
   { key: "analytics", name: "Analytics", segment: "analytics", memberPlus: true, autoOpen: true },
   { key: "archives", name: "Archives", segment: "projects/archives", memberPlus: true, autoOpen: true },
+  { key: "active-cycles", name: "Active cycles", segment: "active-cycles", memberPlus: true, autoOpen: true },
 ];
 
 /** Sidebar address of one destination (SHELL-053). */

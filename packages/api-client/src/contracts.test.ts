@@ -1681,8 +1681,14 @@ describe("sidebar contracts", () => {
     });
     const client = createClient({ baseUrl: "https://api.test", transport });
     expect((await listFavorites(client, "acme"))[0]?.entity_type).toBe("issue");
-    const created = await createFavorite(client, "acme", { entity_type: "issue", entity_identifier: UUID });
+    const created = await createFavorite(client, "acme", {
+      entity_type: "issue",
+      entity_identifier: UUID,
+      entity_data: { name: "Fix login" },
+    });
     expect(created.entity_data).toBeNull();
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(String(postCall?.init.body ?? "")).toContain("Fix login");
     const children = await listFavoriteGroup(client, "acme", UUID);
     expect(children).toHaveLength(1);
     const moved = await updateFavorite(client, "acme", UUID2, { parent: null, sequence: 12.5 });

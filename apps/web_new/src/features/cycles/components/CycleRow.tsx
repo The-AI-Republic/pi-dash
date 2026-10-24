@@ -6,24 +6,27 @@
 // the completion ring, the lifecycle marker, the project-timezone date
 // span, and the extras for the row's state — the work-item count on
 // draft and upcoming rows, the creator avatar on the active row,
-// creator plus assignees elsewhere. The favorite star is a marker here;
-// slice H turns it into the toggle. The row menu trigger (slice E)
-// sits beside the quick-look eye.
+// creator plus assignees elsewhere. The favorite star is the working
+// toggle (CYC-029). The row menu trigger (slice E) sits beside the
+// quick-look eye.
 
 import { Link } from "@tanstack/react-router";
 import { Avatar, Badge, IconButton } from "@pidash/kit";
 import type { CycleRow as CycleRowData } from "@pidash/api-client";
-import { Eye, Layers, Star, Users } from "lucide-react";
+import { Eye, Layers, Users } from "lucide-react";
 import * as React from "react";
 
 import { groupOfCycle, lifecycleLabel, lifecycleTone } from "../lib/cycleGroups.js";
 import { UNKNOWN_CYCLE_MEMBER, type CycleMemberEntry } from "../lib/cycleMembers.js";
 import { cycleDetailPath } from "../lib/cycleScreen.js";
 import { cycleProgressPercent } from "../lib/cycleProgress.js";
+import { canTransferFromRow, transferableWorkCount } from "../lib/cycleTransfer.js";
 import type { CycleProjectRef } from "../dialog/CycleDialog.js";
 import { CycleDateSpan } from "./CycleDateSpan.js";
+import { CycleFavoriteStar } from "./CycleFavoriteStar.js";
 import { CycleProgressRing } from "./CycleProgressRing.js";
 import { CycleRowMenu } from "./CycleRowMenu.js";
+import { CycleTransferAction } from "./CycleTransferAction.js";
 
 export interface CycleRowProps {
   workspaceSlug: string;
@@ -112,20 +115,7 @@ export function CycleRow({
         )}
       </Link>
       {showFavoriteMarker ? (
-        <span
-          data-testid="cycle-favorite-marker"
-          data-favorite={cycle.is_favorite ? "true" : "false"}
-          role="img"
-          aria-label={cycle.is_favorite ? "Marked as favorite" : "Not marked as favorite"}
-          className="inline-flex shrink-0"
-        >
-          <Star
-            size={16}
-            strokeWidth={1.5}
-            aria-hidden="true"
-            className={cycle.is_favorite ? "fill-(--accent) text-(--accent)" : "text-(--text-muted)"}
-          />
-        </span>
+        <CycleFavoriteStar workspaceSlug={workspaceSlug} projectId={projectId} cycle={cycle} />
       ) : null}
       <IconButton
         label={`Quick look at ${cycle.name}`}
@@ -142,6 +132,17 @@ export function CycleRow({
         canMutate={canMutate}
         currentProject={currentProject}
       />
+      {canMutate && canTransferFromRow(cycle) ? (
+        <CycleTransferAction
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          sourceCycleId={cycle.id}
+          label={`Transfer ${transferableWorkCount(cycle)} work items`}
+          variant="secondary"
+          size="small"
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100"
+        />
+      ) : null}
     </div>
   );
 }

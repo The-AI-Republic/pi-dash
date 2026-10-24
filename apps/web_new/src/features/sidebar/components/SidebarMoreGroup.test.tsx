@@ -57,6 +57,7 @@ describe("SidebarMoreGroup", () => {
       "AI Dev Machines",
       "Analytics",
       "Archives",
+      "Active cycles",
     ]);
     fireEvent.click(toggle());
     expect(toggle()).toHaveAttribute("aria-expanded", "false");
@@ -100,6 +101,7 @@ describe("SidebarMoreGroup", () => {
       "/acme/ai-dev-machines/",
       "/acme/analytics/",
       "/acme/projects/archives/",
+      "/acme/active-cycles/",
     ]);
   });
 

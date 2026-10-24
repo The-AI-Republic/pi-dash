@@ -57,6 +57,7 @@ import { Route as SettingsProfileIndexRouteImport } from './routes/settings/prof
 import { Route as SettingsProfileTabRouteImport } from './routes/settings/profile/$tab'
 import { Route as SpacesWorkspaceSlugProjectIdRouteImport } from './routes/spaces/$workspaceSlug/$projectId'
 import { Route as SpacesIssuesAnchorRouteImport } from './routes/spaces/issues/$anchor'
+import { Route as WsGatedActiveCyclesIndexRouteImport } from './routes/$ws/_gated/active-cycles/index'
 import { Route as WsGatedAiDevMachinesIndexRouteImport } from './routes/$ws/_gated/ai-dev-machines/index'
 import { Route as WsGatedAnalyticsIndexRouteImport } from './routes/$ws/_gated/analytics/index'
 import { Route as WsGatedAnalyticsTabIdRouteImport } from './routes/$ws/_gated/analytics/$tabId'
@@ -390,6 +391,12 @@ const SpacesIssuesAnchorRoute = SpacesIssuesAnchorRouteImport.update({
   path: '/issues/$anchor',
   getParentRoute: () => SpacesRouteRoute,
 } as any)
+const WsGatedActiveCyclesIndexRoute =
+  WsGatedActiveCyclesIndexRouteImport.update({
+    id: '/active-cycles/',
+    path: '/active-cycles/',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
 const WsGatedAiDevMachinesIndexRoute =
   WsGatedAiDevMachinesIndexRouteImport.update({
     id: '/',
@@ -985,6 +992,7 @@ export interface FileRoutesByFullPath {
   '/god-mode/authentication/google': typeof GodModeDashboardAuthenticationGoogleRoute
   '/god-mode/loop/$jobId': typeof GodModeDashboardLoopJobIdRoute
   '/god-mode/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
+  '/$ws/active-cycles/': typeof WsGatedActiveCyclesIndexRoute
   '/$ws/ai-dev-machines/': typeof WsGatedAiDevMachinesIndexRoute
   '/$ws/analytics/': typeof WsGatedAnalyticsIndexRoute
   '/$ws/apps/': typeof WsGatedAppsIndexRoute
@@ -1111,6 +1119,7 @@ export interface FileRoutesByTo {
   '/god-mode/authentication/google': typeof GodModeDashboardAuthenticationGoogleRoute
   '/god-mode/loop/$jobId': typeof GodModeDashboardLoopJobIdRoute
   '/god-mode/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
+  '/$ws/active-cycles': typeof WsGatedActiveCyclesIndexRoute
   '/$ws/ai-dev-machines': typeof WsGatedAiDevMachinesIndexRoute
   '/$ws/analytics': typeof WsGatedAnalyticsIndexRoute
   '/$ws/apps': typeof WsGatedAppsIndexRoute
@@ -1251,6 +1260,7 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/authentication/google': typeof GodModeDashboardAuthenticationGoogleRoute
   '/god-mode/_dashboard/loop/$jobId': typeof GodModeDashboardLoopJobIdRoute
   '/god-mode/_dashboard/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
+  '/$ws/_gated/active-cycles/': typeof WsGatedActiveCyclesIndexRoute
   '/$ws/_gated/ai-dev-machines/': typeof WsGatedAiDevMachinesIndexRoute
   '/$ws/_gated/analytics/': typeof WsGatedAnalyticsIndexRoute
   '/$ws/_gated/apps/': typeof WsGatedAppsIndexRoute
@@ -1391,6 +1401,7 @@ export interface FileRouteTypes {
     | '/god-mode/authentication/google'
     | '/god-mode/loop/$jobId'
     | '/god-mode/workspace/create'
+    | '/$ws/active-cycles/'
     | '/$ws/ai-dev-machines/'
     | '/$ws/analytics/'
     | '/$ws/apps/'
@@ -1517,6 +1528,7 @@ export interface FileRouteTypes {
     | '/god-mode/authentication/google'
     | '/god-mode/loop/$jobId'
     | '/god-mode/workspace/create'
+    | '/$ws/active-cycles'
     | '/$ws/ai-dev-machines'
     | '/$ws/analytics'
     | '/$ws/apps'
@@ -1656,6 +1668,7 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/authentication/google'
     | '/god-mode/_dashboard/loop/$jobId'
     | '/god-mode/_dashboard/workspace/create'
+    | '/$ws/_gated/active-cycles/'
     | '/$ws/_gated/ai-dev-machines/'
     | '/$ws/_gated/analytics/'
     | '/$ws/_gated/apps/'
@@ -2096,6 +2109,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/spaces/issues/$anchor'
       preLoaderRoute: typeof SpacesIssuesAnchorRouteImport
       parentRoute: typeof SpacesRouteRoute
+    }
+    '/$ws/_gated/active-cycles/': {
+      id: '/$ws/_gated/active-cycles/'
+      path: '/active-cycles'
+      fullPath: '/$ws/active-cycles/'
+      preLoaderRoute: typeof WsGatedActiveCyclesIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
     }
     '/$ws/_gated/ai-dev-machines/': {
       id: '/$ws/_gated/ai-dev-machines/'
@@ -2971,6 +2991,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedDraftsSplatRoute: typeof WsGatedDraftsSplatRoute
   WsGatedSettingsApiTokensRoute: typeof WsGatedSettingsApiTokensRoute
   WsGatedWorkspaceViewsAllIssuesRoute: typeof WsGatedWorkspaceViewsAllIssuesRoute
+  WsGatedActiveCyclesIndexRoute: typeof WsGatedActiveCyclesIndexRoute
   WsGatedAnalyticsIndexRoute: typeof WsGatedAnalyticsIndexRoute
   WsGatedAppsIndexRoute: typeof WsGatedAppsIndexRoute
   WsGatedDraftsIndexRoute: typeof WsGatedDraftsIndexRoute
@@ -3014,6 +3035,7 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedDraftsSplatRoute: WsGatedDraftsSplatRoute,
   WsGatedSettingsApiTokensRoute: WsGatedSettingsApiTokensRoute,
   WsGatedWorkspaceViewsAllIssuesRoute: WsGatedWorkspaceViewsAllIssuesRoute,
+  WsGatedActiveCyclesIndexRoute: WsGatedActiveCyclesIndexRoute,
   WsGatedAnalyticsIndexRoute: WsGatedAnalyticsIndexRoute,
   WsGatedAppsIndexRoute: WsGatedAppsIndexRoute,
   WsGatedDraftsIndexRoute: WsGatedDraftsIndexRoute,

@@ -18,8 +18,9 @@ import {
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { CycleRow as CycleRowData } from "@pidash/api-client";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { UNKNOWN_CYCLE_MEMBER, type CycleMemberEntry } from "../lib/cycleMembers.js";
 import { CYCLES_CYCLE_ID, CYCLES_PROJECT_ID, makeCycleRow } from "../testing.js";
 import { CycleRow, type CycleRowProps } from "./CycleRow.js";
@@ -77,6 +78,22 @@ async function renderRow(
   await screen.findByTestId("cycle-row");
   return result;
 }
+
+beforeEach(() => {
+  // The row's transfer dialog reads the picker client at render; the
+  // dialog stays closed so no request fires.
+  createAppClient("https://api.test", (() =>
+    Promise.resolve({
+      status: 200,
+      url: "https://api.test/",
+      headers: { get: () => null },
+      text: async () => "[]",
+    })) as never);
+});
+
+afterEach(() => {
+  resetAppClient();
+});
 
 function upcomingRow(overrides: Partial<CycleRowData> = {}): CycleRowData {
   return makeCycleRow({
@@ -169,16 +186,36 @@ describe("CycleRow", async () => {
   it("marks favorites selected and plain rows unselected", async () => {
     const { unmount } = await renderRow({ cycle: upcomingRow({ is_favorite: true }) });
     expect(screen.getByTestId("cycle-favorite-marker")).toHaveAttribute("data-favorite", "true");
-    expect(screen.getByRole("img", { name: "Marked as favorite" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove Cycle 7 from favorites" })).toBeInTheDocument();
     unmount();
     await renderRow({ cycle: upcomingRow({ is_favorite: false }) });
     expect(screen.getByTestId("cycle-favorite-marker")).toHaveAttribute("data-favorite", "false");
-    expect(screen.getByRole("img", { name: "Not marked as favorite" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add Cycle 7 to favorites" })).toBeInTheDocument();
   });
 
   it("hides the star when the marker is not offered", async () => {
     await renderRow({ cycle: upcomingRow(), showFavoriteMarker: false });
     expect(screen.queryByTestId("cycle-favorite-marker")).not.toBeInTheDocument();
+  });
+
+  it("offers the counted transfer action on finished rows holding work", async () => {
+    const { unmount } = await renderRow({
+      cycle: upcomingRow({ status: "completed", total_issues: 3, completed_issues: 1, cancelled_issues: 0 }),
+    });
+    expect(screen.getByRole("button", { name: "Transfer 2 work items" })).toBeInTheDocument();
+    unmount();
+    await renderRow({ cycle: upcomingRow({ status: "upcoming" }) });
+    expect(screen.queryByRole("button", { name: /Transfer \d+ work items/ })).not.toBeInTheDocument();
+  });
+
+  it("hides the transfer action from guests and drained rows", async () => {
+    const drained = upcomingRow({ status: "completed", total_issues: 1, completed_issues: 1, cancelled_issues: 0 });
+    const { unmount } = await renderRow({ cycle: drained });
+    expect(screen.queryByRole("button", { name: /Transfer \d+ work items/ })).not.toBeInTheDocument();
+    unmount();
+    const holding = upcomingRow({ status: "completed", total_issues: 3, completed_issues: 1, cancelled_issues: 0 });
+    await renderRow({ cycle: holding, canMutate: false });
+    expect(screen.queryByRole("button", { name: /Transfer \d+ work items/ })).not.toBeInTheDocument();
   });
 
   it("renders no date element for undated rows and the single date for one-sided ranges", async () => {

@@ -94,6 +94,11 @@ export interface FavoriteCreate {
   sequence?: number;
   parent?: string | null;
   project_id?: string | null;
+  /**
+   * Target projection the sidebar reads back (cycles send `{ name }`
+   * so the entry titles itself; parity/specs/cycles.md §11, CYC-029).
+   */
+  entity_data?: Record<string, unknown> | null;
 }
 
 export async function createFavorite(client: ApiClient, slug: string, input: FavoriteCreate): Promise<Favorite> {

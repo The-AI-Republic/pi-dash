@@ -21,9 +21,6 @@ const mocks = vi.hoisted(() => ({
   setSidebarCollapsed: vi.fn(),
   layout: { current: "list" },
   filter: { current: null as null | Record<string, unknown> },
-  completedNote: { current: false },
-  canTransfer: { current: false },
-  progress: { current: { data: undefined as unknown } },
   parsed: { current: [] as unknown[] },
   overlayCreate: vi.fn(),
   overlayAdd: vi.fn(),
@@ -239,31 +236,15 @@ vi.mock("../../../../../../features/issues/filters/rich/lazy.js", () => ({
   ),
   preloadIssueFilters: mocks.preloadFilters,
 }));
-vi.mock("../../../../../../features/issues/transfer/api.js", () => ({
-  useCycleProgress: () => mocks.progress.current,
-}));
-vi.mock("../../../../../../features/issues/transfer/rules.js", () => ({
-  canTransferCycleIssues: () => mocks.canTransfer.current,
-  showsCompletedCycleNote: () => mocks.completedNote.current,
-}));
-vi.mock("../../../../../../features/issues/transfer/TransferIssuesPrompt.js", () => ({
-  TransferIssuesPrompt: (props: Record<string, unknown>) => (
-    <div data-testid="transfer-prompt" data-can={String(props.canTransfer ?? false)}>
-      <button type="button" onClick={props.onOpen as () => void}>
-        transfer
-      </button>
-    </div>
+vi.mock("../../../../../../features/cycles/components/CyclePaletteEntries.js", () => ({
+  CyclePaletteEntries: (props: Record<string, unknown>) => (
+    <div
+      data-testid="palette-entries"
+      data-cycle={String((props.cycle as { id?: unknown } | undefined)?.id ?? "")}
+      data-role={String(props.memberRole ?? "")}
+      data-archived={String(props.projectArchived ?? false)}
+    />
   ),
-}));
-vi.mock("../../../../../../features/issues/transfer/TransferIssuesDialog.js", () => ({
-  TransferIssuesDialog: (props: Record<string, unknown>) =>
-    props.open === true ? (
-      <div data-testid="transfer-dialog">
-        <button type="button" onClick={props.onClose as () => void}>
-          close transfer
-        </button>
-      </div>
-    ) : null,
 }));
 vi.mock("../../../../../../features/issues/calendar/CalendarEntry.js", () => ({
   CalendarEntry: (props: Record<string, unknown>) => (
@@ -372,9 +353,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.layout.current = "list";
   mocks.filter.current = null;
-  mocks.completedNote.current = false;
-  mocks.canTransfer.current = false;
-  mocks.progress.current = { data: undefined };
   mocks.parsed.current = [];
   mocks.roles.current = { data: { [PROJECT]: 15 }, isPending: false };
   mocks.projectRow.current = { data: { timezone: "America/New_York" } };
@@ -581,22 +559,58 @@ describe("cycle detail route", () => {
     expect(await screen.findByTestId("list-layout")).toHaveAttribute("data-can-edit", "false");
   });
 
-  it("opens and closes the transfer dialog from the completed note", async () => {
-    mocks.completedNote.current = true;
-    mocks.canTransfer.current = true;
+  it("registers the cycle palette entries for the page", async () => {
     renderRoute();
-    expect(await screen.findByTestId("transfer-prompt")).toHaveAttribute("data-can", "true");
-    expect(screen.queryByTestId("transfer-dialog")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "transfer" }));
-    expect(await screen.findByTestId("transfer-dialog")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "close transfer" }));
-    expect(screen.queryByTestId("transfer-dialog")).not.toBeInTheDocument();
+    const entries = await screen.findByTestId("palette-entries");
+    expect(entries).toHaveAttribute("data-cycle", CYCLE);
+    expect(entries).toHaveAttribute("data-role", "15");
+    expect(entries).toHaveAttribute("data-archived", "false");
   });
 
-  it("hides the transfer prompt without the completed note", async () => {
+  it("carries the finished notice with the transfer action on completed cycles holding work", async () => {
+    mocks.cycle.mockReturnValue({
+      queryKey: ["cycle"],
+      queryFn: async () =>
+        cycleSeed({
+          status: "COMPLETED",
+          total_issues: 3,
+          completed_issues: 1,
+          cancelled_issues: 0,
+          progress_snapshot: null,
+        }),
+    });
+    renderRoute();
+    expect(await screen.findByRole("region", { name: "Finished cycle" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Transfer work items" })).toBeInTheDocument();
+  });
+
+  it("keeps the notice but drops the action without work, without a role, or mid-cycle", async () => {
+    mocks.cycle.mockReturnValue({
+      queryKey: ["cycle"],
+      queryFn: async () =>
+        cycleSeed({ status: "COMPLETED", total_issues: 1, completed_issues: 1, cancelled_issues: 0 }),
+    });
+    const { unmount } = renderRoute();
+    expect(await screen.findByRole("region", { name: "Finished cycle" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Transfer work items" })).not.toBeInTheDocument();
+    unmount();
+
+    mocks.roles.current = { data: { [PROJECT]: 5 }, isPending: false };
+    mocks.cycle.mockReturnValue({
+      queryKey: ["cycle"],
+      queryFn: async () =>
+        cycleSeed({ status: "COMPLETED", total_issues: 3, completed_issues: 1, cancelled_issues: 0 }),
+    });
+    const guest = renderRoute();
+    expect(await screen.findByRole("region", { name: "Finished cycle" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Transfer work items" })).not.toBeInTheDocument();
+    guest.unmount();
+
+    mocks.roles.current = { data: { [PROJECT]: 15 }, isPending: false };
+    mocks.cycle.mockReturnValue({ queryKey: ["cycle"], queryFn: async () => cycleSeed({ status: "CURRENT" }) });
     renderRoute();
     expect(await screen.findByTestId("list-layout")).toBeInTheDocument();
-    expect(screen.queryByTestId("transfer-prompt")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Finished cycle" })).not.toBeInTheDocument();
   });
 
   it("clears through the visit-scoped filtered card", async () => {

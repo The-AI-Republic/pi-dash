@@ -17,6 +17,14 @@ describe("cycleKeys", () => {
     expect(cycleKeys.all("acme")).toEqual(["ws", "acme", "cycles"]);
     expect(cycleKeys.list("acme", PROJECT)).toEqual(["ws", "acme", "cycles", "list", PROJECT]);
     expect(cycleKeys.hero("acme", PROJECT)).toEqual(["ws", "acme", "cycles", "hero", PROJECT]);
+    expect(cycleKeys.heroIssues("acme", PROJECT, CYCLE)).toEqual([
+      "ws",
+      "acme",
+      "cycles",
+      "hero-issues",
+      PROJECT,
+      CYCLE,
+    ]);
     expect(cycleKeys.archived("acme", PROJECT)).toEqual(["ws", "acme", "cycles", "archived", PROJECT]);
     expect(cycleKeys.archivedDetail("acme", PROJECT, CYCLE)).toEqual([
       "ws",

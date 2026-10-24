@@ -13,6 +13,7 @@ import * as React from "react";
 
 import { registerCommands, registerPalettePages } from "../../commands/registry.js";
 import { useCommandPalette } from "../../commands/store.js";
+import { isFavoritesSectionOpen, setFavoritesSectionOpen } from "../favorites.js";
 import { copyLinkWithToast, workItemPath } from "../shareLink.js";
 import { notifyError, notifySuccess } from "../toaster.js";
 import {
@@ -263,6 +264,10 @@ export interface CyclePaletteInput {
   refresh: () => Promise<unknown>;
 }
 
+/** Outcome notices; the cycles star toasts the same pair (CYC-029/030). */
+export const CYCLE_FAVORITE_ADDED_TITLE = "Added to favorites";
+export const CYCLE_FAVORITE_REMOVED_TITLE = "Removed from favorites";
+
 /** Register the cycle contextual entries for a mounted cycle screen. */
 export function useCyclePaletteContext(input: CyclePaletteInput): void {
   const mutations = useCycleModuleMutations({
@@ -273,12 +278,26 @@ export function useCyclePaletteContext(input: CyclePaletteInput): void {
   const favorites = usePaletteFavorites(input.workspaceSlug);
 
   const toggleFavorite = React.useCallback(() => {
-    mutations.toggleFavorite.mutate({
-      entityType: "cycle",
-      entityId: input.cycleId,
-      favoriteId: selectFavoriteId(favorites.data ?? [], "cycle", input.cycleId),
-    });
-  }, [mutations, favorites.data, input.cycleId]);
+    const adding = !input.favorite;
+    mutations.toggleFavorite.mutate(
+      {
+        entityType: "cycle",
+        entityId: input.cycleId,
+        favoriteId: selectFavoriteId(favorites.data ?? [], "cycle", input.cycleId),
+        entityName: input.cycleName,
+      },
+      {
+        onSuccess: () => {
+          if (adding) {
+            notifySuccess(CYCLE_FAVORITE_ADDED_TITLE, `${input.cycleName} is now a favorite.`);
+            if (!isFavoritesSectionOpen()) setFavoritesSectionOpen(true);
+          } else {
+            notifySuccess(CYCLE_FAVORITE_REMOVED_TITLE, `${input.cycleName} is no longer a favorite.`);
+          }
+        },
+      }
+    );
+  }, [mutations, favorites.data, input.cycleId, input.cycleName, input.favorite]);
   const copyUrl = React.useCallback(
     () =>
       void copyText(

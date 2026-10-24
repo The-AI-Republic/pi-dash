@@ -19,6 +19,7 @@ import {
 } from "../../commands/registry.js";
 import { useCommandPalette } from "../../commands/store.js";
 import { getToastManager } from "../toaster.js";
+import { contextualKeys } from "./api.js";
 import {
   useCyclePaletteContext,
   useModulePaletteContext,
@@ -72,8 +73,10 @@ const MODULE_FAVORITE = {
 
 function harness() {
   const calls: string[] = [];
+  const bodies: string[] = [];
   const transport = async (url: string, init: { method: string; body?: string | undefined }) => {
     calls.push(`${init.method} ${url}`);
+    if (init.body !== undefined) bodies.push(String(init.body));
     if (url.endsWith("/auth/get-csrf-token/")) return json(url, '{"csrf_token":"csrf"}');
     if (init.method === "GET") {
       if (url.includes("/subscribe/")) return json(url, JSON.stringify({ subscribed: false }));
@@ -116,7 +119,7 @@ function harness() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return { queryClient, calls };
+  return { queryClient, calls, bodies };
 }
 
 const WORK_ITEM_INPUT = {
@@ -262,6 +265,143 @@ describe("contextual mounting hooks", () => {
     await waitFor(() =>
       expect(calls.some((call) => call.startsWith("POST") && call.includes("/user-favorites/"))).toBe(true)
     );
+  });
+
+  it("registers no cycle entries on archived cycles and only copy-URL for guests", async () => {
+    function ArchivedHost(): React.ReactElement {
+      useCyclePaletteContext({
+        workspaceSlug: "acme",
+        projectId: "project-1",
+        cycleId: UUID,
+        cycleName: "Sprint 1",
+        archived: true,
+        favorite: false,
+        standing: { memberRole: 15, archived: false },
+        refresh: async () => undefined,
+      });
+      return <div />;
+    }
+    const { queryClient, calls } = harness();
+    const { unmount } = render(
+      <QueryClientProvider client={queryClient}>
+        <ArchivedHost />
+      </QueryClientProvider>
+    );
+    // The favorites read proves the hook mounted; it registers nothing.
+    await waitFor(() => expect(calls.some((call) => call.includes("/user-favorites/"))).toBe(true));
+    expect(listCommands()).toHaveLength(0);
+    expect(findCommand(`context.cycle.${UUID}.favorite`)).toBeUndefined();
+    expect(findCommand(`context.cycle.${UUID}.copy-url`)).toBeUndefined();
+    unmount();
+
+    function GuestHost(): React.ReactElement {
+      useCyclePaletteContext({
+        workspaceSlug: "acme",
+        projectId: "project-1",
+        cycleId: UUID,
+        cycleName: "Sprint 1",
+        archived: false,
+        favorite: false,
+        standing: { memberRole: 5, archived: false },
+        refresh: async () => undefined,
+      });
+      return <div />;
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <GuestHost />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(findCommand(`context.cycle.${UUID}.copy-url`)).toBeDefined());
+    expect(findCommand(`context.cycle.${UUID}.favorite`)).toBeUndefined();
+  });
+
+  it("toasts the favorite outcome and titles the sidebar entry", async () => {
+    function CycleHost(): React.ReactElement {
+      useCyclePaletteContext({
+        workspaceSlug: "acme",
+        projectId: "project-1",
+        cycleId: UUID,
+        cycleName: "Sprint 1",
+        archived: false,
+        favorite: false,
+        standing: { memberRole: 15, archived: false },
+        refresh: async () => undefined,
+      });
+      return <div />;
+    }
+    const { queryClient, bodies } = harness();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ToastHost manager={getToastManager()} />
+        <CycleHost />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(findCommand(`context.cycle.${UUID}.favorite`)).toBeDefined());
+    await act(async () => {
+      await findCommand(`context.cycle.${UUID}.favorite`)!.run();
+    });
+    expect(await screen.findByText("Added to favorites")).toBeInTheDocument();
+    expect(await screen.findByText("Sprint 1 is now a favorite.")).toBeInTheDocument();
+    await waitFor(() => expect(bodies.some((body) => body.includes("Sprint 1"))).toBe(true));
+    expect(window.localStorage.getItem("web_new.favorites.open")).toBe("1");
+    window.localStorage.removeItem("web_new.favorites.open");
+  });
+
+  it("toasts the removal outcome without reopening the favorites section", async () => {
+    const removal = {
+      id: FAV_ID,
+      entity_type: "cycle",
+      entity_identifier: UUID,
+      entity_data: { name: "Sprint 1" },
+      name: null,
+      is_folder: false,
+      sequence: 1,
+      parent: null,
+      workspace_id: UUID,
+      project_id: UUID,
+    };
+    function CycleHost(): React.ReactElement {
+      useCyclePaletteContext({
+        workspaceSlug: "acme",
+        projectId: "project-1",
+        cycleId: UUID,
+        cycleName: "Sprint 1",
+        archived: false,
+        favorite: true,
+        standing: { memberRole: 15, archived: false },
+        refresh: async () => undefined,
+      });
+      return <div />;
+    }
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    // Seed before mount so the first registration already resolves the
+    // cycle's favorite id; the background refetch serves the same list.
+    queryClient.setQueryData(contextualKeys.favorites("acme"), [MODULE_FAVORITE, removal]);
+    const calls: string[] = [];
+    createAppClient("https://api.test", (async (url: string, init: { method: string }) => {
+      calls.push(`${init.method} ${url}`);
+      if (url.includes("/user-favorites/") && init.method === "GET")
+        return json(url, JSON.stringify([MODULE_FAVORITE, removal]));
+      if (url.includes("/user-favorites/") && init.method === "DELETE") return json(url, "", 204);
+      return json(url, JSON.stringify([]));
+    }) as never);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ToastHost manager={getToastManager()} />
+        <CycleHost />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(findCommand(`context.cycle.${UUID}.favorite`)).toBeDefined());
+    expect(findCommand(`context.cycle.${UUID}.favorite`)?.title).toBe("Remove from favorites");
+    await act(async () => {
+      await findCommand(`context.cycle.${UUID}.favorite`)!.run();
+    });
+    expect(await screen.findByText("Removed from favorites")).toBeInTheDocument();
+    await waitFor(() => expect(calls.some((call) => call.includes(FAV_ID))).toBe(true));
+    expect(window.localStorage.getItem("web_new.favorites.open")).toBeNull();
   });
 
   it("registers module entries and writes member and status picks", async () => {
