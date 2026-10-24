@@ -133,6 +133,14 @@ function epic(): Issue {
   };
 }
 
+/** The state trigger sits inside its label, so its name carries both. */
+async function openStatePicker(text: string): Promise<void> {
+  const shown = await screen.findByText(text);
+  const trigger = shown.closest("button");
+  expect(trigger).not.toBeNull();
+  fireEvent.click(trigger!);
+}
+
 function renderDialog(props: Partial<React.ComponentProps<typeof EpicDialog>> = {}) {
   const onOpenChange = vi.fn();
   const onSaved = vi.fn();
@@ -303,6 +311,84 @@ describe("EpicDialog", () => {
     expect(refused).toHaveTextContent("Close the last sub-item first");
     expect(screen.getByRole("option", { name: "Todo" })).toBeEnabled();
   }, 20_000);
+
+  it("asks the rules as a creation for a blank form and as an edit for a row", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    edition.flags[WORKFLOW_FLAG] = true;
+    const refusal = vi.fn(() => null);
+    registerEditionIssuesProviders({ workflowRules: { refusal } });
+    renderDialog();
+    const createTrigger = (await screen.findByText("Set state")).closest("button");
+    expect(createTrigger).not.toBeNull();
+    fireEvent.click(createTrigger!);
+    await screen.findByRole("option", { name: /Todo/ }, { timeout: 10_000 });
+    expect(refusal).toHaveBeenCalledWith({
+      projectId: PROJECT,
+      fromStateId: null,
+      toStateId: TODO,
+      purpose: "create",
+    });
+    cleanup();
+    renderDialog({ epic: epic() });
+    const editTrigger = (await screen.findByText("Todo")).closest("button");
+    expect(editTrigger).not.toBeNull();
+    fireEvent.click(editTrigger!);
+    await screen.findByRole("option", { name: /Done/ }, { timeout: 10_000 });
+    expect(refusal).toHaveBeenCalledWith({
+      projectId: PROJECT,
+      fromStateId: TODO,
+      toStateId: DONE,
+      purpose: "state-picker",
+    });
+  }, 30_000);
+
+  it("greys a create state the rules deny, and refuses it again at submit", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    edition.flags[WORKFLOW_FLAG] = true;
+    // Rules move while the form is open (a project configuration can be
+    // refetched), so the value picked under the old rules is asked about
+    // again before it is filed.
+    registerEditionIssuesProviders({ workflowRules: { refusal: () => null } });
+    const { onOpenChange, onSaved } = renderDialog();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Epic name"), "Big rock");
+    await openStatePicker("Set state");
+    await user.click(await screen.findByRole("option", { name: /Done/ }, { timeout: 10_000 }));
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ toStateId }) => (toStateId === DONE ? { reason: "New epics start in the intake state" } : null),
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Create epic" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("New epics start in the intake state");
+    expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  }, 30_000);
+
+  it("clears the state refusal once another state is picked", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({ workflowRules: { refusal: () => null } });
+    renderDialog();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Epic name"), "Big rock");
+    await openStatePicker("Set state");
+    await user.click(await screen.findByRole("option", { name: /Done/ }, { timeout: 10_000 }));
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ toStateId }) => (toStateId === DONE ? { reason: "New epics start in the intake state" } : null),
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Create epic" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await openStatePicker("Done");
+    await user.click(await screen.findByRole("option", { name: /Todo/ }, { timeout: 10_000 }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create epic" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "POST")).toBe(true));
+    expect(calls.find((call) => call.method === "POST")?.body).toMatchObject({ state_id: TODO });
+  }, 30_000);
 
   it("keeps the dialog open and names the failure when the write is refused", async () => {
     edition.flags[EPICS_FLAG] = true;

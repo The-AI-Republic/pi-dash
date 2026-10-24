@@ -21,6 +21,7 @@ import {
   isWorkflowGateEnabled,
   refusalMessage,
   selectionStateGate,
+  selectionStateRefusal,
   stateGateFor,
   stateOptionGate,
   transitionRefusal,
@@ -252,6 +253,16 @@ describe("state gates", () => {
     expect(gate(state(DONE))).toEqual({ disabled: true, reason: "Blocked work cannot finish" });
     expect(gate(state(TODO))).toEqual({ disabled: false });
     expect(selectionStateGate(PROJECT, [])!(state(DONE))).toEqual({ disabled: false });
+  });
+
+  it("reports the first refused row when a bulk target is asked, and nothing in the community build", () => {
+    register({ workflowRules: closedDoneRules() });
+    expect(selectionStateRefusal(PROJECT, [TODO, BLOCKED], DONE)).toBeNull();
+    edition.flags[WORKFLOW_FLAG] = true;
+    expect(selectionStateRefusal(PROJECT, [TODO, BLOCKED], DONE)).toEqual({
+      reason: "Finish the review first",
+    });
+    expect(selectionStateRefusal(PROJECT, [], DONE)).toBeNull();
   });
 
   it("reports a refused create state at submit and passes an open one", () => {

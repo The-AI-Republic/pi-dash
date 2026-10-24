@@ -33,7 +33,7 @@ import {
   type EpicDialogValues,
 } from "./epicModel.js";
 import { EPICS_FLAG, isEditionFlagOn } from "./flags.js";
-import { stateOptionGate } from "./workflow.js";
+import { createStateRefusal, creationStateGate, stateOptionGate } from "./workflow.js";
 
 export { EPICS_FLAG };
 
@@ -66,17 +66,21 @@ export function EpicDialog({
   const [values, setValues] = React.useState<EpicDialogValues>(() => epicDraftFrom(epic));
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [stateError, setStateError] = React.useState<string | null>(null);
   const editing = epic !== undefined;
   const enabled = isEpicDialogEnabled();
   // The workflow gate applies here as it does everywhere a state moves
-  // (ISS-233); without it this is undefined and the picker stays plain.
-  const stateGate = stateOptionGate(projectId, epic?.state_id ?? null);
+  // (ISS-233). An edit asks about the state it opened with, a create asks
+  // as a new item with no origin; without the flag both are undefined and
+  // the picker stays plain.
+  const stateGate = editing ? stateOptionGate(projectId, epic.state_id) : creationStateGate(projectId);
 
   // Each open starts from the row it edits (or a blank create).
   React.useEffect(() => {
     if (!open) return;
     setValues(epicDraftFrom(epic));
     setError(null);
+    setStateError(null);
   }, [open, epic]);
 
   if (!enabled) return null;
@@ -89,6 +93,16 @@ export function EpicDialog({
     if (!canSubmitEpic(values)) {
       setError(EPIC_NAME_REQUIRED);
       return;
+    }
+    // A create obeys the same rules as a work item's first state: the
+    // picker greys a refused row, and this asks once more so a value set
+    // before the rules applied cannot be filed (ISS-233).
+    if (!editing) {
+      const refusal = createStateRefusal({ projectId, stateId: values.stateId });
+      if (refusal !== null) {
+        setStateError(refusal.reason);
+        return;
+      }
     }
     setBusy(true);
     try {
@@ -157,8 +171,16 @@ export function EpicDialog({
               placeholder="Set state"
               preload={values.stateId !== null}
               {...(stateGate === undefined ? {} : { optionGate: stateGate })}
-              onChange={(stateId) => set("stateId", stateId)}
+              onChange={(stateId) => {
+                setStateError(null);
+                set("stateId", stateId);
+              }}
             />
+            {stateError === null ? null : (
+              <p role="alert" className="text-meta text-(--danger)">
+                {stateError}
+              </p>
+            )}
           </label>
           <label className="text-caption flex flex-col gap-(--space-1) text-(--text-muted)">
             Priority

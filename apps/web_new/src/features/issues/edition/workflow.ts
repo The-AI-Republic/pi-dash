@@ -190,17 +190,33 @@ export function creationStateGate(projectId: string): StateGate | undefined {
 export function selectionStateGate(projectId: string, fromStateIds: readonly (string | null)[]): StateGate | undefined {
   if (!isWorkflowGateEnabled()) return undefined;
   return (state) => {
-    for (const fromStateId of fromStateIds) {
-      const refusal = transitionRefusal({
-        projectId,
-        fromStateId,
-        toStateId: state.id,
-        purpose: "state-picker",
-      });
-      if (refusal !== null) return { disabled: true, reason: refusal.reason };
-    }
-    return { disabled: false };
+    const refusal = selectionStateRefusal(projectId, fromStateIds, state.id);
+    return refusal === null ? { disabled: false } : { disabled: true, reason: refusal.reason };
   };
+}
+
+/**
+ * The refusal a bulk state target carries for the current selection, or
+ * null when every selected row may enter it. The picker gate uses it to
+ * grey the row; the submit uses it again so a target picked before the
+ * selection changed cannot slip a refused row into the batch.
+ */
+export function selectionStateRefusal(
+  projectId: string,
+  fromStateIds: readonly (string | null)[],
+  toStateId: string
+): WorkflowRefusal | null {
+  if (!isWorkflowGateEnabled()) return null;
+  for (const fromStateId of fromStateIds) {
+    const refusal = transitionRefusal({
+      projectId,
+      fromStateId,
+      toStateId,
+      purpose: "state-picker",
+    });
+    if (refusal !== null) return refusal;
+  }
+  return null;
 }
 
 /**
