@@ -133,6 +133,9 @@ describe("Sidebar", () => {
   it("renders the update control beside the account row when provided", () => {
     render(sidebar({ updateControl: <span>update ready</span> }));
     expect(screen.getByText("update ready")).toBeInTheDocument();
+    const account = screen.getByTestId("sidebar-user-menu");
+    const update = screen.getByText("update ready");
+    expect(account).not.toContainElement(update);
   });
 
   it("mounts no plan badge unless the edition slot is filled (CLOUD-038)", () => {
