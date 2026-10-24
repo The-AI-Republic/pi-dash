@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // The modules list header (MOD-001/011): the project crumb plus a trailing
-// Modules crumb, the slot controls in the cluster, and the layout switcher
-// on the trailing edge.
+// Modules crumb, the slot controls in the cluster, the applied-chip strip
+// below it, and the layout switcher on the trailing edge.
 
 import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
@@ -66,6 +66,26 @@ describe("ModulesListHeader", () => {
     render(<ModulesListHeader projectName="Website relaunch" layout="list" onLayoutChange={onLayoutChange} />);
     fireEvent.click(screen.getByRole("button", { name: "Board layout" }));
     expect(onLayoutChange).toHaveBeenCalledWith("board");
+  });
+
+  it("renders the applied-chip strip directly below the control cluster", () => {
+    render(
+      <ModulesListHeader
+        projectName="Website relaunch"
+        layout="list"
+        onLayoutChange={vi.fn()}
+        chips={<div data-testid="modules-filter-chips">chips</div>}
+      />
+    );
+    const header = screen.getByTestId("modules-list-header");
+    const chips = screen.getByTestId("modules-filter-chips");
+    expect(header).toContainElement(chips);
+    expect(screen.getByTestId("modules-list-controls").nextElementSibling).toBe(chips);
+  });
+
+  it("renders no strip when nothing is applied", () => {
+    render(<ModulesListHeader projectName="Website relaunch" layout="list" onLayoutChange={vi.fn()} chips={null} />);
+    expect(screen.getByTestId("modules-list-header").children).toHaveLength(2);
   });
 
   it("keeps the compact switcher on small screens", () => {

@@ -1,11 +1,13 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Modules list header (parity/specs/modules.md §2.1, MOD-001/011). The
-// trail reads the project name and a trailing Modules crumb; the control
-// cluster carries whatever the other slices mount — create, search,
-// ordering and filters — plus this slice's layout switcher. The crumb is
-// never deeper than the list itself: Modules is the current location.
+// Modules list header (parity/specs/modules.md §2.1, §2.7, MOD-001/007/
+// 011). The trail reads the project name and a trailing Modules crumb; the
+// control cluster carries whatever the other slices mount — create, search,
+// ordering and filters — plus this slice's layout switcher, and the
+// applied-chip strip sits directly below it so the narrowing controls stay
+// visible while the strip is showing. The crumb is never deeper than the
+// list itself: Modules is the current location.
 
 import { Breadcrumbs } from "@pidash/kit";
 import * as React from "react";
@@ -28,6 +30,8 @@ export interface ModulesListHeaderProps {
   orderControl?: React.ReactNode;
   /** Filters menu. Slot owner: NEWFRONT-794. */
   filterControl?: React.ReactNode;
+  /** Applied-filter chips; nothing renders while no filter is active. */
+  chips?: React.ReactNode;
 }
 
 export function ModulesListHeader({
@@ -38,6 +42,7 @@ export function ModulesListHeader({
   searchControl,
   orderControl,
   filterControl,
+  chips,
 }: ModulesListHeaderProps): React.ReactElement {
   return (
     <div data-testid="modules-list-header" className="flex flex-col gap-(--space-3)">
@@ -55,6 +60,7 @@ export function ModulesListHeader({
           <ModulesLayoutSwitcher layout={layout} onLayoutChange={onLayoutChange} />
         </div>
       </div>
+      {chips}
     </div>
   );
 }
