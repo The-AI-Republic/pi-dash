@@ -930,7 +930,7 @@ fn decode_body(body: &[u8]) -> (String, PageEncoding) {
 }
 
 /// Stripped `<title>` text (`soup.find("title").get_text().strip()`,
-/// `:144-145`), or `None` when there is no title tag. `<title>` is
+/// `:141-143`), or `None` when there is no title tag. `<title>` is
 /// RCDATA (`html/parser.py:116`): nested markup is literal text while
 /// entities still decode, and the span ends only at `</title` followed
 /// by `[\t\n\r\f />]` (case-insensitive — the `interesting` pattern
@@ -2230,10 +2230,10 @@ mod tests {
             (b"<title>a</title foo=baz>rest".as_slice(), "a"),
             (b"<title>a</title b rest".as_slice(), "a"),
             (b"<title>a</title!>b</title>".as_slice(), "a</title!>b"),
-            (
-                b"<title>a</title\x00>b</title>".as_slice(),
-                "a</title\x00>b",
-            ),
+            // No NUL row: a NUL byte flips UnicodeDammit to UTF-16 (via
+            // charset-normalizer when installed) so Django returns None —
+            // charset sniffing, not RCDATA (PIDASHCONV-1410 review).
+            (b"<title>a</ title>b</title>".as_slice(), "a</ title>b"),
             (b"<title>a</titlefoo>".as_slice(), "a</titlefoo>"),
             (b"<title>a</title".as_slice(), "a</title"),
             (b"<title>abc".as_slice(), "abc"),

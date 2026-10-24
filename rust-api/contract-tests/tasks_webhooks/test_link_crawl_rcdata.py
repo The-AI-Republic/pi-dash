@@ -83,7 +83,9 @@ def test_close_needs_no_bracket():
 
 def test_close_rejects_non_delimiters_and_eof():
     assert django_title(b"<title>a</title!>b</title>") == "a</title!>b"
-    assert django_title(b"<title>a</title\x00>b</title>") == "a</title\x00>b"
+    # No NUL vector: a NUL byte flips UnicodeDammit to UTF-16 (via
+    # charset-normalizer when installed) so Django returns None — a
+    # charset-sniffing quirk, not RCDATA (PIDASHCONV-1410 review).
     assert django_title(b"<title>a</ title>b</title>") == "a</ title>b"
     assert django_title(b"<title>a</title") == "a</title"
 
