@@ -123,6 +123,8 @@ export {
   moduleLinkTitle,
   moduleLinksNeedAuthors,
   moduleSidebarEditable,
+  ModuleProgressSection,
+  ModuleProgressSectionContent,
   resolveModuleLinkAuthor,
   showsModulePoints,
   useModuleLinksWrite,
@@ -133,6 +135,8 @@ export {
   type ModuleLinkUpdate,
   type ModuleLinksSectionProps,
   type ModuleLinksWriteArgs,
+  type ModuleProgressSectionContentProps,
+  type ModuleProgressSectionProps,
 } from "./components/sidebar/index.js";
 export {
   MODULES_LIST_PREFS_STORAGE_KEY,

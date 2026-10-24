@@ -22380,56 +22380,191 @@ export class WebNewDriver implements ParityDriver {
     return todo("modulesDetailSlowFetchShowsLoader");
   }
 
+  /** The module analytics sidebar (slice C's tree, both mounts). */
+  private moduleSidebar(): Locator {
+    return this.page.getByTestId("modules-analytics-sidebar");
+  }
+
+  /** Breakdown rows of the selected tab, in rendered order. */
+  private moduleProgressEntries(): Locator {
+    return this.moduleSidebar()
+      .getByTestId("module-progress-entries")
+      .locator('[data-testid^="module-progress-entry-"]');
+  }
+
+  /** Index of the entry titled exactly `title`, or -1 when absent. */
+  private async moduleProgressEntryIndex(title: string): Promise<number> {
+    const rows = await this.modulesDetailProgressStatsRows();
+    return rows.findIndex((row) => row.title === title);
+  }
+
   async modulesDetailProgressOpen(): Promise<boolean> {
-    return todo("modulesDetailProgressOpen");
+    // The breakdown tabs mount only while the disclosure expands; the
+    // inactive/invalid branch never renders them.
+    const tabs = this.moduleSidebar().getByRole("tab");
+    return (
+      (await tabs.count()) > 0 &&
+      (await tabs
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
 
   async modulesDetailProgressHeaderPercent(): Promise<number | null> {
-    return todo("modulesDetailProgressHeaderPercent");
+    const badge = this.moduleSidebar().getByTestId("module-progress-percent");
+    if ((await badge.count()) === 0) return null;
+    if (
+      !(await badge
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    return Number(((await badge.first().innerText()) ?? "").replace(/\D/g, "") || "0");
   }
 
   async modulesDetailProgressNotice(): Promise<string | null> {
-    return todo("modulesDetailProgressNotice");
+    for (const text of ["This module isn't active yet.", "Invalid date. Please enter valid date."]) {
+      const notice = this.moduleSidebar().getByText(text, { exact: true });
+      if (
+        (await notice.count()) > 0 &&
+        (await notice
+          .first()
+          .isVisible()
+          .catch(() => false))
+      )
+        return text;
+    }
+    return null;
   }
 
   async modulesDetailProgressChartVisible(): Promise<boolean> {
-    return todo("modulesDetailProgressChartVisible");
+    const chart = this.moduleSidebar().getByTestId("module-progress-chart");
+    return (await chart.count()) > 0 && (await chart.isVisible().catch(() => false));
   }
 
   async modulesDetailProgressMeasureValue(): Promise<string | null> {
-    return todo("modulesDetailProgressMeasureValue");
+    const trigger = this.moduleSidebar().getByTestId("module-progress-measure");
+    if ((await trigger.count()) === 0) return null;
+    if (!(await trigger.isVisible().catch(() => false))) return null;
+    return ((await trigger.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailProgressMeasureOptions(): Promise<string[]> {
-    return todo("modulesDetailProgressMeasureOptions");
+    const trigger = this.moduleSidebar().getByTestId("module-progress-measure");
+    if ((await trigger.count()) === 0) return [];
+    await trigger.first().scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await this.page.getByRole("option").allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text !== "");
   }
 
-  async modulesDetailMeasureSwitchGetCount(_label: string): Promise<number> {
-    return todo("modulesDetailMeasureSwitchGetCount");
+  async modulesDetailMeasureSwitchGetCount(label: string): Promise<number> {
+    let gets = 0;
+    const onResponse = (response: { request: () => { method: () => string }; url: () => string }): void => {
+      try {
+        if (response.request().method() !== "GET") return;
+        if (/\/modules\/[0-9a-fA-F-]{36}\/$/.test(new URL(response.url()).pathname)) gets += 1;
+      } catch {
+        // Ignore malformed URLs; the waiter below is the real gate.
+      }
+    };
+    this.page.on("response", onResponse);
+    try {
+      const trigger = this.moduleSidebar().getByTestId("module-progress-measure");
+      await trigger.first().scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+      await trigger.first().click({ timeout: WebNewDriver.WAIT_MS });
+      // If a stale toggle state swallowed the open, the option never
+      // appears: one recovery click re-opens before giving up.
+      const option = this.page.getByRole("option", { name: label }).first();
+      try {
+        await option.waitFor({ state: "visible", timeout: 5_000 });
+      } catch {
+        await trigger.first().click({ timeout: WebNewDriver.WAIT_MS });
+      }
+      await option.click({ timeout: WebNewDriver.WAIT_MS });
+      await expect.poll(() => this.modulesDetailProgressMeasureValue(), { timeout: WebNewDriver.WAIT_MS }).toBe(label);
+      // Let the refetch the switch fires land before counting.
+      await this.page.waitForTimeout(3_000);
+      return gets;
+    } finally {
+      this.page.off("response", onResponse);
+    }
   }
 
-  async modulesDetailProgressStatsTab(_tab: "States" | "Assignees" | "Labels"): Promise<void> {
-    return todo("modulesDetailProgressStatsTab");
+  async modulesDetailProgressStatsTab(tab: "States" | "Assignees" | "Labels"): Promise<void> {
+    const trigger = this.moduleSidebar().getByRole("tab", { name: tab });
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => trigger.getAttribute("aria-selected"), { timeout: WebNewDriver.WAIT_MS }).toBe("true");
   }
 
   async modulesDetailActiveStatsTab(): Promise<string> {
-    return todo("modulesDetailActiveStatsTab");
+    const selected = this.moduleSidebar().locator("[role='tab'][aria-selected='true']").first();
+    await selected.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await selected.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailProgressStatsRows(): Promise<ModulesDetailStatRow[]> {
-    return todo("modulesDetailProgressStatsRows");
+    const rows = this.moduleProgressEntries();
+    const total = await rows.count();
+    const out: ModulesDetailStatRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await rows
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      const match = /^([\s\S]*?) (\d+)% of (\d+)$/.exec(text);
+      if (match === null || match[1] === undefined || match[1].trim() === "") continue;
+      out.push({ title: match[1].trim(), percent: Number(match[2]), total: Number(match[3]) });
+    }
+    return out;
   }
 
-  async modulesDetailProgressEntryClick(_title: string): Promise<void> {
-    return todo("modulesDetailProgressEntryClick");
+  async modulesDetailProgressEntryClick(title: string): Promise<void> {
+    const index = await this.moduleProgressEntryIndex(title);
+    if (index === -1) throw new Error(`[parity] unknown module progress entry: ${title}`);
+    const entry = this.moduleProgressEntries().nth(index);
+    await entry.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDetailProgressEntryClickable(_title: string): Promise<boolean> {
-    return todo("modulesDetailProgressEntryClickable");
+  async modulesDetailProgressEntryClickable(title: string): Promise<boolean> {
+    // Interactive entries render as buttons carrying aria-pressed; inert
+    // rows (peek mounts, guests, the unassigned row) render plain divs.
+    const index = await this.moduleProgressEntryIndex(title);
+    if (index === -1) return false;
+    return (
+      (await this.moduleProgressEntries()
+        .nth(index)
+        .getAttribute("aria-pressed")
+        .catch(() => null)) !== null
+    );
   }
 
-  async modulesDetailProgressEntrySelected(_title: string): Promise<boolean> {
-    return todo("modulesDetailProgressEntrySelected");
+  async modulesDetailProgressEntrySelected(title: string): Promise<boolean> {
+    const index = await this.moduleProgressEntryIndex(title);
+    if (index === -1) return false;
+    return (
+      (await this.moduleProgressEntries()
+        .nth(index)
+        .getAttribute("aria-pressed")
+        .catch(() => null)) === "true"
+    );
+  }
+
+  async modulesXAnalyticsSidebarVisible(): Promise<boolean> {
+    // The cross-cutting desktop/edition legs only need the sidebar
+    // present on the detail page (MOD-042, MOD-043).
+    const sidebar = this.moduleSidebar();
+    return (await sidebar.count()) > 0 && (await sidebar.isVisible().catch(() => false));
   }
 
   /** The sidebar's links section; mounted once the sidebar renders. */
