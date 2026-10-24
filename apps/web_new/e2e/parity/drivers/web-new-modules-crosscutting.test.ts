@@ -375,31 +375,9 @@ describe("the layout and analytics reads", () => {
     expect(await new WebNewDriver(fake.asPage()).modulesXBoardNames()).toEqual(["Row"]);
   });
 
-  it("reads the analytics sidebar and the links section", async () => {
-    const fake = new FakePage({
-      "page testid(modules-analytics-sidebar)": { count: 1, visible: true },
-      "page testid(modules-links-section)": { count: 1, visible: true },
-    });
-    const driver = new WebNewDriver(fake.asPage());
-    expect(await driver.modulesXAnalyticsSidebarVisible()).toBe(true);
-    expect(await driver.modulesXLinksSectionVisible()).toBe(true);
-  });
-
-  it("reads the links disclosure when the section hook is absent", async () => {
-    const fake = new FakePage({
-      "page testid(modules-links-section)": { count: 0 },
-      "page testid(modules-analytics-sidebar)": { count: 1, visible: true },
-      "page testid(modules-analytics-sidebar) role(button,/^links\\b/i)": { count: 1, visible: true },
-    });
-    expect(await new WebNewDriver(fake.asPage()).modulesXLinksSectionVisible()).toBe(true);
-  });
-
-  it("reads no links section without a sidebar", async () => {
-    const fake = new FakePage({
-      "page testid(modules-links-section)": { count: 0 },
-      "page testid(modules-analytics-sidebar)": { count: 0 },
-    });
-    expect(await new WebNewDriver(fake.asPage()).modulesXLinksSectionVisible()).toBe(false);
+  it("reads the analytics sidebar on its own", async () => {
+    const fake = new FakePage({ "page testid(modules-analytics-sidebar)": { count: 1, visible: true } });
+    expect(await new WebNewDriver(fake.asPage()).modulesXAnalyticsSidebarVisible()).toBe(true);
   });
 });
 

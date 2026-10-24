@@ -18601,14 +18601,6 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.getByTestId("modules-analytics-sidebar"));
   }
 
-  async modulesXLinksSectionVisible(): Promise<boolean> {
-    if (await this.isShown(this.page.getByTestId("modules-links-section"))) return true;
-    // The section's own disclosure carries the word; the sidebar scopes it.
-    const sidebar = this.page.getByTestId("modules-analytics-sidebar");
-    if ((await sidebar.count()) === 0) return false;
-    return this.isShown(sidebar.first().getByRole("button", { name: /^links\b/i }));
-  }
-
   async modulesXEditionGateMarkersPresent(scope: "list" | "detail"): Promise<boolean> {
     void scope;
     // Upgrade, plan and desktop-shell offers are the markers a build-gated
