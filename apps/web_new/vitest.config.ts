@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 import { FULL_RUN_TEST_TIMEOUT_MS } from "./src/testing/testBudget";
-import { FULL_RUN_COVERAGE_PROCESSING_CONCURRENCY } from "./src/testing/testRunConcurrency";
 import { resolveEditionModule } from "./tools/edition-module.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -120,7 +119,6 @@ export default defineConfig({
       reporter: ["text-summary", "json-summary", "lcov"],
       reportsDirectory: "coverage",
       include: ["src/**"],
-      processingConcurrency: FULL_RUN_COVERAGE_PROCESSING_CONCURRENCY,
     },
   },
 });
