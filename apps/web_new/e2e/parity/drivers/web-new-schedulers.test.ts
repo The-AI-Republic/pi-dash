@@ -1359,10 +1359,8 @@ describe("scheduler catalog", () => {
   it("reads row name, handle, origin, installs, status and update", async () => {
     const name = fake({ text: "Weekly report" });
     const handle = fake({ text: "weekly-report" });
-    const first = fake({
-      locate: (selector: string) =>
-        selector === "p" ? fake({ items: [name] }) : selector === "code" ? handle : absent(),
-    });
+    const paragraphs = fake({ items: [name, handle], nth: (index: number) => [name, handle][index] ?? absent() });
+    const first = fake({ locate: (selector: string) => (selector === "p" ? paragraphs : absent()) });
     const cells = [
       first,
       fake({ text: "Built in" }),
@@ -1370,24 +1368,51 @@ describe("scheduler catalog", () => {
       fake({ text: "Enabled" }),
       fake({ text: "Oct 2, 2026" }),
     ];
-    const dataRow = fake({
-      locate: (selector: string) =>
-        selector === "td[colspan]" ? absent() : selector === "td" ? fake({ items: cells }) : absent(),
+    const dataRow = fake({ locate: (selector: string) => (selector === "td" ? fake({ items: cells }) : absent()) });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="scheduler-row"]' ? fake({ items: [dataRow] }) : absent(),
     });
-    const emptyRow = fake({
-      locate: (selector: string) => (selector === "td[colspan]" ? fake({ count: 1 }) : absent()),
-    });
-    const page = pageOf({ locator: () => fake({ items: [dataRow, emptyRow] }) });
     await expect(new WebNewDriver(page).schedulerCatalogRows()).resolves.toEqual([
       {
         name: "Weekly report",
         handle: "weekly-report",
-        origin: "Built in",
+        origin: "Built-in",
         installs: "2",
         status: "Enabled",
         updated: "Oct 2, 2026",
       },
     ]);
+  });
+
+  it("keeps manifest origin and an empty catalog off the built-in bridge", async () => {
+    const manifestRow = fake({
+      locate: (selector: string) =>
+        selector === "td"
+          ? fake({
+              items: [
+                fake({
+                  locate: (selector: string) =>
+                    selector === "p"
+                      ? fake({ items: [fake({ text: "Imported" }), fake({ text: "imported" })] })
+                      : absent(),
+                }),
+                fake({ text: "Manifest" }),
+              ],
+            })
+          : absent(),
+    });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="scheduler-row"]' ? fake({ items: [manifestRow] }) : absent(),
+    });
+    await expect(new WebNewDriver(page).schedulerCatalogRows()).resolves.toEqual([
+      { name: "Imported", handle: "imported", origin: "Manifest", installs: "", status: "", updated: "" },
+    ]);
+    const empty = pageOf({
+      locator: (selector: string) => (selector === '[data-testid="scheduler-row"]' ? fake({ items: [] }) : absent()),
+    });
+    await expect(new WebNewDriver(empty).schedulerCatalogRows()).resolves.toEqual([]);
   });
 
   it("reports empty, title and create visibility", async () => {
@@ -1408,12 +1433,22 @@ describe("scheduler catalog", () => {
       locate: (selector: string) =>
         selector === "td" ? fake({ last: () => fake({ role: () => actions }) }) : absent(),
     });
-    const page = pageOf({ locator: () => fake({ filter: () => row }) });
+    const rows = vi.fn((selector: string) =>
+      selector === '[data-testid="scheduler-row"]'
+        ? fake({ filter: () => row })
+        : selector === "td:first-child p:nth-of-type(2)"
+          ? fake({ hasText: /^weekly-report$/ })
+          : absent()
+    );
+    const page = pageOf({ locator: rows });
     await expect(new WebNewDriver(page).schedulerRowActions("weekly-report")).resolves.toEqual([
       "Install",
       "Edit",
       "Delete",
     ]);
+    expect(rows).toHaveBeenCalledWith('[data-testid="scheduler-row"]');
+    expect(rows).toHaveBeenCalledWith("td:first-child p:nth-of-type(2)", { hasText: /^weekly-report$/ });
+    expect(rows).not.toHaveBeenCalledWith("code", expect.anything());
   });
 });
 
@@ -1500,6 +1535,21 @@ describe("scheduler definition dialog", () => {
     await expect(driver.schedulerDefinitionErrors()).resolves.toEqual(["Slug is required."]);
   });
 
+  it("maps the definition handle rule to the oracle wording and leaves other errors alone", async () => {
+    const errors = fake({
+      items: [
+        fake({ text: "Use lowercase letters, numbers, and single dashes.", visible: true }),
+        fake({ text: "Enter the base prompt.", visible: true }),
+      ],
+    });
+    const dialog = fake({ locate: (selector: string) => (selector === '[role="alert"]' ? errors : absent()) });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerDefinitionErrors()).resolves.toEqual([
+      "Use lowercase letters, numbers, and dashes only.",
+      "Enter the base prompt.",
+    ]);
+  });
+
   it("closes the definition dialog through Cancel", async () => {
     const cancel = fake({ click: vi.fn(async () => undefined) });
     const handle = fake({ count: 1, waitFor: vi.fn(async () => undefined) });
@@ -1531,7 +1581,7 @@ describe("scheduler edit and delete", () => {
     const cancel = fake({ click: vi.fn(async () => undefined) });
     const confirm = fake({ click: vi.fn(async () => undefined) });
     const dialog = fake({
-      text: "Delete scheduler Weekly report stops firing. The handle weekly-report becomes available for re-creation.",
+      text: "Delete scheduler Deleting Weekly report stops its project installs from firing. The handle weekly-report becomes available again.",
       role: (role: string, options?: Record<string, unknown>) =>
         role === "button" && options?.["name"] === "Cancel"
           ? cancel
@@ -1543,7 +1593,9 @@ describe("scheduler edit and delete", () => {
     });
     const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
     const driver = new WebNewDriver(page);
-    await expect(driver.schedulerDeleteDialogText()).resolves.toContain("available for re-creation");
+    const text = await driver.schedulerDeleteDialogText();
+    expect(text).toContain("will stop firing");
+    expect(text).toContain("available for re-creation");
     await driver.schedulerConfirmDelete();
     expect(confirm.click).toHaveBeenCalled();
     await driver.schedulerCancelDelete();
@@ -1556,6 +1608,58 @@ describe("scheduler edit and delete", () => {
     });
     const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
     await expect(new WebNewDriver(page).schedulerDeleteOpen()).resolves.toBe(true);
+  });
+
+  it("leaves delete copy that already uses the oracle vocabulary untouched", async () => {
+    const dialog = fake({ text: "Any active project bindings will stop firing." });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerDeleteDialogText()).resolves.toBe(
+      "Any active project bindings will stop firing."
+    );
+  });
+});
+
+describe("scheduler notices", () => {
+  function toastPage(title: string, message: string): Page {
+    const card = fake({ text: `${title}\n${message}`, visible: true });
+    return pageOf({ locator: () => fake({ items: [card] }) });
+  }
+
+  it("maps scheduler failure titles to the shared error notice", async () => {
+    for (const title of ["Could not create scheduler", "Could not update scheduler", "Could not delete scheduler"]) {
+      await expect(new WebNewDriver(toastPage(title, "Server detail")).rulesLastToast()).resolves.toEqual({
+        title: "Something went wrong",
+        message: "Server detail",
+      });
+    }
+  });
+
+  it("maps update and delete success messages while leaving other notices alone", async () => {
+    await expect(new WebNewDriver(toastPage("Scheduler updated", "")).rulesLastToast()).resolves.toEqual({
+      title: "Scheduler updated",
+      message: "Subsequent runs will use the updated definition.",
+    });
+    await expect(
+      new WebNewDriver(toastPage("Scheduler deleted", "Its handle can now be used again.")).rulesLastToast()
+    ).resolves.toEqual({ title: "Scheduler deleted", message: "Active bindings have stopped firing." });
+    await expect(
+      new WebNewDriver(toastPage("Scheduler created", "Ready to install.")).rulesLastToast()
+    ).resolves.toEqual({
+      title: "Scheduler created",
+      message: "Ready to install.",
+    });
+    await expect(
+      new WebNewDriver(toastPage("Scheduler updated", "Already has updated definition.")).rulesLastToast()
+    ).resolves.toEqual({
+      title: "Scheduler updated",
+      message: "Already has updated definition.",
+    });
+    await expect(
+      new WebNewDriver(toastPage("Scheduler deleted", "Install has stopped firing.")).rulesLastToast()
+    ).resolves.toEqual({
+      title: "Scheduler deleted",
+      message: "Install has stopped firing.",
+    });
   });
 });
 

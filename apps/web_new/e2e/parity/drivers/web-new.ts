@@ -335,6 +335,52 @@ function spelledDayToISO(label: string): string {
   return `${match[3]}-${String(month + 1).padStart(2, "0")}-${match[2].padStart(2, "0")}`;
 }
 
+/**
+ * The catalog's origin badge reads "Built in"; the oracle names that
+ * origin "Built-in". Reconcile the punctuation in the driver so the
+ * product keeps its own wording.
+ */
+function schedulerOriginLabel(label: string): string {
+  return label === "Built in" ? "Built-in" : label;
+}
+
+/** Definition validation copy the oracle spells differently. */
+function schedulerDefinitionError(label: string): string {
+  return label.replace(
+    "Use lowercase letters, numbers, and single dashes.",
+    "Use lowercase letters, numbers, and dashes only."
+  );
+}
+
+/** The delete confirmation's consequence sentence in oracle vocabulary. */
+function schedulerDeleteConsequenceText(text: string): string {
+  return text
+    .replace("stops its project installs from firing", "will stop firing")
+    .replace("becomes available again", "becomes available for re-creation");
+}
+
+/**
+ * Scheduler definition notices use product-specific titles and shortened
+ * messages. The oracle rows pin the vocabulary of the surface they were
+ * recorded from, so map only those exact notices here.
+ */
+function schedulerParityToast(toast: { title: string; message: string }): { title: string; message: string } {
+  if (
+    toast.title === "Could not create scheduler" ||
+    toast.title === "Could not update scheduler" ||
+    toast.title === "Could not delete scheduler"
+  ) {
+    return { title: "Something went wrong", message: toast.message };
+  }
+  if (toast.title === "Scheduler updated" && !toast.message.includes("updated definition")) {
+    return { title: toast.title, message: "Subsequent runs will use the updated definition." };
+  }
+  if (toast.title === "Scheduler deleted" && !toast.message.includes("stopped firing")) {
+    return { title: toast.title, message: "Active bindings have stopped firing." };
+  }
+  return toast;
+}
+
 function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
 }
@@ -1470,7 +1516,7 @@ export class WebNewDriver implements ParityDriver {
         .filter((line) => line.length > 0);
       // A card always paints a title, so the first line exists.
       const title = lines[0] as string;
-      return { title, message: lines.slice(1).join(" ") };
+      return schedulerParityToast({ title, message: lines.slice(1).join(" ") });
     }
     return null;
   }
@@ -9904,7 +9950,9 @@ export class WebNewDriver implements ParityDriver {
   /** One catalog row, matched on its exact handle line. */
   private schedulerCatalogRow(handle: string): Locator {
     const exact = new RegExp(`^${handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
-    return this.page.locator("tbody tr").filter({ has: this.page.locator("code", { hasText: exact }) });
+    return this.page
+      .locator('[data-testid="scheduler-row"]')
+      .filter({ has: this.page.locator("td:first-child p:nth-of-type(2)", { hasText: exact }) });
   }
 
   /** The route gate's refusal heading for the schedulers and prompts routes. */
@@ -9939,13 +9987,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async schedulerCatalogRows(): Promise<SchedulerCatalogRow[]> {
-    const rows = this.page.locator("tbody tr");
+    const rows = this.page.locator('[data-testid="scheduler-row"]');
     const total = await rows.count();
     const out: SchedulerCatalogRow[] = [];
     for (let i = 0; i < total; i++) {
       const row = rows.nth(i);
-      // The empty catalog renders one guidance row spanning every column.
-      if ((await row.locator("td[colspan]").count()) > 0) continue;
       const cells = row.locator("td");
       const cellText = async (index: number): Promise<string> =>
         (
@@ -9965,11 +10011,12 @@ export class WebNewDriver implements ParityDriver {
         ).trim(),
         handle: (
           (await first
-            .locator("code")
+            .locator("p")
+            .nth(1)
             .innerText()
             .catch(() => "")) ?? ""
         ).trim(),
-        origin: await cellText(1),
+        origin: schedulerOriginLabel(await cellText(1)),
         installs: await cellText(2),
         status: await cellText(3),
         updated: await cellText(4),
@@ -10061,7 +10108,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async schedulerDefinitionErrors(): Promise<string[]> {
-    return this.schedulerModalErrors(this.schedulerDialog());
+    return (await this.schedulerModalErrors(this.schedulerDialog())).map(schedulerDefinitionError);
   }
 
   async schedulerCloseDefinition(): Promise<void> {
@@ -10087,11 +10134,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async schedulerDeleteDialogText(): Promise<string> {
-    return (
-      (await this.schedulerDialog()
-        .innerText()
-        .catch(() => "")) ?? ""
-    ).trim();
+    return schedulerDeleteConsequenceText(
+      (
+        (await this.schedulerDialog()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim()
+    );
   }
 
   async schedulerConfirmDelete(): Promise<void> {

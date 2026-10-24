@@ -32,7 +32,7 @@ export function SchedulerDeleteDialog({
       description={
         scheduler === null
           ? ""
-          : `Deleting ${scheduler.name} stops its project installs from firing. The handle ${scheduler.slug} becomes available for re-creation.`
+          : `Deleting ${scheduler.name} stops its project installs from firing. The handle ${scheduler.slug} becomes available again.`
       }
       actions={
         scheduler === null ? null : (
