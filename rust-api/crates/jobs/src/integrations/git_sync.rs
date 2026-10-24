@@ -1856,7 +1856,6 @@ async fn update_issue_sync(
         .bind(*issue_id)
         .bind(scan.provider.clone())
         .bind(remote.external_id.clone())
-        .bind(remote.external_iid.clone())
         .bind(remote.web_url.clone())
         .bind(remote.state.clone())
         .bind(
@@ -3310,5 +3309,229 @@ mod tests {
             route_for(&registry, "pi_dash.bgtasks.github_sync_task.sync_one_repo"),
             Route::Unknown
         );
+    }
+}
+
+/// Live scratch-DB proof that a re-sync updates the mirror issue and its
+/// sync row (PIDASHCONV-1469), env-gated like the `handlers_project` live
+/// tests: without `DATABASE_URL` these skip. `upsert_issue` runs twice with
+/// the same `external_iid` and a changed title — the first call takes the
+/// INSERT arm, the second the UPDATE arm (`update_issue_sync`), mirroring
+/// the Django `_upsert_issue` control (same iid, changed title, then
+/// `issues.name` plus the sync row's `web_url`/`remote_state` are
+/// re-read). Pre-fix the second call fails: it bound 15 values for the 14
+/// placeholders of `UPDATE_ISSUE_SYNC_SQL` (the stray `external_iid` bind,
+/// which Django keeps lookup-only in `update_or_create`).
+#[cfg(test)]
+mod live_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// Seed user → workspace → project → provider account → repository →
+    /// binding. Column lists mirror the contract-suite factories
+    /// (`_harness/seed.py`, `integrations/seed.py`); every unique column
+    /// carries a random tag so reruns never collide. Returns the scan
+    /// closure plus the repository row id (the one seed id the scan does
+    /// not carry) for teardown.
+    async fn seed_binding(pool: &sqlx::PgPool) -> (BindingScan, Uuid) {
+        let tag: String = Uuid::new_v4().simple().to_string()[..10].to_owned();
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, password, email, username, display_name, first_name, last_name, avatar, date_joined, created_at, updated_at, last_location, created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, is_password_reset_required, token, last_active, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, is_bot, user_timezone, is_email_valid) VALUES ($1, 'pbkdf2_sha256$600000$salt$hash', $2, $3, '', '', '', '', now(), now(), now(), '', '', false, false, false, true, false, false, false, false, '', now(), '', '', 'email', '', false, 'UTC', true)",
+        )
+        .bind(user_id)
+        .bind(format!("rs1469-{tag}@example.com"))
+        .bind(format!("rs1469_{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed user");
+        let workspace_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, owner_id, slug, timezone, background_color, created_at, updated_at) VALUES ($1, $2, $3, $4, 'UTC', '#ffffff', now(), now())",
+        )
+        .bind(workspace_id)
+        .bind(format!("RS1469 {tag}"))
+        .bind(user_id)
+        .bind(format!("rs1469-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        let project_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, network, workspace_id, identifier, module_view, cycle_view, issue_views_view, page_view, intake_view, is_time_tracking_enabled, is_issue_type_enabled, is_default, guest_view_all_features, members_can_edit_states, archive_in, close_in, logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, agent_review_default_interval_seconds, agent_test_default_interval_seconds, agent_ticking_enabled, default_agent_executor, created_at, updated_at) VALUES ($1, $2, '', 2, $3, $4, false, false, false, true, false, false, false, false, false, true, 0, 0, '{}', 'UTC', '', 'main', 10800, 10, 10800, 10800, true, 'local_runner', now(), now())",
+        )
+        .bind(project_id)
+        .bind(format!("RS1469 {tag}"))
+        .bind(workspace_id)
+        .bind(format!("RS{}", tag.to_uppercase()))
+        .execute(pool)
+        .await
+        .expect("seed project");
+        let account_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO git_provider_accounts (id, created_at, updated_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, status, last_check_error, metadata) VALUES ($1, now(), now(), $2, 'github', 'https://github.com', 'pat', 'rs-1', 'rs-bot', 'rs account', $3, $4, 'connected', '', $5)",
+        )
+        .bind(account_id)
+        .bind(workspace_id)
+        .bind(json!({}))
+        .bind(json!({"auth_type": "pat", "host_url": "https://github.com", "token": "x"}))
+        .bind(json!({}))
+        .execute(pool)
+        .await
+        .expect("seed provider account");
+        let repo_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO git_repositories (id, created_at, updated_at, provider, host_url, external_id, namespace, name, full_name, web_url, clone_url_http, clone_url_ssh, default_branch, is_private, metadata) VALUES ($1, now(), now(), 'github', 'https://github.com', $2, 'rs-ct', $3, $4, $5, '', '', 'main', false, $6)",
+        )
+        .bind(repo_id)
+        .bind(format!("rs-repo-{tag}"))
+        .bind(format!("rs{tag}"))
+        .bind(format!("rs-ct/rs{tag}"))
+        .bind(format!("https://github.com/rs-ct/rs{tag}"))
+        .bind(json!({}))
+        .execute(pool)
+        .await
+        .expect("seed repository");
+        let binding_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO git_repository_bindings (id, created_at, updated_at, repository_id, provider_account_id, actor_id, workspace_id, project_id, is_sync_enabled, clone_auth_mode, last_sync_error, metadata) VALUES ($1, now(), now(), $2, $3, $4, $5, $6, true, 'runner_managed', '', $7)",
+        )
+        .bind(binding_id)
+        .bind(repo_id)
+        .bind(account_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(json!({}))
+        .execute(pool)
+        .await
+        .expect("seed binding");
+        let scan = BindingScan {
+            binding_id,
+            project_id,
+            workspace_id,
+            actor_id: user_id,
+            account_id,
+            provider: "github".to_owned(),
+            repository: RemoteRepository {
+                provider: "github".to_owned(),
+                external_id: format!("rs-repo-{tag}"),
+                namespace: "rs-ct".to_owned(),
+                name: format!("rs{tag}"),
+                full_name: format!("rs-ct/rs{tag}"),
+                web_url: format!("https://github.com/rs-ct/rs{tag}"),
+                clone_url_http: String::new(),
+                clone_url_ssh: String::new(),
+                default_branch: "main".to_owned(),
+                is_private: false,
+                metadata: json!({}),
+            },
+            credential: json!({"auth_type": "pat", "host_url": "https://github.com", "token": "x"}),
+        };
+        (scan, repo_id)
+    }
+
+    fn remote_issue(title: &str, web_url: &str, state: &str) -> RemoteIssue {
+        RemoteIssue {
+            external_id: "rs-ext-1".to_owned(),
+            external_iid: "4242".to_owned(),
+            title: title.to_owned(),
+            body: "hello".to_owned(),
+            state: state.to_owned(),
+            author: "alice".to_owned(),
+            web_url: web_url.to_owned(),
+            created_at: Some("2026-01-02T03:04:05Z".to_owned()),
+            updated_at: Some("2026-01-03T04:05:06Z".to_owned()),
+            metadata: json!({}),
+        }
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, scan: &BindingScan, repo_id: Uuid, issue_id: Uuid) {
+        for (sql, id) in [
+            ("DELETE FROM git_issue_syncs WHERE issue_id = $1", issue_id),
+            ("DELETE FROM issue_sequences WHERE issue_id = $1", issue_id),
+            ("DELETE FROM issues WHERE id = $1", issue_id),
+            (
+                "DELETE FROM git_repository_bindings WHERE id = $1",
+                scan.binding_id,
+            ),
+            ("DELETE FROM git_repositories WHERE id = $1", repo_id),
+            (
+                "DELETE FROM git_provider_accounts WHERE id = $1",
+                scan.account_id,
+            ),
+            ("DELETE FROM projects WHERE id = $1", scan.project_id),
+            ("DELETE FROM workspaces WHERE id = $1", scan.workspace_id),
+            ("DELETE FROM users WHERE id = $1", scan.actor_id),
+        ] {
+            sqlx::query(sql)
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("teardown delete");
+        }
+    }
+
+    #[tokio::test]
+    async fn resync_updates_mirror_issue_and_sync_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let (scan, repo_id) = seed_binding(&pool).await;
+        let first = remote_issue(
+            "First title",
+            "https://github.com/rs-ct/x/issues/4242",
+            "open",
+        );
+        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &first, &Utc::now())
+            .await
+            .expect("first scan inserts the mirror issue");
+        let second = remote_issue(
+            "Second title",
+            "https://github.com/rs-ct/x/issues/4242-moved",
+            "closed",
+        );
+        let (issue_id2, sync_id2) = upsert_issue(&pool, &scan, &second, &Utc::now())
+            .await
+            .expect("second scan updates the mirror issue");
+        assert_eq!(issue_id2, issue_id, "re-sync reuses the mirror issue");
+        assert_eq!(sync_id2, sync_id, "re-sync reuses the sync row");
+        let name: String = sqlx::query_scalar("SELECT name FROM issues WHERE id = $1")
+            .bind(issue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back issues.name");
+        assert_eq!(name, "[github_4242] Second title");
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT web_url, remote_state, external_iid FROM git_issue_syncs WHERE id = $1",
+        )
+        .bind(sync_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the sync row");
+        assert_eq!(row.0, "https://github.com/rs-ct/x/issues/4242-moved");
+        assert_eq!(row.1, "closed");
+        assert_eq!(
+            row.2, "4242",
+            "external_iid stays the lookup key, never rewritten"
+        );
+        cleanup(&pool, &scan, repo_id, issue_id).await;
     }
 }
