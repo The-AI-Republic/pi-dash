@@ -319,6 +319,7 @@ export function IntakeScreen({
               issueId={selectedId}
               projectIdentifier={project.data.identifier}
               projectName={project.data.name}
+              published={project.data.anchor != null}
               role={roles.data?.[projectId] ?? null}
               onPrev={stepPrev}
               onNext={stepNext}

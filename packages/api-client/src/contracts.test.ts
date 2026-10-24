@@ -1155,6 +1155,21 @@ describe("project contracts", () => {
     expect(parsed.default_agent_executor).toBe("local_runner");
   });
 
+  it("carries the publication anchor from the full project row", async () => {
+    const { intake_count: _listOnly, ...detail } = project;
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        ...detail,
+        anchor: "public-board",
+        agent_executor_options: [],
+        default_agent_executor: "local_runner",
+      }),
+    });
+    const parsed = await getProject(client, "acme", UUID);
+    expect(parsed.anchor).toBe("public-board");
+  });
+
   it("parses a project row that predates the timezone field", async () => {
     const { intake_count: _listOnly, ...detail } = project;
     const client = createClient({
