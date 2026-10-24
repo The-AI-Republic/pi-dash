@@ -55,6 +55,12 @@ export function moduleViewEnabled(flag: unknown): boolean {
   return flag === true;
 }
 
+/** The project's short identifier, or an empty string when unreadable. */
+export function moduleProjectIdentifier(facts: ModuleProjectFacts | undefined): string {
+  const identifier = facts?.identifier;
+  return typeof identifier === "string" ? identifier : "";
+}
+
 /** The project's zone, or null when the record carries no usable name. */
 export function moduleProjectTimeZone(facts: ModuleProjectFacts | undefined): string | null {
   const zone = facts?.timezone;
