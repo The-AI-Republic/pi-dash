@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 import { FULL_RUN_TEST_TIMEOUT_MS } from "./src/testing/testBudget";
+import { FULL_RUN_COVERAGE_PROCESSING_CONCURRENCY, FULL_RUN_MAX_WORKERS } from "./src/testing/testRunConcurrency";
 import { resolveEditionModule } from "./tools/edition-module.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -30,6 +31,12 @@ export default defineConfig({
     // `// @vitest-environment jsdom` pragma on their first line.
     environment: "node",
     setupFiles: ["./src/test-setup.ts"],
+    // Fork workers and keep the pool small: the reporter RPC runs in the main
+    // process and times out at 60s when a large run saturates it. See
+    // src/testing/testRunConcurrency.ts.
+    pool: "forks",
+    minWorkers: 1,
+    maxWorkers: FULL_RUN_MAX_WORKERS,
     // A full run is ~7 000 tests; on a busy host the tail of the per-test
     // distribution is queueing time, not test work (measured p99.9 8.4 s at
     // load 163). Keep the ceiling above that tail but below a minute so a
@@ -119,6 +126,7 @@ export default defineConfig({
       reporter: ["text-summary", "json-summary", "lcov"],
       reportsDirectory: "coverage",
       include: ["src/**"],
+      processingConcurrency: FULL_RUN_COVERAGE_PROCESSING_CONCURRENCY,
     },
   },
 });
