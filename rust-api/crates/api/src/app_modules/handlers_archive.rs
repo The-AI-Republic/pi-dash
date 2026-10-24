@@ -526,24 +526,26 @@ async fn fetch_archive_label_estimate(
     let total = queries::estimate_sum_sql(None);
     let completed = queries::estimate_sum_sql(Some(true));
     let pending = queries::estimate_sum_sql(Some(false));
-    // Same joins, aliases, grouping and ordering as the main label
-    // estimate query — only the `module_issues.deleted_at IS NULL`
-    // predicate is gone (the `:386-391` ported bug).
+    // Same joins, grouping and ordering as the main label estimate
+    // query — only the `module_issues.deleted_at IS NULL` predicate is
+    // gone (the `:386-391` ported bug). The `issues` table stays
+    // unaliased: the shared guard/sum fragments reference its bare name,
+    // and Postgres hides the original name once a table is aliased.
     let sql = format!(
         "SELECT row_to_json(__r)::text AS __row FROM (
            SELECT labels.name AS label_name, labels.color AS color,
                   labels.id AS label_id, {total} AS total_estimates,
                   {completed} AS completed_estimates, {pending} AS pending_estimates
-           FROM issues i JOIN projects ON projects.id = i.project_id
-           JOIN workspaces ON workspaces.id = i.workspace_id
-           LEFT OUTER JOIN states ON states.id = i.state_id
-           JOIN module_issues ON module_issues.issue_id = i.id
-           LEFT JOIN estimate_points ON estimate_points.id = i.estimate_point_id
-           LEFT JOIN issue_labels ON issue_labels.issue_id = i.id
+           FROM issues JOIN projects ON projects.id = issues.project_id
+           JOIN workspaces ON workspaces.id = issues.workspace_id
+           LEFT OUTER JOIN states ON states.id = issues.state_id
+           JOIN module_issues ON module_issues.issue_id = issues.id
+           LEFT JOIN estimate_points ON estimate_points.id = issues.estimate_point_id
+           LEFT JOIN issue_labels ON issue_labels.issue_id = issues.id
            AND issue_labels.deleted_at IS NULL
            LEFT JOIN labels ON labels.id = issue_labels.label_id
            AND labels.deleted_at IS NULL
-           WHERE {} AND workspaces.slug = $1 AND i.project_id = $2
+           WHERE {} AND workspaces.slug = $1 AND issues.project_id = $2
            AND module_issues.module_id = $3
            GROUP BY labels.name, labels.color, labels.id
            ORDER BY labels.name) AS __r",

@@ -165,6 +165,31 @@ def test_comment_detail_patch_delete(api, world):
     assert api.delete(sub_url(world, issue_id, "comments", comment_id)).status_code == 204
 
 
+def test_comment_labels_max_eight(api, world):
+    """`labels` honors the `ArrayField(size=8)` cap (PIDASHCONV-1383): 9
+    labels → 400 with Django's exact `ArrayMaxLengthValidator` body on both
+    POST and PATCH, the stored row unchanged; 8 labels → 201."""
+    issue_id = world["issue"]["id"]
+    url = sub_url(world, issue_id, "comments")
+    labels9 = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+    expected = {"labels": ["List contains 9 items, it should contain no more than 8."]}
+    rejected = api.post(url, json={"comment_html": "<p>x</p>", "labels": labels9})
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json() == expected
+    assert api.get(url).json()["total_results"] == 0
+    comment_id = api.post(url, json={"comment_html": "<p>v1</p>"}).json()["id"]
+    detail = sub_url(world, issue_id, "comments", comment_id)
+    patched = api.patch(detail, json={"labels": labels9})
+    assert patched.status_code == 400, patched.text
+    assert patched.json() == expected
+    assert api.get(detail).json()["labels"] == []
+    created = api.post(
+        url, json={"comment_html": "<p>z</p>", "labels": labels9[:8]}
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["labels"] == labels9[:8]
+
+
 def test_activity_list_shape(api, world, seeder):
     issue_id = world["issue"]["id"]
     seeder.create_issue_activity(

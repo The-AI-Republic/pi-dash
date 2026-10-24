@@ -822,16 +822,18 @@ pub fn me_activities_from_where() -> String {
 pub const ACTIVITY_GRAPH_MONTHS: u32 = 6;
 
 /// R6 activity graph (`user.py:524-538`): per-day activity counts for the
-/// caller. Port the `__date` asymmetry EXACTLY (verified with
-/// `str(qs.query)` on the pinned Django 4.2.30, `USE_TZ=True`,
-/// `TIME_ZONE="UTC"`): the FILTER converts —
-/// `("issue_activities"."created_at" AT TIME ZONE 'UTC')::date >= ...` —
+/// caller. Port the `__date` asymmetry EXACTLY: the FILTER converts in
+/// the requesting user's zone —
+/// `("issue_activities"."created_at" AT TIME ZONE $4)::date >= ...`
+/// (`created_at__date__gte` compiles to `TruncDate`, whose `get_tzname()`
+/// is the active zone — `TimezoneMixin` activates
+/// `request.user.user_timezone` per request, `app/views/base.py:35-46`) —
 /// while the `Cast("created_at", DateField())` annotation does NOT
-/// (`("issue_activities"."created_at")::date`). The cutoff is server-local
-/// `date.today() - 6 months` (NOT UTC — Django's `date.today()` uses the
-/// system zone; the handler computes it via [`months_ago`] from the local
-/// date and binds it).
-/// Params: `$1` user, `$2` slug, `$3` cutoff `DATE`.
+/// (`("issue_activities"."created_at")::date`, a plain cast in the
+/// session zone). The cutoff is server-local `date.today() - 6 months`
+/// (NOT UTC — Django's `date.today()` uses the system zone; the handler
+/// computes it via [`months_ago`] from the local date and binds it).
+/// Params: `$1` user, `$2` slug, `$3` cutoff `DATE`, `$4` tzname.
 pub fn activity_graph_sql() -> String {
     format!(
         "SELECT CAST(a.created_at AS DATE) AS created_date, \
@@ -839,7 +841,7 @@ pub fn activity_graph_sql() -> String {
          FROM {ISSUE_ACTIVITIES} a \
          JOIN {WORKSPACES} w ON w.id = a.workspace_id \
          WHERE a.actor_id = $1 AND w.slug = $2 \
-         AND (a.created_at AT TIME ZONE 'UTC')::date >= $3 AND a.deleted_at IS NULL \
+         AND (a.created_at AT TIME ZONE $4)::date >= $3 AND a.deleted_at IS NULL \
          GROUP BY CAST(a.created_at AS DATE) ORDER BY created_date"
     )
 }
@@ -851,29 +853,32 @@ pub fn activity_graph_sql() -> String {
 /// `ExtractWeek` declares `IntegerField` output, so Django converts each
 /// `week` to int server-side; the `::INT` cast reproduces that in SQL
 /// (bare `EXTRACT` yields `NUMERIC`, which would serialize as `1.0`).
-/// Every `EXTRACT` converts `AT TIME ZONE 'UTC'` (`USE_TZ=True`,
-/// `TIME_ZONE="UTC"` — verified with `str(qs.query)` on the pinned Django
-/// 4.2.30; bare `EXTRACT` follows the session TimeZone and misbuckets
-/// boundary rows). `COUNT(completed_week)` counts non-null weeks = rows
+/// Every `EXTRACT` converts in the requesting user's zone
+/// (`AT TIME ZONE $4`: `completed_at__month` and `ExtractWeek` use
+/// `get_tzname()`, the active zone — `TimezoneMixin` activates
+/// `request.user.user_timezone` per request, `app/views/base.py:35-46`;
+/// bare `EXTRACT` follows the session TimeZone and misbuckets boundary
+/// rows). `COUNT(completed_week)` counts non-null weeks = rows
 /// (`completed_at IS NOT NULL` is explicit). Root `issue_objects` scope
 /// applies; the single `assignees__in` M2M hop carries NO deleted condition
 /// (live-or-deleted links match), with the `users` target hop folded into
 /// `ia.assignee_id` (Django never emits it — the `__in` lookup targets the
 /// through FK directly). No project/requester scope.
-/// Params: `$1` user, `$2` slug, `$3` month (see [`parse_month_param`]).
+/// Params: `$1` user, `$2` slug, `$3` month (see [`parse_month_param`]),
+/// `$4` tzname.
 pub fn completed_graph_sql() -> String {
     format!(
-        "SELECT (EXTRACT(WEEK FROM i.completed_at AT TIME ZONE 'UTC')::INT % 4) AS week, \
-         COUNT(EXTRACT(WEEK FROM i.completed_at AT TIME ZONE 'UTC')) AS completed_count \
+        "SELECT (EXTRACT(WEEK FROM i.completed_at AT TIME ZONE $4)::INT % 4) AS week, \
+         COUNT(EXTRACT(WEEK FROM i.completed_at AT TIME ZONE $4)) AS completed_count \
          FROM {ISSUES} i \
          JOIN {ISSUE_ASSIGNEES} ia ON ia.issue_id = i.id \
          JOIN {WORKSPACES} w ON w.id = i.workspace_id \
          JOIN {PROJECTS} p ON p.id = i.project_id \
          LEFT JOIN {STATES} s ON s.id = i.state_id \
          WHERE ia.assignee_id = $1 AND w.slug = $2 \
-         AND EXTRACT(MONTH FROM i.completed_at AT TIME ZONE 'UTC') = $3 AND i.completed_at IS NOT NULL \
+         AND EXTRACT(MONTH FROM i.completed_at AT TIME ZONE $4) = $3 AND i.completed_at IS NOT NULL \
          AND {scope} \
-         GROUP BY (EXTRACT(WEEK FROM i.completed_at AT TIME ZONE 'UTC')::INT % 4) ORDER BY week",
+         GROUP BY (EXTRACT(WEEK FROM i.completed_at AT TIME ZONE $4)::INT % 4) ORDER BY week",
         scope = issue_manager_scope("i", "s", "p"),
     )
 }
@@ -1675,9 +1680,10 @@ mod tests {
             sql.contains("COUNT(CAST(a.created_at AS DATE)) AS activity_count"),
             "{sql}"
         );
-        // __date asymmetry: the filter converts, the Cast does not.
+        // __date asymmetry: the filter converts in the bound actor zone
+        // ($4), the Cast does not.
         assert!(
-            sql.contains("(a.created_at AT TIME ZONE 'UTC')::date >= $3"),
+            sql.contains("(a.created_at AT TIME ZONE $4)::date >= $3"),
             "{sql}"
         );
         assert!(
@@ -1689,19 +1695,19 @@ mod tests {
     #[test]
     fn completed_graph_buckets_mod_four() {
         let sql = completed_graph_sql();
-        // All three EXTRACTs convert AT TIME ZONE 'UTC' (USE_TZ, TIME_ZONE=UTC).
+        // All three EXTRACTs convert in the bound actor zone ($4).
         assert!(
-            sql.contains("(EXTRACT(WEEK FROM i.completed_at AT TIME ZONE 'UTC')::INT % 4) AS week"),
+            sql.contains("(EXTRACT(WEEK FROM i.completed_at AT TIME ZONE $4)::INT % 4) AS week"),
             "{sql}"
         );
         assert!(
             sql.contains(
-                "COUNT(EXTRACT(WEEK FROM i.completed_at AT TIME ZONE 'UTC')) AS completed_count"
+                "COUNT(EXTRACT(WEEK FROM i.completed_at AT TIME ZONE $4)) AS completed_count"
             ),
             "{sql}"
         );
         assert!(
-            sql.contains("EXTRACT(MONTH FROM i.completed_at AT TIME ZONE 'UTC') = $3"),
+            sql.contains("EXTRACT(MONTH FROM i.completed_at AT TIME ZONE $4) = $3"),
             "{sql}"
         );
         assert!(sql.contains("i.completed_at IS NOT NULL"), "{sql}");
@@ -1709,12 +1715,14 @@ mod tests {
     }
 
     #[test]
-    fn graph_sql_quotes_utc_zone() {
-        // Postgres parses a bare `AT TIME ZONE UTC` as a column reference
-        // (`column "utc" does not exist`); Django emits a quoted literal.
-        // Both builders must quote every zone conversion (PIDASHCONV-709).
+    fn graph_sql_binds_actor_zone() {
+        // The zone is the bound `$4` (the request user's zone), never a
+        // hard-coded literal: a bare `AT TIME ZONE UTC` parses as a column
+        // reference (`column "utc" does not exist`, PIDASHCONV-709), and a
+        // quoted `'UTC'` misbuckets every user outside UTC (PIDASHCONV-1371).
         for sql in [activity_graph_sql(), completed_graph_sql()] {
-            assert!(sql.contains("AT TIME ZONE 'UTC'"), "{sql}");
+            assert!(sql.contains("AT TIME ZONE $4"), "{sql}");
+            assert!(!sql.contains("AT TIME ZONE 'UTC'"), "{sql}");
             assert!(!sql.contains("AT TIME ZONE UTC"), "{sql}");
         }
     }

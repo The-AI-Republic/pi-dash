@@ -354,8 +354,8 @@ pub struct ProjectRow {
     pub deleted_at: Option<DateTime<Utc>>,
     pub name: String,
     pub description: String,
-    pub description_text: Option<String>,
-    pub description_html: Option<String>,
+    pub description_text: Option<Value>,
+    pub description_html: Option<Value>,
     pub network: i32,
     pub identifier: String,
     pub emoji: Option<String>,
@@ -411,16 +411,25 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
     .bind(id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|row| ProjectRow {
+    let Some(row) = row else { return Ok(None) };
+    // `description_text` / `description_html` are JSONField (jsonb): decode
+    // as JSON, surfacing errors instead of swallowing them into null.
+    let description_text: Option<Value> = row.try_get("description_text")?;
+    let description_html: Option<Value> = row.try_get("description_html")?;
+    // `network` is `PositiveSmallIntegerField` (INT2); sqlx does not widen
+    // INT2 into i32, so decode i16 and widen (same hazard the v1 handler's
+    // `row_i16_as_i32` works around).
+    let network: i16 = row.try_get("network")?;
+    Ok(Some(ProjectRow {
         id: row.get("id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         deleted_at: row.try_get("deleted_at").unwrap_or(None),
         name: row.get("name"),
         description: row.get("description"),
-        description_text: row.try_get("description_text").unwrap_or(None),
-        description_html: row.try_get("description_html").unwrap_or(None),
-        network: row.get("network"),
+        description_text,
+        description_html,
+        network: i32::from(network),
         identifier: row.get("identifier"),
         emoji: row.try_get("emoji").unwrap_or(None),
         icon_prop: row.try_get("icon_prop").unwrap_or(None),
@@ -480,11 +489,11 @@ pub fn render_project(row: &ProjectRow) -> Map<String, Value> {
     );
     out.insert(
         "description_text".to_owned(),
-        opt_str(&row.description_text),
+        row.description_text.clone().unwrap_or(Value::Null),
     );
     out.insert(
         "description_html".to_owned(),
-        opt_str(&row.description_html),
+        row.description_html.clone().unwrap_or(Value::Null),
     );
     out.insert("network".to_owned(), Value::from(row.network));
     out.insert(
@@ -974,8 +983,8 @@ pub struct ModuleRow {
     pub deleted_at: Option<DateTime<Utc>>,
     pub name: String,
     pub description: String,
-    pub description_text: Option<String>,
-    pub description_html: Option<String>,
+    pub description_text: Option<Value>,
+    pub description_html: Option<Value>,
     pub start_date: Option<NaiveDate>,
     pub target_date: Option<NaiveDate>,
     pub status: String,
@@ -1003,15 +1012,20 @@ async fn fetch_module(pool: &PgPool, id: Uuid) -> Result<Option<ModuleRow>, sqlx
     .bind(id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|row| ModuleRow {
+    let Some(row) = row else { return Ok(None) };
+    // `description_text` / `description_html` are JSONField (jsonb): decode
+    // as JSON, surfacing errors instead of swallowing them into null.
+    let description_text: Option<Value> = row.try_get("description_text")?;
+    let description_html: Option<Value> = row.try_get("description_html")?;
+    Ok(Some(ModuleRow {
         id: row.get("id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         deleted_at: row.try_get("deleted_at").unwrap_or(None),
         name: row.get("name"),
         description: row.get("description"),
-        description_text: row.try_get("description_text").unwrap_or(None),
-        description_html: row.try_get("description_html").unwrap_or(None),
+        description_text,
+        description_html,
         start_date: row.try_get("start_date").unwrap_or(None),
         target_date: row.try_get("target_date").unwrap_or(None),
         status: row.get("status"),
@@ -1065,11 +1079,11 @@ pub fn render_module(row: &ModuleRow, members: &[Uuid]) -> Map<String, Value> {
     );
     out.insert(
         "description_text".to_owned(),
-        opt_str(&row.description_text),
+        row.description_text.clone().unwrap_or(Value::Null),
     );
     out.insert(
         "description_html".to_owned(),
-        opt_str(&row.description_html),
+        row.description_html.clone().unwrap_or(Value::Null),
     );
     out.insert("start_date".to_owned(), opt_date(&row.start_date));
     out.insert("target_date".to_owned(), opt_date(&row.target_date));
@@ -1669,6 +1683,13 @@ mod tests {
         }
     }
 
+    fn json_opt(value: &Value) -> Option<Value> {
+        match value {
+            Value::Null => None,
+            v => Some(v.clone()),
+        }
+    }
+
     fn dt(value: &Value) -> DateTime<Utc> {
         value
             .as_str()
@@ -1754,8 +1775,8 @@ mod tests {
             deleted_at: dt_opt(&g["deleted_at"]),
             name: g["name"].as_str().unwrap().to_owned(),
             description: g["description"].as_str().unwrap().to_owned(),
-            description_text: str_opt(&g["description_text"]),
-            description_html: str_opt(&g["description_html"]),
+            description_text: json_opt(&g["description_text"]),
+            description_html: json_opt(&g["description_html"]),
             network: g["network"].as_i64().unwrap() as i32,
             identifier: g["identifier"].as_str().unwrap().to_owned(),
             emoji: str_opt(&g["emoji"]),
@@ -1946,8 +1967,8 @@ mod tests {
             deleted_at: dt_opt(&g["deleted_at"]),
             name: g["name"].as_str().unwrap().to_owned(),
             description: g["description"].as_str().unwrap().to_owned(),
-            description_text: str_opt(&g["description_text"]),
-            description_html: str_opt(&g["description_html"]),
+            description_text: json_opt(&g["description_text"]),
+            description_html: json_opt(&g["description_html"]),
             start_date: date_opt(&g["start_date"]),
             target_date: date_opt(&g["target_date"]),
             status: g["status"].as_str().unwrap().to_owned(),

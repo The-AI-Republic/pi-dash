@@ -15,7 +15,7 @@ import uuid
 import pytest
 
 from _harness.auth import login_session
-from _harness.http import api_client
+from _harness.http import api_client, api_key_client, bearer_client
 from _harness.web import web_post
 
 WEB = "/api/runners"
@@ -577,6 +577,115 @@ def test_web_runs_create_runai_201(user_client, seeder, daemon_world, machine_fl
         "SELECT trigger, prompt_manifest FROM agent_run WHERE id = %s", (body["id"],)
     )
     assert row["trigger"] == "run_ai" and row["prompt_manifest"] is not None
+
+
+def _open_and_poll_runner_session(client, runner_id):
+    """Open a runner session and poll once so the runner is ONLINE + idle.
+
+    Session open alone leaves the runner `offline`; the poll flips it
+    `ONLINE` (`runner/views/sessions.py`) and refreshes the heartbeat,
+    which is what makes the matcher consider the runner for new work.
+    """
+    opened = client.post(f"{DAEMON}/runners/{runner_id}/sessions/", json={})
+    assert opened.status_code == 201, opened.text
+    poll_url = (
+        f"{DAEMON}/runners/{runner_id}/sessions/{opened.json()['session_id']}/poll"
+    )
+    payload = {"ack": [], "status": {"status": "idle"}}
+    polled = client.post(poll_url, json=payload)
+    for _ in range(2):
+        # Django's shared async-Redis client can 500 a poll under the dev
+        # server (`Event loop is closed`); retry like test_daemon_sessions.
+        if polled.status_code != 500:
+            break
+        polled = client.post(poll_url, json=payload)
+    assert polled.status_code == 200, polled.text
+
+
+@pytest.fixture()
+def online_runner_pair(settings, seeder, daemon_world, machine_flow, machine_client):
+    """Two online idle runners in the default pod (PIDASHCONV-1481).
+
+    `machine_flow`'s runner plus a second enrolled runner, each with a live
+    session. The matcher only drains to ONLINE, heartbeat-fresh, idle
+    runners, so each POST below finds a free runner.
+    """
+    _open_and_poll_runner_session(machine_client, machine_flow["runner_id"])
+    host_label = f"online-{seeder.tag}b"[:200]
+    with api_key_client(settings.base_url, daemon_world["api_token"]["token"]) as client:
+        created = client.post(
+            f"{DAEMON}/runners/",
+            json={
+                "project": daemon_world["project"]["identifier"],
+                "workspace_slug": daemon_world["workspace"]["slug"],
+                "host_label": host_label,
+            },
+        )
+    assert created.status_code == 201, created.text
+    second_id = created.json()["runner_id"]
+    with bearer_client(
+        settings.base_url, created.json()["machine_token"],
+        headers={"X-Runner-Id": second_id},
+    ) as client:
+        _open_and_poll_runner_session(client, second_id)
+    yield [machine_flow["runner_id"], second_id]
+    # Teardown mirrors machine_flow's finalizer (conftest.py) for the
+    # endpoint-created rows the seeder never tracked.
+    owner_id = daemon_world["owner"]["id"]
+    seeder.db.execute("DELETE FROM runner_session WHERE runner_id = %s", (second_id,))
+    seeder.db.execute(
+        "UPDATE agent_run SET runner_id = NULL, pinned_runner_id = NULL "
+        "WHERE runner_id = %s OR pinned_runner_id = %s",
+        (second_id, second_id),
+    )
+    seeder.db.execute("DELETE FROM agent_chat_session WHERE runner_id = %s", (second_id,))
+    seeder.db.execute(
+        "DELETE FROM machine_token WHERE user_id = %s AND host_label = %s",
+        (owner_id, host_label),
+    )
+    seeder.db.execute("DELETE FROM runner WHERE id = %s", (second_id,))
+    seeder.db.execute(
+        "DELETE FROM dev_machine WHERE owner_id = %s AND host_label = %s",
+        (owner_id, host_label),
+    )
+
+
+def test_web_runs_create_drains_pod_to_idle_runner(
+    user_client, seeder, daemon_world, online_runner_pair
+):
+    """run_ai + direct POSTs assign in-request with an idle online runner.
+
+    Django drains the pod in `on_commit(dispatch_agent_run)`, so each POST
+    assigns to an idle runner before the 201 (PIDASHCONV-1481). The row —
+    not the 201 body, which renders stale-queued for run_ai — pins this.
+    """
+    issue = _ticking_issue(seeder, daemon_world)
+    runai = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert runai.status_code == 201, runai.text
+    assert runai.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    first = seeder.db.fetchone(
+        "SELECT status, runner_id, owner_id, assigned_at FROM agent_run WHERE id = %s",
+        (runai.json()["id"],),
+    )
+    assert first["status"] == "assigned"
+    assert str(first["runner_id"]) in online_runner_pair
+    assert first["owner_id"] is not None and first["assigned_at"] is not None
+    direct = web_post(
+        user_client, f"{WEB}/runs/",
+        {"prompt": "hello assigned", "workspace": daemon_world["workspace"]["id"]},
+    )
+    assert direct.status_code == 201, direct.text
+    assert direct.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    second = seeder.db.fetchone(
+        "SELECT status, runner_id, owner_id, assigned_at FROM agent_run WHERE id = %s",
+        (direct.json()["id"],),
+    )
+    assert second["status"] == "assigned"
+    assert str(second["runner_id"]) in online_runner_pair
+    assert str(second["runner_id"]) != str(first["runner_id"])
+    assert second["owner_id"] is not None and second["assigned_at"] is not None
 
 
 def test_web_runs_create_runai_queued_202(user_client, seeder, daemon_world):

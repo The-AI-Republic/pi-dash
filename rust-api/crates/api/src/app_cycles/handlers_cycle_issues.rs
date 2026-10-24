@@ -439,9 +439,15 @@ fn flat_row_fields(group_by: Option<&str>, sub_group_by: Option<&str>) -> Vec<St
 }
 
 /// Scalar selects for the list rows: the D-26 `annotation_selects` set
-/// verbatim (`app_issues`, from `apply_annotations` + the grouper array
+/// (`app_issues`, from `apply_annotations` + the grouper array
 /// subqueries) — `cycle_id` / `link_count` / `attachment_count` /
 /// manager-guarded `sub_issues_count` plus the three `Coalesce` arrays.
+/// The three counts use plain `COUNT`, not `NULLIF`: the cycle view
+/// annotates with the scalar `Func(F("id"), function="Count")` shape
+/// (`issue.py:84-104`), whose subquery always returns one row, so an
+/// empty match renders `0` (the `scalar_counts = true` case in
+/// `app_issues`). `NULLIF` belongs only to the grouped
+/// `Subquery(...values().annotate(count=Count()))` shape.
 /// `skip_array` drops one array for its m2m group path (the grouper rule).
 fn cycle_row_selects(skip_array: Option<&str>) -> String {
     let mut selects = String::from(
@@ -450,12 +456,12 @@ fn cycle_row_selects(skip_array: Option<&str>) -> String {
         issue.target_date, issue.sequence_id, issue.project_id, issue.parent_id,
         (SELECT ci.cycle_id FROM cycle_issues ci
           WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1) AS cycle_id,
-        (SELECT NULLIF(COUNT(*), 0) FROM issue_links il
+        (SELECT COUNT(*) FROM issue_links il
           WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS link_count,
-        (SELECT NULLIF(COUNT(*), 0) FROM file_assets fa
+        (SELECT COUNT(*) FROM file_assets fa
           WHERE fa.issue_id = issue.id AND fa.entity_type = 'ISSUE_ATTACHMENT'
             AND fa.deleted_at IS NULL) AS attachment_count,
-        (SELECT NULLIF(COUNT(*), 0) FROM issues c
+        (SELECT COUNT(*) FROM issues c
            LEFT JOIN states cs ON cs.id = c.state_id AND cs.deleted_at IS NULL
            JOIN projects cp ON cp.id = c.project_id
           WHERE c.parent_id = issue.id AND c.deleted_at IS NULL
@@ -771,17 +777,45 @@ async fn cycle_issue_list(
         sub_group_by,
         &timezone,
     )?;
-    // Total count over the pre-annotation set (the `deepcopy` at `:125`).
-    let total_sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
-    let total_count = fetch_count(&pool, &total_sql, filtered.values.clone()).await?;
-    // `order_issue_queryset` (`:130-134`), default `-created_at`.
+    // `order_issue_queryset` (`:130-134`), default `-created_at`. The
+    // cycle list annotates the plain `Func(Count)` form (empty counts
+    // render `0`), so its count keys order `0`-style. The traversal
+    // resolves over the filtered `bridge` base join (pinned live: no
+    // extra fan-out); only a filter-driven `issue_cycle` join — one the
+    // `WHERE` actually references, so Django has it too — wins over the
+    // base (pinned live: Django reuses the filter's scope, not the
+    // base's). The unconditional scaffolding `LEFT JOIN` has no Django
+    // counterpart and must not win.
     let order_spec = pidash_services::app_issues::ordering::order_sql(
         &params.order_by,
         "state.\"group\"",
         |name| format!("min_{}", name.replace("__", "_")),
     );
-    let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
+    let cycle_bridge = if filtered.from_where.contains("\"issue_cycle\".") {
+        "issue_cycle"
+    } else {
+        "bridge"
+    };
+    let key = order_key(
+        &order_spec.out_param,
+        &params.order_by,
+        Some(cycle_bridge),
+        false,
+    )?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
+    // Total count over the pre-annotation set (the `deepcopy` at `:125`).
+    // The flat branch keeps the distinct-issue count; the grouped branch
+    // counts `queryset.count()` over the order-joined rows (pinned live:
+    // fan-out links count).
+    let total_sql = if group_by.is_some() && !key.joins.is_empty() {
+        format!(
+            "SELECT COUNT(*) {}",
+            crate::app_issues::with_order_joins(&filtered.from_where, &key.joins)
+        )
+    } else {
+        format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where)
+    };
+    let total_count = fetch_count(&pool, &total_sql, filtered.values.clone()).await?;
     let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw).map_err(page_denial)?;
     if group_by.is_some() {
@@ -792,15 +826,19 @@ async fn cycle_issue_list(
             &filtered,
             group_by.unwrap_or_default(),
             sub_group_by.map(str::to_owned),
-            &key_expr,
+            &key.expr,
             direction,
             per_page,
             cursor,
             total_count,
+            &key.joins,
         )
         .await;
     }
-    cycle_flat_response(&pool, &filtered, &key_expr, direction, per_page, cursor).await
+    cycle_flat_response(
+        &pool, &filtered, &key.expr, direction, per_page, cursor, &key.joins,
+    )
+    .await
 }
 
 /// Plain `paginate` branch (`issue.py:213-221`): distinct rows, the
@@ -812,6 +850,7 @@ async fn cycle_flat_response(
     direction: &str,
     per_page: i64,
     cursor: crate::paginator::Cursor,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -821,9 +860,12 @@ async fn cycle_flat_response(
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
     let selects = cycle_row_selects(None);
+    // The cycle-name traversal join rides on the row query only (scoped
+    // to the filtered `bridge`, so no extra fan-out here); the totals
+    // below stay distinct-issue counts.
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
-        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
-        filtered.from_where,
+        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
         window.stop - window.offset,
         window.offset
     );
@@ -978,6 +1020,7 @@ async fn cycle_grouped_response(
     per_page: i64,
     cursor: crate::paginator::Cursor,
     total_count: i64,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
@@ -997,13 +1040,15 @@ async fn cycle_grouped_response(
         Some(sub) => format!("{group_expr}, {sub}"),
         None => group_expr.clone(),
     };
+    // The cycle-name traversal join rides on the row query (scoped to the
+    // filtered `bridge`, so no extra fan-out here).
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
         "SELECT * FROM (SELECT DISTINCT {selects}{member_select}, ({key_expr}) AS __order_key,
          ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY ({key_expr}) {direction} NULLS LAST, issue.created_at DESC) AS __rn
-         {from_where}) __w
+         {row_where}) __w
          WHERE __w.__rn > {offset} AND __w.__rn <= {stop}
          ORDER BY __w.__order_key {direction} NULLS LAST, __w.created_at DESC",
-        from_where = filtered.from_where,
         offset = window.offset,
         stop = window.stop,
     );
@@ -1771,6 +1816,25 @@ mod tests {
             "AS module_ids",
         ] {
             assert!(selects.contains(alias), "missing {alias}");
+        }
+        // Scalar `Func(... "Count")` shape (`issue.py:84-104`): plain
+        // `COUNT`, never `NULLIF`, so empty renders `0` (PIDASHCONV-1416).
+        assert!(
+            !selects.contains("NULLIF"),
+            "cycle counts must not NULLIF: {selects}"
+        );
+        for alias in [
+            "AS link_count",
+            "AS attachment_count",
+            "AS sub_issues_count",
+        ] {
+            let head = selects.split(alias).next().expect("alias");
+            assert!(
+                head.rsplit("(SELECT ")
+                    .next()
+                    .is_some_and(|frag| frag.trim_start().starts_with("COUNT(*)")),
+                "missing plain COUNT for {alias}"
+            );
         }
         assert!(!cycle_row_selects(Some("label_ids")).contains("AS label_ids"));
         assert!(!cycle_row_selects(Some("assignee_ids")).contains("AS assignee_ids"));

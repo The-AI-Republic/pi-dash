@@ -3036,10 +3036,20 @@ fn regroup_plot(
                 row.get("segment").cloned().unwrap_or(Value::Null),
             );
         }
-        item.insert(
-            value_key.to_owned(),
-            row.get(value_key).cloned().unwrap_or(Value::Null),
-        );
+        // Estimate sums go through [`render_estimate`] like route 1:
+        // `row_to_json` spells whole float8 sums as integers (`3`),
+        // while Django's `Sum(Cast(..., FloatField()))` renders `3.0`.
+        let raw = row.get(value_key).cloned().unwrap_or(Value::Null);
+        let rendered = if value_key == "estimate" {
+            match &raw {
+                Value::Null => Value::Null,
+                Value::Number(number) => render_estimate(number.as_f64()),
+                _ => raw,
+            }
+        } else {
+            raw
+        };
+        item.insert(value_key.to_owned(), rendered);
         if !groups.contains_key(&key) {
             order.push(key.clone());
         }
@@ -3073,7 +3083,7 @@ fn saved_statements(
     link_joins: &str,
 ) -> Option<(String, String)> {
     let (dim_expr, dim_join) = q::dimension_sql(x_axis)?;
-    let (seg_select, seg_group, seg_join) = match segment {
+    let (seg_select, seg_outer, seg_group, seg_join) = match segment {
         Some(seg) if !seg.is_empty() => {
             let (expr, join) = q::dimension_sql(seg)?;
             // Date segments render through the monthly `Concat`
@@ -3086,10 +3096,11 @@ fn saved_statements(
             (
                 format!(", {aliased} AS \"segment\""),
                 ", \"segment\"".to_owned(),
+                ", \"segment\"".to_owned(),
                 join,
             )
         }
-        _ => (String::new(), String::new(), String::new()),
+        _ => (String::new(), String::new(), String::new(), String::new()),
     };
     // One join per table: a dimension/segment join targeting `states`
     // (e.g. `state__group`) subsumes the manager `states` join (the
@@ -3130,26 +3141,29 @@ fn saved_statements(
             &format!("{base_join}{dim_join}{seg_join}{link_joins}"),
             with_states,
         );
+        // NULL dimensions are excluded for every axis
+        // (`analytics_plot.py:84-86`), exactly like
+        // [`q::base_plot_estimate_sql`]: the guard repeats the inlined
+        // expression. For date axes that expression is the monthly
+        // `CONCAT`, which Postgres never makes NULL (it skips null
+        // inputs), so missing dates are kept as `'-'` buckets.
+        let null_guard = format!(" AND {dim_expr} IS NOT NULL");
         format!(
             "SELECT {dim_expr} AS \"dimension\"{seg_select}, \
              SUM(CAST(\"estimate_points\".\"value\" AS DOUBLE PRECISION)) AS \"estimate\" \
-             {from} WHERE ({scope}) GROUP BY \"dimension\"{seg_group} ORDER BY \"dimension\" ASC"
+             {from} WHERE ({scope}){null_guard} GROUP BY \"dimension\"{seg_group} ORDER BY \"dimension\" ASC"
         )
     } else {
         // `COUNT(*)` grouped by dimension (+ segment),
-        // (`analytics_plot.py:96-107`). Date axes exclude NULL
-        // dimensions (`:85-86`); the guard tests the raw column — a
-        // `CONCAT` expression is never NULL in Postgres (it skips null
-        // inputs), so guarding the expression would keep NULL dates as
-        // `'-'` buckets instead of excluding them.
-        let null_guard = if q::is_date_axis(x_axis) {
-            format!(" AND \"issues\".\"{x_axis}\" IS NOT NULL")
-        } else {
-            String::new()
-        };
+        // (`analytics_plot.py:96-107`). NULL dimensions are excluded
+        // for every axis (`:84-86`, like
+        // [`q::base_plot_count_sql`]): the guard repeats the inlined
+        // expression — never the raw column, which would drop the
+        // `'-'` bucket a `CONCAT` date dimension yields for NULLs.
+        let null_guard = format!(" AND {dim_expr} IS NOT NULL");
         let from = issue_from_states(&plot_joins, with_states);
         format!(
-            "SELECT \"dimension\", COUNT(*) AS \"count\" FROM \
+            "SELECT \"dimension\"{seg_outer}, COUNT(*) AS \"count\" FROM \
              (SELECT {dim_expr} AS \"dimension\"{seg_select} {from} WHERE ({scope}){null_guard}) \
              GROUP BY \"dimension\"{seg_group} ORDER BY \"dimension\" ASC"
         )

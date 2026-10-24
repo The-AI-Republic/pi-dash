@@ -2244,11 +2244,11 @@ async fn patch_state_inner(
             }
         }
     }
-    // Apply the patch: supplied fields only; `save()` recomputes the slug and
-    // stamps `updated_by` (crum) + `updated_at` (auto_now).
+    // Apply the patch: supplied fields only; `save()` recomputes the slug
+    // unconditionally (`db/models/state.py:132`) and stamps `updated_by`
+    // (crum) + `updated_at` (auto_now).
     if let Some(name) = input.name {
-        row.name = name.clone();
-        row.slug = state_model::slugify_name(&name);
+        row.name = name;
     }
     if let Some(description) = input.description {
         row.description = description;
@@ -2274,6 +2274,7 @@ async fn patch_state_inner(
     if let Some(external_id) = input.external_id {
         row.external_id = external_id;
     }
+    row.slug = state_model::slugify_name(&row.name);
     row.updated_at = micros_now();
     row.updated_by_id = Some(gate.actor.id);
     let update = sqlx::query(

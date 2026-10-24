@@ -689,7 +689,7 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.as_ref() == "23505"))
 }
 
-/// Whether the entry carries any observability key (the `:353-357`
+/// Whether the entry carries any observability key (the `:400-404`
 /// `has_snapshot` gate): `observed_run_id`, a snapshot field,
 /// `tokens`, or `model`. Controls whether the `get_or_create` runs at
 /// all — the planner re-derives the same gate, but the gate must run
@@ -838,7 +838,7 @@ fn parse_live_datetime(text: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Bind one live-state `SET` value (`:383-394` — `Null` renders
+/// Bind one live-state `SET` value (`:430-438` — `Null` renders
 /// inline, so only `Text`/`Json` arrive here): Django field
 /// adaptation per column. Text columns take `str()` (strings bind
 /// verbatim; numbers/bools render; nested values render compact —
@@ -850,6 +850,8 @@ fn parse_live_datetime(text: &str) -> Option<DateTime<Utc>> {
 /// Typed columns must bind native values: Postgres has no `text`
 /// assignment cast for `uuid`/`timestamptz`, so binding the raw
 /// string fails the `UPDATE` where Django's `save()` stores it.
+/// `agent_health` rides the default text arm (`CharField`; the
+/// planner already skipped unknown labels).
 fn bind_live_state_value<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     column: &str,
@@ -862,7 +864,7 @@ fn bind_live_state_value<'q>(
             }
             _ => None,
         },
-        "last_event_at" => match value {
+        "last_event_at" | "agent_last_activity_at" => match value {
             SetValue::Text(text) | SetValue::Json(Value::String(text)) => {
                 parse_live_datetime(text).map(|dt| query.bind(dt))
             }
@@ -922,7 +924,7 @@ fn bind_live_state_value<'q>(
 }
 
 /// `upsert_runner_live_state(runner, status_entry)`
-/// (`session_service.py:336-397`), fully swallowed: the source wraps
+/// (`session_service.py:383-448`), fully swallowed: the source wraps
 /// the whole call in `try/except Exception` (log only), so every
 /// failure here logs and returns. The `get_or_create` selects, then
 /// inserts on a miss (a lost insert race re-selects, as Django's
@@ -1134,7 +1136,7 @@ async fn dispatch_assign(
 
 /// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
 /// (miss ⇒ `Ok(false)`), else the locked drain. Runner-row indices
-/// follow the 30-column projection (`id` 0, `owner_id` 1, `pod_id` 4,
+/// follow the 32-column projection (`id` 0, `owner_id` 1, `pod_id` 4,
 /// `provisioning` 7, `visibility` 8); run-row indices the 41-column
 /// image (`id` 0, `work_item_id` 7, `prompt` 19, `run_config` 23).
 async fn drain_for_runner_by_id(
@@ -2219,7 +2221,7 @@ mod tests {
         );
     }
 
-    /// The live-state snapshot gate (`:353-357`): only observability
+    /// The live-state snapshot gate (`:400-404`): only observability
     /// keys run the `get_or_create` at all.
     #[test]
     fn live_state_gate_needs_snapshot_keys() {
@@ -2237,6 +2239,8 @@ mod tests {
             "approvals_pending",
             "llm_model",
             "turn_count",
+            "agent_health",
+            "agent_last_activity_at",
             "tokens",
             "model",
         ] {

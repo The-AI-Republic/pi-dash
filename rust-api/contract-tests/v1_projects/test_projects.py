@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from psycopg.types.json import Json
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -180,6 +181,70 @@ def test_create_with_self_project_lead(seed, conn):
     proj, members, state_count, pod = _partial_create_rows(
         conn, seed["ws_a"]["id"], ident)
     assert str(proj["project_lead_id"]) == seed["owner"]["id"]
+    assert members == [(seed["owner"]["id"], db.ADMIN)]
+    assert state_count == 0
+    assert pod == {"name": f"{ident}_pod_1"}
+
+
+def _deactivated_member(conn, seed, tag):
+    """A workspace MEMBER whose users.is_active is false (PIDASHCONV-1394).
+
+    Mirrors account deactivation (app/views/user/base.py:279-346), which flips
+    users.is_active but leaves the membership row in place: Django's lead /
+    assignee FK querysets (stock UserManager) and the validate() membership
+    check filter on neither, so the member stays assignable.
+    """
+    cand = db.create_user(conn, tag + "d", first_name="CtDeact")
+    db.add_workspace_member(conn, seed["ws_a"]["id"], cand["id"], db.MEMBER)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE users SET is_active = false WHERE id = %s", (cand["id"],))
+    conn.commit()
+    return cand
+
+
+def test_patch_deactivated_member_as_lead_and_assignee(seed, conn):
+    """A deactivated workspace member stays assignable (PIDASHCONV-1394).
+
+    PATCHing project_lead / default_assignee to a member with
+    users.is_active=false answers 200 with the id echoed back, and the FK is
+    written — on both backends. A client echoing a project whose lead has
+    since deactivated must not get a 400.
+    """
+    tag = db.new_tag()
+    cand = _deactivated_member(conn, seed, tag)
+    pid = db.create_project(conn, seed["ws_a"]["id"], tag + "p",
+                            created_by_id=seed["owner"]["id"])["id"]
+    db.add_project_member(conn, seed["ws_a"]["id"], pid, seed["owner"]["id"], db.ADMIN)
+    r = http.patch(seed["keys"][KEY], f"{base(seed)}/{pid}/",
+                   json={"project_lead": cand["id"]})
+    assert r.json()["project_lead"] == cand["id"]
+    saved = db.fetch_one(conn, "SELECT project_lead_id FROM projects WHERE id = %s", (pid,))
+    assert str(saved["project_lead_id"]) == cand["id"]
+    r = http.patch(seed["keys"][KEY], f"{base(seed)}/{pid}/",
+                   json={"default_assignee": cand["id"]})
+    assert r.json()["default_assignee"] == cand["id"]
+    saved = db.fetch_one(conn, "SELECT default_assignee_id FROM projects WHERE id = %s", (pid,))
+    assert str(saved["default_assignee_id"]) == cand["id"]
+
+
+def test_create_with_deactivated_project_lead(seed, conn):
+    """Create with a deactivated lead follows the PB-2023 path (PIDASHCONV-1394).
+
+    The FK validates (no is_active filter), so the create commits the project
+    row plus the creator's membership and then answers 400
+    {"error": "Please provide valid detail"} — same rows as an active lead.
+    """
+    tag = db.new_tag()
+    cand = _deactivated_member(conn, seed, tag)
+    ident = f"X{tag.upper()}"[:12]
+    r = http.post(seed["keys"][KEY], base(seed) + "/",
+                  json={"name": f"CT DeactLead {tag}", "identifier": ident,
+                        "project_lead": cand["id"]}, expect=400)
+    assert r.status_code == 400
+    assert r.json() == {"error": "Please provide valid detail"}
+    proj, members, state_count, pod = _partial_create_rows(
+        conn, seed["ws_a"]["id"], ident)
+    assert str(proj["project_lead_id"]) == cand["id"]
     assert members == [(seed["owner"]["id"], db.ADMIN)]
     assert state_count == 0
     assert pod == {"name": f"{ident}_pod_1"}
@@ -500,3 +565,28 @@ def test_cover_image_body_key_is_ignored(seed):
     ).json()
     assert not COVER_KEYS & set(patched)
     assert patched["name"] == created["name"]
+
+
+def test_detail_renders_stored_network_and_description_json(seed, conn):
+    """Detail echoes stored network + JSON descriptions (PIDASHCONV-1388 twin).
+
+    HTTP-side twin of the tasks_webhooks project-chain tests: the worker
+    fan-out must decode these same columns (INT2 network, jsonb
+    descriptions). Seeded via SQL because create ignores the description
+    fields (ProjectCreateSerializer.Meta.fields) — the read path is what
+    this pins.
+    """
+    pid = db.create_project(conn, seed["ws_a"]["id"], db.new_tag(),
+                            created_by_id=seed["owner"]["id"])["id"]
+    db.add_project_member(conn, seed["ws_a"]["id"], pid, seed["owner"]["id"], db.ADMIN)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET network = 2, description_text = %s,"
+            " description_html = %s WHERE id = %s",
+            (Json({"ops": "text"}), Json({"a": 1}), pid),
+        )
+    conn.commit()
+    body = http.get(seed["keys"][KEY], f"{base(seed)}/{pid}/").json()
+    assert body["network"] == 2
+    assert body["description_text"] == {"ops": "text"}
+    assert body["description_html"] == {"a": 1}

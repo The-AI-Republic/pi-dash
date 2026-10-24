@@ -843,6 +843,8 @@ mod tests {
         "updated_at",
         "revoked_at",
         "revoked_reason",
+        "paused_at",
+        "paused_by_id",
     ];
     const POD_COLS: &[&str] = &[
         "id",

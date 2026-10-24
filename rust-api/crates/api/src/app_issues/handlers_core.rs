@@ -126,7 +126,7 @@ use pidash_services::app_issues::serializers_engage::{
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
 use pidash_services::dispatch::admission::{
     managed_runner_availability, LlmProfile, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL,
-    HEARTBEAT_GRACE_SECS, ONLINE_MANAGED_RUNNER_SQL,
+    ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL, HEARTBEAT_GRACE_SECS, ONLINE_MANAGED_RUNNER_SQL,
 };
 use pidash_services::dispatch::policy::{
     cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
@@ -2787,7 +2787,10 @@ async fn project_scoped_exists(
     Ok(row.is_some())
 }
 
-async fn assistant_has_api_key(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<bool, sqlx::Error> {
+pub(crate) async fn assistant_has_api_key(
+    pool: &sqlx::PgPool,
+    user_id: &Uuid,
+) -> Result<bool, sqlx::Error> {
     let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(ASSISTANT_KEY_SQL)
         .bind(user_id)
         .fetch_optional(pool)
@@ -2809,7 +2812,7 @@ async fn fetch_project_ws(
     }))
 }
 
-async fn enrolled_runner(
+pub(crate) async fn enrolled_runner(
     pool: &sqlx::PgPool,
     user_id: &Uuid,
     project_id: &Uuid,
@@ -2824,7 +2827,7 @@ async fn enrolled_runner(
     Ok(row.is_some())
 }
 
-async fn online_runner(
+pub(crate) async fn online_runner(
     pool: &sqlx::PgPool,
     user_id: &Uuid,
     project_id: &Uuid,
@@ -2836,6 +2839,22 @@ async fn online_runner(
         .bind(project_id)
         .bind(workspace_id)
         .bind(bound)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.is_some())
+}
+
+/// The paused tiebreaker (`policy.py:88-91`, `09738d222`).
+pub(crate) async fn paused_runner(
+    pool: &sqlx::PgPool,
+    user_id: &Uuid,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(i32,)> = sqlx::query_as(ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(workspace_id)
         .fetch_optional(pool)
         .await?;
     Ok(row.is_some())
@@ -3047,6 +3066,7 @@ async fn run_validate(
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
+    let mut paused_exists = false;
     let mut executor_returns = false;
     let viewer = UserFlags {
         is_active: actor.user_active,
@@ -3118,6 +3138,19 @@ async fn run_validate(
                                             )
                                             .await
                                             .map_err(|_| db_error())?;
+                                            // `09738d222`: the paused
+                                            // tiebreaker runs only when
+                                            // nothing is online.
+                                            if !online_exists {
+                                                paused_exists = paused_runner(
+                                                    pool,
+                                                    &actor.user_id,
+                                                    &project.project_id,
+                                                    &project.workspace_id,
+                                                )
+                                                .await
+                                                .map_err(|_| db_error())?;
+                                            }
                                         }
                                     }
                                 }
@@ -3127,6 +3160,7 @@ async fn run_validate(
                                     || llm_profile.clone(),
                                     enrolled_exists,
                                     online_exists,
+                                    paused_exists,
                                 );
                                 if !verdict.available
                                     && verdict.reason_code
@@ -3241,6 +3275,7 @@ async fn run_validate(
         llm_profile: &|| llm_profile.clone(),
         enrolled_exists: &|| enrolled_exists,
         online_exists: &|| online_exists,
+        paused_exists: &|| paused_exists,
     };
     let ctx = ValidateContext {
         project_id,
@@ -3419,16 +3454,17 @@ async fn default_pod_for_project(
 }
 
 /// `self.state` on a save whose state id Django must resolve
-/// (untouched-state updates, destroy): the `State.objects` manager, so a
-/// triage/deleted id raises `DoesNotExist` → the required-object 404.
+/// (untouched-state updates, destroy): a forward-FK read, which Django
+/// 4.2 resolves through `State._base_manager` (a plain `Manager` —
+/// `State` sets no `base_manager_name`), so triage and soft-deleted
+/// states still resolve and only a dangling FK misses → the
+/// required-object 404.
 async fn saved_state_group(pool: &sqlx::PgPool, state_id: &Uuid) -> Result<Option<String>, Denial> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT \"group\" FROM states WHERE id = $1 AND deleted_at IS NULL AND NOT (\"group\" = 'triage')",
-    )
-    .bind(state_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(String,)> = sqlx::query_as("SELECT \"group\" FROM states WHERE id = $1")
+        .bind(state_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.map(|row| row.0))
 }
 
@@ -4289,6 +4325,8 @@ struct RenderedLive {
     usage: Value,
     llm_model: Option<String>,
     turn_count: Option<i32>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
     updated_at: String,
 }
 
@@ -4326,6 +4364,8 @@ fn rendered_run_from_pg(
                     usage,
                     llm_model: live_llm,
                     turn_count: row.try_get("turn_count")?,
+                    agent_health: row.try_get("agent_health")?,
+                    agent_last_activity_at: opt_moment("agent_last_activity_at")?,
                     updated_at: serialize_iso_datetime(updated),
                 })
             }
@@ -4564,6 +4604,8 @@ async fn render_detail_map(
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: live.updated_at.as_str(),
         }),
     });
@@ -4596,6 +4638,8 @@ async fn render_detail_map(
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: live.updated_at.as_str(),
         }),
     });
@@ -5885,8 +5929,9 @@ pub async fn destroy_issue(
         .await
         .map_err(|_| Denial::ServerError)?;
     // `issue.delete()`: `deleted_at` now, then the full `save()` (the
-    // state legs run — a triage/deleted state 404s here — plus stripped
-    // + audit), then the related-objects forward.
+    // state legs run — the FK follow resolves triage/deleted states,
+    // only a dangling FK 404s — plus stripped + audit), then the
+    // related-objects forward.
     row.deleted_at = Some(utc_now_micros());
     update_state_legs(&pool, &mut row, false, None).await?;
     row.updated_by_id = Some(user_id);

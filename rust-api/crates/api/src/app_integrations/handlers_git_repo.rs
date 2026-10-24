@@ -776,13 +776,89 @@ async fn delete_repository(
     json_response(StatusCode::OK, UNBOUND_BODY.to_owned())
 }
 
+/// What Django's ORM Collector deletes when a `GitRepositoryBinding` is
+/// hard-deleted (`delete(soft=False)`): the `GitIssueSync` rows pointing at
+/// it (`git.py:153`, `on_delete=CASCADE`) and their `GitCommentSync` rows
+/// (`:191`). The Collector follows FKs via `_base_manager`, so soft-deleted
+/// children go too — hence no `deleted_at` filter here. The FKs are plain
+/// `DEFERRABLE INITIALLY DEFERRED` constraints with no `ON DELETE CASCADE`,
+/// so callers run this before the parent DELETE, in the same transaction.
+/// Shared with the `github_proj` rebind path, which hard-deletes bindings
+/// from `_upsert_git_binding_for_github_sync` (`github.py:404-406`).
+pub(crate) async fn delete_git_binding_children(
+    ex: &mut sqlx::PgConnection,
+    binding_ids: &[uuid::Uuid],
+) -> Result<(), sqlx::Error> {
+    if binding_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"DELETE FROM git_comment_syncs
+           WHERE issue_sync_id IN (
+               SELECT id FROM git_issue_syncs WHERE binding_id = ANY($1)
+           )"#,
+    )
+    .bind(binding_ids)
+    .execute(&mut *ex)
+    .await?;
+    sqlx::query("DELETE FROM git_issue_syncs WHERE binding_id = ANY($1)")
+        .bind(binding_ids)
+        .execute(&mut *ex)
+        .await?;
+    Ok(())
+}
+
+/// The `GithubRepositorySync` half of the Collector cascade
+/// (`github.py:81` → `:107`): `GithubCommentSync` rows first, then
+/// `GithubIssueSync` rows, with no `deleted_at` filter (see
+/// [`delete_git_binding_children`]). Shared with the `github_proj` bind
+/// rebind (`github.py:1026-1032`).
+pub(crate) async fn delete_github_sync_children(
+    ex: &mut sqlx::PgConnection,
+    sync_ids: &[uuid::Uuid],
+) -> Result<(), sqlx::Error> {
+    if sync_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"DELETE FROM github_comment_syncs
+           WHERE issue_sync_id IN (
+               SELECT id FROM github_issue_syncs WHERE repository_sync_id = ANY($1)
+           )"#,
+    )
+    .bind(sync_ids)
+    .execute(&mut *ex)
+    .await?;
+    sqlx::query("DELETE FROM github_issue_syncs WHERE repository_sync_id = ANY($1)")
+        .bind(sync_ids)
+        .execute(&mut *ex)
+        .await?;
+    Ok(())
+}
+
 /// `unbind_repository` (`services.py:374-378`): hard deletes scoped to the
-/// live rows of this workspace slug + project.
+/// live rows of this workspace slug + project, in one transaction. The
+/// parent filters stay live-only (the default manager); the child deletes
+/// take no `deleted_at` filter (the Collector's `_base_manager`).
 async fn unbind_repository(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
 ) -> Result<(), RepoDenial> {
+    let mut tx = pool.begin().await.map_err(|_| RepoDenial::ServerError)?;
+    let binding_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r#"SELECT b.id FROM git_repository_bindings b
+           JOIN workspaces w ON w.id = b.workspace_id
+           WHERE b.project_id = $1 AND w.slug = $2 AND b.deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|_| RepoDenial::ServerError)?;
+    delete_git_binding_children(&mut tx, &binding_ids)
+        .await
+        .map_err(|_| RepoDenial::ServerError)?;
     sqlx::query(
         r#"DELETE FROM git_repository_bindings b
            USING workspaces w
@@ -791,9 +867,22 @@ async fn unbind_repository(
     )
     .bind(project_id)
     .bind(slug)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|_| RepoDenial::ServerError)?;
+    let sync_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r#"SELECT s.id FROM github_repository_syncs s
+           JOIN workspaces w ON w.id = s.workspace_id
+           WHERE s.project_id = $1 AND w.slug = $2 AND s.deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|_| RepoDenial::ServerError)?;
+    delete_github_sync_children(&mut tx, &sync_ids)
+        .await
+        .map_err(|_| RepoDenial::ServerError)?;
     sqlx::query(
         r#"DELETE FROM github_repository_syncs s
            USING workspaces w
@@ -802,9 +891,10 @@ async fn unbind_repository(
     )
     .bind(project_id)
     .bind(slug)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|_| RepoDenial::ServerError)?;
+    tx.commit().await.map_err(|_| RepoDenial::ServerError)?;
     Ok(())
 }
 
@@ -1772,6 +1862,20 @@ async fn bind_transaction(
     } else {
         git_repository_binding::CLONE_AUTH_MODE_PUBLIC
     };
+    // Rebind (`services.py:324-328`): Collector-cascade the children of the
+    // live rows first — the FKs have no `ON DELETE CASCADE`, so the bare
+    // parent DELETEs below would 23503 at COMMIT once anything synced.
+    let rebind_binding_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM git_repository_bindings
+           WHERE project_id = $1 AND deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|_| RepoDenial::ServerError)?;
+    delete_git_binding_children(&mut tx, &rebind_binding_ids)
+        .await
+        .map_err(|_| RepoDenial::ServerError)?;
     sqlx::query(
         r#"DELETE FROM git_repository_bindings
            WHERE project_id = $1 AND deleted_at IS NULL"#,
@@ -1780,6 +1884,17 @@ async fn bind_transaction(
     .execute(&mut *tx)
     .await
     .map_err(|_| RepoDenial::ServerError)?;
+    let rebind_sync_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM github_repository_syncs
+           WHERE project_id = $1 AND deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|_| RepoDenial::ServerError)?;
+    delete_github_sync_children(&mut tx, &rebind_sync_ids)
+        .await
+        .map_err(|_| RepoDenial::ServerError)?;
     sqlx::query(
         r#"DELETE FROM github_repository_syncs
            WHERE project_id = $1 AND deleted_at IS NULL"#,

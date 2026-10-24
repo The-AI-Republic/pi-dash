@@ -248,7 +248,17 @@ pub fn run_select_sql() -> String {
 /// The parent's runner for pinning (`service.py:538-540`:
 /// `parent.runner`). `$1` is the runner id.
 pub const RUNNER_SELECT_SQL: &str =
-    "SELECT id, pod_id, status, last_heartbeat_at FROM runner WHERE id = $1";
+    "SELECT id, pod_id, status, last_heartbeat_at, paused_at FROM runner WHERE id = $1";
+
+/// The decoded [`RUNNER_SELECT_SQL`] row
+/// (`id, pod_id, status, last_heartbeat_at, paused_at`).
+pub type RunnerSelectRow = (
+    Uuid,
+    Uuid,
+    String,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+);
 
 /// The assigned pod (`service.py:329`): the default `Pod.objects`
 /// manager excludes soft-deleted rows (`runner/models.py:42-49`). `$1`
@@ -599,6 +609,8 @@ pub struct RunnerView {
     pub status: String,
     /// `70d684af`: the pin check needs the heartbeat freshness.
     pub last_heartbeat_at: Option<DateTime<Utc>>,
+    /// `09738d222`: the pin check skips operator-paused runners.
+    pub paused_at: Option<DateTime<Utc>>,
 }
 
 /// The consumed `pod` projection (live rows only, per `PodManager`).
@@ -877,7 +889,9 @@ pub fn run_config_for_issue(
 /// eligible: only the pinned runner may take a pinned run, so pinning
 /// to a runner that is gone would park the run in QUEUED and block
 /// every later run on the issue. A BUSY runner is alive and stays
-/// eligible; the pinned run waits for it.
+/// eligible; the pinned run waits for it. `09738d222`: an
+/// operator-paused runner is not eligible either — its pins would only
+/// wait out the pause.
 pub fn pinned_runner_for(
     runner: Option<&RunnerView>,
     target_pod_id: Option<Uuid>,
@@ -891,6 +905,9 @@ pub fn pinned_runner_for(
         .last_heartbeat_at
         .is_none_or(|hb| hb < now - Duration::seconds(HEARTBEAT_GRACE_SECS))
     {
+        return None;
+    }
+    if runner.paused_at.is_some() {
         return None;
     }
     if target_pod_id.is_some_and(|pod| runner.pod_id != pod) {
@@ -2636,6 +2653,7 @@ mod tests {
             pod_id: uid(0x50),
             status: "online".to_owned(),
             last_heartbeat_at: Some(clock),
+            paused_at: None,
         };
         // M1: no runner.
         assert_eq!(pinned_runner_for(None, Some(uid(0x50)), clock), None);
@@ -2719,6 +2737,15 @@ mod tests {
         assert_eq!(
             pinned_runner_for(Some(&edge), Some(uid(0x50)), clock),
             Some(uid(0x60))
+        );
+        // M11 (`09738d222`): paused otherwise-fresh runners hold no pin.
+        let paused = RunnerView {
+            paused_at: Some(clock),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&paused), Some(uid(0x50)), clock),
+            None
         );
     }
 
@@ -3063,6 +3090,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(Some(parent)))
@@ -3090,6 +3118,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         let mut req = dispatch_req(Some(parent));
@@ -3211,6 +3240,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         let outcome = create_continuation_run(&mut seam, &continuation_req(parent))
@@ -3348,6 +3378,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
@@ -3375,6 +3406,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {

@@ -544,7 +544,7 @@ pub fn managed_cap_count_sql() -> String {
 /// `Runner.objects.create(owner, workspace_id, dev_machine, pod, name,
 /// host_label, provisioning, enrolled_at=now())`. `Runner.save()`'s
 /// single-project auto-resolve is a no-op here (`pod` is always set —
-/// `:676-680` 409s otherwise), so this is a plain 30-column `INSERT`
+/// `:676-680` 409s otherwise), so this is a plain 32-column `INSERT`
 /// with every column bound (`$1..$30` in [`r_cols::COLUMNS`] order):
 /// `$1` id (fresh uuid4), `$2` owner, `$3` workspace, `$4` dev machine
 /// (or NULL — legacy path), `$5` pod, `$6` name (explicit or
@@ -969,6 +969,8 @@ mod tests {
         "updated_at",
         "revoked_at",
         "revoked_reason",
+        "paused_at",
+        "paused_by_id",
     ];
     const POD_COLS: &[&str] = &[
         "id",
@@ -1364,7 +1366,7 @@ mod tests {
     }
 
     #[test]
-    fn e7_insert_binds_all_thirty_columns() {
+    fn e7_insert_binds_all_thirty_two_columns() {
         let sql = runner_insert_sql();
         let cols = RUNNER_COLS
             .iter()
@@ -1375,7 +1377,7 @@ mod tests {
             sql,
             format!(
                 "INSERT INTO \"runner\" ({cols}) VALUES ({})",
-                (1..=30)
+                (1..=32)
                     .map(|i| format!("${i}"))
                     .collect::<Vec<_>>()
                     .join(", "),

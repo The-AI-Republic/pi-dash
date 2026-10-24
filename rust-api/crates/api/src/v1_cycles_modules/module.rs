@@ -59,6 +59,9 @@
 //!   project before the body runs anyway.
 //! * The members rewrite and every default-ordered read use `-created_at`
 //!   ordering, including the `str(queryset)` payload text.
+//! * v1 `members` includes soft-deleted `ModuleMember` rows, as Django's
+//!   unfiltered M2M read does (`serializers/module.py:203-206`,
+//!   PIDASHCONV-1418).
 //!
 //! Fixture: `FX-CYCMOD-08`
 //! (`rust-api/fixtures/v1_cycles_modules/handlers/module.golden.json`).
@@ -3671,8 +3674,10 @@ pub async fn fetch_project(
         .ok_or(Denial::NotFound)
 }
 
-/// `instance.members.all()`: live membership ids in `User` `-created_at`
-/// order (the M2M queryset's default ordering, verified live).
+/// `instance.members.all()`: membership ids in `User` `-created_at`
+/// order (the M2M queryset's default ordering, verified live), including
+/// soft-deleted rows — Django's M2M manager joins the through table with
+/// no soft-delete filter (`serializers/module.py:203-206`, PIDASHCONV-1418).
 pub async fn fetch_members(
     pool: &PgPool,
     module_id: &uuid::Uuid,
@@ -3680,7 +3685,7 @@ pub async fn fetch_members(
     sqlx::query_scalar(
         r#"SELECT mm."member_id" FROM "module_members" mm
            INNER JOIN "users" u ON u."id" = mm."member_id"
-           WHERE mm."module_id" = $1 AND mm."deleted_at" IS NULL
+           WHERE mm."module_id" = $1
            ORDER BY u."created_at" DESC"#,
     )
     .bind(module_id)

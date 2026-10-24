@@ -51,9 +51,9 @@ pub const TERMINAL_EFFECTS_TASK: &str = "runner.apply_agent_run_terminal_effects
 pub const YIELD_KEYS: [&str; 4] = ["status", "note", "yielded_at", "stop_ticking"];
 
 /// `runner` columns in Django `_meta` order (captured from
-/// `Runner._meta.concrete_fields`): the capacity re-read joins the
-/// full row. Canonical home is the D-13 port; this list pins the
-/// `SELECT` text until it lands.
+/// `Runner._meta.concrete_fields`, plus the `09738d222` pause pair):
+/// the capacity re-read joins the full row. Canonical home is the
+/// D-13 port; this list pins the `SELECT` text until it lands.
 const RUNNER_COLUMNS: &[&str] = &[
     "id",
     "owner_id",
@@ -85,6 +85,8 @@ const RUNNER_COLUMNS: &[&str] = &[
     "updated_at",
     "revoked_at",
     "revoked_reason",
+    "paused_at",
+    "paused_by_id",
 ];
 
 /// How finalization planning fails: `new_status` is not terminal
@@ -410,7 +412,7 @@ pub fn update_hooks_marker_sql() -> &'static str {
 }
 
 /// Capacity re-read (`apply_terminal_effects:183`):
-/// `select_related("runner", "pod").get(pk)` — 41 + 10 + 30 columns,
+/// `select_related("runner", "pod").get(pk)` — 41 + 10 + 32 columns,
 /// `.get()` so no `LIMIT`. A missing row raises `DoesNotExist` (no
 /// guard in the source); the executing layer propagates it. Param:
 /// `$1` run id.
@@ -1471,7 +1473,7 @@ mod tests {
             vec![
                 ("\"agent_run\"".to_owned(), 41),
                 ("\"pod\"".to_owned(), 10),
-                ("\"runner\"".to_owned(), 30),
+                ("\"runner\"".to_owned(), 32),
             ]
         );
         assert!(
@@ -1528,6 +1530,8 @@ mod tests {
                 "updated_at",
                 "revoked_at",
                 "revoked_reason",
+                "paused_at",
+                "paused_by_id",
             ]
         );
         assert_eq!(scheduler_binding::COLUMNS.len(), 22);

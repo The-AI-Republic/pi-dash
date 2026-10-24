@@ -17,6 +17,10 @@
 //!   revoke frames + session closes; runner rows untouched (port as-is).
 //! * `POST /api/runners/<rid>/revoke/` — row-locked read, view/manage
 //!   gates, idempotent 200 (no re-emit when already revoked).
+//! * `POST /api/runners/<rid>/pause/` (`09738d222`) — stamp the pause,
+//!   release pins, return the runner plus `in_flight_runs`.
+//! * `POST /api/runners/<rid>/resume/` (`09738d222`) — clear the pause,
+//!   drain queued work to the runner, return the runner.
 //!
 //! Fixture ids D13-F3 (`tokens/tokens.golden.json`: rotation mints),
 //! D13-F5 (`queries/*.sql`: refresh/revoke/cascade SQL), D13-F6
@@ -321,7 +325,8 @@ fn machine_lazy_sql() -> String {
 const LIVE_STATE_SQL: &str =
     "SELECT \"runner_id\", \"observed_run_id\", \"last_event_at\", \"last_event_kind\", \
      \"last_event_summary\", \"agent_pid\", \"agent_subprocess_alive\", \
-     \"approvals_pending\", \"usage\", \"llm_model\", \"turn_count\", \"updated_at\" \
+     \"approvals_pending\", \"usage\", \"llm_model\", \"turn_count\", \
+     \"agent_health\", \"agent_last_activity_at\", \"updated_at\" \
      FROM \"runner_live_state\" WHERE \"runner_live_state\".\"runner_id\" = $1 LIMIT 1";
 
 // ---------------------------------------------------------------------------
@@ -1383,7 +1388,7 @@ pub async fn runner_revoke(
             return server_error();
         }
     }
-    match render_revoked_runner(&pool, runner_id).await {
+    match render_toggled_runner(&pool, runner_id).await {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(response) => response,
     }
@@ -1546,6 +1551,8 @@ struct FullRunner {
     updated_at: DateTime<Utc>,
     revoked_at: Option<DateTime<Utc>>,
     revoked_reason: String,
+    paused_at: Option<DateTime<Utc>>,
+    paused_by_id: Option<Uuid>,
 }
 
 /// Decode a full runner row positionally (`r_cols::COLUMNS` order —
@@ -1574,6 +1581,8 @@ fn decode_full_runner(row: &sqlx::postgres::PgRow) -> Result<FullRunner, Respons
         updated_at: row.try_get(27).map_err(|_| server_error())?,
         revoked_at: row.try_get(28).map_err(|_| server_error())?,
         revoked_reason: row.try_get(29).map_err(|_| server_error())?,
+        paused_at: row.try_get(30).map_err(|_| server_error())?,
+        paused_by_id: row.try_get(31).map_err(|_| server_error())?,
     })
 }
 
@@ -1592,7 +1601,7 @@ struct DevMachineMiniOwned {
     label: String,
 }
 
-/// Owned live-state snapshot (`RunnerLiveState`, `models.py:1454-1500`).
+/// Owned live-state snapshot (`RunnerLiveState`, `models.py:1504-1558`).
 struct LiveStateOwned {
     observed_run_id: Option<String>,
     last_event_at: Option<String>,
@@ -1604,6 +1613,8 @@ struct LiveStateOwned {
     usage: Value,
     llm_model: Option<String>,
     turn_count: Option<i64>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
     updated_at: String,
 }
 
@@ -1623,7 +1634,9 @@ async fn fetch_live_state(
     };
     let observed: Option<Uuid> = row.try_get(1).map_err(|_| server_error())?;
     let last_event_at: Option<DateTime<Utc>> = row.try_get(2).map_err(|_| server_error())?;
-    let updated_at: DateTime<Utc> = row.try_get(11).map_err(|_| server_error())?;
+    let agent_last_activity_at: Option<DateTime<Utc>> =
+        row.try_get(12).map_err(|_| server_error())?;
+    let updated_at: DateTime<Utc> = row.try_get(13).map_err(|_| server_error())?;
     let agent_pid: Option<i32> = row.try_get(5).map_err(|_| server_error())?;
     let approvals_pending: Option<i32> = row.try_get(7).map_err(|_| server_error())?;
     let turn_count: Option<i32> = row.try_get(10).map_err(|_| server_error())?;
@@ -1640,6 +1653,10 @@ async fn fetch_live_state(
         usage: row.try_get(8).map_err(|_| server_error())?,
         llm_model: row.try_get(9).map_err(|_| server_error())?,
         turn_count: turn_count.map(i64::from),
+        agent_health: row.try_get(11).map_err(|_| server_error())?,
+        agent_last_activity_at: agent_last_activity_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
         updated_at: crate::serializer::render_datetime(&updated_at),
     }))
 }
@@ -1669,6 +1686,8 @@ struct RunnerRender {
     enrolled_at: Option<String>,
     revoked_at: Option<String>,
     revoked_reason: String,
+    paused_at: Option<String>,
+    paused_by: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -1702,6 +1721,8 @@ impl RunnerRender {
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: &live.updated_at,
         });
         let row = shapes::RunnerRow {
@@ -1727,6 +1748,8 @@ impl RunnerRender {
             enrolled_at: self.enrolled_at.as_deref(),
             revoked_at: self.revoked_at.as_deref(),
             revoked_reason: &self.revoked_reason,
+            paused_at: self.paused_at.as_deref(),
+            paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
         };
@@ -1734,11 +1757,14 @@ impl RunnerRender {
     }
 }
 
-/// Serialize the re-read runner for the revoke 200 (`:491-492`): the
-/// refresh row plus the serializer's lazy loads (pod, dev-machine mini,
-/// project identifier, live state). A vanished row is the source's
+/// Serialize the re-read runner for the revoke/pause/resume 200s
+/// (revoke `:491-492`; pause/resume `_serialize_toggled_runner`,
+/// `runners.py:596-601`): the refresh row plus the serializer's lazy
+/// loads (pod, dev-machine mini, project identifier, live state).
+/// Same body as the `select_related` re-read — the joins only change
+/// the query shape, never the bytes. A vanished row is the source's
 /// `DoesNotExist` → 500.
-async fn render_revoked_runner(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
+async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(&runner_refresh_sql())
         .bind(runner_id)
         .fetch_optional(pool)
@@ -1834,10 +1860,429 @@ async fn render_revoked_runner(pool: &PgPool, runner_id: Uuid) -> Result<String,
             .as_ref()
             .map(crate::serializer::render_datetime),
         revoked_reason: runner.revoked_reason.clone(),
+        paused_at: runner
+            .paused_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        paused_by: runner.paused_by_id.map(|id| id.to_string()),
         created_at: crate::serializer::render_datetime(&runner.created_at),
         updated_at: crate::serializer::render_datetime(&runner.updated_at),
     }
     .to_json()
+}
+
+// ---------------------------------------------------------------------------
+// `POST /api/runners/<rid>/pause|resume/` (`runners.py:495-601`, `09738d222`)
+// ---------------------------------------------------------------------------
+
+use pidash_db::runner_enroll::columns::enums as runner_enums;
+use pidash_db::runner_runs::agent_run as run_cols;
+use pidash_services::runner_sessions::offline_recovery as pins_kernel;
+
+/// `{"error": ..., "code": "runner_revoked"}` 409
+/// (`_lock_manageable_runner`, `runners.py:507-522`): the operator
+/// toggle refuses revoked runners — resume cannot un-revoke.
+pub const RUNNER_REVOKED_CONFLICT_BODY: &str =
+    r#"{"error":"runner is revoked","code":"runner_revoked"}"#;
+
+/// `runner.save(update_fields=["paused_at", "paused_by", "updated_at"])`
+/// on pause (`runners.py:544`). Binds: `$1` now, `$2` pausing user id,
+/// `$3` now, `$4` runner id.
+pub const PAUSE_RUNNER_UPDATE_SQL: &str = "UPDATE \"runner\" SET \"paused_at\" = $1, \"paused_by_id\" = $2, \"updated_at\" = $3 WHERE \"runner\".\"id\" = $4";
+
+/// The same `save(update_fields=...)` on resume (`runners.py:587`),
+/// clearing the stamps. Binds: `$1` now, `$2` runner id.
+pub const RESUME_RUNNER_UPDATE_SQL: &str = "UPDATE \"runner\" SET \"paused_at\" = NULL, \"paused_by_id\" = NULL, \"updated_at\" = $1 WHERE \"runner\".\"id\" = $2";
+
+/// In-flight runs for the pause body
+/// (`AgentRun.objects.filter(runner=runner,
+/// status__in=BUSY_STATUSES).values_list("id", "status")`,
+/// `runners.py:552-554`). Binds: `$1` runner id. Statuses in
+/// `BUSY_STATUSES` order (pinned by the test below); newest first.
+pub const IN_FLIGHT_RUNS_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"status\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = $1 AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth')) ORDER BY \"agent_run\".\"created_at\" DESC";
+
+/// `_lock_manageable_runner` (`runners.py:495-522`): lock the row, 404
+/// when missing or invisible, 403 when unmanageable. The caller checks
+/// revocation and writes. (The revoke handler keeps its own copy of
+/// this preamble; this one serves the pause/resume pair.)
+async fn lock_manageable_runner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    user_id: Uuid,
+) -> Result<FullRunner, Response> {
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&runner_locked_read_sql())
+        .bind(runner_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| server_error())?;
+    let Some(row) = row else {
+        return Err(not_found());
+    };
+    let runner = decode_full_runner(&row)?;
+    // View gate → 404 (`:499-500`).
+    let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
+        workspace: WorkspaceId::from(runner.workspace_id.to_string()),
+        authenticated: true,
+        visibility: i32::from(runner.visibility),
+        owned_by_requester: runner.owner_id == user_id,
+    });
+    if !can_view {
+        return Err(not_found());
+    }
+    // Manage gate → 403 (`:501-502`): the private fast path skips the
+    // role read exactly like Python (private non-owners never query).
+    if runner.visibility == runner_perm::VISIBILITY_PRIVATE as i16 {
+        if runner.owner_id != user_id {
+            return Err(forbidden());
+        }
+    } else {
+        let role = workspace_role_in(&mut **tx, runner.workspace_id, user_id).await?;
+        let workspace = WorkspaceId::from(runner.workspace_id.to_string());
+        let scope = TenantScope::new(workspace.clone());
+        let manageable = runner_perm::can_manage_runner(
+            &scope,
+            &runner_perm::ManageFacts {
+                workspace,
+                requester: Some(UserId::from(user_id.to_string())),
+                visibility: i32::from(runner.visibility),
+                owned_by_requester: runner.owner_id == user_id,
+                is_workspace_admin: membership::is_workspace_admin(role),
+            },
+        );
+        if !manageable {
+            return Err(forbidden());
+        }
+    }
+    Ok(runner)
+}
+
+/// `POST /api/runners/<runner_id>/pause/` (`runners.py:525-561`):
+/// stamp the pause (idempotent — an already-paused row keeps its
+/// stamps with no release and no drain), commit, release the
+/// runner's pins, and return the runner plus `in_flight_runs`.
+/// Revoked (either marker) → 409. A non-canonical segment falls
+/// through to Django (which renders its own 404) before auth runs.
+pub async fn runner_pause(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let runner = match lock_manageable_runner(&mut tx, runner_id, user_id).await {
+        Ok(runner) => runner,
+        Err(response) => return response,
+    };
+    if runner.revoked_at.is_some() || runner.status == runner_enums::RUNNER_STATUS_REVOKED {
+        let _ = tx.rollback().await;
+        return conflict(RUNNER_REVOKED_CONFLICT_BODY);
+    }
+    let transition = runner.paused_at.is_none();
+    if transition {
+        let now = now_micros();
+        if sqlx::query(PAUSE_RUNNER_UPDATE_SQL)
+            .bind(now)
+            .bind(user_id)
+            .bind(now)
+            .bind(runner_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    if transition {
+        // The `on_commit` release (`:548-549`): pins drop and affected
+        // pods drain before the body renders.
+        if release_pins_for_paused_runner(&pool, &state, runner_id)
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+    }
+    let in_flight = match fetch_in_flight_runs(&pool, runner_id).await {
+        Ok(json) => json,
+        Err(response) => return response,
+    };
+    let runner_json = match render_toggled_runner(&pool, runner_id).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    json_response(StatusCode::OK, pause_body(&runner_json, &in_flight))
+}
+
+/// `POST /api/runners/<runner_id>/resume/` (`runners.py:564-601`):
+/// clear the stamps (a no-op when unpaused, with no drain), commit,
+/// drain queued work to the runner, and return the runner. Revoked
+/// (either marker) → 409. A non-canonical segment falls through to
+/// Django (which renders its own 404) before auth runs.
+pub async fn runner_resume(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let runner = match lock_manageable_runner(&mut tx, runner_id, user_id).await {
+        Ok(runner) => runner,
+        Err(response) => return response,
+    };
+    if runner.revoked_at.is_some() || runner.status == runner_enums::RUNNER_STATUS_REVOKED {
+        let _ = tx.rollback().await;
+        return conflict(RUNNER_REVOKED_CONFLICT_BODY);
+    }
+    let transition = runner.paused_at.is_some();
+    if transition
+        && sqlx::query(RESUME_RUNNER_UPDATE_SQL)
+            .bind(now_micros())
+            .bind(runner_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+    {
+        return server_error();
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    if transition {
+        // The `on_commit` drain (`:591-592`).
+        if drain_runner_by_id(&pool, &state, runner_id).await.is_err() {
+            return server_error();
+        }
+    }
+    let runner_json = match render_toggled_runner(&pool, runner_id).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    json_response(StatusCode::OK, runner_json)
+}
+
+/// In-flight `{"id", "status"}` rows for the pause body
+/// (`runners.py:552-554`), newest first, as a JSON array string.
+async fn fetch_in_flight_runs(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(IN_FLIGHT_RUNS_SQL)
+        .bind(runner_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| server_error())?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, status)| serde_json::json!({"id": id.to_string(), "status": status}))
+        .collect();
+    serde_json::to_string(&items).map_err(|_| server_error())
+}
+
+/// `{**runner, "in_flight_runs": [...]}` (`runners.py:556-561`): the
+/// runner keys keep their order, the new key trails.
+fn pause_body(runner_json: &str, in_flight_json: &str) -> String {
+    let mut body = runner_json.to_owned();
+    assert_eq!(body.pop(), Some('}'));
+    body.push_str(",\"in_flight_runs\":");
+    body.push_str(in_flight_json);
+    body.push('}');
+    body
+}
+
+/// `release_pins_for_paused_runner` (`tasks.py:184-219`): send every
+/// QUEUED `local_runner` run pinned to a just-paused runner back to
+/// its pod queue, then drain each affected pod — each drain isolated,
+/// so one failed drain never skips the rest. Called from the pause
+/// commit hook (not a celery task).
+async fn release_pins_for_paused_runner(
+    pool: &PgPool,
+    state: &AppState,
+    runner_id: Uuid,
+) -> Result<(), ()> {
+    use sqlx::Row;
+    let pinned: Vec<Uuid> = sqlx::query_scalar(&pins_kernel::paused_runner_pin_ids_select())
+        .bind(AgentExecutorKind::LocalRunner.value())
+        .bind(AgentRunStatus::Queued.value())
+        .bind(runner_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ())?;
+    let lock_sql = pins_kernel::paused_runner_pin_lock_select();
+    let at = |column: &str| run_cols::COLUMNS.iter().position(|name| *name == column);
+    let mut released = 0usize;
+    let mut pod_ids: Vec<Uuid> = Vec::new();
+    for run_id in pinned {
+        // One atomic block per run (`_release_pins`, `tasks.py:148-180`):
+        // re-lock the still-paused pin, clear the parent thread, clear
+        // the pin. A lock miss rolls back the empty tx.
+        let mut tx = pool.begin().await.map_err(|_| ())?;
+        let row: Option<sqlx::postgres::PgRow> = sqlx::query(&lock_sql)
+            .bind(run_id)
+            .bind(AgentRunStatus::Queued.value())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| ())?;
+        let Some(row) = row else {
+            tx.rollback().await.map_err(|_| ())?;
+            continue;
+        };
+        let pod_id: Option<Uuid> = row.try_get(at("pod_id").ok_or(())?).map_err(|_| ())?;
+        let parent_run_id: Option<Uuid> = row
+            .try_get(at("parent_run_id").ok_or(())?)
+            .map_err(|_| ())?;
+        // The T3 parent projection follows the run projection; the
+        // join is a LEFT OUTER JOIN, so every parent cell is null
+        // without one.
+        let thread_at = run_cols::COLUMNS.len() + at("thread_id").ok_or(())?;
+        let parent_thread: Option<String> = row.try_get(thread_at).map_err(|_| ())?;
+        // Parent write first, pin write second (source order).
+        if let Some(parent_id) =
+            parent_run_id.filter(|_| parent_thread.as_deref().is_some_and(|t| !t.is_empty()))
+        {
+            sqlx::query(&pins_kernel::clear_parent_thread_sql())
+                .bind(String::new())
+                .bind(parent_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ())?;
+        }
+        sqlx::query(&pins_kernel::clear_pin_sql())
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ())?;
+        tx.commit().await.map_err(|_| ())?;
+        released += 1;
+        if let Some(pod_id) = pod_id {
+            if !pod_ids.contains(&pod_id) {
+                pod_ids.push(pod_id);
+            }
+        }
+    }
+    for pod_id in pod_ids {
+        if drain_pod_by_id(pool, state, pod_id).await.is_err() {
+            tracing::error!("release pins: drain failed for pod {pod_id}");
+        }
+    }
+    if released > 0 {
+        tracing::info!(
+            "release_pins_for_paused_runner runner={runner_id} unpinned {released} run(s)"
+        );
+    }
+    Ok(())
+}
+
+/// `drain_for_runner_by_id` (`matcher.py:253-264`): runner lookup
+/// (miss ⇒ `Ok(false)`, no tx), else the re-lock/next/assign/send
+/// recipe. A dispatch failure propagates — the row stays `ASSIGNED`
+/// while the caller observes the failure. (Teardown-local copy of the
+/// `runner_open`/`runner_poll` drivers.)
+async fn drain_runner_by_id(pool: &PgPool, state: &AppState, runner_id: Uuid) -> Result<bool, ()> {
+    use sqlx::Row;
+    let found: Option<sqlx::postgres::PgRow> =
+        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL)
+            .bind(runner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| ())?;
+    if found.is_none() {
+        return Ok(false);
+    }
+    let mut tx = pool.begin().await.map_err(|_| ())?;
+    let threshold = alive_threshold(now_micros());
+    let locked: Option<sqlx::postgres::PgRow> =
+        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL)
+            .bind(threshold)
+            .bind(runner_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| ())?;
+    let Some(locked) = locked else {
+        return Ok(false);
+    };
+    let locked_runner_id: Uuid = locked.try_get(0).map_err(|_| ())?;
+    let owner_id: Uuid = locked.try_get(1).map_err(|_| ())?;
+    let pod_id: Uuid = locked.try_get(4).map_err(|_| ())?;
+    let provisioning: String = locked.try_get(7).map_err(|_| ())?;
+    let visibility: i16 = locked.try_get(8).map_err(|_| ())?;
+    // Non-private runners issue no query (the `qs.none()` arm).
+    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
+    else {
+        return Ok(false);
+    };
+    let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
+        .bind(pod_id)
+        .bind(locked_runner_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| ())?;
+    let Some(run) = run else {
+        return Ok(false);
+    };
+    let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
+    let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
+    let prompt: String = run.try_get(19).map_err(|_| ())?;
+    let run_config: Value = run.try_get(23).map_err(|_| ())?;
+    let Value::Object(run_config) = run_config else {
+        return Err(());
+    };
+    sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
+        .bind(owner_id)
+        .bind(locked_runner_id)
+        .bind(now_micros())
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| ())?;
+    let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
+        run_id,
+        runner_id: locked_runner_id,
+        owner_id,
+        work_item_id,
+        prompt,
+        run_config,
+    });
+    tx.commit().await.map_err(|_| ())?;
+    // The `on_commit` send fires before the `:294` log line (the
+    // registration runs immediately with no active transaction).
+    let pubsub = PoolPubsubStore::new(pool, state);
+    let outcome = match plan.after_commit {
+        drain_kernel::DrainEffect::SendAssign {
+            runner_id,
+            ref message,
+        } => pubsub_kernel::send_to_runner(&pubsub, runner_id, message)
+            .await
+            .map_err(|_| ())?,
+    };
+    for warning in &outcome.warnings {
+        tracing::warn!("{warning}");
+    }
+    tracing::info!(
+        "{}",
+        drain_kernel::drain_for_runner_log(&locked_runner_id, &run_id)
+    );
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -2653,6 +3098,14 @@ pub fn web_routes() -> Router<AppState> {
             "/api/runners/{runner_id}/revoke/",
             owned(post(runner_revoke), POST_ONLY),
         )
+        .route(
+            "/api/runners/{runner_id}/pause/",
+            owned(post(runner_pause), POST_ONLY),
+        )
+        .route(
+            "/api/runners/{runner_id}/resume/",
+            owned(post(runner_resume), POST_ONLY),
+        )
 }
 
 #[cfg(test)]
@@ -2912,6 +3365,62 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(&pepper).unwrap();
         mac.update(minted.raw.as_bytes());
         assert_eq!(hex(&mac.finalize().into_bytes()), minted.hashed);
+    }
+
+    // ---- Operator pause/resume SQL + bodies (`09738d222`) -------------------
+
+    #[test]
+    fn pause_resume_sql_match_django_saves() {
+        // SET order follows `update_fields`, not the model.
+        assert_eq!(
+            PAUSE_RUNNER_UPDATE_SQL,
+            "UPDATE \"runner\" SET \"paused_at\" = $1, \"paused_by_id\" = $2, \"updated_at\" = $3 WHERE \"runner\".\"id\" = $4"
+        );
+        assert_eq!(
+            RESUME_RUNNER_UPDATE_SQL,
+            "UPDATE \"runner\" SET \"paused_at\" = NULL, \"paused_by_id\" = NULL, \"updated_at\" = $1 WHERE \"runner\".\"id\" = $2"
+        );
+    }
+
+    #[test]
+    fn in_flight_sql_lists_busy_statuses_in_order() {
+        use pidash_services::runner_sessions::guards::BUSY_STATUSES;
+        let want: Vec<String> = BUSY_STATUSES
+            .iter()
+            .map(|status| format!("'{}'", status.value()))
+            .collect();
+        assert!(
+            IN_FLIGHT_RUNS_SQL.contains(&format!("IN ({})", want.join(", "))),
+            "{IN_FLIGHT_RUNS_SQL}"
+        );
+        assert!(
+            IN_FLIGHT_RUNS_SQL.contains("\"agent_run\".\"runner_id\" = $1"),
+            "{IN_FLIGHT_RUNS_SQL}"
+        );
+        assert!(
+            IN_FLIGHT_RUNS_SQL.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"),
+            "{IN_FLIGHT_RUNS_SQL}"
+        );
+    }
+
+    #[test]
+    fn pause_body_appends_in_flight_runs_last() {
+        assert_eq!(
+            pause_body(r#"{"a":1}"#, r#"[{"id":"x","status":"running"}]"#),
+            r#"{"a":1,"in_flight_runs":[{"id":"x","status":"running"}]}"#
+        );
+        assert_eq!(
+            pause_body(r#"{"a":1}"#, "[]"),
+            r#"{"a":1,"in_flight_runs":[]}"#
+        );
+    }
+
+    #[test]
+    fn revoked_conflict_body_shape() {
+        assert_eq!(
+            RUNNER_REVOKED_CONFLICT_BODY,
+            r#"{"error":"runner is revoked","code":"runner_revoked"}"#
+        );
     }
 
     // ---- D13-F5: refresh/revoke SQL ----------------------------------

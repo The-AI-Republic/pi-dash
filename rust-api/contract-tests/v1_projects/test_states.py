@@ -124,6 +124,34 @@ def test_patch(seed, conn):
         "State with the same external id and external source already exists")
 
 
+def test_patch_reslugifies_without_name(seed, conn):
+    # Django State.save() slugifies unconditionally (db/models/state.py:132),
+    # so a PATCH that omits name still rewrites the slug. Default states are
+    # bulk-created with slug "" (bulk_create skips save()), so a color-only
+    # PATCH on Backlog must return and store "backlog". PIDASHCONV-1390.
+    tag = db.new_tag()
+    ident = f"C{tag.upper()}"[:12]
+    created = http.post(
+        seed["keys"][KEY],
+        f"/api/v1/workspaces/{seed['ws_a']['slug']}/projects/",
+        json={"name": f"CT Reslug {tag}", "identifier": ident},
+        expect=201,
+    ).json()
+    pid = created["id"]
+    pbase = (f"/api/v1/workspaces/{seed['ws_a']['slug']}"
+             f"/projects/{pid}/states")
+    states = http.get(seed["keys"][KEY], pbase + "/").json()
+    backlog = [s for s in states["results"] if s["name"] == "Backlog"][0]
+    assert backlog["slug"] == ""
+    body = http.patch(seed["keys"][KEY], f"{pbase}/{backlog['id']}/",
+                      json={"color": "#0000ff"}).json()
+    assert body["color"] == "#0000ff"
+    assert body["slug"] == "backlog"
+    row = db.fetch_one(
+        conn, "SELECT slug FROM states WHERE id = %s", (backlog["id"],))
+    assert row["slug"] == "backlog"
+
+
 def test_delete_empty(seed, conn):
     tag = db.new_tag()
     st = db.create_state(conn, seed["ws_a"]["id"], seed["project"]["id"], tag)
