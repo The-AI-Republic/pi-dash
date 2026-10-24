@@ -87,11 +87,25 @@ test(
       expect(await driver.assistantDictationHint()).toBeNull();
     });
 
-    await test.step("the read still reports the flag while it is off", async () => {
-      if (driver.target !== "web_new") return;
+    await test.step("save, test and transcribe answer not-found while delete stays open", async () => {
+      if (driver.target !== "web_new") {
+        // The oracle's backend has no switch: its delete is open, which is
+        // the half the target keeps. The refusing writes are target-only.
+        await driver.assistantDictationApiProbe();
+        return;
+      }
+      await driver.settingsProfileStubDictationWritesDisabled();
       const probe = await driver.assistantDictationApiProbe();
       expect(probe.read).toBe(200);
       expect(probe.readEnabled).toBe(false);
+      expect(probe.save).toBe(404);
+      expect(probe.test).toBe(404);
+      expect(probe.transcribe).toBe(404);
+      // Removing a stored key stays open so the owner can always clear it.
+      expect(probe.remove).toBe(204);
+      expect((await serverAssistantSttGet(ownerSession)).has_api_key).toBe(false);
+      // The probe consumed the saved key; restore it for the halves below.
+      await serverAssistantSttPut(ownerSession, DUMMY_STT);
     });
 
     await test.step("a live recording is abandoned when the flag flips mid-recording", async () => {
@@ -110,18 +124,6 @@ test(
       // Nothing may upload after the switch turned the cell off.
       expect(await driver.assistantTranscribeRequests()).toEqual([]);
       expect(await driver.assistantDraftValue()).toBe("");
-    });
-
-    await test.step("save, test and transcribe answer not-found while delete stays open", async () => {
-      if (driver.target !== "web_new") return;
-      await driver.settingsProfileStubDictationWritesDisabled();
-      const probe = await driver.assistantDictationApiProbe();
-      expect(probe.read).toBe(200);
-      expect(probe.readEnabled).toBe(false);
-      expect(probe.save).toBe(404);
-      expect(probe.test).toBe(404);
-      expect(probe.transcribe).toBe(404);
-      expect(probe.remove).toBe(204);
     });
 
     await test.step("voice settings narrow to remove-only while a key is saved", async () => {

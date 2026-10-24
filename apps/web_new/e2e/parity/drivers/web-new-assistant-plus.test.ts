@@ -635,7 +635,7 @@ describe("dictation kill switch", () => {
     };
     const driver = new WebNewDriver(pageOf({ route, request }));
     await driver.settingsProfileStubDictationEnabled(false);
-    const configHandler = handlerFor(route, "**/api/users/me/ai-assistant/stt-config/**");
+    const configHandler = handlerFor(route, "**/api/users/me/ai-assistant/stt-config/");
     const read = stubRoute({ method: () => "GET" });
     await configHandler(read as unknown as Route);
     expect(read.fulfill).toHaveBeenCalledWith({
@@ -664,7 +664,8 @@ describe("dictation kill switch", () => {
       method: () => "POST",
       url: () => "https://app.test/api/users/me/ai-assistant/stt-config/test/",
     });
-    await configHandler(test as unknown as Route);
+    const testHandler = handlerFor(route, "**/api/users/me/ai-assistant/stt-config/test/");
+    await testHandler(test as unknown as Route);
     expect(test.fulfill).toHaveBeenCalledWith({
       status: 404,
       contentType: "application/json",
@@ -685,12 +686,13 @@ describe("dictation kill switch", () => {
     const unroute = vi.fn(async () => undefined);
     const driver = new WebNewDriver(pageOf({ route, unroute }));
     await driver.settingsProfileStubDictationEnabled(true);
-    const configHandler = handlerFor(route, "**/api/users/me/ai-assistant/stt-config/**");
+    const configHandler = handlerFor(route, "**/api/users/me/ai-assistant/stt-config/");
     const write = stubRoute({ method: () => "PUT" });
     await configHandler(write as unknown as Route);
     expect(write.fallback).toHaveBeenCalledTimes(1);
     await driver.settingsProfileClearDictationStubs();
-    expect(unroute).toHaveBeenCalledWith("**/api/users/me/ai-assistant/stt-config/**");
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/ai-assistant/stt-config/");
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/ai-assistant/stt-config/test/");
     expect(unroute).toHaveBeenCalledWith("**/api/users/me/ai-assistant/transcribe/");
   });
 });

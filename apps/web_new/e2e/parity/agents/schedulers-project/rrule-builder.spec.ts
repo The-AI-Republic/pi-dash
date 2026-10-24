@@ -204,24 +204,33 @@ test(
     await test.step("saving persists exactly what the builder serialized", async () => {
       await driver.schedulerProjectEditSubmit();
       await expect.poll(() => driver.schedulerProjectEditOpen(), { timeout: 30_000 }).toBe(false);
-      expect(await storedRule(workspaceSlug, project.id, handle, ownerSession)).toBe(
-        "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,FR"
-      );
+      // The builder steps above are target-only, so the oracle still holds
+      // its untouched stored rule; both legs prove the save round-trips the
+      // editor's current text.
+      const expected = driver.target === "web_new" ? "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,FR" : "FREQ=DAILY";
+      expect(await storedRule(workspaceSlug, project.id, handle, ownerSession)).toBe(expected);
     });
 
     await test.step("an inexpressible rule opens raw and submits byte-identical unless edited", async () => {
-      const stored = "RRULE:FREQ=WEEKLY;BYDAY=MO;BYHOUR=9";
+      // BYHOUR is a valid RFC 5545 rule the repeat controls cannot show;
+      // the server stores it verbatim (it only strips an `RRULE:` prefix).
+      const stored = "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9";
+      await openEdit(driver, workspaceSlug, project.id, handle);
+      await driver.schedulerRecurrenceRaw(stored);
+      await driver.schedulerProjectEditSubmit();
+      await expect.poll(() => driver.schedulerProjectEditOpen(), { timeout: 30_000 }).toBe(false);
+      expect(await storedRule(workspaceSlug, project.id, handle, ownerSession)).toBe(stored);
+
       await openEdit(driver, workspaceSlug, project.id, handle);
       if (driver.target === "web_new") {
-        let facts = await driver.schedulerRecurrenceFacts();
+        const facts = await driver.schedulerRecurrenceFacts();
         expect(facts.rawVisible).toBe(true);
         expect(facts.advancedVisible).toBe(false);
         expect(facts.rawValue).toBe(stored);
       }
-      await driver.schedulerRecurrenceRaw(stored);
+      // Untouched: the stored bytes must round-trip through the editor.
       await driver.schedulerProjectEditSubmit();
       await expect.poll(() => driver.schedulerProjectEditOpen(), { timeout: 30_000 }).toBe(false);
-      // Untouched: the stored bytes must round-trip through the editor.
       expect(await storedRule(workspaceSlug, project.id, handle, ownerSession)).toBe(stored);
 
       await openEdit(driver, workspaceSlug, project.id, handle);

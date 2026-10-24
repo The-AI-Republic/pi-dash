@@ -19389,6 +19389,7 @@ export class WebDriver implements ParityDriver {
     return this.page.evaluate(async () => {
       const base = "/api/users/me/ai-assistant";
       const readResponse = await fetch(`${base}/stt-config/`, { credentials: "include" });
+      const read = readResponse.status;
       let readEnabled: boolean | null = null;
       try {
         const body = (await readResponse.json()) as { enabled?: unknown };
@@ -19417,7 +19418,7 @@ export class WebDriver implements ParityDriver {
       });
       const remove = await fetch(`${base}/stt-config/`, { method: "DELETE", credentials: "include" });
       return {
-        read: readResponse.status,
+        read,
         readEnabled,
         save: save.status,
         test: test.status,
@@ -48227,14 +48228,15 @@ export class WebDriver implements ParityDriver {
     this.assistantDictationEnabledStub = null;
     this.assistantDictationWritesDisabled = false;
     this.assistantDictationRoutesInstalled = false;
-    await this.page.unroute("**/api/users/me/ai-assistant/stt-config/**");
+    await this.page.unroute("**/api/users/me/ai-assistant/stt-config/");
+    await this.page.unroute("**/api/users/me/ai-assistant/stt-config/test/");
     await this.page.unroute("**/api/users/me/ai-assistant/transcribe/");
   }
 
   private async installDictationStubRoutes(): Promise<void> {
     if (this.assistantDictationRoutesInstalled) return;
     this.assistantDictationRoutesInstalled = true;
-    await this.page.route("**/api/users/me/ai-assistant/stt-config/**", async (route) => {
+    await this.page.route("**/api/users/me/ai-assistant/stt-config/", async (route) => {
       const request = route.request();
       const method = request.method();
       const enabled = this.assistantDictationEnabledStub;
@@ -48246,6 +48248,17 @@ export class WebDriver implements ParityDriver {
         return;
       }
       if (this.assistantDictationWritesDisabled && (method === "PUT" || method === "POST")) {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "dictation_disabled" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
+    await this.page.route("**/api/users/me/ai-assistant/stt-config/test/", async (route) => {
+      if (this.assistantDictationWritesDisabled && route.request().method() === "POST") {
         await route.fulfill({
           status: 404,
           contentType: "application/json",
