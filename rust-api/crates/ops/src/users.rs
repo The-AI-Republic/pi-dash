@@ -843,6 +843,12 @@ async fn run_create_dummy_data_inner(
     )
     .await
     .map_err(|e| caught_db_error_text(&e))?;
+    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
+    // during the create above, before the member rows below: seed the
+    // builtin schedulers. The receiver swallows every failure, so this
+    // never fails the command. `None` created_by: a management command
+    // has no crum request user, so Django stamps `NULL`.
+    pidash_services::scheduler::builtins::seed_builtin_schedulers(pool, workspace_id, None).await;
     let props = queries::workspace_member_props_json();
     let issue_props = queries::workspace_issue_props_json();
     queries::workspace_member_create(pool, workspace_id, owner.id, 20, &props, &issue_props)

@@ -2418,10 +2418,10 @@ async fn create_workspace(
     // during the save above, before the member row below: seed the
     // builtin schedulers. The receiver swallows every failure, so this
     // never fails the request.
-    crate::app_workspace::handlers_workspace::seed_builtin_schedulers(
+    pidash_services::scheduler::builtins::seed_builtin_schedulers(
         &pool,
         workspace_id,
-        actor.id,
+        Some(actor.id),
     )
     .await;
     // `WorkspaceMember.objects.create(workspace_id, member=user, role=20,

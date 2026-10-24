@@ -404,6 +404,28 @@ impl PgDummyData {
         .execute(&self.pool)
         .await
         .map_err(db_error)?;
+        // `create_default_pod_for_new_project` (`runner/signals.py:31-66`):
+        // the `post_save` handler fires during `Project.objects.create`,
+        // before the member rows below. Best-effort + idempotent — never
+        // fails the task. Lead/assignee are `None` on this path (the task
+        // passes neither), so `created_by` stamps `NULL`, like Django.
+        if let (Ok(project_uuid), Ok(workspace_uuid)) = (
+            uuid::Uuid::parse_str(&project_id),
+            uuid::Uuid::parse_str(workspace_id),
+        ) {
+            pidash_services::runner_runs::signals::create_default_pod_for_new_project(
+                &self.pool,
+                &pidash_services::runner_runs::signals::NewProject {
+                    id: project_uuid,
+                    workspace_id: workspace_uuid,
+                    identifier: identifier.clone(),
+                    created: true,
+                    project_lead: None,
+                    default_assignee: None,
+                },
+            )
+            .await;
+        }
         // `ProjectMember.objects.create` runs the `save()` hook: the
         // property row persists BEFORE the member row, and `save()`
         // nulls the audit user on both.
