@@ -47,11 +47,13 @@
 //!   `assistant_user_llm_config` row.
 //! * `extra_toolsets_enabled` is `false`, exactly as CE
 //!   (`ee/cloud_agent/toolsets.py:23-32`).
-//! * The admission cache is request-scoped memory: the sync
-//!   `AdmissionCache` trait cannot reach the async Redis client, and it is
-//!   consulted only when building a cloud-executor run, so every CE/local
-//!   path answers identically to Django; only concurrent cloud load could
-//!   over-admit versus the shared cache.
+//! * The admission cache is the shared Redis (PIDASHCONV-1487): the
+//!   sync `AdmissionCache` trait opens a short sync connection per call
+//!   (the `project_move_handoff::RedisAdmissionCache` position), so the
+//!   per-user / per-workspace minute buckets match Django's exactly,
+//!   sequentially as well as under concurrent load. The drivers consult
+//!   it only when building a cloud-executor run, so every CE/local path
+//!   answers identically with no Redis traffic.
 //!
 //! Ported bugs: none found in these four units on read-through (the
 //! agent-guard ownership bug is P1's, listed on PIDASHCONV-671).
@@ -74,7 +76,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -90,6 +92,8 @@ use pidash_auth::scope::TenantScope;
 use pidash_types::orchestration::{normalize_outcome, RUN_OUTCOMES};
 use pidash_types::runner_runs::AgentRunStatus;
 
+use crate::project_move_handoff::RedisAdmissionCache;
+use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
 
 use super::perms::{
@@ -853,49 +857,6 @@ pub async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Pr
     .transpose()
 }
 
-/// Request-scoped admission cache: the sync `AdmissionCache` trait cannot
-/// reach the async Redis client, and the drivers consult it only when
-/// building a cloud-executor run, so a per-request map answers identically
-/// to Django on every CE/local path (see the module docs).
-#[derive(Debug, Default)]
-pub struct RequestCache {
-    buckets: Mutex<HashMap<String, i64>>,
-}
-
-#[derive(Debug)]
-pub struct CacheError(pub String);
-
-impl std::fmt::Display for CacheError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for CacheError {}
-
-impl pidash_services::dispatch::admission::AdmissionCache for RequestCache {
-    type Error = CacheError;
-
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-        self.buckets
-            .lock()
-            .map(|buckets| buckets.get(key).copied())
-            .map_err(|e| CacheError(e.to_string()))
-    }
-
-    fn add_or_incr(&self, key: &str, _timeout_secs: i64) -> Result<(), Self::Error> {
-        self.buckets
-            .lock()
-            .map(|mut buckets| {
-                buckets
-                    .entry(key.to_owned())
-                    .and_modify(|n| *n += 1)
-                    .or_insert(1);
-            })
-            .map_err(|e| CacheError(e.to_string()))
-    }
-}
-
 /// LLM-key presence for the D-11 closures: the actor plus every
 /// fallback-creator candidate the drivers may query (issue creator,
 /// project lead, default assignee, live assignees), read from
@@ -1105,7 +1066,7 @@ pub fn profile_fn(
 
 /// Live [`StoreDeps`](pidash_jobs::orchestration::StoreDeps): settings from
 /// the app state, LLM presence for the creator universe, the installed
-/// toolsets seam, and the request admission cache.
+/// toolsets seam, and the shared Redis admission cache.
 /// Returns the opaque struct so each driver call site keeps its concrete
 /// closure types.
 #[allow(clippy::too_many_arguments)]
@@ -1119,7 +1080,7 @@ pub async fn dispatch_deps(
 ) -> Result<
     (
         pidash_jobs::orchestration::StoreDeps<
-            RequestCache,
+            RedisAdmissionCache,
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
             impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
         >,
@@ -1129,11 +1090,14 @@ pub async fn dispatch_deps(
 > {
     let presence = fetch_presence(pool, actor_id, issue, project).await?;
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
+    let cache = RedisAdmissionCache {
+        client: redis_client(state),
+    };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
             cloud: state.settings().cloud_agent.clone(),
             managed: state.settings().managed_runner.clone(),
-            cache: RequestCache::default(),
+            cache,
             has_usable_llm_config: gate_fn(verdicts),
             toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),
@@ -1156,7 +1120,7 @@ pub async fn dispatch_deps_for_ids(
 ) -> Result<
     (
         pidash_jobs::orchestration::StoreDeps<
-            RequestCache,
+            RedisAdmissionCache,
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
             impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
         >,
@@ -1167,11 +1131,14 @@ pub async fn dispatch_deps_for_ids(
     let universe = creator_universe_for_ids(pool, actor_id, issue_id).await?;
     let presence = Arc::new(fetch_llm_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
+    let cache = RedisAdmissionCache {
+        client: redis_client(state),
+    };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
             cloud: state.settings().cloud_agent.clone(),
             managed: state.settings().managed_runner.clone(),
-            cache: RequestCache::default(),
+            cache,
             has_usable_llm_config: gate_fn(verdicts),
             toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),

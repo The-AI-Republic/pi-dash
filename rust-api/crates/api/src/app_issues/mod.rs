@@ -1552,18 +1552,65 @@ pub fn filtered_set(
 // `NULLS LAST` plus a `-created_at` tiebreak (`OffsetPaginator.get_result`
 // and the grouped variants). This resolves the rewritten key to SQL.
 
-/// `(key expression, descending)` for the rewritten `order_by` param.
+/// The resolved `ORDER BY` key: the value expression, the direction, and
+/// any extra `FROM`-clause joins the expression needs. Only
+/// `issue_cycle__cycle__name` needs joins; every other key is a column or
+/// a self-contained scalar subquery over the base tables.
+pub struct OrderKey {
+    pub expr: String,
+    pub descending: bool,
+    pub joins: String,
+}
+
+/// The resolved `ORDER BY` key for the rewritten `order_by` param.
 /// The default branch of `order_issue_queryset` orders by the raw param,
 /// so any valid ORM path works in Python and only a truly invalid path
 /// raises `FieldError` (generic 500). FK names order by their id column
 /// (`estimate_point` → `estimate_point_id`, `project` → `project_id`,
 /// `parent` → `parent_id`, `state` → `state_id`); `state__name` resolves
-/// through the state join. Deeper relation traversals beyond the
-/// `min_values` trio stay a 500 (out of pilot scope; the suite never sends
-/// them).
-pub fn order_key(out_param: &str, orig_param: &str) -> Result<(String, bool), Denial> {
+/// through the state join.
+/// `link_count` / `attachment_count` / `sub_issues_count` are the
+/// `Count` subquery annotations the issue lists apply
+/// (`apply_annotations`). Most lists use the plain `Func(Count)` form:
+/// the bare `COUNT(*)` always returns one row, so an empty set orders
+/// as `0`, never `NULL`. The project list (`IssueViewSet.list`) uses the
+/// grouped `Subquery` form instead, which yields no row — SQL `NULL` —
+/// when empty, so empties sort `NULLS LAST` in both directions (pinned
+/// live); its callers pass `null_counts`. The sub-issue scope is the
+/// `IssueManager` one either way: `NULL`-state children count, triage
+/// children do not — even when the triage state row itself is
+/// soft-deleted, because joins never apply the related manager's guard
+/// (pinned live).
+/// `estimate_point__key` is the forward-FK value (`NULL` when the issue
+/// has no estimate; the FK join filters nothing).
+/// `issue_cycle__cycle__name` is Django's plain join, not an annotation:
+/// `LEFT JOIN` over the bridge and the cycle with no `deleted_at` guard
+/// on either (soft-deleted bridge rows and soft-deleted cycles both
+/// sort), which fans a multi-linked issue out into one row per link
+/// (pinned live: identical dicts, flat totals stay distinct-issue
+/// counts). Callers splice [`OrderKey::joins`] into the row query's
+/// `FROM` only — never into the flat totals. `cycle_bridge` carries an
+/// already-joined bridge alias to resolve over instead of joining fresh:
+/// Django reuses a same-path join for the traversal, scope included
+/// (pinned live: the cycle list reuses its filtered `bridge`, so no
+/// extra fan-out there; a cycle filter's `issue_cycle` join wins over
+/// the base one; a filtered module sort stays within the filter).
+/// Callers whose `FROM` has no bridge join pass `None`. Deeper relation
+/// traversals beyond these stay a 500.
+pub fn order_key(
+    out_param: &str,
+    orig_param: &str,
+    cycle_bridge: Option<&str>,
+    null_counts: bool,
+) -> Result<OrderKey, Denial> {
     let descending = out_param.starts_with('-');
     let key = out_param.trim_start_matches('-');
+    let mut joins = String::new();
+    let count = if null_counts {
+        "NULLIF(COUNT(*), 0)"
+    } else {
+        "COUNT(*)"
+    };
     let expr = match key {
         "priority_order" => pidash_services::app_issues::ordering::priority_case_sql(),
         "state_order" => {
@@ -1583,9 +1630,34 @@ pub fn order_key(out_param: &str, orig_param: &str) -> Result<(String, bool), De
         "state__name" => "state.name".to_owned(),
         "created_by" => "issue.created_by_id".to_owned(),
         "updated_by" => "issue.updated_by_id".to_owned(),
+        "link_count" => format!(
+            "(SELECT {count} FROM issue_links il WHERE il.issue_id = issue.id AND il.deleted_at IS NULL)"
+        ),
+        "attachment_count" => format!(
+            "(SELECT {count} FROM file_assets fa WHERE fa.issue_id = issue.id AND fa.entity_type = 'ISSUE_ATTACHMENT' AND fa.deleted_at IS NULL)"
+        ),
+        "sub_issues_count" => format!(
+            "(SELECT {count} FROM issues c LEFT JOIN states cs ON cs.id = c.state_id JOIN projects cp ON cp.id = c.project_id WHERE c.parent_id = issue.id AND c.deleted_at IS NULL AND NOT (cs.\"group\" = 'triage' AND cs.\"group\" IS NOT NULL) AND c.archived_at IS NULL AND cp.archived_at IS NULL AND c.is_draft = FALSE)"
+        ),
+        "estimate_point__key" => {
+            "(SELECT ep.key FROM estimate_points ep WHERE ep.id = issue.estimate_point_id)".to_owned()
+        }
+        "issue_cycle__cycle__name" => {
+            joins = match cycle_bridge {
+                Some(alias) => format!(
+                    "LEFT JOIN cycles AS __order_c ON __order_c.id = {alias}.cycle_id"
+                ),
+                None => "LEFT JOIN cycle_issues AS __order_ci ON __order_ci.issue_id = issue.id LEFT JOIN cycles AS __order_c ON __order_c.id = __order_ci.cycle_id".to_owned(),
+            };
+            "__order_c.name".to_owned()
+        }
         _ => return Err(Denial::ServerError),
     };
-    Ok((expr, descending))
+    Ok(OrderKey {
+        expr,
+        descending,
+        joins,
+    })
 }
 
 /// The `Min(...)` annotation for the assignee/label/module order branch,
@@ -1597,6 +1669,34 @@ fn min_order_subquery(relation: &str) -> Result<String, Denial> {
         "assignees__first_name" => Ok("(SELECT MIN(u.first_name) FROM issue_assignees ia JOIN users u ON u.id = ia.assignee_id WHERE ia.issue_id = issue.id AND ia.deleted_at IS NULL)".to_owned()),
         "issue_module__module__name" => Ok("(SELECT MIN(m.name) FROM module_issues mi JOIN modules m ON m.id = mi.module_id AND m.deleted_at IS NULL WHERE mi.issue_id = issue.id AND mi.deleted_at IS NULL)".to_owned()),
         _ => Err(Denial::ServerError),
+    }
+}
+
+/// True when a `FROM ... WHERE ...` fragment already joins the cycle
+/// bridge as `issue_cycle` (a filter or group key referenced it). Django
+/// reuses that same-path join for the cycle-name traversal instead of
+/// joining again — including the filter's scope (pinned live: a filtered
+/// sort does not fan out beyond the filter) — so the order key resolves
+/// over it. Matches only the join clause, never filter markers (those
+/// quote the alias: `"issue_cycle".`).
+pub fn has_issue_cycle_join(from_where: &str) -> bool {
+    from_where.contains("cycle_issues AS issue_cycle ON")
+}
+
+/// Splice [`OrderKey::joins`] into a row query's `FROM ... WHERE ...`
+/// fragment, ahead of the top-level `WHERE`. Empty joins return the
+/// fragment untouched, so every existing key renders byte-identical SQL.
+pub fn with_order_joins(from_where: &str, order_joins: &str) -> String {
+    if order_joins.is_empty() {
+        return from_where.to_owned();
+    }
+    match from_where.find(" WHERE ") {
+        Some(at) => format!(
+            "{} {order_joins} {}",
+            &from_where[..at],
+            &from_where[at + 1..]
+        ),
+        None => format!("{from_where} {order_joins}"),
     }
 }
 
@@ -1998,8 +2098,18 @@ pub async fn list_issues(
         false,
         FilterLayers::FULL,
     )?;
-    let (key_expr, descending) = order_key(&order_spec.out_param, &context.params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
+    // The project list annotates the grouped `Subquery` count form (empty
+    // counts render `NULL`), so its count keys order `NULL`-style. Its
+    // `FROM` always carries the unfiltered `issue_cycle` bridge join,
+    // which the cycle-name traversal reuses like Django (fresh joins
+    // would fan every link out twice).
+    let key = order_key(
+        &order_spec.out_param,
+        &context.params.order_by,
+        Some("issue_cycle"),
+        true,
+    )?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
     // `per_page` already validated by the strict preamble; the cursor
     // parses here with the paginator kernel's exact errors.
     let per_page = context.params.per_page;
@@ -2013,10 +2123,11 @@ pub async fn list_issues(
             &filtered,
             &group,
             sub_group_by.clone(),
-            &key_expr,
+            &key.expr,
             direction,
             per_page,
             cursor,
+            &key.joins,
         )
         .await;
     }
@@ -2024,7 +2135,8 @@ pub async fn list_issues(
     let selects = annotation_selects(true, None, false, true, false);
     let fields = on_results_fields(None, None);
     flat_paginated_response(
-        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields, false, None,
+        &context, &filtered, &key.expr, direction, per_page, cursor, selects, fields, false, None,
+        &key.joins,
     )
     .await
 }
@@ -2045,6 +2157,7 @@ async fn flat_paginated_response(
     fields: Vec<String>,
     shift: bool,
     expands: Option<&[String]>,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -2052,9 +2165,12 @@ async fn flat_paginated_response(
     let limit = per_page.min(1000);
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
+    // The cycle-name traversal joins ride on the row query only: fan-out
+    // rows differ in `__order_key`, so `DISTINCT` keeps one row per link
+    // like Django, while the totals below stay distinct-issue counts.
+    let row_where = with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
-        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
-        filtered.from_where,
+        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
         window.stop - window.offset,
         window.offset
     );
@@ -2135,6 +2251,7 @@ async fn grouped_response(
     direction: &str,
     per_page: i64,
     cursor: crate::paginator::Cursor,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
@@ -2154,13 +2271,15 @@ async fn grouped_response(
         Some(sub) => format!("{group_expr}, {sub}"),
         None => group_expr.clone(),
     };
+    // The cycle-name traversal joins ride on the row query: the window
+    // numbers fan-out rows like Django's, and the final order is global.
+    let row_where = with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
         "SELECT * FROM (SELECT DISTINCT {selects}{member_select}, ({key_expr}) AS __order_key,
          ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY ({key_expr}) {direction} NULLS LAST, issue.created_at DESC) AS __rn
-         {from_where}) __w
+         {row_where}) __w
          WHERE __w.__rn > {offset} AND __w.__rn <= {stop}
          ORDER BY __w.__order_key {direction} NULLS LAST, __w.created_at DESC",
-        from_where = filtered.from_where,
         offset = window.offset,
         stop = window.stop,
     );
@@ -2194,8 +2313,19 @@ async fn grouped_response(
     let totals = total_dict(&group_totals);
     let next = next_cursor(limit, window.page, has_more);
     let prev = prev_cursor(limit, window.page);
+    // Grouped `total_count`/`total_results` are `queryset.count()` over
+    // the order-joined rows (pinned live: fan-out links count, so a
+    // 5-issue list with two doubled issues answers 7). Without traversal
+    // joins the sets coincide and the distinct count stands.
     let total_count = {
-        let sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
+        let sql = if order_joins.is_empty() {
+            format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where)
+        } else {
+            format!(
+                "SELECT COUNT(*) {}",
+                with_order_joins(&filtered.from_where, order_joins)
+            )
+        };
         fetch_count(&context.pool, &sql, filtered.values.clone()).await?
     };
     let fields = on_results_fields(Some(group_by), sub_group_by.as_deref());
@@ -2458,13 +2588,13 @@ pub async fn flat_list(
     }
     // Flat ordering: the `order_issue_queryset` fragment directly — no
     // paginator re-ordering, no `NULLS LAST` (Postgres defaults apply).
-    let order_clause = flat_order_sql(&order_spec, &context.params.order_by)?;
+    // The cycle-name traversal joins ride on the row query's `FROM`, so a
+    // multi-linked issue fans out into one row per link like Django.
+    let (order_clause, order_joins) = flat_order_sql(&order_spec, &context.params.order_by)?;
     // Scalar `Func(Count)` annotations: empty counts render 0.
     let selects = annotation_selects(true, None, false, true, true);
-    let inner = format!(
-        "SELECT {selects} {} ORDER BY {order_clause}",
-        filtered.from_where
-    );
+    let row_where = with_order_joins(&filtered.from_where, &order_joins);
+    let inner = format!("SELECT {selects} {row_where} ORDER BY {order_clause}");
     let rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
     // The flat `.values()` shape: 26 keys with `deleted_at`, no `state__group`.
     let fields: Vec<String> = LIST_VALUES_FIELDS
@@ -2636,29 +2766,38 @@ fn serializer_row_map(
 /// `ORDER BY` for the unpaginated flat endpoint: the rewritten branches
 /// carry complete SQL; the default branch resolves the raw param without
 /// the paginator's `NULLS LAST` or forced tiebreak.
-fn flat_order_sql(order_spec: &OrderSpec, orig_param: &str) -> Result<String, Denial> {
+fn flat_order_sql(order_spec: &OrderSpec, orig_param: &str) -> Result<(String, String), Denial> {
     let out = order_spec.out_param.as_str();
     if out == "priority_order"
         || out == "-priority_order"
         || out == "state_order"
         || out == "-state_order"
     {
-        return Ok(order_spec.order_by_sql.clone());
+        return Ok((order_spec.order_by_sql.clone(), String::new()));
     }
     if out == "min_values" || out == "-min_values" {
         let descending = out.starts_with('-');
         let sub = min_order_subquery(orig_param.trim_start_matches('-'))?;
-        return Ok(format!(
-            "{sub} {}, created_at DESC",
-            if descending { "DESC" } else { "ASC" }
+        return Ok((
+            format!(
+                "{sub} {}, created_at DESC",
+                if descending { "DESC" } else { "ASC" }
+            ),
+            String::new(),
         ));
     }
-    let (expr, descending) = order_key(out, orig_param)?;
-    let mut sql = format!("{expr} {}", if descending { "DESC" } else { "ASC" });
+    // The flat `FROM` always carries the unfiltered `issue_cycle`
+    // bridge join, which the cycle-name traversal reuses like Django.
+    let key = order_key(out, orig_param, Some("issue_cycle"), false)?;
+    let mut sql = format!(
+        "{expr} {}",
+        if key.descending { "DESC" } else { "ASC" },
+        expr = key.expr,
+    );
     if !orig_param.contains("created_at") {
         sql.push_str(", created_at DESC");
     }
-    Ok(sql)
+    Ok((sql, key.joins))
 }
 
 /// The `IssueDetailEndpoint.get` permission subquery: the issue survives
@@ -2741,8 +2880,17 @@ pub async fn detail_list(
         true,
         FilterLayers::NO_GUEST,
     )?;
-    let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
+    // The detail endpoint annotates the plain `Func(Count)` form (empty
+    // counts render `0`), so its count keys order `0`-style. Its `FROM`
+    // always carries the unfiltered `issue_cycle` bridge join, which the
+    // cycle-name traversal reuses like Django.
+    let key = order_key(
+        &order_spec.out_param,
+        &params.order_by,
+        Some("issue_cycle"),
+        false,
+    )?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
     // `per_page` already validated by the strict preamble; the cursor
     // parses here with the paginator kernel's exact errors.
     let per_page = params.per_page;
@@ -2757,7 +2905,7 @@ pub async fn detail_list(
     flat_paginated_response(
         &context,
         &filtered,
-        &key_expr,
+        &key.expr,
         direction,
         per_page,
         cursor,
@@ -2765,6 +2913,7 @@ pub async fn detail_list(
         fields,
         false,
         context.params.expand.as_deref(),
+        &key.joins,
     )
     .await
 }
@@ -3230,17 +3379,18 @@ mod tests {
 
     #[test]
     fn order_key_resolves_fk_and_state_names() {
-        let (expr, descending) = order_key("estimate_point", "estimate_point").expect("key");
-        assert_eq!(expr, "issue.estimate_point_id");
-        assert!(!descending);
-        let (expr, _) = order_key("-project", "-project").expect("key");
-        assert_eq!(expr, "issue.project_id");
-        let (expr, _) = order_key("parent", "parent").expect("key");
-        assert_eq!(expr, "issue.parent_id");
-        let (expr, _) = order_key("-deleted_at", "-deleted_at").expect("key");
-        assert_eq!(expr, "issue.\"deleted_at\"");
-        let (expr, _) = order_key("state__name", "state__name").expect("key");
-        assert_eq!(expr, "state.name");
+        let key = order_key("estimate_point", "estimate_point", None, false).expect("key");
+        assert_eq!(key.expr, "issue.estimate_point_id");
+        assert!(!key.descending);
+        assert!(key.joins.is_empty());
+        let key = order_key("-project", "-project", None, false).expect("key");
+        assert_eq!(key.expr, "issue.project_id");
+        let key = order_key("parent", "parent", None, false).expect("key");
+        assert_eq!(key.expr, "issue.parent_id");
+        let key = order_key("-deleted_at", "-deleted_at", None, false).expect("key");
+        assert_eq!(key.expr, "issue.\"deleted_at\"");
+        let key = order_key("state__name", "state__name", None, false).expect("key");
+        assert_eq!(key.expr, "state.name");
     }
 
     #[test]
@@ -3311,13 +3461,105 @@ mod tests {
 
     #[test]
     fn order_key_resolves_rewritten_params() {
-        let (expr, descending) = order_key("-created_at", "-created_at").expect("key");
-        assert_eq!(expr, "issue.\"created_at\"");
-        assert!(descending);
-        let (expr, descending) = order_key("priority_order", "-priority").expect("key");
-        assert!(expr.contains("CASE"));
-        assert!(!descending);
-        assert!(order_key("nope", "nope").is_err());
+        let key = order_key("-created_at", "-created_at", None, false).expect("key");
+        assert_eq!(key.expr, "issue.\"created_at\"");
+        assert!(key.descending);
+        assert!(key.joins.is_empty());
+        let key = order_key("priority_order", "-priority", None, false).expect("key");
+        assert!(key.expr.contains("CASE"));
+        assert!(!key.descending);
+        assert!(order_key("nope", "nope", None, false).is_err());
+    }
+
+    #[test]
+    fn order_key_resolves_spreadsheet_sort_keys() {
+        // Plain `Func(Count)` form: bare `COUNT(*)`, `0` on empty.
+        let key = order_key("link_count", "link_count", None, false).expect("key");
+        assert!(key.expr.contains("COUNT(*) FROM issue_links"));
+        assert!(!key.expr.contains("NULLIF"));
+        assert!(!key.descending);
+        assert!(key.joins.is_empty());
+        let key = order_key("-attachment_count", "-attachment_count", None, false).expect("key");
+        assert!(key.expr.contains("COUNT(*) FROM file_assets"));
+        assert!(key.expr.contains("entity_type = 'ISSUE_ATTACHMENT'"));
+        assert!(key.descending);
+        // The `IssueManager` scope: triage excluded, `NULL` states kept.
+        let key = order_key("sub_issues_count", "sub_issues_count", None, false).expect("key");
+        assert!(key.expr.contains("COUNT(*) FROM issues c"));
+        assert!(key.expr.contains("NOT (cs.\"group\" = 'triage'"));
+        // Project-list form: grouped `Subquery`, `NULL` on empty.
+        let key = order_key("-link_count", "-link_count", None, true).expect("key");
+        assert!(key.expr.contains("NULLIF(COUNT(*), 0) FROM issue_links"));
+        assert!(key.descending);
+        // The estimate traversal is a forward-FK scalar, `NULL` when unset.
+        let key =
+            order_key("estimate_point__key", "estimate_point__key", None, false).expect("key");
+        assert_eq!(
+            key.expr,
+            "(SELECT ep.key FROM estimate_points ep WHERE ep.id = issue.estimate_point_id)"
+        );
+        assert!(!key.descending);
+        assert!(key.joins.is_empty());
+    }
+
+    #[test]
+    fn order_key_cycle_name_joins_plain_and_scoped() {
+        // The default traversal joins the bridge and the cycle with no
+        // guards, so soft-deleted rows sort and multi-linked issues fan out.
+        let key = order_key(
+            "-issue_cycle__cycle__name",
+            "-issue_cycle__cycle__name",
+            None,
+            false,
+        )
+        .expect("key");
+        assert_eq!(key.expr, "__order_c.name");
+        assert!(key.descending);
+        assert!(key
+            .joins
+            .contains("LEFT JOIN cycle_issues AS __order_ci ON __order_ci.issue_id = issue.id"));
+        assert!(key
+            .joins
+            .contains("LEFT JOIN cycles AS __order_c ON __order_c.id = __order_ci.cycle_id"));
+        assert!(!key.joins.contains("deleted_at"));
+        // The cycle-issue list reuses its filtered bridge alias instead.
+        let key = order_key(
+            "issue_cycle__cycle__name",
+            "issue_cycle__cycle__name",
+            Some("bridge"),
+            false,
+        )
+        .expect("key");
+        assert_eq!(key.expr, "__order_c.name");
+        assert!(!key.joins.contains("__order_ci"));
+        assert!(key
+            .joins
+            .contains("LEFT JOIN cycles AS __order_c ON __order_c.id = bridge.cycle_id"));
+    }
+
+    #[test]
+    fn has_issue_cycle_join_matches_join_clause_only() {
+        assert!(has_issue_cycle_join(
+            "FROM issues AS issue LEFT JOIN cycle_issues AS issue_cycle ON issue_cycle.issue_id = issue.id WHERE x = $1"
+        ));
+        assert!(has_issue_cycle_join(
+            "FROM issues AS issue INNER JOIN cycle_issues AS issue_cycle ON issue_cycle.issue_id = issue.id WHERE x = $1"
+        ));
+        // A filter marker quoting the alias is not a join clause.
+        assert!(!has_issue_cycle_join(
+            "FROM issues AS issue WHERE \"issue_cycle\".cycle_id = $1"
+        ));
+        assert!(!has_issue_cycle_join("FROM issues AS issue WHERE x = $1"));
+    }
+
+    #[test]
+    fn with_order_joins_splices_ahead_of_where() {
+        let base = "FROM issues AS issue WHERE issue.id = $1";
+        assert_eq!(with_order_joins(base, ""), base);
+        assert_eq!(
+            with_order_joins(base, "LEFT JOIN t AS x ON x.id = issue.id"),
+            "FROM issues AS issue LEFT JOIN t AS x ON x.id = issue.id WHERE issue.id = $1"
+        );
     }
 
     #[test]

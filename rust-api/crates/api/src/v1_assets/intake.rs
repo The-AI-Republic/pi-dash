@@ -9203,6 +9203,35 @@ async fn validate_issue_input(
             )));
         }
     }
+    // `assigned_pod` gate (`serializers/issue.py:193-216`): runs right after
+    // the start/target date check, keyed on the field itself. The project
+    // check reads the INSTANCE's project (the context fallback, `:200-201`),
+    // so it is live on this endpoint; the active-run gate fires on any real
+    // change — assign, reassign or clear — with null counted as a value.
+    if let Some(new_pod) = patch.assigned_pod {
+        if let Some(pod_id) = new_pod {
+            let pod_project: Option<Uuid> = sqlx::query_scalar(
+                r#"SELECT project_id FROM pod WHERE id = $1 AND deleted_at IS NULL"#,
+            )
+            .bind(pod_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            let pod_project = pod_project.ok_or(Denial::ServerError)?;
+            if pod_project != instance.project_id {
+                return Err(Denial::FieldErrors(single_field(
+                    "assigned_pod",
+                    "pod is in a different project",
+                )));
+            }
+        }
+        if new_pod != instance.assigned_pod_id && issue_has_active_run(pool, &instance.id).await? {
+            return Err(Denial::FieldErrors(single_field(
+                "assigned_pod",
+                "cannot reassign pod while the issue has an active run",
+            )));
+        }
+    }
     if let Some(html) = patch.description_html.clone() {
         match check_description_html(&html, from_markdown) {
             Ok(cleaned) => patch.description_html = Some(cleaned),
@@ -9248,31 +9277,16 @@ async fn validate_issue_input(
             "Estimate point is not valid please pass a valid estimate_point_id",
         )));
     }
-    if let Some(Some(pod_id)) = patch.assigned_pod {
-        // The pod check reads the INSTANCE's project (the context
-        // fallback, `:269-270`), so it is live on this endpoint.
-        let pod_project: Option<Uuid> = sqlx::query_scalar(
-            r#"SELECT project_id FROM pod WHERE id = $1 AND deleted_at IS NULL"#,
-        )
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        let pod_project = pod_project.ok_or(Denial::ServerError)?;
-        if pod_project != instance.project_id {
-            return Err(Denial::FieldErrors(single_non_field(
-                "Selected pod does not belong to this project",
-            )));
-        }
-        if Some(pod_id) != instance.assigned_pod_id
-            && issue_has_active_run(pool, &instance.id).await?
-        {
-            return Err(Denial::FieldErrors(single_non_field(
-                "Cannot reassign pod to an issue with an active run.",
-            )));
-        }
-    }
     Ok(patch)
+}
+
+fn single_field(name: &str, message: &str) -> Value {
+    let mut map = Map::with_capacity(1);
+    map.insert(
+        name.to_owned(),
+        Value::Array(vec![Value::String(message.to_owned())]),
+    );
+    Value::Object(map)
 }
 
 fn single_non_field(message: &str) -> Value {

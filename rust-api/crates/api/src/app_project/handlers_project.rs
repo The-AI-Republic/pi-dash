@@ -1642,16 +1642,32 @@ async fn executor_options(
     viewer: Option<(&uuid::Uuid, &ExecutorUser)>,
 ) -> Result<[pidash_services::dispatch::policy::ExecutorOption; 3], Denial> {
     use pidash_services::dispatch::admission::{
-        managed_runner_availability, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL, HEARTBEAT_GRACE_SECS,
+        managed_runner_availability, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL,
+        ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL, HEARTBEAT_GRACE_SECS,
         ONLINE_MANAGED_RUNNER_SQL,
     };
-    use pidash_services::dispatch::policy::LOCAL_RUNNER_EXISTS_SQL;
-    let local: Option<(i32,)> = sqlx::query_as(LOCAL_RUNNER_EXISTS_SQL)
+    use pidash_services::dispatch::policy::{
+        LOCAL_RUNNER_AVAILABLE_EXISTS_SQL, LOCAL_RUNNER_EXISTS_SQL,
+    };
+    // `agent_execution.py:112-121`: the unpaused leg always runs; the
+    // online-incl-paused leg runs only when nothing is available (the
+    // `elif` distinguishes "paused" from "none").
+    let local_available: Option<(i32,)> = sqlx::query_as(LOCAL_RUNNER_AVAILABLE_EXISTS_SQL)
         .bind(project_id)
         .bind(workspace_id)
         .fetch_optional(pool)
         .await
         .map_err(db_denial)?;
+    let local: Option<(i32,)> = if local_available.is_some() {
+        local_available
+    } else {
+        sqlx::query_as(LOCAL_RUNNER_EXISTS_SQL)
+            .bind(project_id)
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_denial)?
+    };
     let settings = state.settings();
     // The seam is async but the services closures below are sync `FnOnce`,
     // so both verdicts resolve eagerly here and move into the closures.
@@ -1712,18 +1728,34 @@ async fn executor_options(
                 .fetch_optional(pool)
                 .await
                 .map_err(db_denial)?;
+            // `policy.py:88-91` (`09738d222`): the paused tiebreaker runs
+            // only when a runner is enrolled but none is online.
+            let mut paused = false;
+            if enrolled.is_some() && online.is_none() {
+                let row: Option<(i32,)> =
+                    sqlx::query_as(ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+                        .bind(user_id)
+                        .bind(project_id)
+                        .bind(workspace_id)
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(db_denial)?;
+                paused = row.is_some();
+            }
             managed_runner_availability(
                 &settings.managed_runner,
                 flags,
                 || llm_profile,
                 enrolled.is_some(),
                 online.is_some(),
+                paused,
             )
         }
         _ => managed_runner_availability(
             &settings.managed_runner,
             flags,
             || llm_profile,
+            false,
             false,
             false,
         ),
@@ -1734,6 +1766,7 @@ async fn executor_options(
             flags.copied(),
             flags.is_some(),
             || llm_usable,
+            local_available.is_some(),
             local.is_some(),
             managed,
         ),

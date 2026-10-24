@@ -45,6 +45,6 @@ pub use fire_tick_seam::{
 };
 pub use runner_seams::{
     complete_project_move_handoff_live, disarm_on_terminal_signal, maybe_apply_deferred_pause_live,
-    CacheError, DisarmError, RunnerSeamCache,
+    DisarmError,
 };
 pub use scheduler_dispatch::{dispatch_scheduler_run, live_scheduler_dispatch};

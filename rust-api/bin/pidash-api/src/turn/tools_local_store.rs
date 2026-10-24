@@ -1583,7 +1583,8 @@ impl ToolStore for PgToolStore {
         actor_id: &Uuid,
         now: &DateTime<Utc>,
     ) -> Result<(IssueRow, Option<TransitionOutcome>), StoreError> {
-        use pidash_jobs::orchestration::{LiveCreationStore, RunnerSeamCache, StoreDeps};
+        use pidash_jobs::admission::RedisAdmissionCache;
+        use pidash_jobs::orchestration::{LiveCreationStore, StoreDeps};
         use pidash_services::orchestration::entries::{
             handle_issue_state_transition, TransitionRequest,
         };
@@ -1607,7 +1608,7 @@ impl ToolStore for PgToolStore {
         let make_deps = || StoreDeps {
             cloud: cloud.clone(),
             managed: managed.clone(),
-            cache: RunnerSeamCache::default(),
+            cache: RedisAdmissionCache::from_env(),
             toolsets: Arc::clone(&toolsets),
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
@@ -1930,7 +1931,8 @@ impl ToolStore for PgToolStore {
         created_by: Option<Uuid>,
         now: &DateTime<Utc>,
     ) -> Result<TransitionOutcome, StoreError> {
-        use pidash_jobs::orchestration::{LiveCreationStore, RunnerSeamCache, StoreDeps};
+        use pidash_jobs::admission::RedisAdmissionCache;
+        use pidash_jobs::orchestration::{LiveCreationStore, StoreDeps};
         use pidash_services::orchestration::entries::{
             handle_issue_state_transition, TransitionRequest,
         };
@@ -1953,7 +1955,7 @@ impl ToolStore for PgToolStore {
         let make_deps = || StoreDeps {
             cloud: cloud.clone(),
             managed: managed.clone(),
-            cache: RunnerSeamCache::default(),
+            cache: RedisAdmissionCache::from_env(),
             toolsets: Arc::clone(&toolsets),
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {
@@ -2037,7 +2039,8 @@ impl ToolStore for PgToolStore {
         actor_id: &Uuid,
         now: &DateTime<Utc>,
     ) -> Result<Option<TransitionOutcome>, StoreError> {
-        use pidash_jobs::orchestration::{LiveCreationStore, RunnerSeamCache, StoreDeps};
+        use pidash_jobs::admission::RedisAdmissionCache;
+        use pidash_jobs::orchestration::{LiveCreationStore, StoreDeps};
         use pidash_services::orchestration::entries::{
             fire_state_transition, FireOutcome, FireRequest,
         };
@@ -2060,7 +2063,7 @@ impl ToolStore for PgToolStore {
         let make_deps = || StoreDeps {
             cloud: cloud.clone(),
             managed: managed.clone(),
-            cache: RunnerSeamCache::default(),
+            cache: RedisAdmissionCache::from_env(),
             toolsets: Arc::clone(&toolsets),
             has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
             llm_profile: move |user: Option<Uuid>| {

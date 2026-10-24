@@ -113,9 +113,8 @@
 
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, Request, State};
+use axum::http::StatusCode;
 use axum::response::Response;
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
@@ -146,18 +145,13 @@ use pidash_types::runner_sessions::{
 use crate::runner_enroll::auth::{authenticate_access_token, ALLOW_POST};
 use crate::runner_enroll::now_micros;
 use crate::runner_runs::run_endpoints::drain_lifecycle_effects;
-use crate::runner_runs::{json_response, pool_of, server_error, LivePorts};
+use crate::runner_runs::{is_uuid_path_segment, json_response, pool_of, server_error, LivePorts};
 use crate::state::AppState;
 
 /// Long-poll wait slice (`_POLL_SLICE_MS`, `sessions.py:42`).
 const POLL_SLICE_MS: u64 = 1000;
 /// `XREADGROUP COUNT` on every poll read (`:483-488, :525-531`).
 const POLL_READ_COUNT: i64 = 100;
-/// Django's `custom_404_view` bytes (`app/views/error_404.py`):
-/// `JsonResponse({"error": "Page not found."})`. The `<uuid:>`
-/// converter 404s non-UUID segments before any view runs; axum matches
-/// the segment, so the handlers answer those bytes on a bad id.
-const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// Lock/statement caps (`_bound_txn_waits`, `:50-71`). Neither
 /// `RUNNER_TXN_*` setting exists in the settings modules, so the
 /// `getattr` defaults always apply; the bytes replay the FX-RSES-02
@@ -188,14 +182,16 @@ fn render(response: HttpResponse) -> Response {
     json_response(status, response.body)
 }
 
-/// Resolver-404 for a non-UUID path id (see [`PAGE_NOT_FOUND_BODY`]).
-fn page_not_found() -> Response {
-    json_response(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned())
-}
-
-/// Parse a `<uuid:>` path segment, or the resolver-404.
-fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
-    raw.parse().map_err(|_| page_not_found())
+/// Parse a `<uuid:>` path segment. The converter regex is
+/// lowercase-hex-only; anything else matches no Django route, so
+/// callers proxy the request to Django, reproducing its 404
+/// byte-for-byte in every settings flavor (the `runner_open.rs`
+/// `parse_uuid` precedent).
+fn parse_uuid(raw: &str) -> Result<Uuid, ()> {
+    if !is_uuid_path_segment(raw) {
+        return Err(());
+    }
+    raw.parse().map_err(|_| ())
 }
 
 /// `timezone.now().isoformat()`: `+00:00` suffix, microseconds iff
@@ -215,7 +211,7 @@ fn redis_client(state: &AppState) -> Option<redis::Client> {
         .url
         .as_deref()
         .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
+        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 /// Python truthiness for JSON values (`None`/`False`/`0`/`""`/`[]`/`{}`
@@ -693,7 +689,7 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.as_ref() == "23505"))
 }
 
-/// Whether the entry carries any observability key (the `:353-357`
+/// Whether the entry carries any observability key (the `:400-404`
 /// `has_snapshot` gate): `observed_run_id`, a snapshot field,
 /// `tokens`, or `model`. Controls whether the `get_or_create` runs at
 /// all — the planner re-derives the same gate, but the gate must run
@@ -842,7 +838,7 @@ fn parse_live_datetime(text: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Bind one live-state `SET` value (`:383-394` — `Null` renders
+/// Bind one live-state `SET` value (`:430-438` — `Null` renders
 /// inline, so only `Text`/`Json` arrive here): Django field
 /// adaptation per column. Text columns take `str()` (strings bind
 /// verbatim; numbers/bools render; nested values render compact —
@@ -854,6 +850,8 @@ fn parse_live_datetime(text: &str) -> Option<DateTime<Utc>> {
 /// Typed columns must bind native values: Postgres has no `text`
 /// assignment cast for `uuid`/`timestamptz`, so binding the raw
 /// string fails the `UPDATE` where Django's `save()` stores it.
+/// `agent_health` rides the default text arm (`CharField`; the
+/// planner already skipped unknown labels).
 fn bind_live_state_value<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     column: &str,
@@ -866,7 +864,7 @@ fn bind_live_state_value<'q>(
             }
             _ => None,
         },
-        "last_event_at" => match value {
+        "last_event_at" | "agent_last_activity_at" => match value {
             SetValue::Text(text) | SetValue::Json(Value::String(text)) => {
                 parse_live_datetime(text).map(|dt| query.bind(dt))
             }
@@ -926,7 +924,7 @@ fn bind_live_state_value<'q>(
 }
 
 /// `upsert_runner_live_state(runner, status_entry)`
-/// (`session_service.py:336-397`), fully swallowed: the source wraps
+/// (`session_service.py:383-448`), fully swallowed: the source wraps
 /// the whole call in `try/except Exception` (log only), so every
 /// failure here logs and returns. The `get_or_create` selects, then
 /// inserts on a miss (a lost insert race re-selects, as Django's
@@ -1138,7 +1136,7 @@ async fn dispatch_assign(
 
 /// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
 /// (miss ⇒ `Ok(false)`), else the locked drain. Runner-row indices
-/// follow the 30-column projection (`id` 0, `owner_id` 1, `pod_id` 4,
+/// follow the 32-column projection (`id` 0, `owner_id` 1, `pod_id` 4,
 /// `provisioning` 7, `visibility` 8); run-row indices the 41-column
 /// image (`id` 0, `work_item_id` 7, `prompt` 19, `run_config` 23).
 async fn drain_for_runner_by_id(
@@ -1568,19 +1566,25 @@ async fn read_with_eviction_awareness(
 pub async fn runner_session_poll(
     State(state): State<AppState>,
     Path((raw_runner_id, raw_sid)): Path<(String, String)>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: Request,
 ) -> Response {
-    let pool = match pool_of(&state) {
-        Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database).
     let runner_id = match parse_uuid(&raw_runner_id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(()) => return crate::edge::proxy(State(state), req).await,
     };
     let sid = match parse_uuid(&raw_sid) {
         Ok(id) => id,
+        Err(()) => return crate::edge::proxy(State(state), req).await,
+    };
+    let headers = req.headers().clone();
+    let body = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return server_error(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool.clone(),
         Err(response) => return response,
     };
     // Stock settings carry no `RUNNER_ACCESS_TOKEN_KEYS`, so the ring
@@ -2217,7 +2221,7 @@ mod tests {
         );
     }
 
-    /// The live-state snapshot gate (`:353-357`): only observability
+    /// The live-state snapshot gate (`:400-404`): only observability
     /// keys run the `get_or_create` at all.
     #[test]
     fn live_state_gate_needs_snapshot_keys() {
@@ -2235,6 +2239,8 @@ mod tests {
             "approvals_pending",
             "llm_model",
             "turn_count",
+            "agent_health",
+            "agent_last_activity_at",
             "tokens",
             "model",
         ] {

@@ -3105,20 +3105,48 @@ async fn view_issues_list(
 
     // Ordering (`:242-244`): the rewritten paginator key over the
     // annotation expressions, `NULLS LAST`, `issue.created_at` tiebreak —
-    // exactly `OffsetPaginator.get_result`.
+    // exactly `OffsetPaginator.get_result`. The view annotates the plain
+    // `Func(Count)` form (empty counts render `0`), so its count keys
+    // order `0`-style. A filter that referenced the cycle bridge lends
+    // its join to the cycle-name traversal (Django reuses it, scope
+    // included, instead of joining again); otherwise the traversal joins
+    // fresh.
     let order_param =
         crate::app_issues::query_last(&query, "order_by").unwrap_or("-created_at".to_owned());
     let spec = queries_views::view_issues_order_sql(&order_param);
-    let (key_expr, descending) = crate::app_issues::order_key(&spec.out_param, &order_param)
+    let filter_sql = format!(
+        "{} {}",
+        complex_where.as_deref().unwrap_or(""),
+        legacy_where.as_deref().unwrap_or(""),
+    );
+    let cycle_bridge = filter_sql
+        .contains("\"issue_cycle\".")
+        .then_some("issue_cycle");
+    let key = crate::app_issues::order_key(&spec.out_param, &order_param, cycle_bridge, false)
         .map_err(|_| Denial::ServerError)?;
-    let direction = if descending { "DESC" } else { "ASC" };
-    let order_by_sql = format!("({key_expr}) {direction} NULLS LAST, issue.created_at DESC");
+    let direction = if key.descending { "DESC" } else { "ASC" };
+    let order_by_sql = format!(
+        "({expr}) {direction} NULLS LAST, issue.created_at DESC",
+        expr = key.expr,
+    );
 
     let mut list_sql = queries_views::view_issues_list_sql(
         complex_where.as_deref(),
         legacy_where.as_deref(),
         &order_by_sql,
     );
+    // The cycle-name traversal joins ride on the row query only, ahead of
+    // the top-level `WHERE` (anchored on the builder's slug predicate —
+    // the annotation subqueries carry their own `WHERE`s, so a plain
+    // first-`WHERE` splice would land inside the select list). Fan-out
+    // rows flow through the `LIMIT`/`OFFSET` window like Django's.
+    if !key.joins.is_empty() {
+        list_sql = list_sql.replacen(
+            "WHERE w.slug = ($1)",
+            &format!("{} WHERE w.slug = ($1)", key.joins),
+            1,
+        );
+    }
     let mut count_sql =
         queries_views::view_issues_count_sql(complex_where.as_deref(), legacy_where.as_deref());
     // Relation joins for filter references (Django's `filter()` joins):

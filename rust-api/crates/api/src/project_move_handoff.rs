@@ -34,6 +34,7 @@ use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags as SvcUserFlags,
 };
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::ops::boot::cache_key;
 use pidash_services::orchestration::creation::{
     self as creation_kernel, active_run_sql, latest_prior_run_sql, run_insert_returning_sql,
     run_lock_sql, run_select_sql, user_id_for_run, ASSIGNED_POD_SELECT_SQL,
@@ -52,7 +53,7 @@ use pidash_services::orchestration::creation::{
     finalize_lock_sql, AdmissionError as ServiceAdmissionError, CreationError, CreationSeam,
     ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
     FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RunView, RunnerView, StateView, TickerBudget,
+    RunView, RunnerSelectRow, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_services::runner_runs::finalization as finalize_kernel;
@@ -89,7 +90,7 @@ fn redis_client(state: &AppState) -> Option<redis::Client> {
         .url
         .as_deref()
         .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
+        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -140,12 +141,15 @@ pub(crate) async fn drain_publish_effects(
 // The D-12 handoff twin seam (the driver is called, never inlined)
 // ---------------------------------------------------------------------------
 
-/// Redis-backed [`AdmissionCache`]: the first production implementation
-/// of the sync trait. Each call opens a short sync connection (the
-/// trait is sync; only cloud admission paths touch it). An unset or
-/// unusable `REDIS_URL` fails closed like Python's backend failure.
+/// Redis-backed [`AdmissionCache`]: the production implementation of
+/// the sync trait, shared by the handoff twin, the direct-create tail,
+/// and the v1 work-item actions. Each call opens a short sync
+/// connection (the trait is sync; only cloud admission paths touch
+/// it). Keys go through Django's [`cache_key`] (`:1:{key}`), so Rust
+/// and Django count the same buckets. An unset or unusable `REDIS_URL`
+/// fails closed like Python's backend failure.
 #[derive(Clone)]
-pub(crate) struct RedisAdmissionCache {
+pub struct RedisAdmissionCache {
     pub(crate) client: Option<redis::Client>,
 }
 
@@ -165,7 +169,9 @@ impl AdmissionCache for RedisAdmissionCache {
             return cache_unavailable("bucket_count");
         };
         let mut connection = client.get_connection()?;
-        let value: Option<i64> = redis::cmd("GET").arg(key).query(&mut connection)?;
+        let value: Option<i64> = redis::cmd("GET")
+            .arg(cache_key(key))
+            .query(&mut connection)?;
         Ok(value)
     }
 
@@ -177,14 +183,16 @@ impl AdmissionCache for RedisAdmissionCache {
         // `cache.add(key, 1, timeout) or cache.incr(key)`: set-if-absent
         // with TTL, else increment.
         let set: Option<String> = redis::cmd("SET")
-            .arg(key)
+            .arg(cache_key(key))
             .arg(1)
             .arg("EX")
             .arg(timeout_secs)
             .arg("NX")
             .query(&mut connection)?;
         if set.is_none() {
-            let _: i64 = redis::cmd("INCR").arg(key).query(&mut connection)?;
+            let _: i64 = redis::cmd("INCR")
+                .arg(cache_key(key))
+                .query(&mut connection)?;
         }
         Ok(())
     }
@@ -415,20 +423,20 @@ impl CreationSeam for HandoffStore<'_, '_> {
     }
 
     async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        let row: Option<(Uuid, Uuid, String, Option<DateTime<Utc>>)> =
-            sqlx::query_as(RUNNER_SELECT_SQL)
-                .bind(runner_id)
-                .fetch_optional(&mut **self.tx.inner())
-                .await
-                .map_err(Self::db)?;
-        Ok(
-            row.map(|(id, pod_id, status, last_heartbeat_at)| RunnerView {
+        let row: Option<RunnerSelectRow> = sqlx::query_as(RUNNER_SELECT_SQL)
+            .bind(runner_id)
+            .fetch_optional(&mut **self.tx.inner())
+            .await
+            .map_err(Self::db)?;
+        Ok(row.map(
+            |(id, pod_id, status, last_heartbeat_at, paused_at)| RunnerView {
                 id,
                 pod_id,
                 status,
                 last_heartbeat_at,
-            }),
-        )
+                paused_at,
+            },
+        ))
     }
 
     async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {

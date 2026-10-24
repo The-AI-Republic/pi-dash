@@ -821,17 +821,34 @@ async fn module_issue_list(
         sub_group_by,
         &timezone,
     )?;
-    // Total count over the pre-annotation set (the `deepcopy` at `:107`).
-    let total_sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
-    let total_count = fetch_count(&pool, &total_sql, filtered.values.clone()).await?;
-    // `order_issue_queryset` (`:112-117`), default `created_at`.
+    // `order_issue_queryset` (`:112-117`), default `created_at`. The
+    // module list annotates the plain `Func(Count)` form (empty counts
+    // render `0`), so its count keys order `0`-style. A filter that
+    // referenced the cycle bridge lends its join to the cycle-name
+    // traversal (Django reuses it, scope included, instead of joining
+    // again); otherwise the traversal joins fresh.
     let order_spec = pidash_services::app_issues::ordering::order_sql(
         &params.order_by,
         "state.\"group\"",
         |name| format!("min_{}", name.replace("__", "_")),
     );
-    let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
+    let cycle_bridge =
+        crate::app_issues::has_issue_cycle_join(&filtered.from_where).then_some("issue_cycle");
+    let key = order_key(&order_spec.out_param, &params.order_by, cycle_bridge, false)?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
+    // Total count over the pre-annotation set (the `deepcopy` at `:107`).
+    // The flat branch keeps the distinct-issue count; the grouped branch
+    // counts `queryset.count()` over the order-joined rows (pinned live:
+    // fan-out links count).
+    let total_sql = if group_by.is_some() && !key.joins.is_empty() {
+        format!(
+            "SELECT COUNT(*) {}",
+            crate::app_issues::with_order_joins(&filtered.from_where, &key.joins)
+        )
+    } else {
+        format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where)
+    };
+    let total_count = fetch_count(&pool, &total_sql, filtered.values.clone()).await?;
     let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw).map_err(page_denial)?;
     if group_by.is_some() {
@@ -842,15 +859,19 @@ async fn module_issue_list(
             &filtered,
             group_by.unwrap_or_default(),
             sub_group_by.map(str::to_owned),
-            &key_expr,
+            &key.expr,
             direction,
             per_page,
             cursor,
             total_count,
+            &key.joins,
         )
         .await;
     }
-    module_flat_response(&pool, &filtered, &key_expr, direction, per_page, cursor).await
+    module_flat_response(
+        &pool, &filtered, &key.expr, direction, per_page, cursor, &key.joins,
+    )
+    .await
 }
 
 /// Plain `paginate` branch (`issue.py:199-207`): distinct rows, the
@@ -862,6 +883,7 @@ async fn module_flat_response(
     direction: &str,
     per_page: i64,
     cursor: crate::paginator::Cursor,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -871,9 +893,12 @@ async fn module_flat_response(
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
     let selects = module_row_selects(&[]);
+    // The cycle-name traversal joins ride on the row query only: fan-out
+    // rows differ in `__order_key`, so `DISTINCT` keeps one row per link
+    // like Django, while the totals below stay distinct-issue counts.
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
-        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
-        filtered.from_where,
+        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
         window.stop - window.offset,
         window.offset
     );
@@ -1067,6 +1092,7 @@ async fn module_grouped_response(
     per_page: i64,
     cursor: crate::paginator::Cursor,
     total_count: i64,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
@@ -1093,13 +1119,15 @@ async fn module_grouped_response(
         Some(sub) => format!("{group_expr}, {sub}"),
         None => group_expr.clone(),
     };
+    // The cycle-name traversal joins ride on the row query: the window
+    // numbers fan-out rows like Django's, and the final order is global.
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
         "SELECT * FROM (SELECT DISTINCT {selects}{member_selects}, ({key_expr}) AS __order_key,
          ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY ({key_expr}) {direction} NULLS LAST, issue.created_at DESC) AS __rn
-         {from_where}) __w
+         {row_where}) __w
          WHERE __w.__rn > {offset} AND __w.__rn <= {stop}
          ORDER BY __w.__order_key {direction} NULLS LAST, __w.created_at DESC",
-        from_where = filtered.from_where,
         offset = window.offset,
         stop = window.stop,
     );
@@ -1178,15 +1206,22 @@ async fn module_grouped_response(
     // page 0; a 3-issue list with `per_page=1` answers count 1 on page 0
     // and count 1 on page 1). `total_count`/`total_results` stay the full
     // distinct-issue count.
+    // The cycle-name traversal is the exception: Django's grouped `count`
+    // is the raw window length (`CursorResult.__len__`), fan-out links
+    // included (pinned live), so the collapse is skipped while its joins
+    // are present.
     let mut seen_issues = std::collections::HashSet::new();
-    let page_issue_count = page
-        .iter()
-        .filter(|row| {
-            row.get("id")
-                .map(|id| seen_issues.insert(id.to_string()))
-                .unwrap_or(false)
-        })
-        .count();
+    let page_issue_count = if order_joins.is_empty() {
+        page.iter()
+            .filter(|row| {
+                row.get("id")
+                    .map(|id| seen_issues.insert(id.to_string()))
+                    .unwrap_or(false)
+            })
+            .count()
+    } else {
+        page.len()
+    };
     Ok(json_response(
         StatusCode::OK,
         envelope(

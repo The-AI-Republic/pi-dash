@@ -2907,8 +2907,10 @@ fn sorted_pretty(value: &Value) -> String {
     // matching CPython `json.dumps(indent=2)` for JSON scalars. Python
     // renders `True/False/None`; payloads crossing this path are JSON
     // column values, which carry no such scalars beyond what serde
-    // already normalizes.
-    serde_json::to_string_pretty(&sort(value)).unwrap_or_else(|_| "{}".to_owned())
+    // already normalizes. The `ensure_ascii` pass matches Python's
+    // default escaping of non-ASCII (PIDASHCONV-1234).
+    let pretty = serde_json::to_string_pretty(&sort(value)).unwrap_or_else(|_| "{}".to_owned());
+    context::ensure_ascii_json(&pretty)
 }
 
 /// `_scheduler_context` (`views.py:463-483`): the binding must live in
@@ -3122,6 +3124,23 @@ mod tests {
         assert_eq!(
             sorted_pretty(&payload),
             "{\n  \"a\": {\n    \"c\": 3,\n    \"d\": 4\n  },\n  \"z\": 1\n}"
+        );
+    }
+
+    #[test]
+    fn parent_payload_escapes_non_ascii_like_ensure_ascii() {
+        // PIDASHCONV-1234: preview parity with `json.dumps(payload,
+        // indent=2, sort_keys=True)` — lowercase `\uXXXX`, surrogate
+        // pairs above the BMP, never raw UTF-8.
+        let payload = serde_json::json!({"summary": "fix — done ✓"});
+        assert_eq!(
+            sorted_pretty(&payload),
+            "{\n  \"summary\": \"fix \\u2014 done \\u2713\"\n}"
+        );
+        let astral = serde_json::json!({"note": "ship 🚀"});
+        assert_eq!(
+            sorted_pretty(&astral),
+            "{\n  \"note\": \"ship \\ud83d\\ude80\"\n}"
         );
     }
 
