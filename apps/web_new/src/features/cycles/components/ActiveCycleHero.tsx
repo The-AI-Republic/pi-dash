@@ -64,15 +64,19 @@ export function ActiveCycleHero({
   const current = hero.data?.[0];
   const breakdown = useApplyBreakdownFilter({ workspaceSlug, projectId, cycleId: current?.id ?? "" });
   const estimatesEnabled = project.data?.estimate !== null && project.data?.estimate !== undefined;
-  const estimates = useQuery({
-    ...projectEstimatesQueryOptions(getAppClient(), workspaceSlug, projectId),
-    enabled: estimatesEnabled,
-  });
   const progress = useQuery({
     ...heroProgressQueryOptions(getAppClient(), workspaceSlug, projectId, current?.id ?? ""),
     enabled: current !== undefined,
   });
-  const estimateType = estimatesEnabled ? (selectActiveEstimate(estimates.data ?? [])?.type ?? null) : null;
+  const pointData = (progress.data?.total_estimate_points ?? 0) > 0;
+  // The family decides whether categories hide the switch, so it is
+  // needed whenever the switch could otherwise appear -- including a
+  // disabled estimates setting that still carries point data.
+  const estimates = useQuery({
+    ...projectEstimatesQueryOptions(getAppClient(), workspaceSlug, projectId),
+    enabled: estimatesEnabled || pointData,
+  });
+  const estimateType = selectActiveEstimate(estimates.data ?? [])?.type ?? null;
   const measureAvailable = heroMeasureAvailable({
     estimatesEnabled,
     estimateType,

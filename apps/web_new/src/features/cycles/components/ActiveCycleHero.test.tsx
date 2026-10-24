@@ -206,6 +206,18 @@ describe("ActiveCycleHero", () => {
     expect(screen.getByTestId("hero-breakdown-probe")).toHaveAttribute("data-measure", "issues");
   });
 
+  it("still reads the family for categories when estimates are disabled with point data", async () => {
+    hero.project.current = { data: { estimate: null } };
+    hero.progress.mockResolvedValue({ total_estimate_points: 6 });
+    hero.estimates.mockResolvedValue(makeEstimateList([makeEstimate({ type: "categories" })]));
+    renderHero();
+    await waitFor(() =>
+      expect(screen.getByTestId("hero-burndown-probe")).toHaveAttribute("data-estimate-type", "categories")
+    );
+    expect(screen.getByTestId("hero-burndown-probe")).toHaveAttribute("data-measure", "issues");
+    expect(screen.getByTestId("hero-breakdown-probe")).toHaveAttribute("data-measure", "issues");
+  });
+
   it("drops estimates where the project disables them or still loads", async () => {
     hero.project.current = { data: { estimate: null } };
     const { unmount } = render(
