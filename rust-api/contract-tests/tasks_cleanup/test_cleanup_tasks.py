@@ -1708,3 +1708,45 @@ def test_description_version_task_writes_null_audit(db_conn, broker_url):
     assert row["created_by_id"] is None
     assert row["updated_by_id"] is None
     assert str(row["owned_by_id"]) == str(owner["id"])
+
+
+def test_1327_failing_task_is_recorded_and_worker_continues(db_conn, broker_url):
+    """PIDASHCONV-1327 oracle: a raising task fails loudly, worker carries on.
+
+    In Celery 5.4 an exception inside a task is caught by the worker's
+    tracer: the task is marked failed with its traceback logged, and the
+    worker carries on with the next message (acks-early default keeps no
+    orphaned in-progress state). The Rust queue must match that: a
+    panicking handler settles its row with ``last_error`` instead of
+    stranding it ``running`` (see the replay in ``test_rust_replay.py``).
+
+    A ``PROTECT``-guarded tombstone makes ``hard_delete`` raise
+    ``ProtectedError`` mid-sweep (PIDASHCONV-928 shape): the failing rows
+    remain (the recorded failure), while the barrier task published
+    behind it is consumed (the worker continued past the failure — the
+    helper raises unless both halves happen).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"1327fail{tag}")
+    marker = seed_helpers.issue_chain(db_conn, f"1327failm{tag}")
+    pod = _seed_pod(db_conn, chain, f"1327 pod {tag}")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET assigned_pod_id = %s::uuid WHERE id = %s::uuid",
+            (str(pod["id"]), str(chain["issue"]["id"])),
+        )
+    _tombstone(db_conn, "pod", pod["id"])
+    _tombstone(db_conn, "workspaces", marker["workspace"]["id"])
+    _run_hard_delete_expecting_failure(
+        db_conn, "workspaces", marker["workspace"]["id"]
+    )
+    try:
+        assert not _missing(db_conn, "pod", pod["id"])
+        assert not _missing(db_conn, "issues", chain["issue"]["id"])
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                'DELETE FROM "issues" WHERE id = %s::uuid',
+                (str(chain["issue"]["id"]),),
+            )
+            cur.execute('DELETE FROM "pod" WHERE id = %s::uuid', (str(pod["id"]),))
