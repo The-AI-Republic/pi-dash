@@ -12,7 +12,7 @@
 // detail sidebar (slice G), so the frame's title field does not commit.
 
 import { Link } from "@tanstack/react-router";
-import { Badge, Button, IconButton, Skeleton } from "@pidash/kit";
+import { Badge, Button, IconButton } from "@pidash/kit";
 import type { CycleRow as CycleRowData } from "@pidash/api-client";
 import { ExternalLink, Link2 } from "lucide-react";
 import * as React from "react";
@@ -25,6 +25,7 @@ import { cycleProgressCounts, cycleProgressPercent } from "../lib/cycleProgress.
 import { copyCycleLink, openCycleInNewTab } from "../lib/cycleShare.js";
 import { CycleDateSpan } from "./CycleDateSpan.js";
 import { CycleProgressRing } from "./CycleProgressRing.js";
+import { CycleSidebarSkeleton } from "./CycleSidebarSkeleton.js";
 
 export interface CyclePeekPanelProps {
   workspaceSlug: string;
@@ -35,17 +36,6 @@ export interface CyclePeekPanelProps {
   /** IANA name of the project's timezone. */
   projectTimeZone: string;
   onClose: () => void;
-}
-
-function CyclePeekSkeleton(): React.ReactElement {
-  return (
-    <div data-testid="cycle-peek-skeleton" className="flex flex-col gap-(--space-3)">
-      <Skeleton height="14px" width="45%" />
-      <Skeleton height="12px" width="75%" />
-      <Skeleton height="12px" width="55%" />
-      <Skeleton height="12px" width="30%" />
-    </div>
-  );
 }
 
 interface CyclePeekBodyProps {
@@ -129,7 +119,7 @@ export function CyclePeekPanel({
       }
     >
       {detail.isPending ? (
-        <CyclePeekSkeleton />
+        <CycleSidebarSkeleton testId="cycle-peek-skeleton" />
       ) : cycle === null ? (
         <div data-testid="cycle-peek-error" className="flex flex-col items-start gap-(--space-3)">
           <p className="text-body text-(--text)">Couldn&apos;t load this cycle.</p>

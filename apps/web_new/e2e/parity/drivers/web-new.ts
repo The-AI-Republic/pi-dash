@@ -305,6 +305,32 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Spelled month names behind the oracle's day labels. */
+const SPELLED_MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+/** "October 15th, 2026" to its ISO day; the oracle spells ordinals. */
+function spelledDayToISO(label: string): string {
+  const match = /^([A-Za-z]+) (\d+)(?:st|nd|rd|th), (\d{4})$/.exec(label.trim());
+  const month = match === null ? -1 : SPELLED_MONTHS.indexOf(match[1] ?? "");
+  if (match === null || month === -1 || match[2] === undefined || match[3] === undefined) {
+    throw new Error(`[parity] cannot read the day label ${JSON.stringify(label)}.`);
+  }
+  return `${match[3]}-${String(month + 1).padStart(2, "0")}-${match[2].padStart(2, "0")}`;
+}
+
 function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
 }
@@ -17088,17 +17114,50 @@ export class WebNewDriver implements ParityDriver {
 
   // --- NEWFRONT-253 (cycles detail/sidebar, CYC-032-039). Stage 0
   // --- oracle convention: todo() stubs until the area lands in web_new.
+  /** The detail sidebar panel (absent while collapsed). */
+  private cycleSidebar(): Locator {
+    return this.page.getByTestId("cycle-sidebar");
+  }
+
+  /** The sidebar name heading, settled for sidebar-scoped reads. */
+  private async cycleSidebarSettled(): Promise<void> {
+    await this.cycleSidebar().getByTestId("cycle-sidebar-name").waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async cyclesDetailSidebarName(): Promise<string | null> {
-    return todo("cyclesDetailSidebarName");
+    const heading = this.cycleSidebar().getByTestId("cycle-sidebar-name");
+    if ((await heading.count()) === 0) return null;
+    if (!(await heading.isVisible().catch(() => false))) return null;
+    return ((await heading.innerText()) ?? "").trim() || null;
   }
   async cyclesToggleSidebarViaHeader(): Promise<void> {
-    return todo("cyclesToggleSidebarViaHeader");
+    // Wide screens carry the header toggle; narrow ones carry the trail
+    // toggle instead — click whichever is showing.
+    const desktop = this.page.getByTestId("cycle-sidebar-toggle");
+    if (
+      (await desktop.count()) > 0 &&
+      (await desktop
+        .first()
+        .isVisible()
+        .catch(() => false))
+    ) {
+      await desktop.first().click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.page.getByTestId("cycle-sidebar-toggle-narrow").click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesCloseSidebarViaPanel(): Promise<void> {
-    return todo("cyclesCloseSidebarViaPanel");
+    await this.cycleSidebarSettled();
+    await this.cycleSidebar().getByTestId("cycle-sidebar-close").click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesSidebarCollapsedStored(): Promise<boolean> {
-    return todo("cyclesSidebarCollapsedStored");
+    return this.page.evaluate(() => {
+      try {
+        return window.localStorage.getItem("cycle_sidebar_collapsed") === "true";
+      } catch {
+        return false;
+      }
+    });
   }
   async cyclesHeaderBadgeText(): Promise<string | null> {
     const badge = this.page.getByTestId("cycle-detail-badge");
@@ -17180,55 +17239,155 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByTestId("cycle-mobile-back").click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesSidebarDateText(): Promise<string> {
-    return todo("cyclesSidebarDateText");
+    await this.cycleSidebarSettled();
+    return (
+      (await this.cycleSidebar().getByTestId("cycle-sidebar-dates-trigger").innerText({
+        timeout: WebNewDriver.WAIT_MS,
+      })) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
   async cyclesSidebarDateDisabled(): Promise<boolean> {
-    return todo("cyclesSidebarDateDisabled");
+    await this.cycleSidebarSettled();
+    return this.cycleSidebar()
+      .getByTestId("cycle-sidebar-dates-trigger")
+      .isDisabled({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => true);
   }
   async cyclesSidebarOpenDatePicker(): Promise<void> {
-    return todo("cyclesSidebarOpenDatePicker");
+    await this.cycleSidebarSettled();
+    await this.cycleSidebar().getByTestId("cycle-sidebar-dates-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("cycle-sidebar-dates-picker-calendar").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async cyclesPickDateDay(_label: string): Promise<void> {
-    return todo("cyclesPickDateDay");
+  async cyclesPickDateDay(label: string): Promise<void> {
+    // The oracle names old-app day buttons ("October 15th, 2026"); the
+    // new grid carries ISO day cells, so the label parses to its day.
+    const iso = spelledDayToISO(label);
+    const calendar = this.page.getByTestId("cycle-sidebar-dates-picker-calendar");
+    await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const target = new Date(`${iso}T12:00:00`);
+    await calendar
+      .getByLabel("Month", { exact: true })
+      .selectOption({ label: target.toLocaleString("en-US", { month: "long" }) });
+    await calendar.getByLabel("Year", { exact: true }).selectOption({ label: String(target.getFullYear()) });
+    await calendar.locator(`button[data-day="${iso}"]`).click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesDismissDatePicker(): Promise<void> {
-    return todo("cyclesDismissDatePicker");
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByTestId("cycle-sidebar-dates-picker-calendar")
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
   async cyclesSidebarDescription(): Promise<string | null> {
-    return todo("cyclesSidebarDescription");
+    await this.cycleSidebarSettled();
+    const body = this.cycleSidebar().getByTestId("cycle-sidebar-description");
+    if ((await body.count()) === 0) return null;
+    if (!(await body.isVisible().catch(() => false))) return null;
+    return ((await body.innerText()) ?? "").trim() || null;
   }
   async cyclesSidebarLead(): Promise<{ name: string; avatar: string }> {
-    return todo("cyclesSidebarLead");
+    await this.cycleSidebarSettled();
+    const row = this.cycleSidebar().getByTestId("cycle-sidebar-lead");
+    const name = ((await row.getByTestId("cycle-sidebar-lead-name").innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const image = row.locator("img").first();
+    if ((await image.count()) > 0) return { name, avatar: (await image.getAttribute("src")) ?? "" };
+    const glyph = row.getByRole("img").first();
+    const avatar = ((await glyph.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return { name, avatar };
   }
   async cyclesProgressWorkItemsText(): Promise<string> {
-    return todo("cyclesProgressWorkItemsText");
+    await this.cycleSidebarSettled();
+    return (
+      (await this.cycleSidebar().getByTestId("cycle-progress-work-items").innerText({
+        timeout: WebNewDriver.WAIT_MS,
+      })) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
   async cyclesProgressPointsText(): Promise<string | null> {
-    return todo("cyclesProgressPointsText");
+    const row = this.cycleSidebar().getByTestId("cycle-progress-points");
+    if ((await row.count()) === 0) return null;
+    if (!(await row.isVisible().catch(() => false))) return null;
+    return ((await row.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
   async cyclesProgressChartVisible(): Promise<boolean> {
-    return todo("cyclesProgressChartVisible");
+    const chart = this.cycleSidebar().getByTestId("cycle-progress-chart");
+    return (await chart.count()) > 0 && (await chart.isVisible().catch(() => false));
   }
   async cyclesProgressMeasureValue(): Promise<string | null> {
-    return todo("cyclesProgressMeasureValue");
+    const trigger = this.cycleSidebar().getByTestId("cycle-progress-measure");
+    if ((await trigger.count()) === 0) return null;
+    if (!(await trigger.isVisible().catch(() => false))) return null;
+    return ((await trigger.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
   async cyclesProgressMeasureOptions(): Promise<string[]> {
-    return todo("cyclesProgressMeasureOptions");
+    const trigger = this.cycleSidebar().getByTestId("cycle-progress-measure");
+    if ((await trigger.count()) === 0) return [];
+    await trigger.first().scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await this.page.getByRole("option").allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text !== "");
   }
-  async cyclesProgressPickMeasure(_label: string): Promise<void> {
-    return todo("cyclesProgressPickMeasure");
+  async cyclesProgressPickMeasure(label: string): Promise<void> {
+    const trigger = this.cycleSidebar().getByTestId("cycle-progress-measure");
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: label }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.cyclesProgressMeasureValue(), { timeout: WebNewDriver.WAIT_MS }).toBe(label);
   }
-  async cyclesProgressStatsTab(_tab: "States" | "Assignees" | "Labels"): Promise<void> {
-    return todo("cyclesProgressStatsTab");
+  async cyclesProgressStatsTab(tab: "States" | "Assignees" | "Labels"): Promise<void> {
+    const trigger = this.cycleSidebar().getByRole("tab", { name: tab });
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => trigger.getAttribute("aria-selected"), { timeout: WebNewDriver.WAIT_MS }).toBe("true");
   }
   async cyclesProgressStatsRows(): Promise<CyclesProgressStatRow[]> {
-    return todo("cyclesProgressStatsRows");
+    const panel = this.cycleSidebar().getByTestId("cycle-progress-entries");
+    const rows = panel.locator('[data-testid^="cycle-progress-entry-"]');
+    const total = await rows.count();
+    const out: CyclesProgressStatRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await rows
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      const match = /^([\s\S]*) (\d+)% of (\d+)$/.exec(text);
+      if (match === null || match[1] === undefined || match[1].trim() === "") continue;
+      out.push({ title: match[1].trim(), percent: Number(match[2]), total: Number(match[3]) });
+    }
+    return out;
   }
   async cyclesProgressEmptyText(): Promise<string | null> {
-    return todo("cyclesProgressEmptyText");
+    const notice = this.cycleSidebar().getByText("No Data yet", { exact: true });
+    if ((await notice.count()) === 0) return null;
+    if (
+      !(await notice
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    return "No Data yet";
   }
-  async cyclesProgressEntryClick(_title: string): Promise<void> {
-    return todo("cyclesProgressEntryClick");
+  async cyclesProgressEntryClick(title: string): Promise<void> {
+    await this.cycleSidebarSettled();
+    // The oracle passes lowercase group keys ("backlog"); entries title
+    // themselves ("Backlog"), so the match ignores case.
+    const panel = this.cycleSidebar().getByTestId("cycle-progress-entries");
+    const entry = panel.getByRole("button", { name: new RegExp(escapeRegExp(title), "i") }).first();
+    await entry.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesMobileOpenAnalytics(): Promise<void> {
     // Scoped to the narrow header: the trigger also mounts (hidden) in
@@ -19609,32 +19768,76 @@ export class WebNewDriver implements ParityDriver {
   async cyclesHeroOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
     return todo("cyclesHeroOpenList");
   }
-  async cyclesHeroOpenDetail(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("cyclesHeroOpenDetail");
+  async cyclesHeroOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    // The scenario signs in first; the context already carries the
+    // session, so the address opens directly.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.page.waitForLoadState("domcontentloaded");
   }
-  async cyclesHeroOpenPeekRaw(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("cyclesHeroOpenPeekRaw");
+  async cyclesHeroOpenPeekRaw(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles?peek=${encodeURIComponent(cycleId)}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.page.waitForLoadState("domcontentloaded");
   }
   async cyclesHeroReload(): Promise<void> {
-    return todo("cyclesHeroReload");
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
   }
-  async cyclesHeroDelayDetailReads(_ms: number): Promise<void> {
-    return todo("cyclesHeroDelayDetailReads");
+  async cyclesHeroDelayDetailReads(ms: number): Promise<void> {
+    // Holds the cycle GETs so the sidebar skeleton stays observable;
+    // the budget covers the list, detail, progress and analytics reads.
+    let remaining = 24;
+    await this.page.route(
+      (url) => /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/cycles\/($|\?|[^/]+\/)/.test(url.pathname),
+      async (route) => {
+        if (route.request().method() === "GET" && remaining > 0) {
+          remaining -= 1;
+          await new Promise((resolve) => setTimeout(resolve, ms));
+        }
+        await route.continue();
+      }
+    );
   }
-  async cyclesHeroHideCycleFromListReads(_cycleId: string): Promise<void> {
-    return todo("cyclesHeroHideCycleFromListReads");
+  async cyclesHeroHideCycleFromListReads(cycleId: string): Promise<void> {
+    // Strips one cycle from the bare-array list reads so the surface
+    // under test cannot borrow its row.
+    await this.page.route(
+      (url) => /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/cycles\/($|\?)/.test(url.pathname),
+      async (route) => {
+        const response = await route.fetch();
+        try {
+          const body = (await response.json()) as unknown;
+          if (Array.isArray(body)) {
+            await route.fulfill({
+              response,
+              json: body.filter((entry) => (entry as { id?: unknown }).id !== cycleId),
+            });
+            return;
+          }
+        } catch {
+          // A non-JSON or failed list read passes through untouched.
+        }
+        await route.fulfill({ response });
+      }
+    );
   }
   async cyclesHeroSidebarSkeletonVisible(): Promise<boolean> {
-    return todo("cyclesHeroSidebarSkeletonVisible");
+    return this.isShown(this.page.getByTestId("cycle-sidebar-skeleton"));
   }
   async cyclesHeroSidebarName(): Promise<string | null> {
-    return todo("cyclesHeroSidebarName");
+    return this.cyclesDetailSidebarName();
   }
   async cyclesHeroPeekSkeletonVisible(): Promise<boolean> {
-    return todo("cyclesHeroPeekSkeletonVisible");
+    return this.isShown(this.page.getByTestId("cycle-peek-skeleton"));
   }
   async cyclesHeroPeekName(): Promise<string | null> {
-    return todo("cyclesHeroPeekName");
+    const heading = this.page.getByTestId("cycle-preview").locator("h4").first();
+    if ((await heading.count()) === 0) return null;
+    if (!(await heading.isVisible().catch(() => false))) return null;
+    return ((await heading.innerText()) ?? "").trim() || null;
   }
   async cyclesHeroGroupHeading(): Promise<string | null> {
     return todo("cyclesHeroGroupHeading");

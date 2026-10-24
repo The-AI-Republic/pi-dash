@@ -37,7 +37,7 @@ const CYCLES = [
   { id: CYCLE_B, project_id: CYCLES_PROJECT_ID, name: "Sprint 2", is_favorite: false, status: "COMPLETED" },
 ];
 
-function renderCrumbs() {
+function renderCrumbs(narrowActions: React.ReactNode = null) {
   mocks.navigate.mockClear();
   const transport = async (url: string) => {
     if (url.endsWith("/auth/get-csrf-token/")) {
@@ -66,6 +66,7 @@ function renderCrumbs() {
           cycleId={CYCLE_A}
           cycleName="Sprint 1"
           cycleStatus="CURRENT"
+          narrowActions={narrowActions}
         />
       </QueryClientProvider>
     ),
@@ -119,5 +120,11 @@ describe("CycleDetailCrumbs", () => {
     fireEvent.click(await screen.findByTestId("cycle-switcher-trigger"));
     fireEvent.click(await screen.findByRole("option", { name: "Sprint 1" }));
     expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("mounts narrow actions beside the back control", async () => {
+    renderCrumbs(<button type="button" data-testid="narrow-action" />);
+    expect(await screen.findByTestId("cycle-mobile-back")).toBeInTheDocument();
+    expect(screen.getByTestId("narrow-action")).toBeInTheDocument();
   });
 });

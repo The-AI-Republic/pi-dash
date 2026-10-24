@@ -343,6 +343,13 @@ export type { CustomDateMode, DatePreset } from "./filters/rich/legacyDimensions
 // out of eager closures. The parts type is compile-time only.
 export { LazyIssueFilters, loadIssueFilters, preloadIssueFilters } from "./filters/rich/lazy.js";
 export type { RichFilterBuilderParts } from "./filters/rich/RichFilterBuilder.js";
+// Shared filter model seam (CYC-039, NEWFRONT-713). The cycle sidebar
+// toggles breakdown entries through the same condition codec and slot
+// helpers the layouts use; the codec already rides the initial bundle
+// behind the layouts, so these named edges add no new chunk.
+export { useRichFilters, useUpdateRichFilters } from "./filters/rich/useRichFilters.js";
+export { conditionKey, findField, richFilterFields } from "./filters/rich/expression.js";
+export { selectedIds, togglePick } from "./filters/rich/slotModel.js";
 export { ISSUE_DATES_FAILED_TITLE, useUpdateIssueDates, withIssueDates } from "./api/dates.js";
 export type { IssueDatesInput } from "./api/dates.js";
 export {

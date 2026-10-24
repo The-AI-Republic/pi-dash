@@ -24,6 +24,8 @@ export interface CycleDetailCrumbsProps {
   cycleId: string;
   cycleName: string;
   cycleStatus: string | undefined;
+  /** Trailing narrow controls (the sidebar toggle); the wide trail has the header. */
+  narrowActions?: React.ReactNode | undefined;
 }
 
 export function CycleDetailCrumbs({
@@ -33,6 +35,7 @@ export function CycleDetailCrumbs({
   cycleId,
   cycleName,
   cycleStatus,
+  narrowActions,
 }: CycleDetailCrumbsProps): React.ReactElement {
   const navigate = useNavigate();
   const listHref = cyclesListHref(workspaceSlug, projectId);
@@ -100,7 +103,7 @@ export function CycleDetailCrumbs({
           </li>
         </ol>
       </nav>
-      <div className="shrink-0 md:hidden">
+      <div className="flex shrink-0 items-center justify-between gap-(--space-2) md:hidden">
         <Link
           to={listHref}
           data-testid="cycle-mobile-back"
@@ -110,6 +113,7 @@ export function CycleDetailCrumbs({
           <ChevronLeft size={16} strokeWidth={1.5} aria-hidden="true" />
           {CYCLES_CRUMB}
         </Link>
+        {narrowActions}
       </div>
     </>
   );

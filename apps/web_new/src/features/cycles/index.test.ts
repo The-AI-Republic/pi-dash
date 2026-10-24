@@ -6,14 +6,26 @@ import { describe, expect, it } from "vitest";
 import {
   archivedCyclesQueryOptions,
   countCycleFilters,
+  BREAKDOWN_FILTER_STEMS,
+  breakdownEntryActive,
+  breakdownTabKey,
+  completionChartPoints,
   CYCLE_ARCHIVE_FAILED_LINE,
   CYCLE_ARCHIVE_FAILED_TITLE,
   CYCLE_ARCHIVE_GATE_HINT,
   CYCLE_ARCHIVE_LINE,
   CYCLE_ARCHIVE_TITLE,
+  CYCLE_BREAKDOWN_TABS,
+  CYCLE_DATES_EMPTY_LABEL,
+  CYCLE_DATES_UPDATED_TITLE,
   CYCLE_DELETED_TITLE,
   CYCLE_DELETE_FAILED_LINE,
   CYCLE_DELETE_FAILED_TITLE,
+  CYCLE_PROGRESS_EMPTY_TEXT,
+  CYCLE_PROGRESS_MEASURES,
+  CYCLE_SIDEBAR_COLLAPSE_LABEL,
+  CYCLE_SIDEBAR_COLLAPSED_KEY,
+  CYCLE_SIDEBAR_EXPAND_LABEL,
   CYCLE_FILTER_CHIP_LABELS,
   CYCLE_FILTER_DIMENSIONS,
   CYCLE_FILTER_SECTION_TITLES,
@@ -35,6 +47,7 @@ import {
   copyCycleLink,
   CreateCycleDialog,
   UpdateCycleDialog,
+  cycleAnalyticsQueryOptions,
   cycleCoversToday,
   cycleDaysComplete,
   cycleDaysUnchanged,
@@ -49,6 +62,7 @@ import {
   CycleDeleteDialog,
   CycleDetailCrumbs,
   CycleDetailGate,
+  CycleDetailSidebar,
   CycleFilterChips,
   CycleFilterMenu,
   CycleGoneAway,
@@ -57,13 +71,21 @@ import {
   CycleMemberDatesFrame,
   cycleKeys,
   cycleOverlapMessage,
+  cycleProgressChartVisible,
   cycleProgressCounts,
+  cycleProgressEmptyText,
   cycleProgressPercent,
+  cycleProgressQueryOptions,
   CyclePeekPanel,
   CycleProgressRing,
   CycleRow,
   CycleRowMenu,
+  CycleSidebarDates,
+  CycleSidebarProgress,
+  CycleSidebarSkeleton,
+  CycleSidebarToggle,
   cycleSpanModel,
+  DEFAULT_BREAKDOWN_TAB,
   CyclesFeatureGate,
   cyclesFeatureHref,
   CyclesListBody,
@@ -104,25 +126,41 @@ import {
   lifecycleTone,
   makeCycleFilter,
   matchesCycleQuery,
+  measureLabel,
   openCycleInNewTab,
   parseCycleDateEntry,
   parseCyclesListSearch,
+  pointsPairText,
+  progressGrandTotal,
+  progressShare,
   projectIssuesHref,
   projectOffsetChip,
   projectToday,
+  readBreakdownTab,
+  readSidebarCollapsed,
   resetCycleFilterStore,
   resetCycleSearchStore,
   resolveCyclesBody,
+  selectAssigneeRows,
   selectCycleMemberDirectory,
+  selectLabelRows,
+  selectStateGroupRows,
+  showPointsRow,
   switchCycleTarget,
+  toggleBreakdownCondition,
   UNKNOWN_CYCLE_MEMBER,
   useArchiveCycle,
+  useCycleAnalyticsTab,
   useCycleDetail,
   useCycleFilterStore,
   useCycleListFilter,
   useCycleSearchStore,
+  useCycleSidebarCollapsed,
   useDeleteCycle,
   useRestoreCycle,
+  workItemsPairText,
+  writeBreakdownTab,
+  writeSidebarCollapsed,
   zoneOffsetMinutes,
 } from "./index.js";
 
@@ -266,5 +304,49 @@ describe("cycles barrel", () => {
     expect(CycleDeleteDialog).toBeDefined();
     expect(CycleArchiveDialog).toBeDefined();
     expect(FinishedCycleNotice).toBeDefined();
+  });
+
+  it("re-exports the detail sidebar, its dates, progress, toggle, skeleton, state and queries", () => {
+    expect(CycleDetailSidebar).toBeDefined();
+    expect(CycleSidebarDates).toBeDefined();
+    expect(CYCLE_DATES_UPDATED_TITLE).toBe("Cycle updated successfully.");
+    expect(CYCLE_DATES_EMPTY_LABEL).toBe("Start date");
+    expect(CycleSidebarProgress).toBeDefined();
+    expect(CycleSidebarSkeleton).toBeDefined();
+    expect(CycleSidebarToggle).toBeDefined();
+    expect(CYCLE_SIDEBAR_COLLAPSE_LABEL).toBe("Collapse sidebar");
+    expect(CYCLE_SIDEBAR_EXPAND_LABEL).toBe("Expand sidebar");
+    expect(CYCLE_SIDEBAR_COLLAPSED_KEY).toBe("cycle_sidebar_collapsed");
+    expect(readSidebarCollapsed).toBeDefined();
+    expect(writeSidebarCollapsed).toBeDefined();
+    expect(useCycleSidebarCollapsed).toBeDefined();
+    expect(CYCLE_BREAKDOWN_TABS).toEqual(["States", "Assignees", "Labels"]);
+    expect(DEFAULT_BREAKDOWN_TAB).toBe("Assignees");
+    expect(breakdownTabKey).toBeDefined();
+    expect(readBreakdownTab).toBeDefined();
+    expect(writeBreakdownTab).toBeDefined();
+    expect(useCycleAnalyticsTab).toBeDefined();
+    expect(CYCLE_PROGRESS_MEASURES).toEqual([
+      { value: "issues", label: "Work items" },
+      { value: "points", label: "Estimates" },
+    ]);
+    expect(measureLabel).toBeDefined();
+    expect(progressGrandTotal).toBeDefined();
+    expect(progressShare).toBeDefined();
+    expect(selectStateGroupRows).toBeDefined();
+    expect(selectAssigneeRows).toBeDefined();
+    expect(selectLabelRows).toBeDefined();
+    expect(cycleProgressChartVisible).toBeDefined();
+    expect(cycleProgressEmptyText).toBeDefined();
+    expect(CYCLE_PROGRESS_EMPTY_TEXT).toBe("No Data yet");
+    expect(completionChartPoints).toBeDefined();
+    expect(workItemsPairText).toBeDefined();
+    expect(pointsPairText).toBeDefined();
+    expect(showPointsRow).toBeDefined();
+    expect(BREAKDOWN_FILTER_STEMS).toEqual({ States: "state_group", Assignees: "assignee_id", Labels: "label_id" });
+    expect(toggleBreakdownCondition).toBeDefined();
+    expect(breakdownEntryActive).toBeDefined();
+    expect(cycleProgressQueryOptions).toBeDefined();
+    expect(cycleAnalyticsQueryOptions).toBeDefined();
   });
 });
