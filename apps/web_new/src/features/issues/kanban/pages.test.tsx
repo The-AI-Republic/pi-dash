@@ -246,10 +246,10 @@ describe("useBoard", () => {
   });
 });
 
-function many(prefix: string, count: number): IssueListItem[] {
+function many(prefix: string, count: number, start = 4000): IssueListItem[] {
   return Array.from({ length: count }, (_, index) =>
     row({
-      id: `223e4567-e89b-12d3-a456-42661417${String(4000 + index).slice(-4)}`,
+      id: `223e4567-e89b-12d3-a456-42661417${String(start + index).slice(-4)}`,
       name: `${prefix} ${index}`,
       sequence_id: 100 + index,
     })
@@ -380,6 +380,40 @@ describe("board pagination", () => {
     act(() => result.current.loadMoreColumn(STATE));
     act(() => result.current.loadMoreColumn("missing"));
     expect(calls).toHaveLength(2);
+  });
+
+  it("leaves other columns alone when one column pages deeper", async () => {
+    const OTHER = "623e4567-e89b-12d3-a456-426614174005";
+    const twoColumnPage = (
+      aRows: IssueListItem[],
+      aTotal: number,
+      bRows: IssueListItem[],
+      bTotal: number
+    ): Record<string, unknown> => ({
+      ...envelope,
+      grouped_by: "state_id",
+      total_count: aTotal + bTotal,
+      results: {
+        [STATE]: { results: aRows, total_results: aTotal },
+        [OTHER]: { results: bRows, total_results: bTotal },
+      },
+    });
+    const queryClient = boardClient();
+    const { client, calls } = pagingClient(twoColumnPage(many("a", 30), 32, many("b", 10, 4100), 30), {
+      "30:1:0": twoColumnPage([extraRow(0), extraRow(1)], 32, [extraRow(4), extraRow(5)], 30),
+      "30:0:0": twoColumnPage(many("a", 30), 32, [extraRow(2), extraRow(3)], 30),
+    });
+    const { result } = renderHook(() => useBoard(client, "acme", input()), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    act(() => result.current.loadMoreColumn(STATE));
+    await waitFor(() => expect(boardCellOf(result.current.board, STATE, null)?.rows).toHaveLength(32));
+    expect(boardCellOf(result.current.board, OTHER, null)?.rows).toHaveLength(10);
+    expect(result.current.columnHasMore(OTHER)).toBe(true);
+    act(() => result.current.loadMoreColumn(OTHER));
+    await waitFor(() => expect(boardCellOf(result.current.board, OTHER, null)?.rows).toHaveLength(12));
+    expect(calls).toHaveLength(3);
   });
 
   it("pages a sub-grouped cell behind its own cursor", async () => {

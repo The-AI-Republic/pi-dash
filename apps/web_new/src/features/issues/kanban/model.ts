@@ -346,17 +346,47 @@ export function boardPageCursor(loaded: number, pageSize: number): string {
 }
 
 /**
+ * The column or cell that asked for a later page. Flat pages have no
+ * owner and keep merging whole; column and cell pages merge only into
+ * the owner, so uneven columns never inherit each other's windows.
+ */
+export type BoardPageOwner =
+  | { kind: "column"; columnKey: string }
+  | { kind: "cell"; columnKey: string; laneKey: string };
+
+/**
  * Fold a later page into the board: rows append per cell without
  * duplicates, and every total refreshes from the latest envelope. Cells,
  * lanes and columns the first page never discovered join the tail.
+ * With an owner, only the owner's rows append and only the owner joins
+ * the tail: other cells keep their rows (totals still refresh, since
+ * every envelope carries full counts), and a newly discovered non-owner
+ * bucket stays out rather than joining with a partial window.
  */
-export function mergeBoardPage(current: BoardData, incoming: BoardData): BoardData {
+export function mergeBoardPage(current: BoardData, incoming: BoardData, owner?: BoardPageOwner): BoardData {
+  const ownsCell = (laneKey: string, columnKey: string): boolean => {
+    if (owner === undefined) return true;
+    if (columnKey !== owner.columnKey) return false;
+    if (owner.kind === "cell") return laneKey === owner.laneKey;
+    return laneKey === "";
+  };
+  const ownsLane = (laneKey: string): boolean => {
+    if (owner === undefined) return true;
+    if (owner.kind === "column") return false;
+    return laneKey === owner.laneKey;
+  };
+  const ownsColumn = (columnKey: string): boolean => {
+    if (owner === undefined) return true;
+    return columnKey === owner.columnKey;
+  };
   const columns = current.columns.map((column) => {
     const next = incoming.columns.find((entry) => entry.key === column.key);
     return next === undefined ? column : { ...column, total: next.total };
   });
   for (const column of incoming.columns) {
-    if (!columns.some((entry) => entry.key === column.key)) columns.push(column);
+    if (columns.some((entry) => entry.key === column.key)) continue;
+    if (!ownsColumn(column.key)) continue;
+    columns.push(column);
   }
   const lanes = current.lanes.map((lane) => {
     const next = incoming.lanes.find((entry) => entry.key === lane.key);
@@ -365,7 +395,11 @@ export function mergeBoardPage(current: BoardData, incoming: BoardData): BoardDa
     for (const [key, cell] of Object.entries(next.cells)) {
       const existing = cells[key];
       if (existing === undefined) {
-        cells[key] = cell;
+        if (ownsCell(lane.key, key)) cells[key] = cell;
+        continue;
+      }
+      if (!ownsCell(lane.key, key)) {
+        cells[key] = { ...existing, total: cell.total };
         continue;
       }
       const seen = new Set(existing.rows.map((row) => row.id));
@@ -378,7 +412,10 @@ export function mergeBoardPage(current: BoardData, incoming: BoardData): BoardDa
     return { ...lane, cells, total: next.total };
   });
   for (const lane of incoming.lanes) {
-    if (!lanes.some((entry) => entry.key === lane.key)) lanes.push(lane);
+    if (lanes.some((entry) => entry.key === lane.key)) continue;
+    if (!ownsLane(lane.key)) continue;
+    const cells = Object.fromEntries(Object.entries(lane.cells).filter(([key]) => ownsCell(lane.key, key)));
+    lanes.push({ ...lane, cells });
   }
   return { columns, lanes, subGrouped: current.subGrouped, total: incoming.total };
 }

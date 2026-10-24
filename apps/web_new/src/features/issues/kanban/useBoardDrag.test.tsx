@@ -111,7 +111,7 @@ describe("useBoardDrag", () => {
     expect(result.current.target).toBeNull();
   });
 
-  it("falls back to the last target when the release resolves nowhere", () => {
+  it("clears the hovered target over empty chrome and cancels a nowhere release", () => {
     mountCard();
     const boardRef = React.createRef<HTMLElement>();
     const drops: Array<BoardDropPoint | null> = [];
@@ -119,8 +119,11 @@ describe("useBoardDrag", () => {
     act(() => result.current.startDrag(draggedCard()));
     act(() => fire("pointermove", 50, 120));
     expect(result.current.target?.kind).toBe("card");
+    act(() => fire("pointermove", 900, 900));
+    expect(result.current.target).toBeNull();
     act(() => fire("pointerup", 900, 900));
-    expect(drops[0]?.kind).toBe("card");
+    expect(drops).toHaveLength(1);
+    expect(drops[0]).toBeNull();
   });
 
   it("cancels without committing", () => {

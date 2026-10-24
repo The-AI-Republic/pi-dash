@@ -76,14 +76,12 @@ export function useBoardDrag(
     const onMove = (event: PointerEvent): void => {
       pointRef.current = { x: event.clientX, y: event.clientY };
       const point = boardDropAtPoint(doc, event.clientX, event.clientY);
-      if (point !== null) {
-        targetRef.current = point;
-        setTarget(point);
-      }
+      targetRef.current = point;
+      setTarget(point);
       scrollToward({ x: event.clientX, y: event.clientY });
     };
     const onUp = (event: PointerEvent): void => {
-      const point = boardDropAtPoint(doc, event.clientX, event.clientY) ?? targetRef.current;
+      const point = boardDropAtPoint(doc, event.clientX, event.clientY);
       const done = draggedRef.current;
       draggedRef.current = null;
       targetRef.current = null;

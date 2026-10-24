@@ -247,8 +247,9 @@ export function KanbanBoard({
   /**
    * One released drag: the delete zone hands the card to the delete
    * confirmation, a drop back onto its own seat stays silent, a refused
-   * drop explains itself, and every other drop writes the destination
-   * value plus its new sort position and highlights the landed card.
+   * drop explains itself — even a reorder inside its own cell — and
+   * every other drop writes the destination value plus its new sort
+   * position and highlights the landed card.
    */
   function commitDrop(dragged: DraggedCard, target: BoardDropPoint | null): void {
     if (target === null) return;
@@ -257,23 +258,6 @@ export function KanbanBoard({
       return;
     }
     const sameCell = target.columnKey === dragged.groupKey && (target.laneKey ?? "") === (dragged.laneKey ?? "");
-    if (!sameCell) {
-      const refusal = boardDropRefusal({
-        orderBy: prefs.orderBy,
-        groupDimension: prefs.groupBy,
-        subDimension: subGroup,
-        canEdit: editAllowed,
-        destColumnKey: target.columnKey,
-        openCycleIds: refs.openCycleIds,
-        ...(workflowReasonFor(target.columnKey) === undefined
-          ? {}
-          : { workflowBlockedReason: workflowReasonFor(target.columnKey) }),
-      });
-      if (refusal !== null) {
-        notifyInfo(MOVE_REFUSED_TITLE, refusal.toast);
-        return;
-      }
-    }
     const destCell = boardCellOf(board, target.columnKey, target.laneKey);
     if (destCell === null) return;
     const index = insertionIndexForDrop(
@@ -284,6 +268,21 @@ export function KanbanBoard({
       target.edge
     );
     if (sameCell && index === dragged.sourceIndex) return;
+    const refusal = boardDropRefusal({
+      orderBy: prefs.orderBy,
+      groupDimension: prefs.groupBy,
+      subDimension: subGroup,
+      canEdit: editAllowed,
+      destColumnKey: target.columnKey,
+      openCycleIds: refs.openCycleIds,
+      ...(workflowReasonFor(target.columnKey) === undefined
+        ? {}
+        : { workflowBlockedReason: workflowReasonFor(target.columnKey) }),
+    });
+    if (refusal !== null) {
+      notifyInfo(MOVE_REFUSED_TITLE, refusal.toast);
+      return;
+    }
     const plan = planBoardMove({
       issue: dragged.issue,
       groupDimension: prefs.groupBy,

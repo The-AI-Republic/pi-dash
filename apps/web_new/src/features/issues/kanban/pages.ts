@@ -45,6 +45,7 @@ import {
   subGroupedBoard,
   type BoardCell,
   type BoardData,
+  type BoardPageOwner,
 } from "./model.js";
 
 export interface BoardReadInput {
@@ -211,6 +212,19 @@ export function boardCellKey(columnKey: string, laneKey: string): string {
   return JSON.stringify([laneKey, columnKey]);
 }
 
+/** Split a cell cursor owner back into its lane and column. */
+export function parseBoardCellKey(key: string): [laneKey: string, columnKey: string] {
+  return JSON.parse(key) as [string, string];
+}
+
+/** The requesting owner of one extra page; flat pages merge whole. */
+function pageOwner(entry: BoardExtraPage): BoardPageOwner | undefined {
+  if (entry.kind === "flat") return undefined;
+  if (entry.kind === "column") return { kind: "column", columnKey: entry.key };
+  const [laneKey, columnKey] = parseBoardCellKey(entry.key);
+  return { kind: "cell", columnKey, laneKey };
+}
+
 /** One cell of the merged board, or null before the first page lands. */
 export function boardCellOf(board: BoardData | null, columnKey: string, laneKey: string | null): BoardCell | null {
   if (board === null) return null;
@@ -278,12 +292,12 @@ export function useBoard(client: ApiClient, workspaceSlug: string, input: BoardR
   const board = React.useMemo(() => {
     if (first.data === undefined) return null;
     let merged = toBoard(first.data, input);
-    for (const query of extraQueries) {
+    for (const [index, query] of extraQueries.entries()) {
       if (query.data === undefined) continue;
-      merged = mergeBoardPage(merged, toBoard(query.data, input));
+      merged = mergeBoardPage(merged, toBoard(query.data, input), pageOwner(extras[index]!));
     }
     return merged;
-  }, [first.data, extraQueries, input]);
+  }, [first.data, extraQueries, extras, input]);
 
   const flatPages = React.useMemo(() => {
     const pages: BoardResponse[] = [];

@@ -1126,6 +1126,39 @@ describe("KanbanBoard drag and drop", () => {
     expect(mocks.notifyInfo).toHaveBeenCalledWith("Cannot move the work item", expect.any(String));
   });
 
+  it("refuses a same-cell reorder under a non-manual order", () => {
+    setup({ prefs: prefs({ orderBy: "-created_at" }) });
+    stubFlatGeometry();
+    pressCard(cardByName("Fix login"));
+    fireEvent(document, pointer("pointermove", 100, 240));
+    expect(screen.getByTestId("kanban-drop-overlay")).toHaveTextContent("Ordered by Last created");
+    fireEvent(document, pointer("pointerup", 100, 240));
+    expect(mocks.moveCard).not.toHaveBeenCalled();
+    expect(mocks.notifyInfo).toHaveBeenCalledWith(
+      "Cannot move the work item",
+      expect.stringMatching(/ordered by Last created/i)
+    );
+  });
+
+  it("refuses a same-cell reorder in undraggable groupings", () => {
+    setup({ prefs: prefs({ groupBy: "created_by" }) });
+    stubFlatGeometry();
+    pressCard(cardByName("Fix login"));
+    fireEvent(document, pointer("pointermove", 100, 240));
+    fireEvent(document, pointer("pointerup", 100, 240));
+    expect(mocks.moveCard).not.toHaveBeenCalled();
+    expect(mocks.notifyInfo).toHaveBeenCalledWith("Cannot move the work item", expect.any(String));
+  });
+
+  it("stays silent dropping back onto its own seat under a refused order", () => {
+    setup({ prefs: prefs({ orderBy: "-created_at" }) });
+    stubFlatGeometry();
+    pressCard(cardByName("Fix login"));
+    fireEvent(document, pointer("pointerup", 90, 90));
+    expect(mocks.moveCard).not.toHaveBeenCalled();
+    expect(mocks.notifyInfo).not.toHaveBeenCalled();
+  });
+
   it("refuses completed cycle columns but lets cards leave them", () => {
     mocks.board = {
       columns: [
