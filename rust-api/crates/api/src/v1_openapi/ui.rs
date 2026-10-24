@@ -29,7 +29,7 @@ use rand::distr::{Alphanumeric, SampleString};
 
 use crate::state::AppState;
 
-use super::throttle::DenialRenderer;
+use super::negotiate::{self, NegotiationError, Renderer, UI_RENDERERS};
 
 /// UI page content type: `TemplateHTMLRenderer.media_type`.
 pub const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";
@@ -44,6 +44,11 @@ pub const NOT_ALLOWED_BODY: &str = "405 Method Not Allowed";
 /// `TemplateHTMLRenderer` exception fallback (`'%d %s'`, no `404.html`
 /// template exists).
 pub const UNKNOWN_FORMAT_BODY: &str = "404 Not Found";
+
+/// Exact bytes of the `NotAcceptable` 406 on both UI pages: the
+/// `TemplateHTMLRenderer.get_exception_template` fallback (`'%d %s'`,
+/// `renderers.py:191-202`), rendered by the page's first (only) renderer.
+pub const NOT_ACCEPTABLE_BODY: &str = "406 Not Acceptable";
 
 /// The served swagger-ui template: FX-OPENAPI-05's normalized capture with
 /// the CSRF hole emptied (`CSRFTOKEN"] = "";`). The hole is refilled per
@@ -62,82 +67,90 @@ const CSRF_HOLE: &str = "CSRFTOKEN\"] = \"\";";
 const CSRF_TOKEN_LEN: usize = 64;
 
 /// `GET /api/schema/swagger-ui/`: the swagger-ui page with a fresh CSRF
-/// token per render. Gated on the cutover flip; `?format=` negotiates
-/// before throttling (DRF `initial`).
+/// token per render. Gated on the cutover flip; the single
+/// `text/html` renderer is chosen by DRF content negotiation (404 on an
+/// unknown `?format=`, 406 when `Accept` matches nothing), before throttling.
 pub async fn serve_swagger_ui(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
-    if !serves_html(&req) {
-        return unknown_format();
-    }
+    let (renderer, _accepted_media_type) = match ui_renderer(&req) {
+        Ok(picked) => picked,
+        Err(NegotiationError::NotFound) => return unknown_format(),
+        Err(NegotiationError::NotAcceptable) => return not_acceptable(),
+    };
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
-        return super::throttled(DenialRenderer::UiPage, denied.wait, false);
+        return super::throttled(renderer, denied.wait, false);
     }
     super::view_response(
         StatusCode::OK,
-        CONTENT_TYPE_HTML,
+        &negotiate::content_type(renderer),
         fill_csrf_token(new_csrf_token()).into_bytes(),
         false,
     )
 }
 
 /// `GET /api/schema/redoc/`: the redoc page, byte-static. Gated on the
-/// cutover flip; `?format=` negotiates before throttling (DRF `initial`).
+/// cutover flip; the single `text/html` renderer is chosen by DRF content
+/// negotiation, before throttling.
 pub async fn serve_redoc(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
-    if !serves_html(&req) {
-        return unknown_format();
-    }
+    let (renderer, _accepted_media_type) = match ui_renderer(&req) {
+        Ok(picked) => picked,
+        Err(NegotiationError::NotFound) => return unknown_format(),
+        Err(NegotiationError::NotAcceptable) => return not_acceptable(),
+    };
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
-        return super::throttled(DenialRenderer::UiPage, denied.wait, false);
+        return super::throttled(renderer, denied.wait, false);
     }
     super::view_response(
         StatusCode::OK,
-        CONTENT_TYPE_HTML,
+        &negotiate::content_type(renderer),
         REDOC_TEMPLATE.as_bytes().to_vec(),
         false,
     )
 }
 
 /// Unsafe methods on either UI page: the pinned `405 Method Not Allowed`
-/// fallback. Negotiation runs before throttling (DRF `initial`):
-/// unknown formats 404 without spending budget, and a throttled caller
-/// answers 429 instead.
+/// fallback in the negotiated renderer. Negotiation runs before throttling
+/// (DRF `initial`): unknown formats 404 and unacceptable ones 406 without
+/// spending budget, and a throttled caller answers 429 instead.
 pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> Response {
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
-    if !serves_html(&req) {
-        return unknown_format();
-    }
+    let (renderer, _accepted_media_type) = match ui_renderer(&req) {
+        Ok(picked) => picked,
+        Err(NegotiationError::NotFound) => return unknown_format(),
+        Err(NegotiationError::NotAcceptable) => return not_acceptable(),
+    };
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
-        return super::throttled(DenialRenderer::UiPage, denied.wait, false);
+        return super::throttled(renderer, denied.wait, false);
     }
     super::view_response(
         StatusCode::METHOD_NOT_ALLOWED,
-        CONTENT_TYPE_HTML,
+        &negotiate::content_type(renderer),
         NOT_ALLOWED_BODY.as_bytes().to_vec(),
         false,
     )
 }
 
-/// `?format=` negotiation for the single-`TemplateHTMLRenderer` pages:
-/// absent, empty, or `html` serves; anything else 404s (DRF
-/// `negotiation.py:filter_renderers`, bare `Http404`).
-fn serves_html(req: &Request) -> bool {
-    matches!(
-        super::last_format_value(req.uri().query().unwrap_or("")).as_deref(),
-        None | Some("") | Some("html")
-    )
+/// Content negotiation for the single-`TemplateHTMLRenderer` pages. An
+/// unknown `?format=` (404) and an unmatched `Accept` (406) map to the
+/// renderer-appropriate `TemplateHTMLRenderer` exception fallbacks at the
+/// call site.
+fn ui_renderer(req: &Request) -> Result<(Renderer, String), NegotiationError> {
+    let format = super::last_format_value(req.uri().query().unwrap_or(""));
+    let accept = negotiate::accept_header(req);
+    negotiate::select_renderer(&UI_RENDERERS, format.as_deref(), &accept)
 }
 
 /// The unknown-format 404 on either UI page: the `TemplateHTMLRenderer`
@@ -147,6 +160,17 @@ fn unknown_format() -> Response {
         StatusCode::NOT_FOUND,
         CONTENT_TYPE_HTML,
         UNKNOWN_FORMAT_BODY.as_bytes().to_vec(),
+        false,
+    )
+}
+
+/// The `NotAcceptable` 406 on either UI page: the same
+/// `TemplateHTMLRenderer` exception fallback (`'%d %s'`).
+fn not_acceptable() -> Response {
+    super::view_response(
+        StatusCode::NOT_ACCEPTABLE,
+        CONTENT_TYPE_HTML,
+        NOT_ACCEPTABLE_BODY.as_bytes().to_vec(),
         false,
     )
 }

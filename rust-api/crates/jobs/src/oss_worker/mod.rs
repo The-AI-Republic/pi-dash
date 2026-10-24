@@ -152,11 +152,15 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // W-export). Django drops both (PDASHOSS01-292); Rust runs them.
     crate::tasks_export::register_issue_export_task(registry, ctx.pools.primary().clone());
     crate::tasks_export::register_analytic_task(registry, ctx.pools.primary().clone());
-    // `register_assets` installs sweep + metadata + copy (assets.rs:692).
+    // `register_assets` installs sweep + metadata + copy with the live
+    // S3 store (PIDASHCONV-1292): the copy and metadata handlers execute
+    // real HEAD and PUT-copy requests, exactly like the Django tasks.
     crate::tasks_cleanup::assets::register_assets(
         registry,
         ctx.pools.primary().clone(),
-        std::sync::Arc::new(crate::tasks_cleanup::assets::UnavailableObjectStore),
+        std::sync::Arc::new(
+            crate::tasks_cleanup::assets::LiveS3ObjectStore::from_settings(&ctx.settings),
+        ),
         std::sync::Arc::new(crate::tasks_cleanup::assets::NoopLiveConvert),
     );
     crate::tasks_cleanup::register_expiry(
@@ -170,6 +174,10 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         registry,
         ctx.pools.primary().clone(),
         ctx.seed_dir.clone(),
+        ctx.settings.cloud_agent.clone(),
+        ctx.settings.managed_runner.clone(),
+        std::sync::Arc::new(NoExtraToolsets),
+        ctx.assistant_seam.clone(),
     );
     crate::tasks_cleanup::dummy_data::register(registry, ctx.pools.primary().clone());
     // D-05 integrations groups (PIDASHCONV-238; kept in sync with
@@ -220,13 +228,36 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // the Rust worker owns it — otherwise the task is lost at
     // switchover (parity gap W-license).
     crate::license::tasks::register(registry, ctx.pools.primary().clone());
+    // The shared Redis client (the `LivePorts::new` shape — `None` when
+    // `REDIS_URL` is unset or unparsable): the sweep's post-commit publish
+    // and, below, the runner seams. Built once, cloned per consumer.
+    let redis = match ctx
+        .settings
+        .redis
+        .url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .map(redis::Client::open)
+    {
+        None => None,
+        Some(Ok(client)) => Some(client),
+        Some(Err(error)) => {
+            tracing::warn!(%error, "redis: REDIS_URL unparsable; continuing without cache");
+            None
+        }
+    };
     // D-06 stale-turn sweep (PIDASHCONV-831; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The live
-    // store fails RUNNING turns older than 390s, like the beat in Django.
-    // `assistant.run_turn` stays Python-owned: `register_turn_handler`
-    // needs a live `TurnSeam` and none exists (only test fakes) — never
-    // register it here until the seam lands.
-    crate::assistant::register_sweep_handler(registry, ctx.pools.primary().clone());
+    // store fails RUNNING turns older than the configured hard limit + 60s
+    // (390s at defaults), like the beat in Django (PIDASHCONV-1248).
+    // `assistant.run_turn` is registered by `worker()` (`main.rs`) with
+    // the live `TurnSeam` (PIDASHCONV-863) — never register it here too.
+    crate::assistant::register_sweep_handler(
+        registry,
+        ctx.pools.primary().clone(),
+        redis.clone(),
+        ctx.settings.assistant.turn_hard_limit,
+    );
     // Loop scan + fire (PIDASHCONV-838; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The
     // beat entry fires the scanner every minute and the scanner fans
@@ -331,21 +362,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // all thirteen — otherwise the runs are lost at switchover
     // (parity gap W-runner, plus the four dormant names the
     // registers also own).
-    let redis = match ctx
-        .settings
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .map(redis::Client::open)
-    {
-        None => None,
-        Some(Ok(client)) => Some(client),
-        Some(Err(error)) => {
-            tracing::warn!(%error, "redis: REDIS_URL unparsable; continuing without cache");
-            None
-        }
-    };
     let runner_seams = std::sync::Arc::new(runner_seams::RunnerSeams::new(
         ctx.pools.primary().clone(),
         redis,

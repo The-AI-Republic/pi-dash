@@ -655,18 +655,24 @@ pub fn tick_context(ticker: &TickerView) -> Option<Value> {
 }
 
 /// Pick the implementation payload the review prompt inspects
-/// (`context.py:401-416`): the run's own parent, else the ticker-stashed
-/// resume parent (fresh review-entry runs have `parent_run=None`).
+/// (`context.py:401-416`): the run's own parent when one exists, else the
+/// ticker-stashed resume parent (fresh review-entry runs have
+/// `parent_run=None`). A parent run with a falsy payload (`NULL`, `{}`,
+/// ...) renders the fallback — the ticker is never consulted then, so
+/// `has_parent_run` must travel separately from `direct` (PIDASHCONV-1232).
 pub fn resolve_parent_payload<'a>(
     direct: Option<&'a Value>,
+    has_parent_run: bool,
     ticker_stored: Option<&'a Value>,
 ) -> Option<&'a Value> {
-    match direct {
+    let candidate = if has_parent_run {
+        direct
+    } else {
+        ticker_stored
+    };
+    match candidate {
         Some(value) if payload_present(value) => Some(value),
-        _ => match ticker_stored {
-            Some(value) if payload_present(value) => Some(value),
-            _ => None,
-        },
+        _ => None,
     }
 }
 
@@ -699,7 +705,7 @@ fn payload_present(value: &Value) -> bool {
 /// template variable (never re-parsed as JSON downstream), so both render
 /// the same text; byte-identical escaping is not preserved.
 pub fn parent_done_payload_json(payload: Option<&Value>) -> String {
-    match resolve_parent_payload(payload, None) {
+    match resolve_parent_payload(payload, true, None) {
         Some(value) => {
             serde_json::to_string_pretty(&sort_value(value)).unwrap_or_else(|_| "{}".to_owned())
         }
@@ -2060,16 +2066,39 @@ mod tests {
         let direct = json!({"b": 1, "a": 1});
         let stored = json!({"z": 1});
         assert_eq!(
-            resolve_parent_payload(Some(&direct), Some(&stored)),
+            resolve_parent_payload(Some(&direct), true, Some(&stored)),
             Some(&direct)
         );
         assert_eq!(
-            resolve_parent_payload(Some(&json!({})), Some(&stored)),
+            resolve_parent_payload(None, false, Some(&stored)),
             Some(&stored)
         );
+        assert_eq!(resolve_parent_payload(None, false, None), None);
         // `sort_keys=True` parity: `a` renders before `b`.
         let rendered = parent_done_payload_json(Some(&direct));
         assert!(rendered.find("\"a\"").expect("a") < rendered.find("\"b\"").expect("b"));
+    }
+
+    #[test]
+    fn parent_payload_ignores_ticker_when_parent_exists_without_payload() {
+        // PIDASHCONV-1232: `run.parent_run` exists but its `done_payload`
+        // is falsy — Django renders the fallback and never consults the
+        // ticker's resume parent (`context.py:409-415`).
+        let stored = json!({"z": 1});
+        for falsy in [json!(null), json!({}), json!([]), json!(""), json!(0)] {
+            assert_eq!(
+                resolve_parent_payload(Some(&falsy), true, Some(&stored)),
+                None,
+                "falsy direct payload must not fall through to the ticker: {falsy}"
+            );
+        }
+        assert_eq!(
+            resolve_parent_payload(None, true, Some(&stored)),
+            None,
+            "NULL direct payload with a parent run must not fall through"
+        );
+        // The ticker side keeps the same truthiness gate.
+        assert_eq!(resolve_parent_payload(None, false, Some(&json!({}))), None);
     }
 
     #[test]

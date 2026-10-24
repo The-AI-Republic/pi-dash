@@ -844,6 +844,18 @@ fn estimate_join() -> String {
         .to_owned()
 }
 
+/// Distribution-only estimate join (PIDASHCONV-1185): Django's points
+/// distributions annotate `Sum("estimate_point__value")` over the full
+/// `Issue.issue_objects` base with no `estimate_point` filter, so the ORM
+/// emits a LEFT OUTER JOIN against the nullable FK (`db/models/issue.py:130-136`)
+/// and issues without an estimate point keep their group with NULL sums.
+/// The `estimates.type = 'points'` predicate the burndown needs does not
+/// belong here — Django's points check is the separate project-level
+/// `exists()` (see project_estimates_points).
+fn estimate_left_join() -> String {
+    "LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id".to_owned()
+}
+
 /// Assignee estimate distribution (`archive.py:367-419`): one row per
 /// assignee (plus the NULL row for unassigned issues), ordered by
 /// display name. The joins are LEFT (annotation-side) with no
@@ -861,7 +873,7 @@ fn assignee_estimate_sql() -> String {
         avatar = avatar_url_case(),
         sums = estimate_sums_select(),
         from = distribution_from(),
-        est = estimate_join(),
+        est = estimate_left_join(),
         scope = distribution_scope_where(),
     )
 }
@@ -880,7 +892,7 @@ fn label_estimate_sql() -> String {
          ORDER BY l.name ASC",
         sums = estimate_sums_select(),
         from = distribution_from(),
-        est = estimate_join(),
+        est = estimate_left_join(),
         scope = distribution_scope_where(),
     )
 }
@@ -922,8 +934,8 @@ fn label_count_sql() -> String {
 }
 
 /// Whether the project estimates in points (`archive.py:358-363`):
-/// `Project.objects` is the plain manager — no deleted guards, ported
-/// literally.
+/// `Project.objects` is the soft-deletion manager (`mixins.py:61-67`), so a
+/// soft-deleted project is excluded.
 async fn project_estimates_points(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -933,7 +945,8 @@ async fn project_estimates_points(
         "SELECT EXISTS (SELECT 1 FROM projects p \
            JOIN workspaces w ON w.id = p.workspace_id \
            JOIN estimates e ON e.id = p.estimate_id \
-          WHERE w.slug = $1 AND p.id = $2 AND e.type = 'points')",
+          WHERE w.slug = $1 AND p.id = $2 AND e.type = 'points' \
+            AND p.deleted_at IS NULL)",
     )
     .bind(slug)
     .bind(project_id)
@@ -1454,8 +1467,8 @@ async fn archived_retrieve(
 ) -> Result<Response, Denial> {
     // Routing first (Django's `<uuid:pk>` 404 precedes auth).
     let pk = match pk_raw.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&pk_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
@@ -1631,8 +1644,8 @@ async fn archive_post(
 ) -> Result<Response, Denial> {
     // Routing first (Django's `<uuid:cycle_id>` 404 precedes auth).
     let cycle_id = match cycle_raw.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&cycle_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
@@ -1693,8 +1706,8 @@ async fn unarchive_delete(
 ) -> Result<Response, Denial> {
     // Routing first (Django's `<uuid:cycle_id>` 404 precedes auth).
     let cycle_id = match cycle_raw.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&cycle_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();

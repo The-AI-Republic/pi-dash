@@ -8,6 +8,8 @@
 //!
 //! * [`guards`] — constants, throttle spec, URI builder, device matrix,
 //!   OAuth view shape (PIDASHCONV-331, AUTHOAUTH-F9).
+//! * [`login`] — shared `django.contrib.auth.login()` session semantics
+//!   for the four providers (PIDASHCONV-1357).
 //! * [`device_flow`] — device start / approve / token-poll handlers +
 //!   route registration (PIDASHCONV-342, AUTHOAUTH-F12).
 //! * [`device_session`] — workspaces list, machine-token exchange, revoke
@@ -35,6 +37,7 @@
 pub mod device_flow;
 pub mod device_session;
 pub mod guards;
+pub mod login;
 pub mod oauth_gitea;
 pub mod oauth_github;
 pub mod oauth_gitlab;

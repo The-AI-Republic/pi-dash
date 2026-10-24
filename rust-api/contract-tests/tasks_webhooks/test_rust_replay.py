@@ -17,7 +17,6 @@ Run with the Django worker (and beat) STOPPED and the Rust worker
 running against the same DATABASE_URL::
 
     export DATABASE_URL=postgresql://...  # your own scratch database
-    export CELERY_BROKER_URL=amqp://...   # same broker the Rust worker uses
     pidash-api worker &  # Rust worker; Django worker stopped
     pytest -p no:django tasks_webhooks/test_rust_replay.py -v
 
@@ -100,6 +99,7 @@ import hashlib
 import hmac
 import json
 import socket
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -109,7 +109,7 @@ from _harness import config, rust_queue
 from _harness import seed as seed_helpers
 from _harness.db import insert_row
 from _harness.db import snapshot, wait_for_condition as wait_for
-from _harness.sinks import WildcardHttpProbe
+from _harness.sinks import HostileLengthSink, WildcardHttpProbe
 from psycopg.types.json import Json
 
 M = "pi_dash.bgtasks"
@@ -127,7 +127,7 @@ PROCESS_LOGS = f"{M}.logger_task.process_logs"
 TRACK_EVENT = f"{M}.event_tracking_task.track_event"
 
 
-def test_rust_worker_liveness(db_conn, broker_url, webhook_sink):
+def test_rust_worker_liveness(db_conn, webhook_sink):
     """Rust inspect-equivalent: an owned send job settles and POSTs.
 
     Replaces ``test_worker_registration`` (Celery broadcast inspect,
@@ -157,6 +157,17 @@ def _seed_sink_hook(db_conn, **flags):
     return hook
 
 
+def _seed_hook_at(db_conn, base_url, **flags):
+    owner = seed_helpers.user(db_conn, "rust-replay-chunked-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplaychunked", owner["id"])
+    url = f"{base_url}/hook/{uuid.uuid4().hex}"
+    hook = seed_helpers.webhook(db_conn, workspace["id"], url, issue=True, **flags)
+    hook = dict(hook)
+    hook["workspace_slug"] = workspace["slug"]
+    hook["owner_id"] = owner["id"]
+    return hook
+
+
 def _send_kwargs(hook, probe_id):
     return {
         "webhook_id": str(hook["id"]),
@@ -169,7 +180,7 @@ def _send_kwargs(hook, probe_id):
     }
 
 
-def test_rust_webhook_send_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_send_executes_locally(db_conn, webhook_sink):
     """Send path, Rust side: EXECUTE locally (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_send_success`` (same payload incl. the
@@ -206,7 +217,35 @@ def test_rust_webhook_send_executes_locally(db_conn, broker_url, webhook_sink):
     assert "create" in row["request_body"]
 
 
-def test_rust_webhook_failure_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
+    db_conn, chunked_keepalive_sink
+):
+    """Rust side: chunked + keep-alive must not time out, log 500, or retry."""
+    hook = _seed_hook_at(db_conn, chunked_keepalive_sink.url)
+    chunked_keepalive_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = rust_queue.queue_depth()
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-chunked")
+    )
+    deliveries = chunked_keepalive_sink.wait_for_count(1, what="chunked webhook POST")
+    assert len(deliveries) == 1
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="chunked webhook_logs row",
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["response_body"] == "ok"
+    assert row["retry_count"] == 0
+    rust_queue.wait_for_settled(celery_id, what="chunked send acked")
+    rust_queue.wait_for_queue_drain(baseline=baseline, what="chunked queue drained")
+    time.sleep(1)
+    assert len(chunked_keepalive_sink.snapshot()) == 1, "event was redelivered"
+    assert not rust_queue.row_present(celery_id), "chunked send was requeued"
+    assert len(_log_diff_rows(db_conn, before)) == 1
+
+
+def test_rust_webhook_failure_executes_locally(db_conn, webhook_sink):
     """First-attempt failure, Rust side: same 500 row, no retry (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_send_failure_logs_retry_count``: a 500
@@ -232,7 +271,137 @@ def test_rust_webhook_failure_executes_locally(db_conn, broker_url, webhook_sink
     assert str(row["response_status"]) == "500"
 
 
-def test_rust_webhook_redelivery_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_send_hostile_content_length_retries_locally(
+    db_conn, webhook_sink
+):
+    """Hostile Content-Length, Rust side: failure row + requeue, worker alive (PIDASHCONV-1273).
+
+    Mirrors ``test_webhook_send_hostile_content_length_logs_failure_and_retries``:
+    the sink answers ``Content-Length: 1000000000000`` and closes. The
+    client must report a transport error (EOF before the promised
+    bytes) — not abort the worker on a 1 TB preallocation — so the
+    handler logs the failure row (500, ``retry_count`` 0) and the
+    worker requeues with the Celery backoff (the row returns to
+    ``queued`` with ``attempts`` bumped). A follow-up send to the
+    healthy sink proves the worker survived. The requeued row is
+    deleted at teardown so its jittered refire (up to 600s out) cannot
+    pollute later tests. A fast jitter draw may refire before the
+    delete lands, so the requeue poll accepts ``attempts >= 1`` and
+    the row assertions pin the first attempt.
+    """
+    with HostileLengthSink() as hostile:
+        owner = seed_helpers.user(db_conn, "rust-replay-hostile-owner")
+        workspace = seed_helpers.workspace(db_conn, "rustreplayhostile", owner["id"])
+        hook = seed_helpers.webhook(
+            db_conn,
+            workspace["id"],
+            f"{hostile.url}/hook/{uuid.uuid4().hex}",
+            issue=True,
+        )
+        hook = dict(hook)
+        hook["workspace_slug"] = workspace["slug"]
+        before = snapshot(db_conn, ["webhook_logs"])
+        celery_id = rust_queue.publish(
+            WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-hostile")
+        )
+        hostile.wait_for_count(1, what="hostile webhook POST")
+        rows = wait_for(
+            lambda: [
+                row
+                for row in _log_diff_rows(db_conn, before)
+                if "rust-replay-hostile" in row["request_body"]
+            ]
+            or None,
+            what="hostile-length webhook_logs row",
+        )
+        first = min(rows, key=lambda row: row["retry_count"])
+        assert first["retry_count"] == 0
+        assert str(first["response_status"]) == "500"
+        assert first["response_headers"] == ""
+        assert first["response_body"]
+
+        def _requeued():
+            with db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, attempts FROM rust_job_queue WHERE celery_id = %s",
+                    (celery_id,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                return None
+            status, attempts = row
+            if status == "queued" and attempts >= 1:
+                return (status, attempts)
+            return None
+
+        assert wait_for(_requeued, what="requeued retry row") is not None
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM rust_job_queue WHERE celery_id = %s", (celery_id,)
+            )
+
+    # The worker survived the hostile delivery: a follow-up send to the
+    # healthy sink executes end to end.
+    hook = _seed_sink_hook(db_conn)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-hostile-liveness")
+    )
+    rust_queue.wait_for_settled(celery_id, what="post-hostile send settled")
+    webhook_sink.wait_for_count(1, what="post-hostile webhook POST")
+    alive = wait_for(
+        lambda: [
+            row
+            for row in _log_diff_rows(db_conn, before)
+            if "rust-replay-hostile-liveness" in row["request_body"]
+        ]
+        or None,
+        what="post-hostile webhook_logs row",
+    )
+    assert str(alive[0]["response_status"]) == "200"
+
+
+def test_rust_webhook_send_query_on_bare_host_posts_to_root(
+    db_conn, webhook_sink
+):
+    """Query-string URL with no path, Rust side: POST /?token=... (PIDASHCONV-1275).
+
+    Mirrors ``test_webhook_send_query_on_bare_host_posts_to_root_with_query``:
+    the Rust worker must end the URL authority at the first of '/',
+    '?' or '#' (urllib3 ``parse_url`` parity) so the delivery goes
+    to the bare host with '/?token=abc' as the request target and
+    the log row carries the sink's status. Pre-fix the query folded
+    into the host and every delivery failed with a transport error.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-query-host-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayqueryhost", owner["id"])
+    token = uuid.uuid4().hex
+    hook = seed_helpers.webhook(
+        db_conn,
+        workspace["id"],
+        f"{config.WEBHOOK_SINK_BASE}?token={token}",
+        issue=True,
+    )
+    hook = dict(hook)
+    hook["workspace_slug"] = workspace["slug"]
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-query-host")
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{WEBHOOK_SEND} executed")
+    (delivery,) = webhook_sink.wait_for_count(1, what="query-host webhook POST")
+    assert delivery["path"] == f"/?token={token}"
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="query-host webhook_logs row",
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["retry_count"] == 0
+
+
+def test_rust_webhook_redelivery_executes_locally(db_conn, webhook_sink):
     """Redelivery: two publishes → two POSTs, two rows (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_redelivery_posts_twice_with_identical_bodies``:
@@ -260,7 +429,7 @@ def test_rust_webhook_redelivery_executes_locally(db_conn, broker_url, webhook_s
     assert all(str(r["response_status"]) == "200" for r in logged)
 
 
-def test_rust_activity_chain_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_activity_chain_executes_locally(db_conn, webhook_sink):
     """Chain entry, Rust side: the whole fan-out runs locally (PIDASHCONV-1105).
 
     Mirrors ``test_activity_chain_fans_out_to_sink`` (same seed, same
@@ -300,7 +469,7 @@ def test_rust_activity_chain_executes_locally(db_conn, broker_url, webhook_sink)
     assert row["event_type"] == "issue"
 
 
-def test_rust_webhook_activity_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_activity_executes_locally(db_conn, webhook_sink):
     """Fan-out midpoint, Rust side: EXECUTE locally (PIDASHCONV-1105).
 
     Publishes ``webhook_activity`` directly in the oracle arg shape (the
@@ -350,7 +519,7 @@ def _soft_delete(conn, table, row_id):
 
 
 def test_rust_webhook_send_skips_soft_deleted_webhook(
-    db_conn, broker_url, webhook_sink
+    db_conn, webhook_sink
 ):
     """Send task, Rust side: a soft-deleted webhook is swallowed.
 
@@ -378,7 +547,7 @@ def test_rust_webhook_send_skips_soft_deleted_webhook(
     assert _log_diff_rows(db_conn, before) == [], "send logged a soft-deleted webhook"
 
 
-def test_rust_fanout_skips_soft_deleted_webhook(db_conn, broker_url, webhook_sink):
+def test_rust_fanout_skips_soft_deleted_webhook(db_conn, webhook_sink):
     """Fan-out, Rust side: soft-deleted webhooks get no send job.
 
     ``webhook_activity`` selects
@@ -424,7 +593,7 @@ def test_rust_fanout_skips_soft_deleted_webhook(db_conn, broker_url, webhook_sin
     assert _log_diff_rows(db_conn, before) == [], "fan-out logged a deleted hook"
 
 
-def test_rust_fanout_swallows_soft_deleted_issue(db_conn, broker_url, webhook_sink):
+def test_rust_fanout_swallows_soft_deleted_issue(db_conn, webhook_sink):
     """Fan-out, Rust side: a soft-deleted event model is swallowed.
 
     ``get_model_data`` reads via ``Model.objects.get(pk=...)``, so a
@@ -467,7 +636,7 @@ def test_rust_fanout_swallows_soft_deleted_issue(db_conn, broker_url, webhook_si
     assert _log_diff_rows(db_conn, before) == [], "fan-out logged a deleted issue"
 
 
-def test_rust_deactivation_email_executes_locally(db_conn, broker_url, smtp_sink):
+def test_rust_deactivation_email_executes_locally(db_conn, smtp_sink):
     """Deactivation mail, Rust side: EXECUTE locally (PIDASHCONV-1105).
 
     Mirrors ``test_deactivation_email_delivers`` (same positional
@@ -512,7 +681,7 @@ def _expected_signature(secret, payload):
     ).hexdigest()
 
 
-def test_rust_webhook_send_signature_logged(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_send_signature_logged(db_conn, webhook_sink):
     """Fixed secret, Rust side: identical HMAC over the envelope (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_send_signature_logged``: the logged
@@ -558,7 +727,7 @@ def test_rust_webhook_send_signature_logged(db_conn, broker_url, webhook_sink):
     assert logged_body == payload
 
 
-def test_rust_webhook_send_exhaustion_deactivates(db_conn, broker_url, smtp_sink):
+def test_rust_webhook_send_exhaustion_deactivates(db_conn, smtp_sink):
     """Retries exhausted, Rust side: same row, disable, mail (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_send_exhaustion_deactivates``: the row lands
@@ -631,7 +800,7 @@ def _added_rows(conn, table, before):
     return [after[k] for k in new_keys]
 
 
-def test_rust_process_logs_executes_locally(db_conn, broker_url):
+def test_rust_process_logs_executes_locally(db_conn):
     """process_logs, Rust side: EXECUTE locally (PIDASHCONV-260, FX-LOG-01).
 
     Revisits ``test_rust_process_logs_forwards_to_python``: EXECUTE
@@ -733,7 +902,7 @@ def _issue_snapshot_row(conn, issue_id):
     return snapshot(conn, ["issues"])["issues"].get(str(issue_id))
 
 
-def test_rust_archive_and_close_executes_locally(db_conn, broker_url):
+def test_rust_archive_and_close_executes_locally(db_conn):
     """archive_and_close, Rust side: EXECUTE locally (PIDASHCONV-837).
 
     Revisits the ``ARCHIVE_AND_CLOSE`` forward case: 837 wired
@@ -774,7 +943,7 @@ def test_rust_archive_and_close_executes_locally(db_conn, broker_url):
     assert moved["state_id"] == str(seeded["close_target"]["id"])
 
 
-def test_rust_track_event_executes_locally(db_conn, broker_url, posthog_sink):
+def test_rust_track_event_executes_locally(db_conn, posthog_sink):
     """track_event, Rust side: EXECUTE locally (PIDASHCONV-1107).
 
     Mirrors ``test_track_event_posts_capture_to_posthog`` (same probe
@@ -819,7 +988,7 @@ def test_rust_track_event_executes_locally(db_conn, broker_url, posthog_sink):
     assert msg["properties"]["$geoip_disable"] is True
 
 
-def test_rust_track_event_assigns_workspace_role(db_conn, broker_url, posthog_sink):
+def test_rust_track_event_assigns_workspace_role(db_conn, posthog_sink):
     """Role events, Rust side: same owner/admin/unknown stamp as Django."""
     owner = seed_helpers.user(db_conn, "rust-replay-role-owner")
     member = seed_helpers.user(db_conn, "rust-replay-role-member")
@@ -847,7 +1016,7 @@ def test_rust_track_event_assigns_workspace_role(db_conn, broker_url, posthog_si
     assert roles == {"owner": "owner", "admin": "admin", "unknown": "unknown"}
 
 
-def test_rust_recent_visited_executes_locally(db_conn, broker_url):
+def test_rust_recent_visited_executes_locally(db_conn):
     """recent_visited_task, Rust side: EXECUTE locally (PIDASHCONV-1107).
 
     Mirrors ``test_recent_visited_writes_row`` (same payload): create
@@ -932,7 +1101,7 @@ def _live_page_logs(db_conn, page_id):
     ]
 
 
-def test_rust_page_transaction_executes_locally(db_conn, broker_url):
+def test_rust_page_transaction_executes_locally(db_conn):
     """page_transaction, Rust side: EXECUTE locally (PIDASHCONV-1107).
 
     Mirrors ``test_page_transaction_writes_page_logs`` (same payload):
@@ -989,7 +1158,7 @@ def test_rust_page_transaction_executes_locally(db_conn, broker_url):
     assert all(row["deleted_at"] is not None for row in deleted)
 
 
-def test_rust_page_transaction_url_src_inserts_nothing(db_conn, broker_url):
+def test_rust_page_transaction_url_src_inserts_nothing(db_conn):
     """URL image src, Rust side: same poisoned batch, no rows (PIDASHCONV-1107).
 
     Mirrors ``test_page_transaction_url_src_inserts_nothing``: the UUID
@@ -1016,7 +1185,38 @@ def test_rust_page_transaction_url_src_inserts_nothing(db_conn, broker_url):
     assert _added_rows(db_conn, "page_logs", before) == []
 
 
-def test_rust_issue_activity_executes_locally(db_conn, broker_url):
+def test_rust_page_transaction_second_chunk_poison_inserts_nothing(db_conn):
+    """Poison id past the first 50, Rust side: no rows (PIDASHCONV-1282).
+
+    Mirrors ``test_page_transaction_second_chunk_poison_inserts_nothing``:
+    Django's bulk_create is one transaction over all batches, so the Rust
+    driver must commit every chunk INSERT atomically too — the 50 valid
+    first-chunk rows must roll back when the 51st id fails to parse.
+    Settlement proves the handler ran.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-txchunk-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplaytxchunk", owner["id"])
+    page = _seed_page(db_conn, workspace["id"], owner["id"])
+    parts = [
+        f'<mention-component id="{uuid.uuid4()}" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="ISS-{n}" entity_type="issue"></mention-component>'
+        for n in range(50)
+    ]
+    parts.append(
+        f'<mention-component id="not-a-uuid" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="ISS-50" entity_type="issue"></mention-component>'
+    )
+    html = "".join(parts)
+    before = snapshot(db_conn, ["page_logs"])
+    celery_id = rust_queue.publish(
+        PAGE_TRANSACTION,
+        args=[html, "", str(page["id"])],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{PAGE_TRANSACTION} poisoned run")
+    assert _added_rows(db_conn, "page_logs", before) == []
+
+
+def test_rust_issue_activity_executes_locally(db_conn):
     """issue_activity, Rust side: EXECUTE locally (PIDASHCONV-836).
 
     Revisits ``test_rust_issue_activity_forwards_to_python``: this issue
@@ -1077,6 +1277,192 @@ def test_rust_issue_activity_executes_locally(db_conn, broker_url):
     assert row["epoch"] == epoch
 
 
+#: PIDASHCONV-1277: same stamps as the oracle twins, so the newest-first
+#: expectation is deterministic on both backends.
+_R1277_OLD_TS = "2026-01-01T00:00:00+00:00"
+_R1277_NEW_TS = "2026-06-01T00:00:00+00:00"
+_R1277_EMOJI = "\U0001f44d"  # thumbs up, the issue's example
+_R1277_EPOCH = 1780000000
+
+
+def _r1277_ordered_pair():
+    """Two ascending uuids: random per run, ordered always (PIDASHCONV-1277)."""
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    return (first, second) if first < second else (second, first)
+
+
+def _r1277_pair(db_conn, tag):
+    """One project, two issues (ascending ids), and a reactor user (PIDASHCONV-1277).
+
+    Ascending ids make the pre-fix failure deterministic: the unordered
+    ``LIMIT 1`` returns the older row under every plan (seqscan heap
+    order, pkey id order, partial-unique ``(issue_id,...)`` /
+    ``(comment_id,...)`` key order). The fixed ``ORDER BY created_at
+    DESC`` is unaffected by ids.
+    """
+    chain = seed_helpers.issue_chain(db_conn, tag)
+    issue_x_id, issue_y_id = _r1277_ordered_pair()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET id = %s WHERE id = %s",
+            (issue_x_id, str(chain["issue"]["id"])),
+        )
+    db_conn.commit()
+    chain["issue"]["id"] = issue_x_id
+    issue2 = insert_row(
+        db_conn,
+        "issues",
+        {
+            "id": issue_y_id,
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "state_id": str(chain["state"]["id"]),
+            "name": "contract issue two",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 2,
+            "is_draft": False,
+            "sort_order": 65534,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    chain["issue2"] = issue2
+    chain["reactor"] = seed_helpers.user(db_conn, f"{tag}-reactor")
+    return chain
+
+
+def _r1277_comment(db_conn, chain, issue, comment_id):
+    # varchar[]-safe array literals; seed.issue_comment's [] lists send
+    # json against varchar[] columns (see the oracle twin's note).
+    return insert_row(
+        db_conn,
+        "issue_comments",
+        {
+            "id": comment_id,
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(chain["reactor"]["id"]),
+            "access": "EXTERNAL",
+            "attachments": "{}",
+            "comment_html": "<p>hi</p>",
+            "comment_json": {},
+            "comment_stripped": "hi",
+            "labels": "{}",
+            "speaker_label": "",
+            "speaker_type": "human",
+        },
+    )
+
+
+def test_rust_issue_activity_comment_reaction_picks_newest(db_conn):
+    """comment_reaction created, Rust side: the NEWEST match (PIDASHCONV-1277).
+
+    Mirrors ``test_issue_activity_comment_reaction_picks_newest`` (same
+    seeds, same payload): settlement plus the row diff is the proof —
+    with the Django worker stopped, a forward could never produce a
+    local row. Pre-fix the unordered ``LIMIT 1`` returns the older
+    reaction, so the activity lands on issue X instead of issue Y.
+    """
+    chain = _r1277_pair(db_conn, "rr1277comment")
+    ws, project, reactor = chain["workspace"], chain["project"], chain["reactor"]
+    comment_a_id, comment_b_id = _r1277_ordered_pair()
+    comment_a = _r1277_comment(db_conn, chain, chain["issue"], comment_a_id)
+    comment_b = _r1277_comment(db_conn, chain, chain["issue2"], comment_b_id)
+    base = {
+        "workspace_id": str(ws["id"]),
+        "project_id": str(project["id"]),
+        "actor_id": str(reactor["id"]),
+        "reaction": _R1277_EMOJI,
+    }
+    old_id, new_id = _r1277_ordered_pair()
+    insert_row(db_conn, "comment_reactions", {
+        "id": old_id,
+        **base, "comment_id": str(comment_a["id"]), "created_at": _R1277_OLD_TS,
+    })
+    newer = insert_row(db_conn, "comment_reactions", {
+        "id": new_id,
+        **base, "comment_id": str(comment_b["id"]), "created_at": _R1277_NEW_TS,
+    })
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "comment_reaction.activity.created",
+            "requested_data": json.dumps({"reaction": _R1277_EMOJI}),
+            "current_instance": None,
+            "issue_id": None,
+            "actor_id": str(reactor["id"]),
+            "project_id": str(project["id"]),
+            "epoch": _R1277_EPOCH,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="comment-reaction issue_activities row",
+    )
+    assert row["issue_id"] == str(chain["issue2"]["id"])
+    assert row["new_identifier"] == str(newer["id"])
+    assert row["verb"] == "created"
+    assert row["field"] == "reaction"
+    assert row["new_value"] == _R1277_EMOJI
+    assert row["comment"] == "added the reaction"
+
+
+def test_rust_issue_activity_issue_reaction_picks_newest(db_conn):
+    """issue_reaction created, Rust side: new_identifier is NEWEST (PIDASHCONV-1277).
+
+    Mirrors ``test_issue_activity_issue_reaction_picks_newest`` (same
+    seeds, same payload): settlement plus the row diff is the proof.
+    Pre-fix the unordered ``LIMIT 1`` names the older reaction id.
+    """
+    chain = _r1277_pair(db_conn, "rr1277issue")
+    ws, project, reactor = chain["workspace"], chain["project"], chain["reactor"]
+    base = {
+        "workspace_id": str(ws["id"]),
+        "project_id": str(project["id"]),
+        "actor_id": str(reactor["id"]),
+        "reaction": _R1277_EMOJI,
+    }
+    old_id, new_id = _r1277_ordered_pair()
+    insert_row(db_conn, "issue_reactions", {
+        "id": old_id,
+        **base, "issue_id": str(chain["issue"]["id"]), "created_at": _R1277_OLD_TS,
+    })
+    newer = insert_row(db_conn, "issue_reactions", {
+        "id": new_id,
+        **base, "issue_id": str(chain["issue2"]["id"]), "created_at": _R1277_NEW_TS,
+    })
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue_reaction.activity.created",
+            "requested_data": json.dumps({"reaction": _R1277_EMOJI}),
+            "current_instance": None,
+            "issue_id": str(chain["issue2"]["id"]),
+            "actor_id": str(reactor["id"]),
+            "project_id": str(project["id"]),
+            "epoch": _R1277_EPOCH,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="issue-reaction issue_activities row",
+    )
+    assert row["issue_id"] == str(chain["issue2"]["id"])
+    assert row["new_identifier"] == str(newer["id"])
+    assert row["verb"] == "created"
+    assert row["field"] == "reaction"
+    assert row["new_value"] == _R1277_EMOJI
+    assert row["comment"] == "added the reaction"
+
+
 #: ``data:image/svg+xml;base64,`` + DEFAULT_FAVICON
 #: (``work_item_link_task.py:24``), the favicon fallback.
 DEFAULT_FAVICON_DATA_URI = (
@@ -1090,7 +1476,7 @@ DEFAULT_FAVICON_DATA_URI = (
 )
 
 
-def test_rust_crawl_link_executes_locally(db_conn, broker_url):
+def test_rust_crawl_link_executes_locally(db_conn):
     """crawl_work_item_link_title, Rust side: EXECUTE locally (PIDASHCONV-1107).
 
     Mirrors ``test_crawl_link_updates_metadata`` (same payload): the
@@ -1135,12 +1521,107 @@ def test_rust_crawl_link_executes_locally(db_conn, broker_url):
     }
 
 
+def _seed_closed_to_world(db_conn, slug):
+    """Issue + cancel state + one notified subscriber (PIDASHCONV-1276).
+
+    Mirrors the oracle seed in ``test_webhook_tasks.py``: the
+    subscriber is an active project member with a preferences row, so
+    ``notifications`` writes exactly one ``notifications`` row for
+    them.
+    """
+    chain = seed_helpers.issue_chain(db_conn, slug)
+    owner, workspace, project, issue = (
+        chain["owner"],
+        chain["workspace"],
+        chain["project"],
+        chain["issue"],
+    )
+    close_state = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], name="Cancelled", group="cancelled"
+    )
+    sub = seed_helpers.user(db_conn, f"{slug}-subscriber")
+    seed_helpers.project_member(db_conn, project["id"], workspace["id"], sub["id"])
+    seed_helpers.issue_subscriber(
+        db_conn, project["id"], workspace["id"], issue["id"], sub["id"]
+    )
+    seed_helpers.notification_preference(db_conn, sub["id"])
+    return {
+        "owner": owner,
+        "workspace": workspace,
+        "project": project,
+        "issue": issue,
+        "close_state": close_state,
+        "subscriber": sub,
+    }
+
+
+def test_rust_issue_activity_closed_to_writes_state_row_and_notifies(db_conn):
+    """closed_to, Rust side: EXECUTE locally (PIDASHCONV-1276).
+
+    Mirrors ``test_issue_activity_closed_to_writes_state_row_and_notifies``
+    (same auto-close payload): the Rust worker resolves ``closed_to``
+    through the project-scoped states snapshot
+    (``activity_dispatch.rs``), writes the one
+    ``"Pi Dash updated the state to "`` row, and enqueues + executes
+    ``notifications`` for the subscriber. Settlement plus the row
+    diffs is the proof: with the Django worker stopped, a forward
+    could never produce local rows.
+    """
+    world = _seed_closed_to_world(db_conn, "rustclosedto")
+    issue, owner, project = world["issue"], world["owner"], world["project"]
+    close_state, sub = world["close_state"], world["subscriber"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "notifications", "email_notification_logs"])
+
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"closed_to": str(close_state["id"])}),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="closed_to issue_activities row",
+    )
+    assert row["field"] == "state"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "Pi Dash updated the state to "
+    assert row["new_value"] == close_state["name"]
+    assert row["new_identifier"] == str(close_state["id"])
+    assert row["old_value"] is None
+    assert row["old_identifier"] is None
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+    (note,) = wait_for(
+        lambda: _added_rows(db_conn, "notifications", before) or None,
+        what="closed_to notifications row",
+    )
+    assert note["receiver_id"] == str(sub["id"])
+    assert note["entity_identifier"] == str(issue["id"])
+    assert note["sender"] == "in_app:issue_activities:subscribed"
+    assert note["title"] == "Pi Dash updated the state to "
+    assert note["triggered_by_id"] == str(owner["id"])
+    assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
+
+
 @pytest.mark.parametrize(
     "family",
     [socket.AF_INET, socket.AF_INET6],
     ids=["wildcard-ipv4", "wildcard-ipv6"],
 )
-def test_rust_crawl_link_denies_wildcard_hosts(db_conn, broker_url, family):
+def test_rust_crawl_link_denies_wildcard_hosts(db_conn, family):
     """Rust-side guard refusal for 0.0.0.0 and :: (Django parity).
 
     The listener is bound to the wildcard address and serves a distinctive
@@ -1185,4 +1666,90 @@ def test_rust_crawl_link_denies_wildcard_hosts(db_conn, broker_url, family):
             "url": url,
             "favicon_url": None,
         }
+
+
+def test_rust_crawl_link_nulls_audit_columns(db_conn):
+    """Crawl, Rust side: the save NULLs both audit columns (PIDASHCONV-1281).
+
+    Mirrors ``test_crawl_link_nulls_audit_columns``: Django's
+    worker-context full ``save()`` blanks ``created_by``/``updated_by``
+    (``BaseModel.save``, no crum user — the PB-2008/PB-2009 semantics),
+    so the Rust ``UPDATE`` must carry ``created_by_id = NULL,
+    updated_by_id = NULL`` alongside the metadata write.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaycrawlaudit")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    url = "http://127.0.0.1:9/rust-replay-audit-probe"
+    link = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "Audit probe",
+            "url": url,
+            "issue_id": str(issue["id"]),
+            "project_id": str(project["id"]),
+            "workspace_id": str(workspace["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
+            "metadata": {},
+        },
+    )
+    celery_id = rust_queue.publish(
+        CRAWL_LINK_TITLE,
+        args=[str(link["id"]), url],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{CRAWL_LINK_TITLE} executed")
+
+    def _crawled():
+        row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link["id"]))
+        return row if row and row["metadata"] != {} else None
+
+    crawled = wait_for(_crawled, what="issue_links metadata")
+    assert crawled["metadata"] == {
+        "title": None,
+        "favicon": DEFAULT_FAVICON_DATA_URI,
+        "url": url,
+        "favicon_url": None,
+    }
+    assert crawled["created_by_id"] is None
+    assert crawled["updated_by_id"] is None
+
+
+def test_rust_crawl_link_skips_soft_deleted_link(db_conn):
+    """Crawl, Rust side: a soft-deleted link is not touched (PIDASHCONV-1281).
+
+    Mirrors ``test_crawl_link_skips_soft_deleted_link``: the Rust lookup
+    must scope ``deleted_at IS NULL`` like the ``SoftDeletionManager``,
+    so the job warns and settles without writing. Settlement deletes the
+    queue row only after the handler returns, so any (incorrect) write
+    would already be visible in the re-read row.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaycrawldead")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    url = "http://127.0.0.1:9/rust-replay-dead-probe"
+    link = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "Dead probe",
+            "url": url,
+            "issue_id": str(issue["id"]),
+            "project_id": str(project["id"]),
+            "workspace_id": str(workspace["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
+            "metadata": {},
+        },
+    )
+    _soft_delete(db_conn, "issue_links", link["id"])
+    before = snapshot(db_conn, ["issue_links"])["issue_links"][str(link["id"])]
+    celery_id = rust_queue.publish(
+        CRAWL_LINK_TITLE,
+        args=[str(link["id"]), url],
+    )
+    rust_queue.wait_for_settled(
+        celery_id, what=f"{CRAWL_LINK_TITLE} settled for a soft-deleted link"
+    )
+    after = snapshot(db_conn, ["issue_links"])["issue_links"][str(link["id"])]
+    assert after == before
 

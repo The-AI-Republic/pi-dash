@@ -48,7 +48,6 @@
 
 use std::collections::HashMap;
 
-use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
@@ -58,8 +57,9 @@ use sqlx::{Postgres, Row};
 
 use crate::app_cycles::gates;
 use crate::app_issues::{
-    complex_filter, fetch_count, fetch_json_rows, group_values, legacy_sql, multi_map, order_key,
-    page_denial, query_last, render_condition, shape_row, Binder, Denial, FilteredSet, QueryMap,
+    complex_filter, fetch_count, fetch_json_rows, filters_timezone, group_values, legacy_sql,
+    multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
+    FilteredSet, QueryMap,
 };
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
@@ -674,6 +674,12 @@ fn bind_values<'a>(
             SeaValue::Char(value) => query.bind(value.map(|char| char.to_string())),
             SeaValue::Bytes(value) => query.bind(value.clone().map(|bytes| (*bytes).clone())),
             SeaValue::Uuid(value) => query.bind(value.clone().map(|id| *id)),
+            SeaValue::ChronoDate(value) => query.bind(value.clone().map(|date| *date)),
+            SeaValue::ChronoDateTimeUtc(value) => query.bind(value.clone().map(|moment| *moment)),
+            SeaValue::ChronoTime(_)
+            | SeaValue::ChronoDateTime(_)
+            | SeaValue::ChronoDateTimeLocal(_)
+            | SeaValue::ChronoDateTimeWithTimeZone(_) => return Err(Denial::ServerError),
         };
     }
     Ok(query)
@@ -697,6 +703,7 @@ fn cycle_filtered_set(
     query: &QueryMap,
     group_by: Option<&str>,
     sub_group_by: Option<&str>,
+    tz: &chrono_tz::Tz,
 ) -> Result<FilteredSet, Denial> {
     let mut binder = Binder::new();
     let slug_holder = binder.bind_string(slug.to_owned());
@@ -722,7 +729,7 @@ fn cycle_filtered_set(
         let holder = binder.bind_uuid(issue_id);
         fragments.push(format!("issue.id = {holder}"));
     }
-    if let Some(cond) = complex_filter(query)? {
+    if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
         fragments.push(binder.splice(&fragment, values));
     }
@@ -795,7 +802,11 @@ async fn cycle_issue_list(
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
     let (pool, user_id, project_id) =
         cycle_issue_context(&state, &slug, &project_raw, gate_for_list(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
@@ -834,6 +845,7 @@ async fn cycle_issue_list(
         created_by: guest_creator_scope(&pool, &slug, &project_id, &user_id).await?,
         issue_id: None,
     };
+    let timezone = filters_timezone(&pool, &user_id, &query).await?;
     let filtered = cycle_filtered_set(
         &slug,
         &project_id,
@@ -843,6 +855,7 @@ async fn cycle_issue_list(
         &query,
         group_by,
         sub_group_by,
+        &timezone,
     )?;
     // Total count over the pre-annotation set (the `deepcopy` at `:125`).
     let total_sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
@@ -902,6 +915,7 @@ async fn cycle_issue_retrieve(
         &empty_query_map(),
         None,
         None,
+        &chrono_tz::UTC,
     )?;
     let sql = format!(
         "SELECT DISTINCT {} {} LIMIT 1",
@@ -1252,14 +1266,15 @@ fn is_falsy_json(value: &Value) -> bool {
 /// Classify the decoded `issues` member (`issue.py:223-242`).
 ///
 /// Falsy values answer 400 `{"error": "Issues are required"}`. Of the
-/// truthy values, arrays yield their string items — a `null` item flows
-/// into the `NOT NULL` `bulk_create` and dies with `IntegrityError` →
-/// 400 `The payload is not valid`, any other non-string item fails the
-/// UUID coercion in the `__in` filter → 400 invalid detail — while a
-/// non-empty string iterates its chars and a non-empty object iterates
-/// its keys through that same `__in` coercion → 400 invalid detail, and
-/// truthy numbers/bools are not iterable → `TypeError` → generic 500.
-fn extract_issue_strings(issues: &Value) -> Result<Vec<String>, Denial> {
+/// truthy values, arrays yield one [`IssueInput`] per item — a `null` item
+/// flows into the `NOT NULL` `bulk_create` and dies with `IntegrityError`
+/// → 400 `The payload is not valid`, and a float/negative/out-of-range
+/// item fails the UUID coercion in the `__in` filter → 400 invalid detail
+/// — while a non-empty string iterates its chars and a non-empty object
+/// iterates its keys through that same `__in` coercion → 400 invalid
+/// detail, and truthy numbers/bools are not iterable → `TypeError` →
+/// generic 500.
+fn extract_issue_inputs(issues: &Value) -> Result<Vec<IssueInput>, Denial> {
     if is_falsy_json(issues) {
         return Err(Denial::BadError("Issues are required".to_owned()));
     }
@@ -1267,12 +1282,28 @@ fn extract_issue_strings(issues: &Value) -> Result<Vec<String>, Denial> {
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                match item.as_str() {
-                    Some(text) => out.push(text.to_owned()),
-                    None if item.is_null() => {
+                match item {
+                    // A string stays raw for the set difference and is
+                    // parsed as hex here, but the error is only raised at
+                    // the `__in` filter below (`issue.py:239`).
+                    Value::String(text) => out.push(IssueInput {
+                        raw_key: text.clone(),
+                        parsed: text.parse::<uuid::Uuid>().map_err(|_| ()),
+                    }),
+                    // `input_form = "int" if isinstance(value, int) else
+                    // "hex"`: a JSON bool is a Python `int` (`True == 1`).
+                    Value::Bool(flag) => out.push(IssueInput {
+                        raw_key: if *flag { "true" } else { "false" }.to_owned(),
+                        parsed: Ok(uuid::Uuid::from_u128(u128::from(*flag))),
+                    }),
+                    Value::Number(number) => out.push(IssueInput {
+                        raw_key: number.to_string(),
+                        parsed: number.as_u128().map(uuid::Uuid::from_u128).ok_or(()),
+                    }),
+                    Value::Null => {
                         return Err(Denial::BadError("The payload is not valid".to_owned()));
                     }
-                    None => return Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+                    _ => return Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
                 }
             }
             Ok(out)
@@ -1282,14 +1313,55 @@ fn extract_issue_strings(issues: &Value) -> Result<Vec<String>, Denial> {
     }
 }
 
+/// One member of the decoded `issues` array: the raw Python value, used for
+/// `set(issues) - set(existing_issues)` (`issue.py:242`, which compares raw
+/// values, not coerced ids), and the deferred `UUIDField.to_python` result
+/// consumed by the `issue_id__in` filter (`issue.py:239`).
+struct IssueInput {
+    /// Raw-value identity: a string is itself; a coerced scalar keeps its
+    /// digits (`true`/`false` for bools) so it never matches the canonical
+    /// UUID strings in `existing_issues`.
+    raw_key: String,
+    /// `Ok` when the `UUIDField` coerces the raw value; `Err` for a
+    /// `ValidationError` (float, negative or out-of-range int). The error
+    /// surfaces at the filter, after the cycle lookup + end-date check.
+    parsed: Result<uuid::Uuid, ()>,
+}
+
+/// `UUIDField.to_python` (`django/db/models/fields/__init__.py`): a string
+/// parses as hex; a bool, or a non-negative int below `2**128`, becomes
+/// `uuid.UUID(int=v)`; anything else raises `ValidationError`
+/// (`Denial::BadError` with the invalid-detail body).
+pub(crate) fn coerce_uuid_field(value: &Value) -> Result<uuid::Uuid, Denial> {
+    match value {
+        Value::Bool(flag) => Ok(uuid::Uuid::from_u128(u128::from(*flag))),
+        Value::Number(number) => number
+            .as_u128()
+            .map(uuid::Uuid::from_u128)
+            .ok_or_else(|| Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+        Value::String(raw) => parse_uuid_or_invalid(raw),
+        _ => Err(Denial::BadError(INVALID_DETAIL_MSG.to_owned())),
+    }
+}
+
+/// Surface a deferred [`IssueInput::parsed`] failure as the `__in` filter's
+/// `ValidationError` → 400 invalid detail.
+fn coerced_input(input: &IssueInput) -> Result<uuid::Uuid, Denial> {
+    input
+        .parsed
+        .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+}
+
 /// `CycleIssueViewSet.create` (`issue.py:223-297`).
 async fn cycle_issue_create(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
     let (pool, user_id, project_id) =
         cycle_issue_context(&state, &slug, &project_raw, gate_for_create(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
@@ -1297,12 +1369,16 @@ async fn cycle_issue_create(
     // (DRF parses lazily), so body errors never preempt auth/gate. A
     // non-object body has no `.get` (AttributeError → 500); objects fall
     // through to the truthiness check below.
-    let data = decode_request_body(&headers, &body)?;
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let data = decode_request_body(&parts.headers, &bytes)?;
     let issues_value = match data.as_object() {
         Some(_) => data.get("issues").cloned().unwrap_or(Value::Null),
         None => return Err(Denial::ServerError),
     };
-    let issue_strings = extract_issue_strings(&issues_value)?;
+    let issue_inputs = extract_issue_inputs(&issues_value)?;
     // `Cycle.objects.get(workspace__slug, project_id, pk)` (`:230`).
     let cycle: Option<(
         uuid::Uuid,
@@ -1329,10 +1405,12 @@ async fn cycle_issue_create(
         ));
     }
     // UUID coercion happens at the `__in` filter (`:239`), after the
-    // cycle lookup and the end-date check above.
-    let mut issue_ids = Vec::with_capacity(issue_strings.len());
-    for raw in &issue_strings {
-        issue_ids.push(parse_uuid_or_invalid(raw)?);
+    // cycle lookup and the end-date check above. A float, negative or
+    // out-of-range int raises `ValidationError` here, exactly like the
+    // filter.
+    let mut issue_ids = Vec::with_capacity(issue_inputs.len());
+    for input in &issue_inputs {
+        issue_ids.push(coerced_input(input)?);
     }
     // Bridges already created for these issues in *other* cycles (`:239`).
     let existing: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
@@ -1354,15 +1432,11 @@ async fn cycle_issue_create(
         .map(|(issue_id, _)| issue_id.to_string())
         .collect();
     let mut seen_new = std::collections::HashSet::new();
-    let mut new_strings: Vec<String> = Vec::new();
-    for raw in &issue_strings {
-        if !existing_strings.contains(raw) && seen_new.insert(raw.clone()) {
-            new_strings.push(raw.clone());
+    let mut new_ids: Vec<uuid::Uuid> = Vec::new();
+    for input in &issue_inputs {
+        if !existing_strings.contains(&input.raw_key) && seen_new.insert(input.raw_key.clone()) {
+            new_ids.push(coerced_input(input)?);
         }
-    }
-    let mut new_ids = Vec::with_capacity(new_strings.len());
-    for raw in &new_strings {
-        new_ids.push(parse_uuid_or_invalid(raw)?);
     }
     // `bulk_create(..., batch_size=10)` (`:244-257`); batching is
     // unobservable, one multi-row INSERT with RETURNING for the activity
@@ -1395,7 +1469,13 @@ async fn cycle_issue_create(
             .fetch_all(&pool)
             .await
             .map_err(|error| match error {
-                sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+                // `bulk_create` on a foreign key (`issue_id`) that no
+                // `issues` row owns raises `IntegrityError` → 400 payload
+                // not valid (`:244-257` through `handle_exception`); the
+                // partial-unique bridge constraint maps the same way.
+                sqlx::Error::Database(db)
+                    if matches!(db.code().as_deref(), Some("23505" | "23503")) =>
+                {
                     Denial::BadError("The payload is not valid".to_owned())
                 }
                 _ => Denial::ServerError,
@@ -1423,12 +1503,7 @@ async fn cycle_issue_create(
         }
     }
     // `issue_activity.delay(type="cycle.activity.created", ...)` (`:281-295`).
-    let origin = state
-        .settings()
-        .urls
-        .app_base_url
-        .clone()
-        .ok_or(Denial::ServerError)?;
+    let origin = super::activity_origin(&state).ok_or(Denial::ServerError)?;
     let updated_activity: Vec<Value> = moved
         .iter()
         .map(|(old_cycle_id, issue_id)| {
@@ -1466,7 +1541,7 @@ async fn cycle_issue_create(
     );
     kwargs.insert(
         "requested_data".to_owned(),
-        Value::String(serde_json::json!({"cycles_list": issue_strings}).to_string()),
+        Value::String(serde_json::json!({"cycles_list": issues_value}).to_string()),
     );
     kwargs.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
     kwargs.insert("issue_id".to_owned(), Value::Null);
@@ -1519,17 +1594,16 @@ async fn cycle_issue_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw, issue_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) || super::is_noncanonical_uuid(&issue_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
     let (pool, user_id, project_id) =
         cycle_issue_context(&state, &slug, &project_raw, gate_for_destroy(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
     let issue_id = parse_uuid_or_invalid(&issue_raw)?;
-    let origin = state
-        .settings()
-        .urls
-        .app_base_url
-        .clone()
-        .ok_or(Denial::ServerError)?;
+    let origin = super::activity_origin(&state).ok_or(Denial::ServerError)?;
     let mut kwargs = Map::new();
     kwargs.insert(
         "type".to_owned(),
@@ -1643,9 +1717,16 @@ mod tests {
     }
 
     /// Render a classifier outcome as `(status, body)` for exact comparison.
-    fn outcome_strings(result: Result<Vec<String>, Denial>) -> (u16, String) {
+    fn outcome_strings(result: Result<Vec<IssueInput>, Denial>) -> (u16, String) {
         match result {
-            Ok(strings) => (201, strings.join(",")),
+            Ok(inputs) => (
+                201,
+                inputs
+                    .iter()
+                    .map(|input| input.raw_key.clone())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
             Err(Denial::BadError(message)) => {
                 (400, format!("{{\"error\":{}}}", json_string(&message)))
             }
@@ -1678,7 +1759,7 @@ mod tests {
         for raw in ["null", "false", "0", "0.0", r#""""#, "[]", "{}"] {
             let value: Value = serde_json::from_str(raw).expect("fixture");
             assert_eq!(
-                outcome_strings(extract_issue_strings(&value)),
+                outcome_strings(extract_issue_inputs(&value)),
                 (400, ISSUES_REQUIRED_BODY.to_owned()),
                 "falsy input {raw}"
             );
@@ -1686,7 +1767,7 @@ mod tests {
         // Missing member defaults to `[]` (`.get("issues", [])`), also falsy.
         let missing: Value = serde_json::from_str(r#"{"other": 1}"#).expect("fixture");
         assert_eq!(
-            outcome_strings(extract_issue_strings(
+            outcome_strings(extract_issue_inputs(
                 &missing.get("issues").cloned().unwrap_or(Value::Null)
             )),
             (400, ISSUES_REQUIRED_BODY.to_owned()),
@@ -1697,10 +1778,10 @@ mod tests {
         for raw in [r#""abc""#, r#"{"a": 1}"#] {
             let value: Value = serde_json::from_str(raw).expect("fixture");
             assert!(
-                matches!(extract_issue_strings(&value), Err(Denial::BadError(_))),
+                matches!(extract_issue_inputs(&value), Err(Denial::BadError(_))),
                 "truthy iterable {raw}"
             );
-            let (_, body) = outcome_strings(extract_issue_strings(&value));
+            let (_, body) = outcome_strings(extract_issue_inputs(&value));
             assert_eq!(
                 body,
                 format!("{{\"error\":{}}}", json_string(INVALID_DETAIL_MSG)),
@@ -1711,7 +1792,7 @@ mod tests {
         for raw in ["1", "1.5", "true"] {
             let value: Value = serde_json::from_str(raw).expect("fixture");
             assert!(
-                matches!(extract_issue_strings(&value), Err(Denial::ServerError)),
+                matches!(extract_issue_inputs(&value), Err(Denial::ServerError)),
                 "truthy scalar {raw}"
             );
         }
@@ -1720,23 +1801,61 @@ mod tests {
         // other non-string items fail the `__in` coercion → 400 detail.
         let null_item: Value = serde_json::from_str("[null]").expect("fixture");
         assert_eq!(
-            outcome_strings(extract_issue_strings(&null_item)),
+            outcome_strings(extract_issue_inputs(&null_item)),
             (400, r#"{"error":"The payload is not valid"}"#.to_owned()),
             "[null]"
-        );
-        let num_item: Value = serde_json::from_str("[123]").expect("fixture");
-        let (_, body) = outcome_strings(extract_issue_strings(&num_item));
-        assert_eq!(
-            body,
-            format!("{{\"error\":{}}}", json_string(INVALID_DETAIL_MSG)),
-            "[123]"
         );
         // Well-formed arrays pass through as raw strings (UUID coercion
         // happens later, after the cycle lookup + end-date check).
         let good: Value = serde_json::from_str(r#"["a", "b"]"#).expect("fixture");
         assert_eq!(
-            extract_issue_strings(&good).expect("strings"),
+            extract_issue_inputs(&good)
+                .expect("strings")
+                .iter()
+                .map(|input| input.raw_key.clone())
+                .collect::<Vec<_>>(),
             vec!["a".to_owned(), "b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn issue_items_coerce_int_and_bool_ids_like_the_uuid_field() {
+        // `UUIDField.to_python` (`input_form = "int"` for a Python int/bool):
+        // `[5]`/`[true]`/`[false]` coerce and then miss the `__in` filter.
+        let inputs = |raw: &str| {
+            let value: Value = serde_json::from_str(raw).expect("fixture");
+            extract_issue_inputs(&value).expect("array")
+        };
+        let int_items = inputs("[5]");
+        assert_eq!(int_items[0].raw_key, "5");
+        assert_eq!(int_items[0].parsed.expect("int"), uuid::Uuid::from_u128(5));
+        let true_items = inputs("[true]");
+        assert_eq!(true_items[0].raw_key, "true");
+        assert_eq!(
+            true_items[0].parsed.expect("true"),
+            uuid::Uuid::from_u128(1)
+        );
+        let false_items = inputs("[false]");
+        assert_eq!(false_items[0].raw_key, "false");
+        assert_eq!(
+            false_items[0].parsed.expect("false"),
+            uuid::Uuid::from_u128(0)
+        );
+        // A non-canonical raw key never matches an existing canonical UUID
+        // string, so `[5]` counts as new exactly like `set([5]) -
+        // set(["00000000-...-0005"])` in the view.
+        assert_ne!(int_items[0].raw_key, uuid::Uuid::from_u128(5).to_string());
+        // Floats, negatives and out-of-range ints stay invalid detail
+        // (deferred to the `__in` filter, hence `Err` not a rejection).
+        for raw in ["[5.5]", "[-1]", "[340282366920938463463374607431768211456]"] {
+            let items = inputs(raw);
+            assert!(items[0].parsed.is_err(), "{raw}");
+        }
+        // The largest in-range int coerces; one past does not.
+        let max = inputs("[340282366920938463463374607431768211455]");
+        assert_eq!(
+            max[0].parsed.expect("max"),
+            uuid::Uuid::from_u128(u128::MAX)
         );
     }
 
@@ -1815,6 +1934,7 @@ mod tests {
             &empty_query(),
             None,
             None,
+            &chrono_tz::UTC,
         )
         .expect("scope");
         for needle in [
@@ -1854,6 +1974,7 @@ mod tests {
             &empty_query(),
             None,
             None,
+            &chrono_tz::UTC,
         )
         .expect("scope");
         assert!(filtered.from_where.contains("issue.created_by_id = "));

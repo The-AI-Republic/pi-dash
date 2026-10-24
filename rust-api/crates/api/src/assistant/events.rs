@@ -283,10 +283,11 @@ async fn assistant_event_stream(
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
     // `_resolve` (`events.py:28-38`) as the ported pure decision: the actor
-    // lookup doubles as the `is_authenticated` check (unknown/inactive
-    // session users resolve to nobody, like DRF's session auth), and the
-    // thread scope doubles as the thread fetch.
-    let actor = request_actor(pool, extension).await?;
+    // lookup doubles as the `is_authenticated` check (an unknown/inactive
+    // user, a mismatching session hash, or a non-ModelBackend session all
+    // resolve to nobody, like Django's `get_user`), and the thread scope
+    // doubles as the thread fetch.
+    let actor = request_actor(&state, pool, extension).await?;
     let authenticated = actor.is_some();
     let user_id = actor.as_ref().map(|actor| actor.id);
     let role = match user_id {

@@ -428,19 +428,23 @@ fn quoted_printable_encode(body: &str) -> String {
     encoded_lines.join("\n")
 }
 
-/// Render the MIME bytes (`EmailMessage.message()` shape, verified against
-/// the interpreter): `multipart/alternative` with `text/plain` then
-/// `text/html` (`charset="utf-8"`, CTE `7bit` for short ASCII parts,
-/// `8bit` for short non-ASCII parts, `quoted-printable` when any body
-/// line exceeds 998 bytes — the probed Django selection), `From`/`To`/
-/// `Subject` verbatim, `Date`/`Message-ID` synthesized like Django's.
+/// Render the MIME bytes (`EmailMessage.message()` shape, verified
+/// against the interpreter): `multipart/alternative` with `text/plain`
+/// then `text/html` (`charset="utf-8"`, CTE `7bit` for short ASCII
+/// parts, `8bit` for short non-ASCII parts, `quoted-printable` when
+/// any body line exceeds 998 bytes — the probed Django selection).
+/// `From`, `To` and `Subject` go through the two-stage header render
+/// (RFC 2047 plus IDNA plus the generator refold); `Date` and
+/// `Message-ID` are synthesized like Django's. CR/LF headers and
+/// unparsable addresses fail, like the errors Django raises out of
+/// `message()`.
 pub fn message_bytes(
     from: &str,
     mail: &OutgoingMail,
     boundary: &str,
     date: &str,
     msg_id: &str,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
     let part = |ctype: &str, body: &str| {
         let (cte, encoded) = if body_needs_qp(body) {
             ("quoted-printable", quoted_printable_encode(body))
@@ -453,15 +457,16 @@ pub fn message_bytes(
             "--{boundary}\r\nContent-Type: {ctype}; charset=\"utf-8\"\r\nContent-Transfer-Encoding: {cte}\r\n\r\n{encoded}\r\n"
         )
     };
+    let from = address_header("From", from)?;
+    let to = address_header("To", &mail.to)?;
+    let subject = subject_header(&mail.subject)?;
     let mut out = format!(
-        "From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\nDate: {date}\r\nMessage-ID: {msg_id}\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"{boundary}\"\r\n\r\n",
-        to = mail.to,
-        subject = mail.subject,
+        "{from}\r\n{to}\r\n{subject}\r\nDate: {date}\r\nMessage-ID: {msg_id}\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"{boundary}\"\r\n\r\n",
     );
     out.push_str(&part("text/plain", &mail.text_body));
     out.push_str(&part("text/html", &mail.html_body));
     out.push_str(&format!("--{boundary}--\r\n"));
-    crlf_dot_stuff(out)
+    Ok(crlf_dot_stuff(out))
 }
 
 /// `message.as_bytes(linesep="\r\n")` (what `EmailBackend.send`
@@ -540,12 +545,15 @@ pub fn message_bytes_mixed(
     msg_id: &str,
 ) -> Result<Vec<u8>, String> {
     let cte = |body: &str| if body.is_ascii() { "7bit" } else { "8bit" };
+    let subject = subject_header(subject)?;
+    let from = address_header("From", from)?;
+    let to = address_header("To", to)?;
     let mut out = format!(
         "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
          MIME-Version: 1.0\r\n\
-         Subject: {subject}\r\n\
-         From: {from}\r\n\
-         To: {to}\r\n\
+         {subject}\r\n\
+         {from}\r\n\
+         {to}\r\n\
          Date: {date}\r\n\
          Message-ID: {msg_id}\r\n\
          \r\n"
@@ -578,21 +586,842 @@ pub fn message_bytes_mixed(
     Ok(crlf_dot_stuff(out))
 }
 
-/// `smtplib.quoteaddr`: display name off, bare addr-spec in `<>`.
-fn quote_address(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if let Some(start) = trimmed.rfind('<') {
-        if let Some(end) = trimmed[start..].find('>') {
-            let inner = trimmed[start + 1..start + end].trim();
-            if !inner.is_empty() {
-                return format!("<{inner}>");
+/// `email.header.MAXLINELEN` (`header.py:28`): the fold width both
+/// header stages wrap at.
+const HEADER_MAX_LINE: usize = 78;
+/// RFC 2047 chrome around one `utf-8` encoded word (`charset.py:318`:
+/// `len(charset) + RFC2047_CHROME_LEN` = 5 + 7): `=?`, the `?q?`/`?b?`
+/// marker, `?=`.
+const ENCODED_WORD_CHROME: usize = 12;
+
+// ---- RFC 2047 header encoding (PIDASHCONV-1286) ----
+//
+// Django renders `From`/`To`/`Subject` in two stages, and the wire
+// bytes need both. Stage 1 runs at `msg[name] = value` time through
+// `forbid_multi_line_headers` (`message.py:55-76`): CR/LF is rejected
+// (`BadHeaderError`); `Subject` folds ASCII via `Header(val).encode()`
+// and encodes non-ASCII via `Header(val, 'utf-8').encode()`; address
+// headers pass ASCII through verbatim and sanitize non-ASCII piece by
+// piece over `getaddresses`. Stage 2 is the compat32 generator refold
+// (`_policybase.py:348-377`): `Header(stored, header_name).encode()`
+// at `maxlinelen` 78 under the real `Name: ` prefix — a single long
+// encoded word lands on its own continuation line
+// (`Subject: \r\n =?utf-8?q?...?=`), it is never split mid-word.
+
+/// Safe header bytes under `email.quoprimime._QUOPRI_HEADER_MAP`
+/// (`quoprimime.py:62-66`): `-!*+/`, ASCII letters and digits pass
+/// through; space becomes `_`; every other octet is `=XX`.
+fn is_qp_header_safe(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'!' | b'*' | b'+' | b'/')
+}
+
+/// `email.quoprimime.header_length` (`quoprimime.py:84-94`): the
+/// Q-encoded width of raw bytes, chrome excluded.
+fn qp_header_len(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .map(|&b| {
+            if b == b' ' || is_qp_header_safe(b) {
+                1
+            } else {
+                3
+            }
+        })
+        .sum()
+}
+
+/// `email.quoprimime.header_encode` with the `utf-8` charset
+/// (`quoprimime.py:127-145`): empty input encodes empty (no chrome).
+fn qp_header_encode(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("=?utf-8?q?");
+    for &byte in bytes {
+        if byte == b' ' {
+            out.push('_');
+        } else if is_qp_header_safe(byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("={byte:02X}"));
+        }
+    }
+    out.push_str("?=");
+    out
+}
+
+/// `email.base64mime.header_length` (`base64mime.py:49-56`): 4 chars
+/// per 3-byte group (or nonzero fraction thereof).
+fn b64_header_len(nbytes: usize) -> usize {
+    nbytes.div_ceil(3) * 4
+}
+
+/// `email.base64mime.header_encode` with the `utf-8` charset
+/// (`base64mime.py:59-70`): standard padded base64; empty stays empty.
+fn b64_header_encode(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    format!("=?utf-8?b?{}?=", STANDARD.encode(bytes))
+}
+
+/// `Header(val, 'utf-8').encode()` for the single-chunk values Django
+/// passes (`header.py:309-387` + `charset.py:293-352`): the SHORTEST
+/// encoder (B vs Q over the WHOLE value, ties to Q —
+/// `_get_encoder`, `charset.py:354-367`) is fixed once, then the value
+/// splits greedily per character so each encoded word fits its line
+/// budget (first `78 - 12`, continuations `78 - 1 - 12`: one
+/// continuation space plus the chrome), and the words join with
+/// `\n ` (the `feed` assembly, `header.py:454-473`, emits first,
+/// middles, last in order).
+fn utf8_header_encode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let use_base64 = b64_header_len(bytes.len()) < qp_header_len(bytes);
+    let encode = |chunk: &str| {
+        if use_base64 {
+            b64_header_encode(chunk.as_bytes())
+        } else {
+            qp_header_encode(chunk.as_bytes())
+        }
+    };
+    let chunk_len = |chunk: &str| {
+        if use_base64 {
+            b64_header_len(chunk.len())
+        } else {
+            qp_header_len(chunk.as_bytes())
+        }
+    };
+    // Greedy per-character split (`charset.py:330-348`).
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut budget = HEADER_MAX_LINE - ENCODED_WORD_CHROME;
+    for ch in value.chars() {
+        current.push(ch);
+        if chunk_len(&current) > budget {
+            current.pop();
+            if words.is_empty() && current.is_empty() {
+                // Python appends None (nothing fits the first line);
+                // unreachable for utf-8 (one char encodes to at most
+                // 12, below every budget) — emit the lone char.
+                words.push(encode(&ch.to_string()));
+            } else {
+                words.push(encode(&current));
+                current.clear();
+                current.push(ch);
+            }
+            budget = HEADER_MAX_LINE - 1 - ENCODED_WORD_CHROME;
+        }
+    }
+    words.push(encode(&current));
+    let (first, rest) = words.split_first().expect("final push always runs");
+    let mut out = first.clone();
+    for word in rest {
+        out.push('\n');
+        out.push(' ');
+        out.push_str(word);
+    }
+    out
+}
+
+/// One `(fws, part)` pair of the accumulator below.
+struct AccPart {
+    fws: String,
+    part: String,
+}
+
+/// Port of `email.header._Accumulator` (`header.py:536-573`): the
+/// current line as (folding whitespace, text) pairs plus the pending
+/// header-name prefix length.
+struct Accumulator {
+    parts: Vec<AccPart>,
+    initial_size: usize,
+}
+
+impl Accumulator {
+    fn new(initial_size: usize) -> Self {
+        Self {
+            parts: Vec::new(),
+            initial_size,
+        }
+    }
+
+    fn push(&mut self, fws: &str, part: &str) {
+        self.parts.push(AccPart {
+            fws: fws.to_owned(),
+            part: part.to_owned(),
+        });
+    }
+
+    fn pop_from(&mut self, index: usize) -> Vec<AccPart> {
+        self.parts.split_off(index)
+    }
+
+    fn pop(&mut self) -> (String, String) {
+        self.parts
+            .pop()
+            .map(|pair| (pair.fws, pair.part))
+            .unwrap_or_default()
+    }
+
+    /// `__len__` (`:555-557`) is the two-arg `sum` form: text width
+    /// plus the pending prefix.
+    fn len(&self) -> usize {
+        self.parts
+            .iter()
+            .map(|pair| pair.fws.len() + pair.part.len())
+            .sum::<usize>()
+            + self.initial_size
+    }
+
+    fn part_count(&self) -> usize {
+        self.parts.len()
+    }
+
+    fn to_line(&self) -> String {
+        self.parts
+            .iter()
+            .map(|pair| format!("{}{}", pair.fws, pair.part))
+            .collect()
+    }
+
+    fn reset(&mut self, start: Vec<AccPart>) {
+        self.parts = start;
+        self.initial_size = 0;
+    }
+
+    /// `is_onlyws` (`:569-570`): note `''.isspace()` is false, so a
+    /// nonempty all-empty pair list is NOT whitespace-only.
+    fn is_onlyws(&self) -> bool {
+        if self.initial_size != 0 {
+            return false;
+        }
+        if self.parts.is_empty() {
+            return true;
+        }
+        let line = self.to_line();
+        !line.is_empty() && line.chars().all(|ch| ch.is_whitespace())
+    }
+}
+
+/// Port of `email.header._ValueFormatter` for the ASCII path
+/// (`header.py:408-533`): `maxlinelen` 78, `splitchars` `;, \t`,
+/// one-space continuation.
+struct AsciiFolder {
+    lines: Vec<String>,
+    current: Accumulator,
+}
+
+impl AsciiFolder {
+    fn new(header_len: usize) -> Self {
+        Self {
+            lines: Vec::new(),
+            current: Accumulator::new(header_len),
+        }
+    }
+
+    /// `newline` (`header.py:424-433`): a whitespace-only tail glues
+    /// onto the previous line instead of standing alone.
+    fn newline(&mut self) {
+        let end = self.current.pop();
+        if end != (" ".to_owned(), String::new()) {
+            self.current.push(&end.0, &end.1);
+        }
+        if self.current.len() > 0 {
+            if self.current.is_onlyws() && !self.lines.is_empty() {
+                let tail = self.current.to_line();
+                self.lines
+                    .last_mut()
+                    .expect("guarded by is_empty check")
+                    .push_str(&tail);
+            } else {
+                self.lines.push(self.current.to_line());
+            }
+        }
+        self.current.reset(Vec::new());
+    }
+
+    /// `add_transition` (`header.py:435-436`).
+    fn add_transition(&mut self) {
+        self.current.push(" ", "");
+    }
+
+    /// `_append_chunk` (`header.py:503-533`): past 78 chars the best
+    /// split point wins scanning backward, `;` first, then `,`, then
+    /// whitespace. With no split point and a pending header prefix,
+    /// the prefix stands alone and the chunk moves to a continuation
+    /// line; without a prefix the overlong line stands unfolded.
+    fn append_chunk(&mut self, fws: &str, part: &str) {
+        self.current.push(fws, part);
+        if self.current.len() <= HEADER_MAX_LINE {
+            return;
+        }
+        let mut found = None;
+        for ch in [';', ',', ' ', '\t'] {
+            for index in (1..self.current.part_count()).rev() {
+                if ch == ' ' || ch == '\t' {
+                    let pair_fws = &self.current.parts[index].fws;
+                    if !pair_fws.is_empty() && pair_fws.starts_with(ch) {
+                        found = Some(index);
+                        break;
+                    }
+                }
+                let prev = &self.current.parts[index - 1].part;
+                if !prev.is_empty() && prev.ends_with(ch) {
+                    found = Some(index);
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        if let Some(index) = found {
+            let remainder = self.current.pop_from(index);
+            self.lines.push(self.current.to_line());
+            self.current.reset(remainder);
+        } else {
+            let (fws, part) = self.current.pop();
+            if self.current.initial_size > 0 {
+                self.newline();
+                // "We don't use continuation_ws here because the
+                // whitespace after a header should always be a space."
+                let fws = if fws.is_empty() { " ".to_owned() } else { fws };
+                self.current.push(&fws, &part);
+            } else {
+                self.current.push(&fws, &part);
             }
         }
     }
-    if trimmed.starts_with('<') {
-        return trimmed.to_owned();
+
+    /// `_ascii_split` (`header.py:481-501`): split on space/tab runs,
+    /// keeping the separators, then feed `(fws, part)` pairs.
+    fn ascii_split(&mut self, fws: &str, string: &str) {
+        let combined = format!("{fws}{string}");
+        let mut atoms = split_fws_runs(&combined);
+        if atoms.first().is_some_and(|first| !first.is_empty()) {
+            atoms.insert(0, "");
+        } else {
+            atoms.remove(0);
+        }
+        let (pairs, _) = atoms.as_chunks::<2>();
+        for pair in pairs {
+            self.append_chunk(pair[0], pair[1]);
+        }
     }
-    format!("<{trimmed}>")
+
+    fn finish(mut self, linesep: &str) -> String {
+        self.newline();
+        self.lines.join(linesep)
+    }
+}
+
+/// `re.split("([ \\t]+)", value)`: split on space/tab runs, keeping
+/// the separators (edge elements stay, possibly empty).
+fn split_fws_runs(value: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = value.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b' ' || bytes[index] == b'\t' {
+            let mut end = index;
+            while end < bytes.len() && (bytes[end] == b' ' || bytes[end] == b'\t') {
+                end += 1;
+            }
+            out.push(&value[start..index]);
+            out.push(&value[index..end]);
+            start = end;
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    out.push(&value[start..]);
+    out
+}
+
+/// Source line split for the folder: `\r\n`, `\r` or `\n` (Python's
+/// `splitlines` also breaks on vertical tab, form feed and Unicode
+/// line boundaries — absurd in a header value, kept glued here).
+fn split_header_lines(value: &str) -> Vec<&str> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let bytes = value.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' {
+            out.push(&value[start..index]);
+            index += usize::from(bytes.get(index + 1) == Some(&b'\n')) + 1;
+            start = index;
+        } else if bytes[index] == b'\n' {
+            out.push(&value[start..index]);
+            index += 1;
+            start = index;
+        } else {
+            index += 1;
+        }
+    }
+    if start < bytes.len() {
+        out.push(&value[start..]);
+    }
+    out
+}
+
+/// `Header(val).encode()` for a pure-ASCII `val` (`header.py:309-387`
+/// with one `us-ascii` chunk): feed the first source line, then each
+/// further line after a forced break (leading space/tab kept as the
+/// fold point, `:376-378`), a trailing transition (`:381-382`), and
+/// join with `linesep`. `header_len` is the `Name: ` prefix width (0
+/// for the stage-1 fold; the generator refold passes the real name).
+/// The `_embedded_header` refusal (`:384-386`) cannot trigger here:
+/// stage-1 inputs carry no newlines (rejected upstream) and every
+/// fold the stages emit starts with a space.
+fn ascii_header_encode(value: &str, header_len: usize, linesep: &str) -> String {
+    let mut folder = AsciiFolder::new(header_len);
+    let mut raw_lines = split_header_lines(value);
+    if raw_lines.is_empty() {
+        folder.ascii_split("", "");
+    } else {
+        let first = raw_lines.remove(0);
+        folder.ascii_split("", first);
+        for line in raw_lines {
+            folder.newline();
+            let stripped = line.trim_start_matches([' ', '\t']);
+            let fws = &line[..line.len() - stripped.len()];
+            folder.ascii_split(fws, stripped);
+        }
+    }
+    folder.add_transition();
+    folder.finish(linesep)
+}
+
+/// Collapse each space/tab run to one space and trim (the mailbox
+/// parser folds CFWS this way: `José\tBoss` and `José  Boss` both
+/// read as one-spaced).
+fn collapse_ws(value: &str) -> String {
+    value
+        .split([' ', '\t'])
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Strip `(comment)` groups, innermost-first so nesting resolves;
+/// quotes (backslash-aware) protect parens, and backslashes pass
+/// through verbatim (display escapes are not unescaped — absurd
+/// input, kept literal). Unbalanced parens or quotes fail: the stdlib
+/// parser consumes the rest as a runaway comment, which we refuse to
+/// reinterpret.
+fn strip_comments(value: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(value.len());
+    let mut depth = 0;
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for ch in value.chars() {
+        if escaped {
+            if depth == 0 {
+                out.push('\\');
+                out.push(ch);
+            }
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => {
+                in_quotes = !in_quotes;
+                if depth == 0 {
+                    out.push(ch);
+                }
+            }
+            '(' if !in_quotes => depth += 1,
+            ')' if !in_quotes => {
+                if depth == 0 {
+                    return Err("invalid email address".to_owned());
+                }
+                depth -= 1;
+            }
+            _ => {
+                if depth == 0 {
+                    out.push(ch);
+                }
+            }
+        }
+    }
+    if escaped && depth == 0 {
+        out.push('\\');
+    }
+    if depth > 0 || in_quotes {
+        return Err("invalid email address".to_owned());
+    }
+    Ok(out)
+}
+
+/// Split a quoted local part: `"..."` plus what follows it. The inner
+/// text unescapes quoted-pairs (`\"` → `"`, `\\` → `\`, generally
+/// backslash + any char → the char); spacing inside is preserved
+/// verbatim. Returns `None` when the addr-spec is not quoted.
+fn parse_quoted_local(addr: &str) -> Result<Option<(String, &str)>, String> {
+    if !addr.starts_with('"') {
+        return Ok(None);
+    }
+    let mut inner = String::new();
+    let mut chars = addr[1..].char_indices();
+    while let Some((index, ch)) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some((_, escaped)) => inner.push(escaped),
+                None => return Err("invalid email address".to_owned()),
+            }
+        } else if ch == '"' {
+            return Ok(Some((inner, &addr[1 + index + 1..])));
+        } else {
+            inner.push(ch);
+        }
+    }
+    Err("invalid email address".to_owned())
+}
+
+/// Split one addr-spec into local part and domain. A quoted local
+/// part must be followed by exactly `@domain`; a bare one needs
+/// exactly one `@`, except the envelope's local-only shape (no `@`
+/// at all — accepted when `require_at` is false). Bare `,;:` and
+/// stray quotes fail (the mailbox parser stops there); whitespace in
+/// the domain fails; bare local-part whitespace collapses.
+fn split_addr_spec(addr: &str, require_at: bool) -> Result<(String, String), String> {
+    let invalid = || "invalid email address".to_owned();
+    if let Some((inner, rest)) = parse_quoted_local(addr)? {
+        let domain = rest.strip_prefix('@').ok_or_else(invalid)?;
+        if domain.is_empty() || domain.contains('@') {
+            return Err(invalid());
+        }
+        return Ok((inner, domain.to_owned()));
+    }
+    if addr.contains('"') {
+        return Err(invalid());
+    }
+    let mut pieces = addr.split('@');
+    let local = pieces.next().ok_or_else(invalid)?;
+    let Some(domain) = pieces.next() else {
+        if require_at {
+            return Err(invalid());
+        }
+        let local = collapse_ws(local);
+        if local.is_empty() {
+            return Err(invalid());
+        }
+        return Ok((local, String::new()));
+    };
+    if pieces.next().is_some() {
+        return Err(invalid());
+    }
+    let local = collapse_ws(local);
+    if local.is_empty() || domain.is_empty() {
+        return Err(invalid());
+    }
+    if local.contains([',', ';', ':']) || domain.contains([',', ';', ':', '"']) {
+        return Err(invalid());
+    }
+    if domain.contains([' ', '\t']) {
+        return Err(invalid());
+    }
+    Ok((local, domain.to_owned()))
+}
+
+/// Clean the display-name half of `display <addr>`: comments off,
+/// then unquoted phrase-enders fail (`@,;:` and `<>` outside quotes
+/// stop the mailbox parser), quotes come off, whitespace collapses.
+fn clean_display(raw: &str) -> Result<String, String> {
+    let uncommented = strip_comments(raw)?;
+    let mut in_quotes = false;
+    for ch in uncommented.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if !in_quotes && matches!(ch, '@' | ',' | ';' | ':' | '<' | '>') {
+            return Err("invalid email address".to_owned());
+        }
+    }
+    Ok(collapse_ws(&uncommented.replace('"', "")))
+}
+
+/// The `get_mailbox` half of `sanitize_address` (`message.py:82-104`):
+/// split `display <addr>` (last `<`, first `>` after it, only
+/// whitespace past it) or a bare addr-spec (comments off, trimmed),
+/// then local/domain. `require_at` selects the header tuple rule
+/// (the addr-spec must carry `@` — `rsplit` fails otherwise) vs the
+/// envelope string rule (a bare local part without domain is
+/// accepted and renders bare).
+fn parse_address(value: &str, require_at: bool) -> Result<(String, String, String), String> {
+    let invalid = || "invalid email address".to_owned();
+    let (display_raw, addr_raw) = if let Some(open) = value.rfind('<') {
+        let rest = &value[open + 1..];
+        let close = rest.find('>').ok_or_else(invalid)?;
+        if !rest[close + 1..].chars().all(|ch| ch == ' ' || ch == '\t') {
+            return Err(invalid());
+        }
+        (
+            value[..open].to_owned(),
+            rest[..close].trim_matches([' ', '\t']).to_owned(),
+        )
+    } else {
+        if value.contains('>') {
+            return Err(invalid());
+        }
+        (String::new(), strip_comments(value)?.trim().to_owned())
+    };
+    if addr_raw.is_empty() {
+        return Err(invalid());
+    }
+    // The bracket split took the last `<`, so the addr-spec holds no
+    // `<`; a comment may still trail inside the brackets.
+    let addr = strip_comments(&addr_raw)?.trim().to_owned();
+    let display = clean_display(&display_raw)?;
+    let (local, domain) = split_addr_spec(&addr, require_at)?;
+    // Newlines in the parts fail (`message.py:102-104`) — checked
+    // post-parse, so a newline smuggled inside a stripped comment
+    // does not fail the send.
+    if display.contains(['\r', '\n'])
+        || local.contains(['\r', '\n'])
+        || domain.contains(['\r', '\n'])
+    {
+        return Err("invalid email address".to_owned());
+    }
+    Ok((display, local, domain))
+}
+
+/// `django.utils.encoding.punycode` (`encoding.py:211-213`) with
+/// `encodings/idna.py:60-71` label rules: ASCII labels pass through
+/// byte-identical (case kept — `ToASCII` step 1 returns early);
+/// non-ASCII labels encode per label through UTS-46
+/// (`idna::domain_to_ascii`, the locked 1.x the services/api crates
+/// use) with Python's `0 < len < 64` encoded-length refusal; a
+/// trailing root dot survives, any other empty label refuses, and
+/// `''` stays empty. Residual: deviation mappings (ß→ss, ς→σ,
+/// ZWJ/ZWNJ) — IDNA2003 maps them, UTS-46 keeps them (same residual
+/// as the EmailValidator port).
+fn idna_ascii_domain(domain: &str) -> Result<String, String> {
+    let invalid = || "invalid email address".to_owned();
+    if domain.is_empty() {
+        return Ok(String::new());
+    }
+    let (body, dot) = match domain.strip_suffix('.') {
+        Some(stripped) => (stripped, "."),
+        None => (domain, ""),
+    };
+    let mut out = Vec::new();
+    for label in body.split('.') {
+        if label.is_empty() {
+            return Err(invalid());
+        }
+        if label.is_ascii() {
+            if label.len() >= 64 {
+                return Err(invalid());
+            }
+            out.push(label.to_owned());
+        } else {
+            let encoded = idna::domain_to_ascii(label).map_err(|_| invalid())?;
+            if encoded.is_empty() || encoded.len() >= 64 {
+                return Err(invalid());
+            }
+            out.push(encoded);
+        }
+    }
+    Ok(out.join(".") + dot)
+}
+
+/// `email.utils.specialsre` (`utils.py:48`): display names carrying
+/// one of these quote under `formataddr`.
+fn is_formataddr_special(byte: u8) -> bool {
+    matches!(
+        byte,
+        b']' | b'[' | b'\\' | b'(' | b')' | b'<' | b'>' | b'@' | b',' | b':' | b';' | b'"' | b'.'
+    )
+}
+
+/// `email._header_value_parser.DOT_ATOM_ENDS` (`ATOM_ENDS` minus `.`):
+/// a local part carrying one of these quotes under `Address`.
+fn is_dot_atom_end(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t')
+        || matches!(
+            byte,
+            b'(' | b')' | b'<' | b'>' | b'@' | b',' | b':' | b';' | b'"' | b'\\' | b'[' | b']'
+        )
+}
+
+/// `Address.addr_spec` (`headerregistry.py`) without CTE: quote the
+/// local part when it carries a `DOT_ATOM_ENDS` char (escaping `\`
+/// then `"` — `quote_string`), join `local@domain`, or the bare
+/// local when the domain is empty.
+fn addr_spec_join(local: &str, domain: &str) -> String {
+    let quoted = if local.bytes().any(is_dot_atom_end) {
+        format!("\"{}\"", local.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        local.to_owned()
+    };
+    if domain.is_empty() {
+        quoted
+    } else {
+        format!("{quoted}@{domain}")
+    }
+}
+
+/// One `getaddresses` piece through `sanitize_address`
+/// (`message.py:78-119`): display and local-part Header-encoding,
+/// `punycode` domain, `formataddr` join. An ASCII display quotes per
+/// `specialsre` (after `escapesre`); an encoded display never quotes
+/// (its alphabet is disjoint from the specials). `require_at`
+/// selects the header tuple rule vs the envelope string rule (see
+/// [`parse_address`]).
+fn sanitize_address_piece(piece: &str, require_at: bool) -> Result<String, String> {
+    let (display, local, domain) = parse_address(piece, require_at)?;
+    let display = if display.is_empty() {
+        String::new()
+    } else if display.is_ascii() {
+        let folded = ascii_header_encode(&display, 0, "\n");
+        if folded.bytes().any(is_formataddr_special) {
+            format!("\"{}\"", folded.replace('\\', "\\\\").replace('"', "\\\""))
+        } else {
+            folded
+        }
+    } else {
+        utf8_header_encode(&display)
+    };
+    let local = if local.is_ascii() {
+        local
+    } else {
+        utf8_header_encode(&local)
+    };
+    let domain = idna_ascii_domain(&domain)?;
+    let addr_spec = addr_spec_join(&local, &domain);
+    if display.is_empty() {
+        Ok(addr_spec)
+    } else {
+        Ok(format!("{display} <{addr_spec}>"))
+    }
+}
+
+/// `getaddresses` splitting for the header path: commas at depth 0
+/// only (inside `<>`, `""` or `()` they belong to the address).
+/// Empty pieces fail (the tuple unpack fails on them).
+fn split_top_level_commas(value: &str) -> Result<Vec<String>, String> {
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut angle: u32 = 0;
+    let mut paren: u32 = 0;
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for ch in value.chars() {
+        if escaped {
+            current.push('\\');
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            '<' if !in_quotes => {
+                angle += 1;
+                current.push(ch);
+            }
+            '>' if !in_quotes => {
+                angle = angle.saturating_sub(1);
+                current.push(ch);
+            }
+            '(' if !in_quotes => {
+                paren += 1;
+                current.push(ch);
+            }
+            ')' if !in_quotes => {
+                paren = paren.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if !in_quotes && angle == 0 && paren == 0 => {
+                if current.trim().is_empty() {
+                    return Err("invalid email address".to_owned());
+                }
+                pieces.push(current.trim().to_owned());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if current.trim().is_empty() {
+        return Err("invalid email address".to_owned());
+    }
+    pieces.push(current.trim().to_owned());
+    Ok(pieces)
+}
+
+/// `forbid_multi_line_headers` (`message.py:55-76`) + the compat32
+/// generator refold (`_policybase.py:348-377`) for `Subject`: CR/LF
+/// is rejected, ASCII folds via `Header(val).encode()`, non-ASCII
+/// encodes via `Header(val, 'utf-8').encode()`, and the stored value
+/// refolds under the `Subject: ` prefix at emit time. Returns the
+/// full header (folds use CRLF).
+fn subject_header(subject: &str) -> Result<String, String> {
+    if subject.contains(['\r', '\n']) {
+        return Err("invalid email header".to_owned());
+    }
+    let stage1 = if subject.is_ascii() {
+        ascii_header_encode(subject, 0, "\n")
+    } else {
+        utf8_header_encode(subject)
+    };
+    Ok(format!(
+        "Subject: {}",
+        ascii_header_encode(&stage1, "Subject".len() + 2, "\r\n")
+    ))
+}
+
+/// Same two stages for `From`/`To` (`message.py:55-76` address
+/// branch): ASCII values pass through verbatim (only `subject` gets
+/// the `Header()` wrap), non-ASCII values split over `getaddresses`
+/// and sanitize piece by piece (`, ` join), then the generator
+/// refolds under the real header name. Returns the full header.
+fn address_header(name: &str, value: &str) -> Result<String, String> {
+    if value.contains(['\r', '\n']) {
+        return Err("invalid email header".to_owned());
+    }
+    let stage1 = if value.is_ascii() {
+        value.to_owned()
+    } else {
+        let mut pieces = Vec::new();
+        for piece in split_top_level_commas(value)? {
+            pieces.push(sanitize_address_piece(&piece, true)?);
+        }
+        pieces.join(", ")
+    };
+    Ok(format!(
+        "{name}: {}",
+        ascii_header_encode(&stage1, name.len() + 2, "\r\n")
+    ))
+}
+
+/// The `smtp.py:_send` envelope (`:141-159`): `sanitize_address` over
+/// the raw string (no comma split — each recipient sanitizes alone),
+/// then `smtplib.sendmail`'s `quoteaddr` (bare addr-spec in `<>`).
+/// The display name validates but never reaches the wire; unparsable
+/// input fails the send instead of mailing garbage.
+fn envelope_address(value: &str) -> Result<String, String> {
+    let (_display, local, domain) = parse_address(value, false)?;
+    let local = if local.is_ascii() {
+        local
+    } else {
+        utf8_header_encode(&local)
+    };
+    let domain = idna_ascii_domain(&domain)?;
+    Ok(format!("<{}>", addr_spec_join(&local, &domain)))
 }
 
 fn tls_config() -> Result<rustls::ClientConfig, String> {
@@ -814,21 +1643,12 @@ pub async fn smtp_send(cfg: &SmtpSend, mail: &OutgoingMail) -> Result<(), String
     // `port=int(...)` already ran; a range failure is `OverflowError` at
     // connect — inside the `try`, so it fails the send.
     let port: u16 = u16::try_from(cfg.port).map_err(|_| format!("bad SMTP port: {}", cfg.port))?;
-    if [
-        mail.subject.as_str(),
-        cfg.from_email.as_str(),
-        mail.to.as_str(),
-    ]
-    .iter()
-    .any(|h| h.contains(['\r', '\n']))
-    {
-        // `EmailMessage.message()` header validation (`BadHeaderError`).
-        return Err("invalid email header".to_owned());
-    }
     let boundary = make_boundary();
     let date = make_date();
     let msg_id = format!("<{boundary}@pidash>");
-    let content = message_bytes(&cfg.from_email, mail, &boundary, &date, &msg_id);
+    // Header validation (`BadHeaderError`) and address parsing live in
+    // the builder now; both fail the send like Django's raise.
+    let content = message_bytes(&cfg.from_email, mail, &boundary, &date, &msg_id)?;
     smtp_deliver(cfg, port, &mail.to, &content).await
 }
 
@@ -860,6 +1680,11 @@ fn make_date() -> String {
 /// attachment variant (same wire, never a fork). Any failure is `Err` —
 /// the caller swallows it.
 async fn smtp_deliver(cfg: &SmtpSend, port: u16, to: &str, content: &[u8]) -> Result<(), String> {
+    // The envelope sanitizes before connecting (`smtp.py:_send`
+    // sanitizes, then `sendmail` dials): unparsable addresses fail
+    // without any network traffic.
+    let mail_from = envelope_address(&cfg.from_email)?;
+    let rcpt_to = envelope_address(to)?;
     let stream = tokio::net::TcpStream::connect((cfg.host.as_str(), port))
         .await
         .map_err(|e| format!("SMTP connect failed: {e}"))?;
@@ -917,14 +1742,12 @@ async fn smtp_deliver(cfg: &SmtpSend, port: u16, to: &str, content: &[u8]) -> Re
         )
         .await?;
     }
-    io.write_str(&format!("MAIL FROM:{}", quote_address(&cfg.from_email)))
-        .await?;
+    io.write_str(&format!("MAIL FROM:{mail_from}")).await?;
     let (code, _) = io.read_reply().await?;
     if code != 250 {
         return Err("SMTP sender refused".to_owned());
     }
-    io.write_str(&format!("RCPT TO:{}", quote_address(to)))
-        .await?;
+    io.write_str(&format!("RCPT TO:{rcpt_to}")).await?;
     let (code, _) = io.read_reply().await?;
     if code != 250 && code != 251 {
         return Err("SMTP recipient refused".to_owned());
@@ -958,13 +1781,6 @@ pub async fn smtp_send_mixed(
     attachments: &[MailAttachment<'_>],
 ) -> Result<(), String> {
     let port: u16 = u16::try_from(cfg.port).map_err(|_| format!("bad SMTP port: {}", cfg.port))?;
-    if [subject, cfg.from_email.as_str(), to]
-        .iter()
-        .any(|h| h.contains(['\r', '\n']))
-    {
-        // `EmailMessage.message()` header validation (`BadHeaderError`).
-        return Err("invalid email header".to_owned());
-    }
     let boundary = make_boundary();
     let date = make_date();
     let msg_id = format!("<{boundary}@pidash>");
@@ -1311,12 +2127,15 @@ mod tests {
     }
 
     #[test]
-    fn quote_address_shapes_envelope() {
+    fn envelope_address_shapes_envelope() {
         assert_eq!(
-            quote_address("Team Pi Dash <team@airepublic.com>"),
+            envelope_address("Team Pi Dash <team@airepublic.com>").expect("valid"),
             "<team@airepublic.com>"
         );
-        assert_eq!(quote_address("plain@example.com"), "<plain@example.com>");
+        assert_eq!(
+            envelope_address("plain@example.com").expect("valid"),
+            "<plain@example.com>"
+        );
     }
 
     /// Scripted fake SMTP server: greeting + one reply per command,
@@ -1594,7 +2413,7 @@ mod tests {
             text_body: "plain".to_owned(),
             html_body: "<p>hi ’</p>".to_owned(),
         };
-        let bytes = message_bytes("f@x.io", &mail, "b", "date", "<id>");
+        let bytes = message_bytes("f@x.io", &mail, "b", "date", "<id>").expect("builds");
         let text = String::from_utf8(bytes).expect("utf-8");
         // `as_bytes(linesep="\r\n")`: no bare-LF line ending survives
         // (a strict server reads the whole body as one overlong line).
@@ -1625,7 +2444,8 @@ mod tests {
             html_body: "<p>é</p>".to_owned(),
         };
         let text =
-            String::from_utf8(message_bytes("f@x.io", &mail, "b", "date", "<id>")).expect("utf-8");
+            String::from_utf8(message_bytes("f@x.io", &mail, "b", "date", "<id>").expect("builds"))
+                .expect("utf-8");
         assert!(text.contains("Content-Transfer-Encoding: quoted-printable"));
         // The short non-ASCII part stays 8bit.
         assert!(text.contains("Content-Transfer-Encoding: 8bit"));
@@ -1805,6 +2625,445 @@ mod tests {
             text.contains("Content-Transfer-Encoding: 8bit\r\nContent-Disposition: attachment;")
         );
         assert!(text.contains("\"café\"\r\n\r\n--b--\r\n"));
+    }
+
+    #[test]
+    fn rfc2047_subject_vectors_match_python() {
+        // Stage-1 `Header(val, 'utf-8').encode()` pins (Django 4.2.30
+        // venv probes): single words, Q/B SHORTEST picks, ties to Q,
+        // multi-word folds.
+        let cases = [
+            (
+                "José has invited you to join them in Café on Pi Dash",
+                "=?utf-8?q?Jos=C3=A9_has_invited_you_to_join_them_in_Caf=C3=A9_on_Pi_Dash?=",
+            ),
+            (
+                "José has invited you to join them in Café on Pi Dash with extra words éàü",
+                "=?utf-8?q?Jos=C3=A9_has_invited_you_to_join_them_in_Caf=C3=A9_on_Pi_Dash_wit?=\n \
+                 =?utf-8?q?h_extra_words_=C3=A9=C3=A0=C3=BC?=",
+            ),
+            ("josé", "=?utf-8?b?am9zw6k=?="),
+            ("Équipe Pi Dash", "=?utf-8?q?=C3=89quipe_Pi_Dash?="),
+            ("Jürgen", "=?utf-8?q?J=C3=BCrgen?="),
+            ("é", "=?utf-8?b?w6k=?="),
+            ("éab", "=?utf-8?q?=C3=A9ab?="),
+            ("aéb", "=?utf-8?q?a=C3=A9b?="),
+            ("", ""),
+            ("   ", "=?utf-8?q?___?="),
+            (
+                "日本語の長い表示名テスト追加分です",
+                "=?utf-8?b?5pel5pys6Kqe44Gu6ZW344GE6KGo56S65ZCN44OG44K544OI6L+95Yqg5YiG44Gn?=\n \
+                 =?utf-8?b?44GZ?=",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(utf8_header_encode(input), expected, "{input:?}");
+        }
+        // Full wire headers (stage 1 + generator refold under
+        // `Subject: `): the encoded word is unbreakable, so over-long
+        // subjects fold right after the prefix.
+        assert_eq!(
+            subject_header("José has invited you to join them in Café on Pi Dash")
+                .expect("encodes"),
+            "Subject: \r\n \
+             =?utf-8?q?Jos=C3=A9_has_invited_you_to_join_them_in_Caf=C3=A9_on_Pi_Dash?=",
+        );
+        assert_eq!(
+            subject_header("Hello Pi Dash").expect("encodes"),
+            "Subject: Hello Pi Dash",
+        );
+        assert_eq!(
+            subject_header(
+                "A new password to your Pi Dash account has been requested \
+                 with some extra padding words here"
+            )
+            .expect("encodes"),
+            "Subject: A new password to your Pi Dash account has been requested with some\r\n \
+             extra\r\n \
+             padding words here",
+        );
+        assert_eq!(
+            subject_header(
+                "José has invited you to join them in Café on Pi Dash with extra words éàü"
+            )
+            .expect("encodes"),
+            "Subject: \r\n \
+             =?utf-8?q?Jos=C3=A9_has_invited_you_to_join_them_in_Caf=C3=A9_on_Pi_Dash_wit?=\r\n \
+             =?utf-8?q?h_extra_words_=C3=A9=C3=A0=C3=BC?=",
+        );
+        assert_eq!(
+            subject_header("a\nb").expect_err("newline rejected"),
+            "invalid email header",
+        );
+        assert_eq!(
+            subject_header("a\rb").expect_err("CR rejected"),
+            "invalid email header",
+        );
+    }
+
+    #[test]
+    fn ascii_fold_engine_vectors_match_python() {
+        // `Header(val).encode()` pins: unbreakable lines stand (no
+        // prefix) or move whole (with prefix), splits prefer `;` over
+        // `,` over whitespace, FWS runs ride along.
+        assert_eq!(
+            ascii_header_encode(&"s".repeat(100), 0, "\n"),
+            "s".repeat(100)
+        );
+        assert_eq!(
+            ascii_header_encode(&"s".repeat(100), "Subject".len() + 2, "\n"),
+            format!("\n {}", "s".repeat(100)),
+        );
+        assert_eq!(
+            ascii_header_encode(&format!("{} b", "a".repeat(70)), 0, "\n"),
+            format!("{} b", "a".repeat(70)),
+        );
+        assert_eq!(
+            ascii_header_encode(&format!("{} b", "a".repeat(77)), 0, "\n"),
+            format!("{}\n b", "a".repeat(77)),
+        );
+        assert_eq!(
+            ascii_header_encode(&format!("{}; {}", "a".repeat(70), "b".repeat(20)), 0, "\n"),
+            format!("{};\n {}", "a".repeat(70), "b".repeat(20)),
+        );
+        assert_eq!(
+            ascii_header_encode(&format!("{}, {}", "a".repeat(70), "b".repeat(20)), 0, "\n"),
+            format!("{},\n {}", "a".repeat(70), "b".repeat(20)),
+        );
+        assert_eq!(
+            ascii_header_encode(&format!("{}  {}", "a".repeat(70), "b".repeat(20)), 0, "\n"),
+            format!("{}\n  {}", "a".repeat(70), "b".repeat(20)),
+        );
+        assert_eq!(
+            ascii_header_encode(
+                &format!(
+                    "{}; {} , {}",
+                    "a".repeat(60),
+                    "b".repeat(10),
+                    "c".repeat(20)
+                ),
+                0,
+                "\n",
+            ),
+            format!(
+                "{};\n {} , {}",
+                "a".repeat(60),
+                "b".repeat(10),
+                "c".repeat(20)
+            ),
+        );
+        assert_eq!(
+            ascii_header_encode(&format!("{}\t{}", "a".repeat(70), "b".repeat(20)), 0, "\n"),
+            format!("{}\n\t{}", "a".repeat(70), "b".repeat(20)),
+        );
+    }
+
+    #[test]
+    fn sanitize_address_vectors_match_django() {
+        // `sanitize_address` pins (tuple/header semantics: `@`
+        // required): display encode + quote, local encode + quote,
+        // IDNA domain, comment/whitespace handling.
+        let cases = [
+            ("contract@example.com", "contract@example.com"),
+            ("user@münchen.de", "user@xn--mnchen-3ya.de"),
+            ("josé@example.com", "=?utf-8?b?am9zw6k=?=@example.com"),
+            ("Team <t@e.com>", "Team <t@e.com>"),
+            (
+                "Équipe Pi Dash <team@x.com>",
+                "=?utf-8?q?=C3=89quipe_Pi_Dash?= <team@x.com>",
+            ),
+            ("\"Doe, John\" <j@x.com>", "\"Doe, John\" <j@x.com>"),
+            ("\"a@b\" <x@y.de>", "\"a@b\" <x@y.de>"),
+            ("\"á@b\" <x@y.de>", "=?utf-8?b?w6FAYg==?= <x@y.de>"),
+            ("José (boss) <x@y.de>", "=?utf-8?b?Sm9zw6k=?= <x@y.de>"),
+            ("José (a (b) c) <x@y.de>", "=?utf-8?b?Sm9zw6k=?= <x@y.de>"),
+            ("(boss) <x@y.de>", "x@y.de"),
+            ("x@y.de (José)", "x@y.de"),
+            ("  x@y.de  ", "x@y.de"),
+            ("<team@x.com>", "team@x.com"),
+            ("a b@c.de", "\"a b\"@c.de"),
+            ("á b@c.de", "=?utf-8?q?=C3=A1_b?=@c.de"),
+            ("a  b@c.de", "\"a b\"@c.de"),
+            ("\"a b\"@x.de", "\"a b\"@x.de"),
+            ("\"áb\"@x.de", "=?utf-8?b?w6Fi?=@x.de"),
+            ("\"a\\\"b\"@x.de", "\"a\\\"b\"@x.de"),
+            ("a.b@x.de", "a.b@x.de"),
+            (".a@x.de", ".a@x.de"),
+            ("a..b@x.de", "a..b@x.de"),
+            ("\"ab\"@x.de", "ab@x.de"),
+            ("\"a.b\"@x.de", "a.b@x.de"),
+            ("\"\"@b.de", "@b.de"),
+            ("Mr. José <a@b.de>", "=?utf-8?b?TXIuIEpvc8Op?= <a@b.de>"),
+            ("José\tBoss <x@y.de>", "=?utf-8?q?Jos=C3=A9_Boss?= <x@y.de>"),
+            ("José  Boss <x@y.de>", "=?utf-8?q?Jos=C3=A9_Boss?= <x@y.de>"),
+            ("Team <téam@x.com>", "Team <=?utf-8?b?dMOpYW0=?=@x.com>"),
+            // The parts check runs post-parse: a newline smuggled
+            // inside a stripped comment does not fail the send.
+            ("(a\nb) <x@y.de>", "x@y.de"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                sanitize_address_piece(input, true).expect("valid"),
+                expected,
+                "{input:?}",
+            );
+        }
+        for input in [
+            "a@b@c.de",
+            "<>",
+            "Jürgen <>",
+            "",
+            "@b.de",
+            "a@",
+            "@",
+            "fóo",
+            "fóo bar",
+            "José: boss <x@y.de>",
+            "José; boss <x@y.de>",
+            "José@home <x@y.de>",
+            "a<b <x@y.de>",
+            "Doe, José <x@y.de>",
+            "a\nb@c.de",
+        ] {
+            assert!(
+                sanitize_address_piece(input, true).is_err(),
+                "{input:?} must fail",
+            );
+        }
+    }
+
+    #[test]
+    fn idna_domain_vectors_match_python() {
+        // `punycode` pins: ASCII labels verbatim (case kept), per-label
+        // encode, trailing root dot kept, empty/overlong refused.
+        let cases = [
+            ("example.com", "example.com"),
+            ("EXAMPLE.COM", "EXAMPLE.COM"),
+            ("münchen.de", "xn--mnchen-3ya.de"),
+            ("MÜNCHEN.DE", "xn--mnchen-3ya.DE"),
+            ("exämple.com", "xn--exmple-cua.com"),
+            ("mün_chen.de", "xn--mn_chen-n2a.de"),
+            ("münchen.de.", "xn--mnchen-3ya.de."),
+            ("example.com.", "example.com."),
+            ("", ""),
+            ("münchen", "xn--mnchen-3ya"),
+            ("例え.jp", "xn--r8jz45g.jp"),
+            ("-x.de", "-x.de"),
+            ("x-.de", "x-.de"),
+            ("_dmarc.x.de", "_dmarc.x.de"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                idna_ascii_domain(input).expect("valid"),
+                expected,
+                "{input:?}",
+            );
+        }
+        let long_label = "l".repeat(63) + ".de";
+        assert_eq!(
+            idna_ascii_domain(&long_label).expect("63 chars fit"),
+            long_label,
+        );
+        // Residual deviation mapping (UTS-46 keeps ß; IDNA2003 maps it
+        // to `ss`, so Python answers `strasse.de`): same residual as
+        // the EmailValidator port.
+        assert_eq!(
+            idna_ascii_domain("straße.de").expect("valid"),
+            "xn--strae-oqa.de",
+        );
+        for input in [".", "a..de"] {
+            assert!(idna_ascii_domain(input).is_err(), "{input:?} must fail");
+        }
+        assert!(idna_ascii_domain(&("l".repeat(64) + ".de")).is_err());
+        assert!(idna_ascii_domain(&format!("{}.de", "ü".repeat(63))).is_err());
+    }
+
+    #[test]
+    fn address_header_wire_vectors_match_django() {
+        // Full `From:`/`To:` wire headers: ASCII verbatim, non-ASCII
+        // sanitized piece by piece, refolded under the name.
+        let cases = [
+            (
+                "From",
+                "Pi Dash Contract <contract@example.com>",
+                "From: Pi Dash Contract <contract@example.com>",
+            ),
+            (
+                "From",
+                "Équipe Pi Dash <team@x.com>",
+                "From: =?utf-8?q?=C3=89quipe_Pi_Dash?= <team@x.com>",
+            ),
+            ("To", "user@münchen.de", "To: user@xn--mnchen-3ya.de"),
+            (
+                "To",
+                "josé@example.com",
+                "To: =?utf-8?b?am9zw6k=?=@example.com",
+            ),
+            (
+                "To",
+                "Jürgen <j@exämple.com>",
+                "To: =?utf-8?q?J=C3=BCrgen?= <j@xn--exmple-cua.com>",
+            ),
+            ("To", "a@x.de, b@y.de", "To: a@x.de, b@y.de"),
+            (
+                "To",
+                "a@x.de, Jürgen <j@y.de>",
+                "To: a@x.de, =?utf-8?q?J=C3=BCrgen?= <j@y.de>",
+            ),
+            (
+                "To",
+                "\"Doe, John\" <j@x.com>",
+                "To: \"Doe, John\" <j@x.com>",
+            ),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(
+                address_header(name, input).expect("valid"),
+                expected,
+                "{name}: {input:?}",
+            );
+        }
+        assert!(address_header("To", "á@b@c").is_err());
+        assert!(address_header("To", "fóo").is_err());
+        assert!(address_header("From", "a\nb@c.de").is_err());
+    }
+
+    #[test]
+    fn envelope_address_vectors_match_smtplib() {
+        // `sanitize` + `quoteaddr`: display validated but dropped,
+        // addr-spec IDNA-encoded, local-only accepted, garbage fails.
+        let cases = [
+            (
+                "Team Pi Dash <team@airepublic.com>",
+                "<team@airepublic.com>",
+            ),
+            ("plain@example.com", "<plain@example.com>"),
+            ("Équipe Pi Dash <team@x.com>", "<team@x.com>"),
+            ("user@münchen.de", "<user@xn--mnchen-3ya.de>"),
+            ("josé@example.com", "<=?utf-8?b?am9zw6k=?=@example.com>"),
+            ("fóo", "<=?utf-8?q?f=C3=B3o?=>"),
+            ("foo", "<foo>"),
+            ("a b@c.de", "<\"a b\"@c.de>"),
+            ("<team@x.com>", "<team@x.com>"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                envelope_address(input).expect("valid"),
+                expected,
+                "{input:?}"
+            );
+        }
+        for input in ["a@b@c.de", "", "a@", "@b", "<>", "Jürgen <>", "a\nb@c.de"] {
+            assert!(envelope_address(input).is_err(), "{input:?} must fail");
+        }
+    }
+
+    #[test]
+    fn header_path_residuals_vs_old_parser_getaddresses() {
+        // Known divergences from Django's HEADER path (probed on Django
+        // 4.2.30 / CPython 3.12 in the PIDASHCONV-1286 review): the header
+        // path feeds `getaddresses` TUPLES through `sanitize_address`
+        // (`message.py:63-69`), while this port sanitizes each comma
+        // piece with the string-path (`get_mailbox`) rules. The two agree
+        // on every realistic input (bare and `Display <addr>` addresses,
+        // quoted `,`/`;` in displays, multi-recipient lists — see the
+        // vectors above); they differ only on malformed or exotic inputs
+        // that app validation (`validate_email` on invites) and the
+        // single-recipient `to=[email]` shape keep out of reach. The
+        // envelope is unaffected throughout (the display never reaches
+        // the wire there).
+        // An unquoted `:` reads as a route marker to the old parser, so
+        // Django SENDS `To: boss <x@y.de>`; refused here, like the new
+        // parser refuses it.
+        assert!(address_header("To", "José: boss <x@y.de>").is_err());
+        // The old parser keeps `(comment)` text in the display name and
+        // encodes it (`To: =?utf-8?b?Sm9zw6kgKGJvc3Mp?= <x@y.de>`);
+        // stripped here.
+        assert_eq!(
+            address_header("To", "José (boss) <x@y.de>").expect("builds"),
+            "To: =?utf-8?b?Sm9zw6k=?= <x@y.de>",
+        );
+        // A trailing comment becomes the display name to the old parser
+        // (`To: =?utf-8?b?Sm9zw6k=?= <x@y.de>`); stripped here.
+        assert_eq!(
+            address_header("To", "x@y.de (José)").expect("builds"),
+            "To: x@y.de",
+        );
+        // Quoted local parts keep their quotes through `getaddresses`
+        // and `Address` re-quotes them (`To: "\"ab\""@x.de`, Django's own
+        // garbage); unquoted here.
+        assert_eq!(
+            address_header("To", "\"ab\"@x.de, é@y.de").expect("builds"),
+            "To: ab@x.de, =?utf-8?b?w6k=?=@y.de",
+        );
+        // Group syntax (`Friends: a@x.de, é@y.de;`) delivers to the
+        // members upstream; refused here (the `:` fails the piece).
+        assert!(address_header("To", "Friends: a@x.de, é@y.de;").is_err());
+        // `""` parses to an empty mailbox upstream (`Address('','')`
+        // renders `<>`, so Django sends `MAIL FROM:<>`); refused here.
+        assert!(envelope_address("\"\"").is_err());
+    }
+
+    #[test]
+    fn message_bytes_encodes_headers_like_django() {
+        // The issue case end to end: non-ASCII From/To/Subject render
+        // as Django's wire bytes (folded encoded words, punycode).
+        let mail = OutgoingMail {
+            to: "invite@münchen.de".to_owned(),
+            subject: "José has invited you to join them in Café on Pi Dash".to_owned(),
+            text_body: "plain".to_owned(),
+            html_body: "<p>hi</p>".to_owned(),
+        };
+        let text = String::from_utf8(
+            message_bytes("Équipe Pi Dash <team@x.com>", &mail, "b", "date", "<id>")
+                .expect("builds"),
+        )
+        .expect("utf-8");
+        let head = text.split("\r\n\r\n").next().expect("headers");
+        assert!(
+            head.contains(
+                "Subject: \r\n \
+                 =?utf-8?q?Jos=C3=A9_has_invited_you_to_join_them_in_Caf=C3=A9_on_Pi_Dash?="
+            ),
+            "{head}",
+        );
+        assert!(
+            head.contains("From: =?utf-8?q?=C3=89quipe_Pi_Dash?= <team@x.com>"),
+            "{head}",
+        );
+        assert!(head.contains("To: invite@xn--mnchen-3ya.de"), "{head}");
+        // Short ASCII headers stay byte-identical to before.
+        let mail = OutgoingMail {
+            to: "contract@example.com".to_owned(),
+            subject: "Your unique Pi Dash login code is 842103".to_owned(),
+            text_body: "plain".to_owned(),
+            html_body: "<p>hi</p>".to_owned(),
+        };
+        let text = String::from_utf8(
+            message_bytes(
+                "Team Pi Dash <team@airepublic.com>",
+                &mail,
+                "b",
+                "date",
+                "<id>",
+            )
+            .expect("builds"),
+        )
+        .expect("utf-8");
+        assert!(text.contains("From: Team Pi Dash <team@airepublic.com>\r\n"));
+        assert!(text.contains("To: contract@example.com\r\n"));
+        assert!(text.contains("Subject: Your unique Pi Dash login code is 842103\r\n"));
+        // CR/LF still fails the build (was the smtp_send pre-check).
+        let mail = OutgoingMail {
+            to: "t@e.st".to_owned(),
+            subject: "a\nb".to_owned(),
+            text_body: "b".to_owned(),
+            html_body: "h".to_owned(),
+        };
+        assert_eq!(
+            message_bytes("f@x.io", &mail, "b", "date", "<id>").expect_err("rejected"),
+            "invalid email header",
+        );
     }
 
     #[test]

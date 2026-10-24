@@ -103,6 +103,7 @@ use sqlx::Row;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_services::space::{guards, queries};
 
 // ---------------------------------------------------------------------------
@@ -532,14 +533,15 @@ async fn fetch_board(pool: &sqlx::PgPool, anchor: &str) -> Result<Option<BoardRo
 
 /// `ProjectBaseModel.save` forces `workspace` from `project.workspace`
 /// (`db/models/project.py:309-311`): written rows resolve the workspace
-/// through the project row. Forward FK reads use the soft-deletion
-/// manager, hence the `deleted_at IS NULL` guard.
+/// through the project row. Forward FK reads use `_base_manager`, which
+/// carries no `deleted_at` filter (no model sets `base_manager_name`),
+/// so a soft-deleted project still resolves (PIDASHCONV-1260).
 async fn project_workspace_id(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, HandlerError> {
     let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
+        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1")
             .bind(project_id)
             .fetch_optional(pool)
             .await
@@ -626,21 +628,17 @@ fn python_dump_str(out: &mut String, text: &str) {
     out.push('"');
 }
 
-/// `django.utils.html.strip_tags`: remove every `<...>` span. The comment
-/// `save()` computes `comment_stripped` this way (`db/models/issue.py:601`;
-/// `""` stays `""`).
-fn strip_tags(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut in_tag = false;
-    for ch in value.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
+/// The `Description` mirror row's stripped text on `create()`: `Description.save`
+/// RECOMPUTES it with Django's own `strip_tags` (`db/models/description.py:22-29`),
+/// which keeps entities verbatim — unlike the comment column's entity-decoding
+/// MLStripper (`utils/html_processor.py`). Empty HTML stores NULL. (PATCH syncs
+/// the decoded form via queryset `update()`, which runs no `save()`.)
+fn description_stripped_for_create(comment_html: &str) -> Option<String> {
+    if comment_html.is_empty() {
+        None
+    } else {
+        Some(super::sanitize::strip_tags(comment_html))
     }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -708,10 +706,14 @@ async fn ensure_public_member(
         .await
         .map_err(|_| HandlerError::ServerError)?;
     if existing.is_none() {
+        // `created_by` is the request user (`member_id` at every call
+        // site); `updated_by` stays NULL on create (`BaseModel.save`,
+        // `db/models/base.py:23-43`).
         sqlx::query(pidash_jobs::space::PUBLIC_MEMBER_INSERT_SQL)
             .bind(uuid::Uuid::new_v4())
             .bind(project_id)
             .bind(workspace_id)
+            .bind(member_id)
             .bind(member_id)
             .execute(pool)
             .await
@@ -1145,8 +1147,10 @@ async fn render_comment(
     })
 }
 
-/// `issue_detail`: the flat leaf over the comment's issue FK. A dangling
-/// FK is a 500 like Python's `DoesNotExist` → fallback envelope.
+/// `issue_detail`: the flat leaf over the comment's issue FK. The read
+/// mirrors `_base_manager` (no `deleted_at` filter), so a soft-deleted
+/// issue still renders; only a genuinely missing row is a 500 like
+/// Python's `DoesNotExist` → fallback envelope (PIDASHCONV-1260).
 async fn render_issue_flat(
     pool: &sqlx::PgPool,
     issue_id: Option<&str>,
@@ -1156,7 +1160,7 @@ async fn render_issue_flat(
     };
     let row = fetch_optional_object(
         pool,
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"id\" = $1)",
+        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"id\" = $1)",
         &[uuid_param(issue_id)?],
     )
     .await?
@@ -1193,6 +1197,8 @@ async fn render_issue_flat(
 }
 
 /// `project_detail`: the app lite leaf over the comment's project FK.
+/// Unfiltered `_base_manager` read: a soft-deleted project still renders
+/// (PIDASHCONV-1260).
 async fn render_project_lite(
     pool: &sqlx::PgPool,
     project_id: Option<&str>,
@@ -1202,7 +1208,7 @@ async fn render_project_lite(
     };
     let row = fetch_optional_object(
         pool,
-        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"id\" = $1)",
+        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
         &[uuid_param(project_id)?],
     )
     .await?
@@ -1227,6 +1233,8 @@ async fn render_project_lite(
 }
 
 /// `workspace_detail`: the app lite leaf over the comment's workspace FK.
+/// Unfiltered `_base_manager` read: a soft-deleted workspace still renders
+/// (PIDASHCONV-1260).
 async fn render_workspace_lite(
     pool: &sqlx::PgPool,
     workspace_id: Option<&str>,
@@ -1236,7 +1244,7 @@ async fn render_workspace_lite(
     };
     let row = fetch_optional_object(
         pool,
-        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"deleted_at\" IS NULL AND \"workspaces\".\"id\" = $1)",
+        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"id\" = $1)",
         &[uuid_param(workspace_id)?],
     )
     .await?
@@ -2021,8 +2029,9 @@ async fn comment_create_inner(
     let now = chrono::Utc::now();
     let comment_id = uuid::Uuid::new_v4();
     // `IssueComment.save`: `comment_stripped` is recomputed from
-    // `comment_html` (`db/models/issue.py:601`); absent html defaults to
-    // `"<p></p>"` (model default).
+    // `comment_html` with MLStripper (`db/models/issue.py:601` over
+    // `utils/html_processor.py`); absent html defaults to `"<p></p>"`
+    // (model default).
     let html = input
         .comment_html
         .clone()
@@ -2030,7 +2039,7 @@ async fn comment_create_inner(
     let stripped = if html.is_empty() {
         String::new()
     } else {
-        strip_tags(&html)
+        ml_strip_tags(&html)
     };
     let comment_json = input
         .comment_json
@@ -2041,8 +2050,12 @@ async fn comment_create_inner(
     // (sqlx encodes `&[String]` as an array), never as JSON values.
     let attachments = input.attachments.clone().unwrap_or_default();
     let labels = input.labels.clone().unwrap_or_default();
+    // `IssueComment.save` runs the comment insert, the `Description` mirror
+    // insert and the link update inside one `transaction.atomic()` block
+    // (`db/models/issue.py:598-627`): a mid-save failure leaves no rows.
+    let mut tx = pool.begin().await.map_err(|_| HandlerError::ServerError)?;
     insert_comment(
-        pool,
+        &mut tx,
         &comment_id,
         &now,
         &actor.id,
@@ -2059,7 +2072,8 @@ async fn comment_create_inner(
     .await?;
     // The `Description` mirror row (`IssueComment.save`, `:604-623`):
     // workspace/project follow the comment, `created_by` is the actor,
-    // `updated_by` stays NULL on create.
+    // `updated_by` stays NULL on create. `Description.save` recomputes the
+    // stripped text with Django's verbatim `strip_tags`, not the ML value.
     let description_id = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_stripped, description_json, description_html, description_binary) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, NULL)")
         .bind(description_id)
@@ -2067,10 +2081,10 @@ async fn comment_create_inner(
         .bind(actor.id)
         .bind(workspace_id)
         .bind(project_id)
-        .bind(&stripped)
+        .bind(description_stripped_for_create(&html))
         .bind(&comment_json)
         .bind(&html)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     // The description link is a second `save(update_fields=["description_id"])`
@@ -2083,9 +2097,10 @@ async fn comment_create_inner(
     )
     .bind(description_id)
     .bind(comment_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|_| HandlerError::ServerError)?;
+    tx.commit().await.map_err(|_| HandlerError::ServerError)?;
     let row = fetch_comment_by_id(pool, &comment_id)
         .await?
         .ok_or(HandlerError::ServerError)?;
@@ -2131,7 +2146,7 @@ fn string_list(value: &Value) -> Result<Vec<String>, HandlerError> {
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_comment(
-    pool: &sqlx::PgPool,
+    ex: &mut sqlx::PgConnection,
     comment_id: &uuid::Uuid,
     now: &chrono::DateTime<chrono::Utc>,
     actor_id: &uuid::Uuid,
@@ -2171,7 +2186,7 @@ async fn insert_comment(
         .bind(input.speaker_agent_run_id.flatten())
         .bind(edited_at)
         .bind(input.parent_id.flatten())
-        .execute(pool)
+        .execute(&mut *ex)
         .await
         .map_err(integrity_error)?;
     if result.rows_affected() != 1 {
@@ -2292,7 +2307,7 @@ async fn comment_partial_update_inner(
     // explicit `comment_stripped` without new html is overwritten back.
     let html = input.comment_html.clone().or(old.comment_html.clone());
     let stripped = match &html {
-        Some(text) if !text.is_empty() => strip_tags(text),
+        Some(text) if !text.is_empty() => ml_strip_tags(text),
         _ => String::new(),
     };
     let now = chrono::Utc::now();
@@ -2447,7 +2462,9 @@ async fn apply_comment_update(
             .bind(parse_old_uuid(&old.updated_by)?)
             .bind(workspace_id)
             .bind(project_id)
-            .bind(&stripped_value)
+            // A relinked Description is a fresh `create()`, so its stripped
+            // text is the `Description.save` recompute, not the ML value.
+            .bind(description_stripped_for_create(&new_html))
             .bind(&comment_json)
             .bind(&new_html)
             .execute(pool)
@@ -3829,10 +3846,23 @@ mod tests {
     }
 
     #[test]
-    fn strip_tags_matches_django() {
-        assert_eq!(strip_tags("<p>hi</p>"), "hi");
-        assert_eq!(strip_tags(""), "");
-        assert_eq!(strip_tags("<p></p>"), "");
+    fn description_mirror_keeps_entities_verbatim() {
+        // `Description.save` recomputes with Django's own `strip_tags`
+        // (`db/models/description.py:22-29`): entities verbatim, a bare `<`
+        // kept as text, empty HTML stores NULL.
+        assert_eq!(description_stripped_for_create(""), None);
+        assert_eq!(
+            description_stripped_for_create("<p>hi</p>"),
+            Some("hi".to_owned())
+        );
+        assert_eq!(
+            description_stripped_for_create("<p>Tom &amp; Jerry</p>"),
+            Some("Tom &amp; Jerry".to_owned())
+        );
+        assert_eq!(
+            description_stripped_for_create("<p>I <3 this</p>"),
+            Some("I <3 this".to_owned())
+        );
     }
 
     #[test]

@@ -21,23 +21,33 @@
 //! `@shared_task` carries no autoretry). Handler `Err` would *retry*, so
 //! Python-raise paths return `Ok(Verdict::Fail)`, never `Err`.
 //!
-//! # Sinks, never live buckets
+//! # Live buckets, boto failure classes
 //!
 //! S3 goes through [`ObjectStore`] and the live-document conversion
-//! through [`LiveConvert`]. [`UnavailableObjectStore`] degrades exactly
-//! like boto with dead credentials (log + `None`, ignored copies) and
-//! [`NoopLiveConvert`] degrades like an unset `LIVE_URL` (the duplicate
-//! is still created; the binary regenerates on first open). Tests inject
-//! fakes that capture every side effect.
+//! through [`LiveConvert`]. [`LiveS3ObjectStore`] executes real SigV4
+//! HEAD and PUT-copy requests (the shared [`pidash_storage`] signer for
+//! HEAD, a local signer mirroring the duplicate-path `copy_auth_headers`
+//! for the copy); [`NoopLiveConvert`] degrades like an unset `LIVE_URL`
+//! (the duplicate is still created; the binary regenerates on first
+//! open). Failures split exactly like boto: a service answer — any
+//! error status, including a missing key — is the `ClientError` Django
+//! swallows, while a transport or config failure is the `BotoCoreError`
+//! that escapes to the task's broad `except`. Tests inject fakes that
+//! capture every side effect.
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde_json::{Map, Value};
+use sha2::Sha256;
 use uuid::Uuid;
 
+use pidash_db::config::{Settings, StorageSettings};
 use pidash_services::tasks_cleanup::assets as logic;
 use pidash_services::tasks_cleanup::assets::{AssetIdPair, CopyEntity, HeadMeta};
+
+type HmacSha256 = Hmac<Sha256>;
 
 use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
@@ -217,18 +227,33 @@ pub trait AssetStore: Send + Sync {
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
 
-/// Object storage. Failures degrade inside the impl (log + `None` /
-/// ignore), exactly like `S3Storage` catching `ClientError` — they never
-/// fail the task.
+/// Object storage. Outcomes split exactly like boto: a service answer
+/// (any error status, including a missing key) is the `ClientError` the
+/// tasks swallow, while a transport or config failure is the
+/// `BotoCoreError` that escapes to the task's broad `except` (silent
+/// skip, no save). Outcomes never fail the task (no `Verdict::Fail`).
 pub trait ObjectStore: Send + Sync {
-    /// `get_object_metadata`: `None` means unavailable (stored as `NULL`).
-    fn head_object(&self, key: &str) -> impl std::future::Future<Output = Option<HeadMeta>> + Send;
-    /// `copy_object`: failures are logged and ignored (the row still counts).
+    /// `S3Storage()` construction inside the task (`copy_s3_object.py:89`,
+    /// `storage_metadata_task.py:19`): an unsignable region (botocore's
+    /// `InvalidRegionError` / `ValueError`) skips the task before any
+    /// write. Pure (no I/O), like the constructor it mirrors.
+    fn check_client(&self) -> Result<(), String>;
+    /// `get_object_metadata`: `Ok(Some)` found; `Ok(None)` is a service
+    /// error (`ClientError`, stored as `NULL`) — and `None` means that
+    /// only; `Err` is a transport or config failure (skip the save).
+    fn head_object(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = Result<Option<HeadMeta>, String>> + Send;
+    /// `copy_object`: `Ok` means copied or service-refused (the pair
+    /// still counts, like the swallowed `ClientError`); `Err` is a
+    /// transport or config failure (the `[]` path: partial rows stay,
+    /// no mark, no rewrite).
     fn copy_object(
         &self,
         src_key: &str,
         dst_key: &str,
-    ) -> impl std::future::Future<Output = ()> + Send;
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
 
 /// The live-document conversion (`utils/live_document.py`). `Ok(None)` is
@@ -242,19 +267,342 @@ pub trait LiveConvert: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Option<ConvertedDoc>, String>> + Send;
 }
 
-/// S3 unavailable: every head answers `None`, every copy is logged and
-/// dropped — the same degradation as boto with dead credentials.
-pub struct UnavailableObjectStore;
+/// Live S3 object storage over SigV4 + reqwest: one signed HEAD per
+/// metadata call, one signed PUT-with-`x-amz-copy-source` per copy,
+/// executed for real. Mirrors `S3Storage()` exactly as the two asset
+/// tasks build it — no request (`copy_s3_object.py:89`,
+/// `storage_metadata_task.py:19`), so both `USE_MINIO` arms pass the
+/// same endpoint URL and region (`storage.py:55-84`): the endpoint URL
+/// when set (path-style), else the regional virtual-hosted endpoint.
+/// Timeouts are boto's: 60 s to connect, 60 s to read. Construction does
+/// no I/O, so registration stays provable with no network; a client
+/// that fails to build behaves as unreachable (transport class).
+#[derive(Debug, Clone)]
+pub struct LiveS3ObjectStore {
+    client: Option<reqwest::Client>,
+    storage: StorageSettings,
+}
 
-impl ObjectStore for UnavailableObjectStore {
-    async fn head_object(&self, key: &str) -> Option<HeadMeta> {
-        tracing::warn!(object = key, "s3 unavailable: head_object degraded to None");
-        None
+impl LiveS3ObjectStore {
+    /// Build from the resolved worker settings. Infallible: the client
+    /// builds lazily per struct (a build failure degrades to the
+    /// transport class per call, like an unreachable store).
+    pub fn from_settings(settings: &Settings) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(60))
+            .read_timeout(std::time::Duration::from_secs(60))
+            .build()
+            .ok();
+        if client.is_none() {
+            tracing::warn!("s3 client failed to build: object store unreachable");
+        }
+        Self {
+            client,
+            storage: settings.storage.clone(),
+        }
     }
 
-    async fn copy_object(&self, src_key: &str, dst_key: &str) {
-        tracing::warn!(src = src_key, dst = dst_key, "s3 unavailable: copy dropped");
+    /// The storage the signer resolves: `S3Storage()` with no request
+    /// never takes the request-host arm, so MinIO mode rides the
+    /// endpoint arm with the chained region verbatim (the
+    /// `s3_scope_region` chain documents this exact constructor).
+    fn signing_storage(&self) -> StorageSettings {
+        let mut storage = self.storage.clone();
+        storage.use_minio = false;
+        storage
     }
+
+    /// Sign one HEAD. Pure given the timestamps (unit-testable without
+    /// I/O); [`ObjectStore::head_object`] executes it. Scheme/host are
+    /// dummy: both arms resolve without them (the endpoint arm rides
+    /// the EndpointUrl branch, the regional arm the Region branch).
+    fn signed_head_for(
+        &self,
+        key: &str,
+        amz_date: &str,
+        date_stamp: &str,
+    ) -> Result<pidash_storage::SignedRequest, String> {
+        let storage = self.signing_storage();
+        pidash_storage::validate_storage(&storage)
+            .map_err(|error| format!("s3 misconfigured: {error}"))?;
+        pidash_storage::sign_head(&storage, "", "", key, amz_date, date_stamp)
+            .map_err(|error| format!("s3 head {key}: {error}"))
+    }
+
+    /// Sign one PUT-copy. Pure given the timestamps; the canonical shape
+    /// mirrors the duplicate-path `copy_auth_headers`
+    /// (`handlers_v2_project.rs`): empty-body PUT, signed headers
+    /// `host;x-amz-content-sha256;x-amz-copy-source;x-amz-date`.
+    fn signed_copy_for(
+        &self,
+        src_key: &str,
+        dst_key: &str,
+        amz_date: &str,
+        date_stamp: &str,
+    ) -> Result<SignedCopyRequest, String> {
+        let storage = self.signing_storage();
+        pidash_storage::validate_storage(&storage)
+            .map_err(|error| format!("s3 misconfigured: {error}"))?;
+        sign_copy_request(&storage, src_key, dst_key, amz_date, date_stamp)
+            .map_err(|error| format!("s3 copy {src_key}: {error}"))
+    }
+}
+
+impl ObjectStore for LiveS3ObjectStore {
+    fn check_client(&self) -> Result<(), String> {
+        // Pure (no I/O): botocore validates the region at client
+        // construction. An invalid name fails (`InvalidRegionError`);
+        // `""` fails only with no endpoint URL to derive from
+        // (`ValueError: Invalid endpoint`) — against a custom endpoint
+        // botocore signs the empty scope verbatim.
+        let storage = self.signing_storage();
+        if !pidash_db::config::is_valid_region_name(&storage.region) {
+            return Err(format!(
+                "s3 misconfigured: region {:?} is not a valid host label",
+                storage.region
+            ));
+        }
+        let has_endpoint = storage
+            .endpoint_url
+            .as_deref()
+            .is_some_and(|url| !url.is_empty());
+        if storage.region.is_empty() && !has_endpoint {
+            return Err(
+                "s3 misconfigured: empty region with no endpoint URL to derive from".to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn head_object(&self, key: &str) -> Result<Option<HeadMeta>, String> {
+        let now = Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let signed = self.signed_head_for(key, &amz_date, &date_stamp)?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| format!("s3 head {key}: transport failure: no client"))?;
+        let response = client
+            .head(&signed.url)
+            .header("Authorization", signed.authorization)
+            .header("x-amz-date", signed.amz_date)
+            .header("x-amz-content-sha256", signed.content_sha256)
+            .send()
+            .await
+            .map_err(|error| format!("s3 head {key}: transport failure: {error}"))?;
+        if response.status().is_success() {
+            return Ok(Some(head_meta_from_headers(response.headers())));
+        }
+        // boto3 raises `ClientError` on any error status (including a
+        // missing key); Django logs it and stores `None`.
+        tracing::warn!(
+            object = key,
+            status = response.status().as_u16(),
+            "s3 head refused: storing NULL"
+        );
+        Ok(None)
+    }
+
+    async fn copy_object(&self, src_key: &str, dst_key: &str) -> Result<(), String> {
+        let now = Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let signed = self.signed_copy_for(src_key, dst_key, &amz_date, &date_stamp)?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| format!("s3 copy {src_key}: transport failure: no client"))?;
+        let mut request = client.put(&signed.url).body(Vec::new());
+        for (name, value) in &signed.headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("s3 copy {src_key}: transport failure: {error}"))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        // boto3 raises `ClientError` on any error status; Django logs it
+        // and the pair still counts.
+        tracing::warn!(
+            src = src_key,
+            dst = dst_key,
+            status = response.status().as_u16(),
+            "s3 copy refused: pair still counts"
+        );
+        Ok(())
+    }
+}
+
+/// A signed PUT-copy request: the destination URL plus the exact headers
+/// to send (`x-amz-content-sha256`, `x-amz-copy-source`, `x-amz-date`,
+/// `authorization`). Any added, dropped, or re-cased signed header
+/// invalidates the signature.
+#[derive(Debug, Clone, PartialEq)]
+struct SignedCopyRequest {
+    url: String,
+    headers: Vec<(String, String)>,
+}
+
+/// Pure SigV4 for the copy PUT, mirroring the duplicate-path
+/// `copy_auth_headers` (`handlers_v2_project.rs:2355-2410`): the
+/// endpoint arms ride the shared
+/// [`pidash_storage::resolve_server_endpoint`], the canonical request is
+/// the empty-body PUT with `x-amz-copy-source`, and the HMAC chain is
+/// byte-identical to the shared signer. `S3Storage()` with no request
+/// never takes the request-host arm, so MinIO mode always rides the
+/// endpoint arm here.
+fn sign_copy_request(
+    storage: &StorageSettings,
+    src_key: &str,
+    dst_key: &str,
+    amz_datetime: &str,
+    date_stamp: &str,
+) -> Result<SignedCopyRequest, pidash_storage::StorageError> {
+    let mut storage = storage.clone();
+    storage.use_minio = false;
+    let storage = storage;
+    let endpoint = pidash_storage::resolve_server_endpoint(&storage, "", "")?;
+    let dst_path = if endpoint.path_style {
+        format!("/{}/{}", storage.bucket_name, uri_encode_path(dst_key))
+    } else {
+        format!("/{}", uri_encode_path(dst_key))
+    };
+    let copy_source = format!("/{}/{}", storage.bucket_name, uri_encode_path(src_key));
+    let payload_hash = pidash_storage::sha256_hex(&[]);
+    let signed_headers = "host;x-amz-content-sha256;x-amz-copy-source;x-amz-date";
+    let canonical = format!(
+        "PUT\n{dst_path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-copy-source:{copy_source}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}",
+        endpoint.signed_host,
+    );
+    let scope = format!("{date_stamp}/{}/s3/aws4_request", storage.region);
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_datetime}\n{scope}\n{}",
+        pidash_storage::sha256_hex(canonical.as_bytes())
+    );
+    let signature = hex(&hmac_sha256(
+        &signing_key(&storage.secret_access_key, date_stamp, &storage.region),
+        string_to_sign.as_bytes(),
+    ));
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
+        storage.access_key_id,
+    );
+    Ok(SignedCopyRequest {
+        url: format!("{}{dst_path}", endpoint.url_base),
+        headers: vec![
+            ("x-amz-content-sha256".to_owned(), payload_hash),
+            ("x-amz-copy-source".to_owned(), copy_source),
+            ("x-amz-date".to_owned(), amz_datetime.to_owned()),
+            ("authorization".to_owned(), authorization),
+        ],
+    })
+}
+
+/// RFC 3986 percent-encoding for SigV4 (unreserved marks stay bare,
+/// everything else `%XX` uppercase — botocore's `quote(..., safe='-_.~')`).
+fn uri_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(
+                    char::from_digit((b >> 4) as u32, 16)
+                        .expect("hex")
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit((b & 0x0f) as u32, 16)
+                        .expect("hex")
+                        .to_ascii_uppercase(),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Path encoding for the canonical URI: slashes survive, every segment is
+/// RFC 3986-encoded (botocore `quote(path, safe='/~')`).
+fn uri_encode_path(path: &str) -> String {
+    path.split('/')
+        .map(uri_encode)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// SigV4 signing key: `kDate/kRegion/kService/kSigning`
+/// (`storage.py` always signs `s3`).
+fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
+    let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), date.as_bytes());
+    let k_region = hmac_sha256(&k_date, region.as_bytes());
+    let k_service = hmac_sha256(&k_region, b"s3");
+    hmac_sha256(&k_service, b"aws4_request")
+}
+
+/// Project one 200 HEAD's headers into the Django-shaped
+/// `get_object_metadata` dict (`storage.py:164-170`): verbatim
+/// `ContentType`, integer `ContentLength`, ISO `LastModified`, verbatim
+/// (quoted) `ETag`, and the `x-amz-meta-*` user metadata. Missing or
+/// unparsable fields answer `None`, like `response.get(...)`.
+fn head_meta_from_headers(headers: &reqwest::header::HeaderMap) -> HeadMeta {
+    let field = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let content_length = field("content-length").and_then(|raw| raw.parse::<i64>().ok());
+    let last_modified = field("last-modified").and_then(|raw| http_date_to_iso(&raw));
+    let mut metadata = Map::new();
+    for (name, value) in headers.iter() {
+        if let Some(key) = name.as_str().strip_prefix("x-amz-meta-") {
+            if let Ok(text) = value.to_str() {
+                metadata.insert(key.to_owned(), Value::String(text.to_owned()));
+            }
+        }
+    }
+    HeadMeta {
+        content_type: field("content-type"),
+        content_length,
+        last_modified,
+        etag: field("etag"),
+        metadata,
+    }
+}
+
+/// S3's IMF-fixdate (`Last-Modified`) to the ISO UTC stamp botocore's
+/// `.isoformat()` renders (`storage.py:166`): `+00:00`, second precision.
+/// Returns `None` when the header is absent or unparsable.
+fn http_date_to_iso(raw: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc2822(raw).ok().map(|fixed| {
+        fixed
+            .with_timezone(&Utc)
+            .format("%Y-%m-%dT%H:%M:%S+00:00")
+            .to_string()
+    })
 }
 
 /// Live server unavailable: conversion answers `None`, so the duplicate
@@ -280,7 +628,9 @@ pub async fn run_sweep<S: AssetStore>(
 }
 
 /// Run the metadata task. Every path is silent (ack): unknown id, bad
-/// UUID text (`ValidationError` → the broad `except`), S3 outage.
+/// UUID text (`ValidationError` → the broad `except`), an unbuildable
+/// client, a refused head (stored as `NULL`, like the `ClientError`), a
+/// failed head (the save is skipped, like the `BotoCoreError`).
 pub async fn run_metadata<S: AssetStore, O: ObjectStore>(
     store: &S,
     s3: &O,
@@ -305,7 +655,17 @@ pub async fn run_metadata<S: AssetStore, O: ObjectStore>(
         Some(key) => key,
         None => return,
     };
-    let metadata = s3.head_object(&key).await.map(|head| head.to_json());
+    if let Err(error) = s3.check_client() {
+        tracing::warn!(%asset_id, %error, "metadata client unavailable: silent skip");
+        return;
+    }
+    let metadata = match s3.head_object(&key).await {
+        Ok(found) => found.map(|head| head.to_json()),
+        Err(error) => {
+            tracing::warn!(%asset_id, %error, "metadata head failed: silent skip");
+            return;
+        }
+    };
     if let Err(error) = store.save_storage_metadata(asset_id, metadata, now).await {
         tracing::warn!(%asset_id, %error, "metadata save failed: silent skip");
     }
@@ -382,6 +742,9 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
         .iter()
         .map(|raw| Uuid::parse_str(raw).ok())
         .collect::<Option<Vec<_>>>()?;
+    // `S3Storage()` inside `copy_assets` (`copy_s3_object.py:89`): an
+    // unbuildable client fails the whole task before any write.
+    s3.check_client().ok()?;
     let originals = store
         .original_assets(workspace_id, project_id, asset_ids)
         .await
@@ -413,8 +776,10 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
         let entity_type = duplicate.entity_type.clone();
         let duplicate = duplicate.with_entity_field(entity_type.as_deref(), entity_id);
         let new_id = store.insert_duplicate(duplicate, now).await.ok()?;
-        // A copy failure is logged and ignored: the pair still counts.
-        s3.copy_object(&original.asset_key, &dst_key).await;
+        // A refused copy is the swallowed `ClientError` (the pair still
+        // counts); a failed copy escapes like the `BotoCoreError` (the
+        // `[]` path: partial rows stay, no mark, no rewrite).
+        s3.copy_object(&original.asset_key, &dst_key).await.ok()?;
         pairs.push(AssetIdPair {
             old_asset_id: original.id.to_string(),
             new_asset_id: new_id.to_string(),
@@ -1101,20 +1466,53 @@ mod tests {
     }
 
     struct FakeS3 {
-        heads: HashMap<String, HeadMeta>,
+        /// `Some` answers the head; `None` is the service-missing
+        /// (`ClientError` → stored `NULL`); an absent key is missing too.
+        heads: HashMap<String, Option<HeadMeta>>,
         copies: Mutex<Vec<(String, String)>>,
+        /// Transport failure: every head and copy errors (the
+        /// `BotoCoreError` class: skip the save / take the `[]` path).
+        down: bool,
+        /// `check_client` outcome (`S3Storage()` construction).
+        client_ok: bool,
+    }
+
+    impl FakeS3 {
+        fn up() -> Self {
+            Self {
+                heads: HashMap::new(),
+                copies: Mutex::new(vec![]),
+                down: false,
+                client_ok: true,
+            }
+        }
     }
 
     impl ObjectStore for FakeS3 {
-        async fn head_object(&self, key: &str) -> Option<HeadMeta> {
-            self.heads.get(key).cloned()
+        fn check_client(&self) -> Result<(), String> {
+            if self.client_ok {
+                Ok(())
+            } else {
+                Err("s3 client down".to_string())
+            }
         }
 
-        async fn copy_object(&self, src_key: &str, dst_key: &str) {
+        async fn head_object(&self, key: &str) -> Result<Option<HeadMeta>, String> {
+            if self.down {
+                return Err("s3 transport down".to_string());
+            }
+            Ok(self.heads.get(key).cloned().flatten())
+        }
+
+        async fn copy_object(&self, src_key: &str, dst_key: &str) -> Result<(), String> {
+            if self.down {
+                return Err("s3 transport down".to_string());
+            }
             self.copies
                 .lock()
                 .unwrap()
                 .push((src_key.to_string(), dst_key.to_string()));
+            Ok(())
         }
     }
 
@@ -1249,8 +1647,10 @@ mod tests {
             metadata: Map::new(),
         };
         let s3 = FakeS3 {
-            heads: HashMap::from([("contract/stale.bin".to_string(), head.clone())]),
+            heads: HashMap::from([("contract/stale.bin".to_string(), Some(head.clone()))]),
             copies: Mutex::new(vec![]),
+            down: false,
+            client_ok: true,
         };
         run_metadata(&store, &s3, &id.to_string(), now).await;
         {
@@ -1260,10 +1660,7 @@ mod tests {
         }
 
         // Unknown head answers None → stored as NULL.
-        let empty = FakeS3 {
-            heads: HashMap::new(),
-            copies: Mutex::new(vec![]),
-        };
+        let empty = FakeS3::up();
         run_metadata(&store, &empty, &id.to_string(), now).await;
         assert_eq!(store.state.lock().unwrap().assets[&id].storage, None);
 
@@ -1272,6 +1669,86 @@ mod tests {
         run_metadata(&store, &empty, &Uuid::new_v4().to_string(), now).await;
         run_metadata(&store, &empty, "not-a-uuid", now).await;
         assert_eq!(store.state.lock().unwrap().saves.len(), saves);
+    }
+
+    #[tokio::test]
+    async fn metadata_transport_failure_skips_save() {
+        // The `BotoCoreError` class escapes `get_object_metadata`, so the
+        // task's broad `except` skips the save — the field keeps its old
+        // value instead of flipping to `NULL` (PIDASHCONV-1292).
+        let store = FakeStore::new();
+        let now = utc(2026, 9, 28);
+        let id = Uuid::new_v4();
+        let ws = Uuid::new_v4();
+        store.state.lock().unwrap().assets.insert(
+            id,
+            FakeAsset {
+                key: "contract/stale.bin".to_string(),
+                attributes: Some(json!({})),
+                size: 0.0,
+                entity_type: None,
+                storage: Some(json!({})),
+                uploaded: true,
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+                created_by: None,
+                workspace_id: ws,
+                user_id: None,
+                project_id: None,
+                issue_id: None,
+                comment_id: None,
+                page_id: None,
+                draft_issue_id: None,
+            },
+        );
+        let down = FakeS3 {
+            down: true,
+            ..FakeS3::up()
+        };
+        run_metadata(&store, &down, &id.to_string(), now).await;
+        let state = store.state.lock().unwrap();
+        assert_eq!(state.assets[&id].storage, Some(json!({})));
+        assert!(state.saves.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_client_failure_skips_save() {
+        // `S3Storage()` raising (bad region) skips before the head.
+        let store = FakeStore::new();
+        let now = utc(2026, 9, 28);
+        let id = Uuid::new_v4();
+        let ws = Uuid::new_v4();
+        store.state.lock().unwrap().assets.insert(
+            id,
+            FakeAsset {
+                key: "contract/stale.bin".to_string(),
+                attributes: Some(json!({})),
+                size: 0.0,
+                entity_type: None,
+                storage: Some(json!({})),
+                uploaded: true,
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+                created_by: None,
+                workspace_id: ws,
+                user_id: None,
+                project_id: None,
+                issue_id: None,
+                comment_id: None,
+                page_id: None,
+                draft_issue_id: None,
+            },
+        );
+        let unbuilt = FakeS3 {
+            client_ok: false,
+            ..FakeS3::up()
+        };
+        run_metadata(&store, &unbuilt, &id.to_string(), now).await;
+        let state = store.state.lock().unwrap();
+        assert_eq!(state.assets[&id].storage, Some(json!({})));
+        assert!(state.saves.is_empty());
     }
 
     fn copy_world() -> (FakeStore, Uuid, Uuid, Uuid, Uuid, Uuid) {
@@ -1330,10 +1807,7 @@ mod tests {
     #[tokio::test]
     async fn copy_duplicates_rewrites_and_saves_docs() {
         let (store, ws, project, user, entity, asset) = copy_world();
-        let s3 = FakeS3 {
-            heads: HashMap::new(),
-            copies: Mutex::new(vec![]),
-        };
+        let s3 = FakeS3::up();
         let live = FakeLive {
             answer: Some(Some(live_doc())),
             seen: Mutex::new(vec![]),
@@ -1410,10 +1884,7 @@ mod tests {
     #[tokio::test]
     async fn copy_skips_silently_on_bad_input() {
         let (store, _ws, project, user, entity, asset) = copy_world();
-        let s3 = FakeS3 {
-            heads: HashMap::new(),
-            copies: Mutex::new(vec![]),
-        };
+        let s3 = FakeS3::up();
         let live = FakeLive {
             answer: Some(Some(live_doc())),
             seen: Mutex::new(vec![]),
@@ -1507,10 +1978,7 @@ mod tests {
     #[tokio::test]
     async fn copy_without_live_answer_skips_docs_save() {
         let (store, _ws, project, user, entity, _asset) = copy_world();
-        let s3 = FakeS3 {
-            heads: HashMap::new(),
-            copies: Mutex::new(vec![]),
-        };
+        let s3 = FakeS3::up();
         let live = FakeLive {
             answer: Some(None),
             seen: Mutex::new(vec![]),
@@ -1536,10 +2004,7 @@ mod tests {
     #[tokio::test]
     async fn copy_transport_failure_skips() {
         let (store, _ws, project, user, entity, _asset) = copy_world();
-        let s3 = FakeS3 {
-            heads: HashMap::new(),
-            copies: Mutex::new(vec![]),
-        };
+        let s3 = FakeS3::up();
         let live = FakeLive {
             answer: None,
             seen: Mutex::new(vec![]),
@@ -1560,6 +2025,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copy_s3_transport_failure_takes_empty_path() {
+        // The `BotoCoreError` class escapes `copy_assets`: the duplicate
+        // rows inserted so far stay (unflipped), but nothing is marked
+        // and the description is never rewritten — the duplicate keeps
+        // pointing at the source assets (PIDASHCONV-1292).
+        let (store, _ws, project, user, entity, asset) = copy_world();
+        let before_html = store.state.lock().unwrap().entities[&("issues".to_string(), entity)]
+            .html
+            .clone();
+        let s3 = FakeS3 {
+            down: true,
+            ..FakeS3::up()
+        };
+        let live = FakeLive {
+            answer: Some(Some(live_doc())),
+            seen: Mutex::new(vec![]),
+        };
+        let uuids = CounterUuid {
+            next: Mutex::new(550),
+        };
+        let outcome = run_copy(
+            &store,
+            &s3,
+            &live,
+            &copy_request(entity, project, user),
+            utc(2026, 9, 28),
+            &|| uuids.gen(),
+        )
+        .await;
+        assert_eq!(outcome, CopyOutcome::Skipped);
+        let state = store.state.lock().unwrap();
+        // One partial row (inserted before the failed copy), unflipped.
+        assert_eq!(state.assets.len(), 2);
+        let dup = state
+            .assets
+            .iter()
+            .find(|(id, _)| **id != asset)
+            .expect("partial duplicate row stays");
+        assert!(!dup.1.uploaded);
+        // No rewrite, no saves, no recorded copies.
+        assert_eq!(
+            state.entities[&("issues".to_string(), entity)].html,
+            before_html
+        );
+        assert!(state.saves.is_empty());
+        assert!(s3.copies.lock().unwrap().is_empty());
+        assert!(live.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_client_failure_skips_before_any_write() {
+        // `S3Storage()` raising fails the whole task before the first
+        // duplicate row exists.
+        let (store, _ws, project, user, entity, _asset) = copy_world();
+        let s3 = FakeS3 {
+            client_ok: false,
+            ..FakeS3::up()
+        };
+        let live = FakeLive {
+            answer: Some(Some(live_doc())),
+            seen: Mutex::new(vec![]),
+        };
+        let uuids = CounterUuid {
+            next: Mutex::new(560),
+        };
+        let outcome = run_copy(
+            &store,
+            &s3,
+            &live,
+            &copy_request(entity, project, user),
+            utc(2026, 9, 28),
+            &|| uuids.gen(),
+        )
+        .await;
+        assert_eq!(outcome, CopyOutcome::Skipped);
+        let state = store.state.lock().unwrap();
+        assert_eq!(state.assets.len(), 1);
+        assert!(state.saves.is_empty());
+        assert!(s3.copies.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn copy_missing_name_renders_none_in_key() {
         let (store, ws, project, user, entity, asset) = copy_world();
         store
@@ -1570,10 +2117,7 @@ mod tests {
             .get_mut(&asset)
             .unwrap()
             .attributes = Some(json!({"type": "png"}));
-        let s3 = FakeS3 {
-            heads: HashMap::new(),
-            copies: Mutex::new(vec![]),
-        };
+        let s3 = FakeS3::up();
         let live = FakeLive {
             answer: Some(None),
             seen: Mutex::new(vec![]),
@@ -1607,10 +2151,7 @@ mod tests {
             .get_mut(&("issues".to_string(), entity))
             .unwrap()
             .html = "<p>no assets here</p>".to_string();
-        let s3 = FakeS3 {
-            heads: HashMap::new(),
-            copies: Mutex::new(vec![]),
-        };
+        let s3 = FakeS3::up();
         let live = FakeLive {
             answer: Some(Some(live_doc())),
             seen: Mutex::new(vec![]),
@@ -1728,6 +2269,181 @@ mod tests {
         assert!(CopyRequest::from_job(&json!([]), &json!({})).is_none());
     }
 
+    fn live_storage() -> StorageSettings {
+        StorageSettings {
+            use_minio: true,
+            minio_endpoint_ssl: false,
+            access_key_id: "AKIDEXAMPLE".to_owned(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned(),
+            bucket_name: "examplebucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some("http://localhost:4566".to_owned()),
+            signed_url_expiration_secs: 3600,
+        }
+    }
+
+    fn live_store() -> LiveS3ObjectStore {
+        let mut settings = Settings::test_defaults();
+        settings.storage = live_storage();
+        LiveS3ObjectStore::from_settings(&settings)
+    }
+
+    #[test]
+    fn live_store_check_client_mirrors_boto_construction() {
+        // The endpoint arm signs with the chained region verbatim.
+        assert!(live_store().check_client().is_ok());
+        // Invalid region names fail (`InvalidRegionError`).
+        let mut settings = Settings::test_defaults();
+        settings.storage = StorageSettings {
+            region: "not a region!".to_owned(),
+            ..live_storage()
+        };
+        assert!(LiveS3ObjectStore::from_settings(&settings)
+            .check_client()
+            .is_err());
+        // Empty region without an endpoint fails (`ValueError`).
+        let mut settings = Settings::test_defaults();
+        settings.storage = StorageSettings {
+            use_minio: false,
+            region: "".to_owned(),
+            endpoint_url: None,
+            ..live_storage()
+        };
+        assert!(LiveS3ObjectStore::from_settings(&settings)
+            .check_client()
+            .is_err());
+        // Empty region against an endpoint signs the empty scope.
+        let mut settings = Settings::test_defaults();
+        settings.storage = StorageSettings {
+            region: "".to_owned(),
+            ..live_storage()
+        };
+        assert!(LiveS3ObjectStore::from_settings(&settings)
+            .check_client()
+            .is_ok());
+    }
+
+    #[test]
+    fn copy_signer_pins_wire_shape() {
+        // Regression pin on the wire shape (URL, copy source, signed
+        // headers, credential scope); S3 accepting the signature is
+        // proven end to end by the contract suite against LocalStack.
+        let signed = sign_copy_request(
+            &live_storage(),
+            "ws/photo 1.png",
+            "ws/abcd-photo 1.png",
+            "20261021T060844Z",
+            "20261021",
+        )
+        .expect("endpoint arm signs");
+        assert_eq!(
+            signed.url,
+            "http://localhost:4566/examplebucket/ws/abcd-photo%201.png"
+        );
+        let header = |name: &str| {
+            signed
+                .headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            header("x-amz-copy-source"),
+            "/examplebucket/ws/photo%201.png"
+        );
+        assert_eq!(header("x-amz-date"), "20261021T060844Z");
+        assert_eq!(
+            header("x-amz-content-sha256"),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let authorization = header("authorization");
+        assert!(
+            authorization.starts_with(
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261021/us-east-1/s3/aws4_request, \
+                 SignedHeaders=host;x-amz-content-sha256;x-amz-copy-source;x-amz-date, Signature="
+            ),
+            "{authorization}"
+        );
+        // Deterministic: same inputs sign the same bytes.
+        let again = sign_copy_request(
+            &live_storage(),
+            "ws/photo 1.png",
+            "ws/abcd-photo 1.png",
+            "20261021T060844Z",
+            "20261021",
+        )
+        .expect("endpoint arm signs");
+        assert_eq!(signed, again);
+    }
+
+    #[test]
+    fn copy_signer_regional_arm_is_virtual_hosted() {
+        let regional = StorageSettings {
+            use_minio: false,
+            region: "eu-west-1".to_owned(),
+            endpoint_url: None,
+            ..live_storage()
+        };
+        let signed = sign_copy_request(&regional, "a.png", "b.png", "20261021T060844Z", "20261021")
+            .expect("regional arm signs");
+        assert_eq!(
+            signed.url,
+            "https://examplebucket.s3.eu-west-1.amazonaws.com/b.png"
+        );
+    }
+
+    #[test]
+    fn http_date_to_iso_renders_botocore_stamp() {
+        assert_eq!(
+            http_date_to_iso("Wed, 21 Oct 2026 06:08:44 GMT").as_deref(),
+            Some("2026-10-21T06:08:44+00:00")
+        );
+        assert_eq!(http_date_to_iso("garbage"), None);
+        assert_eq!(http_date_to_iso(""), None);
+    }
+
+    #[test]
+    fn head_meta_projects_django_shape() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("image/png"));
+        headers.insert("content-length", HeaderValue::from_static("9"));
+        headers.insert(
+            "last-modified",
+            HeaderValue::from_static("Wed, 21 Oct 2026 06:08:44 GMT"),
+        );
+        headers.insert("etag", HeaderValue::from_static("\"abc123\""));
+        headers.insert("x-amz-meta-owner", HeaderValue::from_static("sam"));
+        headers.insert("x-amz-request-id", HeaderValue::from_static("ignored"));
+        let meta = head_meta_from_headers(&headers);
+        assert_eq!(
+            meta.to_json(),
+            json!({
+                "ContentType": "image/png",
+                "ContentLength": 9,
+                "LastModified": "2026-10-21T06:08:44+00:00",
+                "ETag": "\"abc123\"",
+                "Metadata": {"owner": "sam"},
+            })
+        );
+        // Missing or unparsable fields answer null, like `.get(...)`.
+        let mut sparse = HeaderMap::new();
+        sparse.insert("content-length", HeaderValue::from_static("not-a-number"));
+        let meta = head_meta_from_headers(&sparse);
+        assert_eq!(
+            meta.to_json(),
+            json!({
+                "ContentType": null,
+                "ContentLength": null,
+                "LastModified": null,
+                "ETag": null,
+                "Metadata": {},
+            })
+        );
+    }
+
     #[tokio::test]
     async fn registry_owns_all_three_tasks_after_register() {
         // `connect_lazy` never touches the network, but sqlx still needs
@@ -1740,7 +2456,7 @@ mod tests {
         register_assets(
             &mut registry,
             pool,
-            Arc::new(UnavailableObjectStore),
+            Arc::new(LiveS3ObjectStore::from_settings(&Settings::test_defaults())),
             Arc::new(NoopLiveConvert),
         );
         assert!(registry.owns(TASK_DELETE_UNUPLOADED));

@@ -77,9 +77,10 @@ fn ammonia_builder() -> ammonia::Builder<'static> {
     let mut builder = ammonia::Builder::default();
     builder.tags(tag_set());
     builder.generic_attributes(generic_attributes());
-    for (tag, attrs) in tag_attributes() {
-        builder.add_tag_attributes(tag, attrs);
-    }
+    // `tag_attributes` *replaces* ammonia's default per-tag table, like nh3
+    // passing ATTRIBUTES as the complete table; `add_tag_attributes` would
+    // merge into the defaults and leak align/scope/hreflang/cite/datetime.
+    builder.tag_attributes(tag_attributes());
     builder.url_schemes(url_schemes());
     builder
 }
@@ -394,6 +395,78 @@ mod tests {
     fn sanitize_rejects_oversize_input() {
         let big = "x".repeat(MAX_HTML_BYTES + 1);
         assert_eq!(sanitize_html(&big), Sanitize::Invalid);
+    }
+
+    #[test]
+    fn sanitize_strips_ammonia_default_tag_attributes() {
+        // Each pair is `(input, clean_html)` captured by executing
+        // `validate_html_content` (nh3 0.2.18) under `pi_dash.settings.test`.
+        // PIDASHCONV-1331: ammonia's default per-tag table must not leak
+        // through — nh3 passes ATTRIBUTES as the complete table.
+        let vectors = [
+            (
+                concat!(
+                    "<table><tr><th align=\"left\" scope=\"col\">a</th>",
+                    "<td align=\"right\">b</td></tr></table>",
+                    "<a href=\"https://x\" hreflang=\"en\">l</a>",
+                    "<blockquote cite=\"https://c\">q</blockquote>",
+                    "<img src=\"https://i\" align=\"left\">",
+                    "<ins datetime=\"2020\">i</ins>",
+                ),
+                concat!(
+                    "<table><tbody><tr><th>a</th><td>b</td></tr></tbody></table>",
+                    "<a href=\"https://x\" rel=\"noopener noreferrer\">l</a>",
+                    "<blockquote>q</blockquote>",
+                    "<img src=\"https://i\">",
+                    "<ins>i</ins>",
+                ),
+            ),
+            (
+                "<table><tr><th align=\"left\" scope=\"col\">a</th><td align=\"right\">b</td></tr></table>",
+                "<table><tbody><tr><th>a</th><td>b</td></tr></tbody></table>",
+            ),
+            (
+                "<a href=\"https://x\" hreflang=\"en\">l</a>",
+                "<a href=\"https://x\" rel=\"noopener noreferrer\">l</a>",
+            ),
+            (
+                "<blockquote cite=\"https://c\">q</blockquote>",
+                "<blockquote>q</blockquote>",
+            ),
+            (
+                "<img src=\"https://i\" align=\"left\">",
+                "<img src=\"https://i\">",
+            ),
+            ("<ins datetime=\"2020\">i</ins>", "<ins>i</ins>"),
+            (
+                "<del cite=\"https://c\" datetime=\"2020\">d</del>",
+                "<del>d</del>",
+            ),
+            (
+                "<table><tr><td align=\"center\" char=\".\" headers=\"h1\">c</td></tr></table>",
+                "<table><tbody><tr><td>c</td></tr></tbody></table>",
+            ),
+            // Controls: attributes inside ATTRIBUTES (or generic `*`) survive.
+            (
+                "<table><tr><th colspan=\"2\" style=\"color:red\">h</th></tr></table>",
+                "<table><tbody><tr><th colspan=\"2\" style=\"color:red\">h</th></tr></tbody></table>",
+            ),
+            (
+                "<img src=\"https://i\" alt=\"a\" width=\"3\">",
+                "<img src=\"https://i\" alt=\"a\" width=\"3\">",
+            ),
+            (
+                "<ol start=\"5\"><li>a</li></ol>",
+                "<ol start=\"5\"><li>a</li></ol>",
+            ),
+        ];
+        for (input, expected) in vectors {
+            assert_eq!(
+                sanitize_html(input),
+                Sanitize::Clean(expected.to_owned()),
+                "input {input:?}"
+            );
+        }
     }
 
     #[test]

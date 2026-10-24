@@ -20,6 +20,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from psycopg.rows import dict_row
+from psycopg.types.json import Json
+
 from . import djangocrypto
 
 from .db import insert_row
@@ -2211,6 +2214,51 @@ def issue_chain(conn, slug: str) -> dict:
             "state": state, "issue": issue}
 
 
+def bulk_issues(conn, slug: str, n: int) -> dict:
+    """One workspace with ``n`` live issues for the version backfills.
+
+    PIDASHCONV-1294: the description-version sync writes one multi-row
+    INSERT per workspace group, so the bind-param cap only bites with
+    thousands of live issues in a single workspace. Seeds via
+    ``issue_chain`` plus full-row duplication (``issues`` carries no
+    unique constraints, so copies are safe). Every issue gets
+    ``created_by_id`` so owner resolution never needs the project-admin
+    fallback. Returns the chain plus ``pre_total`` (live issues present
+    before seeding, for the sync ``offset``).
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM issues WHERE deleted_at IS NULL")
+        pre_total = cur.fetchone()["n"]
+    chain = issue_chain(conn, slug)
+    owner_id = chain["owner"]["id"]
+    project_member(conn, chain["project"]["id"], chain["workspace"]["id"], owner_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_by_id = %s::uuid WHERE id = %s::uuid",
+            (str(owner_id), str(chain["issue"]["id"])),
+        )
+        cur.execute(
+            "SELECT * FROM issues WHERE id = %s::uuid", (str(chain["issue"]["id"]),)
+        )
+        cols = [d.name for d in cur.description]
+        template = dict(zip(cols, cur.fetchone()))
+    col_sql = ", ".join(f'"{c}"' for c in cols)
+    placeholders = ", ".join(["%s"] * len(cols))
+    batch = []
+    for _ in range(n - 1):
+        row = dict(template)
+        row["id"] = uuid.uuid4()
+        batch.append(
+            tuple(Json(v) if isinstance(v, dict) else v for v in (row[c] for c in cols))
+        )
+    with conn.cursor() as cur:
+        cur.executemany(
+            f"INSERT INTO issues ({col_sql}) VALUES ({placeholders})", batch
+        )
+    chain["pre_total"] = pre_total
+    return chain
+
+
 # ---------------------------------------------------------------------------
 # Cycle / module / comment / intake seeds (PIDASHCONV-1105 webhooks fan-out)
 # ---------------------------------------------------------------------------
@@ -2406,6 +2454,37 @@ def project_member(
     }
     values.update(over)
     return insert_row(conn, "project_members", values)
+
+
+def issue_subscriber(conn, project_id, workspace_id, issue_id, user_id, **over) -> dict:
+    """One ``issue_subscribers`` row (PIDASHCONV-1276 closed_to oracle)."""
+    values = {
+        "project_id": str(project_id),
+        "workspace_id": str(workspace_id),
+        "issue_id": str(issue_id),
+        "subscriber_id": str(user_id),
+    }
+    values.update(over)
+    return insert_row(conn, "issue_subscribers", values)
+
+
+def notification_preference(conn, user_id, **over) -> dict:
+    """One ``user_notification_preferences`` row, all flags on (PIDASHCONV-1276).
+
+    ``notifications`` looks the row up with ``.get(user_id=...)`` — a
+    missing row raises inside the task's broad ``except`` and no
+    notification is written — so every notified subscriber needs one.
+    """
+    values = {
+        "user_id": str(user_id),
+        "property_change": True,
+        "state_change": True,
+        "comment": True,
+        "mention": True,
+        "issue_completed": True,
+    }
+    values.update(over)
+    return insert_row(conn, "user_notification_preferences", values)
 
 
 def project_user_property(conn, project_id, workspace_id, user_id, **over) -> dict:

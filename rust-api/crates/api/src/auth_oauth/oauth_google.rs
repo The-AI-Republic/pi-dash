@@ -102,6 +102,7 @@ use axum::routing::get;
 use axum::{Extension, Router};
 use serde_json::Value;
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::redis::RedisHandle;
@@ -114,7 +115,7 @@ use pidash_services::auth_oauth::providers::{
 };
 use pidash_services::auth_session::{
     allowed_hosts_for, base_host, get_safe_redirect_url, redirection_path_str,
-    select_redirection_path, HostSettings, ParamValue,
+    select_redirection_path, HostSettings, ParamValue, MAX_URL_REDIRECT_LENGTH,
 };
 
 // ---------------------------------------------------------------------------
@@ -190,14 +191,6 @@ pub const TRACK_EVENT_TASK: &str = "pi_dash.bgtasks.event_tracking_task.track_ev
 /// (`utils/analytics_events.py`, `USER_JOINED_WORKSPACE`).
 pub const USER_JOINED_WORKSPACE_EVENT: &str = "user_joined_workspace";
 
-/// `django.contrib.auth.login` backend (`settings/common.py:125`, single
-/// `AUTHENTICATION_BACKENDS` entry; harness `SESSION_BACKEND`).
-pub const LOGIN_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
-/// Salt for `get_session_auth_hash`
-/// (`AbstractBaseUser.get_session_auth_hash`).
-pub const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
-
 /// `make_password` iteration count under the pinned Django 4.2.30
 /// (`PBKDF2PasswordHasher.iterations`, verified against the installed
 /// Django; the admin port pins the same value).
@@ -209,10 +202,18 @@ pub const PASSWORD_HASH_ITERATIONS: u32 = 600_000;
 // ---------------------------------------------------------------------------
 
 /// 302 with a `Location`, mirroring `HttpResponseRedirect(url)`.
+/// Django percent-encodes the URL first (`iri_to_uri`,
+/// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
+/// characters the final `Location` answers 400 (`DisallowedRedirect`).
 pub fn redirect_response(location: &str) -> Response {
-    let Some(value) = crate::response_headers::header_value(location) else {
+    let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
+    let encoded = crate::response_headers::iri_to_uri(location);
+    let Some(value) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     let mut response = StatusCode::FOUND.into_response();
     response.headers_mut().insert(header::LOCATION, value);
     response
@@ -1095,25 +1096,6 @@ pub async fn create_user(
     })
 }
 
-/// `user.get_session_auth_hash()`: `salted_hmac(salt, password)` hex
-/// (`django.utils.crypto.salted_hmac`, SHA256) — same construction as the
-/// license-domain verifier.
-pub fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let bytes = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Profile, sync, stamps, task fan-out.
 // ---------------------------------------------------------------------------
@@ -1721,9 +1703,12 @@ pub async fn enqueue_task(
 /// `save_user_data` (`adapter/base.py:220-234`): login enrichment plus the
 /// activation branch. `user_activation_email.delay(site, user.id)` fires
 /// while the row still shows inactive; the update then stamps the token
-/// rotation (`User.save`: `token_updated_at` set ⇒ `token = 64 hex`) and
-/// marks the user active. `ip` / `user_agent` bind NULL when absent —
-/// the documented NOT NULL 500 hazard.
+/// rotation (`User.save`: `token_updated_at` set ⇒ `token = 64 hex`),
+/// refreshes `updated_at`, backfills a blank `display_name` from the
+/// email local part, syncs `is_staff` from `is_superuser`
+/// (`user.py:169-187`; the github twin is PIDASHCONV-1081), and marks the
+/// user active. `ip` / `user_agent` bind NULL when absent — the
+/// documented NOT NULL 500 hazard.
 pub async fn save_user_data(
     pool: &sqlx::PgPool,
     user: &UserRow,
@@ -1749,7 +1734,9 @@ pub async fn save_user_data(
         "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
          \"last_login_time\" = $3, \"last_login_ip\" = $4, \
          \"last_login_uagent\" = $5, \"token_updated_at\" = $6, \
-         \"is_active\" = TRUE, \"token\" = $7 WHERE \"id\" = $8",
+         \"is_active\" = TRUE, \"token\" = $7, \"updated_at\" = $2, \
+         \"display_name\" = CASE WHEN \"display_name\" = '' THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
+         \"is_staff\" = \"is_staff\" OR \"is_superuser\" WHERE \"id\" = $8",
     )
     .bind(PROVIDER)
     .bind(now)
@@ -2139,38 +2126,31 @@ pub async fn upsert_account(
 }
 
 /// `django.contrib.auth.login` + `user_login`
-/// (`authentication/utils/login.py:14-29`): session-key rotation (flush
-/// when a *different* user is logged in — data gone, fresh key; cycle
-/// when anonymous — data kept, fresh key; untouched for the same user),
-/// the `_auth_*` triple, the `update_last_login` signal write, then
-/// `device_info`. The middleware persists + issues the `session-id`
-/// cookie on success; a 500 answer never persists (status gate).
+/// (`authentication/utils/login.py:14-29`): the shared `login()` half
+/// first (rotation, the `_auth_*` triple, the `update_last_login` signal
+/// write, the CSRF cookie — see
+/// [`super::login::login_session_keys`]), then `device_info`. Returns the
+/// rotated `csrftoken` `Set-Cookie` value for the success redirect. The
+/// middleware persists + issues the `session-id` cookie on success; a 500
+/// answer never persists (status gate).
 pub async fn login_user(
     ctx: &RequestContext<'_>,
+    settings: &pidash_db::config::Settings,
     user: &UserRow,
     secret: &[u8],
     domain: &str,
-) -> Result<(), CallbackError> {
-    match session_get(&ctx.session, "_auth_user_id") {
-        Some(current) if current != user.id.to_string() => ctx.session.lock().clear(),
-        Some(_) => {}
-        None => {
-            ctx.session.lock().key = None;
-        }
-    }
-    session_set(&ctx.session, "_auth_user_id", user.id.to_string());
-    session_set(&ctx.session, "_auth_user_backend", LOGIN_BACKEND.to_owned());
-    session_set(
+) -> Result<String, CallbackError> {
+    let csrf_cookie = super::login::login_session_keys(
         &ctx.session,
-        "_auth_user_hash",
-        session_auth_hash(&user.password, secret),
-    );
-    sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2")
-        .bind(chrono::Utc::now())
-        .bind(user.id)
-        .execute(&ctx.pool)
-        .await
-        .map_err(|_| CallbackError::Internal)?;
+        &ctx.pool,
+        user.id,
+        &user.password,
+        secret,
+        settings,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|_| CallbackError::Internal)?;
     let mut info = serde_json::Map::new();
     info.insert(
         "user_agent".to_owned(),
@@ -2184,7 +2164,7 @@ pub async fn login_user(
     ctx.session
         .lock()
         .set("device_info".to_owned(), Value::Object(info));
-    Ok(())
+    Ok(csrf_cookie)
 }
 
 /// `get_redirection_path` (`utils/redirection_path.py:8-46`): profile
@@ -2435,12 +2415,18 @@ pub async fn app_callback(
         }
         Err(CallbackError::Internal) => server_error(),
         Ok(authed) => {
-            if login_user(&ctx, &authed.row, secret.as_bytes(), &ctx.app_base)
-                .await
-                .is_err()
+            let csrf_cookie = match login_user(
+                &ctx,
+                state.settings(),
+                &authed.row,
+                secret.as_bytes(),
+                &ctx.app_base,
+            )
+            .await
             {
-                return server_error();
-            }
+                Ok(cookie) => cookie,
+                Err(_) => return server_error(),
+            };
             let path = match session_next {
                 Some(next) if !next.is_empty() => next,
                 _ => match redirection_path(
@@ -2461,7 +2447,9 @@ pub async fn app_callback(
                 &[],
                 &allowed_hosts(&ctx.settings_view),
             );
-            redirect_response(&url)
+            let mut response = redirect_response(&url);
+            super::login::push_cookie(&mut response, csrf_cookie);
+            response
         }
     }
 }
@@ -2502,7 +2490,14 @@ pub async fn space_callback(
     // Valid path: `authenticate()` + `user_login()` side effects run
     // first (Python `:85-90`), then the f-string `base_host(...)` raises.
     if let Ok(authed) = authenticate_google(&ctx, &secret, &code, false).await {
-        let _ = login_user(&ctx, &authed.row, secret.as_bytes(), &ctx.space_base).await;
+        let _ = login_user(
+            &ctx,
+            state.settings(),
+            &authed.row,
+            secret.as_bytes(),
+            &ctx.space_base,
+        )
+        .await;
     }
     server_error()
 }
@@ -2510,6 +2505,16 @@ pub async fn space_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_response(&long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_response("http://app.test/?next_path=/x").status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn fixtures_dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/auth_oauth")
@@ -2988,5 +2993,83 @@ mod tests {
             }
         }
         assert_eq!(project_rows, 0, "no project invites seeded");
+    }
+
+    /// Returning-user `save_user_data` applies the `User.save()` effects
+    /// (PIDASHCONV-1364): a blank `display_name` backfills from the email
+    /// local part, `is_staff` syncs from `is_superuser`, and `updated_at`
+    /// refreshes — the `user.py:169-187` semantics behind `base.py:233`.
+    /// Fails on the pre-fix UPDATE (login stamps only).
+    #[tokio::test]
+    async fn google_kernel_save_user_data_applies_save_effects() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go1364-{tag}@example.test");
+        let user_id = uuid::Uuid::new_v4();
+        let stale = chrono::Utc::now() - chrono::Duration::days(7);
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $5, '', '', TRUE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, '', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(&email)
+        .bind(chrono::Utc::now())
+        .bind(stale)
+        .execute(&pool)
+        .await
+        .expect("seed returning user");
+        let user = UserRow {
+            id: user_id,
+            password: "pbkdf2_sha256$600000$kernelseed$kernelhash".to_owned(),
+            email: Some(email.clone()),
+            is_active: true,
+            is_superuser: true,
+            first_name: "Kernel".to_owned(),
+            last_name: "User".to_owned(),
+            display_name: String::new(),
+            avatar: String::new(),
+            avatar_asset_id: None,
+        };
+        save_user_data(
+            &pool,
+            &user,
+            "http://app.example.com",
+            Some("127.0.0.1"),
+            Some("kernel-agent"),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("save_user_data succeeds");
+        let row: (String, bool, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            r#"SELECT "display_name", "is_staff", "updated_at" FROM "users" WHERE "id" = $1"#,
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back user");
+        sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .ok();
+        assert_eq!(
+            row.0,
+            email.split('@').next().unwrap_or_default(),
+            "display_name backfills from the email local part"
+        );
+        assert!(row.1, "is_staff syncs from is_superuser");
+        assert!(row.2 > stale, "updated_at refreshes on the login save");
     }
 }

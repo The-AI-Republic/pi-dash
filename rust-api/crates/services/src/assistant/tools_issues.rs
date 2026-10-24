@@ -563,11 +563,13 @@ pub fn parse_scoped_issue_id(raw: &str) -> Result<Uuid, ToolError> {
 /// which additionally excludes triage states, archived rows/projects, and
 /// drafts). Every read tool ANDs these predicates.
 ///
-/// Triage trap: Django renders `.exclude(state__group='triage')` as
-/// `NOT (states.group = 'triage')`, and `NOT NULL` is `NULL` — so issues
-/// with *no* state are excluded too. The fragment below keeps the exact
-/// `NOT (...)` form instead of the "equivalent" `IS NULL OR !=` rewrite,
-/// which would wrongly admit stateless issues. The queried model is
+/// Triage trap: Django renders `.exclude(state__group='triage')` over the
+/// nullable state FK null-safely, as `NOT (states.group = 'triage' AND
+/// states.group IS NOT NULL)` — the inner `AND` is `FALSE` (not `NULL`)
+/// for a stateless issue, so issues with *no* state are kept. The
+/// fragment below keeps the exact null-safe form; the simpler
+/// `NOT (states.group = 'triage')` rewrite would wrongly drop stateless
+/// issues (PIDASHCONV-1250). The queried model is
 /// `Issue.issue_objects` (soft-delete base, like [`MEMBER_PROJECTS_SQL`]),
 /// hence `issues.deleted_at IS NULL`; joined tables carry no such
 /// predicate.
@@ -579,7 +581,7 @@ pub const SCOPED_ISSUES_SQL: &str = "SELECT DISTINCT issues.* FROM issues \
      LEFT OUTER JOIN states ON states.id = issues.state_id \
      WHERE workspaces.slug = $2 \
      AND issues.deleted_at IS NULL \
-     AND NOT (states.group = 'triage') \
+     AND NOT (states.group = 'triage' AND states.group IS NOT NULL) \
      AND NOT (issues.archived_at IS NOT NULL) \
      AND NOT (projects.archived_at IS NOT NULL) \
      AND NOT (issues.is_draft)";
@@ -2405,7 +2407,8 @@ mod tests {
     fn sql_fragments_name_real_tables() {
         assert!(SCOPED_ISSUES_SQL.contains("FROM issues"));
         assert!(SCOPED_ISSUES_SQL.contains("project_members"));
-        assert!(SCOPED_ISSUES_SQL.contains("NOT (states.group = 'triage')"));
+        assert!(SCOPED_ISSUES_SQL
+            .contains("NOT (states.group = 'triage' AND states.group IS NOT NULL)"));
         assert!(MEMBER_PROJECTS_SQL.contains("FROM projects"));
         assert!(RESOLVE_IDENTIFIER_SQL.contains("UPPER(projects.identifier)"));
         assert!(PAIR_ROWS_SQL.contains("FROM issue_relations"));

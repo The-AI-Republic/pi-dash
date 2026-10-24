@@ -37,6 +37,13 @@ What ports where:
   black-box mid-stream failure; verified empirically.) The typed mid-run path
   on Django is covered by Django's own suite; the typed mid-run path on Rust by
   the unit test above.
+
+A seam fault (PIDASHCONV-1254) ports as a second live case below: a
+turn-scoped trigger fails the first ``assistant_delta`` INSERT — the
+black-box shape of ``_emit_delta`` raising out of ``streamer.handle`` — and
+the turn must fail at once (``internal`` + ``turn_failed``), not at the
+390s sweep. The Rust replay mirrors it in
+``tasks_assistant/test_rust_replay.py``.
 """
 
 from __future__ import annotations
@@ -310,7 +317,9 @@ class _StreamThenErrorStub:
     SSE text chunk, flushes, then sends an SSE error event and closes cleanly.
     The client raises the error out of the stream iteration, so the run fails
     with an untyped provider error after text has streamed — the black-box
-    shape of Django's ``stream_then_fail`` case.
+    shape of Django's ``stream_then_fail`` case. With
+    ``error_message=None`` the stub ends the stream cleanly (``[DONE]``)
+    instead, for tests whose failure comes from elsewhere (a seam fault).
     """
 
     def __init__(self, chunk="Hello", error_message=MIDSTREAM_ERROR_MESSAGE):
@@ -352,24 +361,31 @@ class _StreamThenErrorStub:
                     )
                     self.wfile.flush()
                     time.sleep(0.2)
-                    # Mid-stream error event: the client raises APIError with
-                    # the embedded message out of the stream iteration.
-                    self.wfile.write(
-                        (
-                            "data: "
-                            + json.dumps(
-                                {
-                                    "error": {
-                                        "message": stub.error_message,
-                                        "type": "invalid_request_error",
-                                        "code": "model_not_found",
+                    if stub.error_message is None:
+                        # Clean end: the failure under test comes from
+                        # elsewhere (a seam fault), not the provider.
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                    else:
+                        # Mid-stream error event: the client raises APIError
+                        # with the embedded message out of the stream
+                        # iteration.
+                        self.wfile.write(
+                            (
+                                "data: "
+                                + json.dumps(
+                                    {
+                                        "error": {
+                                            "message": stub.error_message,
+                                            "type": "invalid_request_error",
+                                            "code": "model_not_found",
+                                        }
                                     }
-                                }
-                            )
-                            + "\n\n"
-                        ).encode()
-                    )
-                    self.wfile.flush()
+                                )
+                                + "\n\n"
+                            ).encode()
+                        )
+                        self.wfile.flush()
                 else:
                     content = json.dumps(
                         {
@@ -488,4 +504,130 @@ def test_untyped_midstream_failure_keeps_text_classification(db_conn, broker_url
         }
         assert "assistant_delta" not in kinds, "deltas are pruned on failure"
     finally:
+        stub.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Seam fault injection: a trigger fails one turn's delta writes (PIDASHCONV-1254)
+# --------------------------------------------------------------------------- #
+
+#: The trigger's RAISE text. It matches no ``_classify_error`` marker, so a
+#: mid-stream seam fault classifies ``internal`` on both backends.
+SEAM_FAULT_MESSAGE = "seam fault injection: assistant_delta blocked"
+
+#: The sweep only fails turns older than 390s; failing inside the 60s task
+#: wait proves the turn failed at once, not via the sweep.
+SWEEP_CUTOFF_SECS = 390
+
+
+def _install_delta_fault(db_conn, tag: str, turn_id: str):
+    """Fail this turn's ``assistant_delta`` writes with a turn-scoped trigger.
+
+    ``BEFORE INSERT ON assistant_event ... WHEN (kind, turn_id)``: only this
+    turn's deltas raise; every other write (other turns, other kinds — in
+    particular the ``turn_failed`` event the failure path emits) passes.
+    Names carry the unique tag so parallel runs never share a trigger. Both
+    interpolated values are generated hex/UUIDs, never user input.
+    """
+    fn = f"seam_fault_{tag}"
+    trg = f"seam_fault_{tag}_trg"
+    with db_conn.cursor() as cur:
+        cur.execute(
+            f"CREATE OR REPLACE FUNCTION {fn}() RETURNS trigger LANGUAGE plpgsql AS "
+            f"$$ BEGIN RAISE EXCEPTION '{SEAM_FAULT_MESSAGE}'; END $$"
+        )
+        cur.execute(f"DROP TRIGGER IF EXISTS {trg} ON assistant_event")
+        cur.execute(
+            f"CREATE TRIGGER {trg} BEFORE INSERT ON assistant_event FOR EACH ROW "
+            f"WHEN (NEW.kind = 'assistant_delta' AND NEW.turn_id = '{turn_id}') "
+            f"EXECUTE FUNCTION {fn}()"
+        )
+    return fn, trg
+
+
+def _remove_delta_fault(db_conn, fn: str, trg: str):
+    with db_conn.cursor() as cur:
+        cur.execute(f"DROP TRIGGER IF EXISTS {trg} ON assistant_event")
+        cur.execute(f"DROP FUNCTION IF EXISTS {fn}()")
+
+
+def test_midstream_seam_failure_fails_turn_at_once(db_conn, broker_url):
+    """A DB error from a mid-stream row write fails the turn at once.
+
+    The trigger fails the first ``assistant_delta`` INSERT — the black-box
+    shape of ``_emit_delta`` raising out of ``streamer.handle``. Django
+    catches it in the run's ``except Exception`` arm (``tasks.py:356-361``):
+    the open row fails, the error classifies ``internal``, and the turn fails
+    with ``turn_failed`` — immediately, not at the 390s sweep. The Rust replay
+    in ``tasks_assistant/test_rust_replay.py`` pins the same shape on the
+    Rust worker.
+    """
+    stub = _StreamThenErrorStub(error_message=None)
+    base = stub.start()
+    tag = uuid.uuid4().hex[:8]
+    fn = trg = None
+    try:
+        user, workspace, client = _seed_member(db_conn, f"seam{tag}")
+        _configure_llm(client, base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+        fn, trg = _install_delta_fault(db_conn, tag, turn_id)
+
+        t0 = time.monotonic()
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="seam-fault turn failed",
+        )
+        elapsed = time.monotonic() - t0
+        assert elapsed < SWEEP_CUTOFF_SECS, (
+            f"failed after {elapsed:.0f}s: the sweep won, not the run"
+        )
+
+        def _failure_writes_complete():
+            kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
+            if "turn_failed" in kinds and "assistant_delta" not in kinds:
+                return kinds
+            return None
+
+        kinds = wait_for(_failure_writes_complete, what="seam-fault failure writes")
+        assert row["error_code"] == "internal"
+        assert row["error_detail"] == "The assistant hit an unexpected error."
+        assert row["completed_at"] is not None
+        assert row["started_at"] is not None
+
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT display_content, status FROM assistant_message "
+                "WHERE turn_id = %s AND kind = 'assistant' ORDER BY seq",
+                (turn_id,),
+            )
+            streamed = cur.fetchall()
+        assert streamed, "the streamed chunk wrote an assistant row"
+        assert "".join(r["display_content"] for r in streamed) == "Hello"
+        assert all(r["status"] == "failed" for r in streamed)
+
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT display_content, status FROM assistant_message "
+                "WHERE turn_id = %s AND kind = 'error'",
+                (turn_id,),
+            )
+            err = cur.fetchone()
+        assert err is not None and err["status"] == "failed"
+        assert err["display_content"] == row["error_detail"]
+
+        failed = next(e for e in _turn_events(db_conn, turn_id) if e["kind"] == "turn_failed")
+        assert failed["payload"] == {
+            "turn_id": turn_id,
+            "error_code": "internal",
+            "detail": "The assistant hit an unexpected error.",
+        }
+        assert "assistant_delta" not in kinds, "deltas are pruned on failure"
+    finally:
+        if fn is not None:
+            _remove_delta_fault(db_conn, fn, trg)
         stub.stop()
