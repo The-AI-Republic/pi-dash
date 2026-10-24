@@ -15,9 +15,11 @@ const runtime = vi.hoisted(() => ({
 }));
 
 const navigation = vi.hoisted(() => ({ navigate: vi.fn() }));
+const embed = vi.hoisted(() => ({ framed: false }));
 
 vi.mock("../api/client.js", () => ({ spaceRuntime: runtime }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigation.navigate }));
+vi.mock("../lib/spaceEmbed.js", () => ({ useSpaceEmbedded: () => embed.framed }));
 
 import { createClient } from "@pidash/api-client";
 
@@ -132,6 +134,7 @@ afterEach(() => {
   document.title = "";
   for (const tag of [...document.head.querySelectorAll("meta")]) tag.remove();
   navigation.navigate.mockReset();
+  embed.framed = false;
   vi.restoreAllMocks();
 });
 
@@ -334,6 +337,36 @@ describe("BoardScreen", () => {
     );
     expect(await screen.findByTestId("space-board-empty")).toBeInTheDocument();
     expect(screen.queryByTestId("space-board-layout")).not.toBeInTheDocument();
+  });
+
+  it("mounts the product badge once issues and states settle (SPC-012)", async () => {
+    renderBoard();
+    expect(await screen.findByTestId("space-product-badge")).toBeInTheDocument();
+  });
+
+  it("mounts no badge while settings are still loading", async () => {
+    renderBoard({ settings: () => new Promise(() => undefined) });
+    expect(screen.getByTestId("space-board-placeholder")).toBeInTheDocument();
+    expect(screen.queryByTestId("space-product-badge")).not.toBeInTheDocument();
+  });
+
+  it("mounts no badge while issues load or fail under a resolved navbar", async () => {
+    renderBoard({ issues: () => new Promise(() => undefined) });
+    expect(await screen.findByTestId("space-board-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("space-product-badge")).not.toBeInTheDocument();
+  });
+
+  it("mounts no badge on an issues failure", async () => {
+    renderBoard({ issues: () => reply(500, { detail: "down" }) });
+    expect(await screen.findByTestId("space-board-error")).toBeInTheDocument();
+    expect(screen.queryByTestId("space-product-badge")).not.toBeInTheDocument();
+  });
+
+  it("mounts no badge inside an embedding frame", async () => {
+    embed.framed = true;
+    renderBoard();
+    expect(await screen.findByText("Anonymous visitors can read this")).toBeInTheDocument();
+    expect(screen.queryByTestId("space-product-badge")).not.toBeInTheDocument();
   });
 });
 

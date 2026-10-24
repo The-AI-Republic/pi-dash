@@ -7,11 +7,14 @@
 // renders its decoded glyph; a project with no configured mark renders
 // an empty slot — the old board invents no mark here and neither does
 // the new one; and missing project details altogether render a generic
-// mark so the bar stays intact. The slot always carries data-mark
-// naming its branch for the area gate's driver, which reads the branch
-// rather than guessing from pixels — including while the icon chunk
-// is still loading and for icon names the glyph set does not know,
-// where the shared wrapper shows the identifier initial.
+// mark so the bar stays intact. A mark that cannot be decoded —
+// logo_props that is not a map, or an emoji value outside the code
+// point range — takes the same generic branch: a broken mark must
+// never take the board to the crash screen. The slot always carries
+// data-mark naming its branch for the area gate's driver, which reads
+// the branch rather than guessing from pixels — including while the
+// icon chunk is still loading and for icon names the glyph set does
+// not know, where the shared wrapper shows the identifier initial.
 import { Layers } from "lucide-react";
 import type { SpaceBoardProject } from "@pidash/api-client";
 import * as React from "react";
@@ -23,13 +26,45 @@ import { projectMarkGlyph } from "../lib/projectMark.js";
 /** The mark branch a navbar slot settled on. */
 export type SpaceMarkKind = "icon" | "emoji" | "empty" | "fallback";
 
+type ResolvedSpaceMark =
+  | { kind: "icon"; name: string; color: string | null; identifier: string }
+  | { kind: "emoji"; glyph: string }
+  | { kind: "empty" }
+  | { kind: "fallback" };
+
+/** The logo map when it is one; anything else is a malformed mark. */
+function asLogoMap(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** The decoded emoji glyph, or null when the value does not decode. */
+function safeEmojiGlyph(logoProps: Record<string, unknown>): string | null {
+  try {
+    return projectMarkGlyph(logoProps);
+  } catch {
+    return null;
+  }
+}
+
+/** Settle the mark branch and the payload its render needs. */
+function resolveMark(details: SpaceBoardProject | null): ResolvedSpaceMark {
+  if (details === null) return { kind: "fallback" };
+  const logoProps = asLogoMap(details.logo_props);
+  if (logoProps === null) return { kind: "fallback" };
+  const mark = projectMark(logoProps);
+  if (mark.kind === "icon") return { kind: "icon", name: mark.name, color: mark.color, identifier: details.identifier };
+  if (mark.kind === "emoji") {
+    const glyph = safeEmojiGlyph(logoProps);
+    return glyph === null ? { kind: "fallback" } : { kind: "emoji", glyph };
+  }
+  return { kind: "empty" };
+}
+
 /** Which branch the navbar mark takes for these project details. */
 export function resolveSpaceMarkKind(details: SpaceBoardProject | null): SpaceMarkKind {
-  if (details === null) return "fallback";
-  const mark = projectMark(details.logo_props);
-  if (mark.kind === "icon") return "icon";
-  if (mark.kind === "emoji") return "emoji";
-  return "empty";
+  return resolveMark(details).kind;
 }
 
 const SLOT_CLASSES = "text-body flex size-7 items-center justify-center rounded-(--radius-control) bg-(--subtle)";
@@ -44,23 +79,28 @@ function MarkSlot({ kind, children }: { kind: SpaceMarkKind; children?: React.Re
 
 /** The project's navbar mark. */
 export function SpaceProjectMark({ details }: { details: SpaceBoardProject | null }): React.ReactElement {
-  if (details === null) {
+  const resolved = resolveMark(details);
+  if (resolved.kind === "fallback") {
     return (
       <MarkSlot kind="fallback">
         <Layers aria-hidden="true" size={16} strokeWidth={1.5} />
       </MarkSlot>
     );
   }
-  const mark = projectMark(details.logo_props);
-  if (mark.kind === "icon") {
+  if (resolved.kind === "icon") {
     return (
       <MarkSlot kind="icon">
-        <ProjectMarkIcon mark={mark} identifier={details.identifier} size={16} testId="space-navbar-mark-glyph" />
+        <ProjectMarkIcon
+          mark={{ kind: "icon", name: resolved.name, color: resolved.color }}
+          identifier={resolved.identifier}
+          size={16}
+          testId="space-navbar-mark-glyph"
+        />
       </MarkSlot>
     );
   }
-  if (mark.kind === "emoji") {
-    return <MarkSlot kind="emoji">{projectMarkGlyph(details.logo_props)}</MarkSlot>;
+  if (resolved.kind === "emoji") {
+    return <MarkSlot kind="emoji">{resolved.glyph}</MarkSlot>;
   }
   return <MarkSlot kind="empty" />;
 }

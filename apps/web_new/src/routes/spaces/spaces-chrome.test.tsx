@@ -52,7 +52,7 @@ const settings = {
   is_comments_enabled: false,
   is_reactions_enabled: false,
   is_votes_enabled: false,
-  view_props: {},
+  view_props: { list: true, kanban: true },
   is_disabled: false,
   intake: null,
 };
@@ -152,6 +152,7 @@ describe("spaces chrome", () => {
       "href",
       "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3Dissue-1"
     );
+    await waitFor(() => expect(screen.getByTestId("space-board-empty")).toBeInTheDocument());
     expect(screen.getByTestId("space-product-badge")).toHaveAttribute("href", "https://airepublic.com");
     expect(screen.getByTestId("toast-stack")).toBeInTheDocument();
     expect(screen.queryByTestId("space-route-progress")).not.toBeInTheDocument();
@@ -168,6 +169,6 @@ describe("spaces chrome", () => {
     expect(screen.queryByTestId("space-product-badge")).not.toBeInTheDocument();
     release(reply(200, settings));
     await waitFor(() => expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board"));
-    expect(screen.getByTestId("space-product-badge")).toBeInTheDocument();
+    expect(await screen.findByTestId("space-product-badge")).toBeInTheDocument();
   });
 });

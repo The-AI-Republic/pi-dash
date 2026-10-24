@@ -31,8 +31,13 @@ export type { SpaceAccountIdentity } from "./lib/spaceAccount.js";
 export { isEmbeddedWindow, readSpaceEmbedded, useSpaceEmbedded } from "./lib/spaceEmbed.js";
 export type { FramedWindow } from "./lib/spaceEmbed.js";
 export { healSpaceLocale, storedSpaceLocaleNeedsHeal, useSpaceLocaleTag } from "./lib/spaceLocale.js";
-export { SPACE_MESSAGE_KEYS, spaceMessage } from "./lib/spaceMessages.js";
-export type { SpaceMessageKey } from "./lib/spaceMessages.js";
+export {
+  registerSpaceMessages,
+  resetSpaceMessagesForTests,
+  SPACE_MESSAGE_KEYS,
+  spaceMessage,
+} from "./lib/spaceMessages.js";
+export type { SpaceMessageKey, SpaceMessagePack } from "./lib/spaceMessages.js";
 export {
   notifySpaceAttachmentFailure,
   notifySpaceCommentDeleteFailure,

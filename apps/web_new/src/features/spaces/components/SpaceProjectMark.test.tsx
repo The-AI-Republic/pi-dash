@@ -34,6 +34,15 @@ describe("resolveSpaceMarkKind", () => {
     ["empty settings stay empty", detailsWith({}), "empty"],
     ["uploads are never rendered", detailsWith({ in_use: "upload", url: "https://cdn.test/mark.png" }), "empty"],
     ["missing details fall back", null, "fallback"],
+    ["non-map logo_props falls back", detailsWith("not-a-map" as unknown as Record<string, unknown>), "fallback"],
+    ["null logo_props falls back", detailsWith(null as unknown as Record<string, unknown>), "fallback"],
+    ["array logo_props falls back", detailsWith([] as unknown as Record<string, unknown>), "fallback"],
+    ["out-of-range emoji falls back", detailsWith({ in_use: "emoji", emoji: { value: "99999999" } }), "fallback"],
+    [
+      "undecodable emoji falls back",
+      detailsWith({ in_use: "emoji", emoji: { value: "not-a-code-point" } }),
+      "fallback",
+    ],
   ];
   it.each(cases)("%s", (_label, details, kind) => {
     expect(resolveSpaceMarkKind(details)).toBe(kind);
@@ -83,5 +92,15 @@ describe("SpaceProjectMark", () => {
     expect(markKind()).toBe("fallback");
     expect(container.querySelector("svg")).not.toBeNull();
     expect(screen.getByTestId("space-navbar-mark")).toHaveTextContent("");
+  });
+
+  it("renders the generic mark for malformed logo_props instead of crashing", () => {
+    const { unmount } = render(
+      <SpaceProjectMark details={detailsWith("not-a-map" as unknown as Record<string, unknown>)} />
+    );
+    expect(markKind()).toBe("fallback");
+    unmount();
+    render(<SpaceProjectMark details={detailsWith({ in_use: "emoji", emoji: { value: "99999999" } })} />);
+    expect(markKind()).toBe("fallback");
   });
 });

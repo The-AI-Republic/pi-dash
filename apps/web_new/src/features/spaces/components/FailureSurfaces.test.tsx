@@ -7,6 +7,8 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { LANGUAGE_STORAGE_KEY, registerLocale, resetLocalesForTests } from "../../../core/i18n/locales.js";
+import { registerSpaceMessages, resetSpaceMessagesForTests } from "../lib/spaceMessages.js";
 import {
   SPACE_ANCHOR_NOT_FOUND_ART,
   SPACE_BOARD_ERROR_ART,
@@ -25,6 +27,9 @@ import {
 afterEach(() => {
   document.title = "";
   for (const tag of [...document.head.querySelectorAll("meta")]) tag.remove();
+  globalThis.localStorage?.clear();
+  resetSpaceMessagesForTests();
+  resetLocalesForTests();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -85,6 +90,17 @@ describe("SpaceBoardError", () => {
     render(<SpaceBoardError />);
     expect(document.title).toContain("Board error");
     expectGenericFallbackTags();
+  });
+});
+
+describe("failure surfaces through the message catalog", () => {
+  it("renders the registered pack entry with English fallback per key", () => {
+    registerLocale({ tag: "fr", label: "Francais" });
+    globalThis.localStorage.setItem(LANGUAGE_STORAGE_KEY, "fr");
+    registerSpaceMessages("fr", { "failure.board.heading": "Echec du chargement" });
+    render(<SpaceBoardError />);
+    expect(screen.getByRole("heading", { level: 1, name: "Echec du chargement" })).toBeInTheDocument();
+    expect(screen.getByRole("img")).toHaveAttribute("alt", "An unavailable server");
   });
 });
 

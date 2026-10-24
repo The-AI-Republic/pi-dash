@@ -13,6 +13,7 @@ import * as React from "react";
 import { decideAppInstanceGate } from "../../../core/instance/status.js";
 import { spaceRuntime } from "../api/client.js";
 import { spaceInstanceQueryOptions } from "../api/queries.js";
+import { spaceMessage } from "../lib/spaceMessages.js";
 import { SpaceInstanceFailureScreen } from "./InstanceFailureScreen.js";
 
 export function SpaceBootGate({ children }: { children: React.ReactNode }): React.ReactElement {
@@ -27,10 +28,10 @@ export function SpaceBootGate({ children }: { children: React.ReactNode }): Reac
       <div
         data-testid="space-boot-loader"
         role="status"
-        aria-label="Loading instance"
+        aria-label={spaceMessage("loading.instance")}
         className="flex min-h-screen items-center justify-center bg-(--bg)"
       >
-        <Spinner size="large" label="Loading instance" />
+        <Spinner size="large" label={spaceMessage("loading.instance")} />
       </div>
     );
   }

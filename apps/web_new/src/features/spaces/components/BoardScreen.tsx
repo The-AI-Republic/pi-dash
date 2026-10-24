@@ -132,16 +132,18 @@ function ResolvedBoard({
       ) : issues.data === undefined || states.data === undefined ? (
         <BoardLoading />
       ) : (
-        <BoardContent
-          anchor={anchor}
-          layout={active}
-          filters={filters}
-          page={issues.data}
-          states={states.data}
-          projectIdentifier={identifier}
-        />
+        <>
+          <BoardContent
+            anchor={anchor}
+            layout={active}
+            filters={filters}
+            page={issues.data}
+            states={states.data}
+            projectIdentifier={identifier}
+          />
+          <SpaceProductBadge />
+        </>
       )}
-      <SpaceProductBadge />
     </div>
   );
 }

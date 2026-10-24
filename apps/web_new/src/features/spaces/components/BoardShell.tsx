@@ -60,10 +60,10 @@ export function BoardLoading(): React.ReactElement {
     <div
       data-testid="space-board-loading"
       role="status"
-      aria-label="Loading board"
+      aria-label={spaceMessage("loading.board")}
       className="flex justify-center py-(--space-16)"
     >
-      <Spinner size="large" label="Loading board" />
+      <Spinner size="large" label={spaceMessage("loading.board")} />
     </div>
   );
 }
