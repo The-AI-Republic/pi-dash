@@ -387,6 +387,23 @@ pub enum ArchiveError {
     Transport(String),
 }
 
+/// Classify a mongo archival failure the way `flush_to_mongo_and_delete`
+/// classifies `bulk_write` outcomes (`cleanup_task.py:73-84`): write
+/// failures skip the batch, anything else aborts the task.
+///
+/// `insert_many` reports write and write-concern failures as
+/// `ErrorKind::InsertMany` (mongodb 3.9.1 `src/action/insert_many.rs`);
+/// `ErrorKind::BulkWrite` only comes from `Client::bulk_write`, which this
+/// port does not call — that arm stays for safety.
+fn classify_archive_error(err: &mongodb::error::Error) -> ArchiveError {
+    match *err.kind {
+        mongodb::error::ErrorKind::BulkWrite(_) | mongodb::error::ErrorKind::InsertMany(_) => {
+            ArchiveError::BulkWrite(err.to_string())
+        }
+        _ => ArchiveError::Transport(err.to_string()),
+    }
+}
+
 /// Lazily-connected Mongo handle. Creation performs no I/O, mirroring
 /// `MongoClient(url)` + `get_collection`, which likewise only fail on
 /// misconfiguration — mapped to `None` exactly like Python's broad
@@ -434,10 +451,7 @@ impl MongoSink {
             .ordered(true)
             .await
             .map(|_| ())
-            .map_err(|err| match *err.kind {
-                mongodb::error::ErrorKind::BulkWrite(_) => ArchiveError::BulkWrite(err.to_string()),
-                _ => ArchiveError::Transport(err.to_string()),
-            })
+            .map_err(|err| classify_archive_error(&err))
     }
 }
 
@@ -1001,6 +1015,41 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, FlushOutcome::ArchiveFailedSkipped);
         assert_eq!(archiver.calls.lock().unwrap().len(), 1);
+        assert!(deleter.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn insert_many_write_error_skips_batch() {
+        // `insert_many` reports write failures as `ErrorKind::InsertMany`
+        // (mongodb 3.9.1 `src/action/insert_many.rs`), never as
+        // `ErrorKind::BulkWrite`. Like Django's `BulkWriteError`
+        // (`cleanup_task.py:76-84`) they must skip the batch, not abort
+        // the run (PIDASHCONV-1290). `InsertManyError` is
+        // `#[non_exhaustive]` with a `pub(crate)` ctor, so build one
+        // through its `Deserialize` impl (E11000 dup key).
+        let inner: mongodb::error::InsertManyError = serde_json::from_value(serde_json::json!({
+            "writeErrors": [{"code": 11000, "errmsg": "E11000 duplicate key error"}],
+        }))
+        .expect("fixture deserializes");
+        let err = mongodb::error::Error::from(mongodb::error::ErrorKind::InsertMany(inner));
+        let classified = classify_archive_error(&err);
+        assert!(
+            matches!(classified, ArchiveError::BulkWrite(_)),
+            "InsertMany must classify as BulkWrite, got {classified:?}"
+        );
+        let (archiver, deleter) = fakes(Some(classified));
+        let outcome = flush_batch(
+            Some(&archiver),
+            true,
+            "api_activity_logs",
+            TABLE_API_LOGS,
+            vec![doc(1)],
+            vec![Uuid::nil()],
+            &deleter,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, FlushOutcome::ArchiveFailedSkipped);
         assert!(deleter.calls.lock().unwrap().is_empty());
     }
 
