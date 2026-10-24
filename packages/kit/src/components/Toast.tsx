@@ -153,6 +153,20 @@ function ToastCard({ toast, manager }: { toast: ToastItem; manager: ToastHostMan
 
 function ToastList({ manager }: { manager: ToastHostManager }): React.ReactElement {
   const { toasts } = BaseToast.useToastManager();
+  const toastsRef = React.useRef(toasts);
+  toastsRef.current = toasts;
+  // The provider keeps an auto-dismiss timer per timed notice but never
+  // clears them when it unmounts, so a timer can fire after its host is
+  // gone (in tests, after the jsdom window is torn down, which throws).
+  // Closing each notice here clears its timer while the provider can still
+  // accept the state update. It is a layout effect so the cleanup runs
+  // before the provider's passive unsubscribe, keeping the close delivery.
+  React.useLayoutEffect(
+    () => () => {
+      for (const toast of toastsRef.current) manager.close(toast.id);
+    },
+    [manager]
+  );
   return (
     <>
       {toasts.map((toast) => (

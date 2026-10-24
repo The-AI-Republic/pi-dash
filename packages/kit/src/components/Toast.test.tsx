@@ -203,4 +203,20 @@ describe("Toast inline actions", () => {
     expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
     expect(screen.queryByText("Copied!")).not.toBeInTheDocument();
   });
+
+  it("clears a timed notice's auto-dismiss timer when the host unmounts", async () => {
+    const manager = createKitToastManager();
+    const { unmount } = render(<ToastHost manager={manager} />);
+    showToast(manager, { title: "Saved" });
+    await screen.findByText("Saved");
+
+    // Base UI keeps one auto-dismiss timer per timed notice and only drops
+    // it when that notice closes. Left behind, it fires into a torn-down
+    // document after the host (and its jsdom window) are gone.
+    const scheduled = vi.spyOn(globalThis, "setTimeout");
+    const cleared = vi.spyOn(globalThis, "clearTimeout");
+    unmount();
+    expect(scheduled).not.toHaveBeenCalled();
+    expect(cleared).toHaveBeenCalled();
+  });
 });
