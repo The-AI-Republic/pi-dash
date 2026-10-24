@@ -2881,10 +2881,10 @@ fn json_float_str(value: f64) -> String {
 
 /// One `user_favorites` row's rendered columns (owned text for the hand
 /// assembler — see `render_favorite`).
-struct FavoriteRow {
+pub(crate) struct FavoriteRow {
     id: String,
-    entity_type: String,
-    entity_identifier: Option<String>,
+    pub(crate) entity_type: String,
+    pub(crate) entity_identifier: Option<String>,
     name: Option<String>,
     is_folder: bool,
     sequence: f64,
@@ -2893,7 +2893,7 @@ struct FavoriteRow {
     project_id: Option<String>,
 }
 
-fn favorite_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<FavoriteRow, Denial> {
+pub(crate) fn favorite_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<FavoriteRow, Denial> {
     use sqlx::Row;
     let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
     let entity_type: String = row
@@ -2926,7 +2926,7 @@ fn favorite_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<FavoriteRow, Deni
 /// Render one favorite row in `USER_FAVORITE_WIRE_FIELDS` order. The
 /// `sequence` float renders via [`json_float_str`] (never serde); the
 /// `entity_data` sub-object comes from the merged lite ports.
-fn render_favorite(row: &FavoriteRow, entity: Option<&Value>) -> String {
+pub(crate) fn render_favorite(row: &FavoriteRow, entity: Option<&Value>) -> String {
     let opt = |value: &Option<String>| match value {
         Some(text) => json_string(text),
         None => "null".to_owned(),
@@ -3018,7 +3018,7 @@ async fn page_first_project(pool: &sqlx::PgPool, page_id: &Uuid) -> Result<Optio
 /// `get_entity_data` (`favorite.py:83-88`): `None` for `issue`/`folder`/
 /// unknown types, for a `NULL` identifier, and for a missed fetch; else the
 /// merged lite port of the live entity row.
-async fn fetch_favorite_entity(
+pub(crate) async fn fetch_favorite_entity(
     pool: &sqlx::PgPool,
     entity_type: &str,
     entity_identifier: Option<&str>,
