@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_MODULES_LAYOUT,
+  defaultModuleLinkScheme,
   formatModuleDay,
   formatModuleOffsetChip,
   formatModuleRange,
@@ -13,6 +14,10 @@ import {
   invalidateModuleLists,
   invalidateModuleReads,
   invalidateWorkspaceModules,
+  MODULE_LINK_ADD_TITLE,
+  MODULE_LINK_UPDATE_TITLE,
+  MODULE_LINKS_EMPTY,
+  MODULE_LINKS_TITLE,
   MODULES_CRUMB,
   MODULES_LAYOUTS,
   MODULE_USER_ZONE_HEADING,
@@ -20,6 +25,7 @@ import {
   moduleDayAnchor,
   moduleDetailHref,
   moduleInstantReading,
+  moduleLinkTitle,
   moduleOffsetChip,
   moduleProjectFactsQueryOptions,
   moduleRangeReading,
@@ -32,6 +38,8 @@ import {
   modulesTitle,
   ModuleBoardCard,
   ModuleLayoutIcon,
+  ModuleLinkDialog,
+  ModuleLinksSection,
   ModuleListRow,
   ModulesFeatureGate,
   ModulesLayoutSwitcher,
@@ -65,6 +73,7 @@ import {
   sortModulesByName,
   switchModuleTarget,
   useDetailSidebarCollapsed,
+  useModuleLinksWrite,
   userZoneDiffers,
   writeSidebarCollapsed,
 } from "./index.js";
@@ -149,5 +158,17 @@ describe("modules barrel", () => {
     expect(readSidebarCollapsed).toBeDefined();
     expect(writeSidebarCollapsed).toBeDefined();
     expect(useDetailSidebarCollapsed).toBeDefined();
+  });
+
+  it("re-exports the sidebar links section later slices mount with", () => {
+    expect(MODULE_LINKS_TITLE).toBe("Links");
+    expect(MODULE_LINKS_EMPTY).toBe("No links added yet");
+    expect(MODULE_LINK_ADD_TITLE).toBe("Add link");
+    expect(MODULE_LINK_UPDATE_TITLE).toBe("Update link");
+    expect(ModuleLinksSection).toBeDefined();
+    expect(ModuleLinkDialog).toBeDefined();
+    expect(defaultModuleLinkScheme).toBeDefined();
+    expect(moduleLinkTitle).toBeDefined();
+    expect(useModuleLinksWrite).toBeDefined();
   });
 });

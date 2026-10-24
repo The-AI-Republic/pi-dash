@@ -22432,76 +22432,160 @@ export class WebNewDriver implements ParityDriver {
     return todo("modulesDetailProgressEntrySelected");
   }
 
+  /** The sidebar's links section; mounted once the sidebar renders. */
+  private modulesLinksSection(): Locator {
+    return this.page.getByTestId("modules-links-section").first();
+  }
+
+  /** The add/edit link dialog, scoped by its pinned title. */
+  private modulesLinkDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ hasText: /Add link|Update link/ })
+      .first();
+  }
+
+  /** One link row, scoped by its rendered title-or-URL anchor. */
+  private modulesLinkRow(title: string): Locator {
+    return this.modulesLinksSection()
+      .getByTestId("modules-link-row")
+      .filter({ has: this.page.getByRole("link", { name: title, exact: true }) })
+      .first();
+  }
+
   async modulesDetailLinksOpen(): Promise<boolean> {
-    return todo("modulesDetailLinksOpen");
+    const toggle = this.modulesLinksSection().getByTestId("modules-links-toggle");
+    if ((await toggle.count()) === 0) return false;
+    return (await toggle.first().getAttribute("aria-expanded")) === "true";
   }
 
   async modulesDetailLinksToggle(): Promise<void> {
-    return todo("modulesDetailLinksToggle");
+    await this.modulesLinksSection()
+      .getByTestId("modules-links-toggle")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailLinksEmptyNotice(): Promise<string | null> {
-    return todo("modulesDetailLinksEmptyNotice");
+    const notice = this.modulesLinksSection().getByTestId("modules-links-empty");
+    if (!(await this.isShown(notice))) return null;
+    return (await notice.first().innerText()).replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailLinksAddVisible(): Promise<boolean> {
-    return todo("modulesDetailLinksAddVisible");
+    return this.isShown(this.modulesLinksSection().getByTestId("modules-links-add"));
   }
 
   async modulesDetailLinksAddClick(): Promise<void> {
-    return todo("modulesDetailLinksAddClick");
+    await this.modulesLinksSection().getByTestId("modules-links-add").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.modulesLinkDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailLinksRows(): Promise<ModulesDetailLinkRow[]> {
-    return todo("modulesDetailLinksRows");
+    const rows = this.modulesLinksSection().getByTestId("modules-link-row");
+    const total = await rows.count();
+    const out: ModulesDetailLinkRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const anchor = rows.nth(i).getByRole("link").first();
+      const title = (await anchor.innerText()).replace(/\s+/g, " ").trim();
+      if (title === "") continue;
+      out.push({
+        title,
+        url: (await anchor.getAttribute("href")) ?? "",
+        target: (await anchor.getAttribute("target")) ?? "",
+      });
+    }
+    return out;
   }
 
   async modulesDetailLinkDialogOpen(): Promise<boolean> {
-    return todo("modulesDetailLinkDialogOpen");
+    // Attachment, not visibility: a closed dialog unmounts, while an
+    // opening one can hold a zero-size box under load.
+    return (await this.modulesLinkDialog().count()) > 0;
   }
 
   async modulesDetailLinkDialogTitle(): Promise<string | null> {
-    return todo("modulesDetailLinkDialogTitle");
+    const dialog = this.modulesLinkDialog();
+    if ((await dialog.count()) === 0) return null;
+    const heading = dialog.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    return (await heading.innerText()).replace(/\s+/g, " ").trim();
   }
 
-  async modulesDetailLinkFillUrl(_url: string): Promise<void> {
-    return todo("modulesDetailLinkFillUrl");
+  async modulesDetailLinkFillUrl(url: string): Promise<void> {
+    await this.modulesLinkDialog().getByLabel("URL", { exact: true }).fill(url, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
 
-  async modulesDetailLinkFillTitle(_title: string): Promise<void> {
-    return todo("modulesDetailLinkFillTitle");
+  async modulesDetailLinkFillTitle(title: string): Promise<void> {
+    await this.modulesLinkDialog()
+      .getByLabel(/Display title/)
+      .fill(title, {
+        timeout: WebNewDriver.WAIT_MS,
+      });
   }
 
   async modulesDetailLinkSubmit(): Promise<void> {
-    return todo("modulesDetailLinkSubmit");
+    await this.modulesLinkDialog().getByTestId("modules-link-submit").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailLinkUrlInvalid(): Promise<boolean> {
-    return todo("modulesDetailLinkUrlInvalid");
+    const field = this.modulesLinkDialog().getByLabel("URL", { exact: true });
+    if ((await field.count()) === 0) return false;
+    return (await field.first().getAttribute("aria-invalid")) === "true";
   }
 
   async modulesDetailLinkCancel(): Promise<void> {
-    return todo("modulesDetailLinkCancel");
+    await this.modulesLinkDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.modulesLinkDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDetailLinkCopy(_title: string): Promise<void> {
-    return todo("modulesDetailLinkCopy");
+  async modulesDetailLinkCopy(title: string): Promise<void> {
+    // Headless browsing denies clipboard writes while the copy control
+    // toasts only on success, so the proof needs the grant up front; the
+    // fixture context dies with the scenario, nothing leaks.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.modulesLinkRow(title).getByTestId("modules-link-copy").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDetailLinkEdit(_title: string): Promise<void> {
-    return todo("modulesDetailLinkEdit");
+  async modulesDetailLinkEdit(title: string): Promise<void> {
+    await this.modulesLinkRow(title).getByTestId("modules-link-edit").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.modulesLinkDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDetailLinkDelete(_title: string): Promise<void> {
-    return todo("modulesDetailLinkDelete");
+  async modulesDetailLinkDelete(title: string): Promise<void> {
+    await this.modulesLinkRow(title)
+      .getByTestId("modules-link-delete")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDetailLinkMeta(_title: string): Promise<string | null> {
-    return todo("modulesDetailLinkMeta");
+  async modulesDetailLinkMeta(title: string): Promise<string | null> {
+    const meta = this.modulesLinkRow(title)
+      .getByText(/Added /)
+      .first();
+    if ((await meta.count()) === 0) return null;
+    return (await meta.innerText()).replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailFailNextLinkWrite(): Promise<void> {
-    return todo("modulesDetailFailNextLinkWrite");
+    // Page-scoped: the fixture page dies with the scenario. Link reads
+    // pass through untouched; every write answers a bare refusal.
+    await this.page.route("**/module-links/**", async (route) => {
+      const method = route.request().method();
+      if (method === "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+    });
+  }
+
+  async modulesXLinksSectionVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("modules-links-section"));
   }
 
   async pagesHeaderCopyLinkLabel(): Promise<string | null> {

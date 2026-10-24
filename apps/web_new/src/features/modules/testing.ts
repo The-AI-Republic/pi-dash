@@ -3,12 +3,20 @@
 // See the LICENSE file for details.
 // Modules test fixtures. Tests only; never imported by production code.
 
-import type { ModuleRow as ModuleRowData, ProjectDetails, TransportResponse } from "@pidash/api-client";
+import type {
+  DirectoryMember,
+  ModuleLink as ModuleLinkData,
+  ModuleRow as ModuleRowData,
+  ProjectDetails,
+  TransportResponse,
+  WorkspaceMember,
+} from "@pidash/api-client";
 
 export const MODULES_WS_ID = "123e4567-e89b-12d3-a456-426614174000";
 export const MODULES_PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 export const MODULES_MODULE_ID = "323e4567-e89b-12d3-a456-426614174002";
 export const MODULES_LEAD_ID = "423e4567-e89b-12d3-a456-426614174003";
+export const MODULES_LINK_ID = "523e4567-e89b-12d3-a456-426614174004";
 
 export function jsonResponse(url: string, status: number, body: unknown): TransportResponse {
   return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) } as TransportResponse;
@@ -125,5 +133,37 @@ export function makeProjectDetails(overrides: Partial<ProjectDetails> = {}): Pro
     agent_executor_options: [],
     default_agent_executor: "local_runner",
     ...overrides,
+  };
+}
+
+/** One module reference link as the detail record carries it. */
+export function makeModuleLink(overrides: Partial<ModuleLinkData> = {}): ModuleLinkData {
+  return {
+    id: MODULES_LINK_ID,
+    title: "Launch plan",
+    url: "https://docs.example.com/launch",
+    created_at: "2026-10-01T10:00:00Z",
+    updated_at: "2026-10-01T10:00:00Z",
+    created_by: MODULES_LEAD_ID,
+    updated_by: MODULES_LEAD_ID,
+    ...overrides,
+  };
+}
+
+/** One workspace directory membership for author attribution. */
+export function makeDirectoryEntry(overrides: { member?: Partial<DirectoryMember> } = {}): WorkspaceMember {
+  return {
+    id: "623e4567-e89b-12d3-a456-426614174005",
+    member: {
+      id: MODULES_LEAD_ID,
+      first_name: "Ada",
+      last_name: "Lovelace",
+      avatar: "",
+      avatar_url: null,
+      display_name: "Ada Lovelace",
+      is_bot: false,
+      ...overrides.member,
+    },
+    role: 15,
   };
 }
