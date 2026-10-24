@@ -21,6 +21,9 @@ const POSITIVE = ["SHELL-102"];
 /** Release the mock shell holds in the desktop-positive leg; plainly fake versions. */
 const WAITING_UPDATE = { version: "9.9.9", currentVersion: "9.9.8", installing: false };
 
+/** Sidebar widths the account/update controls must both stay clickable at. */
+const SIDEBAR_WIDTHS = [236, 256, 320, 350];
+
 /** Entry heading the desktop bundle renders for a signed-out visitor (DESK-011). Absent on web. */
 const DESKTOP_ENTRY_HEADING = "The desktop app can't sign you in yet";
 
@@ -127,6 +130,40 @@ test(
       await expect.poll(() => driver.desktopUpdatePresent(), { timeout: 30_000 }).toBe(true);
       const pending = await desktopInvocations(driver.page, "desktop_pending_update");
       expect(pending.length).toBeGreaterThanOrEqual(1);
+    });
+
+    await test.step("the account centre stays clickable with an update waiting", async () => {
+      const account = driver.page.locator('[data-testid="sidebar-user-menu"]');
+      const update = driver.page.getByTestId("desktop-update-control");
+
+      for (const width of SIDEBAR_WIDTHS) {
+        const current = await driver.sidebarWidth();
+        if (current === null) throw new Error("[parity] sidebar has no measured width.");
+        if (current !== width) await driver.dragSidebarGripBy(width - current);
+        await expect.poll(() => driver.sidebarWidth(), { timeout: 15_000 }).toBe(width);
+
+        const accountBox = await account.boundingBox();
+        const updateBox = await update.boundingBox();
+        expect(accountBox).not.toBeNull();
+        expect(updateBox).not.toBeNull();
+        // Each control owns a separate box: the update action starts after
+        // the account trigger ends, with no overlay over its pointer target.
+        expect(updateBox!.x).toBeGreaterThanOrEqual(accountBox!.x + accountBox!.width - 0.5);
+
+        const centre = { x: accountBox!.x + accountBox!.width / 2, y: accountBox!.y + accountBox!.height / 2 };
+        const hit = await driver.page.evaluate(({ x, y }) => {
+          const element = document.elementFromPoint(x, y);
+          return Boolean(element?.closest('[data-testid="sidebar-user-menu"]'));
+        }, centre);
+        expect(hit).toBe(true);
+
+        const installsBefore = (await desktopInvocations(driver.page, "desktop_install_update")).length;
+        await account.click({ position: { x: accountBox!.width / 2, y: accountBox!.height / 2 } });
+        await expect(driver.page.getByRole("menu")).toBeVisible({ timeout: 15_000 });
+        expect(await desktopInvocations(driver.page, "desktop_install_update")).toHaveLength(installsBefore);
+        await driver.page.keyboard.press("Escape");
+        await expect(driver.page.getByRole("menu")).toHaveCount(0);
+      }
     });
 
     await test.step("the server session stays valid throughout", async () => {
