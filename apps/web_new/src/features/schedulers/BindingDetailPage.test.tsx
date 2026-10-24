@@ -39,11 +39,23 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => ({
 }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
-  Link: (props: { children?: React.ReactNode; to?: string; className?: string; params?: unknown }) => (
-    <a href={String(props.to)} className={props.className} data-params={JSON.stringify(props.params)}>
-      {props.children as React.ReactNode}
-    </a>
-  ),
+  Link: (props: {
+    children?: React.ReactNode;
+    to?: string;
+    className?: string;
+    params?: Record<string, string>;
+    onClick?: (event: { stopPropagation: () => void }) => void;
+  }) => {
+    const href = Object.entries(props.params ?? {}).reduce(
+      (path, [key, value]) => path.replace(`$${key}`, value),
+      String(props.to)
+    );
+    return (
+      <a href={href} className={props.className} data-params={JSON.stringify(props.params)} onClick={props.onClick}>
+        {props.children as React.ReactNode}
+      </a>
+    );
+  },
 }));
 
 import { useDocumentHead } from "../../shared/shell/index.js";
@@ -259,6 +271,23 @@ describe("BindingDetailBody", () => {
     expect(navigate).toHaveBeenCalledWith({ href: `/${SLUG}/projects/${PROJECT}/runners/runs/r1` });
   });
 
+  it("offers each run row as a link to the run detail", async () => {
+    setup({ runs: page([runRow()]) });
+    const history = await screen.findByRole("region", { name: "Run history" });
+    // The Started cell renders in the machine's own timezone, so the row is
+    // found by its timezone-independent pod cell instead of the link text.
+    const row = within(history).getByRole("row", { name: /Main pool/ });
+    expect(within(row).getByRole("link")).toHaveAttribute("href", `/${SLUG}/projects/${PROJECT}/runners/runs/r1`);
+  });
+
+  it("keeps the run link from firing the row navigation", async () => {
+    const { user } = setup({ runs: page([runRow()]) });
+    const history = await screen.findByRole("region", { name: "Run history" });
+    const row = within(history).getByRole("row", { name: /Main pool/ });
+    await user.click(within(row).getByRole("link"));
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it("pages through the run history", async () => {
     const { user } = setup({
       runs: page([runRow()], { total_count: 40, total_pages: 2, page: 1 }),
@@ -352,6 +381,14 @@ describe("BindingDetailBody", () => {
     setup({ detail: new Error("404") });
     expect(await screen.findByText(/This scheduler install is not available/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Back to schedulers/ })).toBeInTheDocument();
+  });
+
+  it("explains an unreadable run history as a possibly removed install with a way back", async () => {
+    setup({ runs: new Error("404") });
+    const history = await screen.findByRole("region", { name: "Run history" });
+    const alert = within(history).getByRole("alert");
+    expect(alert).toHaveTextContent("may have been removed");
+    expect(within(alert).getByRole("link", { name: /Back to schedulers/ })).toBeInTheDocument();
   });
 });
 
