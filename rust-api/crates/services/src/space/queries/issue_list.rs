@@ -60,10 +60,6 @@
 //!   `space/views/base.py:199-200`). [`group_values_requires_queryset`]
 //!   marks those branches; the builders still emit the intended SQL for the
 //!   follow-up fix only.
-//! * QUIRK-filtered-out-updated-at (`pi_dash/utils/issue_filters.py:230-238`):
-//!   `filter_updated_at` writes the `created_at__date` term, not
-//!   `updated_at__date` — an `updated_at` query param filters `created_at`.
-//!   [`compile_issue_filters`] keeps that mapping.
 //! * QUIRK-intake-status-fallback (`issue_filters.py:353-365`): the POST
 //!   branch of `filter_intake_status` reads `params.get("inbox_status")`,
 //!   not `"intake_status"`. This endpoint only uses `"GET"`, so the quirk
@@ -475,9 +471,8 @@ pub fn compile_issue_filters(
                 }
                 next = n;
             }
-            // QUIRK-filtered-out-updated-at: writes the created_at term.
             "updated_at" => {
-                let (cs, n) = date_conjuncts("\"issues\".\"created_at\"", raw, true, next);
+                let (cs, n) = date_conjuncts("\"issues\".\"updated_at\"", raw, true, next);
                 for (c, p) in cs {
                     conjuncts.push(c);
                     params.extend(p);
@@ -1368,13 +1363,13 @@ mod tests {
     }
 
     #[test]
-    fn filters_updated_at_hits_created_at_and_type_always_emits() {
-        // QUIRK-filtered-out-updated-at: updated_at compiles to created_at,
-        // on the date part (`created_at__date`, `issue_filters.py:236`).
+    fn filters_updated_at_hits_updated_at_and_type_always_emits() {
+        // `updated_at` compares on the date part of the updated column
+        // (`updated_at__date`, `issue_filters.py:236`).
         let c = compile_issue_filters(&qp(&[("updated_at", "2026-01-01;after")]), 3);
         assert_eq!(
             c.conjuncts,
-            vec!["\"issues\".\"created_at\"::date >= $3".to_string()]
+            vec!["\"issues\".\"updated_at\"::date >= $3".to_string()]
         );
         assert_eq!(c.params, vec!["2026-01-01".to_string()]);
         // `start_date`/`target_date` are bare columns (no `__date` term).
