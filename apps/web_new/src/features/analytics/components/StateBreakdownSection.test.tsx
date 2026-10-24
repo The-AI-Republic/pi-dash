@@ -189,6 +189,20 @@ describe("StateBreakdownSection", () => {
     expect(await readBlob(blob)).toBe("Project,Backlog,Started,Unstarted,Completed,Cancelled\r\nBeta,2,4,3,1,0\r\n");
   });
 
+  it("shows the guidance row when the filter matches no project", async () => {
+    contractMocks.getAnalyticsStats.mockResolvedValue([statsRow("a", "Alpha")]);
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText("Alpha");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.type(screen.getByPlaceholderText("Search"), "no match");
+    expect(screen.getAllByRole("row")).toHaveLength(2);
+    expect(screen.getByTestId("analytics-section-guidance")).toHaveTextContent(
+      "Create projects with work items and assignees to start tracking performance, progress, and team impact here."
+    );
+    expect(screen.getByTestId("analytics-table-count")).toHaveTextContent("1 Projects");
+  });
+
   it("exports the server project name when the live id no longer resolves", async () => {
     contractMocks.getAnalyticsStats.mockResolvedValue([statsRow("gone", "Server name")]);
     const user = userEvent.setup();

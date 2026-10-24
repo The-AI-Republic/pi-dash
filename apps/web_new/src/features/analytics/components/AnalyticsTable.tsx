@@ -21,7 +21,7 @@ export interface AnalyticsTableProps<Row> {
   /** Fixed noun in the row-count label, e.g. `Projects` or the x-axis label. */
   countNoun: string;
   loading?: boolean;
-  /** Guidance copy when the read settled empty or failed. */
+  /** Guidance copy for an empty read or a filter that matches no rows. */
   emptyText?: string | null;
   /** Number of skeleton body rows while loading. */
   skeletonRows?: number;
@@ -96,7 +96,7 @@ export function AnalyticsTable<Row>({
               <Search aria-hidden="true" className="size-4" />
             </IconButton>
           )}
-          {onExport === undefined ? null : (
+          {onExport === undefined || loading ? null : (
             <Button variant="secondary" size="small" onClick={handleExport}>
               {EXPORT_LABEL}
             </Button>
@@ -129,7 +129,7 @@ export function AnalyticsTable<Row>({
                   ))}
                 </tr>
               ))
-            ) : emptyText !== null ? (
+            ) : filtered.length === 0 && emptyText !== null ? (
               <tr>
                 <td colSpan={Math.max(columns.length, 1)} className="px-(--space-3) py-(--space-4)">
                   <AnalyticsSectionGuidance title={emptyText} description="" />
