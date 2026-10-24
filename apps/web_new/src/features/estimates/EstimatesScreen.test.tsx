@@ -16,8 +16,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { authKeys } from "../auth/index.js";
 import { notifyError, notifySuccess } from "../../shared/shell/index.js";
-import { ESTIMATE_CREATED_TITLE, ESTIMATE_DELETED_TITLE } from "./api.js";
+import { ESTIMATE_CREATED_TITLE, ESTIMATE_CREATE_FAILED_TITLE, ESTIMATE_DELETED_TITLE } from "./api.js";
 import { ESTIMATE_DIALOG_TITLE } from "./EstimateCreateDialog.js";
+import { UPDATE_DIALOG_SAVE_LABEL, UPDATE_DIALOG_TITLE } from "./EstimateUpdateDialog.js";
+import { ESTIMATE_SAVED_EDIT_FLAG } from "./model.js";
 import {
   ESTIMATES_ADD_LABEL,
   ESTIMATES_ARCHIVED_HEADING,
@@ -37,6 +39,17 @@ vi.mock("../../shared/shell/index.js", () => ({
   notifySuccess: vi.fn(),
   notifyInfo: vi.fn(),
 }));
+
+const editionHarness = vi.hoisted(() => ({ flags: {} as Record<string, boolean> }));
+vi.mock("../../core/edition/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../core/edition/index.js")>();
+  return {
+    ...original,
+    get edition() {
+      return { ...original.edition, flags: editionHarness.flags };
+    },
+  };
+});
 
 function jsonResponse(url: string, status: number, body: unknown): TransportResponse {
   return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) } as TransportResponse;
@@ -141,6 +154,7 @@ interface StubOptions {
   holdList?: Promise<void>;
   listStatus?: number;
   createStatus?: number;
+  createBody?: unknown;
   deleteStatus?: number;
   patchStatus?: number;
 }
@@ -149,18 +163,20 @@ function stubApi(options: StubOptions = {}) {
   const calls: { method: string; url: string; body: unknown }[] = [];
   let systems = options.systems ?? [];
   let projectEstimate = options.estimate ?? null;
+  const estimatesUrl = `/api/workspaces/${WORKSPACE}/projects/${PROJECT}/estimates/`;
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     const method = init.method ?? "GET";
     const body = init.body === undefined ? undefined : (JSON.parse(init.body) as unknown);
     calls.push({ method, url, body });
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
-    if (url.endsWith(`/api/workspaces/${WORKSPACE}/projects/${PROJECT}/estimates/`) && method === "GET") {
+    if (url.endsWith(estimatesUrl) && method === "GET") {
       if (options.holdList !== undefined) await options.holdList;
       if ((options.listStatus ?? 200) !== 200) return jsonResponse(url, options.listStatus ?? 500, {});
       return jsonResponse(url, 200, systems.map(wireRow));
     }
-    if (url.endsWith(`/api/workspaces/${WORKSPACE}/projects/${PROJECT}/estimates/`) && method === "POST") {
-      if ((options.createStatus ?? 200) !== 200) return jsonResponse(url, options.createStatus ?? 500, {});
+    if (url.endsWith(estimatesUrl) && method === "POST") {
+      if ((options.createStatus ?? 200) !== 200)
+        return jsonResponse(url, options.createStatus ?? 500, options.createBody ?? {});
       const input = body as {
         estimate: { name: string; type: string; last_used: boolean };
         estimate_points: unknown[];
@@ -174,6 +190,34 @@ function stubApi(options: StubOptions = {}) {
       systems = [...systems, created];
       projectEstimate = null;
       return jsonResponse(url, 200, wireRow(created));
+    }
+    if (url.includes("/estimate-points/") && method === "POST") {
+      const input = body as { key: number; value: string };
+      return jsonResponse(url, 200, {
+        id: `99999999-9999-4999-8999-99999999990${input.key}`,
+        key: input.key,
+        value: input.value,
+        description: "",
+      });
+    }
+    if (url.includes("/estimate-points/") && method === "DELETE") return jsonResponse(url, 200, []);
+    if (url.includes(estimatesUrl) && !url.endsWith(estimatesUrl) && method === "PATCH") {
+      const id = url.split("/estimates/")[1]?.replace(/\/$/, "") ?? "";
+      const input = body as {
+        estimate?: { name?: string };
+        estimate_points: { id: string; key: number; value: string }[];
+      };
+      systems = systems.map((row) =>
+        row.id === id
+          ? {
+              ...row,
+              name: input.estimate?.name ?? row.name,
+              points: input.estimate_points.map((entry) => ({ ...entry, description: "" })),
+            }
+          : row
+      );
+      const updated = systems.find((row) => row.id === id) as Row;
+      return jsonResponse(url, 200, wireRow(updated));
     }
     if (url.includes(`/api/workspaces/${WORKSPACE}/projects/${PROJECT}/estimates/`) && method === "DELETE") {
       if ((options.deleteStatus ?? 204) !== 204) return jsonResponse(url, options.deleteStatus ?? 500, {});
@@ -209,6 +253,7 @@ function renderScreen(
 }
 
 beforeEach(() => {
+  editionHarness.flags = {};
   vi.clearAllMocks();
 });
 
@@ -391,7 +436,7 @@ describe("EstimatesScreen", () => {
       systems: [systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true })],
       estimate: ACTIVE_ID,
     });
-    renderScreen();
+    renderScreen(true, ACTIVE_ID);
     await screen.findByText("Active system");
     // Creation belongs to the empty state alone; a populated screen has
     // no add control beside its rows.
@@ -400,6 +445,8 @@ describe("EstimatesScreen", () => {
     await user.click(screen.getByRole("button", { name: "Delete Active system" }));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("Delete estimate system");
+    expect(dialog).toHaveTextContent("Active system");
+    expect(dialog).toHaveTextContent("permanently");
     expect(dialog).toHaveTextContent("This cannot be undone");
 
     // Cancel keeps everything.
@@ -538,5 +585,100 @@ describe("EstimatesScreen", () => {
     await user.click(screen.getByRole("button", { name: "Create estimate" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalled());
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("refuses a duplicate name with a failure notice and keeps the dialog open", async () => {
+    const user = userEvent.setup();
+    stubApi({ createStatus: 400, createBody: { error: "The payload is not valid" } });
+    renderScreen();
+    await screen.findByText(ESTIMATES_EMPTY_TITLE);
+    await user.click(screen.getByRole("button", { name: ESTIMATES_ADD_LABEL }));
+    await user.click(await screen.findByRole("button", { name: /custom/i }));
+    await user.click(screen.getByRole("button", { name: "Create estimate" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(ESTIMATE_CREATE_FAILED_TITLE, expect.any(String)));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.queryByTestId("estimate-system-row")).not.toBeInTheDocument();
+  });
+
+  it("skips the project write when deleting the active system while unlinked", async () => {
+    const user = userEvent.setup();
+    const { calls } = stubApi({
+      systems: [systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true })],
+      estimate: null,
+    });
+    renderScreen();
+    await screen.findByText("Active system");
+    await user.click(screen.getByRole("button", { name: "Delete Active system" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(ESTIMATE_DELETED_TITLE, expect.any(String)));
+    expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
+  });
+
+  it("shows a generated name as-is and links it like any other system", async () => {
+    const user = userEvent.setup();
+    const { calls } = stubApi({
+      systems: [systemRow({ id: ACTIVE_ID, name: "xkqzmpvtyr", last_used: true })],
+      estimate: null,
+    });
+    renderScreen();
+    await screen.findByText("xkqzmpvtyr");
+    await user.click(screen.getByRole("switch", { name: /enable estimates/i }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Estimates enabled", expect.any(String)));
+    expect(calls.filter((call) => call.method === "PATCH").map((call) => call.body)).toEqual([{ estimate: ACTIVE_ID }]);
+  });
+
+  it("offers the edit control beside delete when the edition allows saved edits", async () => {
+    editionHarness.flags = { [ESTIMATE_SAVED_EDIT_FLAG]: true };
+    stubApi({
+      systems: [
+        systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true }),
+        systemRow({ id: OLD_ID, name: "Old system", created_at: "2023-01-01T00:00:00Z" }),
+      ],
+    });
+    renderScreen();
+    await screen.findByText("Active system");
+    const rows = screen.getAllByTestId("estimate-system-row");
+    const controls = within(rows[0] as HTMLElement).getAllByRole("button");
+    expect(controls).toHaveLength(2);
+    expect(controls[0]).toHaveAccessibleName("Delete Active system");
+    expect(controls[1]).toHaveAccessibleName("Edit Active system");
+    expect(within(rows[1] as HTMLElement).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("hides the edit control from a non-admin viewer even in the cloud edition", async () => {
+    editionHarness.flags = { [ESTIMATE_SAVED_EDIT_FLAG]: true };
+    stubApi({ systems: [systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true })] });
+    renderScreen(false);
+    await screen.findByText("Active system");
+    expect(screen.queryByRole("button", { name: /edit/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+  });
+
+  it("opens the update dialog from the row and saves a rename through it", async () => {
+    editionHarness.flags = { [ESTIMATE_SAVED_EDIT_FLAG]: true };
+    const user = userEvent.setup();
+    const { calls } = stubApi({
+      systems: [systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true })],
+    });
+    renderScreen();
+    await screen.findByText("Active system");
+    await user.click(screen.getByRole("button", { name: "Edit Active system" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(UPDATE_DIALOG_TITLE);
+    const name = within(dialog).getByRole("textbox", { name: "System name" });
+    await user.clear(name);
+    await user.type(name, "Renamed system");
+    await user.click(within(dialog).getByRole("button", { name: UPDATE_DIALOG_SAVE_LABEL }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Estimate updated", expect.any(String)));
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({
+      estimate: { name: "Renamed system" },
+      estimate_points: [
+        { id: "aaaaaaaa-0001-4000-8000-000000000001", key: 1, value: "1" },
+        { id: "aaaaaaaa-0002-4000-8000-000000000002", key: 2, value: "2" },
+      ],
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await screen.findByText("Renamed system");
   });
 });

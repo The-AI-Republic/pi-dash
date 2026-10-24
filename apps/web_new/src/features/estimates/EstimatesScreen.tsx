@@ -13,13 +13,15 @@
 import { useQueryClient } from "@tanstack/react-query";
 import type { Estimate } from "@pidash/api-client";
 import { Button, Dialog, EmptyState, IconButton, Skeleton, Switch } from "@pidash/kit";
-import { Trash2 } from "lucide-react";
+import { Pencil, Trash2 } from "lucide-react";
 import * as React from "react";
 
 import { authKeys, useProjectRow } from "../auth/index.js";
+import { edition } from "../../core/edition/index.js";
 import { useDeleteEstimate, useProjectEstimates, useToggleEstimates } from "./api.js";
 import { EstimateCreateDialog } from "./EstimateCreateDialog.js";
-import { selectActiveSystem, selectSupersededSystems, systemValueLabels } from "./model.js";
+import { EstimateUpdateDialog } from "./EstimateUpdateDialog.js";
+import { estimateSavedEditEnabled, selectActiveSystem, selectSupersededSystems, systemValueLabels } from "./model.js";
 
 export const ESTIMATES_HEADING = "Estimates";
 export const ESTIMATES_DESCRIPTION = "Define how your team measures effort so work items read consistently.";
@@ -39,7 +41,7 @@ export const ESTIMATES_EMPTY_DESCRIPTION = "Create a measurement system to start
 export const ESTIMATES_ADD_LABEL = "Add estimate system";
 export const ESTIMATE_DELETE_DIALOG_TITLE = "Delete estimate system";
 export const ESTIMATE_DELETE_DIALOG_BODY =
-  "This removes the system and strips its value from every work item. This cannot be undone.";
+  "This permanently removes the system and strips its value from every work item. This cannot be undone.";
 
 export interface EstimatesScreenProps {
   workspaceSlug: string;
@@ -52,11 +54,29 @@ function SystemRow({
   system,
   manage,
   onDelete,
+  onEdit,
 }: {
   system: Estimate;
   manage: boolean;
   onDelete: ((system: Estimate) => void) | undefined;
+  onEdit?: ((system: Estimate) => void) | undefined;
 }): React.ReactElement {
+  // Delete stays the row's first control so the one-button OSS row and
+  // the parity driver's row-delete click keep working where the edition
+  // adds the edit control beside it.
+  const controls =
+    manage && onDelete !== undefined ? (
+      <div className="flex items-center gap-(--space-2)">
+        <IconButton label={`Delete ${system.name}`} variant="ghost" onClick={() => onDelete(system)}>
+          <Trash2 size={14} aria-hidden="true" />
+        </IconButton>
+        {onEdit === undefined ? null : (
+          <IconButton label={`Edit ${system.name}`} variant="ghost" onClick={() => onEdit(system)}>
+            <Pencil size={14} aria-hidden="true" />
+          </IconButton>
+        )}
+      </div>
+    ) : null;
   return (
     <div
       className="flex items-start justify-between gap-(--space-4) rounded-(--radius-control) border border-(--border) p-(--space-4)"
@@ -67,11 +87,7 @@ function SystemRow({
         <h4 className="text-emphasis truncate text-(--text)">{system.name}</h4>
         <p className="text-body text-(--text-muted)">{systemValueLabels(system).join(", ")}</p>
       </div>
-      {manage && onDelete !== undefined ? (
-        <IconButton label={`Delete ${system.name}`} variant="ghost" onClick={() => onDelete(system)}>
-          <Trash2 size={14} aria-hidden="true" />
-        </IconButton>
-      ) : null}
+      {controls}
     </div>
   );
 }
@@ -111,6 +127,7 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
   const toggle = useToggleEstimates(workspaceSlug, projectId);
   const [creating, setCreating] = React.useState(false);
   const [deleting, setDeleting] = React.useState<Estimate | null>(null);
+  const [editing, setEditing] = React.useState<Estimate | null>(null);
 
   if (systems.isPending) return <EstimatesLoader />;
   if (systems.isError) {
@@ -122,6 +139,9 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
   const superseded = selectSupersededSystems(list);
   // The switch reads the project's stored reference, not list position.
   const enabled = project.data?.estimate != null;
+  // Saved-system editing is a cloud capability: without the edition flag
+  // the row stays delete-only and the update dialog is never mounted.
+  const savedEdit = estimateSavedEditEnabled(edition.flags);
 
   return (
     <section aria-label="Estimates settings" className="flex flex-col gap-(--space-8)" data-testid="estimates-screen">
@@ -168,7 +188,12 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
 
           <div className="flex flex-col gap-(--space-4)" data-testid="estimates-active-section">
             <h3 className="text-h4 text-(--text)">{ESTIMATES_ACTIVE_HEADING}</h3>
-            <SystemRow system={active} manage={canManage} onDelete={(system) => setDeleting(system)} />
+            <SystemRow
+              system={active}
+              manage={canManage}
+              onDelete={(system) => setDeleting(system)}
+              {...(canManage && savedEdit ? { onEdit: (system: Estimate) => setEditing(system) } : {})}
+            />
           </div>
         </div>
       )}
@@ -206,6 +231,15 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
         }}
       />
 
+      {savedEdit && editing !== null ? (
+        <EstimateUpdateDialog
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          system={editing}
+          onClose={() => setEditing(null)}
+        />
+      ) : null}
+
       <Dialog
         open={deleting !== null}
         onOpenChange={(next) => {
@@ -230,8 +264,11 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
                     disabled={remove.isPending}
                     onClick={() => {
                       const target = deleting;
+                      // The unlink follows the stored reference, not the
+                      // row: deleting the active system while the project
+                      // is unlinked needs no project write (EST-016).
                       remove.mutate(
-                        { estimate: target, active: target.id === active?.id },
+                        { estimate: target, active: target.id === active?.id && enabled },
                         { onSuccess: () => setDeleting(null) }
                       );
                     }}

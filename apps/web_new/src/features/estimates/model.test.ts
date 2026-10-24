@@ -12,15 +12,19 @@ import {
   ESTIMATE_FAMILIES,
   ESTIMATE_FAMILY_CATALOGUE,
   ESTIMATE_FAMILY_TIME,
+  ESTIMATE_SAVED_EDIT_FLAG,
   ESTIMATE_VALUE_MAX_LENGTH,
   estimateFamilies,
   estimateFamilyEnabled,
+  estimateFamilyOfType,
   estimatePreview,
+  estimateSavedEditEnabled,
   estimateStarters,
   estimateValueLabel,
   familySystemName,
   moveValueBefore,
   moveValueTo,
+  planEstimateUpdate,
   renumberValues,
   selectActiveSystem,
   selectSupersededSystems,
@@ -243,5 +247,98 @@ describe("value rules", () => {
     expect(moveValueBefore(["1", "2", "3"], 1, 4)).toEqual(["1", "2", "3"]);
     expect(moveValueBefore(["1", "2", "3"], 0, 2).length).toBe(3);
     expect(moveValueBefore(["1"], 0, 0)).toEqual(["1"]);
+  });
+
+  it("reorders id-carrying rows with their ids attached", () => {
+    const rows = [
+      { id: "a", value: "1" },
+      { id: "b", value: "2" },
+      { id: null, value: "3" },
+    ];
+    expect(moveValueTo(rows, 0, 2, "after")).toEqual([
+      { id: "b", value: "2" },
+      { id: null, value: "3" },
+      { id: "a", value: "1" },
+    ]);
+    expect(moveValueBefore(rows, 2, 0)).toEqual([
+      { id: null, value: "3" },
+      { id: "a", value: "1" },
+      { id: "b", value: "2" },
+    ]);
+  });
+});
+
+describe("saved-system editing", () => {
+  it("gates the update dialog behind the edition flag", () => {
+    expect(ESTIMATE_SAVED_EDIT_FLAG).toBe("estimate-saved-edit");
+    expect(estimateSavedEditEnabled()).toBe(false);
+    expect(estimateSavedEditEnabled({})).toBe(false);
+    expect(estimateSavedEditEnabled({ "estimate-saved-edit": false })).toBe(false);
+    expect(estimateSavedEditEnabled({ "estimate-saved-edit": true })).toBe(true);
+  });
+
+  it("reads the validation family from the stored system type", () => {
+    expect(estimateFamilyOfType("points")).toBe("points");
+    expect(estimateFamilyOfType("time")).toBe("time");
+    expect(estimateFamilyOfType("categories")).toBe("categories");
+    expect(estimateFamilyOfType("forthcoming")).toBe("categories");
+  });
+
+  it("keeps a rename-and-reorder as survivors with final keys", () => {
+    const before = [
+      { id: "a", key: 1 },
+      { id: "b", key: 2 },
+      { id: "c", key: 3 },
+    ];
+    expect(
+      planEstimateUpdate(before, [
+        { id: "c", value: "C!" },
+        { id: "a", value: "A" },
+        { id: "b", value: "B" },
+      ])
+    ).toEqual({
+      survivors: [
+        { id: "c", key: 1, value: "C!" },
+        { id: "a", key: 2, value: "A" },
+        { id: "b", key: 3, value: "B" },
+      ],
+      adds: [],
+      removals: [],
+    });
+  });
+
+  it("routes id-less rows to adds and gone ids to removals in key order", () => {
+    const before = [
+      { id: "a", key: 1 },
+      { id: "b", key: 2 },
+      { id: "c", key: 3 },
+    ];
+    expect(
+      planEstimateUpdate(before, [
+        { id: "c", value: "C" },
+        { id: null, value: "fresh" },
+        { id: "a", value: "A" },
+      ])
+    ).toEqual({
+      survivors: [
+        { id: "c", key: 1, value: "C" },
+        { id: "a", key: 3, value: "A" },
+      ],
+      adds: [{ key: 2, value: "fresh" }],
+      removals: ["b"],
+    });
+  });
+
+  it("orders removals by original key with a stable tie-break", () => {
+    const before = [
+      { id: "b", key: 2 },
+      { id: "a", key: 1 },
+      { id: "z", key: 1 },
+    ];
+    expect(planEstimateUpdate(before, [{ id: null, value: "fresh" }])).toEqual({
+      survivors: [],
+      adds: [{ key: 1, value: "fresh" }],
+      removals: ["a", "z", "b"],
+    });
   });
 });
