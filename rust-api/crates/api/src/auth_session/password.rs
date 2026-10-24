@@ -852,6 +852,7 @@ async fn get_csrf_token(
         &secret,
         &pidash_auth::session::http_date(now + pw::CSRF_COOKIE_AGE_SECS),
         secure,
+        state.settings().session.cookie_domain.as_deref(),
     );
     let mut response = json_response(
         StatusCode::OK,
@@ -947,11 +948,18 @@ async fn relogin(
 
 /// Append the rotated `csrftoken` cookie (`login()` calls
 /// `rotate_token()`, so the browser's secret changes on every re-login).
-fn push_csrf_cookie(response: &mut Response, secret: &str, secure: bool, now: i64) {
+fn push_csrf_cookie(
+    response: &mut Response,
+    secret: &str,
+    secure: bool,
+    now: i64,
+    domain: Option<&str>,
+) {
     let cookie = pw::csrf_set_cookie_value(
         secret,
         &pidash_auth::session::http_date(now + pw::CSRF_COOKIE_AGE_SECS),
         secure,
+        domain,
     );
     if let Ok(value) = header::HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
@@ -1122,7 +1130,13 @@ async fn change_password(
         else {
             return server_error();
         };
-        push_csrf_cookie(&mut response, &csrf_secret, secure, now);
+        push_csrf_cookie(
+            &mut response,
+            &csrf_secret,
+            secure,
+            now,
+            state.settings().session.cookie_domain.as_deref(),
+        );
     }
     response
 }
@@ -1248,7 +1262,13 @@ async fn set_password(
         else {
             return server_error();
         };
-        push_csrf_cookie(&mut response, &csrf_secret, secure, now);
+        push_csrf_cookie(
+            &mut response,
+            &csrf_secret,
+            secure,
+            now,
+            state.settings().session.cookie_domain.as_deref(),
+        );
     }
     response
 }
