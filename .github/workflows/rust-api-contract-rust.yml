@@ -249,11 +249,12 @@ jobs:
         # The assistant title contract test captures the DeepSeek wire body on
         # a public host (the SSRF guard rejects loopback provider URLs). The
         # backend process needs the proxy before pytest starts the recorder.
+        # Uppercase only: GitHub rejects both spellings in one env map (its
+        # keys are case-insensitive), and every consumer honors uppercase
+        # (httpx/urllib, reqwest, curl, and the test's own getenv fallback).
         env:
           HTTP_PROXY: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
-          http_proxy: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
           NO_PROXY: 127.0.0.1,localhost
-          no_proxy: 127.0.0.1,localhost
         run: |
           if [ "$DJANGO_SERVER" = "uvicorn" ]; then
             nohup python -m uvicorn pi_dash.asgi:application \
@@ -295,9 +296,7 @@ jobs:
         working-directory: rust-api/contract-tests
         env:
           HTTP_PROXY: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
-          http_proxy: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
           NO_PROXY: 127.0.0.1,localhost
-          no_proxy: 127.0.0.1,localhost
         run: |
           set +e
           IGNORES=$(grep "^${{ matrix.suite }}/" TASK_ORACLE_IGNORES.txt | sed 's/^/--ignore=/' | tr '\n' ' ')
@@ -378,9 +377,7 @@ jobs:
         working-directory: apps/api
         env:
           HTTP_PROXY: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
-          http_proxy: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
           NO_PROXY: 127.0.0.1,localhost
-          no_proxy: 127.0.0.1,localhost
         run: |
           if [ "$DJANGO_SERVER" = "uvicorn" ]; then
             nohup python -m uvicorn pi_dash.asgi:application \
@@ -403,9 +400,7 @@ jobs:
           SPACE_BASE_URL: http://127.0.0.1:8080
           AMQP_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
           HTTP_PROXY: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
-          http_proxy: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
           NO_PROXY: 127.0.0.1,localhost
-          no_proxy: 127.0.0.1,localhost
         run: |
           ./target/debug/pidash-api serve --bind 127.0.0.1:8080 > /tmp/rust-serve.log 2>&1 &
           for i in $(seq 1 60); do
@@ -447,9 +442,7 @@ jobs:
         working-directory: rust-api/contract-tests
         env:
           HTTP_PROXY: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
-          http_proxy: ${{ matrix.suite == 'assistant' && 'http://127.0.0.1:18097' || '' }}
           NO_PROXY: 127.0.0.1,localhost
-          no_proxy: 127.0.0.1,localhost
         run: |
           set +e
           IGNORES=$(grep "^${{ matrix.suite }}/" TASK_ORACLE_IGNORES.txt | sed 's/^/--ignore=/' | tr '\n' ' ')
