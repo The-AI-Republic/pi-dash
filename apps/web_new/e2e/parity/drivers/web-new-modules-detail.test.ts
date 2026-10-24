@@ -50,7 +50,16 @@ class FakePage {
   readonly presses: string[] = [];
   readonly hovers: string[] = [];
   readonly pageCalls: string[] = [];
-  readonly routes: unknown[] = [];
+  readonly routes: Array<{
+    matcher: unknown;
+    handler: (route: {
+      request: () => { method: () => string };
+      fulfill: (answer: unknown) => Promise<void>;
+      continue: () => Promise<void>;
+    }) => Promise<void>;
+  }> = [];
+  readonly fulfilled: unknown[] = [];
+  readonly continued: string[] = [];
   path = "/acme/projects/p1/modules/m1";
   titleValue = "Website - Delivery";
 
@@ -113,6 +122,10 @@ class FakePage {
         self.keys.push(`role:${role}:${options?.name ?? ""}`);
         return self.locator(keyFor(ROOT, "role", [role, options?.name ?? ""]));
       },
+      getByPlaceholder: (placeholder: string) => {
+        self.keys.push(`placeholder:${placeholder}`);
+        return self.locator(keyFor(ROOT, "placeholder", [placeholder]));
+      },
       locator: (selector: string) => {
         self.keys.push(`css:${selector}`);
         return self.locator(keyFor(ROOT, "css", [selector]));
@@ -134,8 +147,8 @@ class FakePage {
       },
       waitForTimeout: async () => undefined,
       keyboard: { press: async () => undefined },
-      route: async (matcher: unknown) => {
-        self.routes.push(matcher);
+      route: async (matcher: unknown, handler: (route: unknown) => Promise<void>) => {
+        self.routes.push({ matcher, handler: handler as never });
       },
       unrouteAll: async () => {
         self.pageCalls.push("unrouteAll");
@@ -409,6 +422,63 @@ describe("modulesDetailMobileFilterToggleVisible", () => {
   it("sees an unguarded toggle", async () => {
     const { driver } = harness({ [`${bar} testid(rich-filter-toggle)`]: { visible: true } });
     expect(await driver.modulesDetailMobileFilterToggleVisible()).toBe(true);
+  });
+});
+
+describe("modulesDetailHeaderAddVisible", () => {
+  const button = "page testid(issues-header) testid(module-add-work-item)";
+
+  it("sees the desktop header add entry", async () => {
+    const { driver } = harness({ [button]: { visible: true } });
+    expect(await driver.modulesDetailHeaderAddVisible()).toBe(true);
+  });
+
+  it("misses the entry for a guest", async () => {
+    const { driver } = harness({ [button]: { count: 0 } });
+    expect(await driver.modulesDetailHeaderAddVisible()).toBe(false);
+  });
+});
+
+describe("modulesDetailHeaderAddClick", () => {
+  it("clicks the desktop header add entry", async () => {
+    const { fake, driver } = harness();
+    await driver.modulesDetailHeaderAddClick();
+    expect(fake.clicks).toEqual(["page testid(issues-header) testid(module-add-work-item)"]);
+  });
+});
+
+describe("modulesDetailFailNextIssuesAdd", () => {
+  function answer(fake: FakePage, method: string) {
+    const registered = fake.routes[0];
+    if (registered === undefined) throw new Error("no route registered");
+    return registered.handler({
+      request: () => ({ method: () => method }),
+      fulfill: async (body) => {
+        fake.fulfilled.push(body);
+      },
+      continue: async () => {
+        fake.continued.push(method);
+      },
+    });
+  }
+
+  it("refuses the module-issues POST and passes reads through", async () => {
+    const { fake, driver } = harness();
+    await driver.modulesDetailFailNextIssuesAdd();
+    expect(fake.routes).toHaveLength(1);
+    expect(fake.routes[0]?.matcher).toBe("**/modules/*/issues/");
+    await answer(fake, "POST");
+    await answer(fake, "GET");
+    expect(fake.fulfilled).toEqual([{ status: 500, contentType: "application/json", body: "{}" }]);
+    expect(fake.continued).toEqual(["GET"]);
+  });
+});
+
+describe("modulesDetailPickerSearch", () => {
+  it("fills the picker's search box", async () => {
+    const { fake, driver } = harness();
+    await driver.modulesDetailPickerSearch("plain");
+    expect(fake.fills).toEqual(["page placeholder(Type to search)=plain"]);
   });
 });
 

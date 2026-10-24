@@ -543,4 +543,4 @@ export type { GlobalIssuesScreenProps } from "./global/GlobalIssuesScreen.js";
 export { GLOBAL_ISSUES_PAGE_SIZE, globalIssuesQueryOptions } from "./global/queries.js";
 export type { IssueFiltersProps } from "./filters/rich/IssueFilters.js";
 export { EntityListScreen } from "./list/EntityListScreen.js";
-export type { EntityListScreenProps } from "./list/EntityListScreen.js";
+export type { EmptyStateActions, EntityListScreenProps } from "./list/EntityListScreen.js";

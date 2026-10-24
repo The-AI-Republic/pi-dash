@@ -74,6 +74,26 @@ export { ModulesListBody, type ModulesListBodyProps } from "./components/Modules
 export { ModulesListHeader, type ModulesListHeaderProps } from "./components/ModulesListHeader.js";
 export { ModulesListScreen, type ModulesListScreenProps } from "./components/ModulesListScreen.js";
 export { ModulesListSkeleton, type ModulesListSkeletonProps } from "./components/ModulesListSkeleton.js";
+export { ModuleAddWorkItem, type ModuleAddWorkItemProps } from "./components/ModuleAddWorkItem.js";
+export { ModuleAddWorkItemButton, type ModuleAddWorkItemButtonProps } from "./components/ModuleAddWorkItemButton.js";
+export {
+  MODULE_ADD_EXISTING_FAILURE,
+  MODULE_ADD_EXISTING_SUCCESS,
+  MODULE_ADD_WORK_ITEM_LABEL,
+  MODULE_PICKER_SEARCH_HINT,
+  canAddWorkItemsToModule,
+  type ModuleAddStanding,
+} from "./lib/moduleAddWorkItem.js";
+export {
+  useModuleAddWorkItem,
+  type ModuleAddWorkItemController,
+  type UseModuleAddWorkItemInput,
+} from "./lib/useModuleAddWorkItem.js";
+export {
+  useModuleAddExisting,
+  type ModuleAddExisting,
+  type UseModuleAddExistingInput,
+} from "./lib/useModuleAddExisting.js";
 export { ModuleDetailBadge, type ModuleDetailBadgeProps } from "./components/ModuleDetailBadge.js";
 export { ModuleDetailCrumbs, type ModuleDetailCrumbsProps } from "./components/ModuleDetailCrumbs.js";
 export { ModuleDetailGate, type ModuleDetailGateProps } from "./components/ModuleDetailGate.js";

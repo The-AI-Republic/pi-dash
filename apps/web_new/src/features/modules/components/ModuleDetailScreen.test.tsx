@@ -33,6 +33,23 @@ vi.mock("./sidebar/moduleSidebarQueries.js", () => ({ moduleDetailQueryOptions: 
 vi.mock("../../issues/prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.prefs }));
 vi.mock("../../issues/list/pages.js", () => ({ listPageQueryOptions: mocks.page }));
 
+vi.mock("./ModuleAddWorkItem.js", () => ({
+  ModuleAddWorkItem: (props: {
+    project: { id: string; memberRole: number | null; archived: boolean };
+    moduleId: string;
+    controller: { canAdd: boolean };
+  }) => (
+    <div
+      data-testid="add-work-item-stub"
+      data-project={props.project.id}
+      data-role={String(props.project.memberRole)}
+      data-archived={String(props.project.archived)}
+      data-module={props.moduleId}
+      data-can-add={String(props.controller.canAdd)}
+    />
+  ),
+}));
+
 vi.mock("./ModuleDetailCrumbs.js", () => ({
   ModuleDetailCrumbs: (props: { projectName: string; moduleName: string }) => (
     <div data-testid="crumbs-stub" data-project={props.projectName} data-module={props.moduleName} />
@@ -48,6 +65,7 @@ vi.mock("../../issues/list/EntityListScreen.js", () => ({
     peekKey: string | null;
     compact: boolean;
     extraHeaderActions: React.ReactNode;
+    emptyStateActions: { canAct: boolean; onCreate: () => void; onAddExisting: () => void };
     onPeekChange: (key: string | null) => void;
   }) => (
     <div
@@ -63,6 +81,7 @@ vi.mock("../../issues/list/EntityListScreen.js", () => ({
         peek
       </button>
       <div data-testid="extra-actions">{props.extraHeaderActions}</div>
+      <div data-testid="empty-actions" data-can-act={String(props.emptyStateActions.canAct)} />
     </div>
   ),
 }));
@@ -185,6 +204,37 @@ describe("ModuleDetailScreen", () => {
     setup({ total: 0 });
     expect(screen.queryByTestId("module-detail-badge")).not.toBeInTheDocument();
     expect(screen.getByTestId("module-detail-sidebar-toggle")).toBeInTheDocument();
+  });
+
+  it("mounts the add entry for an editing standing and hands the empty card the same rule", () => {
+    setup();
+    const add = screen.getByTestId("add-work-item-stub");
+    expect(add).toHaveAttribute("data-project", PROJECT);
+    expect(add).toHaveAttribute("data-module", MODULE);
+    expect(add).toHaveAttribute("data-can-add", "true");
+    // The API row's member_role/archived_at reach the dialog as the option's
+    // memberRole/archived, so its project filter keeps the lone project.
+    expect(add).toHaveAttribute("data-role", "20");
+    expect(add).toHaveAttribute("data-archived", "false");
+    expect(screen.getByTestId("empty-actions")).toHaveAttribute("data-can-act", "true");
+  });
+
+  it("maps an archived project row to the dialog's archived flag", () => {
+    setup({ projects: [project({ archived_at: "2026-01-02T03:04:05Z" })] });
+    expect(screen.queryByTestId("add-work-item-stub")).not.toBeInTheDocument();
+    expect(screen.getByTestId("empty-actions")).toHaveAttribute("data-can-act", "false");
+  });
+
+  it("mounts no add entry for a guest and disables the empty card's actions", () => {
+    setup({ projects: [project({ member_role: 5 })] });
+    expect(screen.queryByTestId("add-work-item-stub")).not.toBeInTheDocument();
+    expect(screen.getByTestId("empty-actions")).toHaveAttribute("data-can-act", "false");
+  });
+
+  it("keeps the add entries on a completed module, as the old header did", () => {
+    setup({ status: "completed" });
+    expect(screen.getByTestId("add-work-item-stub")).toHaveAttribute("data-can-add", "true");
+    expect(screen.getByTestId("empty-actions")).toHaveAttribute("data-can-act", "true");
   });
 
   it("marks a completed module read-only for the host", () => {
