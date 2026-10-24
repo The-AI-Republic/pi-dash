@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 
 const { contractMocks } = vi.hoisted(() => ({
-  contractMocks: { getAnalyticsChart: vi.fn(), listWorkspaceStates: vi.fn() },
+  contractMocks: { getAnalyticsChart: vi.fn(), getProjectAnalyticsChart: vi.fn(), listWorkspaceStates: vi.fn() },
 }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -38,6 +38,9 @@ vi.mock("../../../shared/charts/index.js", async (importOriginal) => {
 
 import { CustomInsightsSection } from "./CustomInsightsSection.js";
 
+const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
+const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
+
 const GUIDANCE =
   "Create projects with work items and assignees to start tracking performance, progress, and team impact here.";
 
@@ -51,6 +54,15 @@ function renderSection(projectIds: readonly string[] = []): void {
   render(
     <QueryClientProvider client={queryClient}>
       <CustomInsightsSection workspaceSlug="acme" projectIds={projectIds} />
+    </QueryClientProvider>
+  );
+}
+
+function renderScoped(dialogScope: { projectId: string; cycleId?: string | null }): void {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <CustomInsightsSection workspaceSlug="acme" projectIds={[]} dialogScope={dialogScope} />
     </QueryClientProvider>
   );
 }
@@ -104,6 +116,40 @@ describe("CustomInsightsSection", () => {
       projectIds: ["a"],
     });
     expect(contractMocks.listWorkspaceStates).not.toHaveBeenCalled();
+  });
+
+  it("plots the project-scoped bars in the dialog and never the workspace read", async () => {
+    contractMocks.getProjectAnalyticsChart.mockResolvedValue({ data: PRIORITY_ROWS, schema: {} });
+    contractMocks.getAnalyticsChart.mockRejectedValue(new Error("workspace read must not run"));
+    renderScoped({ projectId: PROJECT, cycleId: CYCLE });
+    const chart = await screen.findByTestId("mock-chart-bar");
+    expect(chart.dataset["bars"]).toBe(
+      JSON.stringify([
+        { label: "Urgent", values: [1] },
+        { label: "High", values: [2] },
+      ])
+    );
+    expect(contractMocks.getProjectAnalyticsChart).toHaveBeenCalledWith(
+      expect.anything(),
+      "acme",
+      PROJECT,
+      { type: "custom-work-items", xAxis: "PRIORITY", yAxis: "WORK_ITEM_COUNT" },
+      { projectIds: [PROJECT], cycleId: CYCLE }
+    );
+    expect(contractMocks.getAnalyticsChart).not.toHaveBeenCalled();
+    expect(contractMocks.listWorkspaceStates).not.toHaveBeenCalled();
+    const table = screen.getByTestId("analytics-custom-table");
+    expect(within(table).getByRole("button", { name: "Export as csv" })).toBeInTheDocument();
+  });
+
+  it("shows the dialog guidance when its own read fails, without falling back to the workspace", async () => {
+    contractMocks.getProjectAnalyticsChart.mockRejectedValue(new Error("scoped read failed"));
+    contractMocks.getAnalyticsChart.mockResolvedValue({ data: PRIORITY_ROWS, schema: {} });
+    renderScoped({ projectId: PROJECT, cycleId: null });
+    const guidance = await screen.findByTestId("analytics-section-guidance");
+    expect(guidance).toHaveTextContent(GUIDANCE);
+    expect(screen.queryByTestId("mock-chart-bar")).not.toBeInTheDocument();
+    expect(contractMocks.getAnalyticsChart).not.toHaveBeenCalled();
   });
 
   it("re-queries stacked once a split is chosen, then ungrouped once cleared", async () => {

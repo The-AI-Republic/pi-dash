@@ -1536,7 +1536,7 @@ describe("analytics scoped dialog", () => {
     expect(facts[2]?.unassigned).toBe(true);
   });
 
-  it("downloads one dialog table's export at its index", async () => {
+  it("scopes the assignee table's export to its own table and waits for it", async () => {
     const recorder = new Recorder();
     recorder.eventImpl = async () => ({
       path: async () => "/tmp/acme-analytics.csv",
@@ -1550,9 +1550,43 @@ describe("analytics scoped dialog", () => {
       content: "\uFEFFAssignee,Backlog\r\nAda,2\r\n",
     });
     expectTrace(recorder.trace(), [
+      'waitFor page.getByRole("dialog").getByTestId("analytics-dialog-assignee-table").getByRole("button",{"name":"Export as csv"})',
       "waitForEvent page.waitForEvent",
-      'click page.getByRole("dialog").getByRole("button",{"name":"Export as csv"}).nth(1)',
+      'click page.getByRole("dialog").getByTestId("analytics-dialog-assignee-table").getByRole("button",{"name":"Export as csv"})',
     ]);
+    // No positional walk over every dialog button: the index names a table.
+    expect(recorder.trace().some((line) => line.includes(".nth("))).toBe(false);
+  });
+
+  it("scopes the chart table's export to the custom-insights table", async () => {
+    const recorder = new Recorder();
+    recorder.eventImpl = async () => ({
+      path: async () => "/tmp/acme-analytics.csv",
+      suggestedFilename: () => "acme-analytics.csv",
+    });
+    const driver = new WebNewDriver(recorder.page());
+    (driver as unknown as { readDownload: (path: string) => string }).readDownload = () => "\uFEFFPriority,Count\r\n";
+    await expect(driver.analyticsDialogExportDownload(0)).resolves.toEqual({
+      fileName: "acme-analytics.csv",
+      content: "\uFEFFPriority,Count\r\n",
+    });
+    expectTrace(recorder.trace(), [
+      'waitFor page.getByRole("dialog").getByTestId("analytics-custom-table").getByRole("button",{"name":"Export as csv"})',
+      "waitForEvent page.waitForEvent",
+      'click page.getByRole("dialog").getByTestId("analytics-custom-table").getByRole("button",{"name":"Export as csv"})',
+    ]);
+  });
+
+  it("surfaces a missing export control instead of clicking a neighbour's", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => {
+      if (method === "waitFor") return Promise.reject(new Error("no export control"));
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogExportDownload(0)).rejects.toThrow(
+      "no export control"
+    );
+    expect(recorder.trace().includes("waitForEvent page.waitForEvent")).toBe(false);
   });
 
   it("rejects a dialog export that arrived without a path", async () => {

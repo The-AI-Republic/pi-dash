@@ -26171,14 +26171,29 @@ export class WebNewDriver implements ParityDriver {
     });
   }
 
+  /**
+   * The two dialog tables in render order: the custom-insights chart table
+   * first, the assignee table second. Each has its own export control, and
+   * they mount at different times (the chart table waits for its own read),
+   * so the caller's index resolves to that table rather than to a position
+   * in a list of buttons that may not all exist yet.
+   */
+  private analyticsDialogExportAction(tableIndex: 0 | 1): Locator {
+    const table = this.page
+      .getByRole("dialog")
+      .getByTestId(tableIndex === 0 ? "analytics-custom-table" : "analytics-dialog-assignee-table");
+    return table.getByRole("button", { name: "Export as csv" });
+  }
+
   async analyticsDialogExportDownload(tableIndex: 0 | 1): Promise<LocalFileDownload> {
+    // Wait for this table's own control before clicking: the second table
+    // is not the same button as the first at a different position, and the
+    // control only appears once that table's rows have settled.
+    const action = this.analyticsDialogExportAction(tableIndex);
+    await action.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     const [download] = await Promise.all([
       this.page.waitForEvent("download", { timeout: WebNewDriver.WAIT_MS }),
-      this.page
-        .getByRole("dialog")
-        .getByRole("button", { name: "Export as csv" })
-        .nth(tableIndex)
-        .click({ timeout: WebNewDriver.WAIT_MS }),
+      action.click({ timeout: WebNewDriver.WAIT_MS }),
     ]);
     const path = await download.path();
     if (!path) throw new Error("[parity] dialog export download landed without a path.");
