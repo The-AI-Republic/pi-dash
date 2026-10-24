@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Oracle scenario (NEWFRONT-186): the draft preview panel under the
-// section editor renders the in-progress edit against a real issue. BUG
-// (NEWFRONT-193): submit 403s on CSRF, so the scenario locks in the
-// inline CSRF failure and proves the intended draft render through the
-// CSRF-paired API, including the member user-scope path and the tier
-// gate on drafts. Gap: no overridable section spans several kinds, so
+// section editor renders the in-progress edit against a real issue. bug:
+// NEWFRONT-193 — the old app's submit 403s on CSRF, so it shows that
+// failure inline; the intended target, and what apps/web_new ships,
+// renders the draft inline. The gate asserts both targets, including the
+// member user-scope path and the tier gate on drafts. Gap: no
+// overridable section spans several kinds, so
 // the kind switcher never renders; the scheduler recipe is all locked,
 // so the install-target draft shape is proven by AGT-030 instead.
 // Row: AGT-031.
@@ -56,15 +57,26 @@ test(
       expect(await driver.promptsDraftPreviewSubmitEnabled()).toBe(false);
     });
 
-    await test.step("bug: the draft submit fails inline on CSRF", async () => {
+    await test.step("the draft submit renders the draft or fails inline", async () => {
       await driver.promptsEditorFill(DRAFT_BODY);
       await driver.promptsDraftPreviewSubmit(issueId);
-      await expect
-        .poll(async () => (await driver.promptsDraftPreviewResult()).error ?? "", { timeout: 30_000 })
-        .not.toBe("");
-      const result = await driver.promptsDraftPreviewResult();
-      expect(result.error).toContain("CSRF Failed");
-      expect(result.prompt).toBeNull();
+      if (driver.target === "web_new") {
+        // Intended target (AGT-031): the panel renders the unsaved edit.
+        await expect
+          .poll(async () => (await driver.promptsDraftPreviewResult()).prompt ?? "", { timeout: 30_000 })
+          .not.toBe("");
+        const intended = await driver.promptsDraftPreviewResult();
+        expect(intended.prompt).toContain("Parity AGT-031 draft marker.");
+        expect(intended.error).toBeNull();
+      } else {
+        // bug: NEWFRONT-193 — the old app 403s on CSRF and shows that inline.
+        await expect
+          .poll(async () => (await driver.promptsDraftPreviewResult()).error ?? "", { timeout: 30_000 })
+          .not.toBe("");
+        const legacy = await driver.promptsDraftPreviewResult();
+        expect(legacy.error).toContain("CSRF Failed");
+        expect(legacy.prompt).toBeNull();
+      }
       await driver.promptsEditorCancel();
     });
 
