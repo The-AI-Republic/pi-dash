@@ -11,7 +11,7 @@ import * as React from "react";
 
 import { LinksWidget } from "./LinksWidget.js";
 import { RelationsWidget } from "./RelationsWidget.js";
-import { LinkActionButton, RelationActionMenu, WidgetActionsProvider } from "./widgetActions.js";
+import { EpicCreateButton, LinkActionButton, RelationActionMenu, WidgetActionsProvider } from "./widgetActions.js";
 
 export interface IssueWidgetsProps {
   workspaceSlug: string;
@@ -34,6 +34,7 @@ export function IssueWidgets({
       <WidgetActionsProvider>
         <div className="flex flex-wrap items-center gap-(--space-2)">
           <RelationActionMenu canEdit={canEdit} />
+          <EpicCreateButton canEdit={canEdit} />
           <LinkActionButton canEdit={canEdit} />
         </div>
         <RelationsWidget

@@ -59,6 +59,8 @@ export function RelationsWidget({
   const shared = useWidgetActions();
   const addKind = shared.relationKind;
   const setAddKind = shared.setRelationKind;
+  const epicCreateOpen = shared.epicCreateOpen;
+  const setEpicCreateOpen = shared.setEpicCreateOpen;
   const [pendingDelete, setPendingDelete] = React.useState<{ row: RelatedIssue; kind: RelationKind } | null>(null);
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<RelationKind>>(() => new Set());
   const [peek, setPeek] = React.useState<{ row: RelatedIssue; identifier: string } | null>(null);
@@ -218,6 +220,19 @@ export function RelationsWidget({
                 },
               }
             );
+          }}
+        />
+      ) : null}
+      {epicCreateOpen && canEdit ? (
+        <EpicDialog
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          open
+          onOpenChange={(open) => {
+            if (!open) setEpicCreateOpen(false);
+          }}
+          onSaved={() => {
+            void queryClient.invalidateQueries({ queryKey: issueKeys.all(workspaceSlug) });
           }}
         />
       ) : null}

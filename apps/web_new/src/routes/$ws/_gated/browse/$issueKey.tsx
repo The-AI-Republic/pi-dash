@@ -41,6 +41,7 @@ import { CodeReviewsWidget } from "../../../../features/issues/detail/widgets/co
 import { mayDeleteWorkItem } from "../../../../features/issues/lifecycle/rules.js";
 import { useQuickActions } from "../../../../features/issues/menus/useQuickActions.js";
 import {
+  EpicCreateButton,
   LinkActionButton,
   LinksWidget,
   RelationActionMenu,
@@ -239,7 +240,12 @@ function BrowseIssueDetail({
   const widgetSections = [
     {
       label: "Relations" as const,
-      action: <RelationActionMenu canEdit={writable} />,
+      action: (
+        <>
+          <RelationActionMenu canEdit={writable} />
+          <EpicCreateButton canEdit={writable} />
+        </>
+      ),
       node: (
         <RelationsWidget
           workspaceSlug={workspaceSlug}

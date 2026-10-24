@@ -6,16 +6,21 @@
 // a cloud build refuses exactly what its registered rules deny.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { edition } from "../../../core/edition/index.js";
+
 import type { EditionIssuesProviders, WorkflowRules } from "./providers.js";
 import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "./providers.js";
 import { WORKFLOW_FLAG } from "./flags.js";
 import {
   columnStateId,
+  createStateRefusal,
   creationBlockedInColumn,
   creationRefusal,
+  creationStateGate,
   dropBlockedInColumn,
   isWorkflowGateEnabled,
   refusalMessage,
+  selectionStateGate,
   stateGateFor,
   stateOptionGate,
   transitionRefusal,
@@ -40,6 +45,7 @@ function register(providers: EditionIssuesProviders): void {
 
 afterEach(() => {
   resetEditionIssuesProviders();
+  delete edition.flags[WORKFLOW_FLAG];
 });
 
 describe("community build (flag off)", () => {
@@ -73,6 +79,9 @@ describe("community build (flag off)", () => {
     register({ workflowRules: closedDoneRules() });
     expect(stateGateFor({ projectId: PROJECT, fromStateId: TODO, purpose: "state-picker" })).toBeNull();
     expect(stateOptionGate(PROJECT, TODO)).toBeUndefined();
+    expect(creationStateGate(PROJECT)).toBeUndefined();
+    expect(selectionStateGate(PROJECT, [TODO, BLOCKED])).toBeUndefined();
+    expect(createStateRefusal({ projectId: PROJECT, stateId: BLOCKED })).toBeNull();
   });
 });
 
@@ -208,6 +217,51 @@ describe("state gates", () => {
     expect(stateOptionGate(PROJECT, TODO, false)).toBeUndefined();
     const gate = stateOptionGate(PROJECT, TODO, true)!;
     expect(gate(state(DONE))).toEqual({ disabled: true, reason: "Finish the review first" });
+  });
+
+  it("gates a create's first state against the same rules", () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    register({ workflowRules: closedDoneRules() });
+    const gate = creationStateGate(PROJECT)!;
+    expect(gate(state(DONE))).toEqual({ disabled: true, reason: "Finish the review first" });
+    expect(gate(state(TODO))).toEqual({ disabled: false });
+  });
+
+  it("asks the rules with the create purpose and no current state", () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    const refusal = vi.fn(() => null);
+    register({ workflowRules: { refusal } });
+    creationStateGate(PROJECT)!(state(DONE));
+    expect(refusal).toHaveBeenCalledWith({
+      projectId: PROJECT,
+      fromStateId: null,
+      toStateId: DONE,
+      purpose: "create",
+    });
+  });
+
+  it("opens a bulk target only when every selected row may enter it", () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    register({
+      workflowRules: {
+        refusal: ({ fromStateId, toStateId }) =>
+          fromStateId === BLOCKED && toStateId === DONE ? { reason: "Blocked work cannot finish" } : null,
+      },
+    });
+    const gate = selectionStateGate(PROJECT, [TODO, BLOCKED])!;
+    expect(gate(state(DONE))).toEqual({ disabled: true, reason: "Blocked work cannot finish" });
+    expect(gate(state(TODO))).toEqual({ disabled: false });
+    expect(selectionStateGate(PROJECT, [])!(state(DONE))).toEqual({ disabled: false });
+  });
+
+  it("reports a refused create state at submit and passes an open one", () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    register({ workflowRules: closedDoneRules() });
+    expect(createStateRefusal({ projectId: PROJECT, stateId: DONE })).toEqual({
+      reason: "Finish the review first",
+    });
+    expect(createStateRefusal({ projectId: PROJECT, stateId: TODO })).toBeNull();
+    expect(createStateRefusal({ projectId: PROJECT, stateId: null })).toBeNull();
   });
 });
 

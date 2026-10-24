@@ -15,7 +15,13 @@ import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
 
 import { useCreateWorkItem } from "../api/create.js";
-import { BulkToolbar, isBulkOperationsEnabled, useBulkMutations, useBulkSelection } from "../bulk/index.js";
+import {
+  BulkToolbar,
+  isBulkOperationsEnabled,
+  selectedStateIds,
+  useBulkMutations,
+  useBulkSelection,
+} from "../bulk/index.js";
 import { WorkItemPreviewHover } from "../lifecycle/WorkItemPreviewCard.js";
 import { todayIsoDay } from "../dropdowns/calendar.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
@@ -125,7 +131,7 @@ export function GanttLayout({
     () =>
       rows
         .filter((row) => !row.unconfirmed && !row.isEpic)
-        .map((row) => ({ id: row.id, groupKey: TIMELINE_SELECTION_GROUP })),
+        .map((row) => ({ id: row.id, groupKey: TIMELINE_SELECTION_GROUP, stateId: row.stateId })),
     [rows]
   );
   const selection = useBulkSelection(selectionItems, bulkEnabled);
@@ -227,6 +233,7 @@ export function GanttLayout({
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           count={selectedCount}
+          fromStateIds={selectedStateIds(selectionItems, selection.selectedIds)}
           hideCycle={bulkFlags.hideCycle}
           hideModule={bulkFlags.hideModule}
           hideEstimate={bulkFlags.hideEstimate}

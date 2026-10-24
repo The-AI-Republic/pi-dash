@@ -18,6 +18,7 @@ import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { MemberPicker, PriorityPicker, StatePicker } from "../../../shared/pickers/index.js";
 import { issueKeys } from "../api/keys.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
+import { stateOptionGate } from "../edition/workflow.js";
 
 export interface RelationRowProps {
   workspaceSlug: string;
@@ -104,6 +105,7 @@ export function RelationRow({
           value={row.state_id}
           variant="ghost"
           disabled={!canEdit}
+          optionGate={stateOptionGate(row.project_id, row.state_id)}
           onChange={(stateId) => update.mutate({ state_id: stateId })}
         />
         <PriorityPicker

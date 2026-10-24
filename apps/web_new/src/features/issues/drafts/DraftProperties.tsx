@@ -29,6 +29,7 @@ import {
 } from "../../../shared/pickers/index.js";
 import { usePickerStates } from "../../../shared/pickers/reference.js";
 import { notifyError } from "../../../shared/shell/index.js";
+import { stateOptionGate } from "../edition/workflow.js";
 import {
   asPriority,
   assigneePatch,
@@ -123,6 +124,7 @@ export function DraftProperties({
           disabled={disabled}
           placeholder="State"
           preload
+          optionGate={projectId === "" ? undefined : stateOptionGate(projectId, draft.state_id ?? null)}
           onChange={(stateId) => onWrite(statePatch(stateId))}
         />
       </div>

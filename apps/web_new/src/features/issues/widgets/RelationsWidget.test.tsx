@@ -15,7 +15,7 @@ import { resetEditionIssuesProviders } from "../edition/providers.js";
 import { issueKeys } from "../api/keys.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { RelationsWidget } from "./RelationsWidget.js";
-import { RelationActionMenu, WidgetActionsProvider } from "./widgetActions.js";
+import { EpicCreateButton, RelationActionMenu, WidgetActionsProvider } from "./widgetActions.js";
 import {
   ISSUE,
   PEER,
@@ -73,6 +73,7 @@ function renderWidget(options: Parameters<typeof stubTransport>[0] = {}, canEdit
     <QueryClientProvider client={queryClient}>
       <WidgetActionsProvider>
         <RelationActionMenu canEdit={canEdit} />
+        <EpicCreateButton canEdit={canEdit} />
         <RelationsWidget
           workspaceSlug={WS}
           projectId={PROJECT}
@@ -396,6 +397,41 @@ describe("relations widget", () => {
     const dialog = await screen.findByRole("dialog", { name: "Edit epic" }, { timeout: 10_000 });
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit epic" })).not.toBeInTheDocument());
+  });
+
+  it("creates an epic from the action row and posts it to the epics collection (ISS-232)", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    const user = userEvent.setup();
+    const { calls } = renderWidget({ relations: emptyRelations() });
+    expect(screen.queryByRole("button", { name: "Create epic" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create epic" }));
+    const dialog = await screen.findByRole("dialog", { name: "Create epic" }, { timeout: 10_000 });
+    await user.type(within(dialog).getByLabelText("Epic name"), "Big rock");
+    await user.click(within(dialog).getByRole("button", { name: "Create epic" }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.method === "POST" && call.url.includes(`/projects/${PROJECT}/epics/`))).toBe(
+        true
+      )
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create epic" })).not.toBeInTheDocument());
+    // The relations read refreshes so the new epic can be related at once.
+    await waitFor(() =>
+      expect(calls.filter((call) => call.method === "GET" && call.url.includes("/issue-relation/")).length).toBe(2)
+    );
+  });
+
+  it("refuses a blank epic name without writing, and closes on cancel", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    const user = userEvent.setup();
+    const { calls } = renderWidget({ relations: emptyRelations() });
+    await user.click(screen.getByRole("button", { name: "Create epic" }));
+    const dialog = await screen.findByRole("dialog", { name: "Create epic" }, { timeout: 10_000 });
+    await user.click(within(dialog).getByRole("button", { name: "Create epic" }));
+    expect(await within(dialog).findByText("Give the epic a name.")).toBeInTheDocument();
+    expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create epic" })).not.toBeInTheDocument());
+    expect(calls.filter((call) => call.method !== "GET")).toEqual([]);
   });
 
   it("falls back to the work-item form for an epic in the community build", async () => {

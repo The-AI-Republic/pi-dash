@@ -60,6 +60,7 @@ vi.mock("../bulk/index.js", async (importOriginal) => ({
     hideCycle: boolean;
     hideModule: boolean;
     hideEstimate: boolean;
+    fromStateIds?: readonly (string | null)[];
     onUpdate: (properties: unknown) => void;
     onDelete: () => void;
     onArchive: () => void;
@@ -72,6 +73,7 @@ vi.mock("../bulk/index.js", async (importOriginal) => ({
       data-hide-cycle={props.hideCycle ? "true" : undefined}
       data-hide-module={props.hideModule ? "true" : undefined}
       data-hide-estimate={props.hideEstimate ? "true" : undefined}
+      data-from-states={JSON.stringify(props.fromStateIds ?? null)}
     >
       <span>{props.count} selected</span>
       <button type="button" onClick={() => props.onUpdate({ priority: "high" })}>
@@ -621,6 +623,14 @@ describe("GanttLayout bulk selection (ISS-116)", () => {
     renderLayout({ projectRole: 5 });
     expect(screen.queryByLabelText("Select all work items")).toBeNull();
     expect(screen.queryByLabelText("Select WEB-1")).toBeNull();
+  });
+
+  it("hands the toolbar every selected row's state for the workflow gate (ISS-233)", () => {
+    enableBulk();
+    renderLayout({ projectRole: 15 });
+    fireEvent.click(screen.getByLabelText("Select WEB-1"));
+    fireEvent.click(screen.getByLabelText("Select WEB-2"));
+    expect(screen.getByTestId("bulk-toolbar")).toHaveAttribute("data-from-states", JSON.stringify([null, STATE]));
   });
 
   it("reveals the toolbar on selection and clears it", async () => {

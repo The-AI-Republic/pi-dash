@@ -32,6 +32,7 @@ import {
   BulkToolbar,
   BulkUpgradeBanner,
   isBulkOperationsEnabled,
+  selectedStateIds,
   useBulkMutations,
   useBulkSelection,
 } from "../bulk/index.js";
@@ -564,6 +565,7 @@ export function ListLayout({
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           count={selectedCount}
+          fromStateIds={selectedStateIds(selectionItems, selection.selectedIds)}
           hideCycle={flags.hideCycle}
           hideModule={flags.hideModule}
           hideEstimate={!estimateEnabled}
@@ -655,11 +657,11 @@ export function flattenSectionSelection(
   projectId: string,
   expanded: ReadonlySet<string>,
   childrenByParent: ReadonlyMap<string, readonly IssueListItem[]>
-): Array<{ id: string; groupKey: string }> {
-  const out: Array<{ id: string; groupKey: string }> = [];
+): Array<{ id: string; groupKey: string; stateId: string | null }> {
+  const out: Array<{ id: string; groupKey: string; stateId: string | null }> = [];
   const visit = (rows: readonly IssueListItem[], groupKey: string): void => {
     for (const row of rows) {
-      if (row.project_id === projectId) out.push({ id: row.id, groupKey });
+      if (row.project_id === projectId) out.push({ id: row.id, groupKey, stateId: row.state_id });
       if (expanded.has(row.id)) visit(childrenByParent.get(row.id) ?? [], groupKey);
     }
   };

@@ -12,6 +12,17 @@
 export interface SelectionItem {
   id: string;
   groupKey: string;
+  /** The row's current state, so a bulk move can ask the workflow about it. */
+  stateId?: string | null | undefined;
+}
+
+/**
+ * The current states of the selected rows, in list order. A bulk state
+ * write consults the workflow once per row (ISS-233), so the toolbar
+ * needs every origin, not one representative.
+ */
+export function selectedStateIds(items: readonly SelectionItem[], selected: ReadonlySet<string>): Array<string | null> {
+  return items.filter((item) => selected.has(item.id)).map((item) => item.stateId ?? null);
 }
 
 /** A group header's aggregate selection state. */

@@ -26,12 +26,15 @@ import {
   StatePicker,
 } from "../../../shared/pickers/index.js";
 import type { PriorityLevel } from "../../../shared/pickers/index.js";
+import { selectionStateGate } from "../edition/workflow.js";
 import { visibleBulkFields, type BulkPropertyKey } from "./model.js";
 
 export interface BulkToolbarProps {
   workspaceSlug: string;
   projectId: string;
   count: number;
+  /** The selected rows' current states, so the state picker can gate per row. */
+  fromStateIds?: readonly (string | null)[] | undefined;
   hideCycle: boolean;
   hideModule: boolean;
   hideEstimate: boolean;
@@ -139,6 +142,9 @@ export function BulkToolbar(props: BulkToolbarProps): React.ReactElement | null 
   const [estimatePoint, setEstimatePoint] = React.useState<string | null>(null);
 
   const fields = visibleBulkFields(props);
+  // One target has to be open to every selected row (ISS-233); without
+  // the workflow this is undefined and the picker stays plain.
+  const stateGate = selectionStateGate(props.projectId, props.fromStateIds ?? []);
   const selectionLabel = props.count === 1 ? "1 selected" : `${props.count} selected`;
 
   function toggle(key: BulkPropertyKey): void {
@@ -234,6 +240,7 @@ export function BulkToolbar(props: BulkToolbarProps): React.ReactElement | null 
                     value={stateId}
                     onChange={setStateId}
                     disabled={!armed.state_id}
+                    optionGate={stateGate}
                   />
                 ) : null}
                 {key === "priority" ? (

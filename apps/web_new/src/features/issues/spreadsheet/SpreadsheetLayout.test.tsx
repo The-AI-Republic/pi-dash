@@ -42,13 +42,14 @@ vi.mock("../bulk/index.js", async (importOriginal) => ({
   }),
   BulkToolbar: (props: {
     count: number;
+    fromStateIds?: readonly (string | null)[];
     onUpdate: (properties: unknown) => void;
     onDelete: () => void;
     onArchive: () => void;
     onSubscribe: () => void;
     onClear: () => void;
   }) => (
-    <div data-testid="bulk-toolbar">
+    <div data-testid="bulk-toolbar" data-from-states={JSON.stringify(props.fromStateIds ?? null)}>
       <span>{props.count} selected</span>
       <button type="button" onClick={() => props.onUpdate({ priority: "high" })}>
         Update
@@ -1055,6 +1056,16 @@ describe("SpreadsheetLayout selection", () => {
     fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
     expect(await screen.findByTestId("bulk-toolbar")).toHaveTextContent("1 selected");
     expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument();
+  });
+
+  it("hands the toolbar the selected rows' states for the workflow gate (ISS-233)", async () => {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+    stub({ pages: [page([issue(ID1, "Fix login", 1), issue(ID2, "Second", 2, { state_id: ID2 })])] });
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-2" })[0]!);
+    expect(screen.getByTestId("bulk-toolbar")).toHaveAttribute("data-from-states", JSON.stringify([null, ID2]));
   });
 
   it.each([

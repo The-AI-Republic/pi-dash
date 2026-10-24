@@ -31,6 +31,7 @@ import {
   StatePicker,
   type PriorityLevel,
 } from "../../../shared/pickers/index.js";
+import { stateOptionGate } from "../edition/workflow.js";
 import { useListCycleMove, useListIssuePatch, useListModuleWrite } from "./mutations.js";
 
 export interface InlinePropertyStripProps {
@@ -242,6 +243,7 @@ function InlinePropertyStripImpl({
                     trigger={stateTrigger}
                     open={open}
                     onOpenChange={onOpenChange}
+                    optionGate={stateOptionGate(projectId, issue.state_id)}
                   />
                 )}
               </DeferredPicker>

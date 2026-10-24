@@ -169,3 +169,52 @@ export function stateGateFor(input: {
     return refusal === null ? { disabled: false } : { disabled: true, reason: refusal.reason };
   };
 }
+
+/**
+ * The gate a create surface hands its state picker (ISS-233, "state
+ * pickers, and creation"). A new item has no current state, so the rules
+ * see `fromStateId: null` and the `create` purpose; a refused state stays
+ * listed but greyed exactly as it does in an edit. Undefined when this
+ * build enforces no rules, which keeps the community picker plain.
+ */
+export function creationStateGate(projectId: string): StateGate | undefined {
+  return stateGateFor({ projectId, fromStateId: null, purpose: "create" }) ?? undefined;
+}
+
+/**
+ * The gate a multi-item state picker needs: a target is open only when
+ * every item may enter it. `fromStateIds` carries one current state per
+ * selected row, so a bulk move can neither include a refused row nor
+ * pretend the selection shares a single origin.
+ */
+export function selectionStateGate(projectId: string, fromStateIds: readonly (string | null)[]): StateGate | undefined {
+  if (!isWorkflowGateEnabled()) return undefined;
+  return (state) => {
+    for (const fromStateId of fromStateIds) {
+      const refusal = transitionRefusal({
+        projectId,
+        fromStateId,
+        toStateId: state.id,
+        purpose: "state-picker",
+      });
+      if (refusal !== null) return { disabled: true, reason: refusal.reason };
+    }
+    return { disabled: false };
+  };
+}
+
+/**
+ * The refusal a create form reports at submit, or null when the chosen
+ * state is open. The picker already greys refused rows; this is the same
+ * rule asked once more so a stale or seeded state cannot slip through
+ * (ISS-233, creation).
+ */
+export function createStateRefusal(input: { projectId: string; stateId: string | null }): WorkflowRefusal | null {
+  if (input.stateId === null) return null;
+  return transitionRefusal({
+    projectId: input.projectId,
+    fromStateId: null,
+    toStateId: input.stateId,
+    purpose: "create",
+  });
+}

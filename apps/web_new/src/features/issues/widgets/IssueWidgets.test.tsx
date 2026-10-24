@@ -8,6 +8,8 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
+import { EPICS_FLAG } from "../edition/flags.js";
 import { IssueWidgets } from "./IssueWidgets.js";
 import {
   ISSUE,
@@ -36,6 +38,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   resetAppClient();
+  delete edition.flags[EPICS_FLAG];
 });
 
 function renderStack(canEdit = true) {
@@ -60,6 +63,15 @@ describe("issue widget stack", () => {
     expect(await screen.findByRole("button", { name: /Links/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add relation" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add link" })).toBeInTheDocument();
+  });
+
+  it("adds the epic create entry only in a cloud build (ISS-232)", async () => {
+    renderStack();
+    await screen.findByText("Peer work item");
+    expect(screen.queryByRole("button", { name: "Create epic" })).not.toBeInTheDocument();
+    edition.flags[EPICS_FLAG] = true;
+    renderStack();
+    expect(await screen.findByRole("button", { name: "Create epic" })).toBeInTheDocument();
   });
 
   it("keeps the add controls disabled for guests", async () => {

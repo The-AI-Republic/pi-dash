@@ -8,6 +8,7 @@ import {
   groupSelectionState,
   moveActive,
   pruneSelection,
+  selectedStateIds,
   toggleGroup,
   toggleItem,
   visibleBulkFields,
@@ -22,6 +23,17 @@ const ITEMS: SelectionItem[] = [
 ];
 
 describe("bulk selection model", () => {
+  it("lists the selected rows' states in list order, null when a row names none", () => {
+    const rows: SelectionItem[] = [
+      { id: "a", groupKey: "todo", stateId: "s1" },
+      { id: "b", groupKey: "todo" },
+      { id: "c", groupKey: "done", stateId: "s3" },
+    ];
+    expect(selectedStateIds(rows, new Set(["c", "a"]))).toEqual(["s1", "s3"]);
+    expect(selectedStateIds(rows, new Set(["b"]))).toEqual([null]);
+    expect(selectedStateIds(rows, new Set())).toEqual([]);
+  });
+
   it("toggles one row without shift", () => {
     expect([...toggleItem(new Set(), ITEMS, "a", null, false)]).toEqual(["a"]);
     expect([...toggleItem(new Set(["a"]), ITEMS, "a", "a", false)]).toEqual([]);

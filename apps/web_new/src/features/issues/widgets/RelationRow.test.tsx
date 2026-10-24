@@ -9,8 +9,11 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
+import { WORKFLOW_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import { RelationRow, copyWorkItemUrl } from "./RelationRow.js";
-import { PEER, PROJECT, WS, newQueryClient, relatedRow, stubTransport } from "./widgetTestUtils.js";
+import { PEER, PICKER_STATES, PROJECT, WS, newQueryClient, relatedRow, stubTransport } from "./widgetTestUtils.js";
 
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
@@ -19,8 +22,12 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 
-function renderRow(canEdit = true, options: Parameters<typeof stubTransport>[0] = {}) {
-  const { calls, transport } = stubTransport(options);
+function renderRow(
+  canEdit = true,
+  options: Parameters<typeof stubTransport>[0] = {},
+  rowOverrides: Parameters<typeof relatedRow>[0] = {}
+) {
+  const { calls, transport } = stubTransport({ states: PICKER_STATES, ...options });
   createAppClient("https://api.test", transport as never);
   const handlers = {
     onOpen: vi.fn(),
@@ -30,7 +37,13 @@ function renderRow(canEdit = true, options: Parameters<typeof stubTransport>[0] 
   };
   render(
     <QueryClientProvider client={newQueryClient()}>
-      <RelationRow workspaceSlug={WS} projectIdentifier="WEB" row={relatedRow()} canEdit={canEdit} {...handlers} />
+      <RelationRow
+        workspaceSlug={WS}
+        projectIdentifier="WEB"
+        row={relatedRow(rowOverrides)}
+        canEdit={canEdit}
+        {...handlers}
+      />
     </QueryClientProvider>
   );
   return { calls, ...handlers };
@@ -41,6 +54,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   resetAppClient();
+  resetEditionIssuesProviders();
+  delete edition.flags[WORKFLOW_FLAG];
   vi.restoreAllMocks();
 });
 
@@ -133,6 +148,38 @@ describe("relation row", () => {
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(new URL(`/${WS}/browse/WEB-42`, window.location.origin).toString())
     );
+  });
+});
+
+describe("relation row workflow gate (ISS-233)", () => {
+  const ROW_STATE = PICKER_STATES[0]!.id;
+  const REFUSED = PICKER_STATES[1]!.id;
+
+  it("keeps every state open in the community build", async () => {
+    const user = userEvent.setup();
+    registerEditionIssuesProviders({
+      workflowRules: { refusal: () => ({ reason: "no rule should be asked" }) },
+    });
+    renderRow(true, {}, { state_id: ROW_STATE });
+    await user.click(screen.getByRole("button", { name: "Select state" }));
+    const options = await screen.findAllByRole("option");
+    expect(options.every((option) => !(option as HTMLButtonElement).disabled)).toBe(true);
+  });
+
+  it("greys the states the rules refuse from the row's own state", async () => {
+    const user = userEvent.setup();
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ toStateId }) => (toStateId === REFUSED ? { reason: "Finish the parent first" } : null),
+      },
+    });
+    renderRow(true, {}, { state_id: ROW_STATE });
+    await user.click(screen.getByRole("button", { name: "Select state" }));
+    const refused = await screen.findByRole("option", { name: /Done/ });
+    expect(refused).toBeDisabled();
+    expect(refused).toHaveTextContent("Finish the parent first");
+    expect(screen.getByRole("option", { name: "Todo" })).toBeEnabled();
   });
 });
 

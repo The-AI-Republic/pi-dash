@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import type { IssueListItem, State } from "@pidash/api-client";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   patch: vi.fn(),
@@ -79,9 +79,17 @@ vi.mock("../../../shared/pickers/index.js", () => {
     PRIORITY_ICONS: { urgent: icon, high: icon, medium: icon, low: icon, none: icon },
     PRIORITY_TONES: { urgent: "", high: "", medium: "", low: "", none: "" },
     STATE_GROUP_ICONS: new Proxy({}, { get: () => icon }),
-    StatePicker: (props: { onChange: (id: string) => void; disabled?: boolean; trigger: React.ReactNode }) => (
+    StatePicker: (props: {
+      onChange: (id: string) => void;
+      disabled?: boolean;
+      trigger: React.ReactNode;
+      optionGate?: (option: { id: string }) => { disabled: boolean; reason?: string } | null;
+    }) => (
       <div data-testid="state-picker" data-disabled={String(props.disabled ?? false)}>
         {props.trigger}
+        <span data-testid="state-gate-reading">
+          {JSON.stringify(props.optionGate?.({ id: "probe-state" }) ?? null)}
+        </span>
         <button type="button" disabled={props.disabled} onClick={() => props.onChange("next-state")}>
           Pick state
         </button>
@@ -132,6 +140,10 @@ import {
   todayIsoInZone,
   type InlinePropertyStripProps,
 } from "./InlinePropertyStrip.js";
+
+import { edition } from "../../../core/edition/index.js";
+import { WORKFLOW_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
@@ -207,6 +219,10 @@ function props(overrides: Partial<InlinePropertyStripProps> = {}): InlinePropert
 }
 
 beforeEach(() => vi.clearAllMocks());
+afterEach(() => {
+  resetEditionIssuesProviders();
+  delete edition.flags[WORKFLOW_FLAG];
+});
 
 describe("isOverdue", () => {
   it("flags an open due-or-past date and ignores closed or completed work", () => {
@@ -429,6 +445,28 @@ describe("InlinePropertyStrip deferred pickers", () => {
     Object.defineProperty(mouseEvent, "pointerType", { value: "mouse" });
     fireEvent(chip(mouse.container), mouseEvent);
     expect(screen.queryByTestId("state-picker")).not.toBeInTheDocument();
+  });
+
+  it("hands the row's state picker the workflow gate only when the build has one (ISS-233)", () => {
+    registerEditionIssuesProviders({
+      workflowRules: { refusal: () => ({ reason: "no rule should be asked" }) },
+    });
+    render(<InlinePropertyStrip {...props()} />);
+    expect(screen.getByTestId("state-gate-reading")).toHaveTextContent("null");
+  });
+
+  it("greys the states the rules refuse from the row's own state (ISS-233)", () => {
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: ({ fromStateId, toStateId }) =>
+          fromStateId === STATE && toStateId === "probe-state" ? { reason: "Needs review first" } : null,
+      },
+    });
+    render(<InlinePropertyStrip {...props()} />);
+    expect(screen.getByTestId("state-gate-reading")).toHaveTextContent(
+      JSON.stringify({ disabled: true, reason: "Needs review first" })
+    );
   });
 
   it("ignores a disabled chip's hint, press and keys", () => {
