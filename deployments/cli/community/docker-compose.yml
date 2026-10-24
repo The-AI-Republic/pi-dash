@@ -58,6 +58,10 @@ x-app-env: &app-env
   API_KEY_RATE_LIMIT: ${API_KEY_RATE_LIMIT:-60/minute}
   MINIO_ENDPOINT_SSL: ${MINIO_ENDPOINT_SSL:-0}
   LIVE_SERVER_SECRET_KEY: "${LIVE_SERVER_SECRET_KEY:?LIVE_SERVER_SECRET_KEY must be set in pi_dash.env; generate with openssl rand -hex 32}"
+  # The api regenerates page/work-item documents through the live server
+  # (POST {LIVE_BASE_URL}/live/convert-document/); without it every page
+  # write fails with 503 "LIVE_URL is not configured".
+  LIVE_BASE_URL: ${LIVE_BASE_URL:-http://live:3000}
 
 services:
   web:
