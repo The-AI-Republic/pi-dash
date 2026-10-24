@@ -107,6 +107,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-modules-settle.test.ts",
       "e2e/parity/drivers/web-cycles-favorite.test.ts",
       "e2e/parity/drivers/web-new-archives-shell.test.ts",
+      "e2e/parity/drivers/web-new-archives-cycles.test.ts",
       "e2e/parity/drivers/web-new-modules-shell.test.ts",
       "e2e/perf/mocks.test.ts",
     ],
