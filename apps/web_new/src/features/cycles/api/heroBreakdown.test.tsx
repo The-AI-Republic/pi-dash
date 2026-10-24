@@ -37,6 +37,7 @@ let storedFilters: Record<string, unknown>;
 let gets: number;
 let patches: unknown[];
 let patchStatus: number;
+let rowExists: boolean;
 
 const USER_ID = "123e4567-e89b-12d3-a456-426614174020";
 const RECORD_ID = "123e4567-e89b-12d3-a456-426614174021";
@@ -69,10 +70,14 @@ function transport(url: string, init: { method?: string; body?: string }): Promi
   });
   if (url.includes("/user-properties/") && method === "GET") {
     gets += 1;
+    rowExists = true;
     return Promise.resolve(respond(200, record()));
   }
   if (url.includes("/user-properties/") && method === "PATCH") {
     patches.push(init.body === undefined ? null : JSON.parse(init.body));
+    // No row exists until the first GET creates it (NEWFRONT-266): a
+    // PATCH-first write 404s like the old handler's.
+    if (!rowExists) return Promise.resolve(respond(404, { detail: "The required object does not exist." }));
     if (patchStatus !== 200) return Promise.resolve(respond(patchStatus, { detail: "boom" }));
     const body = JSON.parse(init.body ?? "{}") as { rich_filters?: Record<string, unknown> };
     storedFilters = body.rich_filters ?? {};
@@ -133,6 +138,7 @@ beforeEach(() => {
   gets = 0;
   patches = [];
   patchStatus = 200;
+  rowExists = false;
   notify.notifyError.mockClear();
 });
 
@@ -178,5 +184,20 @@ describe("useApplyBreakdownFilter", () => {
     fireEvent.click(screen.getByTestId("entry"));
     await waitFor(() => expect(patches).toHaveLength(1));
     await waitFor(() => expect(router.state.location.pathname).toContain(CYCLES_CYCLE_ID));
+  });
+
+  it("applies the filter on a first click before any properties row exists", async () => {
+    await renderHost();
+    fireEvent.click(screen.getByTestId("entry"));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    // The read lands first and creates the row, so the PATCH that
+    // 404s for PATCH-first writers succeeds here and the click
+    // navigates with the filter applied.
+    expect(gets).toBeGreaterThanOrEqual(1);
+    expect(patches[0]).toEqual({
+      rich_filters: { assignee_id__in: MEMBER },
+    });
+    await waitFor(() => expect(router.state.location.pathname).toContain(CYCLES_CYCLE_ID));
+    expect(notify.notifyError).not.toHaveBeenCalled();
   });
 });

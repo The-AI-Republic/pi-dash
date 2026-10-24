@@ -317,6 +317,42 @@ describe("CreateCycleDialog form", () => {
     expect(within(field).getByRole("button")).toHaveTextContent("Website relaunch");
   });
 
+  it("tabs from the title through every stop to the picker and wraps inside the dialog", async () => {
+    const user = userEvent.setup();
+    renderCreate();
+    await screen.findByRole("heading", { name: "Create cycle" });
+    const dialog = screen.getByRole("dialog");
+    const title = screen.getByPlaceholderText("Title");
+    await waitFor(() => expect(title).toHaveFocus());
+    const stops = [
+      screen.getByPlaceholderText("Description"),
+      screen.getByTestId("cycle-date-range-trigger"),
+      screen.getByRole("button", { name: "Cancel" }),
+      screen.getByRole("button", { name: "Create cycle" }),
+      within(screen.getByTestId("cycle-project-field")).getByRole("button"),
+      title,
+    ];
+    for (const stop of stops) {
+      await user.tab();
+      // The submit-to-picker wrap crosses Base UI's focus guard,
+      // which hands focus over asynchronously.
+      await waitFor(() => expect(stop).toHaveFocus());
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
+  });
+
+  it("shift-tabs from the title back to the picker without leaving the dialog", async () => {
+    const user = userEvent.setup();
+    renderCreate();
+    await screen.findByRole("heading", { name: "Create cycle" });
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() => expect(screen.getByPlaceholderText("Title")).toHaveFocus());
+    await user.tab({ shift: true });
+    const picker = within(screen.getByTestId("cycle-project-field")).getByRole("button");
+    expect(picker).toHaveFocus();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
   it("requires a title on submit and refocuses it", async () => {
     const user = userEvent.setup();
     renderCreate();

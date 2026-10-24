@@ -7,9 +7,12 @@
 // cycle state. Edit opens the shared save dialog, the link actions
 // call the shared helpers, archive and delete confirm through their
 // dialogs, and restore runs straight from the menu. The trigger
-// reveals on row hover on desktop and stays visible on touch; the
-// titles render as headings with the gate hint beneath so the parity
-// driver reads them the same way on both apps.
+// reveals on row hover on desktop and stays visible on touch; on
+// narrow viewports it mounts inline in the row instead (CYC-048), so
+// no action hides behind a hover state there. Exactly one mount is in
+// the DOM at a time, keeping a single tab stop. The titles render as
+// headings with the gate hint beneath so the parity driver reads them
+// the same way on both apps.
 
 import { IconButton, Menu, type MenuEntry as KitMenuEntry } from "@pidash/kit";
 import type { CycleRow as CycleRowData } from "@pidash/api-client";
@@ -17,6 +20,7 @@ import { Archive, ArchiveRestore, Ellipsis, ExternalLink, Link2, Pencil, Trash2 
 import * as React from "react";
 
 import { UpdateCycleDialog, type CycleProjectRef } from "../dialog/CycleDialog.js";
+import { useNarrowViewport } from "../../../shared/shell/index.js";
 import { useArchiveCycle, useDeleteCycle, useRestoreCycle } from "../api/cycleMutations.js";
 import { cycleMenuEntries, type CycleMenuEntryId } from "../lib/cycleMenu.js";
 import { copyCycleLink, openCycleInNewTab } from "../lib/cycleShare.js";
@@ -31,6 +35,12 @@ export interface CycleRowMenuProps {
   canMutate: boolean;
   /** The project in the address: the edit dialog's pre-read label. */
   currentProject: CycleProjectRef;
+  /**
+   * Header mounts (the detail quick actions) have no hover group to
+   * reveal against, so the desktop trigger renders always visible.
+   * Rows leave this off and reveal on hover instead.
+   */
+  alwaysVisible?: boolean | undefined;
 }
 
 const ENTRY_ICONS: Record<CycleMenuEntryId, React.ReactNode> = {
@@ -53,10 +63,12 @@ export function CycleRowMenu({
   cycle,
   canMutate,
   currentProject,
+  alwaysVisible = false,
 }: CycleRowMenuProps): React.ReactElement {
   const [editOpen, setEditOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [archiveOpen, setArchiveOpen] = React.useState(false);
+  const narrow = useNarrowViewport();
   const target = { workspaceSlug, projectId, cycleId: cycle.id };
   const { remove, pending: deletePending } = useDeleteCycle(target);
   const { archive, pending: archivePending } = useArchiveCycle(target);
@@ -92,18 +104,29 @@ export function CycleRowMenu({
     });
   }
 
+  const triggerLabel = `Cycle actions for ${cycle.name}`;
   return (
     <>
       <Menu
         trigger={
-          <IconButton
-            label={`Cycle actions for ${cycle.name}`}
-            size="small"
-            data-testid="cycle-row-menu-trigger"
-            className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100"
-          >
-            <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
-          </IconButton>
+          narrow ? (
+            <IconButton label={triggerLabel} size="small" data-testid="cycle-row-menu-inline" className="shrink-0">
+              <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
+            </IconButton>
+          ) : (
+            <IconButton
+              label={triggerLabel}
+              size="small"
+              data-testid="cycle-row-menu-trigger"
+              className={
+                alwaysVisible
+                  ? "shrink-0"
+                  : "shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100"
+              }
+            >
+              <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
+            </IconButton>
+          )
         }
         items={items}
       />

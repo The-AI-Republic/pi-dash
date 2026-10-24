@@ -32,6 +32,11 @@ vi.mock("../../../shared/shell/toaster.js", () => ({
 const share = vi.hoisted(() => ({ copyCycleLink: vi.fn(), openCycleInNewTab: vi.fn() }));
 vi.mock("../lib/cycleShare.js", () => share);
 
+const viewportHarness = vi.hoisted(() => ({ narrow: false }));
+vi.mock("../../../shared/shell/index.js", () => ({
+  useNarrowViewport: () => viewportHarness.narrow,
+}));
+
 vi.mock("../dialog/CycleDialog.js", () => ({
   UpdateCycleDialog: ({
     open,
@@ -112,7 +117,12 @@ function transport(url: string, init: { method?: string }): Promise<unknown> {
   throw new Error(`unexpected request ${method} ${url}`);
 }
 
-async function renderMenu(cycle: CycleRowData, canMutate: boolean, initialEntry: string = LIST_PATH): Promise<void> {
+async function renderMenu(
+  cycle: CycleRowData,
+  canMutate: boolean,
+  initialEntry: string = LIST_PATH,
+  alwaysVisible?: boolean
+): Promise<ReturnType<typeof render>> {
   const rootRoute = createRootRoute({ component: () => <Outlet /> });
   const menuScreen = (): React.ReactElement => (
     <div className="group">
@@ -122,6 +132,7 @@ async function renderMenu(cycle: CycleRowData, canMutate: boolean, initialEntry:
         cycle={cycle}
         canMutate={canMutate}
         currentProject={{ id: CYCLES_PROJECT_ID, name: "Website relaunch", identifier: "WEB" }}
+        {...(alwaysVisible === undefined ? {} : { alwaysVisible })}
       />
     </div>
   );
@@ -137,12 +148,13 @@ async function renderMenu(cycle: CycleRowData, canMutate: boolean, initialEntry:
     defaultPreload: false,
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
     </QueryClientProvider>
   );
   await screen.findByRole("button", { name: `Cycle actions for ${cycle.name}` });
+  return result;
 }
 
 // Menu clicks go through fireEvent: user-event's pointer sequence trips
@@ -165,6 +177,7 @@ function pickEntry(title: string): void {
 
 beforeEach(() => {
   harness = { deleteStatus: 204, archiveStatus: 200, restoreStatus: 204, deletes: 0, archives: 0, restores: 0 };
+  viewportHarness.narrow = false;
   createAppClient("https://api.test", transport as never);
   Object.defineProperty(window, "scrollTo", { value: () => undefined, writable: true });
 });
@@ -310,5 +323,30 @@ describe("CycleRowMenu", () => {
       expect(notify.notifyError).toHaveBeenCalledWith(CYCLE_RESTORE_FAILED_TITLE, expect.any(String))
     );
     expect(notify.notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("mounts the hover trigger on wide viewports with no inline twin", async () => {
+    await renderMenu(makeCycleRow({ name: "Draft 1", status: "draft" }), true);
+    expect(screen.getByTestId("cycle-row-menu-trigger")).toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-row-menu-inline")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Cycle actions for Draft 1" })).toHaveLength(1);
+  });
+
+  it("reveals the trigger on hover by default and always for header mounts", async () => {
+    const first = await renderMenu(makeCycleRow({ name: "Draft 1", status: "draft" }), true);
+    expect(screen.getByTestId("cycle-row-menu-trigger").className).toContain("opacity-0");
+    first.unmount();
+    await renderMenu(makeCycleRow({ name: "Draft 1", status: "draft" }), true, LIST_PATH, true);
+    expect(screen.getByTestId("cycle-row-menu-trigger").className).not.toContain("opacity-0");
+  });
+
+  it("mounts the menu trigger inline on narrow viewports with the same entries", async () => {
+    viewportHarness.narrow = true;
+    await renderMenu(makeCycleRow({ name: "Draft 1", status: "draft" }), true);
+    expect(screen.getByTestId("cycle-row-menu-inline")).toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Cycle actions for Draft 1" })).toHaveLength(1);
+    await openMenu("Draft 1");
+    expect(menuTitles()).toEqual(["Edit", "Open in new tab", "Copy link", "Archive", "Delete"]);
   });
 });

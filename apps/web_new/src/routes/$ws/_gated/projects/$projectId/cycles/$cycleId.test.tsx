@@ -559,6 +559,52 @@ describe("cycle detail route", () => {
     expect(await screen.findByTestId("list-layout")).toHaveAttribute("data-can-edit", "false");
   });
 
+  it("mounts the detail quick-actions menu with delete for members on live cycles", async () => {
+    renderRoute();
+    const trigger = await screen.findByTestId("cycle-row-menu-trigger");
+    expect(trigger.className).not.toContain("opacity-0");
+    fireEvent.click(trigger);
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toContain("Delete");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete cycle" })).toBeInTheDocument();
+  });
+
+  it("hides the detail quick-actions menu from guests and on finished cycles", async () => {
+    mocks.roles.current = { data: { [PROJECT]: 5 }, isPending: false };
+    mocks.projects.mockReturnValue({
+      queryKey: ["projects"],
+      queryFn: async () => [projectSeed({ member_role: 5 })],
+    });
+    const first = renderRoute();
+    expect(await screen.findByTestId("list-layout")).toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
+    first.unmount();
+    mocks.roles.current = { data: { [PROJECT]: 15 }, isPending: false };
+    mocks.projects.mockReturnValue({ queryKey: ["projects"], queryFn: async () => [projectSeed()] });
+    mocks.cycle.mockReturnValue({ queryKey: ["cycle"], queryFn: async () => cycleSeed({ status: "COMPLETED" }) });
+    renderRoute();
+    expect(await screen.findByTestId("list-layout")).toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
+  });
+
+  it("shows guests the items and badge read-only with no mutation affordances", async () => {
+    mocks.roles.current = { data: { [PROJECT]: 5 }, isPending: false };
+    mocks.projects.mockReturnValue({
+      queryKey: ["projects"],
+      queryFn: async () => [projectSeed({ member_role: 5 })],
+    });
+    renderRoute();
+    expect(await screen.findByTestId("list-layout")).toHaveAttribute("data-can-edit", "false");
+    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-cycle", CYCLE);
+    expect(screen.getByTestId("cycle-detail-badge")).toHaveTextContent("2");
+    expect(screen.getByTestId("analytics-entry")).toHaveAttribute("data-total", "2");
+    expect(screen.getByTestId("detail-sidebar")).toHaveAttribute("data-editable", "false");
+    expect(screen.queryByRole("button", { name: "Add work item" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-row-menu-trigger")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Transfer \d+ work items/ })).not.toBeInTheDocument();
+  });
+
   it("registers the cycle palette entries for the page", async () => {
     renderRoute();
     const entries = await screen.findByTestId("palette-entries");

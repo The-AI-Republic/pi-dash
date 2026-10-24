@@ -9,7 +9,9 @@
 // narrowing to zero rows falls to the no-match view for the cause. The
 // peeked cycle renders the quick look over the list. The screen owns
 // the gate, zero, skeleton, and error states; this body only renders
-// once cycles exist.
+// once cycles exist. On narrow screens a layout menu below the
+// toolbar switches the rows between the list and a gallery of cards
+// (§21, CYC-048); the hero and the groups stay in both.
 
 import { useQuery } from "@tanstack/react-query";
 import type { CycleRow as CycleRowData } from "@pidash/api-client";
@@ -26,8 +28,10 @@ import { groupOfCycle, type CycleListGroup } from "../lib/cycleGroups.js";
 import { selectCycleMemberDirectory } from "../lib/cycleMembers.js";
 import { ActiveCycleHero } from "./ActiveCycleHero.js";
 import { CycleGroup } from "./CycleGroup.js";
+import { CycleListLayoutMenu } from "./CycleListLayoutMenu.js";
 import { CyclePeekPanel } from "./CyclePeekPanel.js";
 import { CycleRow } from "./CycleRow.js";
+import { DEFAULT_CYCLE_LIST_LAYOUT, type CycleListLayout } from "../lib/cycleListLayout.js";
 import { CyclesNoMatch } from "./CyclesNoMatch.js";
 import { CyclesSearchBox } from "./CyclesSearchBox.js";
 
@@ -72,6 +76,9 @@ export function CyclesListBody({
     upcoming: true,
     completed: false,
   });
+  // Narrow-screen row presentation (CYC-048): pure display state,
+  // chosen from the layout menu below the toolbar.
+  const [listLayout, setListLayout] = React.useState<CycleListLayout>(DEFAULT_CYCLE_LIST_LAYOUT);
 
   const groups = React.useMemo(() => {
     const matching = filterCyclesByQuery(cycles.data ?? [], query);
@@ -123,6 +130,7 @@ export function CyclesListBody({
         {filterControl}
         {headerActions}
       </div>
+      <CycleListLayoutMenu layout={listLayout} onLayoutChange={setListLayout} />
       {chips}
       {hero ?? (
         <ActiveCycleHero
@@ -148,9 +156,15 @@ export function CyclesListBody({
             count={groups.upcoming.length}
             expanded={expanded.upcoming}
             onToggle={() => toggleGroup("upcoming")}
+            layout={listLayout}
           >
             {groups.upcoming.map((cycle) => (
-              <CycleRow key={cycle.id} {...rowProps} cycle={cycle} />
+              <CycleRow
+                key={cycle.id}
+                {...rowProps}
+                cycle={cycle}
+                presentation={listLayout === "gallery" ? "card" : "row"}
+              />
             ))}
           </CycleGroup>
           <CycleGroup
@@ -158,9 +172,15 @@ export function CyclesListBody({
             count={groups.completed.length}
             expanded={expanded.completed}
             onToggle={() => toggleGroup("completed")}
+            layout={listLayout}
           >
             {groups.completed.map((cycle) => (
-              <CycleRow key={cycle.id} {...rowProps} cycle={cycle} />
+              <CycleRow
+                key={cycle.id}
+                {...rowProps}
+                cycle={cycle}
+                presentation={listLayout === "gallery" ? "card" : "row"}
+              />
             ))}
           </CycleGroup>
         </>
