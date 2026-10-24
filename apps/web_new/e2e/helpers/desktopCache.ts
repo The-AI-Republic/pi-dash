@@ -1,7 +1,8 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Readiness probe for the desktop warm-start perf spec (NEWFRONT-886).
+// Readiness probes for the desktop specs that reload from the persisted
+// query cache (NEWFRONT-886, NEWFRONT-894).
 //
 // The measured relaunch blocks the issues API, so the spec may only reload
 // once the persisted query cache actually holds the issue list. Bytes under
@@ -11,11 +12,13 @@
 // queries and no issues entry. Reloading on that payload paints the
 // blocked-API error state and times the setup, not the warm start.
 //
-// This module answers the question the measurement asks - how many
-// issue-list rows does the stored payload carry for this project - as a pure
-// function over the stored string. The spec reads the string inside the
-// page (Playwright serializes an evaluate callback by source) and parses it
-// here in Node, so the gate and its unit test share one definition.
+// This module has two halves. `desktopCachePayload` runs inside the page and
+// reads the stored string; `cachedIssueListRows` answers the question both
+// specs ask - how many issue-list rows that payload carries for this
+// project - as a pure function over the string. Playwright serializes an
+// evaluate callback by source, so the spec passes the reader itself and
+// parses its result here in Node: the gate and its unit test share one
+// definition.
 //
 // The key layout mirrors the issues query factory: the workspace scope, the
 // `issues` subtree, then `list`, the project id and the view shape.
@@ -54,6 +57,44 @@ function rowsInEntry(entry: unknown, projectId: string): number {
   if (!isRecord(data)) return 0;
   const results = data["results"];
   return Array.isArray(results) ? results.length : 0;
+}
+
+/**
+ * The stored desktop query-cache payload, or null while there is none.
+ * Runs in the page: pass it to `page.evaluate` and parse the result here.
+ * The names stay local because Playwright ships this function by source and
+ * gives it none of this module's scope.
+ */
+export function desktopCachePayload(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const database = "pidash-web-new";
+    const store = "keyvalue";
+    const key = "pidash.desktop:tanstack-query-cache";
+    try {
+      const open = globalThis.indexedDB.open(database, 1);
+      open.onsuccess = () => {
+        const db = open.result;
+        if (!db.objectStoreNames.contains(store)) {
+          db.close();
+          resolve(null);
+          return;
+        }
+        const request = db.transaction(store, "readonly").objectStore(store).get(key);
+        request.onsuccess = () => {
+          const value: unknown = request.result;
+          db.close();
+          resolve(typeof value === "string" ? value : null);
+        };
+        request.onerror = () => {
+          db.close();
+          resolve(null);
+        };
+      };
+      open.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 /**
