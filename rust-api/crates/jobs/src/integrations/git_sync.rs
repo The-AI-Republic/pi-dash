@@ -68,6 +68,7 @@
 //! the `git_sync_task.before_after.json` name) and
 //! `rust-api/fixtures/integrations/beat.json`.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime};
@@ -1060,37 +1061,53 @@ impl GithubClient for ReqwestGithubClient {
     }
 }
 
-/// GitHub App configuration (`github_app_auth.py:28-51`): `app_id` and
-/// `app_slug` resolve from the environment with the same names as the
-/// instance settings; the private key normalizes escaped newlines
-/// (`_normalize_private_key`). Missing keys fail like
-/// `require_github_app_config` (`GithubAppConfigError`, a non-provider
-/// error — hence [`GithubError::Transport`], which maps to the base
+/// `require_github_app_config` (`github_app_auth.py:63-73`): app id and
+/// slug through the registry-aware reader (`get_configuration_value`,
+/// db-sourced per `registry.py:62-63`), the private key env-sourced
+/// (`registry.py:65`) with escaped newlines normalized
+/// (`_normalize_private_key`). Mirrors the api mint
+/// (`handlers_pr_links.rs::github_app_config`): same keys, same coercion,
+/// same missing message (a non-provider error — hence
+/// [`GithubError::Transport`], which maps to the base
 /// [`GitProviderError::General`], exactly like Python's `_map_error`
-/// passthrough).
-pub fn github_app_config() -> Result<(String, String), GithubError> {
-    let app_id = std::env::var("GITHUB_APP_ID")
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    let app_slug = std::env::var("GITHUB_APP_SLUG")
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    let private_key = std::env::var("GITHUB_APP_PRIVATE_KEY")
-        .unwrap_or_default()
-        .replace("\\r\\n", "\n")
-        .replace("\\n", "\n")
-        .trim()
-        .to_owned();
-    let mut missing = Vec::new();
-    if app_id.is_empty() {
+/// passthrough). Returns only what the mint consumes (id + key); the slug
+/// is validated, never sent (the JWT carries `iss` only).
+async fn resolve_github_app_config(pool: &PgPool) -> Result<(String, String), GithubError> {
+    let store = pidash_db::config::PgConfigStore::new(pool.clone());
+    resolve_github_app_config_in(&store).await
+}
+
+/// Store-generic half of [`resolve_github_app_config`], so unit tests pin
+/// the db/env routing without a live database.
+async fn resolve_github_app_config_in<S: pidash_db::config::accessor::ConfigStore>(
+    store: &S,
+) -> Result<(String, String), GithubError> {
+    let registry = pidash_db::config::registry::global();
+    let keyring = Keyring::from_env();
+    let values = pidash_db::config::accessor::get_many_in(
+        registry,
+        store,
+        &keyring,
+        &["GITHUB_APP_ID", "GITHUB_APP_SLUG", "GITHUB_APP_PRIVATE_KEY"],
+    )
+    .await
+    .unwrap_or_default();
+    let app_id = config_string(&values, "GITHUB_APP_ID");
+    let app_slug = config_string(&values, "GITHUB_APP_SLUG");
+    let private_key = config_string(&values, "GITHUB_APP_PRIVATE_KEY");
+    let config = (
+        app_id.trim().to_owned(),
+        app_slug.trim().to_owned(),
+        pidash_db::app_integrations::queries_github::normalize_private_key(Some(&private_key)),
+    );
+    let mut missing: Vec<&str> = Vec::new();
+    if config.0.is_empty() {
         missing.push("app_id");
     }
-    if app_slug.is_empty() {
+    if config.1.is_empty() {
         missing.push("app_slug");
     }
-    if private_key.is_empty() {
+    if config.2.is_empty() {
         missing.push("private_key");
     }
     if !missing.is_empty() {
@@ -1099,7 +1116,77 @@ pub fn github_app_config() -> Result<(String, String), GithubError> {
             missing.join(", ")
         )));
     }
-    Ok((app_id, private_key))
+    Ok((config.0, config.2))
+}
+
+/// Registry value coercion (the api mint's arms, verbatim): non-string
+/// scalars render like Python (`true` renders `True`); anything else reads
+/// as missing.
+fn config_string(values: &HashMap<String, pidash_db::config::ConfigValue>, key: &str) -> String {
+    match values.get(key) {
+        Some(pidash_db::config::ConfigValue::Str(value)) => value.clone(),
+        Some(pidash_db::config::ConfigValue::Int(value)) => value.to_string(),
+        Some(pidash_db::config::ConfigValue::Float(value)) => value.to_string(),
+        Some(pidash_db::config::ConfigValue::Bool(true)) => "True".to_owned(),
+        Some(pidash_db::config::ConfigValue::Bool(false)) => "False".to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Whether this provider call can reach the GitHub App mint
+/// (`github.py:92-96`): only the github adapter's installation branch
+/// (`auth_type == "github_app"` with a truthy `installation_id`) calls
+/// `for_installation`. Every other shape (PAT credentials, non-github
+/// providers, github_app without an installation) never reads the app
+/// config in Django — so the task resolves config only behind this gate,
+/// and the adapter stays the sole branch authority (an unparsable
+/// installation id still fails in the adapter, before any mint).
+fn needs_github_app_config(provider: &str, credential: &Value) -> bool {
+    if !resolve_adapter_key(provider).is_ok_and(|key| key == "github") {
+        return false;
+    }
+    if credential.get("auth_type").and_then(Value::as_str) != Some("github_app") {
+        return false;
+    }
+    credential.get("installation_id").is_some_and(json_truthy)
+}
+
+thread_local! {
+    /// [`resolve_github_app_config`] outcome for the blocking mint: the
+    /// resolved (id, key) or the missing message. The
+    /// `GithubClient::connect` seam (services-owned) takes only `ClientAuth`,
+    /// so the async task resolves config before `spawn_blocking` and stashes
+    /// it here for [`installation_token`]; the scope guard restores on drop.
+    /// Django reads fresh config per mint; resolving per provider call
+    /// matches that freshness.
+    static GITHUB_APP_CONFIG: RefCell<Option<Result<(String, String), String>>> =
+        const { RefCell::new(None) };
+}
+
+/// RAII stash of [`resolve_github_app_config`] output for one blocking
+/// provider call. Restores the previous value on drop (no nesting today;
+/// the restore keeps a future nested call correct).
+pub(crate) struct GithubAppConfigScope {
+    prev: Option<Result<(String, String), String>>,
+}
+
+impl GithubAppConfigScope {
+    pub(crate) fn stash(resolution: Result<(String, String), String>) -> Self {
+        let prev = GITHUB_APP_CONFIG.with(|slot| slot.borrow_mut().replace(resolution));
+        Self { prev }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stashed() -> Option<Result<(String, String), String>> {
+        GITHUB_APP_CONFIG.with(|slot| slot.borrow().clone())
+    }
+}
+
+impl Drop for GithubAppConfigScope {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        GITHUB_APP_CONFIG.with(|slot| *slot.borrow_mut() = prev);
+    }
 }
 
 /// App JWT claims (`build_app_jwt`, `github_app_auth.py:72-85`): issued a
@@ -1137,6 +1224,9 @@ static INSTALLATION_TOKENS: LazyLock<Mutex<HashMap<i64, (String, SystemTime)>>> 
 /// /app/installations/{id}/access_tokens` under the app JWT; the entry
 /// lives until sixty seconds before `expires_at` (at least sixty seconds
 /// total), defaulting to fifty-five minutes without a parsable expiry.
+/// The config comes from the [`GithubAppConfigScope`] stash (resolved
+/// through the registry before the blocking call); without one the mint
+/// fails closed like `require_github_app_config` with nothing configured.
 pub fn installation_token(
     installation_id: i64,
     http: &reqwest::blocking::Client,
@@ -1149,7 +1239,15 @@ pub fn installation_token(
     {
         return Ok(token.clone());
     }
-    let (app_id, private_key) = github_app_config()?;
+    let (app_id, private_key) = match GITHUB_APP_CONFIG.with(|slot| slot.borrow().clone()) {
+        Some(Ok(config)) => config,
+        Some(Err(message)) => return Err(GithubError::Transport(message)),
+        None => {
+            return Err(GithubError::Transport(
+                "GitHub App config missing: app_id, app_slug, private_key".to_owned(),
+            ));
+        }
+    };
     let now_secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|error| GithubError::Transport(error.to_string()))?
@@ -2326,12 +2424,22 @@ async fn run_scan(
     scan: &BindingScan,
     now: &DateTime<Utc>,
 ) -> Result<(), ScanFault> {
+    let app_resolution = if needs_github_app_config(&scan.provider, &scan.credential) {
+        Some(
+            resolve_github_app_config(pool)
+                .await
+                .map_err(|error| error.message().to_owned()),
+        )
+    } else {
+        None
+    };
     let remote_issues = {
         let providers = providers.clone();
         let credential = scan.credential.clone();
         let repository = scan.repository.clone();
         let provider = scan.provider.clone();
         tokio::task::spawn_blocking(move || {
+            let _scope = app_resolution.map(GithubAppConfigScope::stash);
             providers.list_open_issues(&provider, &credential, &repository)
         })
         .await
@@ -2352,6 +2460,15 @@ async fn run_scan(
         pairs.push((remote_issue.external_iid.clone(), issue_id, sync_id));
     }
     for (issue_iid, issue_id, sync_id) in &pairs {
+        let app_resolution = if needs_github_app_config(&scan.provider, &scan.credential) {
+            Some(
+                resolve_github_app_config(pool)
+                    .await
+                    .map_err(|error| error.message().to_owned()),
+            )
+        } else {
+            None
+        };
         let remote_comments = {
             let providers = providers.clone();
             let credential = scan.credential.clone();
@@ -2359,6 +2476,7 @@ async fn run_scan(
             let provider = scan.provider.clone();
             let issue_iid = issue_iid.clone();
             tokio::task::spawn_blocking(move || {
+                let _scope = app_resolution.map(GithubAppConfigScope::stash);
                 providers.list_issue_comments(&provider, &credential, &repository, &issue_iid)
             })
             .await
@@ -2507,6 +2625,15 @@ pub async fn post_completion_comment(
         &project_id,
         &issue_id,
     ));
+    let app_resolution = if needs_github_app_config(&provider, &credential) {
+        Some(
+            resolve_github_app_config(pool)
+                .await
+                .map_err(|error| error.message().to_owned()),
+        )
+    } else {
+        None
+    };
     let posted = {
         let providers = providers.clone();
         let credential = credential.clone();
@@ -2514,6 +2641,7 @@ pub async fn post_completion_comment(
         let provider = provider.clone();
         let external_iid = external_iid.clone();
         tokio::task::spawn_blocking(move || {
+            let _scope = app_resolution.map(GithubAppConfigScope::stash);
             providers.post_issue_comment(&provider, &credential, &repository, &external_iid, &body)
         })
         .await
@@ -3148,6 +3276,245 @@ mod tests {
         assert_eq!(claims["iat"], json!(999_940));
         assert_eq!(claims["exp"], json!(1_000_540));
         assert_eq!(claims["iss"], json!("42"));
+    }
+
+    // Unparseable key material fails the mint as a transport fault (never
+    // a panic): Python's `jwt.encode` raises the same way, and both land on
+    // the unexpected-fault path. (`iss` itself is pinned by
+    // `app_jwt_claims_match_python` plus the contract test's 404 marker,
+    // which proves the numeric db id reached GitHub as the JWT issuer.)
+    #[test]
+    fn app_jwt_rejects_unparseable_key() {
+        let error = build_app_jwt("14719999", "not-a-pem-key", 1_000_000);
+        assert!(matches!(error, Err(GithubError::Transport(_))), "{error:?}");
+    }
+
+    // Registry value coercion: the api mint's arms, pinned per variant.
+    #[test]
+    fn config_string_coerces_like_python() {
+        use pidash_db::config::ConfigValue::{Bool, Float, Int, Null, Str};
+        let values: HashMap<String, pidash_db::config::ConfigValue> = [
+            ("s".to_owned(), Str("v".to_owned())),
+            ("i".to_owned(), Int(14719999)),
+            ("f".to_owned(), Float(1.5)),
+            ("t".to_owned(), Bool(true)),
+            ("ff".to_owned(), Bool(false)),
+            ("n".to_owned(), Null),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(config_string(&values, "s"), "v");
+        assert_eq!(config_string(&values, "i"), "14719999");
+        assert_eq!(config_string(&values, "f"), "1.5");
+        assert_eq!(config_string(&values, "t"), "True");
+        assert_eq!(config_string(&values, "ff"), "False");
+        assert_eq!(config_string(&values, "n"), "");
+        assert_eq!(config_string(&values, "absent"), "");
+    }
+
+    /// In-memory [`pidash_db::config::accessor::ConfigStore`]: rows for the
+    /// db-sourced keys under test; env-sourced keys still read the process
+    /// environment through the real registry, exactly like production.
+    struct MapStore {
+        rows: HashMap<String, String>,
+    }
+
+    impl pidash_db::config::accessor::ConfigStore for MapStore {
+        async fn fetch(
+            &self,
+            keys: &[&str],
+        ) -> Result<
+            HashMap<String, pidash_db::config::accessor::ConfigRow>,
+            pidash_db::config::accessor::ConfigError,
+        > {
+            Ok(keys
+                .iter()
+                .filter_map(|key| {
+                    self.rows.get(*key).map(|value| {
+                        (
+                            (*key).to_owned(),
+                            pidash_db::config::accessor::ConfigRow {
+                                value: Some(value.clone()),
+                                is_encrypted: false,
+                            },
+                        )
+                    })
+                })
+                .collect())
+        }
+    }
+
+    // GitHub App config resolution (PIDASHCONV-1471): id/slug come from the
+    // db-sourced registry rows even when the env carries decoys; the private
+    // key stays env-sourced (escaped newlines normalized); missing keys fail
+    // with Django's exact message; and the blocking mint fails closed without
+    // a stash even when the env is fully set (no env fallback, no HTTP).
+    // One test owns the process env for the three GITHUB_APP_* vars (no
+    // other test in this process touches them).
+    #[tokio::test]
+    async fn github_app_config_resolves_through_registry() {
+        let saved: Vec<(String, Option<String>)> = ["GITHUB_APP_ID", "GITHUB_APP_SLUG"]
+            .into_iter()
+            .map(|key| (key.to_owned(), std::env::var(key).ok()))
+            .collect();
+        let saved_key = std::env::var("GITHUB_APP_PRIVATE_KEY").ok();
+
+        // db wins over env decoys; values trim; the key comes from the env
+        // with escaped newlines normalized.
+        std::env::set_var("GITHUB_APP_ID", "env-decoy-id");
+        std::env::set_var("GITHUB_APP_SLUG", "env-decoy-slug");
+        std::env::set_var("GITHUB_APP_PRIVATE_KEY", "line1\\nline2");
+        let store = MapStore {
+            rows: [
+                ("GITHUB_APP_ID".to_owned(), "  14719999  ".to_owned()),
+                ("GITHUB_APP_SLUG".to_owned(), "ct-slug".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            resolve_github_app_config_in(&store).await,
+            Ok(("14719999".to_owned(), "line1\nline2".to_owned()))
+        );
+
+        // Nothing anywhere: Django's exact missing message, in order.
+        std::env::remove_var("GITHUB_APP_ID");
+        std::env::remove_var("GITHUB_APP_SLUG");
+        std::env::remove_var("GITHUB_APP_PRIVATE_KEY");
+        let empty = MapStore {
+            rows: HashMap::new(),
+        };
+        assert_eq!(
+            resolve_github_app_config_in(&empty).await,
+            Err(GithubError::Transport(
+                "GitHub App config missing: app_id, app_slug, private_key".to_owned()
+            ))
+        );
+
+        // Partial: only the absent slug is listed.
+        std::env::set_var("GITHUB_APP_PRIVATE_KEY", "env-key");
+        let id_only = MapStore {
+            rows: [("GITHUB_APP_ID".to_owned(), "14719999".to_owned())]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(
+            resolve_github_app_config_in(&id_only).await,
+            Err(GithubError::Transport(
+                "GitHub App config missing: app_slug".to_owned()
+            ))
+        );
+
+        // Fail closed: no stash, fully-set env, no HTTP — the mint cannot
+        // see the env at all. The blocking client lives on a plain thread:
+        // building (and dropping) it inside the async test runtime panics.
+        std::env::set_var("GITHUB_APP_ID", "env-decoy-id");
+        std::env::set_var("GITHUB_APP_SLUG", "env-decoy-slug");
+        // No cache clear: the probe id below is unique to this test and the
+        // fail-closed path never inserts, so there is nothing to clear —
+        // and clearing would race `installation_token_cache_short_circuits`
+        // on the process-wide cache.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert_eq!(GithubAppConfigScope::stashed(), None);
+                    let http = reqwest::blocking::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .expect("client builds");
+                    assert_eq!(
+                        installation_token(-9_991_471, &http),
+                        Err(GithubError::Transport(
+                            "GitHub App config missing: app_id, app_slug, private_key".to_owned()
+                        ))
+                    );
+                })
+                .join()
+                .expect("fail-closed probe joins");
+        });
+
+        for (key, value) in saved {
+            match value {
+                Some(previous) => std::env::set_var(key, previous),
+                None => std::env::remove_var(key),
+            }
+        }
+        match saved_key {
+            Some(previous) => std::env::set_var("GITHUB_APP_PRIVATE_KEY", previous),
+            None => std::env::remove_var("GITHUB_APP_PRIVATE_KEY"),
+        }
+    }
+
+    // The stash guard: set on stash, previous value restored on drop.
+    #[test]
+    fn github_app_scope_restores_previous() {
+        assert_eq!(GithubAppConfigScope::stashed(), None);
+        let outer = GithubAppConfigScope::stash(Ok(("id-a".to_owned(), "key-a".to_owned())));
+        assert_eq!(
+            GithubAppConfigScope::stashed(),
+            Some(Ok(("id-a".to_owned(), "key-a".to_owned())))
+        );
+        {
+            let _inner =
+                GithubAppConfigScope::stash(Err("GitHub App config missing: app_slug".to_owned()));
+            assert_eq!(
+                GithubAppConfigScope::stashed(),
+                Some(Err("GitHub App config missing: app_slug".to_owned()))
+            );
+        }
+        assert_eq!(
+            GithubAppConfigScope::stashed(),
+            Some(Ok(("id-a".to_owned(), "key-a".to_owned())))
+        );
+        drop(outer);
+        assert_eq!(GithubAppConfigScope::stashed(), None);
+    }
+
+    // A stashed resolution error surfaces verbatim from the mint, with no
+    // HTTP (the adapter already branched to the installation path).
+    #[test]
+    fn installation_token_surfaces_stashed_resolution_error() {
+        // No cache clear (see the fail-closed probe above): the probe id is
+        // unique to this test and the error path never inserts.
+        let _scope =
+            GithubAppConfigScope::stash(Err("GitHub App config missing: app_slug".to_owned()));
+        let http = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client builds");
+        assert_eq!(
+            installation_token(-9_991_472, &http),
+            Err(GithubError::Transport(
+                "GitHub App config missing: app_slug".to_owned()
+            ))
+        );
+    }
+
+    // The mint gate: only the github adapter's installation branch resolves
+    // config — every other credential shape never reads it in Django.
+    #[test]
+    fn github_app_gate_matches_adapter_branches() {
+        let app = |installation: Value| json!({"auth_type": "github_app", "installation_id": installation});
+        assert!(needs_github_app_config("github", &app(json!(424242))));
+        assert!(needs_github_app_config("GitHub", &app(json!("424242"))));
+        assert!(needs_github_app_config("github", &app(json!(true))));
+        assert!(!needs_github_app_config(
+            "github",
+            &json!({"auth_type": "pat", "token": "x"})
+        ));
+        assert!(!needs_github_app_config(
+            "github",
+            &json!({"auth_type": "github_app"})
+        ));
+        assert!(!needs_github_app_config("github", &app(json!(0))));
+        assert!(!needs_github_app_config("github", &app(json!(""))));
+        assert!(!needs_github_app_config("github", &app(Value::Null)));
+        assert!(!needs_github_app_config("github", &json!({})));
+        assert!(!needs_github_app_config("gitlab", &app(json!(424242))));
+        assert!(!needs_github_app_config(
+            "no-such-provider",
+            &app(json!(424242))
+        ));
     }
 
     // Every statement parses as Postgres, and the read statements are
