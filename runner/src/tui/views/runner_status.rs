@@ -795,6 +795,191 @@ mod tests {
         assert_eq!(data.picker_runner_name(), Some("alpha".to_string()));
     }
 
+    fn busy(mut snap: RunnerStatusSnapshot, run_id: Uuid) -> RunnerStatusSnapshot {
+        snap.status = RunnerStatus::Busy;
+        snap.current_run = Some(crate::ipc::protocol::CurrentRunSummary {
+            run_id,
+            thread_id: None,
+            status: "running".into(),
+            started_at: chrono::Utc::now(),
+            events: 3,
+        });
+        snap
+    }
+
+    fn rendered_text(tab: &RunnerStatusTab, data: &AppData) -> String {
+        let area = Rect::new(0, 0, 200, 40);
+        let mut buf = Buffer::empty(area);
+        tab.render(area, &mut buf, data, &FocusPath::default());
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn test_app(p: Paths) -> crate::tui::app::App {
+        use crate::tui::event_sender::AppEventSender;
+        use crate::tui::tui_runtime::frame_requester::FrameScheduler;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        // Keep the receiver alive so follow-up Refresh sends don't error.
+        std::mem::forget(rx);
+        let (frame, _draw) = FrameScheduler::spawn();
+        crate::tui::app::App::new(p, TabKind::RunnerStatus, AppEventSender::new(tx), frame)
+    }
+
+    /// PDASHOSS01-316: a runner the daemon appends to config.toml while the
+    /// TUI is open (cloud-driven `create_runner`) must become selectable,
+    /// and the Live state panel must show *its* busy run. Before the fix,
+    /// `config_working` was frozen at TUI launch, so the selection was
+    /// rejected and the panels stayed on the old idle runner.
+    #[tokio::test]
+    async fn hot_added_runner_is_selectable_and_shows_its_active_run() {
+        let alpha = runner("alpha");
+        let beta = runner("beta");
+        let run_id = Uuid::new_v4();
+        let mut app = test_app(paths());
+
+        app.dispatch_app_event(AppEvent::ConfigUpdated(Ok(Some(config(vec![
+            alpha.clone(),
+        ])))))
+        .await
+        .unwrap();
+        app.dispatch_app_event(AppEvent::StatusUpdated(Ok(status(&["alpha"]))))
+            .await
+            .unwrap();
+        assert_eq!(app.data.picker_runner_name(), Some("alpha".to_string()));
+
+        // Cloud creates "beta" on this machine; the daemon writes it to
+        // config.toml and hot-adds it, and it picks up a run.
+        app.dispatch_app_event(AppEvent::ConfigUpdated(Ok(Some(config(vec![
+            alpha.clone(),
+            beta.clone(),
+        ])))))
+        .await
+        .unwrap();
+        let mut live = status(&["alpha"]);
+        live.runners.push(busy(snapshot("beta"), run_id));
+        app.dispatch_app_event(AppEvent::StatusUpdated(Ok(live)))
+            .await
+            .unwrap();
+
+        // User moves the Runners list onto "beta".
+        app.dispatch_app_event(AppEvent::SelectRunnerByName("beta".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(app.data.picker_runner_name(), Some("beta".to_string()));
+        assert_eq!(app.data.ipc.selected_runner.as_deref(), Some("beta"));
+        assert_eq!(
+            app.runner_status.list.selected_id(),
+            Some(&"beta".to_string())
+        );
+        let text = rendered_text(&app.runner_status, &app.data);
+        assert!(text.contains("▶ beta"), "beta must be highlighted:\n{text}");
+        assert!(
+            text.contains(&run_id.to_string()),
+            "Live state must show beta's run:\n{text}"
+        );
+    }
+
+    /// PDASHOSS01-316: a runner stripped from config.toml while the TUI is
+    /// open (cloud delete → daemon `RemoveRunner`) must drop out of the
+    /// picker. Before the fix the picker kept the removed runner, so the
+    /// Live state panel said "no live state" while the list highlighted a
+    /// different runner.
+    #[tokio::test]
+    async fn removed_runner_drops_out_of_picker_and_live_state_follows() {
+        let alpha = runner("alpha");
+        let beta = runner("beta");
+        let run_id = Uuid::new_v4();
+        let mut app = test_app(paths());
+
+        app.dispatch_app_event(AppEvent::ConfigUpdated(Ok(Some(config(vec![
+            beta.clone(),
+            alpha.clone(),
+        ])))))
+        .await
+        .unwrap();
+        app.dispatch_app_event(AppEvent::StatusUpdated(Ok(status(&["alpha", "beta"]))))
+            .await
+            .unwrap();
+        assert_eq!(app.data.picker_runner_name(), Some("beta".to_string()));
+
+        // "beta" is deleted in the cloud and torn down locally; "alpha" is
+        // running an agent.
+        app.dispatch_app_event(AppEvent::ConfigUpdated(Ok(Some(config(vec![
+            alpha.clone(),
+        ])))))
+        .await
+        .unwrap();
+        let mut live = status(&[]);
+        live.runners.push(busy(snapshot("alpha"), run_id));
+        app.dispatch_app_event(AppEvent::StatusUpdated(Ok(live)))
+            .await
+            .unwrap();
+
+        assert_eq!(app.data.picker_runner_name(), Some("alpha".to_string()));
+        assert_eq!(app.data.ipc.selected_runner.as_deref(), Some("alpha"));
+        let text = rendered_text(&app.runner_status, &app.data);
+        assert!(
+            text.contains("▶ alpha"),
+            "alpha must be highlighted:\n{text}"
+        );
+        assert!(
+            text.contains(&run_id.to_string()),
+            "Live state must show alpha's run:\n{text}"
+        );
+        assert!(!text.contains("no live state"), "{text}");
+    }
+
+    #[test]
+    fn adopt_disk_config_keeps_unsaved_edits_across_runner_changes() {
+        use crate::config::schema::AgentKind;
+        let alpha = runner_with_kind("alpha", AgentKind::Codex);
+        let beta = runner("beta");
+        let gamma = runner("gamma");
+        let mut data = AppData::new(paths());
+        data.adopt_disk_config(config(vec![alpha.clone(), beta.clone()]));
+
+        // Unsaved edit on alpha.
+        data.config_working.as_mut().unwrap().runners[0].agent.kind = AgentKind::ClaudeCode;
+        assert!(fields::differs(
+            data.config_loaded.as_ref().unwrap(),
+            data.config_working.as_ref().unwrap()
+        ));
+
+        // Disk: beta removed, gamma added.
+        data.adopt_disk_config(config(vec![alpha.clone(), gamma.clone()]));
+
+        let working = data.config_working.as_ref().unwrap();
+        let ids: Vec<Uuid> = working.runners.iter().map(|r| r.runner_id).collect();
+        assert_eq!(ids, vec![alpha.runner_id, gamma.runner_id]);
+        assert_eq!(working.runners[0].agent.kind, AgentKind::ClaudeCode);
+        assert!(fields::differs(
+            data.config_loaded.as_ref().unwrap(),
+            working
+        ));
+    }
+
+    #[test]
+    fn adopt_disk_config_takes_disk_copy_when_clean() {
+        let mut alpha = runner("alpha");
+        let mut data = AppData::new(paths());
+        data.adopt_disk_config(config(vec![alpha.clone()]));
+
+        alpha.pod_id = Some(Uuid::new_v4());
+        data.adopt_disk_config(config(vec![alpha.clone()]));
+
+        assert_eq!(
+            data.config_working.as_ref().unwrap().runners[0].pod_id,
+            alpha.pod_id
+        );
+    }
+
     fn runner_with_kind(name: &str, kind: crate::config::schema::AgentKind) -> RunnerConfig {
         let mut r = runner(name);
         r.agent.kind = kind;

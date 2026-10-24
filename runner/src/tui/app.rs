@@ -168,6 +168,54 @@ impl AppData {
         true
     }
 
+    /// Fold a freshly polled on-disk config into `config_loaded` and
+    /// `config_working`.
+    ///
+    /// The daemon edits `config.toml` while the TUI is open: a runner
+    /// created in the cloud is appended (`machine_control`), and a runner
+    /// deleted in the cloud is stripped. `config_working` is both the
+    /// edit buffer and the list the runner picker resolves against, so it
+    /// must follow those changes or the picker refuses a new runner and
+    /// keeps pointing at a removed one. With no unsaved edits the disk
+    /// copy is adopted as-is; with edits, the runner list is rebased onto
+    /// the disk's (by `runner_id`, in disk order) and each surviving
+    /// runner keeps its edited block.
+    pub fn adopt_disk_config(&mut self, disk: crate::config::schema::Config) {
+        let prev_loaded = self.config_loaded.replace(disk.clone());
+        let Some(working) = self.config_working.as_mut() else {
+            self.config_working = Some(disk);
+            return;
+        };
+        let clean = prev_loaded
+            .as_ref()
+            .is_some_and(|l| !super::views::config::differs(l, working));
+        if clean {
+            *working = disk;
+            return;
+        }
+        let same_runners = working.runners.len() == disk.runners.len()
+            && working
+                .runners
+                .iter()
+                .zip(&disk.runners)
+                .all(|(w, d)| w.runner_id == d.runner_id);
+        if same_runners {
+            return;
+        }
+        let edited = std::mem::take(&mut working.runners);
+        working.runners = disk
+            .runners
+            .into_iter()
+            .map(|d| {
+                edited
+                    .iter()
+                    .find(|w| w.runner_id == d.runner_id)
+                    .cloned()
+                    .unwrap_or(d)
+            })
+            .collect();
+    }
+
     pub fn sync_picker_to_ipc(&mut self) {
         let selected = self.picker_runner_name();
         self.selected_runner_name = selected.clone();
@@ -475,11 +523,8 @@ impl App {
                 self.data.ipc_config_in_flight = false;
                 match result {
                     Ok(Some(cfg)) => {
-                        self.data.config_loaded = Some(cfg.clone());
+                        self.data.adopt_disk_config(cfg);
                         self.data.config_error = None;
-                        if self.data.config_working.is_none() {
-                            self.data.config_working = Some(cfg);
-                        }
                         self.data.sync_picker_to_ipc();
                         // Disarm the registration form when config exists.
                         self.general.on_config_present(&self.data);
