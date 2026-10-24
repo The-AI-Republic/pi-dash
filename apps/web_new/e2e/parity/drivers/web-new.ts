@@ -12628,9 +12628,16 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByRole("option", { name, exact: true }).click();
   }
 
-  /** The cancelled-state option names in list order; closes the picker after. */
+  /**
+   * The cancelled-state option names in list order; closes the picker after.
+   * The picker only opens once a second cancelled state exists, so a
+   * disabled trigger is reported rather than clicked into a timeout.
+   */
   async automationsCloseStateOptions(): Promise<string[]> {
     const trigger = this.closeStateTrigger();
+    if (await trigger.isDisabled().catch(() => true)) {
+      throw new Error("[parity] the cancelled-state picker is disabled; a second cancelled state is required");
+    }
     await trigger.click();
     const options = this.page.getByRole("option");
     await options.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
@@ -12700,10 +12707,14 @@ export class WebNewDriver implements ParityDriver {
     });
   }
 
-  /** The row headings inside the automations section, in display order. */
+  /**
+   * The built-in row headings, in display order. Only the rows container is
+   * read: an edition's extension rows mount in a sibling slot and are not
+   * part of the built-in pair.
+   */
   async automationsBuiltInRows(): Promise<string[]> {
     const headings = this.page
-      .getByTestId("automations-settings")
+      .getByTestId("automations-built-in-rows")
       .locator("[data-automation-row]")
       .getByRole("heading", { level: 4 });
     const total = await headings.count();

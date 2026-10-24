@@ -235,15 +235,25 @@ function pageDouble(options: PageOptions = {}) {
   const closeRow = rowFor(CLOSE, closeSwitch);
 
   const headings = (options.builtInRows ?? []).map((text) => new LocatorDouble({ text }));
-  // The settings section holds the rows; the slot holds only extensions.
-  const settingsSection = new LocatorDouble({
-    locator: (selector) =>
-      selector === "[data-automation-row]"
-        ? new LocatorDouble({
-            role: (role) => (role === "heading" ? new LocatorDouble({ items: headings }) : absent()),
-          })
-        : absent(),
-  });
+  const extensionHeadings = options.extension === "rows" ? [new LocatorDouble({ text: "Edition automation" })] : [];
+  const rowsOf = (items: LocatorDouble[]) => {
+    const double = new LocatorDouble({
+      locator: (selector) =>
+        selector === "[data-automation-row]"
+          ? new LocatorDouble({
+              role: (role) => (role === "heading" ? new LocatorDouble({ items }) : absent()),
+            })
+          : absent(),
+    });
+    // Record the queries so a test can prove which container was read.
+    double.locator = vi.fn(double.locator.bind(double));
+    return double;
+  };
+  // The section wraps both the built-in rows and the extension slot, so a
+  // query scoped to it would also see edition rows; the container scopes to
+  // the built-in pair alone.
+  const settingsSection = rowsOf([...headings, ...extensionHeadings]);
+  const builtInRows = rowsOf(headings);
   const extensionSlot = new LocatorDouble({
     count: options.extension === "absent" ? 0 : 1,
     visible: true,
@@ -285,9 +295,11 @@ function pageDouble(options: PageOptions = {}) {
     getByTestId: vi.fn((testId: string) =>
       testId === "automations-settings"
         ? settingsSection
-        : testId === "automations-extension"
-          ? extensionSlot
-          : absent()
+        : testId === "automations-built-in-rows"
+          ? builtInRows
+          : testId === "automations-extension"
+            ? extensionSlot
+            : absent()
     ),
     getByPlaceholder: vi.fn((_placeholder: string) => monthInput),
     getByText: vi.fn((_text: string | RegExp) => absent()),
@@ -319,6 +331,8 @@ function pageDouble(options: PageOptions = {}) {
     archiveHeading,
     refusalHeading,
     extensionSlot,
+    section: settingsSection,
+    rowsContainer: builtInRows,
   };
 }
 
@@ -480,10 +494,23 @@ describe("WebNewDriver auto-close row", () => {
     expect(stub.closeState.click).toHaveBeenCalledTimes(2);
   });
 
-  it("lists no options when the picker holds none", async () => {
-    const stub = pageDouble({ options: [] });
-    await expect(new WebNewDriver(stub.page).automationsCloseStateOptions()).resolves.toEqual([]);
-    expect(stub.closeState.click).toHaveBeenCalledTimes(2);
+  it("refuses to read options from the disabled placeholder picker", async () => {
+    // The page disables the trigger until a second cancelled state exists,
+    // so there is no open list to read; the driver says so instead of
+    // hanging on a click that can never open it.
+    const stub = pageDouble({ closeStateDisabled: true, closeStateText: "State", options: [] });
+    await expect(new WebNewDriver(stub.page).automationsCloseStateOptions()).rejects.toThrow(
+      "[parity] the cancelled-state picker is disabled; a second cancelled state is required"
+    );
+    expect(stub.closeState.click).not.toHaveBeenCalled();
+  });
+
+  it("treats an unreadable trigger as disabled rather than clicking it", async () => {
+    const stub = pageDouble({ closeStateRejects: true, options: ["Cancelled"] });
+    await expect(new WebNewDriver(stub.page).automationsCloseStateOptions()).rejects.toThrow(
+      "the cancelled-state picker is disabled"
+    );
+    expect(stub.closeState.click).not.toHaveBeenCalled();
   });
 
   it("picks a cancelled state by name", async () => {
@@ -565,6 +592,13 @@ describe("WebNewDriver automations failures and slots", () => {
   it("lists the built-in row headings in display order", async () => {
     const stub = pageDouble({ builtInRows: [ARCHIVE, CLOSE] });
     await expect(new WebNewDriver(stub.page).automationsBuiltInRows()).resolves.toEqual([ARCHIVE, CLOSE]);
+  });
+
+  it("leaves an edition's extension rows out of the built-in list", async () => {
+    const stub = pageDouble({ builtInRows: [ARCHIVE, CLOSE], extension: "rows" });
+    await expect(new WebNewDriver(stub.page).automationsBuiltInRows()).resolves.toEqual([ARCHIVE, CLOSE]);
+    expect(stub.rowsContainer.locator).toHaveBeenCalledWith("[data-automation-row]");
+    expect(stub.section.locator).not.toHaveBeenCalled();
   });
 
   it("reads an unreadable heading as empty text", async () => {

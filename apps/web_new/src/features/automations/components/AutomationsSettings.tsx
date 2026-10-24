@@ -36,6 +36,7 @@ export const AUTOMATIONS_INTRO =
 export const AUTOMATIONS_LOADING_LABEL = "Loading automations";
 export const AUTOMATIONS_UNAVAILABLE_MESSAGE = "We could not load these settings. Check your connection and try again.";
 export const AUTOMATIONS_EXTENSION_SLOT = "automations-extension";
+export const AUTOMATIONS_ROWS_SLOT = "automations-built-in-rows";
 
 export interface AutomationsSettingsProps {
   workspaceSlug: string;
@@ -136,7 +137,7 @@ export function AutomationsScreen({
     <section aria-label={AUTOMATIONS_HEADING} data-testid="automations-settings" className="flex flex-col">
       <h2 className="text-h3 text-(--text)">{AUTOMATIONS_HEADING}</h2>
       <p className="text-body mt-(--space-1) text-(--text-muted)">{AUTOMATIONS_INTRO}</p>
-      <div className="mt-(--space-6)">
+      <div data-testid={AUTOMATIONS_ROWS_SLOT} className="mt-(--space-6)">
         {projectPending ? (
           <div role="status" aria-label={AUTOMATIONS_LOADING_LABEL}>
             <RowSkeleton />
