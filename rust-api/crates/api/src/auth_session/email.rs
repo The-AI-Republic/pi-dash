@@ -81,6 +81,7 @@ use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
 use crate::auth_session::throttle_ident;
 use crate::edge;
 use crate::license::handlers_auth_forms::client_ip;
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 
 /// `AuthenticationThrottle`: 30/minute, scope `authentication`
@@ -1798,9 +1799,10 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
 
 async fn signin_app(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let peer = parts
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -1819,9 +1821,10 @@ async fn signin_app(State(state): State<AppState>, req: axum::extract::Request) 
 
 async fn signup_app(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let peer = parts
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -1840,9 +1843,10 @@ async fn signup_app(State(state): State<AppState>, req: axum::extract::Request) 
 
 async fn signin_space(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let peer = parts
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -1861,9 +1865,10 @@ async fn signin_space(State(state): State<AppState>, req: axum::extract::Request
 
 async fn signup_space(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let peer = parts
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -2060,9 +2065,10 @@ async fn check_email_throttle(state: &AppState, ident: &str) -> bool {
 
 async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let Some(pool) = state.pools().map(|pools| pools.primary()) else {
         return server_error();
     };
@@ -2235,9 +2241,10 @@ fn session_delete_cookie(ctx: &CookieCtx, cookie_name: &str) -> String {
 /// missing cookie or a live anonymous session answers bare.
 async fn serve_signout(state: &AppState, req: axum::extract::Request, space: bool) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let hosts = host_ctx(state);
     let cookie_name = state.settings().session.cookie_name.clone();
     let peer = parts

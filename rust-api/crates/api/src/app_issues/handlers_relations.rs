@@ -96,6 +96,7 @@ use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 
@@ -244,8 +245,8 @@ enum Denial {
     Conflict(String),
     /// 415, `UnsupportedMediaType` (content negotiation).
     UnsupportedMediaType(String),
-    /// 413, `RequestBodySizeLimitMiddleware` past 5 MiB.
-    RequestTooLarge,
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -295,10 +296,9 @@ impl Denial {
                 StatusCode::BAD_REQUEST,
                 serde_json::to_string(body).unwrap_or_else(|_| super::SERVER_ERROR_BODY.to_owned()),
             ),
-            Denial::WorkItemNotFound => (
-                StatusCode::NOT_FOUND,
-                WORK_ITEM_NOT_FOUND_BODY.to_owned(),
-            ),
+            Denial::WorkItemNotFound => {
+                (StatusCode::NOT_FOUND, WORK_ITEM_NOT_FOUND_BODY.to_owned())
+            }
             Denial::Conflict(message) => (
                 StatusCode::CONFLICT,
                 format!("{{\"error\":{}}}", json_string(message)),
@@ -307,9 +307,9 @@ impl Denial {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
-            Denial::RequestTooLarge => (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -544,9 +544,6 @@ async fn project_workspace(
 // Request bodies
 // ---------------------------------------------------------------------------
 
-/// `RequestBodySizeLimitMiddleware` answers 413 before the view runs.
-const MAX_BODY: usize = 5_242_880;
-
 /// Relations body semantics for the shared negotiator: no list fields
 /// (repeated form keys arrive as the last value, like `QueryDict.get`),
 /// no blank-skipping (every blank runs field validation).
@@ -563,9 +560,12 @@ struct RequestBody {
 
 async fn read_body(req: axum::extract::Request) -> Result<RequestBody, Denial> {
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
+    // The serve-wide `BodyLimitLayer` already 413'd over-limit bodies;
+    // the read below cannot re-cap. A mid-stream transport failure fails
+    // closed with the truncated-body 502.
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::RequestTooLarge)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     match shared_body::negotiate_body(&parts.headers, &bytes, &RELATIONS_BODY_SPEC) {
         Ok(shared_body::NegotiatedBody::Empty) => Ok(RequestBody { map: Map::new() }),
         Ok(shared_body::NegotiatedBody::JsonText { text, .. }) => {
@@ -6751,11 +6751,11 @@ mod tests {
             denied_status(&Denial::LinkNotFound).0,
             StatusCode::NOT_FOUND
         );
-        // The 413 shape matches the middleware (lowercase `detail`); the
-        // 415 shape matches DRF content negotiation.
+        // The truncated-body 502 reuses the shared bad-gateway bytes;
+        // the 415 shape matches DRF content negotiation.
         assert_eq!(
-            denied_status(&Denial::RequestTooLarge).1,
-            r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#
+            denied_status(&Denial::TruncatedBody).1,
+            crate::edge::BAD_GATEWAY_BODY
         );
         assert_eq!(
             denied_status(&Denial::UnsupportedMediaType(

@@ -2085,7 +2085,7 @@ mod tests {
         let response = denial.into_response();
         let status = response.status();
         let body = response.into_body();
-        let bytes = axum::body::to_bytes(body, 4096).await.expect("body");
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.expect("body");
         (status, String::from_utf8(bytes.to_vec()).expect("utf8"))
     }
 

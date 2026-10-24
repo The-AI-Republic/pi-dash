@@ -81,6 +81,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
@@ -920,9 +921,9 @@ pub async fn transfer_issues(
         return crate::edge::proxy(State(state), req).await;
     }
     let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+    let body = match read_request_bytes(body).await {
         Ok(body) => body,
-        Err(_) => return Denial::ServerError.into_response(),
+        Err(response) => return response,
     };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
@@ -2254,9 +2255,9 @@ pub async fn patch_user_properties(
         return crate::edge::proxy(State(state), req).await;
     }
     let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+    let body = match read_request_bytes(body).await {
         Ok(body) => body,
-        Err(_) => return Denial::ServerError.into_response(),
+        Err(response) => return response,
     };
     let context =
         match user_properties_context(&state, slug, project_raw, cycle_raw, extension, "PATCH")

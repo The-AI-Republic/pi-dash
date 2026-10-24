@@ -347,6 +347,8 @@ pub enum Denial {
     BadError(String),
     /// 400, `{"message": ..., "code": ...}` (filter validation).
     BadFilter(String, String),
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -380,6 +382,10 @@ impl Denial {
                     json_string(message),
                     json_string(code)
                 ),
+            ),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
