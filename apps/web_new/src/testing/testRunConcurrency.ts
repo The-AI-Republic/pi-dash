@@ -3,20 +3,21 @@
 // See the LICENSE file for details.
 
 /**
- * Resource limits for a full test run.
+ * Resource limit for coverage runs.
  *
  * Vitest's worker-to-main RPC gives the main process 60 seconds to answer an
  * `onTaskUpdate` call, and that deadline is hardcoded in birpc: Vitest 3
  * passes no `timeout`, so it cannot be raised from configuration. On a large
  * run the main process also carries the reporters and the v8 coverage work,
- * and on a shared host it can miss the deadline while every assertion passes.
- * The run then exits 1 with an infrastructure error instead of a test result.
+ * and a saturated main process misses the deadline after every test has
+ * passed — the run then exits 1 with an infrastructure error instead of a
+ * test result.
  *
- * Bounding the pool is the available lever. Vitest's defaults here are three
- * forks (`cpus - 1` on a four-vCPU host) and a coverage processing
- * concurrency of `min(20, cpus)` (four). The caps below leave the main
- * process room to answer the RPC without changing what any test asserts.
+ * The coverage lever is the one that costs nothing elsewhere. v8 remapping
+ * runs inside the main process with a default concurrency of
+ * `min(20, cpus)` (four here); capping it keeps the main process responsive
+ * without touching how many test workers run. Capping the worker pool was
+ * measured at roughly half the throughput on a loaded host — a cost paid by
+ * every run, not just coverage runs — so the pool keeps its default.
  */
-export const FULL_RUN_MAX_WORKERS = 2;
-
 export const FULL_RUN_COVERAGE_PROCESSING_CONCURRENCY = 2;
