@@ -416,6 +416,7 @@ class RunFailedEndpoint(_RunEndpointBase):
                 run.id,
                 AgentRunStatus.FAILED,
                 error_detail=request.data.get("detail") or "",
+                runner_failure_reason=request.data.get("reason") or "",
                 tokens=request.data.get("tokens") or request.data.get("usage"),
                 model=request.data.get("model"),
             )
