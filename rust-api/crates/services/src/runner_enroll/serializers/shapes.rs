@@ -86,9 +86,9 @@ pub const POD_WIRE_FIELDS: [&str; 11] = [
     "updated_at",
 ];
 
-/// `RunnerLiveStateSerializer.Meta.fields` (`serializers.py:86-99`), wire
+/// `RunnerLiveStateSerializer.Meta.fields` (`serializers.py:85-102`), wire
 /// order.
-pub const LIVE_STATE_WIRE_FIELDS: [&str; 14] = [
+pub const LIVE_STATE_WIRE_FIELDS: [&str; 16] = [
     "observed_run_id",
     "last_event_at",
     "last_event_kind",
@@ -102,6 +102,8 @@ pub const LIVE_STATE_WIRE_FIELDS: [&str; 14] = [
     "usage",
     "llm_model",
     "turn_count",
+    "agent_health",
+    "agent_last_activity_at",
     "updated_at",
 ];
 
@@ -372,6 +374,8 @@ pub struct LiveStateRow<'a> {
     pub usage: &'a Value,
     pub llm_model: Option<&'a str>,
     pub turn_count: Option<i64>,
+    pub agent_health: Option<&'a str>,
+    pub agent_last_activity_at: Option<&'a str>,
     pub updated_at: &'a str,
 }
 
@@ -391,10 +395,12 @@ pub struct LiveStateView<'a> {
     pub usage: &'a Value,
     pub llm_model: Option<&'a str>,
     pub turn_count: Option<i64>,
+    pub agent_health: Option<&'a str>,
+    pub agent_last_activity_at: Option<&'a str>,
     pub updated_at: &'a str,
 }
 
-/// Port of `RunnerLiveStateSerializer` (`serializers.py:75-101`).
+/// Port of `RunnerLiveStateSerializer` (`serializers.py:75-103`).
 pub fn live_state_to_representation<'a>(row: &'a LiveStateRow<'a>) -> LiveStateView<'a> {
     let flats = flat_token_fields(row.usage);
     LiveStateView {
@@ -411,6 +417,8 @@ pub fn live_state_to_representation<'a>(row: &'a LiveStateRow<'a>) -> LiveStateV
         usage: row.usage,
         llm_model: row.llm_model,
         turn_count: row.turn_count,
+        agent_health: row.agent_health,
+        agent_last_activity_at: row.agent_last_activity_at,
         updated_at: row.updated_at,
     }
 }
@@ -1322,6 +1330,8 @@ mod tests {
             usage: &usage,
             llm_model: Some("claude-opus-4-6"),
             turn_count: Some(7),
+            agent_health: Some("healthy"),
+            agent_last_activity_at: Some("2026-10-02T01:02:04+00:00"),
             updated_at: "2026-10-02T01:02:05+00:00",
         };
         let body = serde_json::to_value(live_state_to_representation(&row)).unwrap();
@@ -1331,6 +1341,11 @@ mod tests {
         assert_eq!(body["total_tokens"], json!(12800));
         assert_eq!(body["usage"], usage);
         assert_eq!(body["last_event_summary"], Value::Null);
+        assert_eq!(body["agent_health"], json!("healthy"));
+        assert_eq!(
+            body["agent_last_activity_at"],
+            json!("2026-10-02T01:02:04+00:00")
+        );
     }
 
     #[test]
@@ -1347,6 +1362,8 @@ mod tests {
             usage: &usage,
             llm_model: None,
             turn_count: None,
+            agent_health: None,
+            agent_last_activity_at: None,
             updated_at: "2026-10-02T01:02:05+00:00",
         };
         let body = serde_json::to_value(live_state_to_representation(&row)).unwrap();
@@ -1357,6 +1374,8 @@ mod tests {
             "output_tokens",
             "total_tokens",
             "llm_model",
+            "agent_health",
+            "agent_last_activity_at",
         ] {
             assert_eq!(body[key], Value::Null, "{key}");
         }
@@ -1408,6 +1427,8 @@ mod tests {
                 usage,
                 llm_model: None,
                 turn_count: None,
+                agent_health: None,
+                agent_last_activity_at: None,
                 updated_at: "2026-10-02T01:02:05+00:00",
             }),
             enrolled_at: Some("2026-10-01T00:00:01+00:00"),

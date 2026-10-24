@@ -4289,6 +4289,8 @@ struct RenderedLive {
     usage: Value,
     llm_model: Option<String>,
     turn_count: Option<i32>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
     updated_at: String,
 }
 
@@ -4326,6 +4328,8 @@ fn rendered_run_from_pg(
                     usage,
                     llm_model: live_llm,
                     turn_count: row.try_get("turn_count")?,
+                    agent_health: row.try_get("agent_health")?,
+                    agent_last_activity_at: opt_moment("agent_last_activity_at")?,
                     updated_at: serialize_iso_datetime(updated),
                 })
             }
@@ -4564,6 +4568,8 @@ async fn render_detail_map(
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: live.updated_at.as_str(),
         }),
     });
@@ -4596,6 +4602,8 @@ async fn render_detail_map(
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: live.updated_at.as_str(),
         }),
     });

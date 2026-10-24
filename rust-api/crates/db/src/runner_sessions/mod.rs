@@ -107,7 +107,7 @@
 //! ## `runner_live_state` (D-15 model, D-14 writes)
 //!
 //! `runner_id` (UUID pk, OneToOne; `get_or_create`), `observed_run_id`
-//! (UUID null; wipe driver + update), the eight `SNAPSHOT_FIELDS`
+//! (UUID null; wipe driver + update), the ten `SNAPSHOT_FIELDS`
 //! (`last_event_at`, `last_event_kind`, `last_event_summary`,
 //! `agent_pid`, `agent_subprocess_alive`, `approvals_pending`,
 //! `llm_model`, `turn_count`; wipe + conditional updates), `usage`

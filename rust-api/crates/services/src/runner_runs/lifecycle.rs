@@ -82,6 +82,8 @@ const LIVE_STATE_COLUMNS: &[&str] = &[
     "usage",
     "llm_model",
     "turn_count",
+    "agent_health",
+    "agent_last_activity_at",
     "updated_at",
 ];
 
@@ -1899,12 +1901,14 @@ mod tests {
              \"runner_live_state\".\"usage\", \
              \"runner_live_state\".\"llm_model\", \
              \"runner_live_state\".\"turn_count\", \
+             \"runner_live_state\".\"agent_health\", \
+             \"runner_live_state\".\"agent_last_activity_at\", \
              \"runner_live_state\".\"updated_at\" \
              FROM \"runner_live_state\" \
              WHERE (\"runner_live_state\".\"observed_run_id\" = $1 AND \
              \"runner_live_state\".\"runner_id\" = $2) LIMIT 1"
         );
-        assert_eq!(LIVE_STATE_COLUMNS.len(), 12);
+        assert_eq!(LIVE_STATE_COLUMNS.len(), 14);
     }
 
     #[test]
@@ -2098,6 +2102,8 @@ mod tests {
                 "usage",
                 "llm_model",
                 "turn_count",
+                "agent_health",
+                "agent_last_activity_at",
                 "updated_at",
             ]
         );
