@@ -18,6 +18,8 @@ import { useDocumentHead } from "../../../shared/shell/index.js";
 import { isCompletedModule } from "../../../shared/pickers/modules.js";
 import { EntityListScreen, listPageQueryOptions, prefsQueryOptions, selectDisplayPrefs } from "../../issues/index.js";
 import { moduleDetailTitle } from "../lib/moduleDetail.js";
+import { useModuleAddWorkItem } from "../lib/useModuleAddWorkItem.js";
+import { ModuleAddWorkItem } from "./ModuleAddWorkItem.js";
 import { MODULES_CRUMB } from "../lib/moduleList.js";
 import { useDetailSidebarCollapsed } from "../lib/detailSidebarStore.js";
 import { ModuleAnalyticsSidebar } from "./sidebar/ModuleAnalyticsSidebar.js";
@@ -61,6 +63,16 @@ export function ModuleDetailScreen({
     })
   );
   const { collapsed, setCollapsed } = useDetailSidebarCollapsed();
+  // The header and the empty card share one add controller, so a visit
+  // never mounts a second creation form or picker (MOD-031, §8.3).
+  const add = useModuleAddWorkItem({
+    workspaceSlug,
+    projectId,
+    moduleId,
+    memberRole: project?.member_role ?? null,
+    projectArchived: project === null || project.archived_at !== null,
+    moduleStatus: module.status,
+  });
   useDocumentHead({
     title: project === null ? MODULES_CRUMB : moduleDetailTitle(project.name, module.name),
     robots: "noindex, nofollow",
@@ -98,10 +110,23 @@ export function ModuleDetailScreen({
             compact={compact}
             extraHeaderActions={
               <>
+                {add.canAdd ? (
+                  <ModuleAddWorkItem
+                    workspaceSlug={workspaceSlug}
+                    project={project}
+                    moduleId={moduleId}
+                    controller={add}
+                  />
+                ) : null}
                 <ModuleDetailBadge total={firstPage.total_count} />
                 <ModuleSidebarToggle collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
               </>
             }
+            emptyStateActions={{
+              canAct: add.canAdd,
+              onCreate: add.openCreate,
+              onAddExisting: add.openPicker,
+            }}
           />
         </div>
         {collapsed ? null : (

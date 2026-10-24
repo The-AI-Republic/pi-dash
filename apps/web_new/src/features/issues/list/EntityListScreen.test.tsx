@@ -620,6 +620,35 @@ describe("EntityListScreen", () => {
     expect(openAddExisting).toHaveBeenCalledTimes(1);
   });
 
+  it("routes the empty module's actions to the host's own entries (MOD-031)", async () => {
+    const onCreate = vi.fn();
+    const onAddExisting = vi.fn();
+    setup({
+      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+      moduleId: MODULE,
+      title: "Auth",
+      emptyStateActions: { canAct: true, onCreate, onAddExisting },
+    });
+    fireEvent.click(within(screen.getByTestId("empty-state")).getByRole("button", { name: "Create work item" }));
+    fireEvent.click(within(screen.getByTestId("empty-state")).getByRole("button", { name: "Add existing work item" }));
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(onAddExisting).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the host's empty-state actions disabled for a read-only standing (MOD-031)", () => {
+    const onCreate = vi.fn();
+    const onAddExisting = vi.fn();
+    setup({
+      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+      moduleId: MODULE,
+      title: "Auth",
+      emptyStateActions: { canAct: false, onCreate, onAddExisting },
+    });
+    const card = screen.getByTestId("empty-state");
+    expect(within(card).getByRole("button", { name: "Create work item" })).toBeDisabled();
+    expect(within(card).getByRole("button", { name: "Add existing work item" })).toBeDisabled();
+  });
+
   it("opens the module's create and the cycle's add-existing entries (ISS-069/070)", async () => {
     const openCreate = vi.fn();
     const openAddExisting = vi.fn();

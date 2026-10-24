@@ -28,6 +28,11 @@ export interface AddExistingModalProps {
   excludeCycleMembers?: boolean | undefined;
   /** Module id excludes rows already attached to that module. */
   excludeModuleId?: string | undefined;
+  /**
+   * Placeholder of the search field. Hosts that own their own search
+   * wording pass theirs; the issues picker keeps its label wording.
+   */
+  searchPlaceholder?: string | undefined;
   /** Only offer issues that have no target date yet (calendar days). */
   undatedOnly?: boolean | undefined;
   /** Day a chosen issue must still be able to start by (calendar drops). */
@@ -57,6 +62,7 @@ export function AddExistingModal({
   excludeModuleId,
   undatedOnly = false,
   attachableDay,
+  searchPlaceholder = "Search work items",
 }: AddExistingModalProps): React.ReactElement {
   const [query, setQuery] = React.useState("");
   const [selected, setSelected] = React.useState<string[]>([]);
@@ -123,7 +129,7 @@ export function AddExistingModal({
       <div className="flex flex-col gap-(--space-4)">
         <Input
           label="Search work items"
-          placeholder="Search work items"
+          placeholder={searchPlaceholder}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
