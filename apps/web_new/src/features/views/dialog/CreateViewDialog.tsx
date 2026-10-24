@@ -239,6 +239,12 @@ function SaveViewForm(props: SaveViewFormProps): React.ReactElement {
     };
     const created = await createProjectView(getAppClient(), workspaceSlug, projectId, payload);
     queryClient.setQueryData(builder.savedViewKeys.project(workspaceSlug, projectId, created.id), created);
+    // The acting user's own create updates the list at once (VIEW-043):
+    // a fetched list gains the row without waiting out its stale time,
+    // while a never-fetched list stays unfetched and reads fresh on mount.
+    queryClient.setQueryData<SavedViewList>(viewKeys.projectList(workspaceSlug, projectId), (current) =>
+      current === undefined ? current : [created, ...current]
+    );
     const slot = edition.slots?.viewAccess;
     if (slot !== undefined && access !== SHARED_ACCESS) {
       try {
