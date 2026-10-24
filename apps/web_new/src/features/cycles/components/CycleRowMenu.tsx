@@ -20,7 +20,7 @@ import { Archive, ArchiveRestore, Ellipsis, ExternalLink, Link2, Pencil, Trash2 
 import * as React from "react";
 
 import { UpdateCycleDialog, type CycleProjectRef } from "../dialog/CycleDialog.js";
-import { useNarrowViewport } from "../../../shared/shell/index.js";
+import { useNarrowViewport, useTouchInput } from "../../../shared/shell/index.js";
 import { useArchiveCycle, useDeleteCycle, useRestoreCycle } from "../api/cycleMutations.js";
 import { cycleMenuEntries, type CycleMenuEntryId } from "../lib/cycleMenu.js";
 import { copyCycleLink, openCycleInNewTab } from "../lib/cycleShare.js";
@@ -69,6 +69,8 @@ export function CycleRowMenu({
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [archiveOpen, setArchiveOpen] = React.useState(false);
   const narrow = useNarrowViewport();
+  const touch = useTouchInput();
+  const inline = narrow || touch;
   const target = { workspaceSlug, projectId, cycleId: cycle.id };
   const { remove, pending: deletePending } = useDeleteCycle(target);
   const { archive, pending: archivePending } = useArchiveCycle(target);
@@ -109,7 +111,7 @@ export function CycleRowMenu({
     <>
       <Menu
         trigger={
-          narrow ? (
+          inline ? (
             <IconButton label={triggerLabel} size="small" data-testid="cycle-row-menu-inline" className="shrink-0">
               <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
             </IconButton>

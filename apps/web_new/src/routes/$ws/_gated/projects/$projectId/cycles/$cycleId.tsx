@@ -222,8 +222,11 @@ function CycleDetailContent({
   }
 
   const finished = isCompletedCycle(cycle.status);
-  const canEdit =
-    canEditInProject({ memberRole: project.member_role, archived: project.archived_at !== null }) && !finished;
+  const canMutate = canEditInProject({
+    memberRole: project.member_role,
+    archived: project.archived_at !== null,
+  });
+  const canEdit = canMutate && !finished;
   const canCreate = isProjectAuthorized(roles.data?.[projectId] ?? null) && !finished;
   const creatable: WorkItemCreateProject[] = selectCreatableProjects(
     projects.map((entry) => ({
@@ -377,7 +380,7 @@ function CycleDetailContent({
                   projectIdentifier={project.identifier}
                   entity={entity}
                   canEdit={canEdit}
-                  canAddExisting
+                  canAddExisting={canCreate}
                   membership={{ cycleId }}
                 />
               </React.Suspense>
@@ -428,12 +431,12 @@ function CycleDetailContent({
             {addWorkItem}
             {display}
             <CycleSidebarToggle collapsed={sidebarCollapsed} onToggle={flipSidebar} />
-            {canEdit ? (
+            {canMutate && cycle.archived_at == null ? (
               <CycleRowMenu
                 workspaceSlug={workspaceSlug}
                 projectId={projectId}
                 cycle={cycle}
-                canMutate
+                canMutate={canMutate}
                 currentProject={{ id: projectId, name: project.name, identifier: project.identifier }}
                 alwaysVisible
               />

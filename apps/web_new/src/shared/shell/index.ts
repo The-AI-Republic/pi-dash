@@ -25,6 +25,7 @@ export type { SidebarEditionEntry, SidebarPersonalEntry, SidebarProps, SidebarWo
 export { SIDEBAR_PEEK_DISMISS_MS, SidebarShell } from "./SidebarShell.js";
 export type { SidebarShellProps } from "./SidebarShell.js";
 export { NARROW_VIEWPORT_BREAKPOINT_PX, useNarrowViewport } from "./narrowViewport.js";
+export { useTouchInput } from "./touchInput.js";
 export { isClientSideClick, isHomeRowActive } from "./sidebarLink.js";
 export type { SidebarClick } from "./sidebarLink.js";
 export { TitleBar } from "./TitleBar.js";
