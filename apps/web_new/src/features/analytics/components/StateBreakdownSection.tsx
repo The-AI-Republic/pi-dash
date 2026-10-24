@@ -73,7 +73,6 @@ export function StateBreakdownSection({
   );
   const rows = React.useMemo(() => breakdownRows(stats.data ?? [], projectRows), [stats.data, projectRows]);
   const loading = stats.isPending;
-  const empty = !loading && (stats.isError || rows.length === 0);
 
   return (
     <section aria-labelledby="analytics-breakdown-heading" data-testid="analytics-breakdown">
@@ -108,7 +107,7 @@ export function StateBreakdownSection({
         countNoun="Projects"
         loading={loading}
         skeletonRows={BREAKDOWN_SKELETON_ROWS}
-        emptyText={empty ? BREAKDOWN_GUIDANCE : null}
+        emptyText={BREAKDOWN_GUIDANCE}
         onExport={(visible) => {
           downloadCsvFile(buildAnalyticsCsv(workspaceSlug, analyticsCsvColumns(columns), visible));
         }}

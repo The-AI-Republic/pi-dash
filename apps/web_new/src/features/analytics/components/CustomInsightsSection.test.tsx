@@ -76,6 +76,10 @@ describe("CustomInsightsSection", () => {
     expect(screen.getByRole("heading", { name: "Custom Insights" })).toBeInTheDocument();
     expect(screen.getByTestId("analytics-custom-trigger-1")).toHaveTextContent("Priority");
     expect(screen.getByTestId("analytics-custom-skeleton")).toBeInTheDocument();
+    const table = screen.getByTestId("analytics-custom-table");
+    expect(table.querySelectorAll("tbody tr")).toHaveLength(5);
+    expect(table.querySelectorAll("tbody td > span[style*='height'][style*='20px']")).toHaveLength(10);
+    expect(within(table).queryByRole("button", { name: "Export as csv" })).not.toBeInTheDocument();
     expect(screen.queryByTestId("mock-chart-bar")).not.toBeInTheDocument();
     expect(screen.queryByTestId("analytics-section-guidance")).not.toBeInTheDocument();
   });
@@ -434,6 +438,8 @@ describe("CustomInsightsSection table (ANL-012, ANL-016, ANL-017)", () => {
     const table = screen.getByTestId("analytics-custom-table");
     await user.click(within(table).getByRole("button", { name: "Search" }));
     await user.type(within(table).getByPlaceholderText("Search"), "no match");
+    expect(within(table).getAllByRole("row")).toHaveLength(2);
+    expect(within(table).getByTestId("analytics-section-guidance")).toHaveTextContent(GUIDANCE);
     await user.click(within(table).getByRole("button", { name: "Export as csv" }));
     expect(createObjectUrl).not.toHaveBeenCalled();
   });

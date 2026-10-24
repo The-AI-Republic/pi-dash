@@ -88,9 +88,18 @@ export function CustomInsightsSection({ workspaceSlug, projectIds }: CustomInsig
         onSplitChange={setSplit}
       />
       {loading ? (
-        <div data-testid="analytics-custom-skeleton">
-          <Skeleton height="320px" />
-        </div>
+        <>
+          <div data-testid="analytics-custom-skeleton">
+            <Skeleton height="320px" />
+          </div>
+          <AnalyticsTable
+            testId="analytics-custom-table"
+            columns={columns}
+            rows={[]}
+            countNoun={customAxisLabel(xAxis)}
+            loading
+          />
+        </>
       ) : showGuidance ? (
         <AnalyticsSectionGuidance title={CUSTOM_INSIGHTS_GUIDANCE} description="" />
       ) : (
@@ -101,6 +110,7 @@ export function CustomInsightsSection({ workspaceSlug, projectIds }: CustomInsig
             columns={columns}
             rows={tableRows}
             countNoun={customAxisLabel(xAxis)}
+            emptyText={CUSTOM_INSIGHTS_GUIDANCE}
             onExport={(visible) => {
               downloadCsvFile(buildAnalyticsCsv(workspaceSlug, analyticsCsvColumns(columns), visible));
             }}

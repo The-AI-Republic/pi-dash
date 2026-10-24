@@ -86,9 +86,12 @@ describe("AnalyticsTable", () => {
 
   it("does not export when the filter leaves no rows", async () => {
     const user = userEvent.setup();
-    const { onExport } = setup();
+    const { onExport } = setup({ emptyText: "Create projects with work items." });
     await user.click(screen.getByRole("button", { name: "Search" }));
     await user.type(screen.getByPlaceholderText("Search"), "no match");
+    expect(screen.getAllByRole("row")).toHaveLength(2);
+    expect(screen.getAllByRole("cell")).toHaveLength(1);
+    expect(screen.getByText("Create projects with work items.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Export as csv" }));
     expect(onExport).not.toHaveBeenCalled();
   });
@@ -97,7 +100,7 @@ describe("AnalyticsTable", () => {
     setup({ loading: true, skeletonRows: 3 });
     expect(screen.queryByText("Urgent")).not.toBeInTheDocument();
     expect(document.querySelectorAll("tbody td > span[style*='height'][style*='20px']")).toHaveLength(6);
-    expect(screen.getByRole("button", { name: "Export as csv" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Export as csv" })).not.toBeInTheDocument();
   });
 
   it("renders the guidance branch in one spanning cell when empty", () => {
