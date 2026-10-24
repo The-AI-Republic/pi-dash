@@ -216,7 +216,7 @@ describe("DependencyLayer", () => {
     const ends = dependencyEnds({ rows: [row(A), row(B)], range: RANGE, zoom: "week", rowHeight: ROW_HEIGHT });
     render(<DependencyLayer ends={ends} edges={[]} width={480} height={ROW_HEIGHT * 2} onLink={onLink} />);
     fireEvent.mouseDown(screen.getAllByTestId("gantt-dependency-handle")[0]!, { clientX: 10, clientY: 20 });
-    fireEvent.mouseMove(globalThis, { clientX: 90, clientY: 60 });
+    fireEvent.mouseMove(window, { clientX: 90, clientY: 60 });
     const line = screen.getByTestId("gantt-dependency-drag-line");
     expect(line).toHaveAttribute("x2", "90");
     expect(line).toHaveAttribute("y2", "60");
