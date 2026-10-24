@@ -915,3 +915,100 @@ describe("failing the next drafts PATCH (NEWFRONT-783, DRAFT-012)", () => {
     expect(recorder.unrouted()).toBe(1);
   });
 });
+
+describe("project-feature property reads (NEWFRONT-786, DRAFT-017-019)", () => {
+  it("reads each project-feature slot's text through its hook", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && path.includes("draft-property")) return 1;
+      if (method !== "innerText") return undefined;
+      if (path.includes("estimate")) return "  3 ";
+      if (path.includes("cycle")) return "Sprint 4";
+      if (path.includes("modules")) return "Auth, Billing";
+      return "";
+    };
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.draftEstimateText("One")).resolves.toBe("3");
+    await expect(driver.draftCycleText("One")).resolves.toBe("Sprint 4");
+    await expect(driver.draftModuleText("One")).resolves.toBe("Auth, Billing");
+    expectTrace(recorder.trace(), [
+      "waitFor",
+      "data-draft-property=",
+      "estimate",
+      "waitFor",
+      "data-draft-property=",
+      "cycle",
+      "waitFor",
+      "data-draft-property=",
+      "modules",
+    ]);
+  });
+
+  it("reads blank text where the project offers no control", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.draftEstimateText("One")).resolves.toBe("");
+    await expect(driver.draftCycleText("One")).resolves.toBe("");
+    await expect(driver.draftModuleText("One")).resolves.toBe("");
+  });
+
+  it("reads blank text when the slot detaches mid-read", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && path.includes("draft-property")) return 1;
+      if (method === "innerText") throw new Error("detached");
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).draftEstimateText("One")).resolves.toBe("");
+  });
+
+  it("reports whether each project-feature control renders", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) =>
+      method === "count" && path.includes("draft-property") && path.includes("cycle") ? 1 : 0;
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.draftEstimatePickerVisible("One")).resolves.toBe(false);
+    await expect(driver.draftCyclePickerVisible("One")).resolves.toBe(true);
+    await expect(driver.draftModulePickerVisible("One")).resolves.toBe(false);
+    expectTrace(recorder.trace(), [
+      "waitFor",
+      "count",
+      "data-draft-property=",
+      "estimate",
+      "waitFor",
+      "count",
+      "data-draft-property=",
+      "cycle",
+      "waitFor",
+      "count",
+      "data-draft-property=",
+      "modules",
+    ]);
+  });
+
+  it("opens each project-feature picker through its slot's trigger", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => (method === "count" && path.includes("draft-property") ? 1 : 0);
+    const driver = new WebNewDriver(recorder.page());
+    await driver.draftOpenEstimatePicker("One");
+    await driver.draftOpenCyclePicker("One");
+    await driver.draftOpenModulePicker("One");
+    expectTrace(recorder.clicks(), [
+      "data-draft-property=",
+      "estimate",
+      "data-draft-property=",
+      "cycle",
+      "data-draft-property=",
+      "modules",
+    ]);
+  });
+
+  it("refuses to open a control the project does not offer", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.draftOpenEstimatePicker("One")).rejects.toThrow('no estimate control on draft "One"');
+    await expect(driver.draftOpenCyclePicker("One")).rejects.toThrow('no cycle control on draft "One"');
+    await expect(driver.draftOpenModulePicker("One")).rejects.toThrow('no modules control on draft "One"');
+    expect(recorder.clicks()).toEqual([]);
+  });
+});

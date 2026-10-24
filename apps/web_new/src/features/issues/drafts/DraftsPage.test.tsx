@@ -593,6 +593,35 @@ describe("row flows", () => {
     expect(blocks).toHaveLength(2);
     for (const block of blocks) expect(within(block).getByTestId("draft-properties")).toBeInTheDocument();
   });
+
+  it("resolves each row's feature pickers from its own project detail row (DRAFT-017-019)", async () => {
+    // NEWFRONT-300: gating reads the project's own flags from the detail
+    // collection, so two drafts in different projects offer different
+    // controls on the same screen.
+    const PROJECT_B = "723e4567-e89b-12d3-a456-426614174009";
+    const ESTIMATE = "823e4567-e89b-12d3-a456-426614174007";
+    renderPage({
+      pages: [page([draft(DRAFT_1, "One"), draft(DRAFT_2, "Two", { project_id: PROJECT_B })])],
+      projects: [
+        project(PROJECT, "Atlas", { cycle_view: true, estimate: ESTIMATE }),
+        project(PROJECT_B, "Beacon", { module_view: true }),
+      ],
+    });
+    await screen.findByText("One");
+    await screen.findByText("Two");
+    const slots = (name: string): string[] => {
+      const block = screen.getAllByRole("article").find((candidate) => within(candidate).queryByText(name) !== null)!;
+      return [...block.querySelectorAll("[data-draft-property]")].map(
+        (node) => node.getAttribute("data-draft-property")!
+      );
+    };
+    expect(slots("One")).toContain("cycle");
+    expect(slots("One")).toContain("estimate");
+    expect(slots("One")).not.toContain("modules");
+    expect(slots("Two")).toContain("modules");
+    expect(slots("Two")).not.toContain("cycle");
+    expect(slots("Two")).not.toContain("estimate");
+  });
 });
 
 describe("delete", () => {

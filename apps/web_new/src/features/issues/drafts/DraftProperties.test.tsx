@@ -338,6 +338,79 @@ describe("DraftProperties", () => {
     expect(calls.some((call) => call.name === "estimate")).toBe(false);
   });
 
+  it("shows each project-feature picker from its own flag alone (DRAFT-017-019)", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const row = draft({ module_ids: ["module-1"], cycle_id: "cycle-1", estimate_point: ESTIMATE });
+    const names = (properties: ProjectDetails) => {
+      const { calls, unmount } = renderStrip(row, properties);
+      const mounted = calls.map((call) => call.name as string);
+      unmount();
+      return mounted;
+    };
+    // Each flag mounts exactly its own picker; a stored value never
+    // forces a control the project does not offer.
+    expect(names(project({ cycle_view: true }))).toContain("cycle");
+    expect(names(project({ cycle_view: true }))).not.toContain("module");
+    expect(names(project({ cycle_view: true }))).not.toContain("estimate");
+    expect(names(project({ module_view: true }))).toContain("module");
+    expect(names(project({ module_view: true }))).not.toContain("cycle");
+    expect(names(project({ module_view: true }))).not.toContain("estimate");
+    expect(names(project({ estimate: ESTIMATE }))).toContain("estimate");
+    expect(names(project({ estimate: ESTIMATE }))).not.toContain("cycle");
+    expect(names(project({ estimate: ESTIMATE }))).not.toContain("module");
+  });
+
+  it("scopes the project-feature pickers to the draft's own project (DRAFT-018-019)", () => {
+    // Spec §7: the cycle and module lists are UI-scoped to the draft's
+    // project, so options from another project are never offered.
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { calls } = renderStrip(
+      draft({ module_ids: ["module-1"], cycle_id: "cycle-1", estimate_point: ESTIMATE }),
+      project({ module_view: true, cycle_view: true, estimate: ESTIMATE })
+    );
+    for (const name of ["module", "cycle", "estimate"]) {
+      const picker = calls.find((call) => call.name === name)!;
+      expect(picker["workspaceSlug"]).toBe(SLUG);
+      expect(picker["projectId"]).toBe(PROJECT);
+    }
+    expect(calls.find((call) => call.name === "module")?.["multiple"]).toBe(true);
+    expect(calls.find((call) => call.name === "module")?.["value"]).toEqual(["module-1"]);
+    expect(calls.find((call) => call.name === "cycle")?.["value"]).toBe("cycle-1");
+  });
+
+  it("replaces the whole module set on every pick, down to empty (DRAFT-019)", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { onWrite, calls } = renderStrip(
+      draft({ module_ids: ["module-1", "module-2"] }),
+      project({ module_view: true })
+    );
+    const picker = calls.find((call) => call.name === "module")!;
+    const next = ["module-3"];
+    (picker["onChange"] as (ids: string[]) => void)(next);
+    next.push("module-4");
+    expect(onWrite).toHaveBeenCalledWith({ module_ids: ["module-3"] });
+    (picker["onChange"] as (ids: string[]) => void)([]);
+    expect(onWrite).toHaveBeenCalledWith({ module_ids: [] });
+  });
+
+  it("attaches a cycle pick and clears the estimate back to null (DRAFT-017-018)", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { onWrite, calls } = renderStrip(
+      draft({ cycle_id: null, estimate_point: ESTIMATE }),
+      project({ cycle_view: true, estimate: ESTIMATE })
+    );
+    const cycle = calls.find((call) => call.name === "cycle")!;
+    (cycle["onChange"] as (id: string | null) => void)("cycle-2");
+    expect(onWrite).toHaveBeenCalledWith({ cycle_id: "cycle-2" });
+    const estimate = calls.find((call) => call.name === "estimate")!;
+    (estimate["onChange"] as (id: string | null) => void)(null);
+    expect(onWrite).toHaveBeenCalledWith({ estimate_point: null });
+  });
+
   it("shows a numeric estimate point as its string value", () => {
     states.mockReturnValue({ data: [] } as never);
     stubClient();
