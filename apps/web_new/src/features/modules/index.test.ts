@@ -37,9 +37,16 @@ import {
   modulesListQueryOptions,
   modulesTitle,
   ModuleBoardCard,
+  ModuleCreateAction,
+  ModuleDeleteDialog,
+  ModuleDetailActions,
+  ModuleDialogProvider,
+  ModuleForm,
   ModuleLayoutIcon,
   ModuleLinkDialog,
   ModuleLinksSection,
+  ModuleSaveDialog,
+  useModuleDialogs,
   ModuleListRow,
   ModulesFeatureGate,
   ModulesLayoutSwitcher,
@@ -132,6 +139,16 @@ describe("modules barrel", () => {
     expect(moduleDayAnchor).toBeDefined();
     expect(moduleRangeReading).toBeDefined();
     expect(moduleInstantReading).toBeDefined();
+  });
+
+  it("re-exports the dialog openers every modules surface calls", () => {
+    expect(useModuleDialogs).toBeDefined();
+    expect(ModuleDialogProvider).toBeDefined();
+    expect(ModuleCreateAction).toBeDefined();
+    expect(ModuleSaveDialog).toBeDefined();
+    expect(ModuleForm).toBeDefined();
+    expect(ModuleDeleteDialog).toBeDefined();
+    expect(ModuleDetailActions).toBeDefined();
   });
 
   it("re-exports the tolerant project facts read the gate uses", () => {

@@ -3,13 +3,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // The detail screen frames the shared host with the trail, the tab
-// title, the badge and toggle header actions, and the collapsible
-// sidebar beside the layouts (MOD-029, MOD-030, MOD-032).
+// title, the badge, toggle and module actions header actions, and the
+// collapsible sidebar beside the layouts (MOD-029, MOD-030, MOD-032).
+// The module actions menu is mounted here (MOD-024/025); these cases drive
+// its real trigger through Edit and Delete landing.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   projects: vi.fn(),
@@ -17,6 +19,19 @@ const mocks = vi.hoisted(() => ({
   prefs: vi.fn(),
   page: vi.fn(),
   peekChange: vi.fn(),
+}));
+const routerHarness = vi.hoisted(() => ({ navigate: vi.fn() }));
+const notify = vi.hoisted(() => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useNavigate: () => routerHarness.navigate,
+}));
+
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../shared/shell/index.js")>()),
+  notifyError: notify.notifyError,
+  notifySuccess: notify.notifySuccess,
 }));
 
 vi.mock("@tanstack/react-query", async (importOriginal) => ({
@@ -27,7 +42,6 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
   },
 }));
 
-vi.mock("../../../core/api/client.js", () => ({ getAppClient: () => ({ stub: true }) }));
 vi.mock("../../projects/index.js", () => ({ projectsQueryOptions: mocks.projects }));
 vi.mock("./sidebar/moduleSidebarQueries.js", () => ({ moduleDetailQueryOptions: mocks.detail }));
 vi.mock("../../issues/prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.prefs }));
@@ -79,6 +93,8 @@ vi.mock("./sidebar/ModuleAnalyticsSidebar.js", () => ({
   ),
 }));
 
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { jsonResponse, makeModuleRow } from "../testing.js";
 import { ModuleDetailScreen } from "./ModuleDetailScreen.js";
 import { MODULE_DETAIL_SIDEBAR_STORAGE_KEY } from "../lib/detailSidebarStore.js";
 
@@ -103,16 +119,53 @@ function project(overrides: Record<string, unknown> = {}) {
 }
 
 function detail(overrides: Record<string, unknown> = {}) {
-  return {
+  return makeModuleRow({
     id: MODULE,
     project_id: PROJECT,
     name: "Delivery",
     status: "in-progress",
     ...overrides,
+  });
+}
+
+const PROJECT_PATH = `/api/workspaces/acme/projects/${PROJECT}/`;
+const DETAIL_PATH = `${PROJECT_PATH}modules/${MODULE}/`;
+
+function factsProject(overrides: Record<string, unknown> = {}) {
+  return {
+    ...project(),
+    timezone: "UTC",
+    ...overrides,
   };
 }
 
-function setup(options: { projects?: Array<Record<string, unknown>>; total?: number; status?: string } = {}) {
+/** The transport the mounted menu reads through; the cached reads above
+ * stay mocked, so this only answers the detail, facts and picker reads. */
+function stubTransport(state: { deleteStatus: number }, overrides: Record<string, unknown> = {}) {
+  return (async (url: string, init: { method?: string }) => {
+    const method = init.method ?? "GET";
+    if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
+    if (url === `https://api.test${PROJECT_PATH}`) return jsonResponse(url, 200, factsProject(overrides));
+    if (url === `https://api.test${DETAIL_PATH}` && method === "GET") return jsonResponse(url, 200, detail());
+    if (url === `https://api.test${DETAIL_PATH}` && method === "DELETE") {
+      if (state.deleteStatus === 204) return jsonResponse(url, 204, null);
+      return jsonResponse(url, state.deleteStatus, { detail: "Refused." });
+    }
+    if (url.endsWith("/api/workspaces/acme/members/")) return jsonResponse(url, 200, []);
+    if (url.includes("/members/") && url.includes("/projects/")) return jsonResponse(url, 200, []);
+    if (url.endsWith("/api/users/me/")) return jsonResponse(url, 500, {});
+    return jsonResponse(url, 500, {});
+  }) as never;
+}
+
+function setup(
+  options: {
+    projects?: Array<Record<string, unknown>>;
+    total?: number;
+    status?: string;
+    deleteStatus?: number;
+  } = {}
+) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   (globalThis as { __detailQueryClient?: QueryClient }).__detailQueryClient = queryClient;
   queryClient.setQueryData(PROJECTS_KEY, options.projects ?? [project()]);
@@ -125,6 +178,8 @@ function setup(options: { projects?: Array<Record<string, unknown>>; total?: num
   });
   queryClient.setQueryData(PAGE_KEY, { total_count: options.total ?? 7, results: [], count: 0 });
   mocks.peekChange.mockClear();
+  deleteState.deleteStatus = options.deleteStatus ?? 204;
+  createAppClient("https://api.test", stubTransport(deleteState));
   return render(
     <QueryClientProvider client={queryClient}>
       <ModuleDetailScreen
@@ -139,14 +194,24 @@ function setup(options: { projects?: Array<Record<string, unknown>>; total?: num
   );
 }
 
+let deleteState: { deleteStatus: number };
+
 beforeEach(() => {
   vi.clearAllMocks();
+  deleteState = { deleteStatus: 204 };
+  routerHarness.navigate.mockReset();
+  notify.notifyError.mockReset();
+  notify.notifySuccess.mockReset();
   globalThis.localStorage.clear();
   document.title = "";
   mocks.projects.mockReturnValue({ queryKey: PROJECTS_KEY, queryFn: vi.fn() });
-  mocks.detail.mockReturnValue({ queryKey: DETAIL_KEY, queryFn: vi.fn() });
+  mocks.detail.mockReturnValue({ queryKey: DETAIL_KEY, queryFn: async () => detail() });
   mocks.prefs.mockReturnValue({ queryKey: PREFS_KEY, queryFn: vi.fn() });
   mocks.page.mockReturnValue({ queryKey: PAGE_KEY, queryFn: vi.fn() });
+});
+
+afterEach(() => {
+  resetAppClient();
 });
 
 describe("ModuleDetailScreen", () => {
@@ -231,5 +296,75 @@ describe("ModuleDetailScreen", () => {
     expect(screen.getByRole("heading", { name: "Project not found" })).toBeInTheDocument();
     expect(screen.queryByTestId("entity-stub")).not.toBeInTheDocument();
     expect(document.title).toBe("Modules");
+  });
+
+  it("mounts the actions menu inside the header actions", () => {
+    setup();
+    const actions = screen.getByTestId("extra-actions");
+    expect(within(actions).getByRole("button", { name: "Module actions" })).toBeInTheDocument();
+  });
+
+  it("opens Update module from the real detail trigger, prefilled and with no project picker", async () => {
+    setup();
+    const actions = screen.getByTestId("extra-actions");
+    const trigger = within(actions).getByRole("button", { name: "Module actions" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    expect(await screen.findByRole("heading", { name: "Update module" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Delivery");
+    expect(screen.queryByTestId("module-dialog-project")).not.toBeInTheDocument();
+  });
+
+  it("deletes from the real detail trigger and lands on the plain modules list", async () => {
+    setup();
+    const actions = screen.getByTestId("extra-actions");
+    const trigger = within(actions).getByRole("button", { name: "Module actions" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete module" })).toBeInTheDocument();
+    expect(screen.getByTestId("module-delete-body")).toHaveTextContent("Delivery");
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(routerHarness.navigate).toHaveBeenCalledWith({
+        to: `/acme/projects/${PROJECT}/modules/`,
+        search: {},
+        replace: true,
+      })
+    );
+    expect(notify.notifySuccess).toHaveBeenCalledWith("Success!", expect.stringContaining("Delivery"));
+  });
+
+  it("keeps the module in place when the delete is refused", async () => {
+    setup({ deleteStatus: 403 });
+    const actions = screen.getByTestId("extra-actions");
+    const trigger = within(actions).getByRole("button", { name: "Module actions" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(notify.notifyError).toHaveBeenCalledWith("You don't have permission to perform this action.", "Refused.")
+    );
+    expect(routerHarness.navigate).not.toHaveBeenCalled();
+  });
+
+  it("shows no actions menu to a guest", () => {
+    setup({ projects: [project({ member_role: 5 })] });
+    const actions = screen.getByTestId("extra-actions");
+    expect(within(actions).queryByRole("button", { name: "Module actions" })).not.toBeInTheDocument();
+  });
+
+  it("shows no actions menu for a visitor outside the project", () => {
+    setup({ projects: [project({ member_role: null })] });
+    const actions = screen.getByTestId("extra-actions");
+    expect(within(actions).queryByRole("button", { name: "Module actions" })).not.toBeInTheDocument();
+  });
+
+  it("hides the actions menu on an archived project", () => {
+    setup({ projects: [project({ archived_at: "2026-01-02T03:04:05Z" })] });
+    const actions = screen.getByTestId("extra-actions");
+    expect(within(actions).queryByRole("button", { name: "Module actions" })).not.toBeInTheDocument();
   });
 });

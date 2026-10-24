@@ -120,6 +120,16 @@ describe("DateRangePicker", () => {
     expect(screen.getByRole("button", { name: "Dates" })).toHaveTextContent("Select dates");
   });
 
+  it("pins the default trigger at the caller's keyboard position", () => {
+    const { rerender } = render(
+      <DateRangePicker mode="split" label="Dates" value={{ start: null, end: null }} onChange={() => {}} tabIndex={3} />
+    );
+    expect(screen.getByTestId("date-range-picker-trigger")).toHaveAttribute("tabindex", "3");
+    rerender(<DateRangePicker mode="split" label="Dates" value={{ start: null, end: null }} onChange={() => {}} />);
+    // Unset leaves the trigger in natural order (the popover stamps 0).
+    expect(screen.getByTestId("date-range-picker-trigger")).toHaveAttribute("tabindex", "0");
+  });
+
   it("joins the split trigger spans with an arrow", () => {
     const { rerender } = render(
       <DateRangePicker mode="split" label="Dates" value={{ start: null, end: null }} onChange={() => {}} />
