@@ -384,6 +384,7 @@ export { GanttLayout, barColorsFor, orderedRows } from "./gantt/GanttLayout.js";
 export type { GanttLayoutProps } from "./gantt/GanttLayout.js";
 export { GanttChart, SIDEBAR_WIDTH } from "./gantt/GanttChart.js";
 export type { GanttChartProps } from "./gantt/GanttChart.js";
+export type { GanttTimelineEntity } from "./gantt/GanttSidebar.js";
 export { GanttHeader } from "./gantt/GanttHeader.js";
 export type { GanttHeaderProps } from "./gantt/GanttHeader.js";
 export { ROW_HEIGHT } from "./gantt/rows.js";

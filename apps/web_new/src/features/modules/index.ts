@@ -41,8 +41,34 @@ export { MODULES_SEARCH_TRIGGER_LABEL, ModulesSearch, type ModulesSearchProps } 
 export { ModulesSortMenu, type ModulesSortMenuProps } from "./components/ModulesSortMenu.js";
 export { ModuleLayoutIcon } from "./components/ModuleLayoutIcon.js";
 export { ModuleListRow, type ModuleListRowProps } from "./components/ModuleListRow.js";
-export { ModuleTimelineRow, type ModuleTimelineRowProps } from "./components/ModuleTimelineRow.js";
 export { ModulesFeatureGate, type ModulesFeatureGateProps } from "./components/ModulesFeatureGate.js";
+export {
+  MODULE_TIMELINE_REORDER_FAILED_BODY,
+  MODULE_TIMELINE_REORDER_FAILED_TITLE,
+  MODULE_TIMELINE_REORDER_WARNING_BODY,
+  MODULE_TIMELINE_REORDER_WARNING_TITLE,
+  buildModuleTimelineRows,
+  changedModuleTimelineRanks,
+  moduleTimelineBarColors,
+  moduleTimelineBarTitle,
+  moduleTimelinePrefixStatus,
+  moduleTimelineRange,
+  moduleTimelineTooltip,
+  moduleTimelineTooltipDay,
+  moduleTimelineTooltipForId,
+  normalizeModuleTimelineRanks,
+  warnOnTimelineReorderAttempt,
+  withModuleTimelineDates,
+  withModuleTimelineRanks,
+  type ModuleTimelineRange,
+  type ModuleTimelineRankWrite,
+} from "./components/timeline/moduleTimelineModel.js";
+export { ModulesTimeline, type ModulesTimelineProps } from "./components/timeline/ModulesTimeline.js";
+export {
+  useModuleTimelineMutations,
+  type ModuleTimelineMutations,
+  type ModuleTimelineMutationsArgs,
+} from "./components/timeline/useModuleTimelineMutations.js";
 export { ModulesLayoutSwitcher, type ModulesLayoutSwitcherProps } from "./components/ModulesLayoutSwitcher.js";
 export { ModulesListBody, type ModulesListBodyProps } from "./components/ModulesListBody.js";
 export { ModulesListHeader, type ModulesListHeaderProps } from "./components/ModulesListHeader.js";

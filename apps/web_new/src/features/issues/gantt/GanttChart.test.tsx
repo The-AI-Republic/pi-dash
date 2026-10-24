@@ -923,3 +923,68 @@ describe("GanttChart bulk header (ISS-116)", () => {
     expect(onRowToggle).toHaveBeenCalledWith("row-9", false);
   });
 });
+
+describe("GanttChart entity vocabulary (NEWFRONT-801)", () => {
+  it("keeps the issue sidebar titles and count nouns by default", () => {
+    renderChart();
+    expect(screen.getByText("Issue")).toBeInTheDocument();
+    expect(screen.getByText("Duration")).toBeInTheDocument();
+    expect(screen.getByTestId("gantt-count")).toHaveTextContent("3 work items");
+  });
+
+  it("adopts another entity's sidebar titles, meta and count nouns", () => {
+    renderChart({
+      rows: [row({ id: "row-1", name: "Dated" })],
+      totalCount: 1,
+      entity: {
+        sidebarTitle: "Module",
+        sidebarMeta: null,
+        countNoun: { one: "module", many: "modules" },
+      },
+    });
+    expect(screen.getByText("Module")).toBeInTheDocument();
+    expect(screen.queryByText("Duration")).not.toBeInTheDocument();
+    expect(screen.getByTestId("gantt-count")).toHaveTextContent("1 module");
+  });
+
+  it("threads the entity rows to the sidebar", () => {
+    renderChart({
+      entity: {
+        rowHref: (entry) => `/acme/projects/p/modules/${entry.id}`,
+        rowPrefix: () => <i data-testid="entity-prefix" />,
+        rowDuration: () => null,
+      },
+    });
+    const first = screen.getAllByTestId("gantt-sidebar-row")[0]!;
+    expect(within(first).getByRole("link")).toHaveAttribute("href", "/acme/projects/p/modules/row-1");
+    expect(within(first).getByTestId("entity-prefix")).toBeInTheDocument();
+    expect(within(first).queryByTestId("gantt-row-duration")).toBeNull();
+  });
+
+  it("titles bars with the row name by default", () => {
+    renderChart();
+    expect(document.querySelector("#gantt-block-row-1")).toHaveAttribute("title", "Dated");
+  });
+
+  it("titles bars through the tooltip callback", () => {
+    renderChart({ barTooltip: (entry) => `${entry.name}: custom summary` });
+    expect(document.querySelector("#gantt-block-row-1")).toHaveAttribute("title", "Dated: custom summary");
+  });
+
+  it("reports sidebar attempts through the chart", () => {
+    const onReorderAttempt = vi.fn();
+    renderChart({ onReorderAttempt });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 80 });
+    fireEvent.mouseUp(second);
+    expect(onReorderAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps undated lanes bar-free without a plant handler", () => {
+    renderChart({ canEdit: true });
+    const lane = screen.getByText("No dates").closest("div")!;
+    fireEvent.mouseMove(lane, { clientX: 400, clientY: 10 });
+    expect(screen.queryByTestId("gantt-add-block")).not.toBeInTheDocument();
+  });
+});

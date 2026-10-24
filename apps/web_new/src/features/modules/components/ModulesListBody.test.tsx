@@ -3,16 +3,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // One module set, three renditions (MOD-001/011): rows for the list, cards
-// for the board, name rows for the timeline, each in the default name order
-// and each absent from the other layouts. Slice B narrows that set through
-// the header's search, filters and ordering (MOD-004/005/006/010) — from the
-// list context or explicit props — and swaps the rows for the no-match
-// container when modules exist but nothing matches, without touching the
-// underlying set.
+// for the board, the timeline chart for the timeline, each in the default
+// name order and each absent from the other layouts. Slice B narrows that
+// set through the header's search, filters and ordering
+// (MOD-004/005/006/010) — from the list context or explicit props — and
+// swaps the rows for the no-match container when modules exist but nothing
+// matches, without touching the underlying set.
 
-import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -21,10 +22,12 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
       {children}
     </a>
   ),
+  useNavigate: () => vi.fn(),
 }));
 
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { emptyModuleFilters, toggleModuleFilterValue } from "../lib/moduleListControls.js";
-import { MODULES_PROJECT_ID, makeModuleRow } from "../testing.js";
+import { jsonResponse, MODULES_PROJECT_ID, makeModuleRow } from "../testing.js";
 import { ModuleListProvider, type ModuleListContextValue } from "./moduleListContext.js";
 import { ModulesListBody } from "./ModulesListBody.js";
 
@@ -35,8 +38,21 @@ const ROWS = [
 ];
 
 function renderBody(layout: "list" | "board" | "timeline", modules = ROWS): void {
-  render(<ModulesListBody workspaceSlug="acme" projectId={MODULES_PROJECT_ID} layout={layout} modules={modules} />);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <ModulesListBody workspaceSlug="acme" projectId={MODULES_PROJECT_ID} layout={layout} modules={modules} />
+    </QueryClientProvider>
+  );
 }
+
+beforeEach(() => {
+  createAppClient("https://test.invalid", async (url) => jsonResponse(url, 404, {}));
+});
+
+afterEach(() => {
+  resetAppClient();
+});
 
 function context(overrides: Partial<ModuleListContextValue> = {}): ModuleListContextValue {
   return {
@@ -78,7 +94,7 @@ describe("ModulesListBody", () => {
       "Module 10",
     ]);
     expect(screen.queryAllByTestId("modules-board-card")).toHaveLength(0);
-    expect(screen.queryAllByTestId("modules-timeline-row")).toHaveLength(0);
+    expect(screen.queryAllByTestId("modules-timeline")).toHaveLength(0);
   });
 
   it("renders cards for the board layout", () => {
@@ -92,14 +108,13 @@ describe("ModulesListBody", () => {
     expect(screen.queryAllByTestId("modules-row")).toHaveLength(0);
   });
 
-  it("renders timeline name rows for the timeline layout", () => {
+  it("renders the timeline chart for the timeline layout", () => {
     renderBody("timeline");
     expect(screen.getByTestId("modules-list")).toHaveAttribute("data-layout", "timeline");
-    expect(screen.getAllByTestId("modules-timeline-row-name").map((node) => node.textContent)).toEqual([
-      "Alpha",
-      "Module 2",
-      "Module 10",
-    ]);
+    expect(screen.getByTestId("modules-timeline")).toBeInTheDocument();
+    expect(
+      screen.getAllByTestId("gantt-sidebar-row").map((row) => within(row).getByRole("link").getAttribute("aria-label"))
+    ).toEqual(["Alpha", "Module 2", "Module 10"]);
     expect(screen.queryAllByTestId("modules-row")).toHaveLength(0);
   });
 

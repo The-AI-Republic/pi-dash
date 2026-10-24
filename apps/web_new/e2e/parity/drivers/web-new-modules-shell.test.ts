@@ -69,6 +69,7 @@ class FakePage {
       nth: () => self.locator(id),
       filter: (options: { has?: Locator; hasText?: string | RegExp }) =>
         self.locator(`${id} has(${String((options.has as never)?.["__id"] ?? "")},${String(options.hasText ?? "")})`),
+      or: (other: Locator) => self.locator(`${id} or(${String((other as never)?.["__id"] ?? "")})`),
       getByTestId: (testId: string) => self.locator(`${id} testid(${testId})`),
       getByRole: (role: string, options?: { name?: string }) =>
         self.locator(`${id} role(${role},${options?.name ?? ""})`),
@@ -198,16 +199,14 @@ describe("modulesPageTitle", () => {
 
 describe("modulesAwaitRow", () => {
   it("waits on a row whose own name span matches exactly", async () => {
-    const fake = new FakePage({
-      'page css([data-testid="modules-row"], [data-testid="modules-board-card"], [data-testid="modules-timeline-row"])':
-        {
-          count: 1,
-        },
-    });
+    const fake = new FakePage();
     await new WebNewDriver(fake.asPage()).modulesAwaitRow("Frame (Alpha)");
-    expect(fake.keys[0]).toBe(
-      'css:[data-testid="modules-row"], [data-testid="modules-board-card"], [data-testid="modules-timeline-row"]'
-    );
+    expect(fake.keys).toEqual([
+      'css:[data-testid="modules-row"], [data-testid="modules-board-card"]',
+      'css:[data-testid$="-name"]',
+      "testid:gantt-sidebar-row",
+      "role:link:/^Frame \\(Alpha\\)$/",
+    ]);
   });
 });
 
@@ -281,16 +280,14 @@ describe("modulesListOpenList", () => {
 });
 
 describe("modulesListVisibleNames", () => {
-  it("reads each layout's own name hook", async () => {
+  it("reads the list and board name hooks", async () => {
     const fake = new FakePage({
       "page testid(modules-list) testid(modules-row-name)": { texts: ["Row"] },
       "page testid(modules-list) testid(modules-board-card-name)": { texts: ["Card"] },
-      "page testid(modules-list) testid(modules-timeline-row-name)": { texts: ["Bar"] },
     });
     const driver = new WebNewDriver(fake.asPage());
     expect(await driver.modulesListVisibleNames()).toEqual(["Row"]);
     expect(await driver.modulesListBoardCardNames()).toEqual(["Card"]);
-    expect(await driver.modulesListTimelineNames()).toEqual(["Bar"]);
   });
 });
 

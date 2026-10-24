@@ -17998,15 +17998,18 @@ export class WebNewDriver implements ParityDriver {
     await this.modulesListWaitSettled();
   }
   async modulesAwaitRow(name: string): Promise<void> {
-    // The list or board card whose own name span carries exactly `name`.
-    // Scope to the span so a module called "Alpha 2" never answers for
-    // "Alpha"; the row wrappers also carry the name as data.
+    // The list row or board card whose own name span carries exactly
+    // `name`, or the timeline sidebar row whose link is labelled exactly
+    // `name`. Scope to the span so a module called "Alpha 2" never answers
+    // for "Alpha"; the row wrappers also carry the name as data.
     const exact = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
-    await this.page
-      .locator('[data-testid="modules-row"], [data-testid="modules-board-card"], [data-testid="modules-timeline-row"]')
-      .filter({ has: this.page.locator('[data-testid$="-name"]', { hasText: exact }) })
-      .first()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const classic = this.page
+      .locator('[data-testid="modules-row"], [data-testid="modules-board-card"]')
+      .filter({ has: this.page.locator('[data-testid$="-name"]', { hasText: exact }) });
+    const timeline = this.page
+      .getByTestId("gantt-sidebar-row")
+      .filter({ has: this.page.getByRole("link", { name: exact }) });
+    await classic.or(timeline).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesCurrentUrl(): Promise<string> {
     return this.page.url();
@@ -18022,8 +18025,9 @@ export class WebNewDriver implements ParityDriver {
       throw new Error(`[parity] modules layout is ${String(settled)}, expected ${layout}.`);
     }
   }
-  async modulesSetSort(_label: string): Promise<void> {
-    return todo("modulesSetSort");
+  async modulesSetSort(label: string): Promise<void> {
+    await this.modulesSetSortViaMenu(label);
+    await expect.poll(() => this.modulesSortLabel(), { timeout: WebNewDriver.WAIT_MS }).toBe(label);
   }
   async modulesSortLabel(): Promise<string> {
     const label = this.modulesSortTriggerLabelLocator();
@@ -18149,38 +18153,177 @@ export class WebNewDriver implements ParityDriver {
   async modulesClickRow(_name: string): Promise<void> {
     return todo("modulesClickRow");
   }
+  private modulesTimelineSidebarLinks(): Locator {
+    return this.page.locator('#gantt-sidebar a[href*="/modules/"]');
+  }
+
+  private async modulesTimelineLink(name: string): Promise<Locator> {
+    const links = this.modulesTimelineSidebarLinks();
+    const total = await links.count();
+    for (let index = 0; index < total; index += 1) {
+      const aria = (await links.nth(index).getAttribute("aria-label")) ?? "";
+      if (aria === name) return links.nth(index);
+    }
+    throw new Error(`[parity] no modules timeline row titled ${JSON.stringify(name)}.`);
+  }
+
+  private async modulesTimelineModuleId(name: string): Promise<string> {
+    const link = await this.modulesTimelineLink(name);
+    await link.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const href = (await link.getAttribute("href")) ?? "";
+    const match = /\/modules\/([0-9a-fA-F-]{36})/.exec(href);
+    if (!match || !match[1]) {
+      throw new Error(`[parity] modules timeline row has no module href: ${JSON.stringify(href)}.`);
+    }
+    return match[1];
+  }
+
   async modulesTimelineRows(): Promise<ModulesTimelineRow[]> {
-    return todo("modulesTimelineRows");
+    const links = this.modulesTimelineSidebarLinks();
+    const total = await links.count();
+    const rows: ModulesTimelineRow[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const link = links.nth(index);
+      rows.push({
+        name: (await link.getAttribute("aria-label")) ?? "",
+        href: await link.getAttribute("href"),
+        statusGlyph: (await link.locator("svg").count()) > 0,
+      });
+    }
+    return rows;
   }
-  async modulesTimelineBarColor(_name: string): Promise<string> {
-    return todo("modulesTimelineBarColor");
+
+  /** A rendered bar color normalized to lowercase hex. */
+  private static modulesTimelineHex(color: string): string {
+    const hex = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(color.trim());
+    if (hex?.[1] !== undefined) {
+      const digits = hex[1];
+      const full = digits.length === 3 ? [...digits].map((digit) => digit + digit).join("") : digits;
+      return `#${full.toLowerCase()}`;
+    }
+    const channels = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(color);
+    if (channels?.[1] !== undefined && channels[2] !== undefined && channels[3] !== undefined) {
+      const part = (value: string): string =>
+        Math.max(0, Math.min(255, Number(value)))
+          .toString(16)
+          .padStart(2, "0");
+      return `#${part(channels[1])}${part(channels[2])}${part(channels[3])}`;
+    }
+    throw new Error(`[parity] cannot read a bar color from ${JSON.stringify(color)}.`);
   }
-  async modulesTimelineHoverBar(_name: string): Promise<void> {
-    return todo("modulesTimelineHoverBar");
+
+  async modulesTimelineBarColor(name: string): Promise<string> {
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.page.locator(`#gantt-block-${id}`).first();
+    await bar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The status color lives on the rendered inner block, not the
+    // positioned wrapper.
+    const inner = bar.getByTestId("gantt-bar-body").first();
+    await inner.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const color = await inner.evaluate((node) => (node as HTMLElement).style.backgroundColor);
+    return WebNewDriver.modulesTimelineHex(color);
   }
+
+  async modulesTimelineHoverBar(name: string): Promise<void> {
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.page.locator(`#gantt-block-${id}`).first();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await bar.hover({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async modulesTimelineTooltip(): Promise<string | null> {
-    return todo("modulesTimelineTooltip");
+    // The bar tooltip is the native title carrying the name plus the date
+    // summary; the hovered bar is the one the pointer still rests on.
+    const bar = this.page.locator('[data-testid="gantt-bar"]:hover').first();
+    if ((await bar.count()) === 0) return null;
+    return bar.getAttribute("title");
   }
-  async modulesTimelineBarExists(_name: string): Promise<boolean> {
-    return todo("modulesTimelineBarExists");
+
+  async modulesTimelineBarExists(name: string): Promise<boolean> {
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.page.locator(`#gantt-block-${id}`).first();
+    if ((await bar.count()) === 0) return false;
+    const box = await bar.boundingBox();
+    return box !== null && box.width > 0;
   }
-  async modulesTimelineDragBar(_name: string, _dayDelta: number): Promise<void> {
-    return todo("modulesTimelineDragBar");
+
+  private async modulesTimelineBarBox(
+    name: string
+  ): Promise<{ bar: Locator; box: { x: number; y: number; width: number; height: number } }> {
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.page.locator(`#gantt-block-${id}`).first();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    const box = await bar.boundingBox();
+    if (box === null) throw new Error("[parity] timeline bar has no box.");
+    return { bar, box };
   }
-  async modulesTimelineResizeBar(_name: string, _side: "left" | "right", _dayDelta: number): Promise<void> {
-    return todo("modulesTimelineResizeBar");
+
+  async modulesTimelineDragBar(name: string, dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar drag needs a nonzero day delta.");
+    const dayWidth = await this.ganttDayWidth();
+    const { box } = await this.modulesTimelineBarBox(name);
+    const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await this.ganttGesture(from, { x: from.x + dayDelta * dayWidth, y: from.y });
+    await this.page.waitForTimeout(500);
   }
+
+  async modulesTimelineResizeBar(name: string, side: "left" | "right", dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar resize needs a nonzero day delta.");
+    const dayWidth = await this.ganttDayWidth();
+    const id = await this.modulesTimelineModuleId(name);
+    const bar = this.page.locator(`#gantt-block-${id}`).first();
+    const marker = side === "left" ? "gantt-resize-left" : "gantt-resize-right";
+    const handleLocator = bar.getByTestId(marker).first();
+    await handleLocator.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const box = await handleLocator.boundingBox();
+    if (box === null) throw new Error("[parity] timeline resize handle has no box.");
+    const from = { x: side === "left" ? box.x + 2 : box.x + box.width - 2, y: box.y + box.height / 2 };
+    await this.ganttGesture(from, { x: from.x + dayDelta * dayWidth, y: from.y });
+    await this.page.waitForTimeout(500);
+  }
+
   async modulesTimelineOrder(): Promise<string[]> {
-    return todo("modulesTimelineOrder");
+    const links = this.modulesTimelineSidebarLinks();
+    const total = await links.count();
+    const names: string[] = [];
+    for (let index = 0; index < total; index += 1) {
+      names.push(((await links.nth(index).getAttribute("aria-label")) ?? "").trim());
+    }
+    return names.filter((name) => name !== "");
   }
-  async modulesTimelineDragRowBefore(_sourceName: string, _targetName: string): Promise<void> {
-    return todo("modulesTimelineDragRowBefore");
+
+  async modulesTimelineDragRowBefore(sourceName: string, targetName: string): Promise<void> {
+    await this.ganttRowDrag(sourceName, targetName);
+    await expect
+      .poll(
+        async () => {
+          const order = await this.modulesTimelineOrder();
+          const at = order.indexOf(sourceName);
+          return at !== -1 && order.indexOf(targetName) === at + 1;
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true);
   }
-  async modulesTimelineAttemptRowBefore(_sourceName: string, _targetName: string): Promise<void> {
-    return todo("modulesTimelineAttemptRowBefore");
+
+  async modulesTimelineAttemptRowBefore(sourceName: string, targetName: string): Promise<void> {
+    await this.ganttRowDrag(sourceName, targetName);
+    await this.page.waitForTimeout(3_000);
   }
-  async modulesTimelineAttemptBarMove(_name: string, _dayDelta: number): Promise<void> {
-    return todo("modulesTimelineAttemptBarMove");
+
+  async modulesTimelineAttemptBarMove(name: string, dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar drag needs a nonzero day delta.");
+    const dayWidth = await this.ganttDayWidth();
+    const { box } = await this.modulesTimelineBarBox(name);
+    const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await this.ganttGesture(from, { x: from.x + dayDelta * dayWidth, y: from.y });
+    await this.page.waitForTimeout(3_000);
+  }
+
+  async modulesXTimelineBarsPresent(): Promise<boolean> {
+    const content = this.modulesContent();
+    if ((await content.count()) === 0) return false;
+    return (await content.getByTestId("gantt-bar").count()) > 0;
   }
 
   // --- Pages realtime collaboration + live server (NEWFRONT-319,
@@ -20839,7 +20982,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesTimelineRowNames(): Promise<string[]> {
-    return todo("modulesTimelineRowNames");
+    return this.modulesTimelineOrder();
   }
 
   async modulesDragTimelineRowToSelf(_name: string): Promise<void> {
@@ -20847,7 +20990,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesManualSortWarningVisible(): Promise<boolean> {
-    return todo("modulesManualSortWarningVisible");
+    // The timeline warns through the shared toast stack when a row drag is
+    // attempted outside manual placement (NEWFRONT-801).
+    return this.isShown(this.page.getByText("Manual placement required").first());
   }
 
   // --- Pages list discovery (NEWFRONT-312, PAGE-001-006).
@@ -21497,7 +21642,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesListTimelineNames(): Promise<string[]> {
-    return this.modulesNamesIn("modules-timeline-row-name");
+    return this.modulesTimelineOrder();
   }
 
   private async modulesNamesIn(testId: string): Promise<string[]> {
