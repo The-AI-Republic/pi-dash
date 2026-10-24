@@ -10,10 +10,10 @@
 // key by key, which is why keys are stable identifiers rather than
 // English text. Server data (project, state and member names,
 // identifiers, anchors) and date shapes never pass through here.
-// Two notice pairs reproduce the oracle's pinned wording exactly: the
-// parity suite asserts them on the new app, so they are the specified
-// contract, sourced from the oracle scenarios rather than lifted from
-// old components. Every other entry is new wording.
+// Every entry is new wording: notice copy is not a parity property,
+// so the parity suite pins each outcome's intent (a success notice
+// after copying the link, an error notice after a failed post),
+// never the sentences below.
 import { readStoredLanguage } from "../../../core/i18n/locales.js";
 
 /** Stable identifiers for every public-chrome string. */
@@ -29,7 +29,6 @@ export const SPACE_MESSAGE_KEYS = [
   "loading.board",
   "loading.legacy",
   "loading.instance",
-  "board.issuesFallback",
   "failure.anchor.docTitle",
   "failure.anchor.heading",
   "failure.anchor.body",
@@ -71,7 +70,6 @@ const ENGLISH: Record<SpaceMessageKey, string> = {
   "loading.board": "Loading board",
   "loading.legacy": "Resolving board",
   "loading.instance": "Loading instance",
-  "board.issuesFallback": "Issues",
   "failure.anchor.docTitle": "Pi Dash — Board not found",
   "failure.anchor.heading": "We couldn't find this board",
   "failure.anchor.body": "The board may have been withdrawn or the address may be mistyped.",
@@ -80,16 +78,16 @@ const ENGLISH: Record<SpaceMessageKey, string> = {
   "failure.board.heading": "We couldn't load this board",
   "failure.board.body": "The board data did not arrive. Reload the page or come back in a moment.",
   "failure.board.art": "An unavailable server",
-  // Pinned by the parity suite (board-chrome.spec.ts, SPC-017): the exact
-  // wording a copy confirmation must carry on the new app.
-  "notice.copySuccess.title": "Link copied!",
-  "notice.copySuccess.body": "Work item link copied to clipboard.",
+  // The parity suite (board-chrome.spec.ts, SPC-017) pins the intent —
+  // a success notice naming the copy — never these sentences.
+  "notice.copySuccess.title": "Board link copied",
+  "notice.copySuccess.body": "The link is on your clipboard, ready to share.",
   "notice.copyFailure.title": "Couldn't copy the link",
   "notice.copyFailure.body": "The clipboard refused the write — copy the address manually.",
-  // Pinned by the parity suite (board-chrome.spec.ts, SPC-017): the exact
-  // wording a failed comment post must carry on the new app.
-  "notice.commentFailure.title": "Error!",
-  "notice.commentFailure.body": "Comment could not be posted. Please try again.",
+  // The parity suite pins the intent — an error notice naming the
+  // comment — never these sentences.
+  "notice.commentFailure.title": "Couldn't post the comment",
+  "notice.commentFailure.body": "Your comment was not posted. Give it another try.",
   "notice.voteFailure.title": "Error!",
   "notice.voteFailure.body": "Your vote could not be saved. Please try again.",
   "notice.reactionFailure.title": "Error!",

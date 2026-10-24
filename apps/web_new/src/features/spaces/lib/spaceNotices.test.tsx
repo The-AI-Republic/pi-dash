@@ -29,8 +29,8 @@ describe("space notices", () => {
   it("confirms a copied issue link", async () => {
     renderHost();
     notifySpaceCopySuccess();
-    expect(await screen.findByText("Link copied!")).toBeInTheDocument();
-    expect(await screen.findByText("Work item link copied to clipboard.")).toBeInTheDocument();
+    expect(await screen.findByText("Board link copied")).toBeInTheDocument();
+    expect(await screen.findByText("The link is on your clipboard, ready to share.")).toBeInTheDocument();
   });
 
   it("reports a refused clipboard write", async () => {
@@ -43,7 +43,8 @@ describe("space notices", () => {
   it("reports a failed comment post", async () => {
     renderHost();
     notifySpaceCommentFailure();
-    expect(await screen.findByText("Comment could not be posted. Please try again.")).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't post the comment")).toBeInTheDocument();
+    expect(await screen.findByText("Your comment was not posted. Give it another try.")).toBeInTheDocument();
   });
 
   it("reports failed engagement writes", async () => {
