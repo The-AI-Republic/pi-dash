@@ -719,6 +719,8 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "license", path: "/api/instances/loop/jobs/{pk}/targets/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "license", path: "/api/instances/runners/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "license", path: "/api/instances/workspace-slug-check/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "license", path: "/api/instances/workspaces/",

@@ -53,6 +53,7 @@ pub mod project_move_handoff;
 pub mod prompting;
 pub mod response_headers;
 pub mod routes;
+pub mod runner_admin;
 pub mod runner_enroll;
 pub mod runner_runs;
 pub mod runner_sessions;
