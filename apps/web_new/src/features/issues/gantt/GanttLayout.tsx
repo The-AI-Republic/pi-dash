@@ -219,6 +219,7 @@ export function GanttLayout({
         onDatesChange={(issueId, dates) => mutations.moveBar(issueId, dates)}
         onPlantBlock={(issueId, dates) => mutations.plantBlock(issueId, dates)}
         quickAdd={quickAdd}
+        projectId={projectId}
         renderPreview={renderPreview}
       />
       {selectedCount === 0 ? null : (

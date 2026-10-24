@@ -32,6 +32,7 @@ import { SubIssuesWidget } from "../../../../features/issues/subIssues/SubIssues
 import { IssueRunAIAction } from "../../../../features/issues/detail/IssueAgentActions.js";
 import { AgentStatusPanel } from "../../../../features/issues/detail/agent/AgentStatusPanel.js";
 import { DetailHeaderActions } from "../../../../features/issues/detail/DetailHeaderActions.js";
+import { DetailTypeActivity } from "../../../../features/issues/edition/DetailTypeSlots.js";
 import {
   AttachmentsWidget,
   type AttachmentsWidgetHandle,
@@ -338,6 +339,7 @@ function BrowseIssueDetail({
         activity={
           <div className="flex flex-col gap-(--space-6)">
             {workbench}
+            <DetailTypeActivity workspaceSlug={workspaceSlug} projectId={projectId} issueId={issue.id} />
             <CodeReviewsWidget
               workspaceSlug={workspaceSlug}
               projectId={projectId}

@@ -9,7 +9,9 @@
 // the server value, when the write is refused). The description-meta row
 // carries the issue reaction cluster (ISS-204) beside the history line,
 // with the activity block (ISS-194–204) in its own slot below; the header
-// row (NEWFRONT-644) plugs into its own slot.
+// row (NEWFRONT-644) plugs into its own slot. The cloud duplicate popover
+// (ISS-231) sits beside the save indicator; the community build renders
+// nothing there.
 
 import type { Issue } from "@pidash/api-client";
 import * as React from "react";
@@ -17,6 +19,7 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { descriptionAssetSrc } from "../../../shared/editor/index.js";
 import { DESCRIPTION_SAVE_FAILED_TITLE, TITLE_SAVE_FAILED_TITLE, useUpdateIssue } from "../api/mutations.js";
+import { DetailDuplicatePopover } from "../edition/DetailDuplicatePopover.js";
 import { IssueReactions } from "../reactions/IssueReactions.js";
 import { DescriptionHistory } from "./DescriptionHistory.js";
 import { IssueDescriptionField, type RestoredDescription } from "./IssueDescriptionField.js";
@@ -100,7 +103,13 @@ export function DetailMainColumn({
     <div className="flex min-w-0 flex-1 flex-col gap-(--space-6)">
       <div className="flex items-start justify-between gap-(--space-4)">
         <div className="min-w-0 flex-1">{topSlot}</div>
-        <div className="shrink-0 pt-(--space-2)">
+        <div className="flex shrink-0 items-center gap-(--space-2) pt-(--space-2)">
+          <DetailDuplicatePopover
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            title={issue.name}
+            issueId={issue.id}
+          />
           <SaveIndicator status={pipeline.status} />
         </div>
       </div>

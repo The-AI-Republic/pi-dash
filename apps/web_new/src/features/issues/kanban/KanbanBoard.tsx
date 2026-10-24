@@ -64,6 +64,7 @@ import { useBoardCardMove } from "./mutations.js";
 import { useBoardDrag, type DraggedCard } from "./useBoardDrag.js";
 import type { BoardDropPoint, CardDropEdge } from "./dropTarget.js";
 import { boardDropRefusal, insertionIndexForDrop, MOVE_REFUSED_TITLE, planBoardMove } from "./drag.js";
+import { creationBlockedInColumn, dropBlockedInColumn } from "../edition/workflow.js";
 
 const LazyCreateDialog = React.lazy(() =>
   import("../components/WorkItemCreateDialog.js").then((module) => ({ default: module.WorkItemCreateDialog }))
@@ -98,8 +99,12 @@ export interface KanbanBoardProps {
   moduleId?: string | undefined;
   /** Edition workflow rule reason; OSS never supplies one. */
   creationBlockedReason?: string | undefined;
-  /** Edition workflow reason blocking one drop column; OSS never supplies one. */
-  dropBlockedReason?: ((columnKey: string) => string | undefined) | undefined;
+  /**
+   * Edition workflow reason blocking one drop column, given the state the
+   * dragged card is leaving; OSS never supplies one, and with the gate off
+   * the seam below answers nothing.
+   */
+  dropBlockedReason?: ((columnKey: string, fromStateId: string | null) => string | undefined) | undefined;
 }
 
 /** The browser path a card links to. */
@@ -239,9 +244,19 @@ export function KanbanBoard({
     return cardKey(projectIdentifier, issue);
   }
 
-  /** Edition workflow reason for one column, if the host supplies the seam. */
-  function workflowReasonFor(columnKey: string): string | undefined {
-    return dropBlockedReason?.(columnKey);
+  /**
+   * Edition workflow reason for one column. The host may supply its own
+   * seam; otherwise the workflow gate answers, and in the community build
+   * it answers nothing for every column.
+   */
+  function workflowReasonFor(columnKey: string, fromStateId: string | null): string | undefined {
+    if (dropBlockedReason !== undefined) return dropBlockedReason(columnKey, fromStateId);
+    return dropBlockedInColumn({ projectId, groupDimension: prefs.groupBy, columnKey, fromStateId });
+  }
+
+  /** Edition workflow reason creation is closed in one column. */
+  function creationReasonFor(columnKey: string): string | undefined {
+    return creationBlockedReason ?? creationBlockedInColumn({ projectId, groupDimension: prefs.groupBy, columnKey });
   }
 
   /**
@@ -275,9 +290,9 @@ export function KanbanBoard({
       canEdit: editAllowed,
       destColumnKey: target.columnKey,
       openCycleIds: refs.openCycleIds,
-      ...(workflowReasonFor(target.columnKey) === undefined
+      ...(workflowReasonFor(target.columnKey, dragged.issue.state_id) === undefined
         ? {}
-        : { workflowBlockedReason: workflowReasonFor(target.columnKey) }),
+        : { workflowBlockedReason: workflowReasonFor(target.columnKey, dragged.issue.state_id) }),
     });
     if (refusal !== null) {
       notifyInfo(MOVE_REFUSED_TITLE, refusal.toast);
@@ -311,7 +326,9 @@ export function KanbanBoard({
       canEdit: editAllowed,
       destColumnKey: columnKey,
       openCycleIds: refs.openCycleIds,
-      ...(workflowReasonFor(columnKey) === undefined ? {} : { workflowBlockedReason: workflowReasonFor(columnKey) }),
+      ...(workflowReasonFor(columnKey, drag.dragged.issue.state_id) === undefined
+        ? {}
+        : { workflowBlockedReason: workflowReasonFor(columnKey, drag.dragged.issue.state_id) }),
     });
     return refusal?.overlay ?? null;
   }
@@ -341,7 +358,7 @@ export function KanbanBoard({
   }
 
   function quickAdd(columnKey: string, laneKey: string | null): React.ReactNode {
-    if (!showQuickAdd) return null;
+    if (!showQuickAdd || creationReasonFor(columnKey) !== undefined) return null;
     const prefill = boardPrefill(prefs.groupBy, columnKey, subGroup, laneKey);
     const groupedCycle = typeof prefill["cycle_id"] === "string" ? prefill["cycle_id"] : undefined;
     const groupedModules = Array.isArray(prefill["module_ids"]) ? prefill["module_ids"] : undefined;
@@ -385,7 +402,7 @@ export function KanbanBoard({
       ? "New work items are read-only for you"
       : creationDisabledForGroup(prefs.groupBy)
         ? "Creation is off in this grouping"
-        : undefined;
+        : creationReasonFor(columnKey);
     return (
       <KanbanHeaderCreate
         columnTitle={columnTitle}

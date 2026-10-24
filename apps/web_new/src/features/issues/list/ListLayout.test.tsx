@@ -252,6 +252,8 @@ import { entityPrefsKeyPart } from "../prefs/prefsQuery.js";
 import { entityListsKeyPart } from "../prefs/entities.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity, PrefsRecord } from "../prefs/entities.js";
+import { WORKFLOW_FLAG } from "../edition/flags.js";
+import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import { groupedSections } from "./grouping.js";
 import { edition } from "../../../core/edition/index.js";
 import { BULK_OPERATIONS_FLAG } from "../bulk/edition.js";
@@ -259,6 +261,7 @@ import { ListLayout, type ListLayoutProps } from "./ListLayout.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const STATE = "323e4567-e89b-12d3-a456-426614174002";
+const DONE_STATE = "423e4567-e89b-12d3-a456-426614174003";
 const CYCLE = "423e4567-e89b-12d3-a456-426614174003";
 const MODULE = "523e4567-e89b-12d3-a456-426614174004";
 const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
@@ -489,6 +492,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete edition.flags[BULK_OPERATIONS_FLAG];
+  delete edition.flags[WORKFLOW_FLAG];
+  resetEditionIssuesProviders();
   if (realHeight) Object.defineProperty(HTMLElement.prototype, "offsetHeight", realHeight);
   resetAppClient();
   vi.unstubAllGlobals();
@@ -792,6 +797,52 @@ describe("ListLayout", () => {
     renderLayout({ creationBlockedReason: "Workflow blocks this state" });
     expect(await screen.findByTestId("quick-add-probe")).toHaveAttribute("data-disabled", "true");
     expect(screen.getByTestId("quick-add-probe")).toHaveAttribute("data-reason", "Workflow blocks this state");
+  });
+
+  it("closes section creation where the workflow gate refuses it, per section (ISS-233)", async () => {
+    const sections = groupedSections(
+      { results: { [STATE]: { results: [row()], total_results: 1 }, [DONE_STATE]: { results: [], total_results: 0 } } },
+      new Map([
+        [STATE, "Todo"],
+        [DONE_STATE, "Done"],
+      ]),
+      { showEmptyGroups: true, dimension: "state" }
+    );
+    mocks.pages.mockReturnValue(pageState({ sections, total: 1, grouped: true }));
+    edition.flags[WORKFLOW_FLAG] = true;
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: () => null,
+        creationRefusal: ({ columnKey }) => (columnKey === DONE_STATE ? { reason: "Start items in Todo" } : null),
+      },
+    });
+    renderLayout({ prefs: prefs({ groupBy: "state", showEmptyGroups: true }) });
+    const [todoProbe, doneProbe] = await screen.findAllByTestId("quick-add-probe");
+    expect(todoProbe).toHaveAttribute("data-disabled", "false");
+    expect(doneProbe).toHaveAttribute("data-disabled", "true");
+    expect(doneProbe).toHaveAttribute("data-reason", "Start items in Todo");
+  });
+
+  it("keeps every section open without the workflow flag (OSS absence)", async () => {
+    const sections = groupedSections(
+      { results: { [STATE]: { results: [row()], total_results: 1 }, [DONE_STATE]: { results: [], total_results: 0 } } },
+      new Map([
+        [STATE, "Todo"],
+        [DONE_STATE, "Done"],
+      ]),
+      { showEmptyGroups: true, dimension: "state" }
+    );
+    mocks.pages.mockReturnValue(pageState({ sections, total: 1, grouped: true }));
+    registerEditionIssuesProviders({
+      workflowRules: {
+        refusal: () => null,
+        creationRefusal: () => ({ reason: "no rule should be asked" }),
+      },
+    });
+    renderLayout({ prefs: prefs({ groupBy: "state", showEmptyGroups: true }) });
+    const probes = await screen.findAllByTestId("quick-add-probe");
+    expect(probes).toHaveLength(2);
+    for (const probe of probes) expect(probe).toHaveAttribute("data-disabled", "false");
   });
 
   it("keeps quick-add enabled for an ordinary project view", async () => {

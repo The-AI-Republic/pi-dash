@@ -13,6 +13,7 @@ import type { SubIssueItem } from "@pidash/api-client";
 import { Flag, Minus } from "lucide-react";
 import * as React from "react";
 
+import { stateOptionGate } from "../edition/workflow.js";
 import { DatePicker } from "../dropdowns/DatePicker.js";
 import { DateRangePicker } from "../dropdowns/DateRangePicker.js";
 import { useWeekStart } from "../dropdowns/weekStart.js";
@@ -93,6 +94,7 @@ export function SubIssuePropertyControls({
           variant="ghost"
           disabled={disabled}
           placeholder="State"
+          optionGate={stateOptionGate(projectId, row.state_id)}
           onChange={(stateId) => actions.write({ row, patch: { state_id: stateId }, field: "state_id" })}
         />
       ) : null}

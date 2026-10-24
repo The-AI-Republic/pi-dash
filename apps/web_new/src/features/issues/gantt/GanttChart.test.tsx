@@ -12,7 +12,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
+import { edition } from "../../../core/edition/index.js";
+import { GANTT_DEPENDENCIES_FLAG } from "../edition/flags.js";
 import { formatDay } from "../dropdowns/calendar.js";
 import { GanttChart, SIDEBAR_WIDTH, type GanttSelectionBinding } from "./GanttChart.js";
 import { ROW_OVERSCAN, ROW_HEIGHT } from "./rows.js";
@@ -154,6 +157,44 @@ describe("GanttChart layout", () => {
     expect(tinted.length).toBeLessThan(WEEK_RANGE.dayCount);
     const weekStart = dayColumns().find((column) => column.className.includes("border-l"));
     expect(weekStart?.dataset["day"]).toBe(WEEK_RANGE.startIso);
+  });
+
+  it("names each lane by its row, so a dependency drag can land on one (ISS-237)", () => {
+    renderChart();
+    const lanes = screen.getByTestId("gantt-lanes").querySelectorAll("[data-gantt-lane]");
+    expect([...lanes].map((lane) => lane.getAttribute("data-lane-id"))).toEqual(["row-1", "row-2", "row-3"]);
+  });
+
+  it("mounts no dependency chrome in the community build", () => {
+    renderChart({ projectId: "223e4567-e89b-12d3-a456-426614174001" });
+    expect(screen.queryByTestId("gantt-dependency-layer")).toBeNull();
+    expect(screen.queryAllByTestId("gantt-dependency-handle")).toHaveLength(0);
+  });
+
+  it("mounts the dependency layer when the cloud flag and a project are present (ISS-237)", async () => {
+    edition.flags[GANTT_DEPENDENCIES_FLAG] = true;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <GanttChart
+          rows={ROWS}
+          workspaceSlug="acme"
+          projectId="223e4567-e89b-12d3-a456-426614174001"
+          totalCount={ROWS.length}
+          weekStart={0}
+          onOpenRow={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByTestId("gantt-dependency-layer")).toBeInTheDocument();
+    edition.flags[GANTT_DEPENDENCIES_FLAG] = false;
+  });
+
+  it("leaves the cloud layer off without a project id", () => {
+    edition.flags[GANTT_DEPENDENCIES_FLAG] = true;
+    renderChart();
+    expect(screen.queryByTestId("gantt-dependency-layer")).toBeNull();
+    edition.flags[GANTT_DEPENDENCIES_FLAG] = false;
   });
 
   function barOf(id: string): HTMLElement {
