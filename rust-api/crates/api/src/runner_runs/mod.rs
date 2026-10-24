@@ -1498,6 +1498,8 @@ impl RunnerPorts for LivePorts {
             &self.pool,
             &cloud,
             &managed,
+            self.redis.as_ref(),
+            &settings.runner,
             run_id,
             self.state.toolsets().clone(),
             self.state.assistant_seam().clone(),
