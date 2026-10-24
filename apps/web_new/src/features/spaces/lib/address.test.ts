@@ -13,6 +13,7 @@ import {
   spaceBoardPath,
   spaceLegacyPath,
   spaceReturnPath,
+  type SpaceBoardSearch,
 } from "./address.js";
 
 const ID_A = "11111111-1111-4111-8111-111111111111";
@@ -33,13 +34,17 @@ describe("space address rules", () => {
     expect(spaceLegacyPath("acme", "project-1")).toBe("/spaces/acme/project-1/");
   });
 
-  it("keeps only valid board and peek parameters", () => {
-    expect(parseSpaceBoardSearch({ board: "kanban", peekId: "issue-1", labels: "x" })).toEqual({
-      board: "kanban",
-      peekId: "issue-1",
-    });
+  it("settles board and peekId and validates the filter keys", () => {
+    // The parser settles what the board consumes (slice E's validated facets).
+    // Byte-for-byte echo of the raw address — including an unsettled
+    // `state=abc` — is the href builders' work, pinned below (SPC-013).
+    expect(
+      parseSpaceBoardSearch({ board: "kanban", peekId: "issue-1", state: "abc", priority: "high", labels: "x" })
+    ).toEqual({ board: "kanban", peekId: "issue-1", priority: ["high"] });
     expect(parseSpaceBoardSearch({ board: "timeline", peekId: "" })).toEqual({});
     expect(parseSpaceBoardSearch({ board: 42, peekId: null })).toEqual({});
+    expect(parseSpaceBoardSearch({ state: "", priority: " ", labels: 7, board: "list" })).toEqual({ board: "list" });
+    expect(parseSpaceBoardSearch({ board: "list", unknown: "dropped" })).toEqual({ board: "list" });
   });
 
   it("normalizes a settled board address with a stable parameter order", () => {
@@ -47,6 +52,12 @@ describe("space address rules", () => {
       "/spaces/issues/anchor/?board=list&peekId=p1"
     );
     expect(normalizeBoardHref("anchor", {})).toBe("/spaces/issues/anchor/");
+    // Raw address strings echo byte for byte (SPC-013/SPC-022); the router
+    // hands facets back unvalidated, so the builder reads both shapes.
+    const raw = { labels: "l1", state: "abc", priority: "high", board: "list" } as unknown as SpaceBoardSearch;
+    expect(normalizeBoardHref("anchor", raw)).toBe(
+      "/spaces/issues/anchor/?board=list&priority=high&state=abc&labels=l1"
+    );
   });
 
   it("forwards exactly board and peekId from a legacy link", () => {
@@ -54,11 +65,16 @@ describe("space address rules", () => {
       "/spaces/issues/anchor/?board=kanban&peekId=p1"
     );
     expect(legacyForwardHref("anchor", { board: "bogus", labels: "l1" })).toBe("/spaces/issues/anchor/");
+    expect(legacyForwardHref("anchor", { board: "kanban", peekId: "p1", labels: "l1" })).toBe(
+      "/spaces/issues/anchor/?board=kanban&peekId=p1"
+    );
   });
 
   it("carries a subtree-relative return address without the mount segment", () => {
     expect(spaceReturnPath("anchor", { board: "kanban" })).toBe("/issues/anchor/?board=kanban");
     expect(spaceReturnPath("anchor", {})).toBe("/issues/anchor/");
+    const raw = { board: "list", state: "abc", priority: "high" } as unknown as SpaceBoardSearch;
+    expect(spaceReturnPath("anchor", raw)).toBe("/issues/anchor/?board=list&priority=high&state=abc");
   });
 });
 
@@ -119,5 +135,17 @@ describe("space sign-in return address", () => {
     const { spaceSignInHref } = await import("./address.js");
     expect(spaceSignInHref("anchor", { board: "list" })).toBe("/spaces/?next_path=/issues/anchor/%3Fboard%3Dlist");
     expect(spaceSignInHref("anchor", {})).toBe("/spaces/?next_path=/issues/anchor/");
+  });
+
+  it("keeps board, filters and peekId in the carried position (SPC-013)", async () => {
+    const { spaceSignInHref } = await import("./address.js");
+    const raw = { board: "kanban", state: "abc", priority: "high", peekId: "p1" } as unknown as SpaceBoardSearch;
+    const href = spaceSignInHref("anchor", raw);
+    expect(href).toContain("/issues/anchor");
+    expect(href).toContain("board%3Dkanban");
+    expect(href).toContain("state%3Dabc");
+    expect(href).toContain("priority%3Dhigh");
+    expect(href).toContain("peekId%3Dp1");
+    expect(href).not.toContain("/spaces/issues");
   });
 });

@@ -28,6 +28,9 @@ import {
   type SpaceLayout,
 } from "../lib/address.js";
 import { BoardLoading, BoardNavbar } from "./BoardShell.js";
+import { SpaceAccountSlot } from "./SpaceAccountSlot.js";
+import { SpaceProductBadge } from "./SpaceProductBadge.js";
+import { SpaceThemeSwitch } from "./SpaceThemeSwitch.js";
 import { SpaceAnchorNotFound, SpaceBoardError } from "./FailureSurfaces.js";
 import { SpaceBoardHead } from "./SpaceBoardHead.js";
 
@@ -78,7 +81,14 @@ function ValidAnchorBoard({ anchor, search }: BoardScreenProps): React.ReactElem
       <>
         <SpaceBoardHead anchor={anchor} />
         <div data-testid="space-board">
-          <BoardNavbar settings={undefined} anchor={anchor} search={search} />
+          <BoardNavbar
+            settings={undefined}
+            anchor={anchor}
+            search={search}
+            accountSlot={<SpaceAccountSlot anchor={anchor} search={search} />}
+          >
+            <SpaceThemeSwitch />
+          </BoardNavbar>
           <div data-testid="space-board-placeholder" className="min-h-[60vh]" />
         </div>
       </>
@@ -108,22 +118,31 @@ function ResolvedBoard({
   const identifier = settings.project_details?.identifier ?? "";
   return (
     <div data-testid="space-board">
-      <BoardNavbar settings={settings} anchor={anchor} search={search}>
+      <BoardNavbar
+        settings={settings}
+        anchor={anchor}
+        search={search}
+        accountSlot={<SpaceAccountSlot anchor={anchor} search={search} />}
+      >
         <LayoutSwitcher offered={offered} active={active} onSelect={select} />
+        <SpaceThemeSwitch />
       </BoardNavbar>
       {issues.isError || states.isError ? (
         <SpaceBoardError />
       ) : issues.data === undefined || states.data === undefined ? (
         <BoardLoading />
       ) : (
-        <BoardContent
-          anchor={anchor}
-          layout={active}
-          filters={filters}
-          page={issues.data}
-          states={states.data}
-          projectIdentifier={identifier}
-        />
+        <>
+          <BoardContent
+            anchor={anchor}
+            layout={active}
+            filters={filters}
+            page={issues.data}
+            states={states.data}
+            projectIdentifier={identifier}
+          />
+          <SpaceProductBadge />
+        </>
       )}
     </div>
   );

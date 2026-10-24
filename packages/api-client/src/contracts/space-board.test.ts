@@ -66,11 +66,33 @@ describe("space board contracts", () => {
     expect(transport.calls.at(-1)?.url).toBe("https://api.test/api/public/anchor/anchor123/settings/");
   });
 
-  it("accepts a settings payload whose project details are absent", async () => {
+  it("accepts a settings payload whose project details are null", async () => {
     const { client } = clientFor({ ...settings, project_details: null, anchor: null });
     const parsed = await getSpaceBoardSettings(client, "anchor123");
     expect(parsed.project_details).toBeNull();
     expect(parsed.anchor).toBeNull();
+  });
+
+  it("settles a missing project_details key to null (SPC-010 branch 4)", async () => {
+    const { project_details: _dropped, ...withoutDetails } = settings;
+    expect("project_details" in withoutDetails).toBe(false);
+    const { client } = clientFor(withoutDetails);
+    const parsed = await getSpaceBoardSettings(client, "anchor123");
+    expect(parsed.project_details).toBeNull();
+    expect(parsed.anchor).toBe("anchor123");
+  });
+
+  it("settles malformed project details to null instead of failing the read", async () => {
+    const malformed = [
+      { ...settings, project_details: { ...settings.project_details, logo_props: "not-a-map" } },
+      { ...settings, project_details: { ...settings.project_details, name: undefined } },
+      { ...settings, project_details: "not-an-object" },
+    ];
+    for (const payload of malformed) {
+      const { client } = clientFor(payload);
+      const parsed = await getSpaceBoardSettings(client, "anchor123");
+      expect(parsed.project_details).toBeNull();
+    }
   });
 
   it("reads board metadata with optional fields", async () => {

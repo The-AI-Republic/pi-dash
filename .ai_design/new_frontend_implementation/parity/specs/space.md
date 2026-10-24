@@ -627,7 +627,10 @@ rule as the old hook, with no user-agent heuristics). Inside a frame:
   post failure, comment post success where the design confirms it, vote
   failure, reaction failure, comment edit failure, comment delete success and
   failure, attachment upload failure. Notices are dismissible/auto-expiring,
-  one line plus optional detail, and never block the board.
+  one line plus optional detail, and never block the board. Notice wording
+  is not a parity property: each app confirms the outcome in its own words,
+  and the scenarios pin the outcome (a success notice after copying the
+  link, an error notice after a failed post), never the sentences.
 - A failed write never changes the visible data except through the
   reconcile rules of its own row (SPC-047/048/056/057).
 

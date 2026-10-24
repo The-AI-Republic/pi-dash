@@ -16,6 +16,8 @@ import { spaceRuntime } from "../api/client.js";
 import { spaceKeys } from "../api/keys.js";
 import { resolveLegacySpaceAnchor } from "../api/queries.js";
 import { legacyForwardHref, SPACE_GENERIC_NOT_FOUND, type SpaceBoardSearch } from "../lib/address.js";
+import { spaceMessage } from "../lib/spaceMessages.js";
+import { useSpaceProgress } from "./SpaceRouteProgress.js";
 
 export function LegacyResolver({
   workspaceSlug,
@@ -33,6 +35,9 @@ export function LegacyResolver({
     retry: false,
     staleTime: 30_000,
   });
+  // Slow resolutions raise the subtree progress bar (SPC-017); outside the
+  // provider — including every unit test — this is a silent no-op.
+  useSpaceProgress(query.isPending);
   React.useEffect(() => {
     if (query.isPending) return;
     if (query.data === null || query.data === undefined) {
@@ -45,10 +50,10 @@ export function LegacyResolver({
     <div
       data-testid="space-legacy-loading"
       role="status"
-      aria-label="Resolving board"
+      aria-label={spaceMessage("loading.legacy")}
       className="flex min-h-screen items-center justify-center bg-(--bg)"
     >
-      <Spinner size="large" label="Resolving board" />
+      <Spinner size="large" label={spaceMessage("loading.legacy")} />
     </div>
   );
 }

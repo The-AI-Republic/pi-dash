@@ -3,7 +3,10 @@
 // See the LICENSE file for details.
 // Public-board addresses (parity/specs/space.md §1.3). View state lives in
 // the address; invalid values fall back instead of throwing, and legacy
-// project links forward only the two parameters the old app kept.
+// project links forward only the two parameters the old app kept. Filter
+// keys ride along opaquely so the sign-in/sign-out return address keeps
+// the full position (SPC-013, SPC-014); validating and settling them
+// belongs to the filters slice, not to this parser.
 
 /** Anchors are opaque server ids with this alphabet; anything else is unknown. */
 export const ANCHOR_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -111,19 +114,23 @@ function appendList(params: URLSearchParams, key: string, values: readonly strin
 /**
  * The canonical board address for an anchor and settled search. Parameter
  * order is stable — board, peekId, then the filter facets — so a settled
- * address is byte-identical to a pasted one.
+ * address is byte-identical to a pasted one. `board` and `peekId` settle
+ * through the parser; the filter facets echo byte for byte instead — the
+ * settle rewrite keeps every other parameter that was present (SPC-022),
+ * and the settled address is what the share and sign-in links carry
+ * (SPC-013 keeps even an unsettled `state=abc`).
  */
 export function normalizeBoardHref(anchor: string, search: SpaceBoardSearch): string {
   // The router merges keys the validator did not return back into the search,
-  // so a facet here can still be the raw address string; read it the same way
-  // the parser does rather than trusting the caller's shape.
+  // so a facet here can still be the raw address string; echo it the same way
+  // rather than trusting the caller's shape.
   const settled = parseSpaceBoardSearch({ ...search });
   const params = new URLSearchParams();
   if (settled.board !== undefined) params.set("board", settled.board);
   if (settled.peekId !== undefined) params.set("peekId", settled.peekId);
-  appendList(params, "priority", settled.priority);
-  appendList(params, "state", settled.state);
-  appendList(params, "labels", settled.labels);
+  appendList(params, "priority", listParam(search.priority));
+  appendList(params, "state", listParam(search.state));
+  appendList(params, "labels", listParam(search.labels));
   const query = params.toString();
   return `${spaceBoardPath(anchor)}${query === "" ? "" : `?${query}`}`;
 }

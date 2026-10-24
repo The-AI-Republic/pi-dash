@@ -61,11 +61,32 @@ describe("BoardNavbar", () => {
     expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board");
   });
 
-  it("falls back to the project initial when the mark is not an emoji", () => {
+  // Slice-D evolution (SPC-010, NEWFRONT-756): the slice-A placeholder fell
+  // back to the project initial for icon marks; the spec branch renders
+  // the icon glyph instead, and an unmapped name keeps an empty slot.
+  it("renders the icon glyph for a configured icon mark", async () => {
+    render(
+      <BoardNavbar
+        settings={settingsWith({ in_use: "icon", icon: { name: "rocket_launch", color: "#1075e1" } })}
+        anchor="a"
+        search={{}}
+      />
+    );
+    expect(screen.getByTestId("space-navbar-mark").getAttribute("data-mark")).toBe("icon");
+    expect(await screen.findByTestId("space-navbar-mark-glyph")).toBeInTheDocument();
+  });
+
+  it("keeps the icon branch with the identifier initial for an icon name without a glyph", () => {
     render(
       <BoardNavbar settings={settingsWith({ in_use: "icon", icon: { name: "rocket" } })} anchor="a" search={{}} />
     );
-    expect(screen.getByTestId("space-navbar-mark")).toHaveTextContent("P");
+    expect(screen.getByTestId("space-navbar-mark").getAttribute("data-mark")).toBe("icon");
+    expect(screen.getByTestId("space-navbar-mark")).toHaveTextContent("S");
+  });
+
+  it("carries the full name on hover for truncated names", () => {
+    render(<BoardNavbar settings={settingsWith({}, "A very long project name")} anchor="a" search={{}} />);
+    expect(screen.getByTestId("space-navbar-name")).toHaveAttribute("title", "A very long project name");
   });
 
   it("keeps the position in the sign-in link and lets later slices fill slots", () => {

@@ -33,14 +33,17 @@ export type SpaceBoardWorkspace = z.infer<typeof SpaceBoardWorkspace>;
 
 /**
  * A published board's settings. `project_details` is nullable because the
- * placeholder/empty publish payload serializes none; `view_props` is the
- * loose layout map the publish dialog writes (enabled layouts). The three
- * interaction flags gate the public board's controls. `is_activity_enabled`
- * rides along but no space surface reads it, so it stays optional.
+ * placeholder/empty publish payload serializes none; a missing key or a
+ * value that fails the project shape also settles to null so the board
+ * keeps its generic-mark fallback (SPC-010 branch 4) instead of failing
+ * the whole settings read. `view_props` is the loose layout map the
+ * publish dialog writes (enabled layouts). The three interaction flags
+ * gate the public board's controls. `is_activity_enabled` rides along
+ * but no space surface reads it, so it stays optional.
  */
 export const SpaceBoardSettings = z.object({
   id: uuid(),
-  project_details: z.nullable(SpaceBoardProject),
+  project_details: z.catch(z.nullable(SpaceBoardProject), null),
   workspace_detail: SpaceBoardWorkspace,
   created_at: dateTime(),
   updated_at: dateTime(),

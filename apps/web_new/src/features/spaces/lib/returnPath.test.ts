@@ -7,6 +7,7 @@ import {
   isSpaceLandingTarget,
   parseSpaceLandingSearch,
   resolveSpaceReturnTarget,
+  spaceLandingReturnPath,
   validateSpaceReturnPath,
 } from "./returnPath.js";
 
@@ -131,5 +132,18 @@ describe("parseSpaceLandingSearch", () => {
 
   it("normalizes router-decoded numeric error codes", () => {
     expect(parseSpaceLandingSearch({ error_code: 5075 })).toEqual({ errorCode: "5075" });
+  });
+});
+
+describe("spaceLandingReturnPath", () => {
+  it("names the bare landing root without a query", () => {
+    expect(spaceLandingReturnPath({})).toBe("/");
+  });
+
+  it("echoes the landing query for the sign-out round trip", () => {
+    expect(spaceLandingReturnPath({ email: "a@b.test" })).toBe("/?email=a%40b.test");
+    expect(spaceLandingReturnPath({ nextPath: "/issues/a?board=kanban", errorCode: "5092" })).toBe(
+      "/?next_path=%2Fissues%2Fa%3Fboard%3Dkanban&error_code=5092"
+    );
   });
 });
