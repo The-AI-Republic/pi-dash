@@ -10,7 +10,7 @@
 // api-client seam, so an options-only pin cannot pass while a read still
 // refetches. The acting user's own invalidation is the one thing that does
 // refresh a module view.
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, focusManager, onlineManager, useQuery } from "@tanstack/react-query";
 import type { ApiClient } from "@pidash/api-client";
 import { act, render } from "@testing-library/react";
 import * as React from "react";
@@ -95,6 +95,24 @@ async function settle(): Promise<void> {
   });
 }
 
+/**
+ * Wait past the reads' freshness window, then take the browser through a
+ * blur-and-focus and an offline-and-online round trip. The query managers
+ * are driven directly because they are what TanStack Query subscribes to;
+ * a bare "focus" window event, or an "online" event while the manager is
+ * already online, changes no state and so proves nothing. Call this only
+ * with fake timers running.
+ */
+async function passFocusReconnectAndTime(): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(LIST_STALE_TIME_MS * 6);
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+    onlineManager.setOnline(false);
+    onlineManager.setOnline(true);
+  });
+}
+
 beforeEach(() => {
   mocks.listProjectModules.mockResolvedValue(MODULE_ROWS);
   mocks.getModule.mockResolvedValue(MODULE_DETAIL);
@@ -104,6 +122,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Hand the managers back to their default window listeners.
+  focusManager.setFocused(undefined);
+  onlineManager.setOnline(true);
   vi.clearAllMocks();
   vi.useRealTimers();
 });
@@ -137,11 +158,7 @@ describe("module reads fetch on mount only (MOD-039)", () => {
     expect(mocks.getJson).toHaveBeenCalledTimes(1);
     expect(mocks.getJson).toHaveBeenCalledWith(FACTS_PATH);
 
-    await act(async () => {
-      window.dispatchEvent(new Event("focus"));
-      window.dispatchEvent(new Event("online"));
-      await vi.advanceTimersByTimeAsync(LIST_STALE_TIME_MS * 6);
-    });
+    await passFocusReconnectAndTime();
     await settle();
     expect(mocks.listProjectModules).toHaveBeenCalledTimes(1);
     expect(mocks.getModule).toHaveBeenCalledTimes(1);
@@ -225,11 +242,7 @@ describe("project facts (MOD-039)", () => {
     );
     await settle();
     expect(mocks.getJson).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      window.dispatchEvent(new Event("focus"));
-      window.dispatchEvent(new Event("online"));
-      await vi.advanceTimersByTimeAsync(LIST_STALE_TIME_MS * 6);
-    });
+    await passFocusReconnectAndTime();
     await settle();
     expect(mocks.getJson).toHaveBeenCalledTimes(1);
     expect(client.getQueryData(read.queryKey)).toMatchObject({ id: PROJECT });

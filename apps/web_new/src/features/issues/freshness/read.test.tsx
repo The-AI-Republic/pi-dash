@@ -6,7 +6,7 @@
 // states all three quiet triggers, and a mounted observer fetches exactly
 // once while the window gains focus, the browser reconnects and time
 // passes — even when the surrounding client turns those triggers on.
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, focusManager, onlineManager, useQuery } from "@tanstack/react-query";
 import { act, render } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -45,8 +45,28 @@ async function settle(): Promise<void> {
 }
 
 afterEach(() => {
+  // Hand the managers back to their default window listeners.
+  focusManager.setFocused(undefined);
+  onlineManager.setOnline(true);
   vi.useRealTimers();
 });
+
+/**
+ * Let a few stale windows pass, then make the browser lose and regain
+ * focus and drop and restore the network. The query managers are driven
+ * directly: they are what TanStack Query listens to, while a bare "focus"
+ * event, or an "online" event on an already-online manager, is a no-op.
+ * Time passes first because a refetch-on-focus only fires on stale data.
+ */
+async function passFocusReconnectAndTime(): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(LIST_STALE_TIME_MS * 4);
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+    onlineManager.setOnline(false);
+    onlineManager.setOnline(true);
+  });
+}
 
 describe("FETCH_ON_MOUNT_FRESHNESS", () => {
   it("states the list freshness and every quiet trigger", () => {
@@ -87,11 +107,7 @@ describe("fetchOnMountOptions", () => {
     await settle();
     expect(fetchFn).toHaveBeenCalledTimes(1);
 
-    await act(async () => {
-      window.dispatchEvent(new Event("focus"));
-      window.dispatchEvent(new Event("online"));
-      await vi.advanceTimersByTimeAsync(LIST_STALE_TIME_MS * 4);
-    });
+    await passFocusReconnectAndTime();
     await settle();
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
