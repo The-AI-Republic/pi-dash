@@ -30,9 +30,10 @@ on:
       - "desktop/tests/**"
 
 # A new push to a PR replaces its running CI. Pushes to web-new-dev never
-# cancel a running full suite: the next one waits, and newer merges collapse
+# cancel a running push run: the next one waits, and newer merges collapse
 # into that one pending run, so every completed run covers all merges since
-# the previous one.
+# the previous one. Push runs no longer include the web_new unit suite; the
+# NEWFRONT full-suite scheduler runs it on web-new-dev every 12 hours.
 concurrency:
   group: web-new-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

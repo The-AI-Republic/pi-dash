@@ -11,10 +11,13 @@
 // Usage: node apps/web_new/checks/full-suite.mjs [--since <sha>] [--out <file>]
 //                                                [--no-install]
 //   --since <sha>  the head the previous run checked; commits after it are
-//                  the merge range (default: commits of the last 12 hours)
+//                  the merge range (default, or when the SHA is unknown:
+//                  commits of the last 12 hours)
 //   --out <file>   write the summary here (default: stdout)
 //   --no-install   skip pnpm install --frozen-lockfile
-// Exits 0 when every suite is green, 1 when any test fails for real.
+// Exits 0 when every suite is green, 1 when a test fails for real or a suite
+// crashes, and 2 when the script itself fails (bad arguments, a failed
+// install); the summary then holds only { error }.
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,6 +31,9 @@ const SUITES = [
   { name: "api-client", dir: "packages/api-client" },
 ];
 const EXCERPT_LINES = 30;
+// A suite still running after this is stopped and reported as a crash.
+const SUITE_TIMEOUT_MS = 45 * 60 * 1000;
+const LOAD_FAILURE = "(file failed to load)";
 
 function parseArgs(argv) {
   const opts = { since: null, out: null, install: true };
@@ -48,6 +54,10 @@ function excerpt(text) {
   return text.split("\n").slice(0, EXCERPT_LINES).join("\n").trim();
 }
 
+function tail(output) {
+  return excerpt(output.split("\n").slice(-EXCERPT_LINES).join("\n"));
+}
+
 // Failures in one vitest JSON report, with repo-relative file paths. A file
 // that fails to load has no assertions, only a message; it counts as one
 // failing test named "(file failed to load)".
@@ -57,8 +67,7 @@ function failuresOf(report, root) {
     if (file.status !== "failed") continue;
     const path = relative(root, file.name);
     const failed = (file.assertionResults ?? []).filter((test) => test.status === "failed");
-    if (failed.length === 0)
-      failures.push({ file: path, test: "(file failed to load)", error: excerpt(file.message ?? "") });
+    if (failed.length === 0) failures.push({ file: path, test: LOAD_FAILURE, error: excerpt(file.message ?? "") });
     for (const test of failed)
       failures.push({ file: path, test: test.fullName, error: excerpt((test.failureMessages ?? []).join("\n")) });
   }
@@ -78,34 +87,49 @@ function countsOf(report) {
   };
 }
 
-// A failure is real when the same test fails again on the re-run; a load
-// failure is matched by file. Pure, so the self-test covers every branch.
-function classify(first, rerun) {
+// A failure is real when it fails again on the re-run: the same test, or, for
+// a file that failed to load in either run, any failure in that file. When the
+// re-run itself crashed nothing was disproved, so every failure stays real.
+// Pure, so the self-test covers every branch.
+function classify(first, rerun, rerunCrashed = false) {
   const again = new Set(rerun.map((failure) => `${failure.file}\u0000${failure.test}`));
-  return first.map((failure) => ({
-    ...failure,
-    kind: again.has(`${failure.file}\u0000${failure.test}`) ? "real" : "flaky",
-  }));
+  const failingFiles = new Set(rerun.map((failure) => failure.file));
+  const unloadedFiles = new Set(
+    rerun.filter((failure) => failure.test === LOAD_FAILURE).map((failure) => failure.file)
+  );
+  return first.map((failure) => {
+    const real =
+      rerunCrashed ||
+      again.has(`${failure.file}\u0000${failure.test}`) ||
+      unloadedFiles.has(failure.file) ||
+      (failure.test === LOAD_FAILURE && failingFiles.has(failure.file));
+    return { ...failure, kind: real ? "real" : "flaky" };
+  });
 }
 
 function uniqueFiles(failures) {
   return [...new Set(failures.map((failure) => failure.file))];
 }
 
-/* v8 ignore next 4 -- runs real processes; the self-test injects fakes */
-function defaultSh(cmd, args, cwd) {
+/* v8 ignore next 14 -- runs real processes; the self-test injects fakes */
+function defaultSh(cmd, args, cwd, { timeoutMs } = {}) {
   const result = spawnSync(cmd, args, {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 256 * 1024 * 1024,
+    timeout: timeoutMs,
   });
-  return { status: result.status ?? 1, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
+  return {
+    status: result.status ?? 1,
+    output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+    timedOut: result.error?.code === "ETIMEDOUT",
+  };
 }
 
 /* v8 ignore next 3 -- real git; the self-test injects a fake */
 function defaultGit(args) {
-  return execFileSync("git", args, { cwd: repoDir, encoding: "utf8" }).trim();
+  return execFileSync("git", args, { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
 function readReport(file) {
@@ -116,9 +140,10 @@ function readReport(file) {
   }
 }
 
-// Runs one suite (all files, or only `files`) and returns its parsed report.
-// A run that writes no report at all (vitest crashed) is a failure of the
-// whole suite, kept with the tail of its output.
+// Runs one suite (all files, or only `files`) and returns its parsed report
+// and a crash, if any. A crash is a run that timed out, wrote no report, or
+// failed (non-zero exit, or success: false for unhandled errors or no test
+// files) without a failing test to show for it. It keeps the output's tail.
 function runSuite(suite, files, { sh, tmp, root }) {
   const out = join(tmp, `${suite.name}-${files ? "rerun" : "all"}.json`);
   const args = [
@@ -129,71 +154,102 @@ function runSuite(suite, files, { sh, tmp, root }) {
     `--outputFile=${out}`,
     ...(files ?? []).map((file) => resolve(root, file)),
   ];
-  const result = sh("pnpm", args, resolve(root, suite.dir));
+  const result = sh("pnpm", args, resolve(root, suite.dir), { timeoutMs: SUITE_TIMEOUT_MS });
   const report = readReport(out);
-  if (report) return { report, crash: null };
-  return { report: null, crash: excerpt(result.output.split("\n").slice(-EXCERPT_LINES).join("\n")) };
+  if (result.timedOut)
+    return { report, crash: `timed out after ${SUITE_TIMEOUT_MS / 60000} min\n${tail(result.output)}` };
+  if (!report) return { report: null, crash: tail(result.output) };
+  const failed = result.status !== 0 || report.success === false;
+  if (failed && failuresOf(report, root).length === 0) return { report, crash: tail(result.output) };
+  return { report, crash: null };
 }
 
-function mergeRange(since, git) {
+// One-line commits after `since` (or of the last 12 hours without one),
+// optionally only those touching `paths`.
+function commitLog(git, since, ...paths) {
   const range = since ? [`${since}..HEAD`] : ["--since=12 hours ago", "HEAD"];
-  const log = git(["log", "--format=%h %s", ...range]);
-  return { since, commits: log ? log.split("\n") : [] };
-}
-
-function commitsTouching(file, since, git) {
-  const range = since ? [`${since}..HEAD`] : ["--since=12 hours ago", "HEAD"];
-  const log = git(["log", "--format=%h %s", ...range, "--", file]);
+  const log = git(["log", "--format=%h %s", ...range, ...(paths.length > 0 ? ["--", ...paths] : [])]);
   return log ? log.split("\n") : [];
 }
 
-function main(
-  argv = process.argv.slice(2),
-  {
-    sh = defaultSh,
-    git = defaultGit,
-    root = repoDir,
-    tmp = mkdtempSync(join(tmpdir(), "full-suite-")),
-    write = writeFileSync,
-    log = console.error,
-  } = {}
-) {
-  const opts = parseArgs(argv);
+// A --since SHA that no longer exists (e.g. after a force-push) falls back to
+// the last 12 hours instead of failing the run.
+function knownSince(since, git, log) {
+  if (!since) return null;
   try {
-    return runAll(opts, { sh, git, root, tmp, write, log });
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
+    git(["rev-parse", "--verify", "--quiet", `${since}^{commit}`]);
+    return since;
+  } catch {
+    log(`full-suite: --since ${since} is not a known commit; using the last 12 hours`);
+    return null;
   }
+}
+
+function emit(summary, opts, write) {
+  const json = `${JSON.stringify(summary, null, 2)}\n`;
+  if (opts.out) write(opts.out, json);
+  else process.stdout.write(json);
 }
 
 function runAll(opts, { sh, git, root, tmp, write, log }) {
   if (opts.install) {
-    const install = sh("pnpm", ["install", "--frozen-lockfile"], root);
-    if (install.status !== 0)
-      throw new Error(`pnpm install failed:\n${excerpt(install.output.split("\n").slice(-EXCERPT_LINES).join("\n"))}`);
+    const install = sh("pnpm", ["install", "--frozen-lockfile"], root, { timeoutMs: SUITE_TIMEOUT_MS });
+    if (install.status !== 0 || install.timedOut) throw new Error(`pnpm install failed:\n${tail(install.output)}`);
   }
-  const summary = { head: git(["rev-parse", "HEAD"]), green: true, suites: [], range: mergeRange(opts.since, git) };
+  const since = knownSince(opts.since, git, log);
+  const summary = {
+    head: git(["rev-parse", "HEAD"]),
+    green: true,
+    suites: [],
+    range: { since, requestedSince: opts.since, commits: commitLog(git, since) },
+  };
   for (const suite of SUITES) {
     log(`full-suite: running ${suite.name}`);
     const first = runSuite(suite, null, { sh, tmp, root });
-    const entry = { name: suite.name, counts: countsOf(first.report), crash: first.crash, failures: [] };
+    const entry = {
+      name: suite.name,
+      counts: countsOf(first.report),
+      crash: first.crash,
+      rerunCrash: null,
+      failures: [],
+    };
     const failed = failuresOf(first.report, root);
     if (failed.length > 0) {
-      log(`full-suite: re-running ${uniqueFiles(failed).length} failing ${suite.name} file(s)`);
-      const rerun = runSuite(suite, uniqueFiles(failed), { sh, tmp, root });
-      entry.failures = classify(failed, failuresOf(rerun.report, root)).map((failure) => ({
+      const files = uniqueFiles(failed);
+      log(`full-suite: re-running ${files.length} failing ${suite.name} file(s)`);
+      const rerun = runSuite(suite, files, { sh, tmp, root });
+      entry.rerunCrash = rerun.crash;
+      const commits = new Map(files.map((file) => [file, commitLog(git, since, file)]));
+      entry.failures = classify(failed, failuresOf(rerun.report, root), rerun.crash !== null).map((failure) => ({
         ...failure,
-        commits: commitsTouching(failure.file, opts.since, git),
+        commits: commits.get(failure.file),
       }));
     }
     if (entry.crash || entry.failures.some((failure) => failure.kind === "real")) summary.green = false;
     summary.suites.push(entry);
   }
-  const json = `${JSON.stringify(summary, null, 2)}\n`;
-  if (opts.out) write(opts.out, json);
-  else process.stdout.write(json);
+  emit(summary, opts, write);
   log(`full-suite: ${summary.head.slice(0, 9)} ${summary.green ? "green" : "red"}`);
   return summary.green ? 0 : 1;
+}
+
+function main(
+  argv = process.argv.slice(2),
+  { sh = defaultSh, git = defaultGit, root = repoDir, tmp = null, write = writeFileSync, log = console.error } = {}
+) {
+  let opts = { out: null };
+  let status;
+  const dir = tmp ?? mkdtempSync(join(tmpdir(), "full-suite-"));
+  try {
+    opts = parseArgs(argv);
+    status = runAll(opts, { sh, git, root, tmp: dir, write, log });
+  } catch (error) {
+    log(`full-suite: error: ${error.message}`);
+    emit({ error: error.message }, opts, write);
+    status = 2;
+  }
+  rmSync(dir, { recursive: true, force: true });
+  return status;
 }
 
 // True when this module is the process entry point. Exported so the self-test

@@ -48,6 +48,12 @@ describe("parseArgs", () => {
     expect(parseArgs([])).toEqual({ base: null, full: false, vitestArgs: [] });
   });
 
+  it("passes option values through and refuses path filters", () => {
+    expect(parseArgs(["--reporter", "json", "--coverage"]).vitestArgs).toEqual(["--reporter", "json", "--coverage"]);
+    expect(() => parseArgs(["src/features/foo"])).toThrow("test:changed takes no path filters (src/features/foo)");
+    expect(() => parseArgs(["--reporter=json", "src/a.ts"])).toThrow("takes no path filters (src/a.ts)");
+  });
+
   it("refuses --base without a ref", () => {
     expect(() => parseArgs(["--base"])).toThrow("--base needs a ref");
   });
@@ -59,6 +65,7 @@ describe("planRun", () => {
       planRun({ full: false, vitestArgs: ["--coverage"], changedFiles: ["apps/web_new/src/a.ts"], root: "/repo" })
     ).toEqual({
       mode: "changed",
+      reason: null,
       skipped: [],
       args: ["related", "--run", "--passWithNoTests", "--coverage", "/repo/apps/web_new/src/a.ts"],
     });
@@ -74,14 +81,26 @@ describe("planRun", () => {
       })
     ).toEqual({
       mode: "changed",
+      reason: null,
       skipped: ["apps/web_new/vitest.config.ts", "pnpm-lock.yaml"],
       args: ["related", "--run", "--passWithNoTests", "/repo/apps/web_new/src/x.ts"],
+    });
+  });
+
+  it("runs the whole suite when too many files changed for one command line", () => {
+    const changedFiles = Array.from({ length: 1001 }, (_, i) => `apps/web_new/src/f${i}.ts`);
+    expect(planRun({ full: false, vitestArgs: ["--coverage"], changedFiles, root: "/repo" })).toEqual({
+      mode: "full",
+      reason: "1001 changed files",
+      skipped: [],
+      args: ["run", "--coverage"],
     });
   });
 
   it("runs the whole suite on --full", () => {
     expect(planRun({ full: true, vitestArgs: ["--coverage"], changedFiles: [], root: "" })).toEqual({
       mode: "full",
+      reason: "--full",
       skipped: [],
       args: ["run", "--coverage"],
     });
@@ -150,6 +169,13 @@ describe("main", () => {
       "test:changed: tests affected by 1 file(s) changed since HEAD^1",
       "test:changed: no import edge, left to the scheduled full suite: apps/web_new/vitest.config.ts",
     ]);
+  });
+
+  it("reports why it runs the whole suite for a very large diff", () => {
+    const diff = Array.from({ length: 1001 }, (_, i) => `apps/web_new/src/f${i}.ts`).join("\n");
+    const logs = [];
+    main([], { git: fakeGit({ diff }).git, runVitest: () => 0, log: (line) => logs.push(line) });
+    expect(logs).toEqual(["test:changed: full suite (1001 changed files since mb123)"]);
   });
 
   it("skips the diff entirely on --full", () => {

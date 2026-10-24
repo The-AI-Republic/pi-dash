@@ -15,13 +15,17 @@
 //   --base <ref>  diff against this ref (default: merge base of HEAD and
 //                 origin/web-new-dev)
 //   --full        run the whole suite regardless of what changed
-// Any other argument (e.g. --coverage) is passed through to vitest.
+// Any other option (e.g. --coverage) is passed through to vitest. Path
+// filters are refused: `vitest related` would read them as changed sources.
+// Past MAX_RELATED_FILES changed files (a stale base, a mass rename) the
+// file list could outgrow the OS argument limit, so the whole suite runs.
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const webNewDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_BASE_BRANCH = "origin/web-new-dev";
+const MAX_RELATED_FILES = 1000;
 
 // Repo-relative paths that reach tests without an import edge. Vitest's
 // forceRerunTriggers (package.json, vite/vitest configs, setup files) would
@@ -48,7 +52,14 @@ function parseArgs(argv) {
       i += 1;
       if (!opts.base) throw new Error("--base needs a ref");
     } else if (arg.startsWith("--base=")) opts.base = arg.slice("--base=".length);
-    else opts.vitestArgs.push(arg);
+    else {
+      // A bare word is an option's value (`--reporter json`) or a path filter.
+      const previous = opts.vitestArgs.at(-1);
+      const isValue = previous !== undefined && previous.startsWith("--") && !previous.includes("=");
+      if (!arg.startsWith("-") && !isValue)
+        throw new Error(`test:changed takes no path filters (${arg}); run pnpm exec vitest run <files> instead`);
+      opts.vitestArgs.push(arg);
+    }
   }
   return opts;
 }
@@ -56,10 +67,17 @@ function parseArgs(argv) {
 // Decide what to run. Pure, so the self-test covers every branch. Paths are
 // repo-relative; vitest gets them absolute, as its import graph holds them.
 function planRun({ full, vitestArgs, changedFiles, root }) {
-  if (full) return { mode: "full", skipped: [], args: ["run", ...vitestArgs] };
+  if (full) return { mode: "full", reason: "--full", skipped: [], args: ["run", ...vitestArgs] };
   const skipped = skippedFiles(changedFiles);
   const related = changedFiles.filter((file) => !skipped.includes(file)).map((file) => resolve(root, file));
-  return { mode: "changed", skipped, args: ["related", "--run", "--passWithNoTests", ...vitestArgs, ...related] };
+  if (related.length > MAX_RELATED_FILES)
+    return { mode: "full", reason: `${related.length} changed files`, skipped, args: ["run", ...vitestArgs] };
+  return {
+    mode: "changed",
+    reason: null,
+    skipped,
+    args: ["related", "--run", "--passWithNoTests", ...vitestArgs, ...related],
+  };
 }
 
 function defaultGit(args) {
@@ -91,7 +109,8 @@ function main(
   const root = git(["rev-parse", "--show-toplevel"]);
   const changedFiles = changedFilesSince(base, git, root);
   const plan = planRun({ ...opts, changedFiles, root });
-  log(`test:changed: tests affected by ${changedFiles.length} file(s) changed since ${base}`);
+  if (plan.mode === "full") log(`test:changed: full suite (${plan.reason} since ${base})`);
+  else log(`test:changed: tests affected by ${changedFiles.length} file(s) changed since ${base}`);
   if (plan.skipped.length > 0)
     log(`test:changed: no import edge, left to the scheduled full suite: ${plan.skipped.join(", ")}`);
   return runVitest(plan.args);
