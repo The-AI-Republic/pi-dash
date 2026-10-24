@@ -10,7 +10,7 @@ import { createFileRoute, Outlet } from "@tanstack/react-router";
 import * as React from "react";
 
 import { usePermissions } from "../../../../core/session/index.js";
-import { decideWorkspaceRunnersAccess } from "../../../../features/runners/index.js";
+import { decideWorkspaceRunnersAccess } from "../../../../features/runners/access.js";
 import { RunnersNotAuthorized } from "../../../../features/runners/components/NotAuthorizedView.js";
 
 export const Route = createFileRoute("/$ws/_gated/ai-dev-machines")({

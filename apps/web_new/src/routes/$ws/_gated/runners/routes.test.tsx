@@ -39,7 +39,7 @@ vi.mock("../../../../features/runners/chat/RunnerChatPage.js", () => ({
     return <div data-testid="runner-chat-page" />;
   },
 }));
-vi.mock("../../../../features/runners/index.js", () => ({
+vi.mock("../../../../features/runners/RunnersWorkspaceShell.js", () => ({
   RunnersWorkspaceShell: (props: Record<string, unknown>) => {
     shellProps.push(props);
     return <div data-testid="workspace-shell">{props["children"] as React.ReactNode}</div>;

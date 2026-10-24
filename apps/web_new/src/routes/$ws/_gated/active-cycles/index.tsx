@@ -8,7 +8,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { WorkspaceActivesUpsell } from "../../../../features/cycles/index.js";
+// Deep import (size gate): the cycles barrel also re-exports the transfer
+// hook, which depends on the issues barrel. This route only mounts the
+// upsell, so keep that larger closure off the eager route tree.
+import { WorkspaceActivesUpsell } from "../../../../features/cycles/components/WorkspaceActivesUpsell.js";
 
 export const Route = createFileRoute("/$ws/_gated/active-cycles/")({
   component: ActivesComponent,

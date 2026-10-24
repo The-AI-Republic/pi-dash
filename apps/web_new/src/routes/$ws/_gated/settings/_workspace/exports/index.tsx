@@ -10,11 +10,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import {
-  ExportsSettingsPage,
-  registerWorkspaceSettingsPage,
-  SettingsSectionOutlet,
-} from "../../../../../../features/workspace-settings/index.js";
+import { ExportsSettingsPage } from "../../../../../../features/workspace-settings/components/ExportsSettingsPage.js";
+import { registerWorkspaceSettingsPage } from "../../../../../../features/workspace-settings/lib/registry.js";
+import { SettingsSectionOutlet } from "../../../../../../features/workspace-settings/components/SettingsSectionOutlet.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace/exports/")({
   component: WorkspaceSettingsSectionPage,

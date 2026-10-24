@@ -11,8 +11,8 @@
 import { createFileRoute, Outlet } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ProjectAccessGate } from "../../../../../features/auth/index.js";
-import { ProjectTabStrip } from "../../../../../features/projects/index.js";
+import { ProjectAccessGate } from "../../../../../features/auth/components/ProjectAccessGate.js";
+import { ProjectTabStrip } from "../../../../../features/projects/components/ProjectTabStrip.js";
 // Deferred below the initial chain (NEWFRONT-871, size gate): the entries
 // only register palette commands and their jump page, so they can land
 // after the layout paints — the same shape the workspace entries take in

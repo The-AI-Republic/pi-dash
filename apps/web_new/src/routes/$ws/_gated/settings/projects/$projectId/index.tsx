@@ -7,7 +7,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ProjectSettingsGeneralTab, ProjectSettingsScreen } from "../../../../../../features/project-settings/index.js";
+import { ProjectSettingsGeneralTab } from "../../../../../../features/project-settings/general/GeneralTabScreen.js";
+import { ProjectSettingsScreen } from "../../../../../../features/project-settings/components/ProjectSettingsScreen.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/")({
   component: SettingsRouteComponent,

@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 
 // Stand-in for the page: the settings behavior belongs to the admin
 // area. What this suite owns is the route wiring.
-vi.mock("../../../features/admin/index.js", () => ({
+vi.mock("../../../features/admin/components/AdminEmailPage.js", () => ({
   AdminEmailPage: () => <div data-testid="admin-email-page" />,
 }));
 

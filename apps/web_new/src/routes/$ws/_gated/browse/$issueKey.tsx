@@ -27,7 +27,7 @@ import { CommentThread } from "../../../../features/issues/comments/CommentThrea
 import { DetailMissingState } from "../../../../features/issues/detail/DetailMissingState.js";
 import { DetailSkeleton } from "../../../../features/issues/detail/DetailSkeleton.js";
 import { IssueDetailRoot } from "../../../../features/issues/detail/IssueDetailRoot.js";
-import { IssuePropertiesSidebar } from "../../../../features/issues/detail/sidebar/index.js";
+import { IssuePropertiesSidebar } from "../../../../features/issues/detail/sidebar/IssuePropertiesSidebar.js";
 import { SubIssuesWidget } from "../../../../features/issues/subIssues/SubIssuesWidget.js";
 import { IssueRunAIAction } from "../../../../features/issues/detail/IssueAgentActions.js";
 import { AgentStatusPanel } from "../../../../features/issues/detail/agent/AgentStatusPanel.js";
@@ -43,12 +43,13 @@ import { useQuickActions } from "../../../../features/issues/menus/useQuickActio
 import {
   EpicCreateButton,
   LinkActionButton,
-  LinksWidget,
   RelationActionMenu,
-  RelationsWidget,
   WidgetActionsProvider,
-} from "../../../../features/issues/widgets/index.js";
-import { projectDetailsQueryOptions, ProjectTabStrip } from "../../../../features/projects/index.js";
+} from "../../../../features/issues/widgets/widgetActions.js";
+import { LinksWidget } from "../../../../features/issues/widgets/LinksWidget.js";
+import { RelationsWidget } from "../../../../features/issues/widgets/RelationsWidget.js";
+import { projectDetailsQueryOptions } from "../../../../features/projects/api/queries.js";
+import { ProjectTabStrip } from "../../../../features/projects/components/ProjectTabStrip.js";
 import { canEditInProject, useWorkItemPaletteContext } from "../../../../shared/shell/contextual/index.js";
 import { useDocumentHead } from "../../../../shared/shell/index.js";
 

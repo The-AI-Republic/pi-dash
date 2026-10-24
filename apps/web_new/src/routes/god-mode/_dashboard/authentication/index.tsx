@@ -8,7 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { AdminAuthLanding } from "../../../../features/admin/index.js";
+import { AdminAuthLanding } from "../../../../features/admin/components/AdminAuthLanding.js";
 
 export const Route = createFileRoute("/god-mode/_dashboard/authentication/")({
   component: AuthenticationRoute,

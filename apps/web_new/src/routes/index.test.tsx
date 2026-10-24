@@ -9,8 +9,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Stand-in for the auth card: its internals belong to the auth area.
 // What this suite owns is the search schema plus prop passing.
-vi.mock("../features/auth/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../features/auth/index.js")>()),
+vi.mock("../features/auth/components/EntryScreen.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../features/auth/components/EntryScreen.js")>()),
   EntryScreen: (props: { next?: string; unsafeNext?: string; email?: string; errorCode?: string }) => (
     <div
       data-testid="entry-screen"
@@ -38,6 +38,10 @@ vi.mock("../features/auth/index.js", async (importOriginal) => ({
       data-slug={props.invitationSlug ?? ""}
     />
   ),
+}));
+
+vi.mock("../features/auth/components/DesktopSignInScreen.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../features/auth/components/DesktopSignInScreen.js")>()),
   DesktopSignInScreen: (props: { error?: string; errorDescription?: string }) => (
     <div
       data-testid="desktop-sign-in"

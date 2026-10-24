@@ -9,7 +9,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ProjectsListView } from "../../../../../features/projects/index.js";
+import { ProjectsListView } from "../../../../../features/projects/components/ProjectsListView.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/archives/")({
   component: ArchivedProjectsRoute,

@@ -21,7 +21,9 @@ import {
   loadLandingTarget,
   ONBOARDING_PATH,
 } from "../core/session/index.js";
-import { DesktopSignInScreen, EntryScreen, parseLoginSearch } from "../features/auth/index.js";
+import { DesktopSignInScreen } from "../features/auth/components/DesktopSignInScreen.js";
+import { EntryScreen } from "../features/auth/components/EntryScreen.js";
+import { parseLoginSearch } from "../features/auth/components/LoginSearch.js";
 import { platform } from "../core/platform/index.js";
 
 /** Bare forward to the home route; any query params are dropped. */

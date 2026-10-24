@@ -11,19 +11,17 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
+import { isAdminStanding } from "../../../../../../features/project-settings/tabs.js";
+import { ProjectSettingsPage } from "../../../../../../features/project-settings/components/ProjectSettingsPage.js";
 import {
-  isAdminStanding,
-  ProjectSettingsPage,
   ProjectSettingsShell,
   useProjectSettings,
-} from "../../../../../../features/project-settings/index.js";
-import {
-  EditInstallDialog,
-  InstallsList,
-  InstallDialog,
-  UninstallInstallDialog,
-  useSchedulerBindings,
-} from "../../../../../../features/schedulers/index.js";
+} from "../../../../../../features/project-settings/components/ProjectSettingsLayout.js";
+import { EditInstallDialog } from "../../../../../../features/schedulers/EditInstallDialog.js";
+import { InstallsList } from "../../../../../../features/schedulers/InstallsList.js";
+import { InstallDialog } from "../../../../../../features/schedulers/InstallDialog.js";
+import { UninstallInstallDialog } from "../../../../../../features/schedulers/UninstallInstallDialog.js";
+import { useSchedulerBindings } from "../../../../../../features/schedulers/installData.js";
 import type { SchedulerBinding } from "@pidash/api-client";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/schedulers")({

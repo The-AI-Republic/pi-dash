@@ -8,7 +8,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ProjectSettingsScreen, RepositoryTab } from "../../../../../../features/project-settings/index.js";
+import { ProjectSettingsScreen } from "../../../../../../features/project-settings/components/ProjectSettingsScreen.js";
+import { RepositoryTab } from "../../../../../../features/project-settings/repository/RepositoryTab.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/github")({
   component: SettingsRouteComponent,

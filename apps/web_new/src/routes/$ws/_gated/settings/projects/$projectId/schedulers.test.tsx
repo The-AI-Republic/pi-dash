@@ -31,7 +31,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   return { ...original, useNavigate: () => harness.navigate };
 });
 
-vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
+vi.mock("../../../../../../features/auth/queries.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useProjectRow: () => ({
     status: "success",
@@ -54,9 +54,11 @@ vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
   useJoinProject: () => ({ isPending: false, mutate: vi.fn() }),
 }));
 
-vi.mock("../../../../../../features/schedulers/index.js", async (importOriginal) => ({
+vi.mock("../../../../../../features/schedulers/installData.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useSchedulerBindings: () => harness.bindings,
+}));
+vi.mock("../../../../../../features/schedulers/EditInstallDialog.js", () => ({
   EditInstallDialog: ({ binding, onSaved }: { binding: SchedulerBinding | null; onSaved: () => void }) => (
     <div data-testid="edit-dialog" data-binding={binding?.id ?? ""}>
       <button type="button" onClick={onSaved}>
@@ -64,9 +66,13 @@ vi.mock("../../../../../../features/schedulers/index.js", async (importOriginal)
       </button>
     </div>
   ),
+}));
+vi.mock("../../../../../../features/schedulers/UninstallInstallDialog.js", () => ({
   UninstallInstallDialog: ({ binding }: { binding: SchedulerBinding | null }) => (
     <div data-testid="uninstall-dialog" data-binding={binding?.id ?? ""} />
   ),
+}));
+vi.mock("../../../../../../features/schedulers/InstallsList.js", () => ({
   InstallsList: ({
     variant,
     onCreate,
@@ -95,6 +101,8 @@ vi.mock("../../../../../../features/schedulers/index.js", async (importOriginal)
       </button>
     </div>
   ),
+}));
+vi.mock("../../../../../../features/schedulers/InstallDialog.js", () => ({
   InstallDialog: ({
     open,
     canInstall,

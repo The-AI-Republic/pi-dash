@@ -22,7 +22,7 @@ import { loadIssueListLeaves, primeIssueListLeaves } from "../../../../../../fea
 import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
 import { preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
-import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
+import { projectsQueryOptions } from "../../../../../../features/projects/api/queries.js";
 
 // Start the leaf and filter chunks with the route module so the first
 // layout render does not suspend and mount twice (NEWFRONT-619).

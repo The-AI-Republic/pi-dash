@@ -9,7 +9,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { PromptsView } from "../../../../features/prompts/index.js";
+import { PromptsView } from "../../../../features/prompts/components/PromptsView.js";
 
 export const Route = createFileRoute("/$ws/_gated/prompts/")({
   component: PromptsComponent,

@@ -9,7 +9,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { AdminAiSettingsPage } from "../../../features/admin/index.js";
+import { AdminAiSettingsPage } from "../../../features/admin/components/AdminAiSettingsPage.js";
 
 export const Route = createFileRoute("/god-mode/_dashboard/ai")({
   component: AiSettingsRouteComponent,

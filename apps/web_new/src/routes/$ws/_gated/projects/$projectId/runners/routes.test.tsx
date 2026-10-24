@@ -30,7 +30,7 @@ vi.mock("../../../../../../features/runners/chat/RunnerChatPage.js", () => ({
     return <div data-testid="runner-chat-page" />;
   },
 }));
-vi.mock("../../../../../../features/runners/index.js", () => ({
+vi.mock("../../../../../../features/runners/RunnersProjectShell.js", () => ({
   RunnersProjectShell: (props: Record<string, unknown>) => {
     shellProps.push(props);
     return <div data-testid="project-shell">{props["children"] as React.ReactNode}</div>;
@@ -40,6 +40,16 @@ vi.mock("../../../../../../features/runners/index.js", () => ({
 // module is mocked below so the screen container can mount bare.
 
 vi.mock("../../../../../../features/runners/area.js", () => ({
+  buildRunnersAreaValue: () => ({
+    scope: { workspaceSlug: "acme", projectId: "p-1" },
+    workspaceId: "ws-id",
+    access: "allowed",
+    allowed: true,
+    base: "/acme/projects/p-1/runners",
+    path: (child?: string) =>
+      child === undefined ? "/acme/projects/p-1/runners" : `/acme/projects/p-1/runners/${child}`,
+  }),
+  RunnersAreaProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useRunnersArea: () => ({
     scope: { workspaceSlug: "acme", projectId: "p-1" },
     workspaceId: "ws-id",

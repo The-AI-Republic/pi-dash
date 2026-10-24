@@ -7,11 +7,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import {
-  AdminAuthProviderPage,
-  AUTH_PROVIDER_BY_SLUG,
-  PROVIDER_CREDENTIALS,
-} from "../../../../features/admin/index.js";
+import { AdminAuthProviderPage } from "../../../../features/admin/components/AdminAuthProviderPage.js";
+import { AUTH_PROVIDER_BY_SLUG } from "../../../../features/admin/providerAuth.js";
+import { PROVIDER_CREDENTIALS } from "../../../../features/admin/providerCredentials.js";
 
 export const Route = createFileRoute("/god-mode/_dashboard/authentication/gitlab")({
   component: GitlabAuthenticationRoute,

@@ -14,7 +14,8 @@ import * as React from "react";
 
 import { getAppClient } from "../../../../core/api/client.js";
 import { DraftsPage } from "../../../../features/issues/drafts/DraftsPage.js";
-import { CreateProjectDialog, workspaceMembersQueryOptions } from "../../../../features/projects/index.js";
+import { CreateProjectDialog } from "../../../../features/projects/components/CreateProjectDialog.js";
+import { workspaceMembersQueryOptions } from "../../../../features/projects/api/members.js";
 import { useDocumentHead } from "../../../../shared/shell/index.js";
 
 // Pinned by the drafts parity contract (parity/specs/drafts.md §1.1): the

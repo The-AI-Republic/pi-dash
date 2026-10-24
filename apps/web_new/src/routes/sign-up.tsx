@@ -18,7 +18,8 @@ import {
   loadLandingTarget,
   ONBOARDING_PATH,
 } from "../core/session/index.js";
-import { asString, safeNextPath, SignUpCard } from "../features/auth/index.js";
+import { asString, safeNextPath } from "../features/auth/entrySearch.js";
+import { SignUpCard } from "../features/auth/components/SignUpCard.js";
 
 export interface SignUpSearch {
   next_path?: string | undefined;

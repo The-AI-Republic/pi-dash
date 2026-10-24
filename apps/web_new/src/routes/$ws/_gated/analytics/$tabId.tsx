@@ -13,14 +13,14 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Button, Skeleton } from "@pidash/kit";
 import * as React from "react";
 
-import { AnalyticsScreen } from "../../../../features/analytics/index.js";
+import { AnalyticsScreen } from "../../../../features/analytics/components/AnalyticsScreen.js";
 // Search helpers import deep on purpose: the shell (loader,
 // validateSearch, pending view) stays in the initial chain, and a
 // barrel import here would drag the whole feature back into it
 // (NEWFRONT-732). The screen import above belongs to the split
 // component chunk.
 import { analyticsScopeSearch, parseAnalyticsSearch } from "../../../../features/analytics/lib/search.js";
-import { projectsQueryOptions } from "../../../../features/projects/index.js";
+import { projectsQueryOptions } from "../../../../features/projects/api/queries.js";
 
 export const Route = createFileRoute("/$ws/_gated/analytics/$tabId")({
   validateSearch: (search: Record<string, unknown>) => parseAnalyticsSearch(search),

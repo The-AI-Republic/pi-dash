@@ -17,19 +17,15 @@ import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { WorkspaceHomeTour } from "../../../features/auth/index.js";
-import {
-  HomeAllOffState,
-  HomeDashboard,
-  HomeWidgetStack,
-  ManageWidgetsDialog,
-  QuicklinksWidget,
-} from "../../../features/home/index.js";
-import {
-  CreateProjectDialog,
-  projectsQueryOptions,
-  workspaceMembersQueryOptions,
-} from "../../../features/projects/index.js";
+import { WorkspaceHomeTour } from "../../../features/auth/components/WorkspaceHomeTour.js";
+import { HomeAllOffState } from "../../../features/home/components/HomeAllOffState.js";
+import { HomeDashboard } from "../../../features/home/components/HomeDashboard.js";
+import { HomeWidgetStack } from "../../../features/home/components/HomeWidgetStack.js";
+import { ManageWidgetsDialog } from "../../../features/home/components/ManageWidgetsDialog.js";
+import { QuicklinksWidget } from "../../../features/home/components/QuicklinksWidget.js";
+import { CreateProjectDialog } from "../../../features/projects/components/CreateProjectDialog.js";
+import { projectsQueryOptions } from "../../../features/projects/api/queries.js";
+import { workspaceMembersQueryOptions } from "../../../features/projects/api/members.js";
 
 export const Route = createFileRoute("/$ws/_gated/")({
   loader: async ({ context, params }) => {

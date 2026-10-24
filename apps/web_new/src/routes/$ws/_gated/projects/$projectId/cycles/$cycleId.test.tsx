@@ -7,7 +7,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+beforeAll(async () => {
+  await import("./CycleDetailContent.js");
+}, 60_000);
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
@@ -106,8 +110,8 @@ vi.mock("../../../../../../features/auth/queries.js", () => ({
   useProjectRoles: () => mocks.roles.current,
   useProjectRow: () => mocks.projectRow.current,
 }));
-vi.mock("../../../../../../features/projects/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../../../features/projects/index.js")>()),
+vi.mock("../../../../../../features/projects/api/queries.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../../../features/projects/api/queries.js")>()),
   projectsQueryOptions: mocks.projects,
 }));
 vi.mock("../../../../../../features/issues/display/DisplayControl.js", () => ({

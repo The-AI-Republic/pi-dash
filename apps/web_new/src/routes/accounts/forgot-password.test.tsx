@@ -12,8 +12,8 @@ import { describe, expect, it, vi } from "vitest";
 
 // Stand-in for the auth card: its internals belong to the auth area.
 // What this suite owns is the search schema, the guard, plus prop passing.
-vi.mock("../../features/auth/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../features/auth/index.js")>()),
+vi.mock("../../features/auth/components/ForgotPasswordCard.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../features/auth/components/ForgotPasswordCard.js")>()),
   ForgotPasswordCard: (props: { initialEmail?: string }) => (
     <div data-testid="forgot-card" data-email={props.initialEmail ?? ""} />
   ),

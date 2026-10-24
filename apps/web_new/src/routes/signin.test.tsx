@@ -9,8 +9,8 @@ import { render, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../features/auth/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../features/auth/index.js")>()),
+vi.mock("../features/auth/components/DesktopSignInScreen.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../features/auth/components/DesktopSignInScreen.js")>()),
   DesktopSignInScreen: (props: { error?: string; errorDescription?: string }) => (
     <div
       data-testid="desktop-sign-in"

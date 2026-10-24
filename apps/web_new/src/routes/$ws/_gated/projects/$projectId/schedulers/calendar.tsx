@@ -10,8 +10,8 @@ import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
 import { useWorkspace } from "../../../../../../core/session/index.js";
-import { useProjectRoles } from "../../../../../../features/auth/index.js";
-import { isProjectAdmin } from "../../../../../../features/projects/index.js";
+import { useProjectRoles } from "../../../../../../features/auth/queries.js";
+import { isProjectAdmin } from "../../../../../../features/projects/tabs.js";
 import { useDocumentHead } from "../../../../../../shared/shell/index.js";
 
 // Deferred so the calendar's code stays in its own chunk (Quality gates).

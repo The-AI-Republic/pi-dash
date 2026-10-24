@@ -13,7 +13,7 @@ import * as React from "react";
 // Deep import: the barrel is eager through the router tree and would pin
 // the whole issues feature here (NEWFRONT-871, size gate).
 import { LabelsSettings } from "../../../../../../features/issues/labels/LabelsSettings.js";
-import { ProjectSettingsScreen } from "../../../../../../features/project-settings/index.js";
+import { ProjectSettingsScreen } from "../../../../../../features/project-settings/components/ProjectSettingsScreen.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/labels")({
   component: LabelsRouteComponent,

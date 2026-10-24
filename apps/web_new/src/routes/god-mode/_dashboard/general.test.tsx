@@ -8,7 +8,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../features/admin/index.js", () => ({
+vi.mock("../../../features/admin/components/AdminGeneralSettingsPage.js", () => ({
   AdminGeneralSettingsPage: () => <div data-testid="admin-general-page" />,
 }));
 

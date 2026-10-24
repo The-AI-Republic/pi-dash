@@ -16,10 +16,11 @@ import * as React from "react";
 // Direct module imports: the feature barrels grow with later slices,
 // which must not join this route's initial chunk.
 import { ArchivedCyclesScreen } from "../../../../../../../features/archives/components/ArchivedCyclesScreen.js";
-import { ArchivesShell, archivesRouteTitle, archivesTabHref } from "../../../../../../../features/archives/index.js";
-import { useProjectRow } from "../../../../../../../features/auth/index.js";
+import { ArchivesShell } from "../../../../../../../features/archives/components/ArchivesShell.js";
+import { archivesRouteTitle, archivesTabHref } from "../../../../../../../features/archives/tabs.js";
+import { useProjectRow } from "../../../../../../../features/auth/queries.js";
 import { parseCyclesListSearch } from "../../../../../../../features/cycles/lib/cycleListSearch.js";
-import { useDocumentHead } from "../../../../../../../shared/shell/index.js";
+import { useDocumentHead } from "../../../../../../../shared/shell/document.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/archives/cycles/")({
   validateSearch: (search: Record<string, unknown>) => parseCyclesListSearch(search),

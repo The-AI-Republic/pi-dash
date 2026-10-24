@@ -9,7 +9,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ArchivesDetailFrame } from "../../../../../../../features/archives/index.js";
+import { ArchivesDetailFrame } from "../../../../../../../features/archives/components/ArchivesDetailFrame.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/archives/issues/$archivedIssueId")({
   component: ArchivedIssueDetail,

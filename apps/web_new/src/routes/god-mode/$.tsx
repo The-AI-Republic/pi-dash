@@ -7,7 +7,7 @@
 // trees, so no guard preempts it.
 import { createFileRoute } from "@tanstack/react-router";
 
-import { AdminNotFoundScreen } from "../../features/admin/index.js";
+import { AdminNotFoundScreen } from "../../features/admin/components/AdminNotFoundScreen.js";
 
 export const Route = createFileRoute("/god-mode/$")({
   component: AdminNotFoundScreen,

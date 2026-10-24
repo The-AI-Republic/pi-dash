@@ -11,15 +11,13 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { usePermissions } from "../../../../../../core/session/index.js";
-import { useProjectRoles, useWorkspaceMembership } from "../../../../../../features/auth/index.js";
-import { isProjectAdmin } from "../../../../../../features/projects/index.js";
-import {
-  EditInstallDialog,
-  InstallsList,
-  InstallDialog,
-  UninstallInstallDialog,
-  useSchedulerBindings,
-} from "../../../../../../features/schedulers/index.js";
+import { useProjectRoles, useWorkspaceMembership } from "../../../../../../features/auth/queries.js";
+import { isProjectAdmin } from "../../../../../../features/projects/tabs.js";
+import { EditInstallDialog } from "../../../../../../features/schedulers/EditInstallDialog.js";
+import { InstallsList } from "../../../../../../features/schedulers/InstallsList.js";
+import { InstallDialog } from "../../../../../../features/schedulers/InstallDialog.js";
+import { UninstallInstallDialog } from "../../../../../../features/schedulers/UninstallInstallDialog.js";
+import { useSchedulerBindings } from "../../../../../../features/schedulers/installData.js";
 import type { SchedulerBinding } from "@pidash/api-client";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/schedulers/list")({

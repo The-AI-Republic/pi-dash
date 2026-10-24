@@ -31,7 +31,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 vi.mock("../../../../../../features/issues/prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.prefs }));
 vi.mock("../../../../../../features/issues/list/pages.js", () => ({ listPageQueryOptions: mocks.page }));
-vi.mock("../../../../../../features/projects/index.js", () => ({ projectsQueryOptions: mocks.projects }));
+vi.mock("../../../../../../features/projects/api/queries.js", () => ({ projectsQueryOptions: mocks.projects }));
 vi.mock("../../../../../../features/modules/components/sidebar/moduleSidebarQueries.js", () => ({
   moduleDetailQueryOptions: mocks.detail,
 }));

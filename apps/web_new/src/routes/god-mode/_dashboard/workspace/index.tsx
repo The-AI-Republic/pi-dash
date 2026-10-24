@@ -8,7 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { AdminWorkspacePage } from "../../../../features/admin/index.js";
+import { AdminWorkspacePage } from "../../../../features/admin/components/AdminWorkspacePage.js";
 
 export const Route = createFileRoute("/god-mode/_dashboard/workspace/")({
   component: WorkspaceRoute,

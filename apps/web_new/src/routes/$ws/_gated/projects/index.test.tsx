@@ -23,7 +23,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
 import { sessionKeys } from "../../../../core/session/index.js";
-import { projectKeys } from "../../../../features/projects/index.js";
+import { projectKeys } from "../../../../features/projects/api/keys.js";
 import { Route } from "./index.js";
 
 function renderList(): void {
@@ -113,10 +113,10 @@ afterEach(() => {
 });
 
 describe("projects list route", () => {
-  it("mounts the connected list for the workspace slug", () => {
+  it("mounts the connected list for the workspace slug", async () => {
     renderList();
 
-    expect(screen.getByLabelText("Projects")).not.toBeNull();
+    expect(await screen.findByLabelText("Projects")).not.toBeNull();
     expect(screen.getByRole("heading", { name: "Alpha" })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Project/ })).not.toBeNull();
   });

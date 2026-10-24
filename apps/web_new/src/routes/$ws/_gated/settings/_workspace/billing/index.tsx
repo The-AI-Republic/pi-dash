@@ -8,7 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { BillingPage } from "../../../../../../features/workspace-settings/index.js";
+import { BillingPage } from "../../../../../../features/workspace-settings/billing/BillingPage.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace/billing/")({
   component: WorkspaceSettingsSectionPage,

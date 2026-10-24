@@ -523,7 +523,7 @@ describe("project issues screen", () => {
     const now = new Date().toISOString();
     renderScreen({}, 1, [issueRow({ created_at: now, updated_at: now })]);
 
-    expect(screen.getByRole("heading", { name: "Website" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Website" }, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.getByTestId("layout-switcher-segmented")).toBeInTheDocument();
     // The list is a lazy leaf; the route chunk shows the list skeleton until
     // its module resolves (NEWFRONT-669, size gate).

@@ -17,7 +17,7 @@ import {
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../../features/admin/index.js", () => ({
+vi.mock("../../../../features/admin/components/AdminWorkspaceCreatePage.js", () => ({
   AdminWorkspaceCreatePage: () => <div data-testid="workspace-create-page">create a workspace</div>,
 }));
 

@@ -10,7 +10,7 @@
 import { createFileRoute, Outlet } from "@tanstack/react-router";
 import * as React from "react";
 
-import { AdminDashboardLayout } from "../../../features/admin/index.js";
+import { AdminDashboardLayout } from "../../../features/admin/components/AdminDashboardLayout.js";
 
 export const Route = createFileRoute("/god-mode/_dashboard")({
   component: DashboardLayoutRoute,

@@ -10,7 +10,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ProjectsListView } from "../../../../features/projects/index.js";
+import type { ProjectsListView as ProjectsListViewComponent } from "../../../../features/projects/components/ProjectsListView.js";
+
+// Deferred (size gate): route files are eager, so the screen must not join
+// the initial chunk just because this route can render it.
+const ProjectsListView = React.lazy(() =>
+  import("../../../../features/projects/components/ProjectsListView.js").then((module) => ({
+    default: module.ProjectsListView,
+  }))
+) as typeof ProjectsListViewComponent;
 
 export const Route = createFileRoute("/$ws/_gated/projects/")({
   component: ProjectsListRoute,
@@ -18,5 +26,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/")({
 
 function ProjectsListRoute(): React.ReactElement {
   const { ws } = Route.useParams();
-  return <ProjectsListView workspaceSlug={ws} />;
+  return (
+    <React.Suspense fallback={null}>
+      <ProjectsListView workspaceSlug={ws} />
+    </React.Suspense>
+  );
 }

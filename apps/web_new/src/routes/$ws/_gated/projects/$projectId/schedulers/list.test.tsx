@@ -29,14 +29,20 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   return { ...original, useNavigate: () => navigate };
 });
 vi.mock("../../../../../../core/session/index.js", () => ({
+  ROLE_ADMIN: 20,
+  ROLE_MEMBER: 15,
+  ROLE_GUEST: 5,
+  useWorkspace: () => ({ workspace: { slug: "acme", name: "Acme" } }),
   usePermissions: () => hooks.permissions,
 }));
-vi.mock("../../../../../../features/auth/index.js", () => ({
+vi.mock("../../../../../../features/auth/queries.js", () => ({
   useProjectRoles: () => hooks.roles,
   useWorkspaceMembership: () => hooks.membership,
 }));
-vi.mock("../../../../../../features/schedulers/index.js", () => ({
+vi.mock("../../../../../../features/schedulers/installData.js", () => ({
   useSchedulerBindings: () => hooks.bindings,
+}));
+vi.mock("../../../../../../features/schedulers/InstallsList.js", () => ({
   InstallsList: ({
     onCreate,
     onOpenInstall,
@@ -63,6 +69,8 @@ vi.mock("../../../../../../features/schedulers/index.js", () => ({
       </button>
     </div>
   ),
+}));
+vi.mock("../../../../../../features/schedulers/EditInstallDialog.js", () => ({
   EditInstallDialog: ({ binding, onSaved }: { binding: SchedulerBinding | null; onSaved: () => void }) => (
     <div data-testid="edit-dialog" data-binding={binding?.id ?? ""}>
       <button type="button" onClick={onSaved}>
@@ -70,9 +78,13 @@ vi.mock("../../../../../../features/schedulers/index.js", () => ({
       </button>
     </div>
   ),
+}));
+vi.mock("../../../../../../features/schedulers/UninstallInstallDialog.js", () => ({
   UninstallInstallDialog: ({ binding }: { binding: SchedulerBinding | null }) => (
     <div data-testid="uninstall-dialog" data-binding={binding?.id ?? ""} />
   ),
+}));
+vi.mock("../../../../../../features/schedulers/InstallDialog.js", () => ({
   InstallDialog: ({
     open,
     canInstall,

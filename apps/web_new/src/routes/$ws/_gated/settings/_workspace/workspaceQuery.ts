@@ -10,7 +10,7 @@ import { queryOptions } from "@tanstack/react-query";
 
 import { getWorkspace, type ApiClient, type WorkspaceDetails } from "@pidash/api-client";
 import { workspaceScope } from "../../../../../core/query/index.js";
-import { WORKSPACE_SETTINGS_QUERY_POLICY } from "../../../../../features/workspace-settings/index.js";
+import { WORKSPACE_SETTINGS_QUERY_POLICY } from "../../../../../features/workspace-settings/lib/settingsQuery.js";
 
 export function workspaceSettingsDetailsKey(workspaceSlug: string): readonly unknown[] {
   return [...workspaceScope(workspaceSlug), "workspace-settings", "details"];

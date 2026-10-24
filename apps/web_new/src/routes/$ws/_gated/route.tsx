@@ -37,24 +37,28 @@ import {
   usePermissions,
   workspacesQueryOptions,
 } from "../../../core/session/index.js";
-import { runSignOutAction, signOutCommand, useSignOut, useUpdateProfile } from "../../../features/auth/index.js";
+import { runSignOutAction, signOutCommand } from "../../../features/auth/commands.js";
+import { useSignOut } from "../../../features/auth/signOut.js";
+import { useUpdateProfile } from "../../../features/auth/profile.js";
 // Deep imports: both entries are shell-level and small, and the issues
 // barrel also pins the first route's lazy-only leaves into the shell
 // chunk (NEWFRONT-871, size gate).
 import { QuickCreateButton } from "../../../features/issues/components/QuickCreateButton.js";
 import { WorkItemCreateEntry } from "../../../features/issues/components/WorkItemCreateEntry.js";
-import { unreadNotificationsQueryOptions } from "../../../features/notifications/index.js";
-import { projectsQueryOptions, selectSidebarProjects, SidebarProjectsGroup } from "../../../features/projects/index.js";
+import { unreadNotificationsQueryOptions } from "../../../features/notifications/api/queries.js";
+import { projectsQueryOptions } from "../../../features/projects/api/queries.js";
+import { selectSidebarProjects } from "../../../features/projects/sidebar.js";
+import { SidebarProjectsGroup } from "../../../features/projects/components/SidebarProjectsGroup.js";
+import { SidebarFavoritesGroup } from "../../../features/sidebar/components/SidebarFavoritesGroup.js";
+import { SidebarMoreGroup } from "../../../features/sidebar/components/SidebarMoreGroup.js";
+import { favoritesQueryOptions } from "../../../features/sidebar/api/favorites.js";
 import {
-  SidebarFavoritesGroup,
-  SidebarMoreGroup,
-  favoritesQueryOptions,
   selectPersonalEntries,
   selectPersonalGroup,
   selectVisiblePersonalEntries,
   sidebarPreferencesQueryOptions,
   useSidebarPreferences,
-} from "../../../features/sidebar/index.js";
+} from "../../../features/sidebar/api/preferences.js";
 import type { SearchResultHit } from "../../../shared/commands/index.js";
 import {
   APP_VERSION,

@@ -10,7 +10,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
 import { asString } from "../core/session/index.js";
-import { SingleInvitation } from "../features/auth/index.js";
+import { SingleInvitation } from "../features/auth/components/SingleInvitation.js";
 
 export interface WorkspaceInvitationSearch {
   invitation_id?: string | undefined;

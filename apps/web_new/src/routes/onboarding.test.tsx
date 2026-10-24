@@ -21,8 +21,8 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 // records the props it receives so the suite can assert which steps the
 // screen mounts inside the flow.
 const seenFlowProps = vi.hoisted(() => ({ props: [] as unknown[] }));
-vi.mock("../features/auth/index.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../features/auth/index.js")>();
+vi.mock("../features/auth/components/OnboardingFlow.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../features/auth/components/OnboardingFlow.js")>();
   return {
     ...original,
     OnboardingFlow: (props: unknown) => {
@@ -38,7 +38,8 @@ import {
   settingsQueryOptions,
   workspacesQueryOptions,
 } from "../core/session/queries.js";
-import { InviteMembersStep, WorkspaceStep } from "../features/auth/index.js";
+import { InviteMembersStep } from "../features/auth/components/InviteMembersStep.js";
+import { WorkspaceStep } from "../features/auth/components/WorkspaceStep.js";
 import { myInvitationsQueryOptions } from "../features/auth/invitations.js";
 import { Route } from "./onboarding.js";
 

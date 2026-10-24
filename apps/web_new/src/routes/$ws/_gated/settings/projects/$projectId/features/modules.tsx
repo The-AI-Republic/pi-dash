@@ -10,8 +10,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ModuleFeatureSettings } from "../../../../../../../features/modules/index.js";
-import { ProjectSettingsScreen } from "../../../../../../../features/project-settings/index.js";
+import { ProjectFeatureSettings } from "../../../../../../../features/project-features/components/ProjectFeatureSettings.js";
+import { PROJECT_FEATURES } from "../../../../../../../features/project-features/lib/registry.js";
+import { ProjectSettingsScreen } from "../../../../../../../features/project-settings/components/ProjectSettingsScreen.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/features/modules")({
   component: SettingsRouteComponent,
@@ -19,9 +20,10 @@ export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/f
 
 function SettingsRouteComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
+  const feature = PROJECT_FEATURES.modules;
   return (
     <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="modules">
-      <ModuleFeatureSettings workspaceSlug={ws} projectId={projectId} />
+      <ProjectFeatureSettings feature={feature} />
     </ProjectSettingsScreen>
   );
 }
