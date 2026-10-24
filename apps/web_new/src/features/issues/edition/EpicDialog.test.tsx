@@ -251,6 +251,13 @@ describe("EpicDialog", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("lets the dialog dismiss itself when no write is in flight", async () => {
+    edition.flags[EPICS_FLAG] = true;
+    const { onOpenChange } = renderDialog();
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Create epic" }), { key: "Escape" });
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  });
+
   it("starts each open from the row it edits", async () => {
     edition.flags[EPICS_FLAG] = true;
     const onOpenChange = vi.fn();
