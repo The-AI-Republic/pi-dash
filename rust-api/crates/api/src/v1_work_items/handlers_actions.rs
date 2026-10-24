@@ -231,6 +231,32 @@ fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
     Denial::ServerError
 }
 
+/// Drain the creation driver's post-commit pod decisions. Django
+/// drains the pod inline (`dispatch.py:61-70`, via `on_commit`); the
+/// jobs driver only *returns* the decision, so a `PodDrain` must be
+/// acted on here or the new run stays QUEUED (PIDASHCONV-1494). A
+/// drain failure is the generic 500 with the committed rows
+/// standing, exactly like an `on_commit` raise.
+async fn drain_dispatch_decisions(
+    pool: &PgPool,
+    state: &AppState,
+    decisions: &[(Uuid, pidash_jobs::dispatch::DispatchDecision)],
+    site: &str,
+) -> Result<(), Denial> {
+    for (_, decision) in decisions {
+        if let pidash_jobs::dispatch::DispatchDecision::PodDrain { pod_id } = decision {
+            if crate::runner_sessions::runner_poll::drain_pod_by_id(pool, state, *pod_id)
+                .await
+                .is_err()
+            {
+                tracing::warn!(site, "v1_work_items actions pod-drain failure");
+                return Err(Denial::ServerError);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
     state
         .pools()
@@ -1506,6 +1532,10 @@ async fn retick_inner(
         outcome.run_id,
         outcome.ticker.as_ref().map(|ticker| (ticker, pool)),
     );
+    // Drain after the body is built: the re-tick body carries no run
+    // status, and the committed row must be assigned before the
+    // response returns (PIDASHCONV-1494).
+    drain_dispatch_decisions(&pre.pool, state, &out.dispatch_decisions, "retick-drain").await?;
     Ok(json_response(status, body))
 }
 
@@ -1724,6 +1754,10 @@ async fn run_ai_inner(
         return Err(Denial::ServerError);
     };
     let (status, body) = run_ai_created(id, &status_text, &executor);
+    // Drain after the readback: the body renders the stale pre-drain
+    // row exactly as Django's in-memory run does, while the committed
+    // row is assigned before the response returns (PIDASHCONV-1494).
+    drain_dispatch_decisions(&pre.pool, state, &out.dispatch_decisions, "run-ai-drain").await?;
     Ok(json_response(status, body))
 }
 
