@@ -73,7 +73,12 @@ test(
 
       await test.step("confirming archives, confirms, and lands on the project list", async () => {
         await driver.confirmArchive();
-        await expect.poll(() => driver.isToastVisible("has been archived successfully")).toBe(true);
+        // The archive write cascades (search leaves, lists rebuild), so
+        // the success notice can land well after the default 5s poll
+        // window on a loaded stack (NEWFRONT-606).
+        await expect
+          .poll(() => driver.isToastVisible("has been archived successfully"), { timeout: 30_000 })
+          .toBe(true);
         await expect
           .poll(() => archivesProjectArchivedAt(seed.workspaceSlug, projectId, session), { timeout: 30_000 })
           .not.toBeNull();
