@@ -110,11 +110,14 @@ describe("ModuleAddWorkItem", () => {
     expect(control.setCreateOpen).toHaveBeenCalledWith(false);
   });
 
-  it("lets a successful create refresh the page's module reads", async () => {
+  it("hands a successful create to the page without closing the dialog", async () => {
     const control = controller({ createOpen: true });
     setup(control);
     fireEvent.click(await screen.findByRole("button", { name: "created" }));
     expect(control.handleCreated).toHaveBeenCalledTimes(1);
+    // Create more leaves the form up; only the dialog's own close closes it.
+    expect(control.setCreateOpen).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("create-dialog")).toBeInTheDocument();
   });
 
   it("mounts the shared picker scoped to the module with the module search hint", async () => {

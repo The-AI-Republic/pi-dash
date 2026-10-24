@@ -42,7 +42,6 @@ function mount(overrides: Partial<UseModuleAddWorkItemInput> = {}) {
     moduleId: MODULE,
     memberRole: 20,
     projectArchived: false,
-    moduleStatus: "in-progress",
     ...overrides,
   };
   const view = renderHook(() => useModuleAddWorkItem(input), { wrapper });
@@ -69,7 +68,7 @@ describe("useModuleAddWorkItem", () => {
     expect(result.current.pickerOpen).toBe(false);
   });
 
-  it("cannot open either flow for a guest or a completed module", () => {
+  it("cannot open either flow for a guest or an archived project", () => {
     const guest = mount({ memberRole: 5 });
     act(() => {
       guest.result.current.openCreate();
@@ -80,17 +79,17 @@ describe("useModuleAddWorkItem", () => {
     expect(guest.result.current.canAdd).toBe(false);
     expect(guest.result.current.createOpen).toBe(false);
     expect(guest.result.current.pickerOpen).toBe(false);
-    const completed = mount({ moduleStatus: "completed" });
+    const archived = mount({ projectArchived: true });
     act(() => {
-      completed.result.current.openCreate();
-      completed.result.current.openPicker();
+      archived.result.current.openCreate();
+      archived.result.current.openPicker();
     });
-    expect(completed.result.current.canAdd).toBe(false);
-    expect(completed.result.current.createOpen).toBe(false);
-    expect(completed.result.current.pickerOpen).toBe(false);
+    expect(archived.result.current.canAdd).toBe(false);
+    expect(archived.result.current.createOpen).toBe(false);
+    expect(archived.result.current.pickerOpen).toBe(false);
   });
 
-  it("closes the form and refreshes the module detail after a create", () => {
+  it("refreshes the module detail after a create without closing the form", () => {
     const { result, invalidate } = mount();
     act(() => {
       result.current.openCreate();
@@ -99,7 +98,12 @@ describe("useModuleAddWorkItem", () => {
     act(() => {
       result.current.handleCreated();
     });
-    expect(result.current.createOpen).toBe(false);
+    // Create more keeps the dialog mounted until it calls the setter.
+    expect(result.current.createOpen).toBe(true);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: moduleKeys.detail(SLUG, PROJECT, MODULE) });
+    act(() => {
+      result.current.setCreateOpen(false);
+    });
+    expect(result.current.createOpen).toBe(false);
   });
 });

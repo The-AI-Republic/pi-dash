@@ -7,7 +7,9 @@
 // does not hold yet. The page mounts this once; the header and the empty
 // card both reach it through the controller, so there is a single creation
 // form and a single picker per visit. Creation is the Issues area's dialog
-// (NEWFRONT-630) — this surface only decides the module it lands in.
+// (NEWFRONT-630) — this surface only decides the module it lands in. The
+// dialog owns its own close (including Create more), so a create refreshes
+// the module's reads without unmounting the form.
 
 import * as React from "react";
 

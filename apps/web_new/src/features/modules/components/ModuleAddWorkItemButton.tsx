@@ -3,8 +3,8 @@
 // See the LICENSE file for details.
 // Header creation entry on a module's detail page (parity/specs/modules.md
 // §8.3, MOD-031). The page mounts it only for a standing that may add, so
-// the button itself carries no permission copy: guests and a completed
-// module simply never see it. It opens the shared creation dialog scoped
+// the button itself carries no permission copy: a guest simply never sees
+// it. It opens the shared creation dialog scoped
 // to the module, the same dialog the empty card's first action opens.
 
 import { Button } from "@pidash/kit";
