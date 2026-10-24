@@ -1,13 +1,13 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Self-test for test-impact.mjs on a small in-memory tree: how imports and
-// exports are read and resolved, and which test files a change reaches by
-// imported name.
+// Self-test for test-impact.mjs on small in-memory trees: how modules are
+// parsed and resolved, and which test files a change reaches by imported name.
 import { describe, expect, it } from "vitest";
 
-import { affectedTests, bindings, createGraph, parseExports, parseImports, resolveSpecifier } from "./test-impact.mjs";
+import { affectedTests, aliasesFor, bindings, createGraph, parseModule, resolveSpecifier } from "./test-impact.mjs";
 
+const W = "apps/web_new/src/";
 const tree = {
   "packages/kit/src/index.ts": [
     'export { Button } from "./Button";',
@@ -17,7 +17,7 @@ const tree = {
     'export * as icons from "./icons";',
     'export { Missing } from "./Missing";',
     'export * from "./gone";',
-    'export * from "./tokens";',
+    'export type { Only } from "./Dialog";',
   ].join("\n"),
   "packages/kit/src/Button.tsx": 'import { cx } from "./cx";\nexport function Button() {}',
   "packages/kit/src/Dialog.tsx":
@@ -33,88 +33,117 @@ const tree = {
   "packages/api-client/src/projects.ts": "export async function listProjects() {}",
   "packages/api-client/src/cycles.ts":
     'import { listProjects } from "./projects.js";\nexport const listCycles = listProjects;',
-  "apps/web_new/src/features/auth/index.ts":
-    'export { useSession } from "./session";\nexport { SignIn } from "./SignIn";',
-  "apps/web_new/src/features/auth/session.ts":
+  [`${W}features/auth/index.ts`]:
+    'export { useSession } from "./session";\nexport { SignIn } from "./SignIn";\nexport * from "./register";',
+  [`${W}features/auth/session.ts`]:
     'import { listProjects } from "@pidash/api-client";\nexport const useSession = listProjects;',
-  "apps/web_new/src/features/auth/SignIn.tsx":
+  [`${W}features/auth/SignIn.tsx`]:
     'import { Button } from "@pidash/kit";\nexport default function SignIn() {}\nexport { SignIn };',
-  "apps/web_new/src/features/auth/session.test.ts": 'import { useSession } from "@web_new/features/auth";',
-  "apps/web_new/src/features/auth/SignIn.test.tsx": 'import { SignIn } from "../auth";',
-  "apps/web_new/src/features/grid/Grid.tsx":
-    'import { DataTable as T, type DialogProps } from "@pidash/kit";\nimport "./grid.css";',
-  "apps/web_new/src/features/grid/grid.css": ".grid {}",
-  "apps/web_new/src/features/grid/Grid.test.tsx": 'import Grid from "./Grid";',
-  "apps/web_new/src/features/all/All.test.tsx": 'import * as kit from "@pidash/kit";',
-  "apps/web_new/src/features/all/Lazy.test.tsx": 'const m = await import("../cycles/cycles");',
-  "apps/web_new/src/features/all/Types.test.ts":
+  [`${W}features/auth/register.ts`]:
+    'import { cx } from "../../shared/cx";\nregisterAuth(cx);\nexport const registered = true;',
+  [`${W}shared/cx.ts`]: 'import { useState } from "react";\nexport const cx = 2;',
+  [`${W}features/auth/session.test.ts`]: 'import { useSession } from "@web_new/features/auth";',
+  [`${W}features/auth/SignIn.test.tsx`]: 'import { SignIn } from "../auth";',
+  [`${W}features/grid/Grid.tsx`]:
+    'import { DataTable as T, type DialogProps } from "@pidash/kit";\nimport "./grid.css";\nexport default T;',
+  [`${W}features/grid/grid.css`]: ".grid {}",
+  [`${W}features/grid/Grid.test.tsx`]: 'import Grid from "./Grid";',
+  [`${W}features/all/All.test.tsx`]: 'import * as kit from "@pidash/kit";',
+  [`${W}features/all/Lazy.test.tsx`]: 'const m = await import("../cycles/cycles");',
+  [`${W}features/all/Types.test.ts`]:
     'import type { Button } from "@pidash/kit";\nlet t: typeof import("@pidash/kit");',
-  "apps/web_new/src/features/cycles/cycles.ts":
+  [`${W}features/cycles/cycles.ts`]:
     'import { listCycles } from "@pidash/api-client";\nexport const cycles = listCycles;',
-  "apps/web_new/src/features/cycles/cycles.test.ts": 'import { cycles } from "./cycles";',
-  "apps/web_new/src/core/edition/oss.ts": "export const edition = 1;",
-  "apps/web_new/src/core/edition/edition.test.ts": 'import { edition } from "@pidash/edition";',
+  [`${W}features/cycles/cycles.test.ts`]: 'import { cycles } from "./cycles";',
+  [`${W}core/edition/oss.ts`]: "export const edition = 1;",
+  [`${W}core/edition/edition.test.ts`]: 'import { edition } from "@pidash/edition";',
+  [`${W}test-setup.ts`]: 'import { budget } from "./testing/budget";',
+  [`${W}testing/budget.ts`]: "export const budget = 1;",
   "apps/web_new/e2e/parity/drivers/x.test.ts": 'import { RED } from "@pidash/kit";',
-  "apps/web_new/src/setup.ts": 'import "react";',
 };
 const files = Object.keys(tree);
 const fileSet = new Set(files);
 const read = (file) => tree[file] ?? null;
+const select = (changedFiles, readBase = read, over = {}) => {
+  const all = { ...tree, ...over };
+  return affectedTests({ changedFiles, read: (file) => all[file] ?? null, readBase, files: Object.keys(all) }).tests;
+};
 
-describe("parseExports", () => {
-  it("reads declarations, defaults, local lists, re-exports and stars", () => {
-    const parsed = parseExports(tree["packages/kit/src/index.ts"]);
-    expect(parsed.reexports[1]).toEqual({
-      from: "./Dialog",
-      specifiers: [
-        { name: "Dialog", alias: "Dialog", type: false },
-        { name: "DialogProps", alias: "DialogProps", type: true },
-      ],
-    });
-    expect(parsed.reexports.find((entry) => entry.from === "./icons").specifiers).toEqual([
-      { name: "*", alias: "icons", type: false },
-    ]);
-    expect(parsed.stars).toEqual(["./tokens", "./gone", "./tokens"]);
-    expect([...parseExports(tree["apps/web_new/src/features/auth/SignIn.tsx"]).local]).toEqual(["default", "SignIn"]);
-    expect([...parseExports("export { a, };\nexport async function b() {}").local]).toEqual(["b", "a"]);
-  });
-});
-
-describe("parseImports", () => {
-  it("reads value imports and skips type-only ones and re-exports", () => {
-    expect(parseImports(tree["apps/web_new/src/features/grid/Grid.tsx"])).toEqual([
+describe("parseModule", () => {
+  it("reads value imports, skipping type-only ones, comments and re-export statements", () => {
+    expect(parseModule(tree[`${W}features/grid/Grid.tsx`], "Grid.tsx").imports).toEqual([
       { from: "@pidash/kit", names: new Set(["DataTable"]) },
       { from: "./grid.css", names: null },
     ]);
-    expect(parseImports(tree["apps/web_new/src/features/all/Types.test.ts"])).toEqual([]);
-    expect(parseImports('export { a } from "./a";\nimport { type T } from "./t";')).toEqual([]);
+    expect(parseModule(tree[`${W}features/all/Types.test.ts`]).imports).toEqual([]);
+    expect(
+      parseModule('import {\n  a, // first, important\n  type B,\n} from "./a"\nexport { c } from "./c";').imports
+    ).toEqual([{ from: "./a", names: new Set(["a"]) }]);
+    expect(parseModule('import { type T } from "./t";').imports).toEqual([]);
   });
 
   it("treats default as a name and namespace, side-effect and dynamic imports as everything", () => {
-    expect(parseImports('import Grid, { a } from "./Grid";')).toEqual([
-      { from: "./Grid", names: new Set(["a", "default"]) },
+    expect(parseModule('import d, { a } from "./m";').imports).toEqual([
+      { from: "./m", names: new Set(["default", "a"]) },
     ]);
-    expect(parseImports('import * as kit from "@pidash/kit";\nawait import("./x");')).toEqual([
-      { from: "@pidash/kit", names: null },
+    expect(
+      parseModule('import d, * as ns from "./m";\nimport "./s";\nawait import("./x");\nimport(name);', "m.mjs").imports
+    ).toEqual([
+      { from: "./m", names: null },
+      { from: "./s", names: null },
       { from: "./x", names: null },
     ]);
+  });
+
+  it("reads declarations of every kind, defaults, local lists, re-exports and stars", () => {
+    const parsed = parseModule(
+      [
+        "export const { a, b: [c, , d] } = x;",
+        "export const enum E { A }",
+        "export function f() {}",
+        "export class K {}",
+        "export default function () {}",
+        "const g = 1;",
+        "export { g as G, type H };",
+        'export { i, type J } from "./i";',
+        'export type { L } from "./l";',
+        'export * as ns from "./ns";',
+        'export * from "./star";',
+        '"use client";',
+      ].join("\n"),
+      "x.jsx"
+    );
+    expect([...parsed.local].sort()).toEqual(["E", "G", "K", "a", "c", "d", "default", "f"]);
+    expect(parsed.reexports).toEqual([
+      { from: "./i", specifiers: [{ name: "i", alias: "i" }] },
+      { from: "./ns", specifiers: [{ name: "*", alias: "ns" }] },
+    ]);
+    expect(parsed.stars).toEqual(["./star"]);
+    expect(parsed.effects).toBe(false);
+    expect(parseModule("export default x;").local).toEqual(new Set(["default"]));
+    expect(parseModule('export {} from "./e";').reexports).toEqual([]);
+  });
+
+  it("flags modules that run code at load time", () => {
+    expect(parseModule(tree[`${W}features/auth/register.ts`]).effects).toBe(true);
+    expect(parseModule("if (x) y();").effects).toBe(true);
+    expect(parseModule("export const a = make();").effects).toBe(false);
   });
 });
 
 describe("resolveSpecifier", () => {
   it("resolves aliases, @web_new paths, relative paths, .js suffixes and index files", () => {
     expect(resolveSpecifier("x", "@pidash/kit", fileSet)).toBe("packages/kit/src/index.ts");
-    expect(resolveSpecifier("x", "@pidash/edition", fileSet)).toBe("apps/web_new/src/core/edition/oss.ts");
-    expect(resolveSpecifier("x", "@web_new/features/auth", fileSet)).toBe("apps/web_new/src/features/auth/index.ts");
+    expect(resolveSpecifier("x", "@pidash/edition", fileSet)).toBe(`${W}core/edition/oss.ts`);
+    expect(resolveSpecifier("x", "@pidash/edition", fileSet, aliasesFor("cloud.ts"))).toBe("cloud.ts");
+    expect(resolveSpecifier("x", "@web_new/features/auth", fileSet)).toBe(`${W}features/auth/index.ts`);
     expect(resolveSpecifier("packages/kit/src/Table.tsx", "./VirtualList.js", fileSet)).toBe(
       "packages/kit/src/VirtualList.tsx"
     );
-    expect(resolveSpecifier("apps/web_new/src/features/all/Lazy.test.tsx", "../cycles/cycles", fileSet)).toBe(
-      "apps/web_new/src/features/cycles/cycles.ts"
+    expect(resolveSpecifier(`${W}features/all/Lazy.test.tsx`, "../cycles/cycles", fileSet)).toBe(
+      `${W}features/cycles/cycles.ts`
     );
-    expect(resolveSpecifier("apps/web_new/src/features/grid/Grid.tsx", "./grid.css", fileSet)).toBe(
-      "apps/web_new/src/features/grid/grid.css"
-    );
+    expect(resolveSpecifier(`${W}features/grid/Grid.tsx`, "./grid.css", fileSet)).toBe(`${W}features/grid/grid.css`);
   });
 
   it("returns null for npm packages and missing files", () => {
@@ -125,35 +154,33 @@ describe("resolveSpecifier", () => {
 
 describe("createGraph", () => {
   it("maps each public name to its declaring file through aliases, nested entries and stars", () => {
-    const { exportMap } = createGraph(files, read);
-    const kit = exportMap("packages/kit/src/index.ts");
+    const kit = createGraph(files, read).exportMap("packages/kit/src/index.ts");
     expect([...kit.get("Button")]).toEqual(["packages/kit/src/Button.tsx"]);
     expect([...kit.get("DataTable")]).toEqual(["packages/kit/src/Table.tsx"]);
     expect([...kit.get("RED")]).toEqual(["packages/kit/src/tokens/colors.ts"]);
     expect([...kit.get("SIZE")]).toEqual(["packages/kit/src/tokens/index.ts"]);
     expect([...kit.get("icons")]).toEqual(["packages/kit/src/icons.ts"]);
     expect(kit.has("Missing")).toBe(false);
+    expect(kit.has("Only")).toBe(false);
   });
 
-  it("survives files it cannot read and re-export cycles", () => {
+  it("does not cache an export map left incomplete by a re-export cycle", () => {
     const loop = {
-      "a.ts": 'export * from "./b";\nexport { x } from "./b";',
-      "b.ts": 'export * from "./a";\nexport const x = 1;',
+      "p.ts": 'export * from "./q";\nexport const pa = 1;',
+      "q.ts": 'export * from "./p";\nexport { qa as qb } from "./p";\nexport const qa = 1;',
+      "r.ts": 'export { ghost } from "./s";',
+      "s.ts": "",
     };
-    const { exportMap } = createGraph([...Object.keys(loop), "c.ts"], (file) => loop[file] ?? null);
-    expect([...exportMap("a.ts").get("x")]).toEqual(["b.ts"]);
-    expect(exportMap("c.ts").size).toBe(0);
-    const ghost = createGraph(
-      ["d.ts", "e.ts"],
-      (file) => ({ "d.ts": 'export { ghost } from "./e";', "e.ts": "" })[file]
-    );
-    expect([...ghost.exportMap("d.ts").get("ghost")]).toEqual(["e.ts"]);
+    const graph = createGraph(Object.keys(loop), (file) => loop[file]);
+    expect([...graph.exportMap("q.ts").get("pa")]).toEqual(["p.ts"]);
+    expect([...graph.exportMap("p.ts").get("qa")]).toEqual(["q.ts"]);
+    expect([...graph.exportMap("r.ts").get("ghost")]).toEqual(["s.ts"]);
   });
 });
 
 describe("bindings", () => {
   it("keys each direct export by where it comes from", () => {
-    expect(bindings('export { A as B } from "./a";\nexport const C = 1;\nexport * from "./d";')).toEqual(
+    expect(bindings(parseModule('export { A as B } from "./a";\nexport const C = 1;\nexport * from "./d";'))).toEqual(
       new Map([
         ["C", "local"],
         ["B", "./a#A"],
@@ -164,52 +191,108 @@ describe("bindings", () => {
 });
 
 describe("affectedTests", () => {
-  const select = (changedFiles, readBase = (file) => read(file)) =>
-    affectedTests({ changedFiles, read, readBase, files });
-
   it("follows a change only to the tests that import its names, through entry files", () => {
-    expect(select(["apps/web_new/src/features/auth/session.ts"])).toEqual([
-      "apps/web_new/src/features/auth/session.test.ts",
-    ]);
+    expect(select([`${W}features/auth/session.ts`])).toEqual([`${W}features/auth/session.test.ts`]);
     expect(select(["packages/kit/src/Button.tsx"])).toEqual([
-      "apps/web_new/src/features/all/All.test.tsx",
-      "apps/web_new/src/features/auth/SignIn.test.tsx",
+      `${W}features/all/All.test.tsx`,
+      `${W}features/auth/SignIn.test.tsx`,
     ]);
   });
 
   it("follows chains inside packages, aliases, side-effect and dynamic imports", () => {
     expect(select(["packages/kit/src/VirtualList.tsx"])).toEqual([
-      "apps/web_new/src/features/all/All.test.tsx",
-      "apps/web_new/src/features/grid/Grid.test.tsx",
+      `${W}features/all/All.test.tsx`,
+      `${W}features/grid/Grid.test.tsx`,
     ]);
-    expect(select(["apps/web_new/src/features/grid/grid.css"])).toEqual([
-      "apps/web_new/src/features/grid/Grid.test.tsx",
-    ]);
+    expect(select([`${W}features/grid/grid.css`])).toEqual([`${W}features/grid/Grid.test.tsx`]);
     expect(select(["packages/api-client/src/projects.ts"])).toEqual([
-      "apps/web_new/src/features/all/Lazy.test.tsx",
-      "apps/web_new/src/features/auth/session.test.ts",
-      "apps/web_new/src/features/cycles/cycles.test.ts",
+      `${W}features/all/Lazy.test.tsx`,
+      `${W}features/auth/session.test.ts`,
+      `${W}features/cycles/cycles.test.ts`,
     ]);
-    expect(select(["apps/web_new/src/core/edition/oss.ts"])).toEqual(["apps/web_new/src/core/edition/edition.test.ts"]);
+    expect(select([`${W}core/edition/oss.ts`])).toEqual([`${W}core/edition/edition.test.ts`]);
+  });
+
+  it("selects every test that loads a module running code at load time, whatever it imports", () => {
+    expect(select([`${W}shared/cx.ts`])).toEqual([
+      `${W}features/auth/SignIn.test.tsx`,
+      `${W}features/auth/session.test.ts`,
+    ]);
+    const before = 'import { cx } from "../../shared/cx";\nregisterAuth(cx);\nexport const registered = true;';
+    const after = { [`${W}features/auth/register.ts`]: "export const registered = true;" };
+    expect(select([`${W}features/auth/register.ts`], () => before, after)).toEqual([
+      `${W}features/auth/SignIn.test.tsx`,
+      `${W}features/auth/session.test.ts`,
+    ]);
   });
 
   it("selects a changed test itself, and never a deleted one or a type-only user", () => {
-    expect(select(["apps/web_new/src/features/cycles/cycles.test.ts", "apps/web_new/src/gone.test.ts"])).toEqual([
-      "apps/web_new/src/features/cycles/cycles.test.ts",
+    expect(select([`${W}features/cycles/cycles.test.ts`, `${W}gone.test.ts`])).toEqual([
+      `${W}features/cycles/cycles.test.ts`,
     ]);
-    expect(select(["packages/kit/src/tokens/colors.ts"])).not.toContain("apps/web_new/src/features/all/Types.test.ts");
+    expect(select(["packages/kit/src/tokens/colors.ts"])).not.toContain(`${W}features/all/Types.test.ts`);
   });
 
-  it("treats an edited re-export as a change for the files importing that name from it", () => {
-    const base = 'export { useSession } from "./session";\nexport { SignIn } from "./Old";';
-    const result = select(["apps/web_new/src/features/auth/index.ts"], (file) =>
-      file === "apps/web_new/src/features/auth/index.ts" ? base : read(file)
-    );
-    expect(result).toEqual(["apps/web_new/src/features/auth/SignIn.test.tsx"]);
-    expect(select(["packages/kit/src/index.ts"], () => null)).toContain("apps/web_new/e2e/parity/drivers/x.test.ts");
-    expect(select(["apps/web_new/src/features/auth/index.ts"], () => null)).toEqual([
-      "apps/web_new/src/features/auth/SignIn.test.tsx",
-      "apps/web_new/src/features/auth/session.test.ts",
+  it("follows an edited re-export to importers of the edited file and of entry files passing it on", () => {
+    const nested = {
+      "packages/kit/src/index.ts":
+        'export * from "./components";\nexport { Button as Btn, Other as O } from "./components";\nexport * as comps from "./components";',
+      "packages/kit/src/components/index.ts": 'export { Button } from "./B2";',
+      "packages/kit/src/components/B1.ts": "export const Button = 1;",
+      "packages/kit/src/components/B2.ts": "export const Button = 2;",
+      [`${W}a.test.ts`]: 'import { Button } from "@pidash/kit";',
+      [`${W}b.test.ts`]: 'import { Btn } from "@pidash/kit";',
+      [`${W}c.test.ts`]: 'import { Other } from "@pidash/kit";',
+      [`${W}d.test.ts`]: 'import { comps } from "@pidash/kit";',
+    };
+    const result = affectedTests({
+      changedFiles: ["packages/kit/src/components/index.ts"],
+      read: (file) => nested[file] ?? null,
+      readBase: () => 'export { Button } from "./B1";',
+      files: Object.keys(nested),
+    });
+    expect(result.tests).toEqual([`${W}a.test.ts`, `${W}b.test.ts`, `${W}d.test.ts`]);
+    const starAdded = affectedTests({
+      changedFiles: ["packages/kit/src/components/index.ts"],
+      read: (file) => nested[file] ?? null,
+      readBase: () => 'export { Button } from "./B2";\nexport * from "./B1";',
+      files: Object.keys(nested),
+    });
+    expect(starAdded.tests).toEqual([`${W}a.test.ts`, `${W}b.test.ts`, `${W}c.test.ts`, `${W}d.test.ts`]);
+  });
+
+  it("treats added, removed and star changes in an entry file as changes for their importers", () => {
+    const base =
+      'export { useSession } from "./session";\nexport { SignIn } from "./Old";\nexport * from "./register";';
+    expect(select([`${W}features/auth/index.ts`], () => base)).toEqual([`${W}features/auth/SignIn.test.tsx`]);
+    const removed = `${tree[`${W}features/auth/index.ts`]}\nexport { gone } from "./gone";`;
+    expect(select([`${W}features/auth/index.ts`], () => removed)).toEqual([]);
+    expect(select([`${W}features/auth/index.ts`], () => null)).toEqual([
+      `${W}features/auth/SignIn.test.tsx`,
+      `${W}features/auth/session.test.ts`,
     ]);
+    expect(select(["packages/kit/src/index.ts"], () => null)).toContain("apps/web_new/e2e/parity/drivers/x.test.ts");
+  });
+
+  it("follows an edited re-export around a re-export cycle without looping", () => {
+    const loop = {
+      [`${W}p.ts`]: 'export * from "./q";\nexport const pa = 1;',
+      [`${W}q.ts`]: 'export * from "./p";\nexport { qa } from "./r";',
+      [`${W}r.ts`]: "export const qa = 1;",
+      [`${W}t.test.ts`]: 'import { qa } from "./p";',
+    };
+    const result = affectedTests({
+      changedFiles: [`${W}q.ts`],
+      read: (file) => loop[file] ?? null,
+      readBase: () => 'export * from "./p";',
+      files: Object.keys(loop),
+    });
+    expect(result.tests).toEqual([`${W}t.test.ts`]);
+  });
+
+  it("reports a change that reaches the test setup file", () => {
+    const run = (changedFiles) => affectedTests({ changedFiles, read, readBase: read, files });
+    expect(run([`${W}testing/budget.ts`])).toEqual({ tests: [], setupReached: true });
+    expect(run([`${W}shared/cx.ts`]).setupReached).toBe(false);
   });
 });

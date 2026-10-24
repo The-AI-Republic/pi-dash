@@ -21,10 +21,11 @@
 // suite runs.
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { affectedTests } from "./test-impact.mjs";
+import { resolveEditionModule } from "../tools/edition-module.mjs";
+import { SOURCE_ROOTS, affectedTests, aliasesFor } from "./test-impact.mjs";
 
 const webNewDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_BASE_BRANCH = "origin/web-new-dev";
@@ -100,29 +101,46 @@ function defaultRead(root) {
 }
 
 // Every tracked or new file the graph needs, and each file's text at the base.
-function selectTests(changedFiles, { base, root, git, read }) {
-  const files = git([
-    "-C",
-    root,
-    "ls-files",
-    "--cached",
-    "--others",
-    "--exclude-standard",
-    "--",
-    "apps/web_new",
-    "packages/kit/src",
-    "packages/api-client/src",
-  ])
+// Each file's text at the base (null where it did not exist), from one
+// `git cat-file --batch` instead of a git process per file.
+function defaultReadBase(root, base, files) {
+  const texts = new Map();
+  if (files.length === 0) return texts;
+  const input = files.map((file) => `${base}:${file}\n`).join("");
+  const result = spawnSync("git", ["-C", root, "cat-file", "--batch"], { input, maxBuffer: 512 * 1024 * 1024 });
+  if (result.status !== 0) return texts;
+  const out = result.stdout;
+  let at = 0;
+  for (const file of files) {
+    const end = out.indexOf(10, at);
+    const header = out.toString("utf8", at, end).split(" ");
+    at = end + 1;
+    if (header[1] !== "blob") {
+      texts.set(file, null);
+      continue;
+    }
+    const size = Number(header[2]);
+    texts.set(file, out.toString("utf8", at, at + size));
+    at += size + 1;
+  }
+  return texts;
+}
+
+// The graph needs every tracked or new file under the source roots, each
+// changed file's text at the base, and the edition module vitest loads.
+function selectTests(changedFiles, { base, root, git, read, readBaseFiles, env }) {
+  const files = git(["-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "--", ...SOURCE_ROOTS])
     .split("\n")
     .filter(Boolean);
-  const readBase = (file) => {
-    try {
-      return git(["-C", root, "show", `${base}:${file}`]);
-    } catch {
-      return null;
-    }
-  };
-  return affectedTests({ changedFiles, read, readBase, files });
+  const baseTexts = readBaseFiles(root, base, changedFiles);
+  const edition = relative(root, resolveEditionModule(env, resolve(root, "apps/web_new")).modulePath);
+  return affectedTests({
+    changedFiles,
+    read,
+    readBase: (file) => baseTexts.get(file) ?? null,
+    files,
+    aliases: aliasesFor(edition),
+  });
 }
 
 /* v8 ignore next 3 -- spawns vitest itself; the self-test injects a fake */
@@ -139,7 +157,14 @@ function changedFilesSince(base, git, root = git(["rev-parse", "--show-toplevel"
 
 function main(
   argv = process.argv.slice(2),
-  { git = defaultGit, runVitest = defaultRunVitest, log = console.log, read = null } = {}
+  {
+    git = defaultGit,
+    runVitest = defaultRunVitest,
+    log = console.log,
+    read = null,
+    readBaseFiles = defaultReadBase,
+    env = process.env,
+  } = {}
 ) {
   const opts = parseArgs(argv);
   if (opts.full) {
@@ -149,12 +174,21 @@ function main(
   const base = opts.base ?? git(["merge-base", "HEAD", DEFAULT_BASE_BRANCH]);
   const root = git(["rev-parse", "--show-toplevel"]);
   const changedFiles = changedFilesSince(base, git, root);
-  const tests = selectTests(changedFiles, { base, root, git, read: read ?? defaultRead(root) });
+  const { tests, setupReached } = selectTests(changedFiles, {
+    base,
+    root,
+    git,
+    read: read ?? defaultRead(root),
+    readBaseFiles,
+    env,
+  });
   const plan = planRun({ ...opts, tests, root });
   const skipped = skippedFiles(changedFiles);
   if (plan.mode === "full") log(`test:changed: full suite (${plan.reason} since ${base})`);
   else log(`test:changed: ${changedFiles.length} file(s) changed since ${base} reach ${tests.length} test file(s)`);
   if (skipped.length > 0) log(`test:changed: no import edge, left to the scheduled full suite: ${skipped.join(", ")}`);
+  if (setupReached)
+    log("test:changed: the change reaches src/test-setup.ts, which every test loads; left to the scheduled full suite");
   if (plan.mode === "none") return 0;
   return runVitest(plan.args);
 }
@@ -172,4 +206,4 @@ if (isCliEntry()) {
   process.exit(main());
 }
 
-export { changedFilesSince, isCliEntry, main, parseArgs, planRun, skippedFiles };
+export { changedFilesSince, defaultReadBase, isCliEntry, main, parseArgs, planRun, skippedFiles };
