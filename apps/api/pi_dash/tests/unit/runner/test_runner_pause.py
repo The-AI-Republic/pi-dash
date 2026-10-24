@@ -55,7 +55,7 @@ def _make_runner(user, workspace, pod, name="r1", *, paused=False):
         workspace=workspace,
         pod=pod,
         name=name,
-        status=RunnerStatus.ONLINE,
+        status=RunnerStatus.PAUSED if paused else RunnerStatus.ONLINE,
         last_heartbeat_at=timezone.now(),
         paused_at=timezone.now() if paused else None,
     )
@@ -150,15 +150,15 @@ def test_pin_release_sweep_frees_runs_pinned_to_paused_runner(db, create_user, w
 
 
 @pytest.mark.unit
-def test_pause_marks_runner_paused_without_touching_status(db, session_client, create_user, workspace, pod):
+def test_pause_sets_paused_status(db, session_client, create_user, workspace, pod):
     runner = _make_runner(create_user, workspace, pod)
     resp = session_client.post(reverse("runner-pause", kwargs={"runner_id": runner.id}))
     assert resp.status_code == 200, resp.content
-    assert resp.json()["paused_at"] is not None
+    assert resp.json()["status"] == RunnerStatus.PAUSED
     runner.refresh_from_db()
+    assert runner.status == RunnerStatus.PAUSED
     assert runner.paused_at is not None
     assert runner.paused_by_id == create_user.id
-    assert runner.status == RunnerStatus.ONLINE
 
 
 @pytest.mark.unit
@@ -236,6 +236,34 @@ def test_resume_clears_pause_and_drains_queued_work(db, session_client, create_u
     run.refresh_from_db()
     assert run.status == AgentRunStatus.ASSIGNED
     assert run.runner_id == runner.id
+    # Assignment leaves the status alone; the run start or next poll sets BUSY.
+    assert runner.status == RunnerStatus.ONLINE
+
+
+@pytest.mark.unit
+def test_resume_idle_runner_goes_online(db, session_client, create_user, workspace, pod):
+    runner = _make_runner(create_user, workspace, pod, paused=True)
+    session_client.post(reverse("runner-resume", kwargs={"runner_id": runner.id}))
+    runner.refresh_from_db()
+    assert runner.status == RunnerStatus.ONLINE
+
+
+@pytest.mark.unit
+def test_resume_runner_with_stale_heartbeat_goes_offline(db, session_client, create_user, workspace, pod):
+    runner = _make_runner(create_user, workspace, pod, paused=True)
+    Runner.objects.filter(pk=runner.pk).update(last_heartbeat_at=timezone.now() - timezone.timedelta(hours=1))
+    session_client.post(reverse("runner-resume", kwargs={"runner_id": runner.id}))
+    runner.refresh_from_db()
+    assert runner.status == RunnerStatus.OFFLINE
+
+
+@pytest.mark.unit
+def test_resume_runner_still_finishing_a_run_goes_busy(db, session_client, create_user, workspace, pod):
+    runner = _make_runner(create_user, workspace, pod, paused=True)
+    _make_run(create_user, pod, runner=runner, status=AgentRunStatus.RUNNING)
+    session_client.post(reverse("runner-resume", kwargs={"runner_id": runner.id}))
+    runner.refresh_from_db()
+    assert runner.status == RunnerStatus.BUSY
 
 
 @pytest.mark.unit
@@ -260,6 +288,47 @@ def test_pause_requires_manage_permission(db, session_client, create_user, works
     assert runner.paused_at is None
 
 
+# ---------------- connectivity writers ----------------
+
+
+@pytest.mark.unit
+def test_session_open_and_close_leave_pause_alone(db, create_user, workspace, pod):
+    from pi_dash.runner.services.session_service import mark_runner_offline, mark_runner_online
+
+    runner = _make_runner(create_user, workspace, pod, paused=True)
+    Runner.objects.filter(pk=runner.pk).update(last_heartbeat_at=None)
+    mark_runner_online(runner.id)
+    runner.refresh_from_db()
+    assert runner.status == RunnerStatus.PAUSED
+    # The heartbeat still records that the daemon is alive.
+    assert runner.last_heartbeat_at is not None
+    mark_runner_offline(runner.id)
+    runner.refresh_from_db()
+    assert runner.status == RunnerStatus.PAUSED
+
+
+@pytest.mark.unit
+def test_migration_backfills_paused_status(db, create_user, workspace, pod):
+    import importlib
+
+    from django.apps import apps as django_apps
+
+    migration = importlib.import_module("pi_dash.runner.migrations.0032_runner_paused_status")
+    paused = _make_runner(create_user, workspace, pod, "was-paused")
+    Runner.objects.filter(pk=paused.pk).update(paused_at=timezone.now(), status=RunnerStatus.BUSY)
+    revoked = _make_runner(create_user, workspace, pod, "revoked")
+    Runner.objects.filter(pk=revoked.pk).update(
+        paused_at=timezone.now(), status=RunnerStatus.REVOKED, revoked_at=timezone.now()
+    )
+    untouched = _make_runner(create_user, workspace, pod, "untouched")
+
+    migration.forwards(django_apps, None)
+
+    assert Runner.objects.get(pk=paused.pk).status == RunnerStatus.PAUSED
+    assert Runner.objects.get(pk=revoked.pk).status == RunnerStatus.REVOKED
+    assert Runner.objects.get(pk=untouched.pk).status == RunnerStatus.ONLINE
+
+
 # ---------------- chat ----------------
 
 
@@ -279,7 +348,7 @@ def test_chat_session_create_rejected_on_paused_runner(db, session_client, creat
 def test_chat_message_rejected_on_paused_runner(db, session_client, create_user, workspace, pod):
     runner = _make_runner(create_user, workspace, pod)
     session = AgentChatSession.objects.create(workspace=workspace, runner=runner, created_by=create_user, pod=pod)
-    Runner.objects.filter(pk=runner.pk).update(paused_at=timezone.now())
+    Runner.objects.filter(pk=runner.pk).update(status=RunnerStatus.PAUSED, paused_at=timezone.now())
     with patch("pi_dash.runner.services.chat.send_to_runner") as send:
         resp = session_client.post(
             f"/api/runners/chat/sessions/{session.id}/messages/", {"content": "hi"}, format="json"
@@ -295,10 +364,11 @@ def test_chat_message_rejected_on_paused_runner(db, session_client, create_user,
 
 
 @pytest.mark.unit
-def test_metrics_report_paused_and_exclude_it_from_online(db, client, create_user, workspace, pod):
+def test_metrics_report_paused_separately_from_online(db, client, create_user, workspace, pod):
     _make_runner(create_user, workspace, pod, "online")
-    _make_runner(create_user, workspace, pod, "paused-online", paused=True)
-    busy = _make_runner(create_user, workspace, pod, "paused-busy", paused=True)
+    _make_runner(create_user, workspace, pod, "paused-1", paused=True)
+    _make_runner(create_user, workspace, pod, "paused-2", paused=True)
+    busy = _make_runner(create_user, workspace, pod, "busy")
     Runner.objects.filter(pk=busy.pk).update(status=RunnerStatus.BUSY)
 
     body = client.get("/api/v1/runner/metrics/").content.decode()

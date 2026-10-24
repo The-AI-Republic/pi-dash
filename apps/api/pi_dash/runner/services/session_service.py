@@ -20,6 +20,7 @@ from uuid import UUID
 from django.utils import timezone
 
 from pi_dash.runner.models import (
+    OPERATOR_HELD_STATUSES,
     AgentHealth,
     AgentRun,
     AgentRunStatus,
@@ -503,11 +504,13 @@ def build_session_open_redeliver(runner: Runner, in_flight_run_id: Optional[str]
 
 
 def mark_runner_online(runner_id: UUID | str) -> None:
-    Runner.objects.filter(pk=runner_id).update(status=RunnerStatus.ONLINE, last_heartbeat_at=timezone.now())
+    now = timezone.now()
+    Runner.objects.filter(pk=runner_id).update(last_heartbeat_at=now)
+    Runner.objects.filter(pk=runner_id).exclude(status__in=OPERATOR_HELD_STATUSES).update(status=RunnerStatus.ONLINE)
 
 
 def mark_runner_offline(runner_id: UUID | str) -> None:
-    Runner.objects.filter(pk=runner_id).exclude(status=RunnerStatus.REVOKED).update(status=RunnerStatus.OFFLINE)
+    Runner.objects.filter(pk=runner_id).exclude(status__in=OPERATOR_HELD_STATUSES).update(status=RunnerStatus.OFFLINE)
 
 
 def resolve_runner_project_slug(runner: Runner) -> Optional[str]:

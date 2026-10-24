@@ -34,7 +34,7 @@ from rest_framework.views import APIView
 
 from pi_dash.utils.db_async import db_sync_to_async
 from pi_dash.runner.authentication import RunnerAccessTokenAuthentication
-from pi_dash.runner.models import RunnerSession, RunnerStatus
+from pi_dash.runner.models import OPERATOR_HELD_STATUSES, RunnerSession, RunnerStatus
 from pi_dash.runner.services import chat as chat_service
 from pi_dash.runner.services import outbox, session_service
 
@@ -381,13 +381,18 @@ def _poll_bookkeeping(runner, body: Dict[str, Any], sid):
             reported_status = status_entry.get("status")
             reports_busy = reported_status == "busy"
             reports_available = reported_status in {"idle", "online"}
+            # A paused (or revoked) runner keeps heartbeating, but its status
+            # is the operator's: the poll must not flip it back to ONLINE, and
+            # there is no work to drain to it.
+            held = prior_status in OPERATOR_HELD_STATUSES
             became_available = prior_status == RunnerStatus.BUSY and reports_available
-            status_allows_drain = reports_available or (not status_entry and prior_status != RunnerStatus.BUSY)
+            status_allows_drain = not held and (
+                reports_available or (not status_entry and prior_status != RunnerStatus.BUSY)
+            )
 
-            runner_updates: Dict[str, Any] = {
-                "last_heartbeat_at": now_ts,
-                "status": RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE,
-            }
+            runner_updates: Dict[str, Any] = {"last_heartbeat_at": now_ts}
+            if not held:
+                runner_updates["status"] = RunnerStatus.BUSY if reports_busy else RunnerStatus.ONLINE
             # The worktree pool is retired (PDASHOSS01-137): there is no
             # per-runner desk capacity to track, so a reported ``free_worktrees``
             # hint is no longer persisted. A post-retirement daemon omits the
