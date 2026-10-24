@@ -137,6 +137,14 @@ jobs:
       - name: Start Rust worker (Django worker stays stopped)
         working-directory: rust-api
         run: |
+          # Fresh test-only RSA key for the github_app mint path: the replay
+          # seeds the app id/slug in instance_configurations (db-sourced, like
+          # Django) while the private key stays env-sourced. Generated per
+          # run so no key material is ever committed (PIDASHCONV-1471).
+          openssl genrsa -out /tmp/contract-github-app.pem 2048 2>/dev/null
+          export GITHUB_APP_PRIVATE_KEY
+          GITHUB_APP_PRIVATE_KEY="$(cat /tmp/contract-github-app.pem)"
+          rm -f /tmp/contract-github-app.pem
           nohup ./target/debug/pidash-api worker \
             > /tmp/contract-rust-worker.log 2>&1 &
           for i in $(seq 1 30); do
