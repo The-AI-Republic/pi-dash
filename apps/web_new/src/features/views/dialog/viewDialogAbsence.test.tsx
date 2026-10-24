@@ -137,15 +137,17 @@ function expectNoPositiveTabindex(root: ParentNode): void {
   }
 }
 
-/** The landmark controls sit in field order within the tab order. */
+/**
+ * The announcement states the full order: title, description, the
+ * remaining form controls, then Cancel and the submit action last.
+ */
 function expectFieldOrder(root: ParentNode, submit: string): void {
   const names = tabbableNames(root);
-  const order = [names.indexOf("Title"), names.indexOf("Description"), names.indexOf("Cancel"), names.indexOf(submit)];
-  expect(
-    order.every((at) => at >= 0),
-    `landmarks present: ${names.join(" | ")}`
-  ).toBe(true);
-  expect([...order].sort((left, right) => left - right)).toEqual(order);
+  expect(names[0], `title leads: ${names.join(" | ")}`).toBe("Title");
+  expect(names[1], `description follows: ${names.join(" | ")}`).toBe("Description");
+  expect(names.indexOf("Title", 1)).toBe(-1);
+  expect(names.indexOf("Description", 2)).toBe(-1);
+  expect(names.slice(-2), `footer trails: ${names.join(" | ")}`).toEqual(["Cancel", submit]);
 }
 
 describe("save dialog tab order (VIEW-044)", () => {
