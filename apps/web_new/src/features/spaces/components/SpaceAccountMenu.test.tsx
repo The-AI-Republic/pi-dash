@@ -64,8 +64,7 @@ describe("SpaceAccountMenu", () => {
     render(
       <SpaceAccountMenu
         viewer={viewerWith()}
-        anchor="anchor-1"
-        search={{}}
+        returnPath="/issues/anchor-1/"
         services={servicesWith(Promise.resolve("tok"))}
       />
     );
@@ -76,8 +75,7 @@ describe("SpaceAccountMenu", () => {
     const { container } = render(
       <SpaceAccountMenu
         viewer={viewerWith({ avatar_url: "https://cdn.test/ada.png" })}
-        anchor="anchor-1"
-        search={{}}
+        returnPath="/issues/anchor-1/"
         services={servicesWith(Promise.resolve("tok"))}
       />
     );
@@ -88,8 +86,7 @@ describe("SpaceAccountMenu", () => {
     render(
       <SpaceAccountMenu
         viewer={viewerWith({ display_name: "" })}
-        anchor="anchor-1"
-        search={{}}
+        returnPath="/issues/anchor-1/"
         services={servicesWith(Promise.resolve("tok"))}
       />
     );
@@ -100,8 +97,7 @@ describe("SpaceAccountMenu", () => {
     render(
       <SpaceAccountMenu
         viewer={viewerWith()}
-        anchor="anchor-1"
-        search={{ board: "kanban", peekId: "issue-1" }}
+        returnPath="/issues/anchor-1/?board=kanban&peekId=issue-1"
         services={servicesWith(Promise.resolve("tok-1"))}
       />
     );
@@ -121,8 +117,7 @@ describe("SpaceAccountMenu", () => {
     render(
       <SpaceAccountMenu
         viewer={viewerWith()}
-        anchor="anchor-1"
-        search={{}}
+        returnPath="/issues/anchor-1/"
         services={servicesWith(new Promise(() => undefined))}
       />
     );
@@ -136,8 +131,7 @@ describe("SpaceAccountMenu", () => {
     render(
       <SpaceAccountMenu
         viewer={viewerWith()}
-        anchor="anchor-1"
-        search={{}}
+        returnPath="/issues/anchor-1/"
         services={servicesWith(Promise.reject(new Error("down")))}
       />
     );
@@ -152,7 +146,7 @@ describe("SpaceAccountMenu", () => {
       throw new Error(`unexpected request ${url}`);
     };
     runtime.client = createClient({ baseUrl: "https://api.test", transport });
-    render(<SpaceAccountMenu viewer={viewerWith()} anchor="anchor-1" search={{}} />);
+    render(<SpaceAccountMenu viewer={viewerWith()} returnPath="/issues/anchor-1/" />);
     fireEvent.click(screen.getByTestId("space-account-trigger"));
     const form = await screen.findByTestId("space-signout-form");
     expect(form.querySelector('input[name="csrfmiddlewaretoken"]')).toHaveAttribute("value", "tok-default");

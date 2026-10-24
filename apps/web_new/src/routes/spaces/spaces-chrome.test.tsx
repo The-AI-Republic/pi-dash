@@ -98,9 +98,31 @@ const instance = {
   },
 };
 
+const ME = {
+  id: UUID,
+  email: "ada@example.test",
+  username: "ada",
+  first_name: "Ada",
+  last_name: "Lovelace",
+  display_name: "Ada",
+  avatar: "",
+  avatar_url: null,
+  cover_image: null,
+  cover_image_url: null,
+  date_joined: "2026-01-01T00:00:00Z",
+  user_timezone: "UTC",
+  is_active: true,
+  is_bot: false,
+  is_email_verified: true,
+  is_password_autoset: false,
+  last_login_medium: "password",
+  last_login_time: null,
+};
+
 function renderChrome(
   path: string,
-  legacy: () => Awaited<ReturnType<Transport>> | Promise<Awaited<ReturnType<Transport>>>
+  legacy: () => Awaited<ReturnType<Transport>> | Promise<Awaited<ReturnType<Transport>>>,
+  viewer: () => Awaited<ReturnType<Transport>> = () => reply(401, { detail: "anonymous" })
 ): void {
   vi.stubGlobal("scrollTo", vi.fn());
   vi.stubEnv("VITE_WEBSITE_URL", undefined as unknown as string);
@@ -117,7 +139,7 @@ function renderChrome(
       });
     }
     if (url.includes("/states/")) return reply(200, []);
-    if (url.includes("/api/users/me/")) return reply(401, { detail: "anonymous" });
+    if (url.includes("/api/users/me/")) return viewer();
     if (url.includes("/anchor/")) return await legacy();
     throw new Error(`unexpected request ${url}`);
   };
@@ -170,5 +192,23 @@ describe("spaces chrome", () => {
     release(reply(200, settings));
     await waitFor(() => expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board"));
     expect(await screen.findByTestId("space-product-badge")).toBeInTheDocument();
+  });
+
+  it("mounts the badge without an account control on the landing auth view", async () => {
+    renderChrome("/spaces/", () => reply(200, settings));
+    expect(await screen.findByTestId("space-auth-card")).toBeInTheDocument();
+    expect(screen.getByTestId("space-product-badge")).toHaveAttribute("href", "https://airepublic.com");
+    expect(screen.queryByTestId("space-account-trigger")).not.toBeInTheDocument();
+  });
+
+  it("mounts the badge and the account menu on the guidance view when signed in", async () => {
+    renderChrome(
+      "/spaces/",
+      () => reply(200, settings),
+      () => reply(200, ME)
+    );
+    expect(await screen.findByTestId("space-landing-guidance")).toBeInTheDocument();
+    expect(screen.getByTestId("space-product-badge")).toBeInTheDocument();
+    expect(screen.getByTestId("space-account-trigger")).toHaveTextContent("Ada");
   });
 });

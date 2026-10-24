@@ -143,3 +143,18 @@ export function parseSpaceLandingSearch(search: Record<string, unknown>): SpaceL
     ...(errorCode === undefined ? {} : { errorCode }),
   };
 }
+
+/**
+ * Subtree-relative landing position for the guidance sign-out form
+ * (SPC-005, SPC-014): the landing root echoing its own query, so a
+ * visitor who signs out and back in lands where they left. The SPC-006
+ * validator still decides whether the value survives.
+ */
+export function spaceLandingReturnPath(search: SpaceLandingSearch): string {
+  const params = new URLSearchParams();
+  if (search.nextPath !== undefined) params.set("next_path", search.nextPath);
+  if (search.email !== undefined) params.set("email", search.email);
+  if (search.errorCode !== undefined) params.set("error_code", search.errorCode);
+  const query = params.toString();
+  return `/${query === "" ? "" : `?${query}`}`;
+}

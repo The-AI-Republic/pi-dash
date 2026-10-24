@@ -5,8 +5,8 @@
 // pill linking the product site in a new tab, pinned above board
 // content but below transient surfaces (toasts, menus) so a notice
 // never slides under an always-on-top brand mark. It mounts on the
-// resolved board and on the landing's auth and guidance views (the
-// landing mounts come from slice B); the loading, framed, not-found,
+// settled board and on the landing's auth and guidance views (through
+// the landing gate's badge slot); the loading, framed, not-found,
 // crash and legacy states mount nothing. An explicitly blank site
 // address or the disabled flag renders nothing — no empty slot, no
 // broken link. The gate driver finds the badge by its test id; the

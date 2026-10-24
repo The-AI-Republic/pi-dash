@@ -14,7 +14,7 @@ import * as React from "react";
 import { spaceRuntime } from "../api/client.js";
 import { spaceViewerQueryOptions } from "../api/queries.js";
 import type { SpaceAuthServices } from "../auth/index.js";
-import { spaceSignInHref, type SpaceBoardSearch } from "../lib/address.js";
+import { spaceReturnPath, spaceSignInHref, type SpaceBoardSearch } from "../lib/address.js";
 import { useSpaceEmbedded } from "../lib/spaceEmbed.js";
 import { spaceMessage } from "../lib/spaceMessages.js";
 import { SpaceAccountMenu } from "./SpaceAccountMenu.js";
@@ -41,5 +41,5 @@ export function SpaceAccountSlot({ anchor, search, services }: SpaceAccountSlotP
       </a>
     );
   }
-  return <SpaceAccountMenu viewer={viewer.data} anchor={anchor} search={search} services={services} />;
+  return <SpaceAccountMenu viewer={viewer.data} returnPath={spaceReturnPath(anchor, search)} services={services} />;
 }

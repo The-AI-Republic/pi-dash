@@ -19,6 +19,8 @@ export { SPACE_SIGN_OUT_ACTION, SpaceAccountMenu } from "./components/SpaceAccou
 export type { SpaceAccountMenuProps } from "./components/SpaceAccountMenu.js";
 export { SpaceAccountSlot } from "./components/SpaceAccountSlot.js";
 export type { SpaceAccountSlotProps } from "./components/SpaceAccountSlot.js";
+export { SpaceLandingAccount } from "./components/SpaceLandingAccount.js";
+export type { SpaceLandingAccountProps } from "./components/SpaceLandingAccount.js";
 export {
   SPACE_PROGRESS_DELAY_MS,
   SpaceProgressProvider,
