@@ -130,7 +130,15 @@ describe("export surfaces under the cloud edition (EXP-024)", () => {
     render(
       <AnalyticsTable
         testId="cloud-analytics-table"
-        columns={[{ key: "name", label: "Name", align: "left", text: (row: { name: string }) => row.name }]}
+        columns={[
+          {
+            key: "name",
+            label: "Name",
+            align: "left",
+            text: (row: { name: string }) => row.name,
+            exportValue: (row: { name: string }) => row.name,
+          },
+        ]}
         rows={[{ name: "Urgent" }]}
         countNoun="Items"
         onExport={() => undefined}

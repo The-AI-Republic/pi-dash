@@ -29,7 +29,7 @@ function controlName(control: ExportControl): string {
   }
   const label = control.getAttribute("aria-label");
   if (label !== null && label !== "") return label;
-  return control.textContent.trim();
+  return (control.textContent ?? "").trim();
 }
 
 /** True when the control participates in the tab order. */

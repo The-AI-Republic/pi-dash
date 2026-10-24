@@ -150,6 +150,19 @@ describe("keyboard helper", () => {
     expect(named[1]?.textContent).toBe("");
   });
 
+  it("treats a control whose text content is null as unnamed", () => {
+    render(
+      <button type="button" className={RING}>
+        Named
+      </button>
+    );
+    const control = screen.getByRole("button", { name: "Named" });
+    Object.defineProperty(control, "textContent", { value: null, configurable: true });
+    // Named only by its text, which is now null: the name resolves to "".
+    expect(() => expectKeyboardReachable(control.parentElement as HTMLElement)).not.toThrow();
+    expect(isTabReachable(control)).toBe(true);
+  });
+
   it("exports the kit focus-ring token the surfaces assert", () => {
     expect(VISIBLE_FOCUS_CLASS).toBe("focus-visible:outline-solid");
   });
