@@ -1874,9 +1874,9 @@ impl SeedStore for PgSeedStore {
         state_id: uuid::Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
+        use crate::admission::RedisAdmissionCache;
         use crate::orchestration::live_inputs::{
-            creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, CallCache,
-            JobsMatcher,
+            creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
         };
         use crate::orchestration::{LiveCreationStore, StoreDeps};
         use pidash_db::dispatch::status::AgentRunTrigger;
@@ -1910,7 +1910,7 @@ impl SeedStore for PgSeedStore {
         let make_deps = || StoreDeps {
             cloud: cloud.clone(),
             managed: managed.clone(),
-            cache: CallCache::default(),
+            cache: RedisAdmissionCache::from_env(),
             has_usable_llm_config: gate_fn(verdicts.clone()),
             toolsets: toolsets.clone(),
             llm_profile: profile_fn(presence.clone()),
