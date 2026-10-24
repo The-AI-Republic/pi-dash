@@ -12,13 +12,16 @@
 //! unless the retry budget is spent, in which case the row parks as `failed`
 //! with its error text.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use futures_util::future::FutureExt as _;
 use sqlx::postgres::PgListener;
 use tokio::sync::{watch, Semaphore};
 
@@ -156,12 +159,40 @@ impl Default for WorkerConfig {
     }
 }
 
+/// Readable text out of a caught panic payload: `panic!("{}", …)` and
+/// `panic_any` with a `String` carry a `String`, `panic!("…")` and
+/// `panic_any` with a literal a `&str`; anything else gets a fixed note
+/// rather than a debug dump.
+///
+/// Takes the box itself, not `&(dyn Any + Send)`: `&Box<dyn Any>` coerces
+/// to a trait object *of the box*, whose downcasts never match the
+/// payload. Calling downcast on the box derefs to the payload's object.
+fn panic_message(payload: &Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else {
+        "unknown panic payload".to_owned()
+    }
+}
+
+/// A caught handler panic as a [`HandlerError`]: the settle path records
+/// it in `last_error` and spends the retry budget like any failure.
+fn panic_error(payload: &Box<dyn Any + Send>) -> HandlerError {
+    format!("handler panicked: {}", panic_message(payload))
+}
+
 /// Dispatch one claimed job: run the local handler, then settle the row.
 ///
 /// An unknown task name is a loud error: no handler owns it, so the row is
 /// parked as `failed` with `unknown task <name>` (and a log line). The Rust
 /// worker owns every Pi Dash task, so this only fires on a bug (an enqueue
 /// of a name with no registered handler).
+///
+/// A panicking handler is settled, never stranded: both the synchronous
+/// call and the polled future run under `catch_unwind`, and either panic
+/// becomes a handler error (see [`settle_verdict`]).
 pub async fn dispatch(
     pool: &sqlx::PgPool,
     registry: &Registry,
@@ -176,7 +207,39 @@ pub async fn dispatch(
         queue::fail(pool, job.id, &error).await?;
         return Ok(DispatchOutcome::Parked);
     };
-    let verdict = handler(job.clone()).await;
+    // A panicking handler settles like a failing one (PIDASHCONV-1327):
+    // without the guard the spawned task unwinds, ack/retry/fail never
+    // run, and the row sits `running` forever. Both the synchronous call
+    // and the polled future are guarded — a panic in either becomes a
+    // handler error, so `settle_for` retries or parks the row with
+    // `last_error`. The guarded future is never polled again after a
+    // catch, which is what makes the `AssertUnwindSafe` sound.
+    let fut = match catch_unwind(AssertUnwindSafe(|| handler(job.clone()))) {
+        Ok(fut) => fut,
+        Err(payload) => {
+            let error = panic_error(&payload);
+            tracing::error!(task = job.task.as_str(), %error, "handler panicked");
+            return settle_verdict(pool, &job, Err(error)).await;
+        }
+    };
+    let verdict = match AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(verdict) => verdict,
+        Err(payload) => {
+            let error = panic_error(&payload);
+            tracing::error!(task = job.task.as_str(), %error, "handler panicked");
+            Err(error)
+        }
+    };
+    settle_verdict(pool, &job, verdict).await
+}
+
+/// Turn a handler's verdict (or failure, including a caught panic) into
+/// its settlement: ack, requeue with the cause recorded, or park.
+async fn settle_verdict(
+    pool: &sqlx::PgPool,
+    job: &JobRow,
+    verdict: Result<Verdict, HandlerError>,
+) -> Result<DispatchOutcome, sqlx::Error> {
     let (verdict, handler_error) = match verdict {
         Ok(verdict) => (verdict, None),
         Err(error) => (
@@ -188,7 +251,7 @@ pub async fn dispatch(
     };
     // A handler failure spends the budget exactly like an explicit retry:
     // `settle_for` parks the row once the budget is gone.
-    match settle_for(&job, &verdict, handler_error.as_deref()) {
+    match settle_for(job, &verdict, handler_error.as_deref()) {
         Settlement::Ack => {
             queue::ack(pool, job.id).await?;
             Ok(DispatchOutcome::Acked)
@@ -240,6 +303,17 @@ pub async fn run_worker(
             None
         }
     };
+    // Boot reclaim (PIDASHCONV-1327): a previous worker may have died
+    // mid-job (panic, SIGKILL, crash, redeploy), leaving rows `running`
+    // that `claim` will never pick up again. Reclaim them before the
+    // first claim; the scheduler loop repeats this every minute for
+    // workers that die while already running. A reclaim error must not
+    // stop the boot — the loop below (and the scheduler) retries.
+    match queue::reclaim_stale_running(&pool, queue::STALE_CLAIM_LEASE_SECS).await {
+        Ok(0) => {}
+        Ok(reclaimed) => tracing::info!(reclaimed, "worker reclaimed stale running jobs"),
+        Err(error) => tracing::warn!(%error, "worker boot reclaim failed; retrying later"),
+    }
     loop {
         if *shutdown.borrow() {
             break;
@@ -278,6 +352,12 @@ pub async fn run_worker(
                     .expect("semaphore never closes");
                 let pool = pool.clone();
                 let registry = registry.clone();
+                // The handle is deliberately unchecked: settlement happens
+                // inside `dispatch` (a handler panic is caught there and
+                // settled with `last_error`), and only a dead process can
+                // still strand a row — which boot + scheduler reclaim
+                // heals (PIDASHCONV-1327). The drain below still waits for
+                // every in-flight job via the semaphore.
                 tokio::spawn(async move {
                     let _permit = permit;
                     let outcome = dispatch(&pool, &registry, job).await;
@@ -332,6 +412,73 @@ mod tests {
         })
     }
 
+    /// A handler that panics synchronously when invoked (before returning
+    /// its future). The never coercion keeps this warning-clean: `panic!`
+    /// diverges, so no unreachable arm is needed.
+    fn panicking_handler_sync(message: &'static str) -> Handler {
+        Arc::new(
+            move |_job: JobRow|
+                   -> Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> {
+                panic!("{message}")
+            },
+        )
+    }
+
+    /// Diverges with `message`, typed as a handler verdict so both
+    /// panicking handlers below stay tail-expression clean (no
+    /// unreachable arm for `panic!` to trip `-D warnings` on).
+    fn panic_never(message: &'static str) -> Result<Verdict, HandlerError> {
+        panic!("{message}")
+    }
+
+    /// A handler that panics when its future is first polled.
+    fn panicking_handler_async(message: &'static str) -> Handler {
+        Arc::new(move |_job: JobRow| {
+            Box::pin(async move { panic_never(message) }) as Pin<Box<dyn Future<Output = _> + Send>>
+        })
+    }
+
+    async fn live_pool() -> sqlx::PgPool {
+        let url =
+            std::env::var("DATABASE_URL").expect("export DATABASE_URL for the live jobs tests");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .expect("connect scratch database");
+        crate::queue::ensure_schema(&pool)
+            .await
+            .expect("ensure queue schema");
+        pool
+    }
+
+    async fn fetch_state(pool: &sqlx::PgPool, id: i64) -> Option<(String, i32, Option<String>)> {
+        sqlx::query_as("SELECT status, attempts, last_error FROM rust_job_queue WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .expect("fetch row state")
+    }
+
+    async fn wait_for_state(
+        pool: &sqlx::PgPool,
+        id: i64,
+        want: &str,
+        what: &str,
+    ) -> (String, i32, Option<String>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match fetch_state(pool, id).await {
+                Some(state) if state.0 == want => return state,
+                Some(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Some(state) => panic!("timed out waiting for {what}; last state: {state:?}"),
+                None => panic!("row {id} vanished while waiting for {what}"),
+            }
+        }
+    }
+
     #[test]
     fn only_registered_tasks_are_owned() {
         let mut registry = Registry::new();
@@ -380,6 +527,26 @@ mod tests {
                 error: "io down".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn panic_payloads_render_as_text() {
+        // `panic!("…")` carries a &str, `panic!("{}", …)` a String.
+        let literal = catch_unwind(AssertUnwindSafe(|| panic!("boom-lit"))).unwrap_err();
+        assert_eq!(panic_message(&literal), "boom-lit");
+        let formatted = catch_unwind(AssertUnwindSafe(|| panic!("{}", "boom-fmt"))).unwrap_err();
+        assert_eq!(panic_message(&formatted), "boom-fmt");
+        let string = catch_unwind(AssertUnwindSafe(|| {
+            std::panic::panic_any("boom-string".to_owned())
+        }))
+        .unwrap_err();
+        assert_eq!(panic_message(&string), "boom-string");
+        let borrowed =
+            catch_unwind(AssertUnwindSafe(|| std::panic::panic_any("boom-str"))).unwrap_err();
+        assert_eq!(panic_message(&borrowed), "boom-str");
+        let exotic = catch_unwind(AssertUnwindSafe(|| std::panic::panic_any(42_i32))).unwrap_err();
+        assert_eq!(panic_message(&exotic), "unknown panic payload");
+        assert!(panic_error(&literal).starts_with("handler panicked: boom-lit"));
     }
 
     #[test]
@@ -460,5 +627,256 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "claim took {elapsed:?}; push-wake should fire in ms"
         );
+    }
+
+    /// Panic settlement (PIDASHCONV-1327): a panicking handler — whether it
+    /// panics synchronously on invocation or asynchronously on first poll —
+    /// settles like a failing one: the row returns to `queued` with
+    /// `attempts + 1` and the panic message in `last_error`, instead of
+    /// sitting `running` forever. Needs a live Postgres; ignored by default.
+    #[tokio::test]
+    #[ignore = "needs live Postgres via DATABASE_URL"]
+    async fn panicking_handler_requeues_with_last_error() {
+        let pool = live_pool().await;
+        for (name, handler, message) in [
+            (
+                "sync",
+                panicking_handler_sync("boom-sync-1327"),
+                "boom-sync-1327",
+            ),
+            (
+                "async",
+                panicking_handler_async("boom-async-1327"),
+                "boom-async-1327",
+            ),
+        ] {
+            let queue = format!("test-panic-{name}-{}", uuid::Uuid::new_v4());
+            let mut registry = Registry::new();
+            registry.register("test.panic.probe", handler);
+            let id = crate::queue::enqueue(
+                &pool,
+                &crate::queue::NewJob {
+                    task: "test.panic.probe".to_owned(),
+                    args: serde_json::json!([]),
+                    kwargs: serde_json::json!({}),
+                    queue: queue.clone(),
+                    visible_at: None,
+                    max_retries: crate::queue::DEFAULT_MAX_RETRIES,
+                },
+            )
+            .await
+            .expect("enqueue probe job");
+            let job = crate::queue::claim(&pool, &queue, "panic-probe")
+                .await
+                .expect("claim")
+                .expect("job claimed");
+            assert_eq!(job.id, id);
+            let outcome = dispatch(&pool, &registry, job)
+                .await
+                .expect("dispatch settles");
+            assert_eq!(
+                outcome,
+                DispatchOutcome::Requeued,
+                "{name} panic must settle"
+            );
+            let (status, attempts, last_error) =
+                fetch_state(&pool, id).await.expect("row still present");
+            assert_eq!(status, "queued", "{name} panic must requeue, not strand");
+            assert_eq!(attempts, 1, "{name} panic must spend one attempt");
+            let error = last_error.expect("panic must be recorded");
+            assert!(
+                error.contains("handler panicked") && error.contains(message),
+                "{name} last_error must carry the panic: {error}"
+            );
+        }
+    }
+
+    /// Panic settlement on a spent budget (PIDASHCONV-1327): with no
+    /// retries left the panicking row parks as `failed`, keeping both the
+    /// budget note and the panic message. Needs a live Postgres; ignored
+    /// by default.
+    #[tokio::test]
+    #[ignore = "needs live Postgres via DATABASE_URL"]
+    async fn panicking_handler_parks_when_budget_spent() {
+        let pool = live_pool().await;
+        let queue = format!("test-panic-spent-{}", uuid::Uuid::new_v4());
+        let mut registry = Registry::new();
+        registry.register(
+            "test.panic.probe",
+            panicking_handler_async("boom-spent-1327"),
+        );
+        let id = crate::queue::enqueue(
+            &pool,
+            &crate::queue::NewJob {
+                task: "test.panic.probe".to_owned(),
+                args: serde_json::json!([]),
+                kwargs: serde_json::json!({}),
+                queue: queue.clone(),
+                visible_at: None,
+                max_retries: 0,
+            },
+        )
+        .await
+        .expect("enqueue probe job");
+        let job = crate::queue::claim(&pool, &queue, "panic-probe")
+            .await
+            .expect("claim")
+            .expect("job claimed");
+        let outcome = dispatch(&pool, &registry, job)
+            .await
+            .expect("dispatch settles");
+        assert_eq!(outcome, DispatchOutcome::Parked);
+        let (status, attempts, last_error) = fetch_state(&pool, id).await.expect("row present");
+        assert_eq!(status, "failed");
+        assert_eq!(attempts, 0, "a park must not spend an attempt");
+        let error = last_error.expect("panic must be recorded");
+        assert!(
+            error.contains("retry budget spent") && error.contains("boom-spent-1327"),
+            "parked panic must keep budget note and cause: {error}"
+        );
+    }
+
+    /// Worker survival (PIDASHCONV-1327): the issue's repro — a panicking
+    /// job under `run_worker` settles (no retries here, so `failed` with
+    /// `last_error`) and the worker goes on to ack the next job. Needs a
+    /// live Postgres; ignored by default.
+    #[tokio::test]
+    #[ignore = "needs live Postgres via DATABASE_URL"]
+    async fn run_worker_survives_panicking_handler() {
+        let pool = live_pool().await;
+        let queue = format!("test-survive-{}", uuid::Uuid::new_v4());
+        let mut registry = Registry::new();
+        registry.register(
+            "test.panic.probe",
+            panicking_handler_async("boom-worker-1327"),
+        );
+        registry.register("test.healthy.probe", handler_for(Ok(Verdict::Ack)));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = tokio::spawn(run_worker(
+            pool.clone(),
+            registry,
+            WorkerConfig {
+                queue: queue.clone(),
+                owner: "survive-probe".to_owned(),
+                poll_interval: Duration::from_millis(50),
+                concurrency: 1,
+            },
+            shutdown_rx,
+        ));
+        let panic_id = crate::queue::enqueue(
+            &pool,
+            &crate::queue::NewJob {
+                task: "test.panic.probe".to_owned(),
+                args: serde_json::json!([]),
+                kwargs: serde_json::json!({}),
+                queue: queue.clone(),
+                visible_at: None,
+                max_retries: 0,
+            },
+        )
+        .await
+        .expect("enqueue panicking job");
+        let (status, _, last_error) =
+            wait_for_state(&pool, panic_id, "failed", "panicking row to settle").await;
+        assert_eq!(status, "failed");
+        let error = last_error.expect("panic must be recorded");
+        assert!(
+            error.contains("handler panicked") && error.contains("boom-worker-1327"),
+            "unexpected last_error: {error}"
+        );
+        // The worker is still alive: a healthy job published after the
+        // panic is claimed and acked (the row is deleted).
+        let healthy_id = crate::queue::enqueue(
+            &pool,
+            &crate::queue::NewJob {
+                task: "test.healthy.probe".to_owned(),
+                args: serde_json::json!([]),
+                kwargs: serde_json::json!({}),
+                queue: queue.clone(),
+                visible_at: None,
+                max_retries: crate::queue::DEFAULT_MAX_RETRIES,
+            },
+        )
+        .await
+        .expect("enqueue healthy job");
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if fetch_state(&pool, healthy_id).await.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not survive the panic: healthy job never acked"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = shutdown_tx.send(true);
+        worker.await.expect("worker joins after shutdown");
+    }
+
+    /// Boot reclaim (PIDASHCONV-1327): a row left `running` with a stale
+    /// `claimed_at` (a worker that died mid-job) is reclaimed when a worker
+    /// boots, then processed normally — here the unknown name parks it as
+    /// `failed` with its cause. Needs a live Postgres; ignored by default.
+    #[tokio::test]
+    #[ignore = "needs live Postgres via DATABASE_URL"]
+    async fn run_worker_boot_reclaims_stale_running_row() {
+        let pool = live_pool().await;
+        let queue = format!("test-reclaim-{}", uuid::Uuid::new_v4());
+        let task = format!("test.unknown.{}", uuid::Uuid::new_v4());
+        let id = crate::queue::enqueue(
+            &pool,
+            &crate::queue::NewJob {
+                task: task.clone(),
+                args: serde_json::json!([]),
+                kwargs: serde_json::json!({}),
+                queue: queue.clone(),
+                visible_at: None,
+                max_retries: crate::queue::DEFAULT_MAX_RETRIES,
+            },
+        )
+        .await
+        .expect("enqueue probe job");
+        // A dead worker's footprint: claimed long ago, never settled.
+        let claimed = crate::queue::claim(&pool, &queue, "dead-worker")
+            .await
+            .expect("claim")
+            .expect("job claimed");
+        assert_eq!(claimed.id, id);
+        sqlx::query(
+            "UPDATE rust_job_queue \
+             SET claimed_at = now() - make_interval(hours => 2), claimed_by = 'dead-worker' \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("backdate claim");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = tokio::spawn(run_worker(
+            pool.clone(),
+            Registry::new(),
+            WorkerConfig {
+                queue: queue.clone(),
+                owner: "reclaim-probe".to_owned(),
+                poll_interval: Duration::from_millis(50),
+                concurrency: 1,
+            },
+            shutdown_rx,
+        ));
+        let (status, attempts, last_error) =
+            wait_for_state(&pool, id, "failed", "stale row to be reclaimed and parked").await;
+        assert_eq!(status, "failed");
+        assert!(
+            attempts >= 1,
+            "reclaim must spend an attempt, got {attempts}"
+        );
+        let error = last_error.expect("parked row must carry its cause");
+        assert!(
+            error.contains("unknown task"),
+            "reclaimed row must be processed normally, got: {error}"
+        );
+        let _ = shutdown_tx.send(true);
+        worker.await.expect("worker joins after shutdown");
     }
 }
