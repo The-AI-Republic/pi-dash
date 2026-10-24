@@ -18,6 +18,7 @@ import { useDocumentHead } from "../../../shared/shell/index.js";
 import { isCompletedModule } from "../../../shared/pickers/modules.js";
 import { EntityListScreen, listPageQueryOptions, prefsQueryOptions, selectDisplayPrefs } from "../../issues/index.js";
 import { moduleDetailTitle } from "../lib/moduleDetail.js";
+import { toModuleCreateProject } from "../lib/moduleAddWorkItem.js";
 import { useModuleAddWorkItem } from "../lib/useModuleAddWorkItem.js";
 import { ModuleAddWorkItem } from "./ModuleAddWorkItem.js";
 import { MODULES_CRUMB } from "../lib/moduleList.js";
@@ -71,7 +72,6 @@ export function ModuleDetailScreen({
     moduleId,
     memberRole: project?.member_role ?? null,
     projectArchived: project === null || project.archived_at !== null,
-    moduleStatus: module.status,
   });
   useDocumentHead({
     title: project === null ? MODULES_CRUMB : moduleDetailTitle(project.name, module.name),
@@ -87,6 +87,9 @@ export function ModuleDetailScreen({
     );
   }
 
+  // The API row names the membership and archive fields differently from
+  // the shared dialog's option; map once, here, so the dialog can offer it.
+  const createProject = toModuleCreateProject(project);
   return (
     <div data-testid="module-detail-screen" className="flex h-full min-h-0 flex-col">
       <ModuleDetailCrumbs
@@ -113,7 +116,7 @@ export function ModuleDetailScreen({
                 {add.canAdd ? (
                   <ModuleAddWorkItem
                     workspaceSlug={workspaceSlug}
-                    project={project}
+                    project={createProject}
                     moduleId={moduleId}
                     controller={add}
                   />

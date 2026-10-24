@@ -34,10 +34,16 @@ vi.mock("../../issues/prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.pr
 vi.mock("../../issues/list/pages.js", () => ({ listPageQueryOptions: mocks.page }));
 
 vi.mock("./ModuleAddWorkItem.js", () => ({
-  ModuleAddWorkItem: (props: { project: { id: string }; moduleId: string; controller: { canAdd: boolean } }) => (
+  ModuleAddWorkItem: (props: {
+    project: { id: string; memberRole: number | null; archived: boolean };
+    moduleId: string;
+    controller: { canAdd: boolean };
+  }) => (
     <div
       data-testid="add-work-item-stub"
       data-project={props.project.id}
+      data-role={String(props.project.memberRole)}
+      data-archived={String(props.project.archived)}
       data-module={props.moduleId}
       data-can-add={String(props.controller.canAdd)}
     />
@@ -206,7 +212,17 @@ describe("ModuleDetailScreen", () => {
     expect(add).toHaveAttribute("data-project", PROJECT);
     expect(add).toHaveAttribute("data-module", MODULE);
     expect(add).toHaveAttribute("data-can-add", "true");
+    // The API row's member_role/archived_at reach the dialog as the option's
+    // memberRole/archived, so its project filter keeps the lone project.
+    expect(add).toHaveAttribute("data-role", "20");
+    expect(add).toHaveAttribute("data-archived", "false");
     expect(screen.getByTestId("empty-actions")).toHaveAttribute("data-can-act", "true");
+  });
+
+  it("maps an archived project row to the dialog's archived flag", () => {
+    setup({ projects: [project({ archived_at: "2026-01-02T03:04:05Z" })] });
+    expect(screen.queryByTestId("add-work-item-stub")).not.toBeInTheDocument();
+    expect(screen.getByTestId("empty-actions")).toHaveAttribute("data-can-act", "false");
   });
 
   it("mounts no add entry for a guest and disables the empty card's actions", () => {
@@ -215,10 +231,10 @@ describe("ModuleDetailScreen", () => {
     expect(screen.getByTestId("empty-actions")).toHaveAttribute("data-can-act", "false");
   });
 
-  it("mounts no add entry on a completed module", () => {
+  it("keeps the add entries on a completed module, as the old header did", () => {
     setup({ status: "completed" });
-    expect(screen.queryByTestId("add-work-item-stub")).not.toBeInTheDocument();
-    expect(screen.getByTestId("empty-actions")).toHaveAttribute("data-can-act", "false");
+    expect(screen.getByTestId("add-work-item-stub")).toHaveAttribute("data-can-add", "true");
+    expect(screen.getByTestId("empty-actions")).toHaveAttribute("data-can-act", "true");
   });
 
   it("marks a completed module read-only for the host", () => {

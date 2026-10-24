@@ -23,8 +23,6 @@ export interface UseModuleAddWorkItemInput {
   memberRole: number | null;
   /** True while the project is archived. */
   projectArchived: boolean;
-  /** The module's stored status. */
-  moduleStatus: string | undefined;
 }
 
 export interface ModuleAddWorkItemController extends ModuleAddExisting {
@@ -36,7 +34,11 @@ export interface ModuleAddWorkItemController extends ModuleAddExisting {
   pickerOpen: boolean;
   openPicker: () => void;
   setPickerOpen: (open: boolean) => void;
-  /** A create landed: close the form and refresh the module's own counts. */
+  /**
+   * A create landed: refresh the module's own reads. The dialog decides
+   * for itself whether to stay open (Create more) and calls
+   * `setCreateOpen(false)` when it really closes.
+   */
   handleCreated: () => void;
 }
 
@@ -46,10 +48,9 @@ export function useModuleAddWorkItem({
   moduleId,
   memberRole,
   projectArchived,
-  moduleStatus,
 }: UseModuleAddWorkItemInput): ModuleAddWorkItemController {
   const queryClient = useQueryClient();
-  const canAdd = canAddWorkItemsToModule({ memberRole, archived: projectArchived, moduleStatus });
+  const canAdd = canAddWorkItemsToModule({ memberRole, archived: projectArchived });
   const [createOpen, setCreateOpenState] = React.useState(false);
   const [pickerOpen, setPickerOpenState] = React.useState(false);
   const addExisting = useModuleAddExisting({ workspaceSlug, projectId, moduleId });
@@ -68,7 +69,6 @@ export function useModuleAddWorkItem({
   const openCreate = React.useCallback(() => setCreateOpenState(canAdd), [canAdd]);
   const openPicker = React.useCallback(() => setPickerOpenState(canAdd), [canAdd]);
   const handleCreated = React.useCallback(() => {
-    setCreateOpenState(false);
     void queryClient.invalidateQueries({ queryKey: moduleKeys.detail(workspaceSlug, projectId, moduleId) });
   }, [moduleId, projectId, queryClient, workspaceSlug]);
   return {
