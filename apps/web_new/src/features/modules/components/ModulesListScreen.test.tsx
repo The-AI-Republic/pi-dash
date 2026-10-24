@@ -503,6 +503,30 @@ describe("ModulesListScreen", () => {
     expect(screen.queryByTestId("modules-filter-active")).not.toBeInTheDocument();
   });
 
+  it("keeps the filters panel open while several statuses are picked", async () => {
+    // The panel must survive the re-render a selection causes: an inline
+    // component type here would remount it and close it after one pick.
+    harness.modules = [
+      makeModuleRow({ name: "Done", status: "completed" }),
+      makeModuleRow({ id: "323e4567-e89b-12d3-a456-426614174010", name: "Started", status: "in-progress" }),
+      makeModuleRow({ id: "323e4567-e89b-12d3-a456-426614174011", name: "Later", status: "backlog" }),
+    ];
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    fireEvent.click(screen.getByTestId("modules-filter-trigger"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Completed" }));
+    expect(screen.getByTestId("modules-filter-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "In Progress" }));
+    expect(screen.getByTestId("modules-filter-panel")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Completed" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("checkbox", { name: "In Progress" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("checkbox", { name: "Backlog" })).toHaveAttribute("aria-checked", "false");
+    await waitFor(() =>
+      expect(screen.getAllByTestId("modules-row-name").map((node) => node.textContent)).toEqual(["Done", "Started"])
+    );
+    expect(readProjectDisplay(MODULES_PROJECT_ID).filters.status).toEqual(["completed", "in-progress"]);
+  });
+
   it("offers the current user first in the people filters once the directory loads", async () => {
     renderScreen();
     await screen.findByTestId("modules-list");
