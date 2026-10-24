@@ -4,10 +4,11 @@
 // Module detail screen (parity/specs/modules.md §8, MOD-029, MOD-030,
 // MOD-032). The modules-owned frame around the shared entity host:
 // the breadcrumb trail with the module switcher, the work-item count
-// badge and sidebar toggle in the desktop header, the tab title, and
-// the analytics sidebar beside the hosted layouts. The gone-away gate
-// wraps this screen at the route; guests render the same frame with
-// the host and sidebar refusing their edits.
+// badge, the sidebar toggle and the module actions menu in the desktop
+// header, the tab title, and the analytics sidebar beside the hosted
+// layouts. The gone-away gate wraps this screen at the route; guests
+// render the same frame with the host and sidebar refusing their edits,
+// and with no module actions menu at all (§4.5).
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import * as React from "react";
@@ -15,6 +16,7 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
+import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { isCompletedModule } from "../../../shared/pickers/modules.js";
 import { EntityListScreen, listPageQueryOptions, prefsQueryOptions, selectDisplayPrefs } from "../../issues/index.js";
 import { moduleDetailTitle } from "../lib/moduleDetail.js";
@@ -27,6 +29,7 @@ import { ModuleAnalyticsSidebar } from "./sidebar/ModuleAnalyticsSidebar.js";
 import { ModuleProgressSection } from "./sidebar/ModuleProgressSection.js";
 import { moduleDetailQueryOptions } from "./sidebar/moduleSidebarQueries.js";
 import { ModuleDetailBadge } from "./ModuleDetailBadge.js";
+import { ModuleDetailActions } from "./dialogs/ModuleDetailActions.js";
 import { ModuleDetailCrumbs } from "./ModuleDetailCrumbs.js";
 import { ModuleSidebarToggle } from "./ModuleSidebarToggle.js";
 
@@ -91,6 +94,10 @@ export function ModuleDetailScreen({
   // The API row names the membership and archive fields differently from
   // the shared dialog's option; map once, here, so the dialog can offer it.
   const createProject = toModuleCreateProject(project);
+  // Edit and Delete are editor entries; guests never see them (§4.5).
+  // Read-only entries (copy link, open in a new tab) belong to the row
+  // actions slice, which extends the same menu through `extraEntries`.
+  const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at !== null });
   return (
     <div data-testid="module-detail-screen" className="flex h-full min-h-0 flex-col">
       <ModuleDetailCrumbs
@@ -124,6 +131,14 @@ export function ModuleDetailScreen({
                 ) : null}
                 <ModuleDetailBadge total={firstPage.total_count} />
                 <ModuleSidebarToggle collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
+                {canEdit ? (
+                  <ModuleDetailActions
+                    workspaceSlug={workspaceSlug}
+                    projectId={projectId}
+                    moduleId={moduleId}
+                    canEdit
+                  />
+                ) : null}
               </>
             }
             emptyStateActions={{

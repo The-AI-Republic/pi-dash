@@ -7,8 +7,10 @@
 // returns the user to the modules list — the page they were on no longer
 // exists. The menu is one overflow trigger marked for the shell
 // (`data-main-menu`); later slices extend it through `extraEntries` rather
-// than forking a second menu. The component brings its own dialog
-// provider, so a detail host only has to mount the menu.
+// than forking a second menu. Edit and Delete are editor entries — a guest
+// offers only the read-only entries another slice supplies, and with none
+// of those the header shows no menu at all (§4.5). The component brings
+// its own dialog provider, so a detail host only has to mount the menu.
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -29,6 +31,8 @@ export interface ModuleDetailActionsProps {
   workspaceSlug: string;
   projectId: string;
   moduleId: string;
+  /** True for project admins and members; guests get no Edit or Delete. */
+  canEdit: boolean;
   /** Entries other slices own (archive/restore, copy link, open…). */
   extraEntries?: readonly MenuEntry[] | undefined;
   /** Menu trigger's accessible label. */
@@ -37,6 +41,9 @@ export interface ModuleDetailActionsProps {
 
 export function ModuleDetailActions(props: ModuleDetailActionsProps): React.ReactElement {
   const project = useQuery(moduleProjectFactsQueryOptions(getAppClient(), props.workspaceSlug, props.projectId));
+  // A guest with nothing read-only to offer gets no trigger instead of an
+  // empty menu; the read stays unconditional so the hook order is fixed.
+  if (!props.canEdit && (props.extraEntries ?? []).length === 0) return <></>;
   return (
     <ModuleDialogProvider
       workspaceSlug={props.workspaceSlug}
@@ -56,6 +63,7 @@ function ModuleActionsMenu({
   workspaceSlug,
   projectId,
   moduleId,
+  canEdit,
   extraEntries = [],
   label = "Module actions",
 }: ModuleDetailActionsProps): React.ReactElement {
@@ -64,15 +72,14 @@ function ModuleActionsMenu({
   const detail = useQuery(moduleDetailQueryOptions(getAppClient(), workspaceSlug, projectId, moduleId));
   const record = detail.data;
 
-  const items: MenuEntry[] = [];
-  if (record !== undefined) {
-    items.push({
+  const items: MenuEntry[] = [...extraEntries];
+  if (record !== undefined && canEdit) {
+    items.unshift({
       label: MODULE_MENU_EDIT,
       onSelect: () => {
         dialogs?.openEdit(record);
       },
     });
-    items.push(...extraEntries);
     items.push({
       label: MODULE_MENU_DELETE,
       onSelect: () => {
