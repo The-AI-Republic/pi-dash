@@ -3212,6 +3212,7 @@ enum FilterPredicate {
 fn compile_draft_filters(
     pairs: &[(String, String)],
     now: &DateTime<Utc>,
+    timezone: &Tz,
 ) -> Result<String, StatusCode> {
     // Ordered map: key → predicate (later assignments overwrite the value,
     // keeping the first position).
@@ -3378,13 +3379,15 @@ fn compile_draft_filters(
                     );
                 }
             }
-            "created_at" => compile_date_param(&mut insert, "created_at__date", raw, now),
+            "created_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
             // BUG: the `updated_at` param filters `created_at`
             // (`issue_filters.py:236`), overwriting that param's keys.
-            "updated_at" => compile_date_param(&mut insert, "created_at__date", raw, now),
-            "start_date" => compile_date_param(&mut insert, "start_date", raw, now),
-            "target_date" => compile_date_param(&mut insert, "target_date", raw, now),
-            "completed_at" => compile_date_param(&mut insert, "completed_at__date", raw, now),
+            "updated_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
+            "start_date" => compile_date_param(&mut insert, "start_date", raw, now, timezone),
+            "target_date" => compile_date_param(&mut insert, "target_date", raw, now, timezone),
+            "completed_at" => {
+                compile_date_param(&mut insert, "completed_at__date", raw, now, timezone)
+            }
             "type" => {
                 let groups: &[&str] = match raw {
                     "backlog" => &["backlog"],
@@ -3544,21 +3547,35 @@ fn escape_like(text: &str) -> String {
 /// `;`-parts route to relative / `__gte` / `__lte` / `__contains`; later
 /// queries overwrite earlier keys. `__gte`/`__lte` values convert as DATES
 /// (fail → 400); `__contains` is a LIKE (never fails).
+///
+/// The `__date` terms truncate in the actor zone: Django's `__date` lookup
+/// is `TruncDate`, whose `get_tzname()` returns the `TimezoneMixin`-activated
+/// user zone, giving `(col AT TIME ZONE '<user tz>')::date`. The plain
+/// `start_date` / `target_date` terms are date columns (no truncation), and
+/// the relative-date bound (`today`) stays UTC (`timezone.now().date()`).
 fn compile_date_param(
     insert: &mut impl FnMut(String, FilterPredicate),
     term: &str,
     raw: &str,
     now: &DateTime<Utc>,
+    timezone: &Tz,
 ) {
     let queries: Vec<&str> = raw.split(',').collect();
     if queries.is_empty() || queries.contains(&"") {
         return;
     }
+    // The zone comes from a parsed `Tz`, so it is a valid IANA name; the
+    // quotes are doubled anyway because this SQL is interpolated, not bound.
+    let zone = timezone.name().replace('\'', "''");
     let column = match term {
-        "created_at__date" => "CAST(draft_issues.created_at AS DATE)",
-        "completed_at__date" => "CAST(draft_issues.completed_at AS DATE)",
-        "start_date" => "draft_issues.start_date",
-        "target_date" => "draft_issues.target_date",
+        "created_at__date" => {
+            format!("(draft_issues.created_at AT TIME ZONE '{zone}')::date")
+        }
+        "completed_at__date" => {
+            format!("(draft_issues.completed_at AT TIME ZONE '{zone}')::date")
+        }
+        "start_date" => "draft_issues.start_date".to_owned(),
+        "target_date" => "draft_issues.target_date".to_owned(),
         _ => unreachable!("date term {term}"),
     };
     for query in queries {
@@ -3798,8 +3815,12 @@ async fn draft_list(
         return Ok(gzip_body(&headers, status, text));
     }
     let pairs = query_pairs(raw_query.as_deref().unwrap_or(""));
+    // The actor zone feeds the `__date` filter truncation (Django's
+    // `TimezoneMixin.initial` activates it before the view runs), so it
+    // resolves before the filters compile; the same value renders rows below.
+    let timezone = actor_timezone(&pool, &user_id).await?;
     // `.filter(**filters)` runs BEFORE `paginate` (`:100-105`).
-    let filters = match compile_draft_filters(&pairs, &utc_now_micros()) {
+    let filters = match compile_draft_filters(&pairs, &utc_now_micros(), &timezone) {
         Ok(sql) => sql,
         Err(StatusCode::INTERNAL_SERVER_ERROR) => {
             return Ok(gzip_body(
@@ -3826,7 +3847,6 @@ async fn draft_list(
     let limit = per_page.min(1000);
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
-    let timezone = actor_timezone(&pool, &user_id).await?;
     // The window and count share one filter text: scope + own rows + legacy.
     let where_sql = format!(
         "{} AND draft_issues.created_by_id = '{}'{}",
