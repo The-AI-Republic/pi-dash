@@ -477,7 +477,12 @@ def test_release_pin_drains_remaining_pods_when_one_drain_fails(db, create_user,
 def test_poll_does_not_cancel_run_that_failed_for_another_reason(db, create_user, workspace, pod, _stub_send_to_runner):
     runner = _make_runner(create_user, workspace, pod, "alive")
     run = _make_run(
-        create_user, workspace, pod, status=AgentRunStatus.FAILED, runner=runner, error_code="heartbeat_reaped"
+        create_user,
+        workspace,
+        pod,
+        status=AgentRunStatus.FAILED,
+        runner=runner,
+        error_details={"code": "heartbeat_reaped"},
     )
 
     session_service.reap_stale_busy_runs(runner, {"in_flight_run": str(run.id)})
