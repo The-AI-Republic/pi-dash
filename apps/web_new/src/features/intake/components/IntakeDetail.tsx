@@ -25,6 +25,7 @@ import { workItemPath } from "../../../shared/shell/shareLink.js";
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import {
   AttachmentsWidget,
+  CommentThread,
   DESCRIPTION_SAVE_FAILED_TITLE,
   DetailSkeleton,
   IssueDetailRoot,
@@ -53,6 +54,8 @@ export interface IntakeDetailProps {
   projectIdentifier: string;
   /** Project name for the accept form's project row. */
   projectName: string;
+  /** Published project: comments carry the access switch (CMT-006). */
+  published: boolean;
   /** The viewer's project role, or null outside the project. */
   role: number | null;
   onPrev: () => void;
@@ -78,6 +81,7 @@ export function IntakeDetail({
   issueId,
   projectIdentifier,
   projectName,
+  published,
   role,
   onPrev,
   onNext,
@@ -141,6 +145,7 @@ export function IntakeDetail({
       issueId={issueId}
       projectIdentifier={projectIdentifier}
       projectName={projectName}
+      published={published}
       role={role}
       detail={detail.data}
       viewerId={me.data?.id ?? null}
@@ -160,6 +165,7 @@ interface IntakeDetailLoadedProps {
   issueId: string;
   projectIdentifier: string;
   projectName: string;
+  published: boolean;
   role: number | null;
   detail: IntakeIssueDetail;
   viewerId: string | null;
@@ -177,6 +183,7 @@ function IntakeDetailLoaded({
   issueId,
   projectIdentifier,
   projectName,
+  published,
   role,
   detail,
   viewerId,
@@ -332,12 +339,24 @@ function IntakeDetailLoaded({
           </span>
         }
         activity={
-          <AttachmentsWidget
-            workspaceSlug={workspaceSlug}
-            projectId={projectId}
-            issueId={issue.id}
-            editable={editability.canEditContent}
-          />
+          <div className="flex flex-col gap-(--space-6)">
+            <AttachmentsWidget
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              issueId={issue.id}
+              editable={editability.canEditContent}
+            />
+            <CommentThread
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              issueId={issue.id}
+              archived={issue.archived_at !== null}
+              published={published}
+              isIntake
+              assigneeIds={issue.assignee_ids}
+              memberRole={role}
+            />
+          </div>
         }
         sidebar={
           <IntakeProperties

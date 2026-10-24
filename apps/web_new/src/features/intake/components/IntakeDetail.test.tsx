@@ -10,7 +10,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { IntakeIssueDetail, IntakeIssueDetailItem, TransportInit } from "@pidash/api-client";
+import type { IntakeIssueDetail, IntakeIssueDetailItem, IssueComment, TransportInit } from "@pidash/api-client";
 import { ToastHost } from "@pidash/kit";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -37,9 +37,32 @@ vi.mock("../../../core/edition/index.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/editor/RichTextEditor.js")>();
+  function FakeEditor({
+    initialHtml,
+    onChange,
+    label,
+  }: {
+    initialHtml: string;
+    onChange: (html: string) => void;
+    label: string;
+  }) {
+    return (
+      <textarea
+        aria-label={label}
+        defaultValue={initialHtml.replace(/<[^>]*>/g, "").trim()}
+        onChange={(event) => onChange(`<p>${event.target.value}</p>`)}
+      />
+    );
+  }
+  return { ...original, RichTextEditor: FakeEditor, CommentRichTextEditor: FakeEditor };
+});
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { INTAKE_SOURCE_PILL_FLAG, ISSUE_DEDUPE_FLAG } from "../../../core/edition/index.js";
+import { edition, INTAKE_SOURCE_PILL_FLAG, ISSUE_DEDUPE_FLAG } from "../../../core/edition/index.js";
 import { setSessionClient } from "../../../core/session/queries.js";
+import { WORKLOG_FLAG } from "../../issues/detail/widgets/worklog/worklog.js";
 import { getToastManager } from "../../../shared/shell/toaster.js";
 import { IntakeDetail } from "./IntakeDetail.js";
 
@@ -52,6 +75,7 @@ const TRIAGE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const BACKLOG = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LABEL = "b23e4567-e89b-12d3-a456-42661417400a";
 const V1 = "c23e4567-e89b-12d3-a456-42661417400c";
+const COMMENT = "f23e4567-e89b-12d3-a456-42661417400f";
 
 const ME_PAYLOAD = {
   id: ME,
@@ -251,6 +275,38 @@ function versionDetail(hourAgo: string) {
   };
 }
 
+function commentRow(): IssueComment {
+  return {
+    id: COMMENT,
+    issue: ISSUE,
+    project: PROJECT,
+    workspace: "b23e4567-e89b-12d3-a456-42661417400e",
+    actor: ADA,
+    actor_detail: DIRECTORY[0]!.member,
+    comment_html: "<p>Intake thread words</p>",
+    comment_stripped: "Intake thread words",
+    comment_json: {},
+    attachments: [],
+    labels: [],
+    access: "INTERNAL",
+    edited_at: null,
+    comment_reactions: [],
+    speaker_type: "human",
+    speaker_label: "",
+    speaker_agent_run_id: null,
+    parent: null,
+    external_source: null,
+    external_id: null,
+    is_synced: false,
+    description: null,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+    created_by: ADA,
+    updated_by: null,
+    deleted_at: null,
+  };
+}
+
 function harness(server: DetailServer, options: { meStatus?: number; searchHits?: unknown[] } = {}) {
   const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
   const searches: string[] = [];
@@ -290,6 +346,13 @@ function harness(server: DetailServer, options: { meStatus?: number; searchHits?
     if (url.endsWith(`/workspaces/${SLUG}/members/`)) return ok(DIRECTORY);
     if (url.endsWith(`/projects/${PROJECT}/issue-labels/`)) return ok(LABELS);
     if (url.includes("/reactions/")) return ok([]);
+    if (url.includes("activity_type=issue-property")) return ok([]);
+    if (url.includes("activity_type=issue-comment")) return ok([commentRow()]);
+    if (url.includes(`/issues/${ISSUE}/comments/`) && init.method === "POST") {
+      const body = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
+      server.writes.push({ url, body });
+      return ok({ data: commentRow() });
+    }
     if (url.includes("/attachments/")) return ok([ATTACHMENT]);
     if (url.endsWith("/api/users/me/")) {
       const status = options.meStatus ?? 200;
@@ -321,6 +384,7 @@ function renderDetail(queryClient: QueryClient, props: Partial<React.ComponentPr
         issueId={ISSUE}
         projectIdentifier="APO"
         projectName="Atlas"
+        published={false}
         role={20}
         onPrev={onPrev}
         onNext={onNext}
@@ -396,6 +460,46 @@ describe("IntakeDetail content (INT-019/024)", () => {
     await waitFor(() => expect(server.writes).toHaveLength(1));
     expect(server.writes[0]!.body).toEqual({ issue: { description_html: "<p>version one</p>" } });
     await waitFor(() => expect(screen.getByRole("region", { name: "Description" })).toHaveTextContent("version one"));
+  });
+
+  it("mounts the shared activity thread with comment and activity rendering (CMT-018)", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+
+    expect(await screen.findByRole("heading", { name: "Activity" })).toBeInTheDocument();
+    expect(await screen.findByText("Intake thread words")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Add comment" })).toBeInTheDocument();
+  });
+
+  it("offers neither copy-link nor the worklog aid on intake, even in a worklog edition", async () => {
+    edition.flags[WORKLOG_FLAG] = true;
+    try {
+      const server: DetailServer = {
+        detailStatus: 200,
+        detail: detailPayload(-2, { assignee_ids: [ME] }),
+        writes: [],
+      };
+      const { queryClient } = harness(server);
+      renderDetail(queryClient, { role: 20 });
+
+      await screen.findByText("Intake thread words");
+      fireEvent.click(await screen.findByRole("button", { name: "Comment actions" }));
+      const menu = await screen.findByRole("menu");
+      expect(within(menu).queryByRole("menuitem", { name: "Copy link" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Log time" })).not.toBeInTheDocument();
+    } finally {
+      delete edition.flags[WORKLOG_FLAG];
+    }
+  });
+
+  it("shows the access switch on a published intake project", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient, { published: true });
+
+    expect(await screen.findByRole("radiogroup", { name: "Comment visibility" })).toBeInTheDocument();
+    expect(await screen.findByText("Intake thread words")).toBeInTheDocument();
   });
 });
 
