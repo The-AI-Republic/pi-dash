@@ -79,11 +79,11 @@ function readBlob(blob: Blob): Promise<string> {
   });
 }
 
-function renderSection(projectIds: readonly string[] = []): void {
+function renderSection(projectIds: readonly string[] = [], projects: readonly Project[] = PROJECTS): void {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <StateBreakdownSection workspaceSlug="acme" projectIds={projectIds} projects={PROJECTS} />
+      <StateBreakdownSection workspaceSlug="acme" projectIds={projectIds} projects={projects} />
     </QueryClientProvider>
   );
 }
@@ -189,6 +189,40 @@ describe("StateBreakdownSection", () => {
     expect(await readBlob(blob)).toBe("Project,Backlog,Started,Unstarted,Completed,Cancelled\r\nBeta,2,4,3,1,0\r\n");
   });
 
+  /** jsdom's FileReader strips the BOM for text reads, so read the bytes too. */
+  function readBlobBytes(blob: Blob): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
+  it("exports with the workspace file name, a BOM, CRLF and quoted text through the table", async () => {
+    contractMocks.getAnalyticsStats.mockResolvedValue([statsRow("a", 'Alpha, "One"')]);
+    const user = userEvent.setup();
+    const createObjectUrl = vi.fn((_blob: Blob) => "blob:csv");
+    Object.assign(URL, { createObjectURL: createObjectUrl, revokeObjectURL: vi.fn() });
+    const downloads: { name: string; href: string }[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push({ name: this.download, href: this.href });
+    });
+    renderSection([], [project("a", 'Alpha, "One"')]);
+    await screen.findByText('Alpha, "One"');
+    const readsBefore = contractMocks.getAnalyticsStats.mock.calls.length;
+
+    await user.click(screen.getByRole("button", { name: "Export as csv" }));
+
+    expect(downloads[0]).toEqual({ name: "acme-analytics.csv", href: "blob:csv" });
+    const bytes = await readBlobBytes(createObjectUrl.mock.calls[0]?.[0] as Blob);
+    expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    expect(new TextDecoder().decode(bytes.slice(3))).toBe(
+      'Project,Backlog,Started,Unstarted,Completed,Cancelled\r\n"Alpha, ""One""",2,4,3,1,0\r\n'
+    );
+    expect(contractMocks.getAnalyticsStats).toHaveBeenCalledTimes(readsBefore);
+  });
+
   it("shows the guidance row when the filter matches no project", async () => {
     contractMocks.getAnalyticsStats.mockResolvedValue([statsRow("a", "Alpha")]);
     const user = userEvent.setup();
@@ -201,6 +235,19 @@ describe("StateBreakdownSection", () => {
       "Create projects with work items and assignees to start tracking performance, progress, and team impact here."
     );
     expect(screen.getByTestId("analytics-table-count")).toHaveTextContent("1 Projects");
+  });
+
+  it("writes a dash for a count the export cannot read, through the table's column", async () => {
+    contractMocks.getAnalyticsStats.mockResolvedValue([statsRow("a", "Alpha", { started_work_items: Number.NaN })]);
+    const user = userEvent.setup();
+    const createObjectUrl = vi.fn((_blob: Blob) => "blob:csv");
+    Object.assign(URL, { createObjectURL: createObjectUrl, revokeObjectURL: vi.fn() });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    renderSection();
+    await screen.findByText("Alpha");
+    await user.click(screen.getByRole("button", { name: "Export as csv" }));
+    const blob = createObjectUrl.mock.calls[0]?.[0] as Blob;
+    expect((await readBlob(blob)).split("\r\n")[1]).toBe("Alpha,2,-,3,1,0");
   });
 
   it("exports the server project name when the live id no longer resolves", async () => {

@@ -65,24 +65,33 @@ cut of its table serializer; NEWFRONT-769 is blocked by 735, owns the export
 rules exercised through the two oracle tables, and changes shared rules in that
 same file rather than creating a second module.
 
-Proposed stable API (the slice may refine types, not duplicate the module):
+Shipped API (NEWFRONT-735, merged as `8fe11330e`; NEWFRONT-769 adopts it as-is,
+so this is the contract both areas build against):
 
 ```ts
-export type CsvCell = string | number | null | undefined;
-export interface CsvTable {
-  fileName: string;
-  headers: readonly string[];
-  rows: readonly (readonly CsvCell[])[];
-}
-export function buildAnalyticsCsv(table: CsvTable): { fileName: string; text: string };
-export function downloadAnalyticsCsv(table: CsvTable): void;
+export interface CsvColumn<Row> { label: string; value: (row: Row) => unknown }
+export interface CsvFile { fileName: string; content: string }
+export function buildCsvDocument<Row>(columns: readonly CsvColumn<Row>[], rows: readonly Row[]): string;
+export function buildAnalyticsCsv<Row>(workspaceSlug: string, columns: readonly CsvColumn<Row>[], rows: readonly Row[]): CsvFile;
+export function analyticsCsvColumns<Row>(columns: readonly { label: string; exportValue: (row: Row) => unknown }[]): CsvColumn<Row>[];
+export function analyticsCsvFileName(workspaceSlug: string): string;
+export function csvCell(value: unknown): string;
+export function downloadCsvFile(file: CsvFile, environment?: CsvDownloadEnvironment): void;
+export class CsvEmptyRowsError extends Error {}
 ```
 
 Contract: the filename is `{workspaceSlug}-analytics.csv`; the first line is the
-table's export headers; null/undefined cells become `-`; zero rows throw before
-any save; the text starts with a UTF-8 BOM, quotes text cells, leaves numbers
-bare, and uses CRLF. Header and cell values come from each table's export-column
-metadata, not from rendered DOM. Evidence:
+table's export headers; null/undefined/NaN and other unreadable cells become
+`-`; zero rows throw `CsvEmptyRowsError` before any Blob or save; the text
+starts with a UTF-8 BOM, quotes text cells (comma, quote, CRLF or edge
+whitespace), leaves finite numbers bare, and records end in CRLF. Header and
+cell values come from each table's export-column metadata, not from rendered
+DOM. All three analytics tables call it — the chart drill-down
+(`CustomInsightsSection`), the insight/state-breakdown table
+(`StateBreakdownSection`) and the scoped dialog table (ANALYTICS slice E). The
+two singles are proven through the tables by `local-file-exports.spec.ts`
+EXP-014/015 (`analyticsExportRowCells("chart" | "insight")`,
+`analyticsExportButtonCount() === 2`). Evidence:
 `apps/web/core/components/analytics/export.ts` (builder and filename) and its
 call sites `insight-table/root.tsx` (filtered row model),
 `work-items/workitems-insight-table.tsx` (insight columns) and
