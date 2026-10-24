@@ -84,6 +84,13 @@ describe("projectMark", () => {
       glyph: "🛰️",
     });
   });
+
+  it("decodes the contract's hexadecimal page mark", () => {
+    expect(projectMark({ in_use: "emoji", emoji: { value: "1f600" } })).toEqual({
+      kind: "emoji",
+      glyph: "😀",
+    });
+  });
 });
 
 describe("decodeEmojiValue", () => {
@@ -95,6 +102,8 @@ describe("decodeEmojiValue", () => {
   it("decodes one or more code points", () => {
     expect(decodeEmojiValue("127793")).toBe("🌱");
     expect(decodeEmojiValue("128640-8205-128752")).toBe("🚀‍🛰");
+    expect(decodeEmojiValue("1f600")).toBe("😀");
+    expect(decodeEmojiValue("1f680-200d-1f6f0")).toBe("🚀‍🛰");
   });
 
   it("leaves a value that cannot decode untouched", () => {

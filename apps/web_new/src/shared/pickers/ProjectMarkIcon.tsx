@@ -22,9 +22,17 @@ export interface ProjectMarkIconProps {
   /** Glyph edge in pixels. */
   size: number;
   testId?: string | undefined;
+  /** Drawn in place of the initial when the stored name has no glyph. */
+  fallback?: React.ReactElement;
 }
 
-export function ProjectMarkIcon({ mark, identifier, size, testId }: ProjectMarkIconProps): React.ReactElement {
+export function ProjectMarkIcon({
+  mark,
+  identifier,
+  size,
+  testId,
+  fallback,
+}: ProjectMarkIconProps): React.ReactElement {
   const [module, setModule] = React.useState<GlyphModule | null>(null);
   React.useEffect(() => {
     let live = true;
@@ -35,7 +43,7 @@ export function ProjectMarkIcon({ mark, identifier, size, testId }: ProjectMarkI
       live = false;
     };
   }, []);
-  const initial = <span aria-hidden="true">{projectMarkText(mark, identifier)}</span>;
+  const initial = fallback ?? <span aria-hidden="true">{projectMarkText(mark, identifier)}</span>;
   if (module === null) return initial;
   const Glyph = module.projectIconGlyph(mark.name);
   if (Glyph === null) return initial;
