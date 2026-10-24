@@ -20,8 +20,8 @@ import { Route } from "./all-issues.js";
 // route itself owns (the static key, the params pass-through), while the
 // screen's own suite owns the interior. `loadWorkspaceViewDetail` stays
 // real so the warming test reads the genuine preload.
-vi.mock("../../../../features/views/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../features/views/index.js")>()),
+vi.mock("../../../../features/views/detail/lazy.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../features/views/detail/lazy.js")>()),
   resolvedWorkspaceViewDetail: () => ({
     WorkspaceViewScreen: function StubScreen({ params }: { params: { ws: string; viewId: string } }) {
       return <div data-testid="stub-screen">{`${params.ws}/${params.viewId}`}</div>;

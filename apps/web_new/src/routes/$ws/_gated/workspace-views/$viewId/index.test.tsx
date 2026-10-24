@@ -194,7 +194,7 @@ describe("workspace view detail route preload", () => {
 
   it("re-raises a chunk failure so the route reports it", async () => {
     vi.resetModules();
-    vi.doMock("../../../../../features/views/index.ts", () => ({
+    vi.doMock("../../../../../features/views/detail/lazy.ts", () => ({
       loadWorkspaceViewDetail: () => Promise.reject(new Error("chunk failed")),
       resolvedWorkspaceViewDetail: () => ({
         WorkspaceViewScreen: () => null,
@@ -205,7 +205,7 @@ describe("workspace view detail route preload", () => {
     await expect(FreshRoute.options.beforeLoad?.({ context: {}, params: PARAMS } as never)).rejects.toThrow(
       "chunk failed"
     );
-    vi.doUnmock("../../../../../features/views/index.ts");
+    vi.doUnmock("../../../../../features/views/detail/lazy.ts");
     vi.resetModules();
   });
 
