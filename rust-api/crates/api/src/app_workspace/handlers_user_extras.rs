@@ -1935,15 +1935,6 @@ fn local_today() -> NaiveDate {
     chrono::Local::now().date_naive()
 }
 
-/// Quote the bare zone literal the F-W24-11 graph builders spell
-/// (`AT TIME ZONE UTC`), which Postgres rejects (`column "utc" does
-/// not exist` — Django emits a quoted literal). A no-op once the
-/// builder fix (PIDASHCONV-709) lands: quoted `'UTC'` no longer
-/// matches the bare pattern.
-fn quote_utc_zone(sql: &str) -> String {
-    sql.replace("AT TIME ZONE UTC", "AT TIME ZONE 'UTC'")
-}
-
 /// `UserActivityGraphEndpoint.get` (`:524-539`): per-day activity
 /// counts for the caller over the trailing 6 months.
 async fn activity_graph(
@@ -1967,14 +1958,14 @@ async fn activity_graph_inner(
         .await?
         .ok_or(HandlerError::Unauthorized)?;
     let cutoff = profile_q::months_ago(local_today(), profile_q::ACTIVITY_GRAPH_MONTHS);
-    let rows: Vec<(NaiveDate, i64)> =
-        sqlx::query_as(&quote_utc_zone(&profile_q::activity_graph_sql()))
-            .bind(actor.id)
-            .bind(slug)
-            .bind(cutoff)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+    let rows: Vec<(NaiveDate, i64)> = sqlx::query_as(&profile_q::activity_graph_sql())
+        .bind(actor.id)
+        .bind(slug)
+        .bind(cutoff)
+        .bind(actor.tz_name.as_str())
+        .fetch_all(pool)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     let mut items = Vec::with_capacity(rows.len());
     for (created_date, activity_count) in rows {
         items.push(serde_json::json!({
@@ -2016,10 +2007,11 @@ async fn completed_graph_inner(
         .ok_or(HandlerError::Unauthorized)?;
     let month = profile_q::parse_month_param(query_last(raw_query, "month").as_deref())
         .map_err(|_| HandlerError::ServerError)?;
-    let rows: Vec<(i32, i64)> = sqlx::query_as(&quote_utc_zone(&profile_q::completed_graph_sql()))
+    let rows: Vec<(i32, i64)> = sqlx::query_as(&profile_q::completed_graph_sql())
         .bind(actor.id)
         .bind(slug)
         .bind(month)
+        .bind(actor.tz_name.as_str())
         .fetch_all(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
@@ -2516,27 +2508,6 @@ mod tests {
         assert_eq!(profile_save_order()[29], "pk");
         assert!(save.contains("$30"));
         assert!(!save.contains("$31"));
-    }
-
-    #[test]
-    fn utc_zone_quoting_is_idempotent() {
-        let bare = "SELECT EXTRACT(WEEK FROM i.completed_at AT TIME ZONE UTC)";
-        let quoted = "SELECT EXTRACT(WEEK FROM i.completed_at AT TIME ZONE 'UTC')";
-        assert_eq!(quote_utc_zone(bare), quoted);
-        // A no-op once the builder fix lands.
-        assert_eq!(quote_utc_zone(quoted), quoted);
-        // Both graph builders execute after quoting.
-        for sql in [
-            profile_q::activity_graph_sql(),
-            profile_q::completed_graph_sql(),
-        ] {
-            let fixed = quote_utc_zone(&sql);
-            assert!(
-                !fixed.contains("AT TIME ZONE UTC"),
-                "bare zone survives: {fixed}"
-            );
-            assert!(fixed.contains("AT TIME ZONE 'UTC'"), "zone lost: {fixed}");
-        }
     }
 
     #[test]

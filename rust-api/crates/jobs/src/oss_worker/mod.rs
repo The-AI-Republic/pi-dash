@@ -237,7 +237,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         .url
         .as_deref()
         .filter(|url| !url.is_empty())
-        .map(redis::Client::open)
+        .map(pidash_db::redis::open_client)
     {
         None => None,
         Some(Ok(client)) => Some(client),

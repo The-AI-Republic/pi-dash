@@ -2140,6 +2140,8 @@ type LiveStateRow = (
     Option<i64>,
     Option<String>,
     Option<i32>,
+    Option<String>,
+    Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
 );
 
@@ -2629,7 +2631,8 @@ async fn render_agent_run(
                 r#"SELECT observed_run_id, last_event_at, last_event_kind, last_event_summary,
                           agent_pid, agent_subprocess_alive, approvals_pending,
                           (usage->>'input_tokens')::bigint, (usage->>'output_tokens')::bigint,
-                          (usage->>'total_tokens')::bigint, llm_model, turn_count, updated_at
+                          (usage->>'total_tokens')::bigint, llm_model, turn_count,
+                          agent_health, agent_last_activity_at, updated_at
                    FROM runner_live_state WHERE runner_id = $1"#,
             )
             .bind(runner_id)
@@ -2653,7 +2656,9 @@ async fn render_agent_run(
                         "total_tokens": state.9,
                         "llm_model": state.10,
                         "turn_count": state.11,
-                        "updated_at": state.12.map(|dt| render_datetime_in(&dt, &timezone)),
+                        "agent_health": state.12,
+                        "agent_last_activity_at": state.13.map(|dt| render_datetime_in(&dt, &timezone)),
+                        "updated_at": state.14.map(|dt| render_datetime_in(&dt, &timezone)),
                     });
                 }
             }
@@ -3491,9 +3496,10 @@ async fn soft_delete_bridge(
 // * QUIRK-create-no-intake (`:265`): create looks the intake up with
 //   `.first()` and dereferences `.id` unguarded, so a missing intake row
 //   is a 500, not the list's 404. Ported as-is.
-// * QUIRK-order-by-passthrough (`:198`): the raw `order_by` param is
-//   interpolated into `ORDER BY`; an unknown field raises at execution
-//   and answers the 500 envelope. Ported as-is.
+// * QUIRK-order-by-rejection (`:198`): an unknown `order_by` field is
+//   Django's `FieldError` path (PIDASHCONV-1426) — rejected before SQL
+//   rendering, answering the 500 envelope; user text never reaches the
+//   statement. Ported as-is.
 // * QUIRK-status-coercion (`:200-202`): a non-numeric status token fails
 //   `IntegerField` coercion at execution (500); an explicit `?status=`
 //   with only `"null"` tokens leaves no filter (all statuses list).
@@ -3586,7 +3592,11 @@ pub async fn collection_list(
         limit: page.limit,
         offset: page.offset,
     };
-    let sql = queries::intake_issue_list_sql(&list_query);
+    // Unknown `order_by` is Django's `FieldError` path (`base.py:198`):
+    // the generic 500, with nothing rendered into SQL (PIDASHCONV-1426).
+    let Some(sql) = queries::intake_issue_list_sql(&list_query) else {
+        return Denial::ServerError.into_response();
+    };
     let mut statement = sqlx::query(&sql).bind(intake_id).bind(gate.project_id);
     statement = bind_owned(statement, &compiled.binds);
     if let Some(statuses) = &list_query.statuses {

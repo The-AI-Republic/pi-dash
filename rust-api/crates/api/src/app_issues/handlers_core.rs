@@ -3419,16 +3419,17 @@ async fn default_pod_for_project(
 }
 
 /// `self.state` on a save whose state id Django must resolve
-/// (untouched-state updates, destroy): the `State.objects` manager, so a
-/// triage/deleted id raises `DoesNotExist` → the required-object 404.
+/// (untouched-state updates, destroy): a forward-FK read, which Django
+/// 4.2 resolves through `State._base_manager` (a plain `Manager` —
+/// `State` sets no `base_manager_name`), so triage and soft-deleted
+/// states still resolve and only a dangling FK misses → the
+/// required-object 404.
 async fn saved_state_group(pool: &sqlx::PgPool, state_id: &Uuid) -> Result<Option<String>, Denial> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT \"group\" FROM states WHERE id = $1 AND deleted_at IS NULL AND NOT (\"group\" = 'triage')",
-    )
-    .bind(state_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(String,)> = sqlx::query_as("SELECT \"group\" FROM states WHERE id = $1")
+        .bind(state_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.map(|row| row.0))
 }
 
@@ -4289,6 +4290,8 @@ struct RenderedLive {
     usage: Value,
     llm_model: Option<String>,
     turn_count: Option<i32>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
     updated_at: String,
 }
 
@@ -4326,6 +4329,8 @@ fn rendered_run_from_pg(
                     usage,
                     llm_model: live_llm,
                     turn_count: row.try_get("turn_count")?,
+                    agent_health: row.try_get("agent_health")?,
+                    agent_last_activity_at: opt_moment("agent_last_activity_at")?,
                     updated_at: serialize_iso_datetime(updated),
                 })
             }
@@ -4564,6 +4569,8 @@ async fn render_detail_map(
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: live.updated_at.as_str(),
         }),
     });
@@ -4596,6 +4603,8 @@ async fn render_detail_map(
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: live.updated_at.as_str(),
         }),
     });
@@ -5885,8 +5894,9 @@ pub async fn destroy_issue(
         .await
         .map_err(|_| Denial::ServerError)?;
     // `issue.delete()`: `deleted_at` now, then the full `save()` (the
-    // state legs run — a triage/deleted state 404s here — plus stripped
-    // + audit), then the related-objects forward.
+    // state legs run — the FK follow resolves triage/deleted states,
+    // only a dangling FK 404s — plus stripped + audit), then the
+    // related-objects forward.
     row.deleted_at = Some(utc_now_micros());
     update_state_legs(&pool, &mut row, false, None).await?;
     row.updated_by_id = Some(user_id);

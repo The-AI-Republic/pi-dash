@@ -1610,8 +1610,11 @@ async fn coerce_fk_user(
         .fetch_one(pool)
         .await
         .map_err(|_| CoerceFail::Msg("Invalid pk.".to_owned()))?,
+        // No `is_active` predicate: the lead/assignee `PrimaryKeyRelatedField`s
+        // read through the stock `UserManager` (`db/models/user.py:131`), and
+        // deactivation leaves the member assignable (PIDASHCONV-1394).
         _ => sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "users" WHERE "id" = $1 AND "is_active")"#,
+            r#"SELECT EXISTS(SELECT 1 FROM "users" WHERE "id" = $1)"#,
         )
         .bind(parsed)
         .fetch_one(pool)

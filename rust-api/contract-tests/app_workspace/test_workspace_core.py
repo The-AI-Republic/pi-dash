@@ -804,6 +804,84 @@ def test_join_accept_unknown_email(user_api, world, space):
     assert count == 1
 
 
+@pytest.mark.parametrize("accepted", ["true", 2, [0]])
+def test_join_accepted_unparsable_bool(other_api, world, space, accepted):
+    # BooleanField.to_python rejects anything but True/False/1/0/"t"/"True"/
+    # "1"/"f"/"False"/"0": the save() raises ValidationError, so the join
+    # 400s and nothing is written (no responded_at, no member row).
+    inv = world["db"].make_invite(
+        space["id"], "other@example.com", token="tok-bad", created_by_id=world["user"]["id"]
+    )
+    res = other_api.post(
+        f"/api/workspaces/{space['slug']}/invitations/{inv['id']}/join/",
+        json={"token": "tok-bad", "accepted": accepted},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "Please provide valid detail"}
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select accepted, responded_at from workspace_member_invites where id = %s;",
+            (inv["id"],),
+        ).fetchone()
+        members = conn.execute(
+            "select count(*) from workspace_members where workspace_id = %s and member_id = %s;",
+            (space["id"], world["other"]["id"]),
+        ).fetchone()[0]
+    assert row == (False, None)
+    assert members == 0
+
+
+def test_join_accepted_null(other_api, world, space):
+    # Explicit null survives to_python as None and hits the NOT NULL column:
+    # IntegrityError, so the join 400s and nothing is written.
+    inv = world["db"].make_invite(
+        space["id"], "other@example.com", token="tok-null", created_by_id=world["user"]["id"]
+    )
+    res = other_api.post(
+        f"/api/workspaces/{space['slug']}/invitations/{inv['id']}/join/",
+        json={"token": "tok-null", "accepted": None},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "The payload is not valid"}
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select accepted, responded_at from workspace_member_invites where id = %s;",
+            (inv["id"],),
+        ).fetchone()
+        members = conn.execute(
+            "select count(*) from workspace_members where workspace_id = %s and member_id = %s;",
+            (space["id"], world["other"]["id"]),
+        ).fetchone()[0]
+    assert row == (False, None)
+    assert members == 0
+
+
+def test_join_accepted_zero_string_stores_false(other_api, world, space):
+    # "0" preps to False (stored) but the raw string is truthy, so the
+    # accept branch still runs: membership is created, invite consumed.
+    inv = world["db"].make_invite(
+        space["id"], "other@example.com", token="tok-0", created_by_id=world["user"]["id"]
+    )
+    res = other_api.post(
+        f"/api/workspaces/{space['slug']}/invitations/{inv['id']}/join/",
+        json={"token": "tok-0", "accepted": "0"},
+    )
+    assert res.status_code == 200
+    assert res.json() == {"message": "Workspace Invitation Accepted"}
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select accepted, responded_at is null, deleted_at is null"
+            " from workspace_member_invites where id = %s;",
+            (inv["id"],),
+        ).fetchone()
+        member = conn.execute(
+            "select role, is_active from workspace_members where workspace_id = %s and member_id = %s;",
+            (space["id"], world["other"]["id"]),
+        ).fetchone()
+    assert row == (False, False, False)
+    assert member == (15, True)
+
+
 # --- users/me invitations ---
 
 

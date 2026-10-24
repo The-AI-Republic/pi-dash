@@ -762,6 +762,62 @@ def test_drafts_anon(anon_api, space):
     assert res.status_code == 401
 
 
+# --- draft date filters follow the actor timezone (PIDASHCONV-1373) ---
+
+# 2026-01-01T20:00:00Z is 2026-01-02 05:00 in Asia/Tokyo: Django's
+# `created_at__date` / `completed_at__date` lookups (TruncDate in the
+# TimezoneMixin-activated actor zone) read 2026-01-02, while a UTC
+# `CAST(col AS DATE)` reads 2026-01-01.
+_TZ_DRAFT_AT = "2026-01-01T20:00:00+00:00"
+
+
+def _seed_tokyo_draft(world, space):
+    db = world["db"]
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET user_timezone = %s WHERE id = %s;",
+                ("Asia/Tokyo", world["user"]["id"]),
+            )
+            cur.execute(
+                """INSERT INTO draft_issues
+                   (id, name, description_json, description_html, priority,
+                    sort_order, workspace_id, created_by_id,
+                    created_at, updated_at, completed_at)
+                   VALUES (%s, 'TZ Draft', '{}', '<p></p>', 'none',
+                           0, %s, %s, %s, %s, %s)""",
+                (
+                    str(uuid.uuid4()),
+                    space["id"],
+                    world["user"]["id"],
+                    _TZ_DRAFT_AT,
+                    _TZ_DRAFT_AT,
+                    _TZ_DRAFT_AT,
+                ),
+            )
+        conn.commit()
+
+
+def test_drafts_created_at_filter_uses_actor_timezone(user_api, space, world):
+    _seed_tokyo_draft(world, space)
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/?created_at=2026-01-02;after")
+    assert res.status_code == 200
+    assert res.json()["total_count"] == 1
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/?created_at=2026-01-01;before")
+    assert res.status_code == 200
+    assert res.json()["total_count"] == 0
+
+
+def test_drafts_completed_at_filter_uses_actor_timezone(user_api, space, world):
+    _seed_tokyo_draft(world, space)
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/?completed_at=2026-01-02;after")
+    assert res.status_code == 200
+    assert res.json()["total_count"] == 1
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/?completed_at=2026-01-01;before")
+    assert res.status_code == 200
+    assert res.json()["total_count"] == 0
+
+
 # --- quick links ---
 
 

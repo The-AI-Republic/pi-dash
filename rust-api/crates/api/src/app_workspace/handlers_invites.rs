@@ -413,9 +413,9 @@ fn py_int(value: &Value) -> Result<i128, ()> {
     }
 }
 
-/// Python truthiness (`invite.py:177`): `accepted` is whatever
-/// `request.data.get("accepted", False)` is truthy for — `"false"`, `1`
-/// and `[0]` all accept.
+/// Python truthiness of the raw `accepted` value (`invite.py:181`): once
+/// `to_python` has accepted it, the in-memory raw value picks the
+/// accept/reject branch — `"0"` accepts while storing `false`.
 fn py_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -434,6 +434,39 @@ fn py_truthy(value: &Value) -> bool {
         Value::String(s) => !s.is_empty(),
         Value::Array(a) => !a.is_empty(),
         Value::Object(m) => !m.is_empty(),
+    }
+}
+
+/// `BooleanField.to_python` (`null=False`,
+/// `django/db/models/fields/__init__.py`): `True`/`False` (and anything
+/// `==`-equal: `1`/`0`, `1.0`/`0.0`) coerce, `"t"`/`"True"`/`"1"` pass,
+/// `"f"`/`"False"`/`"0"` fail; `None` stays `None` (the NOT NULL column
+/// then raises the `IntegrityError` 400); anything else is the
+/// `ValidationError` 400. Mirrors the `app_project` port's `prep_bool`
+/// (PB-0595); each domain file keeps its own copy.
+fn prep_bool(value: &Value) -> Result<Option<bool>, ()> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Bool(flag) => Ok(Some(*flag)),
+        Value::Number(number) => {
+            if number.as_i64() == Some(1) || number.as_u64() == Some(1) {
+                Ok(Some(true))
+            } else if number.as_i64() == Some(0) || number.as_u64() == Some(0) {
+                Ok(Some(false))
+            } else if number.as_f64() == Some(1.0) {
+                Ok(Some(true))
+            } else if number.as_f64() == Some(0.0) {
+                Ok(Some(false))
+            } else {
+                Err(())
+            }
+        }
+        Value::String(raw) => match raw.as_str() {
+            "t" | "True" | "1" => Ok(Some(true)),
+            "f" | "False" | "0" => Ok(Some(false)),
+            _ => Err(()),
+        },
+        _ => Err(()),
     }
 }
 
@@ -3059,7 +3092,20 @@ async fn join_post(
     // (`db/models/base.py:42`); anonymous nulls BOTH audit columns
     // (`:31-33`), so `created_by` keeps the row's value only when authed.
     let now = Utc::now();
-    let accepted = data.get("accepted").is_some_and(py_truthy);
+    // `accepted = request.data.get("accepted", False)` runs through
+    // `BooleanField.to_python` on `save()` (`invite.py:176-179`): a value
+    // `to_python` rejects is the `ValidationError` 400 with nothing
+    // written, and an explicit null falls to the NOT NULL column (the
+    // `IntegrityError` 400 below). The stored bool is the prepped value,
+    // but the accept/reject branch tests the in-memory raw value
+    // (`:181`), so `"0"` accepts while storing `false`.
+    let missing = Value::Bool(false);
+    let raw = data.get("accepted").unwrap_or(&missing);
+    let stored = match prep_bool(raw) {
+        Ok(stored) => stored,
+        Err(()) => return json_response(StatusCode::BAD_REQUEST, VALID_DETAIL_BODY),
+    };
+    let accept = py_truthy(raw);
     let responder_id: Option<uuid::Uuid> = actor.as_ref().map(|actor| actor.id);
     let (updated_by_id, created_by_id) =
         audit_columns_on_update(responder_id, invite.created_by_id);
@@ -3067,7 +3113,7 @@ async fn join_post(
         "UPDATE workspace_member_invites SET accepted = $1, responded_at = $2, updated_at = $2, \
          updated_by_id = $3, created_by_id = $4 WHERE id = $5",
     )
-    .bind(accepted)
+    .bind(stored)
     .bind(now)
     .bind(updated_by_id)
     .bind(created_by_id)
@@ -3080,7 +3126,7 @@ async fn join_post(
         }
         return Denial::ServerError.into_response();
     }
-    if !accepted {
+    if !accept {
         // Rejected: the invite is KEPT (with `responded_at` set — stuck).
         return (
             StatusCode::OK,
@@ -4610,6 +4656,47 @@ mod tests {
         // A digit-only literal past f64 range is a nonzero Python int.
         let huge: Value = serde_json::from_str(&format!("1{}", "0".repeat(400))).expect("json");
         assert!(py_truthy(&huge));
+    }
+
+    #[test]
+    fn prep_bool_matches_to_python() {
+        // `value in (True, False)` — 1/0 and 1.0/0.0 ride `==`.
+        for (raw, want) in [
+            ("true", Some(true)),
+            ("1", Some(true)),
+            ("1.0", Some(true)),
+            ("false", Some(false)),
+            ("0", Some(false)),
+            ("0.0", Some(false)),
+            ("\"t\"", Some(true)),
+            ("\"True\"", Some(true)),
+            ("\"1\"", Some(true)),
+            ("\"f\"", Some(false)),
+            ("\"False\"", Some(false)),
+            ("\"0\"", Some(false)),
+            // `None` stays `None` (the NOT NULL column 400s the write).
+            ("null", None),
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert_eq!(prep_bool(&value), Ok(want), "prep_bool({raw})");
+        }
+        // Exact spellings only — lowercase variants 400.
+        for raw in [
+            "\"true\"",
+            "\"false\"",
+            "\"yes\"",
+            "\"\"",
+            "2",
+            "0.5",
+            "[]",
+            "[0]",
+            "{}",
+            "{\"a\": 1}",
+            "1e999",
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("case is JSON");
+            assert_eq!(prep_bool(&value), Err(()), "prep_bool({raw})");
+        }
     }
 
     #[test]
