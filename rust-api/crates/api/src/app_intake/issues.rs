@@ -3586,6 +3586,7 @@ pub async fn collection_list(
         statuses,
         issue_filters_sql: compiled.fragment.as_deref(),
         issue_filter_binds: compiled.bind_count,
+        joins: &compiled.joins,
         guest_created_by: gate.guest_scoped,
         limit: page.limit,
         offset: page.offset,
