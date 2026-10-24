@@ -2037,8 +2037,8 @@ mod tests {
                 )
             )]
         );
-        // Explicit `null` clears — the one field exempt from the blanket
-        // partial null-skip (DRF `allow_null`).
+        // Explicit `null` clears (`allow_null` from `null=True`), like
+        // the other nullable fields.
         let body = obj(serde_json::json!({"deleted_at": null}));
         assert_eq!(
             validate_partial(&body, Tz::UTC).expect("null clears"),
