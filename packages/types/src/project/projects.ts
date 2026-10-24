@@ -68,6 +68,10 @@ export interface IProject extends IPartialProject {
   next_work_item_sequence?: number;
   repo_url?: string;
   base_branch?: string;
+  // Default work type for this project's issues (PDASHOSS01-234): which
+  // per-work-type prompt guidance agent runs compose with. Resolved at
+  // creation ("software" when a repo is bound, "general" otherwise).
+  default_work_type?: string;
   // Periodic agent re-invocation policy. One budget pool per work item
   // (`agent_default_max_ticks`, `-1` = no cap) spent across every ticking
   // stage, and one cadence column per stage — kept separate on the model so

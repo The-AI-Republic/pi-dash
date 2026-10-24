@@ -17,6 +17,7 @@ import type {
   IResolvedSection,
   TPromptKind,
   TPromptScope,
+  TWorkTypeKey,
 } from "@pi-dash/types";
 import { AlertModalCore, Badge, Button } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
@@ -24,7 +25,9 @@ import { usePromptSection } from "@/hooks/store/use-prompt-section";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
-const KINDS: TPromptKind[] = ["coding-task", "review", "scheduler"];
+const KINDS: TPromptKind[] = ["coding-task", "review", "test", "scheduler"];
+/** Built-in work types whose guidance fills the stage recipes' slots (PDASHOSS01-234). */
+const WORK_TYPES: TWorkTypeKey[] = ["software", "general"];
 type TPromptPageTab = "sections" | "receipt";
 
 type TKindSections = {
@@ -63,9 +66,11 @@ function useKindLabel() {
   return (k: TPromptKind): string => {
     switch (k) {
       case "coding-task":
-        return t("Coding task");
+        return t("Do (In Progress)");
       case "review":
         return t("Review");
+      case "test":
+        return t("Test");
       case "scheduler":
         return t("Scheduler");
       default:
@@ -74,16 +79,37 @@ function useKindLabel() {
   };
 }
 
-function usePromptSectionList(slug: string, kind: TPromptKind, scope: TPromptScope, enabled = true) {
-  const promptStore = usePromptSection();
-  const key = slug && enabled ? (["prompt-sections", slug, kind, scope] as const) : null;
-  return useSWR<IPromptSectionListResponse>(key, () => promptStore.fetchSections(slug, kind, scope));
+function useWorkTypeLabel() {
+  const { t } = useTranslation();
+
+  return (w: TWorkTypeKey): string => {
+    switch (w) {
+      case "software":
+        return t("Software");
+      case "general":
+        return t("General");
+      default:
+        return w;
+    }
+  };
 }
 
-function useCompiledPrompt(slug: string, kind: TPromptKind) {
+function usePromptSectionList(
+  slug: string,
+  kind: TPromptKind,
+  scope: TPromptScope,
+  workType: TWorkTypeKey,
+  enabled = true
+) {
   const promptStore = usePromptSection();
-  const key = slug ? (["prompt-compiled", slug, kind, "user"] as const) : null;
-  return useSWR<IPromptCompiledResponse>(key, () => promptStore.fetchCompiled(slug, kind, "user"));
+  const key = slug && enabled ? (["prompt-sections", slug, kind, scope, workType] as const) : null;
+  return useSWR<IPromptSectionListResponse>(key, () => promptStore.fetchSections(slug, kind, scope, workType));
+}
+
+function useCompiledPrompt(slug: string, kind: TPromptKind, workType: TWorkTypeKey) {
+  const promptStore = usePromptSection();
+  const key = slug ? (["prompt-compiled", slug, kind, "user", workType] as const) : null;
+  return useSWR<IPromptCompiledResponse>(key, () => promptStore.fetchCompiled(slug, kind, "user", workType));
 }
 
 /**
@@ -102,6 +128,8 @@ const PromptsListPage = observer(function PromptsListPage() {
   const slug = workspaceSlug ?? "";
   const isAdmin = allowPermissions([EUserPermissions.ADMIN], EUserPermissionsLevel.WORKSPACE, slug);
   const [tab, setTab] = useState<TPromptPageTab>("sections");
+  const [workType, setWorkType] = useState<TWorkTypeKey>("software");
+  const workTypeLabel = useWorkTypeLabel();
 
   const pageTitle = currentWorkspace?.name ? `${currentWorkspace.name} · ${t("Prompts")}` : t("Prompts");
 
@@ -116,56 +144,79 @@ const PromptsListPage = observer(function PromptsListPage() {
         </p>
       </header>
 
-      <div className="flex items-center gap-2">
-        {(["sections", "receipt"] as TPromptPageTab[]).map((nextTab) => (
-          <button
-            key={nextTab}
-            type="button"
-            onClick={() => setTab(nextTab)}
-            className={`rounded-md px-3 py-1.5 text-13 font-medium transition-colors ${
-              tab === nextTab ? "bg-accent-primary text-on-color" : "bg-layer-1 text-secondary hover:text-primary"
-            }`}
-          >
-            {nextTab === "sections" ? t("Sections") : t("Receipt")}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          {(["sections", "receipt"] as TPromptPageTab[]).map((nextTab) => (
+            <button
+              key={nextTab}
+              type="button"
+              onClick={() => setTab(nextTab)}
+              className={`rounded-md px-3 py-1.5 text-13 font-medium transition-colors ${
+                tab === nextTab ? "bg-accent-primary text-on-color" : "bg-layer-1 text-secondary hover:text-primary"
+              }`}
+            >
+              {nextTab === "sections" ? t("Sections") : t("Receipt")}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-11 font-medium text-secondary">{t("Work type")}</span>
+          {WORK_TYPES.map((nextWorkType) => (
+            <button
+              key={nextWorkType}
+              type="button"
+              onClick={() => setWorkType(nextWorkType)}
+              className={`rounded-md px-3 py-1.5 text-13 font-medium transition-colors ${
+                workType === nextWorkType
+                  ? "bg-accent-primary text-on-color"
+                  : "bg-layer-1 text-secondary hover:text-primary"
+              }`}
+            >
+              {workTypeLabel(nextWorkType)}
+            </button>
+          ))}
+        </div>
       </div>
 
       {tab === "sections" ? (
-        <SectionsLibrary slug={slug} isAdmin={isAdmin} />
+        <SectionsLibrary slug={slug} isAdmin={isAdmin} workType={workType} />
       ) : (
-        <ReceiptLibrary slug={slug} isAdmin={isAdmin} />
+        <ReceiptLibrary slug={slug} isAdmin={isAdmin} workType={workType} />
       )}
     </div>
   );
 });
 
-function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
+function SectionsLibrary({ slug, isAdmin, workType }: { slug: string; isAdmin: boolean; workType: TWorkTypeKey }) {
   const { t } = useTranslation();
   const { mutate } = useSWRConfig();
 
-  const codingUser = usePromptSectionList(slug, "coding-task", "user");
-  const reviewUser = usePromptSectionList(slug, "review", "user");
-  const schedulerUser = usePromptSectionList(slug, "scheduler", "user");
-  const codingWs = usePromptSectionList(slug, "coding-task", "workspace", isAdmin);
-  const reviewWs = usePromptSectionList(slug, "review", "workspace", isAdmin);
-  const schedulerWs = usePromptSectionList(slug, "scheduler", "workspace", isAdmin);
+  const codingUser = usePromptSectionList(slug, "coding-task", "user", workType);
+  const reviewUser = usePromptSectionList(slug, "review", "user", workType);
+  const testUser = usePromptSectionList(slug, "test", "user", workType);
+  const schedulerUser = usePromptSectionList(slug, "scheduler", "user", workType);
+  const codingWs = usePromptSectionList(slug, "coding-task", "workspace", workType, isAdmin);
+  const reviewWs = usePromptSectionList(slug, "review", "workspace", workType, isAdmin);
+  const testWs = usePromptSectionList(slug, "test", "workspace", workType, isAdmin);
+  const schedulerWs = usePromptSectionList(slug, "scheduler", "workspace", workType, isAdmin);
 
   const userLists = useMemo<TKindSections[]>(
     () => [
       { kind: "coding-task", sections: codingUser.data?.sections ?? [] },
       { kind: "review", sections: reviewUser.data?.sections ?? [] },
+      { kind: "test", sections: testUser.data?.sections ?? [] },
       { kind: "scheduler", sections: schedulerUser.data?.sections ?? [] },
     ],
-    [codingUser.data, reviewUser.data, schedulerUser.data]
+    [codingUser.data, reviewUser.data, testUser.data, schedulerUser.data]
   );
   const wsLists = useMemo<TKindSections[]>(
     () => [
       { kind: "coding-task", sections: codingWs.data?.sections ?? [] },
       { kind: "review", sections: reviewWs.data?.sections ?? [] },
+      { kind: "test", sections: testWs.data?.sections ?? [] },
       { kind: "scheduler", sections: schedulerWs.data?.sections ?? [] },
     ],
-    [codingWs.data, reviewWs.data, schedulerWs.data]
+    [codingWs.data, reviewWs.data, testWs.data, schedulerWs.data]
   );
 
   const entries = useMemo<TSectionEntry[]>(() => {
@@ -191,21 +242,34 @@ function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) 
     return map;
   }, [wsLists]);
 
-  const userError = codingUser.error || reviewUser.error || schedulerUser.error;
-  const wsError = codingWs.error || reviewWs.error || schedulerWs.error;
-  const userReady = codingUser.data !== undefined && reviewUser.data !== undefined && schedulerUser.data !== undefined;
+  const userError = codingUser.error || reviewUser.error || testUser.error || schedulerUser.error;
+  const wsError = codingWs.error || reviewWs.error || testWs.error || schedulerWs.error;
+  const userReady =
+    codingUser.data !== undefined &&
+    reviewUser.data !== undefined &&
+    testUser.data !== undefined &&
+    schedulerUser.data !== undefined;
   const workspaceReady =
-    !isAdmin || (codingWs.data !== undefined && reviewWs.data !== undefined && schedulerWs.data !== undefined);
+    !isAdmin ||
+    (codingWs.data !== undefined &&
+      reviewWs.data !== undefined &&
+      testWs.data !== undefined &&
+      schedulerWs.data !== undefined);
 
   async function refresh() {
     await Promise.all([
       codingUser.mutate(),
       reviewUser.mutate(),
+      testUser.mutate(),
       schedulerUser.mutate(),
       codingWs.mutate(),
       reviewWs.mutate(),
+      testWs.mutate(),
       schedulerWs.mutate(),
-      ...KINDS.map((kind) => mutate(["prompt-compiled", slug, kind, "user"] as const)),
+      // A section can appear in any (kind × work type) receipt, so drop them all.
+      ...KINDS.flatMap((kind) =>
+        WORK_TYPES.map((nextWorkType) => mutate(["prompt-compiled", slug, kind, "user", nextWorkType] as const))
+      ),
     ]);
   }
 
@@ -235,10 +299,14 @@ function SectionsLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) 
         )}
         {entries.map(({ section, kinds }) => (
           <SectionCard
-            key={section.key}
+            // workType in the key: remount on toggle so an open editor's
+            // draft preview and other local state can't survive as another
+            // work type's output.
+            key={`${workType}:${section.key}`}
             sectionId={sectionAnchorId(section.key)}
             slug={slug}
             previewKinds={kinds}
+            workType={workType}
             section={section}
             workspaceSection={wsByKey[section.key]}
             workspaceReady={workspaceReady}
@@ -273,38 +341,46 @@ function SectionNavigation({ entries }: { entries: TSectionEntry[] }) {
   );
 }
 
-function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
+function ReceiptLibrary({ slug, isAdmin, workType }: { slug: string; isAdmin: boolean; workType: TWorkTypeKey }) {
   const { t } = useTranslation();
-  const coding = useCompiledPrompt(slug, "coding-task");
-  const review = useCompiledPrompt(slug, "review");
-  const scheduler = useCompiledPrompt(slug, "scheduler");
-  const codingSections = usePromptSectionList(slug, "coding-task", "user");
-  const reviewSections = usePromptSectionList(slug, "review", "user");
-  const schedulerSections = usePromptSectionList(slug, "scheduler", "user");
+  const coding = useCompiledPrompt(slug, "coding-task", workType);
+  const review = useCompiledPrompt(slug, "review", workType);
+  const test = useCompiledPrompt(slug, "test", workType);
+  const scheduler = useCompiledPrompt(slug, "scheduler", workType);
+  const codingSections = usePromptSectionList(slug, "coding-task", "user", workType);
+  const reviewSections = usePromptSectionList(slug, "review", "user", workType);
+  const testSections = usePromptSectionList(slug, "test", "user", workType);
+  const schedulerSections = usePromptSectionList(slug, "scheduler", "user", workType);
 
   const compiledByKind: Partial<Record<TPromptKind, IPromptCompiledResponse>> = {
     "coding-task": coding.data,
     review: review.data,
+    test: test.data,
     scheduler: scheduler.data,
   };
   const sectionsByKind: Partial<Record<TPromptKind, IResolvedSection[]>> = {
     "coding-task": codingSections.data?.sections,
     review: reviewSections.data?.sections,
+    test: testSections.data?.sections,
     scheduler: schedulerSections.data?.sections,
   };
   const error =
     coding.error ||
     review.error ||
+    test.error ||
     scheduler.error ||
     codingSections.error ||
     reviewSections.error ||
+    testSections.error ||
     schedulerSections.error;
   const ready =
     coding.data !== undefined &&
     review.data !== undefined &&
+    test.data !== undefined &&
     scheduler.data !== undefined &&
     codingSections.data !== undefined &&
     reviewSections.data !== undefined &&
+    testSections.data !== undefined &&
     schedulerSections.data !== undefined;
 
   const entries: TReceiptEntry[] = [];
@@ -338,10 +414,13 @@ function ReceiptLibrary({ slug, isAdmin }: { slug: string; isAdmin: boolean }) {
         </div>
         {entries.map(({ kind, compiled, sections }) => (
           <ReceiptCard
-            key={kind}
+            // workType in the key: remount on toggle so a rendered preview
+            // can't linger as stale output under the other work type.
+            key={`${workType}:${kind}`}
             receiptId={receiptAnchorId(kind)}
             slug={slug}
             kind={kind}
+            workType={workType}
             compiled={compiled}
             sections={sections}
             isAdmin={isAdmin}
@@ -385,6 +464,7 @@ type SectionCardProps = {
   sectionId: string;
   slug: string;
   previewKinds: TPromptKind[];
+  workType: TWorkTypeKey;
   /** Effective (user-scope) resolution of the section. */
   section: IResolvedSection;
   /** Workspace-scope resolution of the same section, if loaded. */
@@ -399,6 +479,7 @@ function SectionCard({
   sectionId,
   slug,
   previewKinds,
+  workType,
   section,
   workspaceSection,
   workspaceReady,
@@ -482,6 +563,7 @@ function SectionCard({
         <SectionEditor
           slug={slug}
           previewKinds={previewKinds}
+          workType={workType}
           sectionKey={section.key}
           scope={editScope}
           seed={seedFor(editScope)}
@@ -519,6 +601,7 @@ function SourceBadge({ source }: { source: string }) {
 type SectionEditorProps = {
   slug: string;
   previewKinds: TPromptKind[];
+  workType: TWorkTypeKey;
   sectionKey: string;
   scope: TPromptScope;
   seed: string;
@@ -531,6 +614,7 @@ type SectionEditorProps = {
 function SectionEditor({
   slug,
   previewKinds,
+  workType,
   sectionKey,
   scope,
   seed,
@@ -675,6 +759,7 @@ function SectionEditor({
         <PromptPreviewForm
           slug={slug}
           kind={previewKind}
+          workType={workType}
           submitLabel={t("Preview draft")}
           draft={{ scope, sectionKey, body: draft }}
           nested
@@ -708,6 +793,7 @@ function ReceiptCard({
   receiptId,
   slug,
   kind,
+  workType,
   compiled,
   sections,
   isAdmin,
@@ -715,6 +801,7 @@ function ReceiptCard({
   receiptId: string;
   slug: string;
   kind: TPromptKind;
+  workType: TWorkTypeKey;
   compiled: IPromptCompiledResponse;
   sections: IResolvedSection[];
   isAdmin: boolean;
@@ -771,7 +858,7 @@ function ReceiptCard({
           {isAdmin && (
             <div className="flex flex-col gap-2 border-t border-subtle pt-3">
               <h2 className="text-13 font-medium text-primary">{t("Preview")}</h2>
-              <PromptPreviewForm slug={slug} kind={kind} submitLabel={t("Preview")} />
+              <PromptPreviewForm slug={slug} kind={kind} workType={workType} submitLabel={t("Preview")} />
             </div>
           )}
         </div>
@@ -783,6 +870,7 @@ function ReceiptCard({
 type PromptPreviewFormProps = {
   slug: string;
   kind: TPromptKind;
+  workType: TWorkTypeKey;
   submitLabel: string;
   /** When set, previews an unsaved draft of this section instead of the saved prompt. */
   draft?: { scope: TPromptScope; sectionKey: string; body: string };
@@ -794,7 +882,7 @@ type PromptPreviewFormProps = {
  * Shared "render against a real issue/binding" form used both standalone (the
  * admin PreviewPanel) and inside the section editor (unsaved-draft preview).
  */
-function PromptPreviewForm({ slug, kind, submitLabel, draft, nested }: PromptPreviewFormProps) {
+function PromptPreviewForm({ slug, kind, workType, submitLabel, draft, nested }: PromptPreviewFormProps) {
   const { t } = useTranslation();
   const promptStore = usePromptSection();
   const [target, setTarget] = useState("");
@@ -814,7 +902,9 @@ function PromptPreviewForm({ slug, kind, submitLabel, draft, nested }: PromptPre
     setLoading(true);
     setError(null);
     try {
-      const targetField = isScheduler ? { binding_id: target } : { issue_id: target };
+      // Pin the page's work type so the preview matches the sections shown,
+      // rather than the issue's own effective work type.
+      const targetField = isScheduler ? { binding_id: target } : { issue_id: target, work_type: workType };
       const payload = draft
         ? { ...targetField, scope: draft.scope, section_key: draft.sectionKey, body: draft.body }
         : targetField;
