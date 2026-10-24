@@ -14,6 +14,29 @@ export {
 export type { ModuleAnalyticsSidebarProps } from "./ModuleAnalyticsSidebar.js";
 export { MODULE_NAME_EMPTY, ModuleDescriptionField, ModuleNameField } from "./ModuleIdentityFields.js";
 export type { ModuleDescriptionFieldProps, ModuleNameFieldProps } from "./ModuleIdentityFields.js";
+export { ModuleLinkDialog } from "./ModuleLinkDialog.js";
+export type { ModuleLinkDialogProps, ModuleLinkDraft } from "./ModuleLinkDialog.js";
+export { ModuleLinksSection } from "./ModuleLinksSection.js";
+export type { ModuleLinksSectionProps } from "./ModuleLinksSection.js";
+export {
+  MODULE_LINK_ADD_TITLE,
+  MODULE_LINK_COPIED,
+  MODULE_LINK_CREATED,
+  MODULE_LINK_DELETED,
+  MODULE_LINK_UPDATED,
+  MODULE_LINK_UPDATE_TITLE,
+  MODULE_LINKS_EMPTY,
+  MODULE_LINKS_TITLE,
+  defaultModuleLinkScheme,
+  describeModuleLinkMeta,
+  moduleLinkFavicon,
+  moduleLinkTitle,
+  moduleLinksNeedAuthors,
+  resolveModuleLinkAuthor,
+} from "./moduleLinksModel.js";
+export type { ModuleLinkSummary } from "./moduleLinksModel.js";
+export { useModuleLinksWrite } from "./useModuleLinksWrite.js";
+export type { ModuleLinkUpdate, ModuleLinksWriteArgs } from "./useModuleLinksWrite.js";
 export { MODULE_STATUS_TONES, ModuleStatusPicker } from "./ModuleStatusPicker.js";
 export type { ModuleStatusPickerProps } from "./ModuleStatusPicker.js";
 export {

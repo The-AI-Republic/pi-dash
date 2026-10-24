@@ -9,9 +9,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   jsonResponse,
+  makeDirectoryEntry,
+  makeModuleLink,
   makeModuleRow,
   makeProjectDetails,
   makeProjectRow,
+  MODULES_LEAD_ID,
+  MODULES_LINK_ID,
   MODULES_MODULE_ID,
   MODULES_PROJECT_ID,
   MODULES_WS_ID,
@@ -52,5 +56,21 @@ describe("module fixtures", () => {
     expect(response.url).toBe("https://api.test/thing");
     expect(await response.text()).toBe('{"ok":true}');
     expect(response.headers.get("content-type")).toBeNull();
+  });
+
+  it("builds a module link with a title, URL and author", () => {
+    const link = makeModuleLink();
+    expect(link.id).toBe(MODULES_LINK_ID);
+    expect(link.title).toBe("Launch plan");
+    expect(link.url).toBe("https://docs.example.com/launch");
+    expect(link.created_by).toBe(MODULES_LEAD_ID);
+    expect(makeModuleLink({ title: null })).toMatchObject({ title: null });
+  });
+
+  it("builds a directory membership keyed by the lead", () => {
+    const entry = makeDirectoryEntry();
+    expect(entry.member.id).toBe(MODULES_LEAD_ID);
+    expect(entry.member.display_name).toBe("Ada Lovelace");
+    expect(makeDirectoryEntry({ member: { display_name: "Grace" } }).member.display_name).toBe("Grace");
   });
 });

@@ -55,6 +55,7 @@ const DETAIL_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/modules/${MODUL
 const ARCHIVED_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/archived-modules/${MODULE}/`;
 const ESTIMATES_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/estimates/`;
 const ROLES_PATH = `/api/users/me/workspaces/${SLUG}/project-roles/`;
+const LINKS_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/modules/${MODULE}/module-links/`;
 
 function detailFixture(overrides: Partial<ModuleDetail> = {}): ModuleDetail {
   return {
@@ -153,6 +154,7 @@ interface Harness {
   patches: Array<Record<string, unknown>>;
   detailCalls: number;
   roles: Record<string, number>;
+  linkPosts: Array<Record<string, unknown>>;
 }
 
 let harness: Harness;
@@ -169,6 +171,7 @@ beforeEach(() => {
     patches: [],
     detailCalls: 0,
     roles: {},
+    linkPosts: [],
   };
   createAppClient("https://api.test", (async (url: string, init?: RequestInit) => {
     if (url.endsWith(DETAIL_PATH) || url.endsWith(ARCHIVED_PATH)) {
@@ -208,6 +211,25 @@ beforeEach(() => {
         url,
         headers: { get: () => null },
         text: async () => JSON.stringify(harness.roles),
+      } as never;
+    }
+    if (url.endsWith(LINKS_PATH) && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      harness.linkPosts.push(body);
+      return {
+        status: 201,
+        url,
+        headers: { get: () => null },
+        text: async () =>
+          JSON.stringify({
+            id: "623e4567-e89b-12d3-a456-426614174005",
+            title: body["title"] ?? null,
+            url: body["url"],
+            created_at: "2026-10-20T10:00:00Z",
+            updated_at: "2026-10-20T10:00:00Z",
+            created_by: null,
+            updated_by: null,
+          }),
       } as never;
     }
     throw new Error(`unexpected request: ${url}`);
@@ -410,6 +432,73 @@ describe("ModuleAnalyticsSidebarContent", () => {
     expect(screen.getByLabelText("Module name")).toBeDisabled();
     expect(screen.getByTestId("lead-picker")).toBeDisabled();
   });
+
+  it("closes the tree with the links section below the progress slot", () => {
+    renderContent({
+      progress: <p data-testid="progress-node">Progress goes here</p>,
+      record: detailFixture({
+        link_module: [
+          {
+            id: "523e4567-e89b-12d3-a456-426614174004",
+            title: "Launch plan",
+            url: "https://docs.example.com/launch",
+            created_at: "2026-10-01T10:00:00Z",
+            updated_at: "2026-10-01T10:00:00Z",
+            created_by: null,
+            updated_by: null,
+          },
+        ],
+      }),
+    });
+    const progress = screen.getByTestId("progress-node");
+    const links = screen.getByTestId("modules-links-section");
+    expect(progress.compareDocumentPosition(links) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(links).getByRole("link", { name: "Launch plan" })).toHaveAttribute(
+      "href",
+      "https://docs.example.com/launch"
+    );
+  });
+
+  it("keeps the links rows without actions on the read-only peek mount", () => {
+    renderContent({
+      readOnly: true,
+      record: detailFixture({
+        link_module: [
+          {
+            id: "523e4567-e89b-12d3-a456-426614174004",
+            title: null,
+            url: "https://docs.example.com/launch",
+            created_at: "2026-10-01T10:00:00Z",
+            updated_at: "2026-10-01T10:00:00Z",
+            created_by: null,
+            updated_by: null,
+          },
+        ],
+      }),
+    });
+    const links = screen.getByTestId("modules-links-section");
+    expect(within(links).getByRole("link", { name: "https://docs.example.com/launch" })).toBeInTheDocument();
+    expect(within(links).getByRole("button", { name: "Copy link" })).toBeInTheDocument();
+    expect(within(links).queryByRole("button", { name: "Add link" })).not.toBeInTheDocument();
+    expect(within(links).queryByRole("button", { name: "Edit link" })).not.toBeInTheDocument();
+    expect(within(links).queryByRole("button", { name: "Delete link" })).not.toBeInTheDocument();
+  });
+
+  it("shows archived links read-only without meta", () => {
+    renderContent({
+      readOnly: true,
+      archived: true,
+      record: archivedFixture({
+        link_module: [
+          { id: "523e4567-e89b-12d3-a456-426614174004", title: "Old plan", url: "https://old.example.com" },
+        ],
+      }),
+    });
+    const links = screen.getByTestId("modules-links-section");
+    expect(within(links).getByRole("link", { name: "Old plan" })).toBeInTheDocument();
+    expect(within(links).queryByText(/Added /)).not.toBeInTheDocument();
+    expect(within(links).queryByRole("button", { name: "Add link" })).not.toBeInTheDocument();
+  });
 });
 
 describe("ModuleAnalyticsSidebar", () => {
@@ -470,6 +559,22 @@ describe("ModuleAnalyticsSidebar", () => {
     renderSidebar({ progress: <p>Progress goes here</p> });
     expect(await screen.findByTestId("modules-analytics-sidebar")).toBeInTheDocument();
     expect(screen.getByText("Progress goes here")).toBeInTheDocument();
+  });
+
+  it("creates a link through the section and shows the stored row", async () => {
+    renderSidebar();
+    const sidebar = await screen.findByTestId("modules-analytics-sidebar");
+    const links = within(sidebar).getByTestId("modules-links-section");
+    fireEvent.click(within(links).getByRole("button", { name: "Links" }));
+    fireEvent.click(within(links).getByRole("button", { name: "Add link" }));
+    const dialog = screen.getByRole("dialog", { name: "Add link" });
+    fireEvent.change(within(dialog).getByLabelText("URL"), { target: { value: "example.com" } });
+    fireEvent.change(within(dialog).getByLabelText("Display title"), { target: { value: "Docs" } });
+    fireEvent.click(within(dialog).getByTestId("modules-link-submit"));
+    await waitFor(() => expect(harness.linkPosts).toEqual([{ url: "http://example.com", title: "Docs" }]));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Module link created successfully."));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(await within(links).findByRole("link", { name: "Docs" })).toHaveAttribute("href", "http://example.com");
   });
 
   it("derives read-only standing from the project role map when no override is passed", async () => {

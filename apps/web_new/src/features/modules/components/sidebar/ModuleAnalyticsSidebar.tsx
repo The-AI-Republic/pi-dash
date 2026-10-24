@@ -9,7 +9,8 @@
 // members, completed-over-total work items and, only for a points
 // estimate system, completed-over-total points. Every edit is a partial
 // PATCH through the shared mutation hook; the `progress` slot lets slice L
-// insert the progress section below these fields.
+// insert the progress section below these fields, and slice M's links
+// section closes the tree below it.
 
 import { Button, IconButton, Skeleton } from "@pidash/kit";
 import { useQuery } from "@tanstack/react-query";
@@ -31,6 +32,7 @@ import { isProjectAuthorized } from "../../../projects/index.js";
 import { MemberPicker } from "../../../../shared/pickers/index.js";
 import { formatModuleDay, parseModuleDay } from "../../lib/moduleDates.js";
 import { ModuleDescriptionField, ModuleNameField } from "./ModuleIdentityFields.js";
+import { ModuleLinksSection } from "./ModuleLinksSection.js";
 import { ModuleStatusPicker } from "./ModuleStatusPicker.js";
 import {
   MODULE_SAVE_FAILED_BODY,
@@ -270,6 +272,14 @@ export function ModuleAnalyticsSidebarContent({
       </div>
 
       {progress}
+      <ModuleLinksSection
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        moduleId={record.id}
+        links={record.link_module}
+        canEdit={editable}
+        client={client}
+      />
     </div>
   );
 }
