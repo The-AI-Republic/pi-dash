@@ -84,6 +84,11 @@ jobs:
       EMAIL_USE_TLS: "0"
       EMAIL_USE_SSL: "0"
       EMAIL_FROM: Pi Dash Contract <contract@example.com>
+      # PIDASHCONV-1470: the GitLab gate replay cases seed this fixed
+      # unresolvable self-host (the Rust worker must allow-list it at boot)
+      # with a Fernet-encrypted token (pytest and the worker share SECRET_KEY).
+      GITLAB_ALLOWED_HOSTS: https://gitlab-allowed.invalid
+      SECRET_KEY: "contract-tests-fixed-secret"
       BASE_URL: http://localhost:8000
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
       CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash

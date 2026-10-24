@@ -6,9 +6,38 @@ in reverse-FK order on teardown, so reruns are hermetic.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+
+from cryptography.fernet import Fernet
 from psycopg.types.json import Jsonb
 
 from _harness import db
+
+
+# Fixed self-hosted GitLab name for the PIDASHCONV-1470 gate tests. The
+# `.invalid` TLD (RFC 2606) never resolves, so a worker that passes the
+# allowlist gate fails fast at DNS with no stub, proxy, or fixed port —
+# and the must-use-HTTPS + allowlist gates stay fully exercised. Both
+# workers under test must boot with this host in GITLAB_ALLOWED_HOSTS.
+GITLAB_SELFHOST = "https://gitlab-allowed.invalid"
+
+
+def encrypt_token_for_worker(plaintext: str, secret_key: str) -> str:
+    """Fernet-encrypt a PAT exactly like Django's ``encrypt_data``.
+
+    Mirrors ``apps/api/pi_dash/license/utils/encryption.py`` (``derive_key``
+    = PBKDF2-HMAC-SHA256 over ``secret_key`` salted ``b"salt"`` with 100000
+    rounds, urlsafe-b64; same KDF as ``Keyring::derive_fernet_key`` in
+    ``pidash-db``). ``secret_key`` must equal the SECRET_KEY the worker
+    under test boots with. Production always stores tokens encrypted
+    (``integrations/git/services.py:90,104-108``), so gate tests seed the
+    ciphertext form.
+    """
+    if not plaintext:
+        return ""
+    dk = hashlib.pbkdf2_hmac("sha256", secret_key.encode(), b"salt", 100000)
+    return Fernet(base64.urlsafe_b64encode(dk)).encrypt(plaintext.encode()).decode()
 
 
 class Scope:
@@ -172,6 +201,33 @@ def github_binding(database_url: str, anchor: dict, scope: Scope, *, token: str)
     return {"account_id": account_id, "repository_id": repo_id, "binding_id": binding_id}
 
 
+def gitlab_binding(
+    database_url: str,
+    anchor: dict,
+    scope: Scope,
+    *,
+    host_url: str = GITLAB_SELFHOST,
+    token: str,
+    suffix: str = "ct-gitlab",
+) -> dict:
+    """One enabled GitLab binding (PIDASHCONV-1470 gate tests).
+
+    Pass an ``encrypt_token_for_worker()`` ciphertext as ``token`` to mirror
+    production storage. ``host_url`` defaults to the fixed unresolvable
+    self-host the workers under test allow-list at boot.
+    """
+    account_id = provider_account(
+        database_url, anchor, scope, provider="gitlab", host_url=host_url, token=token
+    )
+    repo_id = repository(
+        database_url, scope, provider="gitlab", host_url=host_url, suffix=suffix
+    )
+    binding_id = binding(
+        database_url, anchor, scope, account_id=account_id, repository_id=repo_id
+    )
+    return {"account_id": account_id, "repository_id": repo_id, "binding_id": binding_id}
+
+
 def unknown_provider_binding(
     database_url: str, anchor: dict, scope: Scope, *, token: str = "contract-test-invalid-token"
 ) -> dict:
@@ -212,6 +268,7 @@ def git_issue_sync(
     issue_id: str,
     external_iid: str = "ct-4242",
     metadata: dict | None = None,
+    provider: str = "github",
 ) -> str:
     """Insert one GitIssueSync row for post_completion_comment probes."""
     project = anchor["projects"][0]
@@ -220,10 +277,11 @@ def git_issue_sync(
         "INSERT INTO git_issue_syncs (id, created_at, updated_at, provider,"
         " external_id, external_iid, web_url, remote_state, metadata,"
         " binding_id, issue_id, project_id, workspace_id)"
-        " VALUES (%s, now(), now(), 'github', %s, %s, %s, 'open', %s, %s, %s, %s, %s)"
+        " VALUES (%s, now(), now(), %s, %s, %s, %s, 'open', %s, %s, %s, %s, %s)"
         " RETURNING id",
         (
             db.new_uuid(),
+            provider,
             f"ct-ext-{external_iid}",
             external_iid,
             f"https://github.com/contract-test/ct/issues/{external_iid}",
