@@ -10,6 +10,7 @@ import { queryOptions } from "@tanstack/react-query";
 import {
   getInstanceBootstrapForStartup,
   getMe,
+  getSpaceBoardMeta,
   getSpaceBoardSettings,
   listSpaceBoardIssues,
   listSpaceBoardStates,
@@ -17,6 +18,7 @@ import {
   type ApiClient,
   type Me,
   type SpaceBoardIssuePage,
+  type SpaceBoardMeta,
   type SpaceBoardSettings,
   type SpaceBoardState,
 } from "@pidash/api-client";
@@ -81,6 +83,21 @@ export function spaceStatesQueryOptions(client: ApiClient, anchor: string) {
 }
 
 /**
+ * Board display metadata for the document head (SPC-007). Gated on a
+ * valid anchor so a malformed value never produces a request; unknown
+ * anchors answer 404 and the head falls back to the generic tags.
+ */
+export function spaceMetaQueryOptions(client: ApiClient, anchor: string) {
+  return queryOptions({
+    queryKey: spaceKeys.meta(anchor),
+    queryFn: () => getSpaceBoardMeta(client, anchor),
+    enabled: isValidAnchor(anchor),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+/**
  * Resolve a legacy project address. Anything the public endpoint refuses
  * (unknown, unpublished, malformed id, non-project payload) is null and
  * lands on the generic not-found page; a transient failure also falls back
@@ -100,4 +117,4 @@ export async function resolveLegacySpaceAnchor(
   }
 }
 
-export type { Me, SpaceBoardIssuePage, SpaceBoardSettings, SpaceBoardState };
+export type { Me, SpaceBoardIssuePage, SpaceBoardMeta, SpaceBoardSettings, SpaceBoardState };

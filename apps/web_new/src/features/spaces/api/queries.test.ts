@@ -9,6 +9,7 @@ import {
   resolveLegacySpaceAnchor,
   spaceInstanceQueryOptions,
   spaceIssuesQueryOptions,
+  spaceMetaQueryOptions,
   spaceSettingsQueryOptions,
   spaceStatesQueryOptions,
   spaceViewerQueryOptions,
@@ -45,6 +46,16 @@ describe("space query options", () => {
     expect(spaceSettingsQueryOptions(client, "bad anchor").enabled).toBe(false);
     expect(spaceIssuesQueryOptions(client, "anchor-1").queryKey).toEqual(["spaces", "anchor", "anchor-1", "issues"]);
     expect(spaceStatesQueryOptions(client, "anchor-1").queryKey).toEqual(["spaces", "anchor", "anchor-1", "states"]);
+  });
+
+  it("keys board metadata by anchor and never requests a malformed one", async () => {
+    const meta = { name: "Public board", description: "Team roadmap" };
+    const valid = spaceMetaQueryOptions(clientWith(transportOf(200, meta)), "anchor-1");
+    expect(valid.queryKey).toEqual(["spaces", "anchor", "anchor-1", "meta"]);
+    expect(valid.enabled).toBe(true);
+    expect(valid.retry).toBe(false);
+    await expect(valid.queryFn!({} as never)).resolves.toMatchObject(meta);
+    expect(spaceMetaQueryOptions(clientWith(transportOf(200, meta)), "bad anchor").enabled).toBe(false);
   });
 
   it("reads the viewer as anonymous on 401 and on any other failure", async () => {

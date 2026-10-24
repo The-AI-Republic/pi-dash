@@ -113,6 +113,8 @@ function renderSpace(path: string, overrides: { settings?: () => Awaited<ReturnT
       });
     }
     if (url.includes("/states/")) return reply(200, []);
+    if (url.includes("/meta/")) return reply(200, { name: "Public board", description: "Team roadmap" });
+    if (url.includes("/auth/get-csrf-token/")) return reply(200, { csrf_token: "csrf-test" });
     if (url.includes("/anchor/")) return reply(200, settings);
     throw new Error(`unexpected request ${url}`);
   };
@@ -179,6 +181,30 @@ describe("spaces route tree", () => {
   it("renders the landing composition point at the public root", async () => {
     renderSpace("/spaces/");
     expect(await screen.findByTestId("space-landing")).toBeInTheDocument();
+  });
+
+  it("hands the decoded landing search to the auth gate", async () => {
+    renderSpace("/spaces/?next_path=%2Fissues%2Fanchor-1&email=ada%40example.com&error_code=5075");
+    expect(await screen.findByTestId("space-auth-card")).toBeInTheDocument();
+    expect(screen.getByLabelText("Email address")).toHaveValue("ada@example.com");
+    expect(screen.getByTestId("space-auth-banner")).toBeInTheDocument();
+  });
+
+  it("claims noindex with the landing title at the public root", async () => {
+    renderSpace("/spaces/");
+    await screen.findByTestId("space-landing");
+    await waitFor(() => expect(document.title).toBe("Pi Dash — Public boards"));
+    expect(document.head.querySelector('meta[name="robots"]')).toHaveAttribute("content", "noindex, nofollow");
+  });
+
+  it("claims the per-board tags with noindex on the board address", async () => {
+    renderSpace("/spaces/issues/anchor-1/");
+    await waitFor(() => expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board"));
+    await waitFor(() => expect(document.title).toBe("Public board"));
+    expect(document.head.querySelector('meta[property="og:title"]')).toHaveAttribute("content", "Public board");
+    expect(document.head.querySelector('meta[name="robots"]')).toHaveAttribute("content", "noindex, nofollow");
+    expect(document.head.querySelector('meta[property="og:image"]')).toBeNull();
+    expect(document.head.querySelector('meta[name="twitter:image"]')).toBeNull();
   });
 
   it("renders the fixed generic not-found address", async () => {

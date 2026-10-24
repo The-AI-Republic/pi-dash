@@ -11,5 +11,6 @@ export const spaceKeys = {
   settings: (anchor: string) => ["spaces", "anchor", anchor, "settings"] as const,
   issues: (anchor: string) => ["spaces", "anchor", anchor, "issues"] as const,
   states: (anchor: string) => ["spaces", "anchor", anchor, "states"] as const,
+  meta: (anchor: string) => ["spaces", "anchor", anchor, "meta"] as const,
   legacy: (workspaceSlug: string, projectId: string) => ["spaces", "legacy", workspaceSlug, projectId] as const,
 } as const;

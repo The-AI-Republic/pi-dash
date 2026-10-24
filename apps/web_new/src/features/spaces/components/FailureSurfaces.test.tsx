@@ -13,6 +13,7 @@ import {
   SpaceAnchorNotFound,
   SpaceBoardError,
 } from "./FailureSurfaces.js";
+import { SPACE_HEAD_DESCRIPTION_FALLBACK, SPACE_HEAD_TITLE_FALLBACK } from "../lib/boardHead.js";
 import { reloadSpaceCrash, SpaceCrashScreen, SPACE_CRASH_HEADING, SPACE_SUPPORT_HREF } from "./CrashScreen.js";
 import {
   reloadSpacePage,
@@ -22,9 +23,37 @@ import {
 } from "./InstanceFailureScreen.js";
 
 afterEach(() => {
+  document.title = "";
+  for (const tag of [...document.head.querySelectorAll("meta")]) tag.remove();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
+
+function expectGenericFallbackTags(): void {
+  expect(document.head.querySelector('meta[name="robots"]')).toHaveAttribute("content", "noindex, nofollow");
+  expect(document.head.querySelector('meta[name="description"]')).toHaveAttribute(
+    "content",
+    SPACE_HEAD_DESCRIPTION_FALLBACK
+  );
+  expect(document.head.querySelector('meta[property="og:title"]')).toHaveAttribute(
+    "content",
+    SPACE_HEAD_TITLE_FALLBACK
+  );
+  expect(document.head.querySelector('meta[property="og:description"]')).toHaveAttribute(
+    "content",
+    SPACE_HEAD_DESCRIPTION_FALLBACK
+  );
+  expect(document.head.querySelector('meta[name="twitter:title"]')).toHaveAttribute(
+    "content",
+    SPACE_HEAD_TITLE_FALLBACK
+  );
+  expect(document.head.querySelector('meta[name="twitter:description"]')).toHaveAttribute(
+    "content",
+    SPACE_HEAD_DESCRIPTION_FALLBACK
+  );
+  expect(document.head.querySelector('meta[property="og:image"]')).toBeNull();
+  expect(document.head.querySelector('meta[name="twitter:image"]')).toBeNull();
+}
 
 describe("SpaceAnchorNotFound", () => {
   it("renders the anchor illustration and no board chrome", () => {
@@ -35,6 +64,12 @@ describe("SpaceAnchorNotFound", () => {
     expect(document.querySelector("header")).toBeNull();
     expect(document.title).toContain("Board not found");
   });
+
+  it("keeps its own title and noindex while carrying the generic description and social tags", () => {
+    render(<SpaceAnchorNotFound />);
+    expect(document.title).toContain("Board not found");
+    expectGenericFallbackTags();
+  });
 });
 
 describe("SpaceBoardError", () => {
@@ -44,6 +79,12 @@ describe("SpaceBoardError", () => {
     expect(screen.getByRole("heading", { level: 1, name: "We couldn't load this board" })).toBeInTheDocument();
     expect(screen.getByRole("img")).toHaveAttribute("src", SPACE_BOARD_ERROR_ART);
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("keeps its own title and noindex while carrying the generic description and social tags", () => {
+    render(<SpaceBoardError />);
+    expect(document.title).toContain("Board error");
+    expectGenericFallbackTags();
   });
 });
 

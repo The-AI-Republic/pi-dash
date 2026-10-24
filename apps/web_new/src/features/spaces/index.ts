@@ -5,3 +5,8 @@
 // each slice adds its own exports and keeps the other slices' lines.
 
 export * from "./auth/index.js";
+export * from "./lib/boardHead.js";
+export * from "./lib/returnPath.js";
+export { LandingGate, LandingGuidance, spaceLandingCapabilities } from "./components/LandingGate.js";
+export type { LandingGateProps, LandingGuidanceProps } from "./components/LandingGate.js";
+export { SpaceBoardHead } from "./components/SpaceBoardHead.js";

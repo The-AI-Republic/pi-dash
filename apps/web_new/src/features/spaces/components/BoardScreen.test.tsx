@@ -17,6 +17,7 @@ vi.mock("../api/client.js", () => ({ spaceRuntime: runtime }));
 
 import { createClient } from "@pidash/api-client";
 
+import { SPACE_HEAD_DESCRIPTION_FALLBACK, SPACE_HEAD_TITLE_FALLBACK } from "../lib/boardHead.js";
 import { BoardScreen } from "./BoardScreen.js";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
@@ -123,8 +124,29 @@ function renderBoard(routes: Routes = {}, anchor = ANCHOR): string[] {
 }
 
 afterEach(() => {
+  document.title = "";
+  for (const tag of [...document.head.querySelectorAll("meta")]) tag.remove();
   vi.restoreAllMocks();
 });
+
+function expectGenericFallbackHead(titlePart: string): void {
+  expect(document.title).toContain(titlePart);
+  expect(document.head.querySelector('meta[name="robots"]')).toHaveAttribute("content", "noindex, nofollow");
+  expect(document.head.querySelector('meta[name="description"]')).toHaveAttribute(
+    "content",
+    SPACE_HEAD_DESCRIPTION_FALLBACK
+  );
+  expect(document.head.querySelector('meta[property="og:title"]')).toHaveAttribute(
+    "content",
+    SPACE_HEAD_TITLE_FALLBACK
+  );
+  expect(document.head.querySelector('meta[property="og:description"]')).toHaveAttribute(
+    "content",
+    SPACE_HEAD_DESCRIPTION_FALLBACK
+  );
+  expect(document.head.querySelector('meta[property="og:image"]')).toBeNull();
+  expect(document.head.querySelector('meta[name="twitter:image"]')).toBeNull();
+}
 
 describe("BoardScreen", () => {
   it("renders the anchor illustration for a malformed anchor without a request", () => {
@@ -172,6 +194,31 @@ describe("BoardScreen", () => {
     renderBoard({ states: () => reply(500, { detail: "down" }) });
     expect(await screen.findByTestId("space-board-error")).toBeInTheDocument();
     expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board");
+  });
+
+  it("keeps the generic description and social tags on a malformed anchor", () => {
+    renderBoard({}, "bad anchor");
+    expect(screen.getByTestId("space-anchor-not-found")).toBeInTheDocument();
+    expectGenericFallbackHead("Board not found");
+  });
+
+  it("keeps the generic description and social tags on an unknown anchor", async () => {
+    renderBoard({ settings: () => reply(404, { detail: "missing" }) });
+    expect(await screen.findByTestId("space-anchor-not-found")).toBeInTheDocument();
+    expectGenericFallbackHead("Board not found");
+  });
+
+  it("keeps the generic description and social tags on a settings failure", async () => {
+    renderBoard({ settings: () => reply(500, { detail: "down" }) });
+    expect(await screen.findByTestId("space-board-error")).toBeInTheDocument();
+    expectGenericFallbackHead("Board error");
+  });
+
+  it("keeps the generic description and social tags on an issues failure", async () => {
+    renderBoard({ issues: () => reply(500, { detail: "down" }) });
+    expect(await screen.findByTestId("space-board-error")).toBeInTheDocument();
+    expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board");
+    expectGenericFallbackHead("Board error");
   });
 
   it("renders grouped issue rows with the public key once data settles", async () => {
