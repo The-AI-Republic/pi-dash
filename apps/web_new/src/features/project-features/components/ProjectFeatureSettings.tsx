@@ -28,9 +28,14 @@ import { isFeatureEnabled, nextFeatureValue, type ProjectFeatureDef } from "../l
 
 export interface ProjectFeatureSettingsProps {
   feature: ProjectFeatureDef;
+  /**
+   * Runs after a successful write, for product areas that keep their own
+   * reads of the flag and must refresh them without a reload.
+   */
+  onUpdated?: (() => void) | undefined;
 }
 
-export function ProjectFeatureSettings({ feature }: ProjectFeatureSettingsProps): React.ReactElement {
+export function ProjectFeatureSettings({ feature, onUpdated }: ProjectFeatureSettingsProps): React.ReactElement {
   const { workspaceSlug, projectId } = useProjectSettings();
   const project = useProjectRow(workspaceSlug, projectId);
   const update = useUpdateProjectFeature(workspaceSlug);
@@ -44,11 +49,13 @@ export function ProjectFeatureSettings({ feature }: ProjectFeatureSettingsProps)
     update.mutate(
       { projectId, patch: { [feature.flag]: next } as FeaturePatch },
       {
-        onSuccess: () =>
+        onSuccess: () => {
           notice.settle({
             title: FEATURE_UPDATE_SUCCESS_TITLE,
             description: FEATURE_UPDATE_SUCCESS_MESSAGE,
-          }),
+          });
+          onUpdated?.();
+        },
         onError: () =>
           notice.settle({
             title: FEATURE_UPDATE_FAILED_TITLE,

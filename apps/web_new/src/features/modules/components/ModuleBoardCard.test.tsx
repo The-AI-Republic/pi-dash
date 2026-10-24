@@ -7,7 +7,7 @@
 // carries the module identity, and the header, footer and actions slots
 // mount outside the name link.
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -48,6 +48,23 @@ describe("ModuleBoardCard", () => {
     expect(card).toHaveAttribute("data-module-id", MODULES_MODULE_ID);
     expect(card).toHaveAttribute("data-module-name", "Card");
     expect(card).toHaveAttribute("data-module-status", "paused");
+  });
+
+  it("is not draggable and carries no drag handler (MOD-041)", () => {
+    render(<ModuleBoardCard workspaceSlug="acme" projectId={MODULES_PROJECT_ID} module={makeModuleRow()} />);
+    const card = screen.getByTestId("modules-board-card");
+    expect(card).not.toHaveAttribute("draggable");
+    for (const handler of ["ondragstart", "ondragend", "ondragover", "ondrop", "ondragenter", "ondragleave"]) {
+      expect(card).not.toHaveAttribute(handler);
+    }
+    expect(within(card).queryAllByRole("button")).toEqual([]);
+    expect(card.querySelector("[draggable], [tabindex]")).toBeNull();
+  });
+
+  it("offers no export, import or print action (MOD-041)", () => {
+    render(<ModuleBoardCard workspaceSlug="acme" projectId={MODULES_PROJECT_ID} module={makeModuleRow()} />);
+    const card = screen.getByTestId("modules-board-card");
+    expect(card.textContent ?? "").not.toMatch(/export|import|print|download|csv/i);
   });
 
   it("mounts the header, footer and action slots outside the name link", () => {

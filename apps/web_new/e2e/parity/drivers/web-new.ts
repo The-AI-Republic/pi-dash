@@ -263,6 +263,7 @@ import type {
   WsSettingsApiTokenRow,
   SettingsGeneralField,
   CommentActivityTraffic,
+  ModulesXPaletteMenuItem,
 } from "./parity-driver";
 
 /**
@@ -18623,6 +18624,192 @@ export class WebNewDriver implements ParityDriver {
     return (await content.getByTestId("gantt-bar").count()) > 0;
   }
 
+  // --- Settings toggle and flag gate (NEWFRONT-806, MOD-036) ---
+
+  /**
+   * Open one project's Modules feature tab and settle on whichever body it
+   * shows: the modules switch (admin standing) or the settings shell's
+   * not-authorized body. Both counts are stable, so a direct address never
+   * leaves the caller reading a half-mounted screen.
+   */
+  async modulesXOpenSettingsModules(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/features/modules`, {
+      waitUntil: "domcontentloaded",
+      timeout: 120_000,
+    });
+    await this.page.waitForLoadState("domcontentloaded");
+    const settled = await Promise.race([
+      this.page
+        .getByRole("switch", { name: "Enable modules", exact: true })
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => true,
+          () => false
+        ),
+      this.page
+        .getByTestId("project-settings-denied")
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
+    if (!settled) throw new Error("[parity] the modules feature tab settled on neither the switch nor the denial.");
+  }
+
+  async modulesXSettingsShowsNotAuthorized(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("project-settings-denied"));
+  }
+
+  async modulesXModulesToggleState(): Promise<boolean | null> {
+    const toggle = this.page.getByRole("switch", { name: "Enable modules", exact: true }).first();
+    if ((await toggle.count()) === 0) return null;
+    if (!(await this.isShown(toggle))) return null;
+    return toggle.isChecked().catch(() => null);
+  }
+
+  async modulesXFlipModulesToggle(): Promise<void> {
+    const toggle = this.page.getByRole("switch", { name: "Enable modules", exact: true }).first();
+    await toggle.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.flipProjectFeatureSwitch(toggle);
+  }
+
+  // --- Palette module menus (NEWFRONT-806, MOD-037) ---
+
+  /**
+   * The rows of the open palette page, one per module. Each row is one
+   * `role="option"`; the status mark sits in the decorative slot ahead of
+   * the title and the selection check (member pickers only) follows the
+   * hint. The jump list draws no check, so `hasCheck` stays false there.
+   */
+  async modulesXPaletteModuleMenuItems(): Promise<ModulesXPaletteMenuItem[]> {
+    const items = this.paletteItems();
+    const total = await items.count();
+    const out: ModulesXPaletteMenuItem[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const item = items.nth(index);
+      if (!(await this.isShown(item))) continue;
+      const title = await item
+        .getByTestId("palette-option-title")
+        .first()
+        .innerText()
+        .catch(() => null);
+      const text = (title ?? (await item.innerText().catch(() => null)) ?? "").replace(/\s+/g, " ").trim();
+      if (text === "") continue;
+      const icon = item.getByTestId("palette-option-icon");
+      out.push({ name: text, hasIcon: (await icon.count()) > 0, hasCheck: (await item.innerText()).includes("✓") });
+    }
+    return out;
+  }
+
+  async modulesXActivatePaletteModuleMenuItem(name: string): Promise<void> {
+    const item = this.paletteItems().filter({ hasText: name }).first();
+    await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  // --- Keyboard (NEWFRONT-806, MOD-040) ---
+
+  /**
+   * Press one key with neutral page focus. Escape is the exception: it has
+   * to reach whatever holds focus (a dialog, a menu, the search field) to
+   * do its work, so that press leaves focus alone.
+   */
+  async modulesXPressKey(key: string): Promise<void> {
+    if (key !== "Escape") await this.modulesXNeutralFocus();
+    await this.page.keyboard.press(key);
+    await this.page.waitForTimeout(150);
+  }
+
+  /**
+   * Type a two-key sequence back to back. The shell forgets a partial
+   * sequence after a second, so the keys go down with no settle between
+   * them and the preamble happens only once, before the first key.
+   */
+  async modulesXPressKeySequence(sequence: string): Promise<void> {
+    await this.modulesXNeutralFocus();
+    for (const key of sequence) {
+      await this.page.keyboard.press(key);
+    }
+    await this.page.waitForTimeout(150);
+  }
+
+  /** Ground focus on the page body so a bare key reaches the shell. */
+  private async modulesXNeutralFocus(): Promise<void> {
+    await this.page.evaluate(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement) active.blur();
+    });
+  }
+
+  // --- Drag and export negatives (NEWFRONT-806, MOD-041) ---
+
+  /**
+   * Press a list row, travel to another row and release over it. A row
+   * that reorders itself on a drag would move here; the modules rows only
+   * link and carry inline controls, so the order and the server stay put.
+   */
+  async modulesXAttemptRowDrag(sourceName: string, targetName: string): Promise<void> {
+    await this.modulesXDragItemByNames(this.page.locator('[data-testid="modules-row"]'), sourceName, targetName);
+  }
+
+  /** The same gesture over board cards. */
+  async modulesXAttemptCardDrag(sourceName: string, targetName: string): Promise<void> {
+    await this.modulesXDragItemByNames(this.page.locator('[data-testid="modules-board-card"]'), sourceName, targetName);
+  }
+
+  /** One press, move and release from the row/card named `sourceName` onto `targetName`. */
+  private async modulesXDragItemByNames(items: Locator, sourceName: string, targetName: string): Promise<void> {
+    const byName = (name: string): Locator => items.filter({ hasText: name }).first();
+    const source = byName(sourceName);
+    const target = byName(targetName);
+    await source.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await source.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await target.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const from = await source.boundingBox();
+    const to = await target.boundingBox();
+    if (from === null || to === null) throw new Error("[parity] drag endpoints have no boxes.");
+    const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+    const end = { x: to.x + to.width / 2, y: to.y + to.height / 2 };
+    const mouse = this.page.mouse;
+    await mouse.move(start.x, start.y);
+    await mouse.down();
+    for (let step = 1; step <= 8; step += 1) {
+      await mouse.move(start.x + ((end.x - start.x) * step) / 8, start.y + ((end.y - start.y) * step) / 8, {
+        steps: 2,
+      });
+    }
+    await mouse.up();
+    await this.page.waitForTimeout(500);
+  }
+
+  /**
+   * Whether the named scope shows an export, import, print or download
+   * control. The list and detail scopes read the page's main region, the
+   * dialog scope the open module form, and each looks at buttons, links
+   * and menu entries — the three shapes such an action takes.
+   */
+  async modulesXExportActionsPresent(scope: "list" | "detail" | "dialog"): Promise<boolean> {
+    const root = scope === "dialog" ? this.modulesXDialogForm() : this.page.locator("main");
+    for (const role of ["button", "link", "menuitem"] as const) {
+      const found = root.getByRole(role, { name: /export|import|print|download/i });
+      const total = await found.count();
+      for (let index = 0; index < total; index += 1) {
+        if (
+          await found
+            .nth(index)
+            .isVisible()
+            .catch(() => false)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   // --- Modules cross-cutting (NEWFRONT-807, MOD-038/039/042/043).
   // --- Deep links and the access wall, the no-live freshness read,
   // --- desktop and edition negatives. Same interface as the oracle
@@ -21910,8 +22097,22 @@ export class WebNewDriver implements ParityDriver {
     return this.modulesTimelineOrder();
   }
 
-  async modulesDragTimelineRowToSelf(_name: string): Promise<void> {
-    return todo("modulesDragTimelineRowToSelf");
+  async modulesDragTimelineRowToSelf(name: string): Promise<void> {
+    // Press the row, leave it briefly and come back: the gesture starts a
+    // drag (tripping the manual-placement gate where it applies) but lands
+    // on the row's own slot, which never reorders it.
+    const row = this.page.getByTestId("gantt-sidebar-row").filter({ hasText: name }).first();
+    await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    const box = await row.boundingBox();
+    if (box === null) throw new Error(`[parity] timeline row "${name}" has no bounding box.`);
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await this.page.mouse.move(x, y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(x, y + 40, { steps: 8 });
+    await this.page.mouse.move(x, y, { steps: 8 });
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(500);
   }
 
   async modulesManualSortWarningVisible(): Promise<boolean> {
@@ -26413,14 +26614,21 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async projectFeaturesToggle(): Promise<void> {
-    // The answer is the project write itself, so wait for it instead of
-    // a fixed sleep. The waiter attaches before the click so a quick
-    // round-trip cannot slip past it.
+    await this.flipProjectFeatureSwitch(this.projectFeatureSwitch());
+  }
+
+  /**
+   * Click one feature switch and settle on its project write. The answer is
+   * the write itself, so the waiter attaches before the click: a quick
+   * round-trip cannot slip past it and the caller reads the next state, not
+   * the old one.
+   */
+  private async flipProjectFeatureSwitch(control: Locator): Promise<void> {
     const wrote = this.waitProjectPatch().then(
       () => true,
       () => false
     );
-    await this.projectFeatureSwitch().first().click();
+    await control.first().click();
     await wrote;
   }
 
