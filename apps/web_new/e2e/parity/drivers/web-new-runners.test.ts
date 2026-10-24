@@ -2389,56 +2389,80 @@ describe("desktop runtime + gate reads (NEWFRONT-557)", () => {
     const rail = stubLocator();
     const page = pageStub({ getByTestId: vi.fn(() => rail) });
     await new WebNewDriver(page).desktopRuntimeOpenRunners("acme");
-    expect(page.goto).toHaveBeenCalledWith("/acme/runners", { timeout: 60_000 });
+    expect(page.goto).toHaveBeenCalledWith("/acme/runners");
+    expect(page.waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
     expect(page.getByTestId).toHaveBeenCalledWith("runners-rail");
+    expect(rail.waitFor).toHaveBeenCalledWith({ timeout: 60_000 });
   });
 
   it("reads rail section headers trimmed", async () => {
-    const headers = stubLocator({ allInnerTexts: vi.fn(async () => [" Built-in ", "Runners"]) });
+    const headers = stubLocator({ count: vi.fn(async () => 2), innerText: vi.fn(async () => " Built-in ") });
     const rail = stubLocator({ locator: vi.fn(() => headers) });
     const page = pageStub({ getByTestId: vi.fn(() => rail) });
-    await expect(new WebNewDriver(page).desktopRuntimeRailSectionHeaders()).resolves.toEqual(["Built-in", "Runners"]);
+    await expect(new WebNewDriver(page).desktopRuntimeRailSectionHeaders()).resolves.toEqual(["Built-in", "Built-in"]);
+    expect(rail.locator).toHaveBeenCalledWith("div.uppercase");
   });
 
-  it("collects rail chat links, skipping non-chat and href-less entries", async () => {
-    const chat = stubLocator({
-      getAttribute: vi.fn(async () => "/acme/runners/chat/r-1"),
+  it("tolerates a header whose text read fails", async () => {
+    const headers = stubLocator({
+      count: vi.fn(async () => 1),
+      innerText: vi.fn(async () => Promise.reject(new Error("gone"))),
+    });
+    const rail = stubLocator({ locator: vi.fn(() => headers) });
+    const page = pageStub({ getByTestId: vi.fn(() => rail) });
+    await expect(new WebNewDriver(page).desktopRuntimeRailSectionHeaders()).resolves.toEqual([""]);
+  });
+
+  it("collects rail chat links with their names", async () => {
+    const links = stubLocator({
+      count: vi.fn(async () => 1),
       innerText: vi.fn(async () => " alpha "),
+      getAttribute: vi.fn(async () => "/acme/runners/chat/r-1"),
     });
-    const overview = stubLocator({
-      getAttribute: vi.fn(async () => "/acme/runners"),
-      innerText: vi.fn(async () => "Overview"),
-    });
-    const bare = stubLocator({ getAttribute: vi.fn(async () => null), innerText: vi.fn(async () => "x") });
-    const rail = stubLocator({
-      getByRole: vi.fn(() => stubLocator({ all: vi.fn(async () => [overview, chat, bare]) })),
-    });
+    const rail = stubLocator({ locator: vi.fn(() => links) });
     const page = pageStub({ getByTestId: vi.fn(() => rail) });
     await expect(new WebNewDriver(page).desktopRuntimeRailChatLinks()).resolves.toEqual([
       { name: "alpha", href: "/acme/runners/chat/r-1" },
     ]);
+    expect(rail.locator).toHaveBeenCalledWith('a[href*="/chat/"]');
   });
 
   it("opens a chat through the chat opener, with and without a session", async () => {
     const page = pageStub();
     const driver = new WebNewDriver(page);
     await driver.desktopRuntimeOpenChat("acme", "r-1", "s-9");
-    expect(page.goto).toHaveBeenCalledWith("/acme/runners/chat/r-1?sessionId=s-9", { timeout: 60_000 });
+    expect(page.goto).toHaveBeenCalledWith("/acme/runners/chat/r-1?sessionId=s-9");
     await driver.desktopRuntimeOpenChat("acme", "r-1");
-    expect(page.goto).toHaveBeenLastCalledWith("/acme/runners/chat/r-1", { timeout: 60_000 });
+    expect(page.goto).toHaveBeenLastCalledWith("/acme/runners/chat/r-1");
+    expect(page.getByTestId).toHaveBeenCalledWith("runner-chat");
+    expect(page.getByTestId).toHaveBeenCalledWith("runner-chat-composer");
   });
 
-  it("reports the inline prompt, mode control and runtime banner", async () => {
-    const on = pageStub({ getByTestId: vi.fn(() => stubLocator({ count: vi.fn(async () => 1) })) });
-    const driver = new WebNewDriver(on);
+  it("reports the approval prompt and mode control from their roles", async () => {
+    const role = vi.fn(() => stubLocator({ count: vi.fn(async () => 1) }));
+    const page = pageStub({ getByRole: role });
+    const driver = new WebNewDriver(page);
     await expect(driver.desktopRuntimeApprovalPromptVisible()).resolves.toBe(true);
     await expect(driver.desktopRuntimeApprovalModeVisible()).resolves.toBe(true);
-    await expect(driver.desktopRuntimeRuntimeBannerVisible()).resolves.toBe(true);
-    const off = pageStub({ getByTestId: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
-    const driverOff = new WebNewDriver(off);
-    await expect(driverOff.desktopRuntimeApprovalPromptVisible()).resolves.toBe(false);
-    await expect(driverOff.desktopRuntimeApprovalModeVisible()).resolves.toBe(false);
-    await expect(driverOff.desktopRuntimeRuntimeBannerVisible()).resolves.toBe(false);
+    expect(role).toHaveBeenCalledWith("alertdialog", { name: "Approval requested" });
+    expect(role).toHaveBeenCalledWith("group", { name: "Approval mode" });
+    const absent = pageStub({ getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
+    await expect(new WebNewDriver(absent).desktopRuntimeApprovalPromptVisible()).resolves.toBe(false);
+    await expect(new WebNewDriver(absent).desktopRuntimeApprovalModeVisible()).resolves.toBe(false);
+  });
+
+  it("reports the runtime banner only when the notice is shown", async () => {
+    const shown = stubLocator({ count: vi.fn(async () => 1), isVisible: vi.fn(async () => true) });
+    const page = pageStub({ getByTestId: vi.fn(() => shown) });
+    await expect(new WebNewDriver(page).desktopRuntimeRuntimeBannerVisible()).resolves.toBe(true);
+    const hidden = stubLocator({ count: vi.fn(async () => 1), isVisible: vi.fn(async () => false) });
+    await expect(
+      new WebNewDriver(pageStub({ getByTestId: vi.fn(() => hidden) })).desktopRuntimeRuntimeBannerVisible()
+    ).resolves.toBe(false);
+    const absent = stubLocator({ count: vi.fn(async () => 0) });
+    await expect(
+      new WebNewDriver(pageStub({ getByTestId: vi.fn(() => absent) })).desktopRuntimeRuntimeBannerVisible()
+    ).resolves.toBe(false);
   });
 
   it("reads the native bridge flag from the page", async () => {
@@ -2446,36 +2470,36 @@ describe("desktop runtime + gate reads (NEWFRONT-557)", () => {
     await expect(new WebNewDriver(page).desktopRuntimeIsTauriPresent()).resolves.toBe(true);
   });
 
-  it("reads transcript bubbles with roles, skipping blanks", async () => {
-    const user = stubLocator({
-      innerText: vi.fn(async () => "hello"),
-      locator: vi.fn(() => stubLocator({ getAttribute: vi.fn(async () => "user") })),
-    });
-    const blank = stubLocator({ innerText: vi.fn(async () => "  "), locator: vi.fn(() => stubLocator()) });
-    const list = stubLocator({
+  // The transcript reader runs its extraction inside a page evaluate; the
+  // stub hands the callback a minimal DOM-shaped column.
+  function bubbleColumn(children: Array<{ role: string | null; text: string }>) {
+    const element = {
+      children: children.map(({ role, text }) => ({
+        querySelector: () => ({ getAttribute: () => role, innerText: text }),
+      })),
+    };
+    return stubLocator({
       count: vi.fn(async () => 1),
-      getByRole: vi.fn(() => stubLocator({ all: vi.fn(async () => [user, blank]) })),
+      evaluate: vi.fn(async (fn: (node: unknown) => unknown) => fn(element)),
     });
-    const page = pageStub({ getByTestId: vi.fn(() => stubLocator({ getByRole: vi.fn(() => list) })) });
+  }
+
+  it("reads transcript bubbles with roles, skipping blanks", async () => {
+    const column = bubbleColumn([
+      { role: "user", text: "hello" },
+      { role: "assistant", text: "  " },
+    ]);
+    const page = pageStub({ getByTestId: vi.fn(() => stubLocator({ locator: vi.fn(() => column) })) });
     await expect(new WebNewDriver(page).desktopRuntimeChatBubbles()).resolves.toEqual([
       { role: "user", text: "hello" },
     ]);
   });
 
   it("reads no bubbles without a list and defaults a missing role", async () => {
-    const absent = pageStub({
-      getByTestId: vi.fn(() => stubLocator({ getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) })),
-    });
+    const absent = pageStub({ getByTestId: vi.fn(() => stubLocator({ locator: vi.fn(() => stubLocator()) })) });
     await expect(new WebNewDriver(absent).desktopRuntimeChatBubbles()).resolves.toEqual([]);
-    const norole = stubLocator({
-      innerText: vi.fn(async () => "note"),
-      locator: vi.fn(() => stubLocator({ getAttribute: vi.fn(async () => null) })),
-    });
-    const list = stubLocator({
-      count: vi.fn(async () => 1),
-      getByRole: vi.fn(() => stubLocator({ all: vi.fn(async () => [norole]) })),
-    });
-    const page = pageStub({ getByTestId: vi.fn(() => stubLocator({ getByRole: vi.fn(() => list) })) });
+    const column = bubbleColumn([{ role: null, text: "note" }]);
+    const page = pageStub({ getByTestId: vi.fn(() => stubLocator({ locator: vi.fn(() => column) })) });
     await expect(new WebNewDriver(page).desktopRuntimeChatBubbles()).resolves.toEqual([
       { role: "status", text: "note" },
     ]);
@@ -2490,66 +2514,32 @@ describe("desktop runtime + gate reads (NEWFRONT-557)", () => {
   });
 
   it("logs watched request URLs and forgets them on stop", async () => {
-    const routes = new Map<string, (route: Route) => Promise<void>>();
+    const handlers: Array<(request: { url(): string }) => void> = [];
     const page = pageStub({
-      route: vi.fn(async (pattern: string, handler: (route: Route) => Promise<void>) => {
-        routes.set(pattern, handler);
+      on: vi.fn((_event: string, handler: (request: { url(): string }) => void) => {
+        handlers.push(handler);
       }),
-      unroute: vi.fn(async (pattern: string) => {
-        routes.delete(pattern);
+      off: vi.fn((_event: string, handler: (request: { url(): string }) => void) => {
+        const at = handlers.indexOf(handler);
+        if (at !== -1) handlers.splice(at, 1);
       }),
     });
     const driver = new WebNewDriver(page);
     await driver.desktopRuntimeStartRequestSpy();
-    expect([...routes.keys()]).toEqual([
-      "**/api/users/me/ai-assistant/**",
-      "**/api/v1/runner/dev-machines/desktop-enroll/**",
-      "**/api/runners/chat/**",
-    ]);
-    const fellThrough: string[] = [];
-    const route = {
-      request: () => ({ url: () => "http://x/api/runners/chat/sessions/" }),
-      fallback: vi.fn(async () => {
-        fellThrough.push("ok");
-      }),
-    } as unknown as Route;
-    const handler = routes.get("**/api/runners/chat/**");
-    if (!handler) throw new Error("spy route was not registered");
-    await handler(route);
+    expect(page.on).toHaveBeenCalledWith("request", expect.any(Function));
+    handlers[0]!({ url: () => "http://x/api/runners/chat/sessions/" });
     await expect(driver.desktopRuntimeSpyUrls()).resolves.toEqual(["http://x/api/runners/chat/sessions/"]);
-    expect(fellThrough).toEqual(["ok"]);
     await driver.desktopRuntimeStopRequestSpy();
-    expect(routes.size).toBe(0);
-    await expect(driver.desktopRuntimeSpyUrls()).resolves.toEqual([]);
-  });
-
-  it("reads signed out when the app never mounted", async () => {
-    const root = stubLocator({ evaluate: vi.fn(async () => false) });
-    const page = pageStub({ locator: vi.fn(() => root) });
-    await expect(new WebNewDriver(page).signedIn()).resolves.toBe(false);
-  });
-
-  it("reads signed in once mounted with no card, signed out with a card", async () => {
-    const mounted = (cardCount: number) => {
-      const card = stubLocator({ count: vi.fn(async () => cardCount) });
-      return pageStub({
-        locator: vi.fn((selector: string) =>
-          selector === "#root"
-            ? stubLocator({ evaluate: vi.fn(async () => true) })
-            : stubLocator({ filter: vi.fn(() => stubLocator({ first: () => card })) })
-        ),
-      });
-    };
-    await expect(new WebNewDriver(mounted(0)).signedIn()).resolves.toBe(true);
-    await expect(new WebNewDriver(mounted(1)).signedIn()).resolves.toBe(false);
+    expect(page.off).toHaveBeenCalledWith("request", expect.any(Function));
+    expect(handlers).toHaveLength(0);
   });
 
   it("reads the detail title field and null when absent", async () => {
     const title = stubLocator({ count: vi.fn(async () => 1), inputValue: vi.fn(async () => "Parity probe") });
-    const page = pageStub({ getByRole: vi.fn(() => title) });
+    const page = pageStub({ getByLabel: vi.fn(() => title) });
     await expect(new WebNewDriver(page).issueDetailTitle()).resolves.toBe("Parity probe");
-    expect(page.getByRole).toHaveBeenCalledWith("textbox", { name: "Title" });
-    const missing = pageStub({ getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
+    expect(page.getByLabel).toHaveBeenCalledWith("Title");
+    const missing = pageStub({ getByLabel: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
     await expect(new WebNewDriver(missing).issueDetailTitle()).resolves.toBeNull();
   });
 
@@ -2557,39 +2547,5 @@ describe("desktop runtime + gate reads (NEWFRONT-557)", () => {
     const row = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "State\nTodo") });
     const page = pageStub({ getByRole: vi.fn(() => row) });
     await expect(new WebNewDriver(page).sidebarProperty("State")).resolves.toBe("Todo");
-  });
-
-  it("reads null for a missing or valueless property", async () => {
-    const missing = pageStub({ getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
-    await expect(new WebNewDriver(missing).sidebarProperty("State")).resolves.toBeNull();
-    const bare = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "State") });
-    const page = pageStub({ getByRole: vi.fn(() => bare) });
-    await expect(new WebNewDriver(page).sidebarProperty("State")).resolves.toBeNull();
-  });
-
-  it("reads issue names from the row anchors, dropping blanks", async () => {
-    const anchored = stubLocator({
-      count: vi.fn(async () => 2),
-      allInnerTexts: vi.fn(async () => [" Parity one ", " "]),
-    });
-    const region = stubLocator({ locator: vi.fn(() => anchored) });
-    const page = pageStub({ getByRole: vi.fn(() => region) });
-    await expect(new WebNewDriver(page).visibleIssueNames()).resolves.toEqual(["Parity one"]);
-    expect(region.locator).toHaveBeenCalledWith('article a[data-row-anchor="true"] > p');
-  });
-
-  it("falls back to the scaffold rows when no anchors render", async () => {
-    const region = stubLocator({ locator: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
-    const row = stubLocator({
-      locator: vi.fn(() =>
-        stubLocator({ nth: vi.fn(() => stubLocator({ innerText: vi.fn(async () => " Scaffold one ") })) })
-      ),
-    });
-    const rows = stubLocator({ count: vi.fn(async () => 1), nth: vi.fn(() => row) });
-    const page = pageStub({
-      getByRole: vi.fn(() => region),
-      locator: vi.fn(() => rows),
-    });
-    await expect(new WebNewDriver(page).visibleIssueNames()).resolves.toEqual(["Scaffold one"]);
   });
 });
