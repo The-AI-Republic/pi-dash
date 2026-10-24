@@ -73,10 +73,10 @@ pub use drain::{
 };
 pub use live_drains::{drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore};
 pub use offline_recovery::{
-    clear_parent_thread_sql, clear_pin_sql, offline_fail_detail, release_pin_lock_select,
-    runner_silent_lock_select, silent_runner_ids_select, stuck_queued_run_ids_select,
-    sweep_cancel_barrier_stamped_sql, sweep_stale_cancel_ids_sql, sweep_stale_cancel_pods_sql,
-    sweep_stale_pairs_sql,
+    clear_parent_thread_sql, clear_pin_sql, offline_fail_detail, offline_stamp_patch,
+    release_pin_lock_select, runner_silent_lock_select, silent_runner_ids_select,
+    stuck_queued_run_ids_select, sweep_cancel_barrier_stamped_sql, sweep_stale_cancel_ids_sql,
+    sweep_stale_cancel_pods_sql, sweep_stale_pairs_sql,
 };
 pub use pubsub::{
     close_runner_session, send_connection_revoke, send_runner_remove, send_runner_revoke,

@@ -136,22 +136,22 @@ def create_agent_run(
     seeder.db.execute(
         """INSERT INTO agent_run
            (id, status, prompt, run_config, required_capabilities, thread_id,
-            lease_expires_at, done_payload, error, created_at, assigned_at,
+            lease_expires_at, done_payload, error_details, created_at, assigned_at,
             started_at, ended_at, owner_id, workspace_id, runner_id, work_item_id,
             parent_run_id, pod_id, created_by_id, pinned_runner_id,
-            scheduler_binding_id, llm_model, refusal_category, queue_position,
+            scheduler_binding_id, llm_model, queue_position,
             trigger, prompt_manifest, executor_kind, dispatch_attempts,
-            cancel_requested_at, cancel_reason, error_code, tool_plan,
+            cancel_requested_at, cancel_reason, tool_plan,
             terminal_hooks_applied_at, terminal_capacity_released_at,
             phase_kind, agent_metadata, usage)
            VALUES (%s,%s,%s,'{}','[]','',
                    %s,
-                   NULL,'',%s,NULL,
+                   NULL,'{}',%s,NULL,
                    %s,
-                   NULL,NULL,%s,NULL,NULL,NULL,%s,%s,NULL,NULL,'','',
+                   NULL,NULL,%s,NULL,NULL,NULL,%s,%s,NULL,NULL,'',
                    NULL,'direct',NULL,%s,0,
                    %s,
-                   %s,'',%s,
+                   %s,%s,
                    NULL,NULL,'','{}','{}')""",
         (
             run_id, status, prompt,
@@ -193,7 +193,15 @@ def create_llm_config(seeder, user_id):
 
 
 def get_run(db, run_id):
-    return db.fetchone("SELECT * FROM agent_run WHERE id = %s", (run_id,))
+    """The ``agent_run`` row plus the model's read-only ``error_code`` /
+    ``error`` properties, read off the ``error_details`` bag
+    (PDASHOSS01-187) exactly as ``AgentRun`` exposes them."""
+    row = db.fetchone("SELECT * FROM agent_run WHERE id = %s", (run_id,))
+    if row is not None:
+        bag = row.get("error_details") or {}
+        row["error_code"] = bag.get("code") or ""
+        row["error"] = bag.get("message") or ""
+    return row
 
 
 def run_events(db, run_id):

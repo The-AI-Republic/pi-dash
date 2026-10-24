@@ -96,14 +96,14 @@ pub mod scheduler_hook;
 pub mod shape;
 
 pub use finalization::{
-    apply_done_payload_merge, effects_lock_passes, finalize_error_code, finalize_lock_passes,
-    finalize_update_sql, lock_issue_sql, lock_run_for_effects_sql, lock_run_for_finalize_sql,
-    merge_done_payload, plan_finalize_values, plan_publish_effects, plan_terminal_effects,
-    plan_terminal_event, select_run_for_capacity_sql, select_run_work_item_id_sql,
-    terminal_event_exists_sql, terminal_event_insert_sql, terminal_event_max_seq_sql,
-    terminal_event_payload, update_capacity_marker_sql, update_hooks_marker_sql, CapacityPlan,
-    EffectsSql, FinalizeError, FinalizeValues, HooksPlan, TerminalEffectsInputs,
-    TerminalEffectsOutcome, TerminalEffectsPlan, TerminalEventPlan,
+    apply_done_payload_merge, effects_lock_passes, error_details_patch, finalize_error_code,
+    finalize_lock_passes, finalize_update_sql, lock_issue_sql, lock_run_for_effects_sql,
+    lock_run_for_finalize_sql, merge_done_payload, plan_finalize_values, plan_publish_effects,
+    plan_terminal_effects, plan_terminal_event, select_run_for_capacity_sql,
+    select_run_work_item_id_sql, terminal_event_exists_sql, terminal_event_insert_sql,
+    terminal_event_max_seq_sql, terminal_event_payload, update_capacity_marker_sql,
+    update_hooks_marker_sql, CapacityPlan, EffectsSql, FinalizeError, FinalizeValues, HooksPlan,
+    TerminalEffectsInputs, TerminalEffectsOutcome, TerminalEffectsPlan, TerminalEventPlan,
 };
 pub use lifecycle::{
     comment_dedupe_exists_sql, comment_description_link_sql, comment_insert_sql,

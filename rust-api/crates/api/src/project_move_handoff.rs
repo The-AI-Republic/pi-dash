@@ -43,17 +43,17 @@ use pidash_services::orchestration::creation::{
     BUNDLE_PARENT_COLS_SQL, BUNDLE_PARENT_DESCRIPTION_SQL, BUNDLE_PRIOR_RUN_COUNT_SQL,
     BUNDLE_PROJECT_IDENTIFIER_SQL, BUNDLE_PROJECT_STATES_SQL, BUNDLE_RELATIONS_SQL,
     BUNDLE_RELATION_TARGETS_SQL, BUNDLE_REMOTE_SQL, BUNDLE_SEQUENCE_SQL, BUNDLE_TICKER_SQL,
-    BUNDLE_WORKSPACE_SQL, DEFAULT_POD_SELECT_SQL, FINALIZE_UPDATE_SQL, ISSUE_LOCK_SQL,
-    ISSUE_SELECT_SQL, PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, RUNNER_SELECT_SQL,
-    RUN_CONFIG_UPDATE_SQL, STATE_SELECT_SQL, TERMINAL_EVENT_EXISTS_SQL, TERMINAL_EVENT_INSERT_SQL,
-    TERMINAL_EVENT_SEQ_SQL, TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL,
-    WORK_ITEM_ID_SELECT_SQL,
+    BUNDLE_WORKSPACE_SQL, DEFAULT_POD_SELECT_SQL, ISSUE_LOCK_SQL, ISSUE_SELECT_SQL,
+    PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, RUNNER_SELECT_SQL, RUN_CONFIG_UPDATE_SQL,
+    STATE_SELECT_SQL, TERMINAL_EVENT_EXISTS_SQL, TERMINAL_EVENT_INSERT_SQL, TERMINAL_EVENT_SEQ_SQL,
+    TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL, WORK_ITEM_ID_SELECT_SQL,
 };
 use pidash_services::orchestration::creation::{
-    finalize_lock_sql, AdmissionError as ServiceAdmissionError, CreationError, CreationSeam,
-    ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RunView, RunnerView, StateView, TickerBudget,
+    finalize_error_details_patch, finalize_lock_sql, finalize_update_sql,
+    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, ExecutionError,
+    ExecutionFields as ServiceExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView,
+    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView,
+    TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_services::runner_runs::finalization as finalize_kernel;
@@ -304,8 +304,7 @@ fn twin_map_run_view(row: &sqlx::postgres::PgRow) -> Result<RunView, sqlx::Error
         phase_kind: row.try_get("phase_kind")?,
         run_config: row.try_get("run_config")?,
         tool_plan: row.try_get("tool_plan")?,
-        error_code: row.try_get("error_code")?,
-        error: row.try_get("error")?,
+        error_details: row.try_get("error_details")?,
         prompt: row.try_get("prompt")?,
         prompt_manifest: row.try_get("prompt_manifest")?,
         ended_at: row.try_get("ended_at")?,
@@ -542,7 +541,7 @@ impl CreationSeam for HandoffStore<'_, '_> {
             .bind(row.work_item_id)
             .bind(row.parent_run_id)
             .bind(row.executor_kind.value())
-            .bind(&row.error_code)
+            .bind(&row.error_details)
             .bind(&row.tool_plan)
             .bind(&row.trigger)
             .bind(&row.phase_kind)
@@ -1368,10 +1367,9 @@ impl FinalizeAgentRunSeam for HandoffStore<'_, '_> {
                 .map_err(twin_db)?;
             return twin_map_run_view(&row).map_err(twin_db);
         }
-        sqlx::query(FINALIZE_UPDATE_SQL)
+        sqlx::query(&finalize_update_sql())
             .bind(now)
-            .bind(error_code)
-            .bind(error)
+            .bind(finalize_error_details_patch(error_code, error))
             .bind(run_id)
             .execute(&mut **self.tx.inner())
             .await

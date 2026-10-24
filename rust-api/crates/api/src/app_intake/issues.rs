@@ -2544,7 +2544,9 @@ pub async fn render_agent_status(
         r#"SELECT r.id, r.status, r.executor_kind, r.queue_position, r.runner_id,
                   ru.name,
                   r.created_at, r.assigned_at, r.started_at, r.ended_at,
-                  r.done_payload, r.error, r.error_code, r.llm_model,
+                  r.done_payload,
+                  COALESCE(r.error_details->>'message', '') AS error,
+                  COALESCE(r.error_details->>'code', '') AS error_code, r.llm_model,
                   (r.usage->>'input_tokens')::bigint, (r.usage->>'output_tokens')::bigint,
                   (r.usage->>'total_tokens')::bigint
            FROM agent_run r LEFT JOIN runner ru ON ru.id = r.runner_id

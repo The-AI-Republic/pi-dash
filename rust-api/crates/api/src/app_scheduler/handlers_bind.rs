@@ -719,7 +719,7 @@ fn binding_runs_count_sql() -> String {
     )
 }
 
-/// Binding-runs page (`views.py:353-359`): the 41-column run image plus
+/// Binding-runs page (`views.py:353-359`): the 40-column run image plus
 /// the pod-mini columns, `-created_at`, `LIMIT $4` / `OFFSET $5`.
 /// Django's page additionally INNER JOINs `scheduler_bindings` +
 /// `schedulers` (the `scheduler_binding__scheduler` select_related
@@ -2256,7 +2256,7 @@ async fn fetch_binding_detail(
 // ---------------------------------------------------------------------------
 
 /// Column counts per BR1 segment (bindings 22 + schedulers 14 +
-/// `AGENT_RUN_COLUMNS` 41 + `POD_COLUMNS` 10 = 87; pinned in tests).
+/// `AGENT_RUN_COLUMNS` 40 + `POD_COLUMNS` 10 = 86; pinned in tests).
 const BINDING_COLUMN_COUNT: usize = 22;
 const SCHEDULER_COLUMN_COUNT: usize = 14;
 
@@ -3393,25 +3393,25 @@ mod tests {
     fn br1_segment_layout_matches_layer_consts() {
         assert_eq!(BINDING_COLUMN_COUNT, 22);
         assert_eq!(SCHEDULER_COLUMN_COUNT, 14);
-        assert_eq!(queries::AGENT_RUN_COLUMNS.len(), 41);
+        assert_eq!(queries::AGENT_RUN_COLUMNS.len(), 40);
         assert_eq!(queries::POD_COLUMNS.len(), 10);
         assert_eq!(
             BINDING_COLUMN_COUNT
                 + SCHEDULER_COLUMN_COUNT
                 + queries::AGENT_RUN_COLUMNS.len()
                 + queries::POD_COLUMNS.len(),
-            87
+            86
         );
         // The display columns the render reads, by layer-const position.
         let run_base = BINDING_COLUMN_COUNT + SCHEDULER_COLUMN_COUNT;
         let pod_base = run_base + queries::AGENT_RUN_COLUMNS.len();
         assert_eq!(queries::AGENT_RUN_COLUMNS[0], "id");
         assert_eq!(queries::AGENT_RUN_COLUMNS[10], "status");
-        assert_eq!(queries::AGENT_RUN_COLUMNS[40], "ended_at");
+        assert_eq!(queries::AGENT_RUN_COLUMNS[39], "ended_at");
         assert_eq!(queries::POD_COLUMNS[0], "id");
         assert_eq!(queries::POD_COLUMNS[3], "name");
         assert_eq!(run_base, 36);
-        assert_eq!(pod_base, 77);
+        assert_eq!(pod_base, 76);
     }
 
     // -- Render ---------------------------------------------------------------
