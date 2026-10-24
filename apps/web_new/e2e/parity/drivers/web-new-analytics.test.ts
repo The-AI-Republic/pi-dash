@@ -40,6 +40,7 @@ const ACTIONS = [
   "fill",
   "inputValue",
   "hover",
+  "boundingBox",
 ];
 
 /** One stubbed route handler invocation. */
@@ -78,6 +79,7 @@ class Recorder {
     if (method === "allTextContents") return [];
     if (method === "textContent" || method === "inputValue" || method === "innerText") return "";
     if (method === "getAttribute") return null;
+    if (method === "boundingBox") return null;
     return undefined;
   };
 
@@ -1361,5 +1363,198 @@ describe("analytics export tables", () => {
     const fired = new Recorder();
     fired.eventImpl = async () => ({});
     await expect(new WebNewDriver(fired.page()).analyticsExportYieldsNoDownload("chart")).resolves.toBe(false);
+  });
+});
+
+describe("analytics scoped dialog", () => {
+  it("opens the header entry and waits for the dialog", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).openAnalytics();
+    expectTrace(recorder.trace(), [
+      'click page.getByRole("button",{"name":"Analytics"}).first()',
+      'waitFor page.getByRole("dialog")',
+    ]);
+  });
+
+  it("closes with Escape and waits for the dialog to detach", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).closeAnalytics();
+    expect(recorder.pressed()).toEqual(["Escape"]);
+    expectTrace(recorder.trace(), ['waitFor page.getByRole("dialog")']);
+    const wait = recorder.calls.find((call) => call.method === "waitFor");
+    expect(wait?.args).toEqual([{ state: "detached", timeout: 30_000 }]);
+  });
+
+  it("reads the visible dialog text", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) =>
+      method === "innerText" ? "  Analytics for Website\nTotal Work items 2  " : undefined;
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogText()).resolves.toBe(
+      "Analytics for Website\nTotal Work items 2"
+    );
+  });
+
+  it("reads the dialog headline cards after the grid settles", async () => {
+    const recorder = new Recorder();
+    const cards = [
+      { label: "Total Work items", value: "2" },
+      { label: "Started Work items", value: "0" },
+    ];
+    recorder.evaluateImpl = () => cards;
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogHeadlineCards()).resolves.toEqual(cards);
+    const [wait] = recorder.waitForFunctions();
+    expect(typeof wait?.[0]).toBe("function");
+  });
+
+  it("throws when the dialog cards never settle", async () => {
+    const recorder = new Recorder();
+    recorder.waitForFunctionImpl = async () => {
+      throw new Error("timeout");
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogHeadlineCards()).rejects.toThrow(
+      "analytics dialog headline cards never settled"
+    );
+  });
+
+  it("opens the issues surface, arms the spinner watch and presses its entry", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).analyticsDialogOpenFromIssues("acme", "p1", COOKIES);
+    expect(recorder.gotos()).toEqual(["/acme/projects/p1/issues"]);
+    expectTrace(recorder.trace(), [
+      "addCookies page.context.addCookies",
+      "evaluate page.evaluate",
+      'waitFor page.getByRole("button",{"name":"Analytics"}).first()',
+      'click page.getByRole("button",{"name":"Analytics"}).first()',
+      'waitFor page.getByRole("dialog")',
+    ]);
+  });
+
+  it("opens the cycle and module surfaces at their own addresses", async () => {
+    const cycleRecorder = new Recorder();
+    await new WebNewDriver(cycleRecorder.page()).analyticsDialogOpenFromCycle("acme", "p1", "c1", COOKIES);
+    expect(cycleRecorder.gotos()).toEqual(["/acme/projects/p1/cycles/c1"]);
+    const moduleRecorder = new Recorder();
+    await new WebNewDriver(moduleRecorder.page()).analyticsDialogOpenFromModule("acme", "p1", "m1", COOKIES);
+    expect(moduleRecorder.gotos()).toEqual(["/acme/projects/p1/modules/m1"]);
+  });
+
+  it("counts the Analytics triggers on a surface", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 0 : undefined);
+    await expect(new WebNewDriver(recorder.page()).analyticsSurfaceTriggerCount()).resolves.toBe(0);
+    expect(recorder.trace()).toEqual(['count page.getByRole("button",{"name":"Analytics"})']);
+  });
+
+  it("reads the dialog heading", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "textContent" ? " Analytics for Website in Sprint 3 " : undefined);
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogTitle()).resolves.toBe(
+      "Analytics for Website in Sprint 3"
+    );
+    expectTrace(recorder.trace(), ['waitFor page.getByRole("dialog").locator("h2")', "textContent"]);
+  });
+
+  it("reports whether the pre-content spinner was seen", async () => {
+    const recorder = new Recorder();
+    recorder.evaluateImpl = () => true;
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogSpinnerSeen()).resolves.toBe(true);
+  });
+
+  it("reports the wide toggle's visibility", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => {
+      if (method === "count") return 1;
+      if (method === "isVisible") return true;
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogWideToggleVisible()).resolves.toBe(true);
+    expect(recorder.trace()).toEqual([
+      'count page.getByTestId("analytics-dialog-wide-toggle")',
+      'isVisible page.getByTestId("analytics-dialog-wide-toggle").first()',
+    ]);
+  });
+
+  it("toggles the wide panel and waits for the width to change", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "boundingBox" ? { x: 0, y: 0, width: 720, height: 900 } : undefined);
+    await new WebNewDriver(recorder.page()).analyticsDialogToggleWide();
+    expectTrace(recorder.trace(), ['getByTestId("analytics-dialog-wide-toggle").first()', "waitForFunction"]);
+    const [wait] = recorder.waitForFunctions();
+    expect(wait?.[1]).toBe(720);
+  });
+
+  it("throws when the panel width never settles", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "boundingBox" ? { x: 0, y: 0, width: 720, height: 900 } : undefined);
+    recorder.waitForFunctionImpl = async () => {
+      throw new Error("timeout");
+    };
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogToggleWide()).rejects.toThrow(
+      "analytics dialog width never settled"
+    );
+  });
+
+  it("throws when the panel content has no box", async () => {
+    const recorder = new Recorder();
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogWidth()).rejects.toThrow(
+      "analytics dialog content has no box"
+    );
+  });
+
+  it("reads the assignee row count from the one dialog table", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 3 : undefined);
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogRowCount()).resolves.toBe(3);
+    expect(recorder.trace()).toEqual(['count page.getByTestId("analytics-dialog-assignee-table").locator("tbody tr")']);
+  });
+
+  it("reads the assignee table headers and cells", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "allTextContents" ? ["Assignee ", "Backlog"] : undefined);
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogTableHeaders()).resolves.toEqual([
+      "Assignee",
+      "Backlog",
+    ]);
+    recorder.evaluateImpl = () => [["Ada", "2", "4"]];
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogTableCells()).resolves.toEqual([["Ada", "2", "4"]]);
+  });
+
+  it("describes each assignee identity cell", async () => {
+    const recorder = new Recorder();
+    recorder.evaluateImpl = () => [
+      { text: "Ada Lovelace", avatar: true, initial: false, unassigned: false },
+      { text: "Bob Stone", avatar: false, initial: true, unassigned: false },
+      { text: "Unassigned", avatar: false, initial: false, unassigned: true },
+    ];
+    const facts = await new WebNewDriver(recorder.page()).analyticsDialogAssigneeFacts();
+    expect(facts.map((fact) => fact.text)).toEqual(["Ada Lovelace", "Bob Stone", "Unassigned"]);
+    expect(facts[2]?.unassigned).toBe(true);
+  });
+
+  it("downloads one dialog table's export at its index", async () => {
+    const recorder = new Recorder();
+    recorder.eventImpl = async () => ({
+      path: async () => "/tmp/acme-analytics.csv",
+      suggestedFilename: () => "acme-analytics.csv",
+    });
+    const driver = new WebNewDriver(recorder.page());
+    (driver as unknown as { readDownload: (path: string) => string }).readDownload = () =>
+      "\uFEFFAssignee,Backlog\r\nAda,2\r\n";
+    await expect(driver.analyticsDialogExportDownload(1)).resolves.toEqual({
+      fileName: "acme-analytics.csv",
+      content: "\uFEFFAssignee,Backlog\r\nAda,2\r\n",
+    });
+    expectTrace(recorder.trace(), [
+      "waitForEvent page.waitForEvent",
+      'click page.getByRole("dialog").getByRole("button",{"name":"Export as csv"}).nth(1)',
+    ]);
+  });
+
+  it("rejects a dialog export that arrived without a path", async () => {
+    const recorder = new Recorder();
+    recorder.eventImpl = async () => ({ path: async () => null, suggestedFilename: () => "x.csv" });
+    await expect(new WebNewDriver(recorder.page()).analyticsDialogExportDownload(0)).rejects.toThrow(
+      "landed without a path"
+    );
   });
 });

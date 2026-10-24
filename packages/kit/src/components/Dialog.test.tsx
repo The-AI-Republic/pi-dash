@@ -117,6 +117,59 @@ describe("Dialog", () => {
     expect(body.parentElement).not.toHaveClass("mt-(--space-8)");
   });
 
+  it("docks a right panel and marks its scrollable body as the document", () => {
+    render(
+      <Dialog title="Analytics for Website" open onOpenChange={() => undefined} placement="right">
+        <p>Panel body</p>
+      </Dialog>
+    );
+    const dialog = screen.getByRole("dialog", { name: "Analytics for Website" });
+    expect(dialog).toHaveClass("top-0", "right-0", "h-full", "w-3/4");
+    const body = screen.getByText("Panel body").parentElement;
+    expect(body).toHaveAttribute("role", "document");
+    expect(body).toHaveClass("overflow-y-auto");
+  });
+
+  it("grows a right panel to full width when wide", () => {
+    render(
+      <Dialog title="Analytics" open onOpenChange={() => undefined} placement="right" wide>
+        <p>Panel body</p>
+      </Dialog>
+    );
+    expect(screen.getByRole("dialog")).toHaveClass("w-full");
+    expect(screen.getByRole("dialog")).not.toHaveClass("w-3/4");
+  });
+
+  it("keeps the centred card when placement is default", () => {
+    render(
+      <Dialog title="Confirm" open onOpenChange={() => undefined}>
+        <p>Body copy</p>
+      </Dialog>
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveClass("top-1/2", "left-1/2", "max-w-md");
+    expect(screen.getByText("Body copy").parentElement).not.toHaveAttribute("role");
+  });
+
+  it("renders header actions beside the close control", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    render(
+      <Dialog
+        title="Analytics"
+        open
+        onOpenChange={() => undefined}
+        headerActions={<Button onClick={onToggle}>Widen</Button>}
+      >
+        <p>Body</p>
+      </Dialog>
+    );
+    const widen = screen.getByRole("button", { name: "Widen" });
+    expect(screen.getByRole("button", { name: "Close dialog" })).toBeInTheDocument();
+    await user.click(widen);
+    expect(onToggle).toHaveBeenCalledOnce();
+  });
+
   it("ignores Escape but still closes from the close button when controlled", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();

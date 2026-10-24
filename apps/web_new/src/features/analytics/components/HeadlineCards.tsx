@@ -8,9 +8,13 @@
 // error banner. Later slices mount their sections below this grid.
 
 import { Skeleton } from "@pidash/kit";
+import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
-import { useAnalyticsTotals } from "../api/totals.js";
+import { getAppClient } from "../../../core/api/client.js";
+import type { AnalyticsDialogScope } from "../api/keys.js";
+import { dialogTotalsQueryOptions } from "../api/projectScope.js";
+import { analyticsTotalsQueryOptions } from "../api/totals.js";
 import { headlineCardsForTab, selectHeadlineValue } from "../lib/cards.js";
 import type { AnalyticsTabId } from "../lib/tabs.js";
 
@@ -19,11 +23,32 @@ export interface HeadlineCardsProps {
   tab: AnalyticsTabId;
   /** Resolved picker scope; enters the query key and the request. */
   projectIds: readonly string[];
+  /**
+   * Scoped dialog mode (parity/specs/analytics.md §13, ANL-014): read the
+   * project endpoint for this scope instead of the workspace read. The tab
+   * is always `work-items` there, so the same five cards render.
+   */
+  dialogScope?: AnalyticsDialogScope | undefined;
 }
 
-export function HeadlineCards({ workspaceSlug, tab, projectIds }: HeadlineCardsProps): React.ReactElement {
-  const totals = useAnalyticsTotals(workspaceSlug, tab, projectIds);
-  const cards = headlineCardsForTab(tab);
+export function HeadlineCards({ workspaceSlug, tab, projectIds, dialogScope }: HeadlineCardsProps): React.ReactElement {
+  // One read runs at a time: the dialog reads the project family, the tab
+  // the workspace family, and the other hook stays idle. Both hooks are
+  // always called so the order never depends on the mode.
+  const dialogTotals = useQuery({
+    ...dialogTotalsQueryOptions(
+      getAppClient(),
+      workspaceSlug,
+      dialogScope ?? { projectId: "", cycleId: null, moduleId: null }
+    ),
+    enabled: dialogScope !== undefined,
+  });
+  const tabTotals = useQuery({
+    ...analyticsTotalsQueryOptions(getAppClient(), workspaceSlug, tab, projectIds),
+    enabled: dialogScope === undefined,
+  });
+  const totals = dialogScope === undefined ? tabTotals : dialogTotals;
+  const cards = headlineCardsForTab(dialogScope === undefined ? tab : "work-items");
   return (
     <div
       data-testid="analytics-headline-grid"

@@ -4,41 +4,42 @@
 // Issues-header analytics entry (parity/specs/issues.md §9, ISS-107).
 // The button shows only to people who can create work items in *this*
 // project — project admins and members, plus workspace admins — and opens
-// a work-items dialog scoped to the current project, with the epic flag
-// carried through. The analytics area owns the destination; until it
-// lands this mount names the project and the server's total, plus the
-// per-group counts once the full list is loaded. The cycle detail
-// (CYC-033, NEWFRONT-712) mounts it with a cycle scope and a narrow-only
-// trigger for every role; the module detail (MOD-032, NEWFRONT-802)
-// mounts it with a module scope. The desktop trigger stays member+.
+// the scoped analytics panel (parity/specs/analytics.md §13). Analytics
+// owns the panel content; this file owns the trigger, the role gate and
+// the scope it hands over. The cycle detail (CYC-033, NEWFRONT-712) mounts
+// it with a cycle scope and a narrow-only trigger for every role; the
+// module detail (MOD-032, NEWFRONT-802) mounts it with a module scope. The
+// desktop trigger stays member+.
 
-import { Button, Dialog } from "@pidash/kit";
+import { Button } from "@pidash/kit";
 import { ChartColumn } from "lucide-react";
 import * as React from "react";
 
 import { usePermissions } from "../../../core/session/index.js";
 import { ROLE_ADMIN, ROLE_MEMBER } from "../../../core/session/permissions.js";
 import { useProjectRoles } from "../../auth/index.js";
-import { usePickerStates } from "../../../shared/pickers/index.js";
+import { ScopedAnalyticsDialog } from "../../analytics/index.js";
 
 export interface AnalyticsEntryProps {
   workspaceSlug: string;
   projectId: string;
   projectName: string;
-  /** True when the list shows epics; the dialog header reflects it. */
-  isEpics?: boolean;
-  /** Rows already loaded, for the group breakdown. */
-  rows?: readonly AnalyticsRow[] | undefined;
-  /** Server total; the dialog always reports this number. */
+  /**
+   * Accepted for the surfaces that still pass their list totals; the
+   * scoped panel reads its own project totals (ANL-014), so the entry no
+   * longer needs them. Kept so callers need no coordinated change.
+   */
+  isEpics?: boolean | undefined;
+  rows?: readonly { state_id: string | null }[] | undefined;
   totalCount?: number | undefined;
   /**
    * Cycle scope (NEWFRONT-712): the dialog reads
-   * `Analytics for {project} in {cycle}`. NEWFRONT-738 fills the body.
+   * `Analytics for {project} in {cycle}`.
    */
   cycle?: { id: string; name: string } | undefined;
   /**
    * Module scope (NEWFRONT-802): the dialog reads
-   * `Analytics for {project} in {module}`. NEWFRONT-738 fills the body.
+   * `Analytics for {project} in {module}`.
    */
   module?: { id: string; name: string } | undefined;
   /**
@@ -48,32 +49,10 @@ export interface AnalyticsEntryProps {
   narrowGuestAccess?: boolean | undefined;
 }
 
-/** One list row, reduced to the state it belongs to. */
-export interface AnalyticsRow {
-  state_id: string | null;
-}
-
-/** Counts rows by their workflow group, in first-seen order. */
-export function groupCounts(
-  rows: readonly AnalyticsRow[],
-  states: readonly { id: string; group: string }[] | undefined
-): { label: string; count: number }[] {
-  const groupOf = new Map((states ?? []).map((state) => [state.id, state.group]));
-  const counts = new Map<string, number>();
-  for (const row of rows) {
-    const label = row.state_id === null ? "No state" : (groupOf.get(row.state_id) ?? "Other");
-    counts.set(label, (counts.get(label) ?? 0) + 1);
-  }
-  return [...counts.entries()].map(([label, count]) => ({ label, count }));
-}
-
 export function AnalyticsEntry({
   workspaceSlug,
   projectId,
   projectName,
-  isEpics = false,
-  rows = [],
-  totalCount = 0,
   cycle,
   module,
   narrowGuestAccess = false,
@@ -81,9 +60,6 @@ export function AnalyticsEntry({
   const permissions = usePermissions(workspaceSlug);
   const projectRoles = useProjectRoles(workspaceSlug);
   const [open, setOpen] = React.useState(false);
-  // Groups resolve only while the dialog is open; the header entry costs
-  // no extra read on a plain list visit.
-  const states = usePickerStates(workspaceSlug, projectId, open);
   // Fail closed while either role read resolves, so nobody sees the entry
   // flash in and out. Workspace admins pass everywhere; otherwise the row
   // needs admin or member standing on this project, which is exactly the
@@ -93,18 +69,11 @@ export function AnalyticsEntry({
   const projectRole = projectRoles.data?.[projectId];
   const allowed = workspaceAdmin || (projectRole !== undefined && projectRole >= ROLE_MEMBER);
   if (!allowed && !narrowGuestAccess) return null;
-  // A partial page would undercount, so the breakdown waits for the full
-  // list; the server total is authoritative either way.
-  const groups = rows.length === totalCount ? groupCounts(rows, states.data) : [];
-  const total = totalCount > 0 ? totalCount : rows.length;
   let entryTestId = "issues-analytics-entry";
-  let description = `Work items in ${projectName}`;
   if (cycle !== undefined) {
     entryTestId = "cycle-analytics-entry";
-    description = `Analytics for ${projectName} in ${cycle.name}`;
   } else if (module !== undefined) {
     entryTestId = "module-analytics-entry";
-    description = `Analytics for ${projectName} in ${module.name}`;
   }
 
   return (
@@ -123,30 +92,15 @@ export function AnalyticsEntry({
           </Button>
         </span>
       ) : null}
-      <Dialog
+      <ScopedAnalyticsDialog
+        workspaceSlug={workspaceSlug}
         open={open}
         onOpenChange={setOpen}
-        title={isEpics ? "Epic analytics" : "Work items analytics"}
-        description={description}
-      >
-        <div className="flex flex-col gap-(--space-3)" data-testid="issues-analytics-body">
-          <p className="text-body text-(--text)">
-            Total Work items <span data-testid="analytics-total">{total}</span>
-          </p>
-          {groups.length > 0 ? (
-            <dl className="flex flex-col gap-(--space-1)">
-              {groups.map((row) => (
-                <div key={row.label} className="flex items-center justify-between gap-(--space-4)">
-                  <dt className="text-body text-(--text-muted)">{row.label}</dt>
-                  <dd className="text-body text-(--text)">{row.count}</dd>
-                </div>
-              ))}
-            </dl>
-          ) : (
-            <p className="text-body text-(--text-muted)">No grouped counts to show yet.</p>
-          )}
-        </div>
-      </Dialog>
+        projectId={projectId}
+        projectName={projectName}
+        cycle={cycle}
+        module={module}
+      />
     </>
   );
 }
