@@ -29738,13 +29738,18 @@ export class WebNewDriver implements ParityDriver {
   }
   private async dragStatesRow(source: string, target: string, edge: "above" | "below"): Promise<void> {
     const row = this.statesRowByName(source);
+    const targetRow = this.statesRowByName(target);
+    // Center the target first, then reveal the source with a minimal
+    // scroll and hover last: the grip is hover-only, so nothing may
+    // scroll between the hover and the gesture. Centering after the
+    // hover hides the grip (PSET-031 cross-group "no geometry"), and a
+    // nearest-only reveal can leave the drop point off-viewport when
+    // the target peeks at the viewport edge (PSET-031 failed move).
+    await targetRow.evaluate((el) => el.scrollIntoView({ block: "center" }));
     await row.scrollIntoViewIfNeeded();
     await row.hover({ timeout: 30_000 });
-    // Cross-group drops miss while the target sits at the viewport edge
-    // (edge auto-scroll moves it mid-gesture), so center it first.
-    const targetRow = this.statesRowByName(target);
-    await targetRow.evaluate((el) => el.scrollIntoView({ block: "center" }));
     const grip = row.getByTestId("state-row-grip");
+    await grip.waitFor({ state: "visible", timeout: 15_000 }).catch(() => {});
     const from = await grip.boundingBox();
     const box = await targetRow.boundingBox();
     if (from === null || box === null) {
@@ -29761,6 +29766,18 @@ export class WebNewDriver implements ParityDriver {
         : { x: box.x + box.width / 2, y: box.y + box.height - 6 };
     await this.page.mouse.move(start.x, start.y);
     await this.page.mouse.down();
+    // Ignite the native drag with press-local micro-moves before the long
+    // traverse: jumping straight to the midpoint can leave the row before
+    // the drag starts, and the drop then silently never happens (PSET-031
+    // failed move). Fail loud when the row never reports dragging.
+    await this.page.mouse.move(start.x + 2, start.y, { steps: 2 });
+    await this.page.mouse.move(start.x + 5, start.y, { steps: 2 });
+    try {
+      await expect.poll(() => row.getAttribute("data-dragging"), { timeout: 5_000 }).toBe("true");
+    } catch (error) {
+      await this.page.mouse.up();
+      throw error;
+    }
     await this.page.mouse.move((start.x + end.x) / 2, (start.y + end.y) / 2, { steps: 6 });
     await this.page.mouse.move(end.x, end.y, { steps: 6 });
     await this.page.waitForTimeout(500);
