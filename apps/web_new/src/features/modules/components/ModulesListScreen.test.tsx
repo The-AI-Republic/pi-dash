@@ -51,6 +51,8 @@ interface Harness {
   meStatus: number;
   modulesCalls: number;
   modules: ReturnType<typeof makeModuleRow>[];
+  createStatus: number;
+  writes: { method: string; url: string; body: Record<string, unknown> | null }[];
 }
 
 const ME_ID = "423e4567-e89b-12d3-a456-426614174003";
@@ -146,8 +148,10 @@ beforeEach(() => {
     meStatus: 200,
     modulesCalls: 0,
     modules: [makeModuleRow()],
+    createStatus: 201,
+    writes: [],
   };
-  createAppClient("https://api.test", (async (url: string) => {
+  createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
     if (url.endsWith(`/api/workspaces/acme/projects/${MODULES_PROJECT_ID}/`)) {
       if (harness.projectDelayMs > 0) await sleep(harness.projectDelayMs);
@@ -162,10 +166,27 @@ beforeEach(() => {
     }
     if (url.endsWith("/api/users/me/")) return jsonResponse(url, harness.meStatus, ME);
     if (url.endsWith("/api/users/me/profile/")) return jsonResponse(url, 200, PROFILE);
+    if ((init.method ?? "GET") === "POST" && url.endsWith(`/projects/${MODULES_PROJECT_ID}/modules/`)) {
+      const body = init.body === undefined ? null : (JSON.parse(init.body) as Record<string, unknown>);
+      harness.writes.push({ method: "POST", url, body });
+      if (harness.createStatus >= 400) return jsonResponse(url, harness.createStatus, { error: "Duplicate." });
+      const created = makeModuleRow({
+        id: "323e4567-e89b-12d3-a456-426614174099",
+        name: String(body?.["name"] ?? "Created"),
+      });
+      harness.modules = [...harness.modules, created];
+      return jsonResponse(url, harness.createStatus, created);
+    }
     if (url.endsWith(`/api/workspaces/acme/projects/${MODULES_PROJECT_ID}/modules/`)) {
       harness.modulesCalls += 1;
       if (harness.modulesDelayMs > 0) await sleep(harness.modulesDelayMs);
       return jsonResponse(url, harness.modulesStatus, harness.modules);
+    }
+    if (url.endsWith(`/projects/${MODULES_PROJECT_ID}/archived-modules/`)) {
+      return jsonResponse(url, 200, []);
+    }
+    if (url.endsWith("/api/workspaces/acme/projects/")) {
+      return jsonResponse(url, 200, [makeProjectRow()]);
     }
     throw new Error(`unexpected request: ${url}`);
   }) as never);
@@ -321,6 +342,94 @@ describe("ModulesListScreen", () => {
     expect(screen.queryByTestId("modules-list-skeleton")).not.toBeInTheDocument();
   });
 
+  it("mounts the header Add action for an admin and opens the create dialog", async () => {
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    fireEvent.click(screen.getByRole("button", { name: "Add Module" }));
+    expect(await screen.findByRole("heading", { name: "Create module" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("module-dialog-project")).getByRole("button")).toHaveTextContent(
+      "Website relaunch"
+    );
+  });
+
+  it("keeps the creation action for a member", async () => {
+    harness.roles = { [MODULES_PROJECT_ID]: 15 };
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    expect(screen.getByRole("button", { name: "Add Module" })).toBeEnabled();
+  });
+
+  it("never offers creation to a guest", async () => {
+    harness.roles = { [MODULES_PROJECT_ID]: 5 };
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    expect(screen.queryByTestId("modules-add")).not.toBeInTheDocument();
+  });
+
+  it("shortens the Add label on small screens", async () => {
+    viewportHarness.narrow = true;
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    expect(screen.getByRole("button", { name: "Add" })).toHaveAttribute("data-testid", "modules-add");
+    expect(screen.queryByRole("button", { name: "Add Module" })).not.toBeInTheDocument();
+  });
+
+  it("shows the onboarding state for a project with no modules and creates from it", async () => {
+    harness.modules = [];
+    renderScreen();
+    const zero = await screen.findByTestId("modules-zero-state");
+    expect(screen.queryByTestId("modules-list")).not.toBeInTheDocument();
+    const action = within(zero).getByRole("button", { name: "Set your first module" });
+    expect(action).toBeEnabled();
+    fireEvent.click(action);
+    expect(await screen.findByRole("heading", { name: "Create module" })).toBeInTheDocument();
+  });
+
+  it("disables the onboarding action for a guest", async () => {
+    harness.modules = [];
+    harness.roles = { [MODULES_PROJECT_ID]: 5 };
+    renderScreen();
+    const zero = await screen.findByTestId("modules-zero-state");
+    expect(within(zero).getByRole("button", { name: "Set your first module" })).toBeDisabled();
+  });
+
+  it("keeps the zero state instead of the no-match container when no filter is active", async () => {
+    harness.modules = [];
+    renderScreen();
+    await screen.findByTestId("modules-zero-state");
+    expect(screen.queryByTestId("modules-no-match")).not.toBeInTheDocument();
+  });
+
+  it("refreshes the list after a create and shows the new module", async () => {
+    harness.modules = [];
+    renderScreen();
+    fireEvent.click(await screen.findByRole("button", { name: "Set your first module" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Fresh Module" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create Module" }));
+    expect(await screen.findByTestId("modules-row-name")).toHaveTextContent("Fresh Module");
+    expect(harness.writes).toHaveLength(1);
+    expect(harness.writes[0]?.body).toMatchObject({ name: "Fresh Module", status: "backlog" });
+    expect(screen.queryByRole("heading", { name: "Create module" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the create dialog up with its input when the write fails", async () => {
+    harness.modules = [];
+    harness.createStatus = 400;
+    renderScreen();
+    fireEvent.click(await screen.findByRole("button", { name: "Set your first module" }));
+    const dialog = await screen.findByRole("dialog");
+    const title = within(dialog).getByRole("textbox", { name: "Title" });
+    fireEvent.change(title, { target: { value: "Duplicate" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create Module" }));
+    await waitFor(() => expect(harness.writes).toHaveLength(1));
+    expect(await screen.findByRole("heading", { name: "Create module" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Duplicate");
+    expect(screen.getByTestId("modules-zero-state")).toBeInTheDocument();
+  });
+
   it("falls back to the crumb as the title before the project arrives", async () => {
     harness.projectDelayMs = 50;
     renderScreen();
@@ -342,7 +451,7 @@ describe("ModulesListScreen", () => {
       expect(screen.getAllByTestId("modules-row-name").map((node) => node.textContent)).toEqual(["Alpha"])
     );
     expect(readProjectDisplay(MODULES_PROJECT_ID).query).toBe("alph");
-    fireEvent.keyDown(field, { key: "Escape" });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Search modules by name" }), { key: "Escape" });
     await waitFor(() =>
       expect(screen.getAllByTestId("modules-row-name").map((node) => node.textContent)).toEqual(["Alpha", "Bravo"])
     );
@@ -392,6 +501,30 @@ describe("ModulesListScreen", () => {
     );
     expect(screen.queryByTestId("modules-filter-chips")).not.toBeInTheDocument();
     expect(screen.queryByTestId("modules-filter-active")).not.toBeInTheDocument();
+  });
+
+  it("keeps the filters panel open while several statuses are picked", async () => {
+    // The panel must survive the re-render a selection causes: an inline
+    // component type here would remount it and close it after one pick.
+    harness.modules = [
+      makeModuleRow({ name: "Done", status: "completed" }),
+      makeModuleRow({ id: "323e4567-e89b-12d3-a456-426614174010", name: "Started", status: "in-progress" }),
+      makeModuleRow({ id: "323e4567-e89b-12d3-a456-426614174011", name: "Later", status: "backlog" }),
+    ];
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    fireEvent.click(screen.getByTestId("modules-filter-trigger"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Completed" }));
+    expect(screen.getByTestId("modules-filter-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "In Progress" }));
+    expect(screen.getByTestId("modules-filter-panel")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Completed" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("checkbox", { name: "In Progress" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("checkbox", { name: "Backlog" })).toHaveAttribute("aria-checked", "false");
+    await waitFor(() =>
+      expect(screen.getAllByTestId("modules-row-name").map((node) => node.textContent)).toEqual(["Done", "Started"])
+    );
+    expect(readProjectDisplay(MODULES_PROJECT_ID).filters.status).toEqual(["completed", "in-progress"]);
   });
 
   it("offers the current user first in the people filters once the directory loads", async () => {

@@ -13,8 +13,13 @@
 // and filters are the viewer's per-project browser record (§13.3.1). This
 // slice owns the header controls, the applied-chip strip and the
 // no-match container; the list context exposes the chosen sort to later
-// slices (the timeline's manual reorder).
+// slices (the timeline's manual reorder). Slice F adds the two creation
+// entry points — the header action and the zero-state shortcut — and the
+// dialog provider whose openers every later menu calls. An empty project
+// renders the onboarding state instead of an empty list. The create action
+// is mounted only for admin and member standing, so guests never see it.
 
+import type { ModuleRow, WorkspaceMember } from "@pidash/api-client";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
@@ -23,14 +28,16 @@ import { getAppClient } from "../../../core/api/client.js";
 import { meQueryOptions } from "../../../core/session/queries.js";
 import { useDocumentHead, useNarrowViewport } from "../../../shared/shell/index.js";
 import { useProjectRoles } from "../../auth/index.js";
-import { isProjectAdmin, workspaceMembersQueryOptions } from "../../projects/index.js";
-import { moduleProjectFactsQueryOptions, moduleViewEnabled } from "../api/projectFacts.js";
+import { isProjectAdmin, isProjectAuthorized, workspaceMembersQueryOptions } from "../../projects/index.js";
+import { moduleProjectFactsQueryOptions, moduleProjectIdentifier, moduleViewEnabled } from "../api/projectFacts.js";
 import { modulesListQueryOptions } from "../api/queries.js";
 import { MODULES_CRUMB, modulesFeatureHref, modulesTitle, resolveModulesListBody } from "../lib/moduleList.js";
-import { resolveCompactLayout } from "../lib/moduleLayouts.js";
+import { resolveCompactLayout, type ModulesLayout } from "../lib/moduleLayouts.js";
 import { useModuleLayout } from "../lib/listLayoutStore.js";
-import { hasModuleFilters } from "../lib/moduleListControls.js";
-import { useModuleListDisplay } from "../lib/moduleListDisplayStore.js";
+import { hasModuleFilters, type ModuleListFilters, type ModuleSort } from "../lib/moduleListControls.js";
+import { useModuleListDisplay, type ModuleListDisplay } from "../lib/moduleListDisplayStore.js";
+import { ModuleCreateAction } from "./dialogs/ModuleCreateAction.js";
+import { ModuleDialogProvider, useModuleDialogs } from "./dialogs/ModuleDialogProvider.js";
 import { ModuleListProvider } from "./moduleListContext.js";
 import { ModulesFeatureGate } from "./ModulesFeatureGate.js";
 import { ModulesFilterChips } from "./ModulesFilterChips.js";
@@ -40,6 +47,102 @@ import { ModulesListHeader } from "./ModulesListHeader.js";
 import { ModulesListSkeleton } from "./ModulesListSkeleton.js";
 import { ModulesSearch } from "./ModulesSearch.js";
 import { ModulesSortMenu } from "./ModulesSortMenu.js";
+import { ModulesZeroState } from "./ModulesZeroState.js";
+
+/** The screen's one page slot: header (or nothing) over the body state. */
+function listSection(header: React.ReactNode, body: React.ReactNode): React.ReactElement {
+  return (
+    <section
+      aria-label={MODULES_CRUMB}
+      data-testid="modules-list-screen"
+      className="flex min-h-0 flex-1 flex-col gap-(--space-4) p-(--space-4)"
+    >
+      {header}
+      {body}
+    </section>
+  );
+}
+
+/**
+ * The settled list surface: header controls plus the body the screen chose.
+ * It is a stable top-level component on purpose — opening the filters and
+ * picking a value re-renders the screen, and an inline component type
+ * would remount the panel (closing it) on every selection.
+ */
+interface ModulesListSettledProps {
+  workspaceSlug: string;
+  projectId: string;
+  projectName: string;
+  layout: ModulesLayout;
+  onLayoutChange: (layout: ModulesLayout) => void;
+  narrow: boolean;
+  createAllowed: boolean;
+  display: ModuleListDisplay;
+  onQueryChange: (query: string) => void;
+  onSortChange: (sort: ModuleSort) => void;
+  onFiltersChange: (filters: ModuleListFilters) => void;
+  members: readonly WorkspaceMember[] | undefined;
+  meId: string | null;
+  shownLayout: ModulesLayout;
+  loading: boolean;
+  modules: readonly ModuleRow[];
+  /** The list read settled empty — onboarding replaces the empty body. */
+  empty: boolean;
+  children?: React.ReactNode;
+}
+
+function ModulesListSettled({
+  workspaceSlug,
+  projectId,
+  projectName,
+  layout,
+  onLayoutChange,
+  narrow,
+  createAllowed,
+  display,
+  onQueryChange,
+  onSortChange,
+  onFiltersChange,
+  members,
+  meId,
+  shownLayout,
+  loading,
+  modules,
+  empty,
+  children,
+}: ModulesListSettledProps): React.ReactElement {
+  const dialogs = useModuleDialogs();
+  const openCreate = (): void => {
+    dialogs?.openCreate();
+  };
+  return listSection(
+    <ModulesListHeader
+      projectName={projectName}
+      layout={layout}
+      onLayoutChange={onLayoutChange}
+      createControl={createAllowed ? <ModuleCreateAction compact={narrow} onCreate={openCreate} /> : null}
+      searchControl={<ModulesSearch query={display.query} onQueryChange={onQueryChange} />}
+      orderControl={<ModulesSortMenu sort={display.sort} onSortChange={onSortChange} />}
+      filterControl={
+        <ModulesFilterMenu filters={display.filters} members={members} meId={meId} onFiltersChange={onFiltersChange} />
+      }
+      chips={
+        <ModulesFilterChips filters={display.filters} members={members} meId={meId} onFiltersChange={onFiltersChange} />
+      }
+    />,
+    children !== undefined ? (
+      children
+    ) : loading ? (
+      <ModulesListSkeleton layout={shownLayout} />
+    ) : empty ? (
+      // Onboarding is for a project that truly has no modules; a failed
+      // read is not proof of that, so it keeps the plain list shell.
+      <ModulesZeroState canCreate={createAllowed} onCreate={openCreate} />
+    ) : (
+      <ModulesListBody workspaceSlug={workspaceSlug} projectId={projectId} layout={shownLayout} modules={modules} />
+    )
+  );
+}
 
 export interface ModulesListScreenProps {
   workspaceSlug: string;
@@ -94,59 +197,67 @@ export function ModulesListScreen({ workspaceSlug, projectId, children }: Module
     setFilters,
     filtersActive,
   };
+  const createAllowed = isProjectAuthorized(roles.data?.[projectId] ?? null);
+  const isAdmin = isProjectAdmin(roles.data?.[projectId] ?? null);
 
-  return (
-    <ModuleListProvider value={context}>
-      <section
-        aria-label={MODULES_CRUMB}
-        data-testid="modules-list-screen"
-        className="flex min-h-0 flex-1 flex-col gap-(--space-4) p-(--space-4)"
-      >
-        {state === "gate" || project.data === undefined ? null : (
-          <ModulesListHeader
-            projectName={project.data.name}
-            layout={layout}
-            onLayoutChange={setLayout}
-            searchControl={<ModulesSearch query={display.query} onQueryChange={setQuery} />}
-            orderControl={<ModulesSortMenu sort={display.sort} onSortChange={setSort} />}
-            filterControl={
-              <ModulesFilterMenu
-                filters={display.filters}
-                members={directory.data}
-                meId={me.data?.id ?? null}
-                onFiltersChange={setFilters}
-              />
-            }
-            chips={
-              <ModulesFilterChips
-                filters={display.filters}
-                members={directory.data}
-                meId={me.data?.id ?? null}
-                onFiltersChange={setFilters}
-              />
-            }
-          />
-        )}
-        {state === "gate" ? (
+  // Before the project resolves there is nothing to gate on: the
+  // skeleton stands alone, with no header and no reads behind it.
+  if (project.data === undefined) {
+    return (
+      <ModuleListProvider value={context}>
+        {listSection(null, <ModulesListSkeleton layout={shownLayout} />)}
+      </ModuleListProvider>
+    );
+  }
+  if (state === "gate") {
+    return (
+      <ModuleListProvider value={context}>
+        {listSection(
+          null,
           <ModulesFeatureGate
-            isAdmin={isProjectAdmin(roles.data?.[projectId] ?? null)}
+            isAdmin={isAdmin}
             onManageFeatures={() => {
               void navigate({ to: modulesFeatureHref(workspaceSlug, projectId) });
             }}
           />
-        ) : state === "skeleton" ? (
-          <ModulesListSkeleton layout={shownLayout} />
-        ) : (
-          (children ?? (
-            <ModulesListBody
-              workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              layout={shownLayout}
-              modules={modules.data ?? []}
-            />
-          ))
         )}
-      </section>
-    </ModuleListProvider>
+      </ModuleListProvider>
+    );
+  }
+
+  return (
+    <ModuleDialogProvider
+      workspaceSlug={workspaceSlug}
+      projectId={projectId}
+      currentProject={{
+        id: projectId,
+        name: project.data.name,
+        identifier: moduleProjectIdentifier(project.data),
+      }}
+    >
+      <ModuleListProvider value={context}>
+        <ModulesListSettled
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          projectName={project.data.name}
+          layout={layout}
+          onLayoutChange={setLayout}
+          narrow={narrow}
+          createAllowed={createAllowed}
+          display={display}
+          onQueryChange={setQuery}
+          onSortChange={setSort}
+          onFiltersChange={setFilters}
+          members={directory.data}
+          meId={me.data?.id ?? null}
+          shownLayout={shownLayout}
+          loading={state === "skeleton"}
+          modules={modules.data ?? []}
+          empty={modules.isSuccess && modules.data.length === 0}
+        >
+          {children}
+        </ModulesListSettled>
+      </ModuleListProvider>
+    </ModuleDialogProvider>
   );
 }

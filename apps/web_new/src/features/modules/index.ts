@@ -25,6 +25,29 @@ export {
 export { modulesListQueryOptions } from "./api/queries.js";
 export { ModuleBoardCard, type ModuleBoardCardProps } from "./components/ModuleBoardCard.js";
 export {
+  ModuleCreateAction,
+  ModuleDeleteDialog,
+  ModuleDetailActions,
+  ModuleDialogProvider,
+  ModuleForm,
+  ModuleSaveDialog,
+  MODULE_ADD_LABEL,
+  MODULE_ADD_LABEL_COMPACT,
+  MODULE_MENU_DELETE,
+  MODULE_MENU_EDIT,
+  useModuleDialogs,
+  type ModuleCreateActionProps,
+  type ModuleDeleteDialogProps,
+  type ModuleDeleteOptions,
+  type ModuleDeleteTarget,
+  type ModuleDetailActionsProps,
+  type ModuleDialogHandle,
+  type ModuleDialogProviderProps,
+  type ModuleFormProject,
+  type ModuleFormProps,
+  type ModuleSaveDialogProps,
+} from "./components/dialogs/index.js";
+export {
   ModuleListProvider,
   useModuleListContext,
   type ModuleListContextValue,
