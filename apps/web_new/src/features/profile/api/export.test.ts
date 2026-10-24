@@ -24,6 +24,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.resetAllMocks();
 });
 
 function sink(): ExportSink & { saved: Array<[string, string]>; revoked: string[]; blob: Blob | null } {

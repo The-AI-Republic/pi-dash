@@ -187,6 +187,7 @@ function invalidated(queryClient: QueryClient, key: readonly unknown[]): boolean
 afterEach(() => {
   resetAppClient();
   vi.restoreAllMocks();
+  vi.resetAllMocks();
 });
 
 describe("invalidateTriageCaches", () => {
