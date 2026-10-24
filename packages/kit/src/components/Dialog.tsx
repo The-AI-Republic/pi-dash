@@ -73,7 +73,10 @@ export function Dialog({
         <BaseDialog.Popup
           {...pickDefined({ initialFocus })}
           className={cn(
-            "shadow-dialog fixed top-1/2 left-1/2 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-(--radius-dialog) border border-(--border) bg-(--bg) p-(--space-12)",
+            // Tall bodies (scheduler installs) scroll inside the panel
+            // instead of clipping past the viewport with body scroll
+            // locked (PSET-056).
+            "shadow-dialog fixed top-1/2 left-1/2 max-h-[calc(100dvh-2rem)] w-full max-w-md -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-(--radius-dialog) border border-(--border) bg-(--bg) p-(--space-12)",
             className
           )}
         >

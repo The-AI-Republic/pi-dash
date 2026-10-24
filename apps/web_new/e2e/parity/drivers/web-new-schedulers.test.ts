@@ -306,6 +306,33 @@ describe("install dialog", () => {
     await expect(driver.schedulerProjectInstallErrors()).resolves.toEqual(["Start time is required."]);
   });
 
+  it("opens the Advanced disclosure before filling a hidden raw rule", async () => {
+    const raw = fake({ visible: false });
+    const disclosure = fake({});
+    const dialog = fake({
+      byLabel: (label) => (label === "Recurrence (RRULE)" ? raw : absent()),
+      role: (role, roleOptions) =>
+        role === "button" && (roleOptions as { name?: string } | undefined)?.name === "Advanced: rule text"
+          ? disclosure
+          : absent(),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=WEEKLY" });
+    expect(disclosure.click).toHaveBeenCalledTimes(1);
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=WEEKLY", { timeout: 30_000 });
+  });
+
+  it("fills the raw rule directly when it already shows", async () => {
+    const raw = fake({ visible: true });
+    const dialog = fake({
+      byLabel: (label) => (label === "Recurrence (RRULE)" ? raw : absent()),
+      role: () => absent(),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=WEEKLY" });
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=WEEKLY", { timeout: 30_000 });
+  });
+
   it("reads the outcome modes and the current help line", async () => {
     const group = fake({
       role: (role) =>

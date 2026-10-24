@@ -97,6 +97,19 @@ describe("Dialog", () => {
     expect(body.parentElement).toHaveClass("mt-(--space-8)");
   });
 
+  it("contains tall bodies inside the viewport with panel scroll", () => {
+    // PSET-056: without these the scheduler install form clips past the
+    // viewport with body scroll locked and its tabs unreachable.
+    render(
+      <Dialog title="Confirm" open onOpenChange={() => undefined}>
+        <p>Body copy</p>
+      </Dialog>
+    );
+    const dialog = screen.getByRole("dialog", { name: "Confirm" });
+    expect(dialog).toHaveClass("max-h-[calc(100dvh-2rem)]");
+    expect(dialog).toHaveClass("overflow-y-auto");
+  });
+
   it("renders its title as the shared dialog heading style", () => {
     render(
       <Dialog title="Confirm" open onOpenChange={() => undefined}>

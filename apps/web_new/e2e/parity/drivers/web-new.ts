@@ -10737,8 +10737,15 @@ export class WebNewDriver implements ParityDriver {
       await dialog.getByLabel("Starts at").fill(input.dtstart, { timeout: WebNewDriver.WAIT_MS });
     if (input.tzid !== undefined)
       await dialog.getByLabel("Time zone").selectOption(input.tzid, { timeout: WebNewDriver.WAIT_MS });
-    if (input.rrule !== undefined)
-      await dialog.getByLabel("Recurrence (RRULE)").fill(input.rrule, { timeout: WebNewDriver.WAIT_MS });
+    if (input.rrule !== undefined) {
+      // Expressible rules hide their raw text behind the Advanced
+      // disclosure; open it before filling (PSET-060).
+      const raw = dialog.getByLabel("Recurrence (RRULE)");
+      if (!(await raw.isVisible().catch(() => false))) {
+        await dialog.getByRole("button", { name: "Advanced: rule text" }).click({ timeout: WebNewDriver.WAIT_MS });
+      }
+      await raw.fill(input.rrule, { timeout: WebNewDriver.WAIT_MS });
+    }
     if (input.extraContext !== undefined)
       await dialog.getByLabel("Project context (optional)").fill(input.extraContext, { timeout: WebNewDriver.WAIT_MS });
   }
