@@ -2,17 +2,19 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// The module detail screen model (MOD-029): the tab title shape, the
-// switcher pick target, the gone-away predicate and the pinned badge
-// tooltip in both numbers.
+// The module detail screen model (MOD-029, MOD-038): the tab title shape,
+// the switcher pick target, the gone-away predicate, the one
+// wall/missing/content split and the pinned badge tooltip in both numbers.
 
 import { ApiError } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import {
+  isAccessRefusal,
   isModuleGoneAway,
   moduleBadgeTooltip,
   moduleDetailTitle,
+  moduleReadOutcome,
   projectIssuesHref,
   switchModuleTarget,
 } from "./moduleDetail.js";
@@ -67,5 +69,70 @@ describe("moduleBadgeTooltip", () => {
 
   it("uses the singular noun for one item", () => {
     expect(moduleBadgeTooltip(1)).toBe("There are 1 work item in this module");
+  });
+});
+
+describe("moduleReadOutcome (MOD-038)", () => {
+  function statusError(status: number): ApiError {
+    return new ApiError({ status, code: "http", message: "denied" });
+  }
+
+  it("shows the content for a resolved live module", () => {
+    expect(moduleReadOutcome({ error: null, archivedAt: null, isAdmin: false })).toEqual({ kind: "content" });
+  });
+
+  it("calls an archived record served on the live address a miss", () => {
+    expect(moduleReadOutcome({ error: null, archivedAt: "2026-03-01T00:00:00Z", isAdmin: false })).toEqual({
+      kind: "missing",
+    });
+  });
+
+  it("calls a 404 a miss", () => {
+    expect(moduleReadOutcome({ error: statusError(404), archivedAt: null, isAdmin: true })).toEqual({
+      kind: "missing",
+    });
+  });
+
+  it("sends a 409 to the join wall whatever the reader's standing", () => {
+    for (const isAdmin of [false, true]) {
+      expect(moduleReadOutcome({ error: statusError(409), archivedAt: null, isAdmin })).toEqual({
+        kind: "wall",
+        wall: "join",
+      });
+    }
+  });
+
+  it("offers a workspace admin the join wall on a private project (403)", () => {
+    expect(moduleReadOutcome({ error: statusError(403), archivedAt: null, isAdmin: true })).toEqual({
+      kind: "wall",
+      wall: "join",
+    });
+  });
+
+  it("shows a refused non-admin the no-access wall, never the missing state", () => {
+    expect(moduleReadOutcome({ error: statusError(403), archivedAt: null, isAdmin: false })).toEqual({
+      kind: "wall",
+      wall: "no-access",
+    });
+  });
+
+  it("keeps pending reads and transient failures on the content path", () => {
+    expect(moduleReadOutcome({ error: null, archivedAt: undefined, isAdmin: false })).toEqual({ kind: "content" });
+    expect(moduleReadOutcome({ error: new Error("network"), archivedAt: null, isAdmin: false })).toEqual({
+      kind: "content",
+    });
+    expect(moduleReadOutcome({ error: statusError(500), archivedAt: null, isAdmin: false })).toEqual({
+      kind: "content",
+    });
+  });
+
+  it("names the refusal statuses", () => {
+    expect([401, 402, 403, 404, 409].map((status) => isAccessRefusal(status))).toEqual([
+      false,
+      false,
+      true,
+      false,
+      true,
+    ]);
   });
 });
