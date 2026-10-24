@@ -13,12 +13,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const hero = vi.hoisted(() => ({
   read: vi.fn(),
+  progress: vi.fn(),
+  estimates: vi.fn(),
   project: { current: { data: { estimate: 1 } as { estimate: number | null } | undefined } },
   apply: vi.fn(),
   pending: false,
 }));
 vi.mock("../api/heroQueries.js", () => ({
   heroQueryOptions: () => ({ queryKey: ["hero"], queryFn: hero.read }),
+  heroProgressQueryOptions: () => ({ queryKey: ["hero-progress"], queryFn: hero.progress }),
+}));
+vi.mock("../../estimates/index.js", () => ({
+  projectEstimatesQueryOptions: () => ({ queryKey: ["estimates"], queryFn: hero.estimates }),
 }));
 vi.mock("../../auth/index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../auth/index.js")>()),
@@ -47,9 +53,15 @@ vi.mock("./HeroBurndownCard.js", () => ({
   HeroBurndownCard: (props: {
     measure: string;
     estimatesEnabled: boolean;
+    estimateType: string | null;
     onMeasureChange: (measure: string) => void;
   }) => (
-    <div data-testid="hero-burndown-probe" data-measure={props.measure} data-estimates={String(props.estimatesEnabled)}>
+    <div
+      data-testid="hero-burndown-probe"
+      data-measure={props.measure}
+      data-estimates={String(props.estimatesEnabled)}
+      data-estimate-type={props.estimateType}
+    >
       <button type="button" onClick={() => props.onMeasureChange("points")}>
         probe measure
       </button>
@@ -79,7 +91,7 @@ vi.mock("./NoActiveCycle.js", () => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { CYCLES_CYCLE_ID, CYCLES_PROJECT_ID, makeCycleRow } from "../testing.js";
+import { CYCLES_CYCLE_ID, CYCLES_PROJECT_ID, makeCycleRow, makeEstimate, makeEstimateList } from "../testing.js";
 import { ACTIVE_CYCLE_HEADING, ActiveCycleHero } from "./ActiveCycleHero.js";
 
 function activeRow(): Record<string, unknown> {
@@ -107,6 +119,8 @@ beforeEach(() => {
   createAppClient("https://api.test", (() => new Promise<never>(() => undefined)) as never);
   hero.project.current = { data: { estimate: 1 } };
   hero.pending = false;
+  hero.progress.mockResolvedValue({ total_estimate_points: 0 });
+  hero.estimates.mockResolvedValue(makeEstimateList([makeEstimate()]));
   hero.read.mockResolvedValue([activeRow()]);
 });
 
@@ -167,9 +181,29 @@ describe("ActiveCycleHero", () => {
     expect(await screen.findByTestId("hero-burndown-probe")).toHaveAttribute("data-measure", "issues");
     expect(screen.getByTestId("hero-breakdown-probe")).toHaveAttribute("data-measure", "issues");
     expect(screen.getByTestId("hero-burndown-probe")).toHaveAttribute("data-estimates", "true");
+    expect(screen.getByTestId("hero-burndown-probe")).toHaveAttribute("data-estimate-type", "points");
     fireEvent.click(screen.getByRole("button", { name: "probe measure" }));
     expect(screen.getByTestId("hero-burndown-probe")).toHaveAttribute("data-measure", "points");
     expect(screen.getByTestId("hero-breakdown-probe")).toHaveAttribute("data-measure", "points");
+  });
+
+  it("passes the active family and counts items for categories", async () => {
+    hero.estimates.mockResolvedValue(makeEstimateList([makeEstimate({ type: "categories" })]));
+    renderHero();
+    expect(await screen.findByTestId("hero-burndown-probe")).toHaveAttribute("data-estimate-type", "categories");
+    expect(screen.getByTestId("hero-burndown-probe")).toHaveAttribute("data-measure", "issues");
+    expect(screen.getByTestId("hero-breakdown-probe")).toHaveAttribute("data-measure", "issues");
+    fireEvent.click(screen.getByRole("button", { name: "probe measure" }));
+    expect(screen.getByTestId("hero-burndown-probe")).toHaveAttribute("data-measure", "issues");
+    expect(screen.getByTestId("hero-breakdown-probe")).toHaveAttribute("data-measure", "issues");
+  });
+
+  it("keeps point-data cycles on items when estimates are disabled", async () => {
+    hero.project.current = { data: { estimate: null } };
+    hero.progress.mockResolvedValue({ total_estimate_points: 6 });
+    renderHero();
+    expect(await screen.findByTestId("hero-burndown-probe")).toHaveAttribute("data-measure", "issues");
+    expect(screen.getByTestId("hero-breakdown-probe")).toHaveAttribute("data-measure", "issues");
   });
 
   it("drops estimates where the project disables them or still loads", async () => {
