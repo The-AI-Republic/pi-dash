@@ -83,7 +83,7 @@ use pidash_services::integrations::adapters_github::{
     ClientAuth, GitHubAdapter, GithubClient, GithubError,
 };
 use pidash_services::integrations::adapters_gitlab::{
-    GitLabAdapter, GitLabRequest, GitLabResponse, GitLabTransport,
+    GitLabAdapter, GitLabConfig, GitLabRequest, GitLabResponse, GitLabTransport,
 };
 use pidash_types::integrations::registry::{provider_payload, resolve_adapter_key};
 use pidash_types::integrations::{
@@ -1336,6 +1336,46 @@ pub struct LiveProviders {
     keyring: Keyring,
 }
 
+/// `decrypt_data` (`license/utils/encryption.py:34-44`) as the
+/// context-free decryptor the GitLab seam takes: Fernet over
+/// `SECRET_KEY`, failures (and empties) → `None` so the adapter falls
+/// back to the raw token (`gitlab.py:191-198`). Byte-mirror of the api
+/// precedent (`handlers_pr_links.rs` / `handlers_relations.rs`
+/// `gitlab_decrypt`): the seam takes a `fn` pointer, so the key is
+/// re-read from the same env the held [`Keyring`] was built from.
+fn gitlab_decrypt(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let decrypted = Keyring::from_env().decrypt(value);
+    if decrypted.is_empty() {
+        None
+    } else {
+        Some(decrypted)
+    }
+}
+
+/// Instance GitLab config (`gitlab.py:49-62`): `gitlab_host` is
+/// `getattr(settings, "GITLAB_HOST", "")`, which Django never defines
+/// (no `settings/*.py` entry), so the effective host is always `""`;
+/// `allowed_hosts` is `GITLAB_ALLOWED_HOSTS` split on commas, stripped,
+/// empties dropped (`settings/common.py:41`), exactly like
+/// `Settings::gitlab_allowed_hosts` (`db/src/config/settings.rs:978`,
+/// env-or-`""` per the accessor rule).
+fn gitlab_config() -> GitLabConfig {
+    let allowed_hosts = std::env::var("GITLAB_ALLOWED_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect();
+    GitLabConfig {
+        gitlab_host: String::new(),
+        allowed_hosts,
+    }
+}
+
 impl LiveProviders {
     pub fn from_env() -> Self {
         Self {
@@ -1345,6 +1385,14 @@ impl LiveProviders {
 
     fn github(&self) -> GitHubAdapter<ReqwestGithubClient> {
         GitHubAdapter::new(self.keyring.clone())
+    }
+
+    /// GitLab adapter with instance config + token decryptor
+    /// (`gitlab.py:49-62,191-209`). Generic over the transport so unit
+    /// tests inject a recording fake; live sites pass the reqwest
+    /// transport.
+    fn gitlab_adapter<T: GitLabTransport>(transport: &T) -> GitLabAdapter<'_, T> {
+        GitLabAdapter::with_decrypt(gitlab_config(), transport, gitlab_decrypt)
     }
 
     /// `adapter.list_open_issues(credential, repository)`
@@ -1366,7 +1414,7 @@ impl LiveProviders {
                 .map_err(DispatchError::Provider),
             "gitlab" => {
                 let transport = ReqwestGitLabTransport::default();
-                let adapter = GitLabAdapter::new(&transport);
+                let adapter = Self::gitlab_adapter(&transport);
                 adapter
                     .list_open_issues(credential, repository)
                     .map_err(DispatchError::Provider)
@@ -1393,7 +1441,7 @@ impl LiveProviders {
                 .map_err(DispatchError::Provider),
             "gitlab" => {
                 let transport = ReqwestGitLabTransport::default();
-                let adapter = GitLabAdapter::new(&transport);
+                let adapter = Self::gitlab_adapter(&transport);
                 adapter
                     .list_issue_comments(credential, repository, issue_iid)
                     .map_err(DispatchError::Provider)
@@ -1421,7 +1469,7 @@ impl LiveProviders {
                 .map_err(DispatchError::Provider),
             "gitlab" => {
                 let transport = ReqwestGitLabTransport::default();
-                let adapter = GitLabAdapter::new(&transport);
+                let adapter = Self::gitlab_adapter(&transport);
                 adapter
                     .post_issue_comment(credential, repository, issue_iid, body)
                     .map_err(DispatchError::Provider)
@@ -3310,5 +3358,151 @@ mod tests {
             route_for(&registry, "pi_dash.bgtasks.github_sync_task.sync_one_repo"),
             Route::Unknown
         );
+    }
+
+    // --- PIDASHCONV-1470: GitLab adapter wiring (decrypt + allowlist) ---
+
+    /// Recording fake answering 200 `[]` to every call.
+    struct FakeGitlab {
+        seen: Mutex<Vec<GitLabRequest>>,
+    }
+
+    impl GitLabTransport for FakeGitlab {
+        fn request(&self, request: &GitLabRequest) -> Result<GitLabResponse, GitProviderError> {
+            self.seen.lock().unwrap().push(request.clone());
+            Ok(GitLabResponse {
+                status: 200,
+                headers: vec![],
+                body: "[]".to_owned(),
+            })
+        }
+    }
+
+    fn gitlab_test_repo() -> RemoteRepository {
+        RemoteRepository {
+            provider: "gitlab".to_owned(),
+            external_id: "123".to_owned(),
+            namespace: "x".to_owned(),
+            name: "y".to_owned(),
+            full_name: "x/y".to_owned(),
+            web_url: "https://gitlab.com/x/y".to_owned(),
+            clone_url_http: String::new(),
+            clone_url_ssh: String::new(),
+            default_branch: String::new(),
+            is_private: false,
+            metadata: Value::Object(Default::default()),
+        }
+    }
+
+    fn private_token(request: &GitLabRequest) -> String {
+        request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("PRIVATE-TOKEN"))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn gitlab_adapter_decrypts_token_and_honors_allowlist() {
+        // One test: the cases share process env, and parallel tests racing
+        // on set_var/remove_var would flake (edge.rs precedent). No other
+        // jobs test reads SECRET_KEY or GITLAB_ALLOWED_HOSTS from process
+        // env; the caller's values are restored below.
+        let saved_secret = std::env::var("SECRET_KEY").ok();
+        let saved_allowed = std::env::var("GITLAB_ALLOWED_HOSTS").ok();
+
+        std::env::set_var("SECRET_KEY", "unit-test-secret-1470");
+        let stored = Keyring::from_env().encrypt("live-pat-1470");
+        assert!(!stored.is_empty() && stored != "live-pat-1470");
+
+        // Ciphertext credential → plaintext PRIVATE-TOKEN (`gitlab.py:191-198`).
+        std::env::remove_var("GITLAB_ALLOWED_HOSTS");
+        let fake = FakeGitlab {
+            seen: Mutex::new(vec![]),
+        };
+        let credential = json!({
+            "auth_type": "pat",
+            "host_url": "https://gitlab.com",
+            "token": stored,
+        });
+        let issues = LiveProviders::gitlab_adapter(&fake)
+            .list_open_issues(&credential, &gitlab_test_repo())
+            .expect("fake 200 lists");
+        assert!(issues.is_empty());
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(private_token(&seen[0]), "live-pat-1470");
+        assert!(seen[0].url.starts_with("https://gitlab.com/api/v4/"));
+        drop(seen);
+
+        // Undecryptable token falls back to the raw value (`or token`).
+        let fake = FakeGitlab {
+            seen: Mutex::new(vec![]),
+        };
+        let credential = json!({
+            "auth_type": "pat",
+            "host_url": "https://gitlab.com",
+            "token": "raw-pat-1470",
+        });
+        LiveProviders::gitlab_adapter(&fake)
+            .list_open_issues(&credential, &gitlab_test_repo())
+            .expect("fake 200 lists");
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(private_token(&seen[0]), "raw-pat-1470");
+        drop(seen);
+
+        // Self-hosted hosts are refused by default (gitlab.com-only).
+        let fake = FakeGitlab {
+            seen: Mutex::new(vec![]),
+        };
+        let credential = json!({
+            "auth_type": "pat",
+            "host_url": "https://gitlab.example.com",
+            "token": stored,
+        });
+        let error = LiveProviders::gitlab_adapter(&fake)
+            .list_open_issues(&credential, &gitlab_test_repo())
+            .expect_err("default config refuses self-hosted hosts");
+        assert_eq!(
+            error,
+            GitProviderError::Permission(
+                "GitLab host is not allowed; ask an instance admin to add it to GITLAB_ALLOWED_HOSTS."
+                    .to_owned()
+            )
+        );
+        assert!(fake.seen.lock().unwrap().is_empty());
+
+        // Allowed once listed (csv, stripped, empties dropped: common.py:41).
+        std::env::set_var(
+            "GITLAB_ALLOWED_HOSTS",
+            " https://gitlab.example.com ,,https://other.example/x/ ",
+        );
+        let fake = FakeGitlab {
+            seen: Mutex::new(vec![]),
+        };
+        LiveProviders::gitlab_adapter(&fake)
+            .list_open_issues(&credential, &gitlab_test_repo())
+            .expect("listed self-hosted host is allowed");
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0]
+            .url
+            .starts_with("https://gitlab.example.com/api/v4/"));
+        assert_eq!(private_token(&seen[0]), "live-pat-1470");
+        drop(seen);
+
+        // The effective GITLAB_HOST is "" (Django never defines it).
+        assert!(gitlab_config().gitlab_host.is_empty());
+
+        match saved_secret {
+            Some(value) => std::env::set_var("SECRET_KEY", value),
+            None => std::env::remove_var("SECRET_KEY"),
+        }
+        match saved_allowed {
+            Some(value) => std::env::set_var("GITLAB_ALLOWED_HOSTS", value),
+            None => std::env::remove_var("GITLAB_ALLOWED_HOSTS"),
+        }
     }
 }
