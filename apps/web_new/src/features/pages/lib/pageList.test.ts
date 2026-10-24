@@ -120,6 +120,15 @@ describe("sortPageRows", () => {
     expect(sortPageRows(rows, { key: "name", direction: "descending" }).map((row) => row.id)).toEqual(["c", "a", "b"]);
   });
 
+  it("compares numbered titles lexicographically rather than numerically", () => {
+    const ten = makePageRow({ id: "ten", name: "Page 10" });
+    const two = makePageRow({ id: "two", name: "Page 2" });
+    expect(sortPageRows([two, ten], { key: "name", direction: "ascending" }).map((row) => row.id)).toEqual([
+      "ten",
+      "two",
+    ]);
+  });
+
   it("sorts by creation in both directions", () => {
     expect(sortPageRows(rows, { key: "created", direction: "ascending" }).map((row) => row.id)).toEqual([
       "a",

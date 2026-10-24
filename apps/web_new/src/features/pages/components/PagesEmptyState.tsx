@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Empty pages collection (parity/specs/pages.md §3.7, PAGE-019). The
-// archived tab cannot be created into, so it carries no action. The
-// ordinary empty state's action is disabled for a guest by its caller.
+// archived tab cannot be created into, so it carries no action, except
+// when the collection read failed: that always falls through to the
+// ordinary empty state (§2.7), and a guest's action stays disabled (§2.5).
 
 import { EmptyState } from "@pidash/kit";
 import * as React from "react";
@@ -22,24 +23,25 @@ export function PagesEmptyState({
   onCreate,
   readFailed = false,
 }: PagesEmptyStateProps): React.ReactElement {
+  const shelved = archived && !readFailed;
   return (
     <div data-testid="pages-empty-state">
       <EmptyState
         variant="detailed"
         art={{ category: "general", type: "empty" }}
-        title={archived ? "No archived pages yet" : "No pages in this project yet"}
+        title={shelved ? "No archived pages yet" : "No pages in this project yet"}
         description={
-          archived
+          shelved
             ? "Pages you archive will be kept here."
             : "Write a page to capture context, plans and decisions beside your work."
         }
-        {...(archived
+        {...(shelved
           ? {}
           : {
               primaryAction: {
                 label: "Create your first Page",
                 onSelect: onCreate,
-                disabled: readFailed ? false : !canCreate,
+                disabled: !canCreate,
               },
             })}
       />

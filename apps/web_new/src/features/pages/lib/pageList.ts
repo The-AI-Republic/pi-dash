@@ -92,7 +92,7 @@ export function pageSortKeyLabel(key: PageSortKey): string {
 }
 
 /** Locale-aware, case-insensitive name comparison; untitled uses its label. */
-const titleCollator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
+const titleCollator = new Intl.Collator(undefined, { sensitivity: "base" });
 
 export function comparePageTitles(left: string, right: string): number {
   return titleCollator.compare(pageDisplayTitle(left), pageDisplayTitle(right));

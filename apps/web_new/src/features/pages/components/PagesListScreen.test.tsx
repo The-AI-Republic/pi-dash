@@ -161,6 +161,22 @@ describe("PagesListScreen", () => {
     expect(screen.queryByRole("button", { name: "Create your first Page" })).not.toBeInTheDocument();
   });
 
+  it("falls through to the ordinary empty state when the archived read fails", async () => {
+    harness.pagesStatus = 500;
+    renderScreen("archived");
+    expect(await screen.findByTestId("pages-empty-state")).toBeInTheDocument();
+    expect(screen.getByText("No pages in this project yet")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create your first Page" })).toBeEnabled();
+  });
+
+  it("keeps the guest create action disabled after a failed read", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 5 };
+    harness.pagesStatus = 500;
+    renderScreen();
+    expect(await screen.findByTestId("pages-empty-state")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create your first Page" })).toBeDisabled();
+  });
+
   it("renders rows in modified-descending order once loaded", async () => {
     harness.pages = [
       makePageRow({ id: pageId(1), name: "Older", updated_at: "2026-01-01T00:00:00Z" }),
