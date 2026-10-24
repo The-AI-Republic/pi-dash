@@ -285,7 +285,14 @@ describe("PagesListScreen", () => {
   it("resets client discovery state when the project changes", async () => {
     harness.pages = [makePageRow({ name: "Alpha" })];
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const view = renderProject(PAGES_PROJECT_ID, client);
+    const otherProjectId = "723e4567-e89b-12d3-a456-426614174006";
+    const view = renderProject(otherProjectId, client);
+    await screen.findByRole("link", { name: "Alpha" });
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <PagesListScreen workspaceSlug="acme" projectId={PAGES_PROJECT_ID} tab="public" />
+      </QueryClientProvider>
+    );
     await screen.findByRole("link", { name: "Alpha" });
     fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
     fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "zzz" } });
@@ -296,7 +303,7 @@ describe("PagesListScreen", () => {
     expect(screen.getByPlaceholderText("Search")).toHaveValue("ada");
     view.rerender(
       <QueryClientProvider client={client}>
-        <PagesListScreen workspaceSlug="acme" projectId="723e4567-e89b-12d3-a456-426614174006" tab="public" />
+        <PagesListScreen workspaceSlug="acme" projectId={otherProjectId} tab="public" />
       </QueryClientProvider>
     );
     expect(await screen.findByRole("link", { name: "Alpha" })).toBeInTheDocument();
