@@ -27,8 +27,9 @@ import { projectsQueryOptions } from "../../../../../../features/projects/api/qu
 primeIssueListLeaves();
 preloadIssueFilters();
 
+const loadCycleDetailContent = () => import("./CycleDetailContent.js");
 const LazyCycleDetailContent = React.lazy(() =>
-  import("./CycleDetailContent.js").then((module) => ({ default: module.CycleDetailContent }))
+  loadCycleDetailContent().then((module) => ({ default: module.CycleDetailContent }))
 );
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cycleId")({
@@ -43,9 +44,10 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
       await context.queryClient.ensureQueryData(
         cycleDetailQueryOptions(context.apiClient, params.ws, params.projectId, params.cycleId)
       );
-      // The board and the list/analytics leaves ride their own chunks;
-      // await them with the data so the first commit is the screen.
-      await Promise.all([loadKanbanLayout(), loadIssueListLeaves()]);
+      // The page body, the board and the list/analytics leaves ride their
+      // own chunks; await them with the data so the first commit is the
+      // screen rather than an intermediate skeleton.
+      await Promise.all([loadCycleDetailContent(), loadKanbanLayout(), loadIssueListLeaves()]);
     } catch (error) {
       // A missing cycle 404s the prefetch: let the gone-away gate own it
       // instead of failing the load (CYC-013).
