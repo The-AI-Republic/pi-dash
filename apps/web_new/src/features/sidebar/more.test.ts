@@ -45,12 +45,12 @@ describe("selectMoreEntries", () => {
 
   it("shows guests the shared rows only", () => {
     const entries = selectMoreEntries({ workspaceSlug: "acme", role: ROLE_GUEST });
-    expect(entries.map((entry) => entry.name)).toEqual(["Projects", "Prompts", "Schedulers", "Active cycles"]);
+    expect(entries.map((entry) => entry.name)).toEqual(["Projects", "Prompts", "Schedulers"]);
   });
 
   it("reads a null role as guest level", () => {
     const entries = selectMoreEntries({ workspaceSlug: "acme", role: null });
-    expect(entries.map((entry) => entry.name)).toEqual(["Projects", "Prompts", "Schedulers", "Active cycles"]);
+    expect(entries.map((entry) => entry.name)).toEqual(["Projects", "Prompts", "Schedulers"]);
   });
 });
 

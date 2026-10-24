@@ -108,6 +108,6 @@ describe("SidebarMoreGroup", () => {
   it("shows guests the shared rows only", () => {
     setup(ROLE_GUEST);
     fireEvent.click(toggle());
-    expect(linkNames()).toEqual(["Projects", "Prompts", "Schedulers", "Active cycles"]);
+    expect(linkNames()).toEqual(["Projects", "Prompts", "Schedulers"]);
   });
 });
