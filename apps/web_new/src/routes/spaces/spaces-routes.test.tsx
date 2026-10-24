@@ -5,7 +5,8 @@
 import { createClient, type Transport } from "@pidash/api-client";
 import { QueryClient } from "@tanstack/react-query";
 import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -52,7 +53,7 @@ const settings = {
   is_comments_enabled: false,
   is_reactions_enabled: false,
   is_votes_enabled: false,
-  view_props: {},
+  view_props: { list: true, kanban: true },
   is_disabled: false,
   intake: null,
 };
@@ -98,7 +99,10 @@ const instance = {
   },
 };
 
-function renderSpace(path: string, overrides: { settings?: () => Awaited<ReturnType<Transport>> } = {}) {
+function renderSpace(
+  path: string,
+  overrides: { settings?: () => Awaited<ReturnType<Transport>>; entries?: string[] } = {}
+) {
   vi.stubGlobal("scrollTo", vi.fn());
   const transport: Transport = async (url) => {
     if (url.includes("/api/instances/")) return reply(200, instance);
@@ -123,7 +127,7 @@ function renderSpace(path: string, overrides: { settings?: () => Awaited<ReturnT
   runtime.queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createRouter({
     routeTree,
-    history: createMemoryHistory({ initialEntries: [path] }),
+    history: createMemoryHistory({ initialEntries: overrides.entries ?? [path] }),
     context: {
       queryClient: runtime.queryClient as QueryClient,
       apiClient: runtime.client as ReturnType<typeof createClient>,
@@ -210,6 +214,32 @@ describe("spaces route tree", () => {
   it("renders the fixed generic not-found address", async () => {
     renderSpace("/404");
     expect(await screen.findByRole("heading", { name: "That page does not exist" })).toBeInTheDocument();
+  });
+});
+
+describe("space board layout address (SPC-021/022)", () => {
+  it("rewrites a missing view to the first enabled one without adding history", async () => {
+    const router = renderSpace("/spaces/issues/anchor-1/", { entries: ["/spaces/", "/spaces/issues/anchor-1/"] });
+    await waitFor(() => expect(router.state.location.search).toEqual({ board: "list" }));
+    expect(router.state.location.pathname).toBe("/spaces/issues/anchor-1/");
+    // The settlement replaced the board entry: Back reaches the landing page,
+    // never the same board without the view parameter.
+    expect(router.history.length).toBe(2);
+    await act(async () => {
+      router.history.back();
+    });
+    await waitFor(() => expect(screen.getByTestId("space-landing")).toBeInTheDocument());
+  });
+
+  it("switches layout with a push so Back returns to the previous view", async () => {
+    const router = renderSpace("/spaces/issues/anchor-1/?board=list");
+    await waitFor(() => expect(screen.getByTestId("space-layout-switcher")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Board layout" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ board: "kanban" }));
+    await act(async () => {
+      router.history.back();
+    });
+    await waitFor(() => expect(router.state.location.search).toEqual({ board: "list" }));
   });
 });
 

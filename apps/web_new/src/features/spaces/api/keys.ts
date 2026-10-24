@@ -9,7 +9,10 @@ export const spaceKeys = {
   instance: ["spaces", "instance"] as const,
   anchor: (anchor: string) => ["spaces", "anchor", anchor] as const,
   settings: (anchor: string) => ["spaces", "anchor", anchor, "settings"] as const,
-  issues: (anchor: string) => ["spaces", "anchor", anchor, "issues"] as const,
+  issues: (anchor: string, filterSignature: string) => ["spaces", "anchor", anchor, "issues", filterSignature] as const,
+  /** One workflow state's later pages; the layout is deliberately absent so both reuse them. */
+  group: (anchor: string, stateId: string, filterSignature: string) =>
+    ["spaces", "anchor", anchor, "issues", filterSignature, "group", stateId] as const,
   states: (anchor: string) => ["spaces", "anchor", anchor, "states"] as const,
   meta: (anchor: string) => ["spaces", "anchor", anchor, "meta"] as const,
   legacy: (workspaceSlug: string, projectId: string) => ["spaces", "legacy", workspaceSlug, projectId] as const,
