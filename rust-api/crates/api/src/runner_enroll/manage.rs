@@ -617,7 +617,7 @@ fn decode_machine_mini(
     }))
 }
 
-/// Owned live-state snapshot (`RunnerLiveState`, `models.py:1454-1500`).
+/// Owned live-state snapshot (`RunnerLiveState`, `models.py:1504-1558`).
 struct LiveStateOwned {
     observed_run_id: Option<String>,
     last_event_at: Option<String>,
@@ -629,6 +629,8 @@ struct LiveStateOwned {
     usage: Value,
     llm_model: Option<String>,
     turn_count: Option<i64>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
     updated_at: String,
 }
 
@@ -644,7 +646,8 @@ async fn fetch_live_state(
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT "runner_id", "observed_run_id", "last_event_at", "last_event_kind",
               "last_event_summary", "agent_pid", "agent_subprocess_alive",
-              "approvals_pending", "usage", "llm_model", "turn_count", "updated_at"
+              "approvals_pending", "usage", "llm_model", "turn_count",
+              "agent_health", "agent_last_activity_at", "updated_at"
            FROM "runner_live_state" WHERE "runner_live_state"."runner_id" = $1 LIMIT 1"#,
     )
     .bind(runner_id)
@@ -656,7 +659,9 @@ async fn fetch_live_state(
     };
     let observed: Option<Uuid> = row.try_get(1).map_err(|_| server_error())?;
     let last_event_at: Option<DateTime<Utc>> = row.try_get(2).map_err(|_| server_error())?;
-    let updated_at: DateTime<Utc> = row.try_get(11).map_err(|_| server_error())?;
+    let agent_last_activity_at: Option<DateTime<Utc>> =
+        row.try_get(12).map_err(|_| server_error())?;
+    let updated_at: DateTime<Utc> = row.try_get(13).map_err(|_| server_error())?;
     let agent_pid: Option<i32> = row.try_get(5).map_err(|_| server_error())?;
     let approvals_pending: Option<i32> = row.try_get(7).map_err(|_| server_error())?;
     let turn_count: Option<i32> = row.try_get(10).map_err(|_| server_error())?;
@@ -673,6 +678,10 @@ async fn fetch_live_state(
         usage: row.try_get(8).map_err(|_| server_error())?,
         llm_model: row.try_get(9).map_err(|_| server_error())?,
         turn_count: turn_count.map(i64::from),
+        agent_health: row.try_get(11).map_err(|_| server_error())?,
+        agent_last_activity_at: agent_last_activity_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
         updated_at: crate::serializer::render_datetime(&updated_at),
     }))
 }
@@ -960,6 +969,8 @@ impl RunnerRender {
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: &live.updated_at,
         });
         let row = shapes::RunnerRow {
@@ -2651,6 +2662,8 @@ mod tests {
             usage: serde_json::json!({}),
             llm_model: Some("m".to_owned()),
             turn_count: Some(3),
+            agent_health: Some("healthy".to_owned()),
+            agent_last_activity_at: Some("2026-10-02T01:02:01Z".to_owned()),
             updated_at: "2026-10-02T01:02:03Z".to_owned(),
         };
         let body = runner_render(&runner, &fixed_pod(), "WEB".to_owned(), None, Some(live))
@@ -2658,7 +2671,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             body,
-            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","provisioning":"manual","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","provisioning":"manual","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
     }
 }

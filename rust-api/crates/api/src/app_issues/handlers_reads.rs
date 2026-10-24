@@ -1858,6 +1858,7 @@ struct AgentRunOwned {
     started_at: Option<String>,
     ended_at: Option<String>,
     live_last_event_at: Option<String>,
+    live_agent_last_activity_at: Option<String>,
     live_updated_at: Option<String>,
 }
 
@@ -1894,6 +1895,7 @@ async fn fetch_agent_run(
         started_at: render_iso_moment(&row, "started_at"),
         ended_at: render_iso_moment(&row, "ended_at"),
         live_last_event_at: render_iso_moment(&row, "last_event_at"),
+        live_agent_last_activity_at: render_iso_moment(&row, "agent_last_activity_at"),
         live_updated_at,
         created_at,
         row,
@@ -1915,6 +1917,8 @@ fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
             usage,
             llm_model: get_str(row, "live_llm_model"),
             turn_count: get_i32(row, "turn_count"),
+            agent_health: get_str(row, "agent_health"),
+            agent_last_activity_at: run.live_agent_last_activity_at.as_deref(),
             updated_at,
         }
     });

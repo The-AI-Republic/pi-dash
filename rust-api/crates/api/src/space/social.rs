@@ -1387,8 +1387,11 @@ fn check_text(
             None
         }
         Some(Value::String(text)) => {
+            // DRF `CharField(trim_whitespace=True)`: strip first, then
+            // count characters — same tail as app_issues `check_text_tail`.
+            let stripped = text.trim();
             if let Some(max) = max_length {
-                if text.len() > max {
+                if stripped.chars().count() > max {
                     push_error(
                         errors,
                         field,
@@ -1396,7 +1399,7 @@ fn check_text(
                     );
                 }
             }
-            Some(text.clone())
+            Some(stripped.to_owned())
         }
         _ => {
             push_error(errors, field, "Not a valid string.".to_owned());
@@ -1486,7 +1489,10 @@ fn check_nullable_text(
         None => None,
         Some(Value::Null) => Some(None),
         Some(Value::String(text)) => {
-            if text.len() > max_length {
+            // DRF `CharField(trim_whitespace=True)`: strip first, then
+            // count characters — same tail as app_issues `check_text_tail`.
+            let stripped = text.trim();
+            if stripped.chars().count() > max_length {
                 push_error(
                     errors,
                     field,
@@ -1494,7 +1500,7 @@ fn check_nullable_text(
                 );
                 None
             } else {
-                Some(Some(text.clone()))
+                Some(Some(stripped.to_owned()))
             }
         }
         _ => {
@@ -1606,8 +1612,11 @@ fn check_string_list(
             for item in items {
                 match item {
                     Value::String(text) => {
+                        // List items are DRF child `CharField`s: strip, then
+                        // count characters (app_issues `check_text_tail`).
+                        let stripped = text.trim();
                         if let Some(max) = item_max_length {
-                            if text.len() > max {
+                            if stripped.chars().count() > max {
                                 push_error(
                                     errors,
                                     field,
@@ -1616,7 +1625,7 @@ fn check_string_list(
                                 return None;
                             }
                         }
-                        out.push(text.clone());
+                        out.push(stripped.to_owned());
                     }
                     _ => {
                         push_error(errors, field, "Not a valid string.".to_owned());

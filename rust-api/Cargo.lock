@@ -2922,6 +2922,7 @@ dependencies = [
  "redis",
  "regex",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",

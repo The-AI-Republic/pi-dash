@@ -39,6 +39,9 @@ def clean_db(db):
                 "issue_sequences",
                 "issue_assignees",
                 "issue_labels",
+                # Activities carry FKs into projects (and issues); the graph
+                # timezone suite (PIDASHCONV-1371) seeds them directly.
+                "issue_activities",
                 "user_favorites",
                 "issues",
                 "draft_issue_assignees",

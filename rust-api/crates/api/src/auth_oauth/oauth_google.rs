@@ -1595,19 +1595,23 @@ pub async fn insert_file_asset(
     Ok(())
 }
 
-/// `delete_old_avatar` (`adapter/base.py:285-287`): when the user carries
-/// an avatar asset, delete the S3 object + the row and clear both columns.
-/// `FileAsset.DoesNotExist` passes silently; any other failure is logged
-/// and the flow continues (`except Exception: log_exception; return`) —
-/// so this returns `()` always and never fails the pipeline.
+/// `delete_old_avatar` (`adapter/base.py:236-254`): when the user carries
+/// a live avatar asset, delete the S3 object, soft-delete the row and
+/// clear both columns. `FileAsset.DoesNotExist` (no row, or a
+/// soft-deleted one — the manager filters `deleted_at IS NULL`) passes
+/// silently; any other failure is logged and the flow continues
+/// (`except Exception: log_exception; return`) — so this returns `()`
+/// always and never fails the pipeline.
 ///
 /// Row-delete policy mirrors `delete_files` exactly: the S3 multi-delete
 /// is idempotent and its `ClientError` collapses to `False`, after which
 /// Python still deletes the row — so any *answered* HTTP response (even
-/// an error status) deletes the row + clears the FK. Only a *transport*
-/// failure (Python's non-`ClientError` raise, e.g. connection loss) or a
-/// misconfigured backend (Python fails lazily on first use) keeps the
-/// old avatar intact.
+/// an error status) soft-deletes the row + clears the FK. Only a
+/// *transport* failure (Python's non-`ClientError` raise, e.g. connection
+/// loss) or a misconfigured backend (Python fails lazily on first use)
+/// keeps the old avatar intact. The row write is a soft delete, never a
+/// hard `DELETE`: the user's FK still points at the row, so a hard
+/// delete would die on the deferred FK in autocommit (PIDASHCONV-1321).
 #[allow(clippy::too_many_arguments)]
 pub async fn delete_old_avatar(
     client: &reqwest::Client,
@@ -1622,18 +1626,19 @@ pub async fn delete_old_avatar(
     let Some(asset_id) = avatar_asset_id else {
         return;
     };
-    let row: Option<(String,)> =
-        match sqlx::query_as("SELECT \"asset\" FROM \"file_assets\" WHERE \"id\" = $1")
-            .bind(asset_id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(error) => {
-                tracing::warn!(%error, "delete_old_avatar lookup failed");
-                return;
-            }
-        };
+    let row: Option<(String,)> = match sqlx::query_as(
+        "SELECT \"asset\" FROM \"file_assets\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
+    )
+    .bind(asset_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(%error, "delete_old_avatar lookup failed");
+            return;
+        }
+    };
     let Some((key,)) = row else {
         return;
     };
@@ -1663,20 +1668,7 @@ pub async fn delete_old_avatar(
             return;
         }
     }
-    if sqlx::query("DELETE FROM \"file_assets\" WHERE \"id\" = $1")
-        .bind(asset_id)
-        .execute(pool)
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let _ = sqlx::query(
-        "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"avatar\" = '' WHERE \"id\" = $1",
-    )
-    .bind(user_id)
-    .execute(pool)
-    .await;
+    crate::auth_oauth::soft_delete_avatar_asset(pool, user_id, asset_id, now).await;
 }
 
 /// Best-effort `.delay()` through the Postgres job queue
@@ -3071,5 +3063,274 @@ mod tests {
         );
         assert!(row.1, "is_staff syncs from is_superuser");
         assert!(row.2 > stale, "updated_at refreshes on the login save");
+    }
+
+    // -- live kernel tests: delete_old_avatar (PIDASHCONV-1321) -----------
+    // The HTTP success path is sealed (hardcoded https googleapis URLs),
+    // so these drive `delete_old_avatar` directly against the scratch DB
+    // with a loopback stub answering 200 to every S3 request.
+
+    /// Loopback S3 stub: answers `200` with an empty body to every
+    /// request. Returns the base URL plus a hit counter.
+    fn s3_stub_200() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind s3 stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// Seed a user carrying a live `USER_AVATAR` asset (column lists mirror
+    /// `insert_file_asset` and `_harness.db.Database.make_user`), with the
+    /// user's FK + avatar string pointed at it. `created_by` is seeded set
+    /// (like `insert_file_asset`) so the test pins Django's anonymous-save
+    /// NULLing (`BaseModel.save`, `db/models/base.py:31-33`).
+    async fn seed_avatar_user(
+        pool: &sqlx::PgPool,
+        email: &str,
+        key: &str,
+    ) -> (uuid::Uuid, uuid::Uuid) {
+        let user_id = uuid::Uuid::new_v4();
+        let asset_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "file_assets"
+               ("id", "created_at", "updated_at", "attributes", "asset",
+                "created_by_id", "updated_by_id", "workspace_id",
+                "is_deleted", "deleted_at", "is_archived",
+                "comment_id", "entity_type", "external_id", "external_source",
+                "is_uploaded", "issue_id", "page_id", "project_id",
+                "size", "storage_metadata", "user_id", "draft_issue_id", "entity_identifier")
+               VALUES ($1, $2, $2, '{"name": "google-avatar.png"}', $3, $4, NULL, NULL,
+                       FALSE, NULL, FALSE,
+                       NULL, 'USER_AVATAR', NULL, NULL,
+                       TRUE, NULL, NULL, NULL,
+                       42, NULL, $4, NULL, NULL)"#,
+        )
+        .bind(asset_id)
+        .bind(now)
+        .bind(key)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed avatar asset");
+        sqlx::query(r#"UPDATE "users" SET "avatar_asset_id" = $1, "avatar" = $2 WHERE "id" = $3"#)
+            .bind(asset_id)
+            .bind("http://avatar.test/old.png")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("point user at asset");
+        (user_id, asset_id)
+    }
+
+    async fn cleanup_avatar_world(pool: &sqlx::PgPool, user_id: uuid::Uuid) {
+        sqlx::query(r#"DELETE FROM "rust_job_queue" WHERE "args"::text LIKE $1"#)
+            .bind(format!("%{user_id}%"))
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query(r#"DELETE FROM "file_assets" WHERE "user_id" = $1"#)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    /// `delete_old_avatar` soft-deletes the asset row (Django
+    /// `SoftDeleteModel.delete`: `deleted_at` + save + the
+    /// `soft_delete_related_objects` enqueue), clears the user's FK +
+    /// avatar string, and deletes the S3 object — instead of hard-deleting
+    /// the still-referenced row (23503, early return, live row + FK left
+    /// pointing at the deleted object).
+    #[tokio::test]
+    async fn google_kernel_delete_old_avatar_soft_deletes() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let (s3_base, hits) = s3_stub_200();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go1321-{tag}@example.test");
+        let (user_id, asset_id) =
+            seed_avatar_user(&pool, &email, &format!("kernel-{tag}-user-avatar.png")).await;
+        let client = reqwest::Client::new();
+
+        delete_old_avatar(
+            &client,
+            &pool,
+            &storage,
+            "http",
+            "127.0.0.1",
+            user_id,
+            Some(asset_id),
+            chrono::Utc::now(),
+        )
+        .await;
+
+        let row: (
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+        ) = sqlx::query_as(
+            r#"SELECT "deleted_at", "created_by_id", "updated_by_id"
+               FROM "file_assets" WHERE "id" = $1"#,
+        )
+        .bind(asset_id)
+        .fetch_one(&pool)
+        .await
+        .expect("old asset row survives as a soft delete");
+        let user: (Option<uuid::Uuid>, String) =
+            sqlx::query_as(r#"SELECT "avatar_asset_id", "avatar" FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read user");
+        let jobs: Vec<(String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
+            r#"SELECT "task", "args", "kwargs" FROM "rust_job_queue"
+               WHERE "args"::text LIKE $1"#,
+        )
+        .bind(format!("%{asset_id}%"))
+        .fetch_all(&pool)
+        .await
+        .expect("read queue");
+        cleanup_avatar_world(&pool, user_id).await;
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the S3 object is deleted exactly once"
+        );
+        assert!(row.0.is_some(), "old asset row soft-deletes");
+        assert_eq!(row.1, None, "anonymous save NULLs created_by");
+        assert_eq!(row.2, None, "anonymous save NULLs updated_by");
+        assert_eq!(user.0, None, "user FK cleared");
+        assert_eq!(user.1, "", "user avatar string cleared");
+        assert_eq!(jobs.len(), 1, "one soft-delete enqueue, {jobs:?}");
+        assert_eq!(
+            jobs[0].0,
+            "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+        );
+        assert_eq!(
+            jobs[0].1,
+            serde_json::json!(["db", "fileasset", asset_id.to_string()])
+        );
+        assert_eq!(jobs[0].2, serde_json::json!({"using": null}));
+    }
+
+    /// A soft-deleted asset reads as missing (Django's `objects.get`
+    /// `deleted_at IS NULL` manager raises `DoesNotExist`): no S3 I/O, no
+    /// user write, no enqueue.
+    #[tokio::test]
+    async fn google_kernel_delete_old_avatar_ignores_soft_deleted() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let (s3_base, hits) = s3_stub_200();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go1321d-{tag}@example.test");
+        let (user_id, asset_id) =
+            seed_avatar_user(&pool, &email, &format!("kernel-{tag}-gone.png")).await;
+        sqlx::query(r#"UPDATE "file_assets" SET "deleted_at" = $1 WHERE "id" = $2"#)
+            .bind(chrono::Utc::now())
+            .bind(asset_id)
+            .execute(&pool)
+            .await
+            .expect("pre-soft-delete the asset");
+        let client = reqwest::Client::new();
+
+        delete_old_avatar(
+            &client,
+            &pool,
+            &storage,
+            "http",
+            "127.0.0.1",
+            user_id,
+            Some(asset_id),
+            chrono::Utc::now(),
+        )
+        .await;
+
+        let user: (Option<uuid::Uuid>, String) =
+            sqlx::query_as(r#"SELECT "avatar_asset_id", "avatar" FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read user");
+        let jobs: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM "rust_job_queue" WHERE "args"::text LIKE $1"#,
+        )
+        .bind(format!("%{asset_id}%"))
+        .fetch_one(&pool)
+        .await
+        .expect("count queue");
+        cleanup_avatar_world(&pool, user_id).await;
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no S3 I/O for a soft-deleted asset"
+        );
+        assert_eq!(user.0, Some(asset_id), "user FK untouched");
+        assert_eq!(jobs, 0, "no enqueue for a soft-deleted asset");
     }
 }

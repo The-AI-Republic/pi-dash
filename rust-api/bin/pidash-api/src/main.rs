@@ -248,7 +248,7 @@ async fn worker(concurrency: u32) -> MainResult {
     // `redis_instance()`), the worker pool, and settings. Construction does
     // no I/O.
     let turn_redis = match settings.redis.url.as_deref().filter(|url| !url.is_empty()) {
-        Some(url) => match redis::Client::open(url) {
+        Some(url) => match pidash_db::redis::open_client(url) {
             Ok(client) => Some(std::sync::Arc::new(client)),
             Err(error) => {
                 tracing::warn!(%error, "assistant: REDIS_URL unparsable; cancel key disabled");
@@ -357,6 +357,12 @@ async fn shutdown_signal() {
 type MainResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> MainResult {
+    // Both `ring` (via reqwest) and `aws-lc-rs` (via mongodb) are enabled
+    // in this binary, so rustls cannot pick a process-level CryptoProvider
+    // by itself and `ClientConfig::builder()` (which redis uses for
+    // `rediss://`) panics. Install ring first, before any TLS use; a
+    // previously installed provider (tests, embedding) is fine too.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     // Ops commands mirror Django management output byte for byte, so
     // they emit no tracing events: the subscriber stays off and stderr

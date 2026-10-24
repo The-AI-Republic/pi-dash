@@ -752,6 +752,8 @@ pub struct LiveStateOwned {
     pub usage: Value,
     pub llm_model: Option<String>,
     pub turn_count: Option<i64>,
+    pub agent_health: Option<String>,
+    pub agent_last_activity_at: Option<String>,
     pub updated_at: String,
 }
 
@@ -798,6 +800,8 @@ impl RunnerDetailOwned {
                 usage: &live.usage,
                 llm_model: live.llm_model.as_deref(),
                 turn_count: live.turn_count,
+                agent_health: live.agent_health.as_deref(),
+                agent_last_activity_at: live.agent_last_activity_at.as_deref(),
                 updated_at: &live.updated_at,
             }
         })
@@ -935,12 +939,15 @@ pub async fn fetch_runner_detail(
         Value,
         Option<String>,
         Option<i32>,
+        Option<String>,
+        Option<DateTime<Utc>>,
         DateTime<Utc>,
     );
     let live: Option<LiveRow> = sqlx::query_as(
         r#"SELECT "observed_run_id", "last_event_at", "last_event_kind",
               "last_event_summary", "agent_pid", "agent_subprocess_alive",
-              "approvals_pending", "usage", "llm_model", "turn_count", "updated_at"
+              "approvals_pending", "usage", "llm_model", "turn_count",
+              "agent_health", "agent_last_activity_at", "updated_at"
            FROM "runner_live_state" WHERE "runner_id" = $1"#,
     )
     .bind(runner_id)
@@ -1002,7 +1009,9 @@ pub async fn fetch_runner_detail(
             usage: live.7,
             llm_model: live.8,
             turn_count: live.9.map(i64::from),
-            updated_at: drf_datetime(&live.10),
+            agent_health: live.10,
+            agent_last_activity_at: drf_opt(&live.11),
+            updated_at: drf_datetime(&live.12),
         }),
         enrolled_at: drf_opt(&enrolled_at),
         revoked_at: drf_opt(&revoked_at),

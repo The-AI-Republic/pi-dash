@@ -7,8 +7,9 @@
 //!   rows older than the TTL.
 //! * `runner.sweep_agent_chat_state` (`:227-244`): `sweep_active_turns()`
 //!   + `sweep_empty_sessions()` from L5.
-//! * `runner.reconcile_stalled_runs` (`:246-330`): the 3-conjunct stall
-//!   watchdog, reaping via L4 `finalize_run_terminal`.
+//! * `runner.reconcile_stalled_runs` (`:412-503`): the 3-conjunct stall
+//!   watchdog (scoped to non-watchdog runners via `agent_health IS NULL`),
+//!   reaping via L4 `finalize_run_terminal`.
 //! * `runner.apply_agent_run_terminal_effects` (`:333-337`) +
 //!   `runner.reconcile_agent_run_terminal_effects` (`:340-353`, one unit):
 //!   the single apply plus the batch-of-100 `.delay` fan-out.
@@ -19,7 +20,7 @@
 //! fail-turn plan, event inserts), L4 `lifecycle`/`finalization`
 //! (terminal-update values, finalize lock/update, the terminal-effects
 //! plan, comment + scheduler-hook SQL). This module adds the candidate
-//! selects Django builds at the task call sites (the stall 3-conjunct
+//! selects Django builds at the task call sites (the stall candidate
 //! query, the reconcile batch query, the two dedupe deletes), the row
 //! mapping, the transaction/savepoint structure, and the post-commit
 //! effect firing. Settings resolve from the environment under the same
@@ -105,7 +106,7 @@ pub const SWEEP_RUN_MESSAGE_DEDUPE_TASK: &str = "runner.sweep_run_message_dedupe
 pub const SWEEP_CHAT_MESSAGE_DEDUPE_TASK: &str = "runner.sweep_chat_message_dedupe";
 /// `runner.sweep_agent_chat_state` (`tasks.py:227`).
 pub const SWEEP_AGENT_CHAT_STATE_TASK: &str = "runner.sweep_agent_chat_state";
-/// `runner.reconcile_stalled_runs` (`tasks.py:246`).
+/// `runner.reconcile_stalled_runs` (`tasks.py:411`).
 pub const RECONCILE_STALLED_RUNS_TASK: &str = "runner.reconcile_stalled_runs";
 /// `runner.reconcile_agent_run_terminal_effects` (`tasks.py:340`).
 pub const RECONCILE_TERMINAL_EFFECTS_TASK: &str = "runner.reconcile_agent_run_terminal_effects";
@@ -118,9 +119,9 @@ pub use finalization::TERMINAL_EFFECTS_TASK;
 // Settings
 // ---------------------------------------------------------------------------
 
-/// `RUNNER_AGENT_STALL_THRESHOLD_SECS` default (`tasks.py:268`).
+/// `RUNNER_AGENT_STALL_THRESHOLD_SECS` default (`tasks.py:438`).
 pub const STALL_THRESHOLD_SECS_DEFAULT: i64 = 360;
-/// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` default (`tasks.py:269`).
+/// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` default (`tasks.py:439`).
 pub const OBSERVABILITY_STALE_SECS_DEFAULT: i64 = 90;
 
 /// Resolve a seconds setting: the env var under Django's setting name,
@@ -147,7 +148,7 @@ pub fn parse_dedupe_ttl(raw: Option<&str>) -> i64 {
     run_message_dedupe_ttl_secs(raw.and_then(|value| value.parse::<i64>().ok()))
 }
 
-/// `RUNNER_AGENT_STALL_THRESHOLD_SECS` (`tasks.py:268`).
+/// `RUNNER_AGENT_STALL_THRESHOLD_SECS` (`tasks.py:438`).
 pub fn stall_threshold_secs() -> i64 {
     setting_secs(
         "RUNNER_AGENT_STALL_THRESHOLD_SECS",
@@ -155,7 +156,7 @@ pub fn stall_threshold_secs() -> i64 {
     )
 }
 
-/// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` (`tasks.py:269`).
+/// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` (`tasks.py:439`).
 pub fn observability_stale_secs() -> i64 {
     setting_secs(
         "RUNNER_AGENT_OBSERVABILITY_STALE_SECS",
@@ -306,7 +307,7 @@ pub fn dedupe_cutoff(now: DateTime<Utc>, ttl_secs: i64) -> DateTime<Utc> {
     now - chrono::Duration::seconds(ttl_secs)
 }
 
-/// The stall cutoffs (`tasks.py:270-272`): the agent-silence cutoff
+/// The stall cutoffs (`tasks.py:440-442`): the agent-silence cutoff
 /// first, the snapshot-freshness cutoff second.
 pub fn stall_cutoffs(
     now: DateTime<Utc>,
@@ -319,16 +320,19 @@ pub fn stall_cutoffs(
     )
 }
 
-/// The stall candidate select (`tasks.py:292-301`): full `agent_run` +
+/// The stall candidate select (`tasks.py:462-472`): full `agent_run` +
 /// full `runner` (`select_related("runner")`) over the two `INNER
 /// JOIN`s. The `WHERE` order is Django's: the `status__in` filter,
 /// then the three live-state conjuncts in Q-sorted (alphabetical)
 /// order — `last_event_at`, `observed_run_id`, `updated_at` — then the
-/// `approvals_pending` OR. Params: `$1`/`$2` the active statuses
-/// (`assigned`, `running`), `$3` the silence cutoff, `$4` the snapshot
-/// cutoff, `$5` zero. `NULL` `last_event_at` rows never match (`__lt`
-/// excludes `NULL`); `NULL` `approvals_pending` rows do (the `IS NULL`
-/// arm). Fixture: FX-RUN-07 `candidate_sql`.
+/// `approvals_pending` OR, then the `agent_health IS NULL` backstop
+/// scope (watchdog runners own their own 24h/48h sweep, `:470`).
+/// Params: `$1`/`$2` the active statuses (`assigned`, `running`),
+/// `$3` the silence cutoff, `$4` the snapshot cutoff, `$5` zero.
+/// `NULL` `last_event_at` rows never match (`__lt` excludes `NULL`);
+/// `NULL` `approvals_pending` rows do (the `IS NULL` arm); only
+/// `NULL` `agent_health` rows match at all. Fixture: FX-RUN-07
+/// `candidate_sql`.
 pub fn stalled_candidate_sql() -> String {
     format!(
         "SELECT {}, {} FROM \"agent_run\" \
@@ -339,7 +343,8 @@ pub fn stalled_candidate_sql() -> String {
          AND \"runner_live_state\".\"observed_run_id\" = (\"agent_run\".\"id\") \
          AND \"runner_live_state\".\"updated_at\" >= $4 \
          AND (\"runner_live_state\".\"approvals_pending\" = $5 \
-         OR \"runner_live_state\".\"approvals_pending\" IS NULL)) \
+         OR \"runner_live_state\".\"approvals_pending\" IS NULL) \
+         AND \"runner_live_state\".\"agent_health\" IS NULL) \
          ORDER BY \"agent_run\".\"created_at\" DESC",
         qualified_columns(agent_run::TABLE, agent_run::COLUMNS),
         qualified_columns(runner_cols::TABLE, runner_cols::COLUMNS),
@@ -906,7 +911,7 @@ async fn sweep_empty_sessions(pool: &PgPool, now: &DateTime<Utc>) -> Result<u64,
 }
 
 // ---------------------------------------------------------------------------
-// Stall watchdog (`tasks.py:246-330`)
+// Stall watchdog (`tasks.py:412-503`)
 // ---------------------------------------------------------------------------
 
 /// The stall detail (`tasks.py:316`).
@@ -2021,7 +2026,9 @@ mod tests {
             );
         assert_eq!(squish(&stalled_candidate_sql()), squish(&normalized));
         // The Q-sorted conjunct order survives normalization: silence
-        // first, then observed, then freshness.
+        // first, then observed, then freshness — with the approvals OR
+        // and the watchdog scope (`agent_health IS NULL`) trailing in
+        // filter order.
         let text = stalled_candidate_sql();
         let silence = text
             .find("\"runner_live_state\".\"last_event_at\" < $3")
@@ -2032,7 +2039,13 @@ mod tests {
         let fresh = text
             .find("\"runner_live_state\".\"updated_at\" >= $4")
             .expect("freshness");
-        assert!(silence < observed && observed < fresh);
+        let approvals = text
+            .find("\"runner_live_state\".\"approvals_pending\" = $5")
+            .expect("approvals");
+        let health = text
+            .find("\"runner_live_state\".\"agent_health\" IS NULL")
+            .expect("health scope");
+        assert!(silence < observed && observed < fresh && fresh < approvals && approvals < health);
     }
 
     #[test]

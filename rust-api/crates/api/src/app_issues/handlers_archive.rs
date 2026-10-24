@@ -747,6 +747,8 @@ struct OwnedLiveState {
     usage: Value,
     llm_model: Option<String>,
     turn_count: Option<i32>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
     updated_at: String,
 }
 
@@ -905,6 +907,8 @@ impl OwnedRun {
                 usage: &live.usage,
                 llm_model: live.llm_model.as_deref(),
                 turn_count: live.turn_count,
+                agent_health: live.agent_health.as_deref(),
+                agent_last_activity_at: live.agent_last_activity_at.as_deref(),
                 updated_at: &live.updated_at,
             }),
         }
@@ -1125,8 +1129,11 @@ async fn fetch_agent_run(
     let usage: Option<Value> = row.try_get(25).map_err(|_| Denial::ServerError)?;
     let live_llm_model: Option<String> = row.try_get(26).map_err(|_| Denial::ServerError)?;
     let turn_count: Option<i32> = row.try_get(27).map_err(|_| Denial::ServerError)?;
+    let agent_health: Option<String> = row.try_get(28).map_err(|_| Denial::ServerError)?;
+    let agent_last_activity_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get(29).map_err(|_| Denial::ServerError)?;
     let live_updated_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(28).map_err(|_| Denial::ServerError)?;
+        row.try_get(30).map_err(|_| Denial::ServerError)?;
     Ok(Some(OwnedRun {
         id: id.to_string(),
         status,
@@ -1157,6 +1164,8 @@ async fn fetch_agent_run(
             usage: usage.unwrap_or(Value::Null),
             llm_model: live_llm_model,
             turn_count,
+            agent_health,
+            agent_last_activity_at: agent_last_activity_at.map(serialize_iso_datetime),
             updated_at: serialize_iso_datetime(updated_at),
         }),
     }))
