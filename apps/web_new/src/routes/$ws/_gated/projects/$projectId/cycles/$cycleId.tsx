@@ -1,16 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Cycle detail (parity/specs/cycles.md §13, CYC-032–034). The Cycles
-// area owns the full page: the breadcrumb trail with the cycle
-// switcher, the stored dates in the member timezone (PROF-017,
+// Cycle detail (parity/specs/cycles.md §13, CYC-032–034; §14, CYC-035).
+// The Cycles area owns the full page: the breadcrumb trail with the
+// cycle switcher, the stored dates in the member timezone (PROF-017,
 // NEWFRONT-859), and the shared issues layouts bound to the
-// { scope: "cycle" } entity with per-cycle preferences. The header
-// actions are the work-item count badge, the member+ add-item button
-// (absent on finished cycles) and the display control; analytics rides
-// the shared entry with the cycle scope. A missing, deleted or
-// archived cycle renders the area's gone-away view through the detail
-// gate (CYC-013).
+// { scope: "cycle" } entity with per-cycle preferences beside the
+// collapsible sidebar. The header actions are the work-item count
+// badge, the member+ add-item button (absent on finished cycles), the
+// display control and the sidebar toggle; analytics rides the shared
+// entry with the cycle scope. A missing, deleted or archived cycle
+// renders the area's gone-away view through the detail gate (CYC-013).
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -23,10 +23,13 @@ import * as React from "react";
 // into the initial bundle (NEWFRONT-619, size gate).
 import { CycleDetailCrumbs } from "../../../../../../features/cycles/components/CycleDetailCrumbs.js";
 import { CycleDetailGate } from "../../../../../../features/cycles/components/CycleDetailGate.js";
+import { CycleDetailSidebar } from "../../../../../../features/cycles/components/CycleDetailSidebar.js";
 import { CycleMemberDates } from "../../../../../../features/cycles/components/CycleMemberDates.js";
+import { CycleSidebarToggle } from "../../../../../../features/cycles/components/CycleSidebarToggle.js";
 import { cycleDetailQueryOptions } from "../../../../../../features/cycles/api/cycleDetail.js";
+import { useCycleSidebarCollapsed } from "../../../../../../features/cycles/api/cycleSidebarState.js";
 import { getAppClient } from "../../../../../../core/api/client.js";
-import { useProjectRoles } from "../../../../../../features/auth/queries.js";
+import { useProjectRoles, useProjectRow } from "../../../../../../features/auth/queries.js";
 import { isProjectAuthorized, projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { isCompletedCycle } from "../../../../../../shared/pickers/cycles.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
@@ -182,6 +185,9 @@ function CycleDetailContent({
   const project = projects.find((entry) => entry.id === projectId) ?? null;
   const { data: cycle } = useSuspenseQuery(cycleDetailQueryOptions(client, workspaceSlug, projectId, cycleId));
   const roles = useProjectRoles(workspaceSlug);
+  const projectRow = useProjectRow(workspaceSlug, projectId);
+  const projectTimeZone = projectRow.data?.timezone ?? "UTC";
+  const [sidebarCollapsed, setSidebarCollapsed] = useCycleSidebarCollapsed();
   // Stored rich filters scope the layouts; the first page only feeds
   // the totals and the empty-card decision.
   const { data: preferences } = useSuspenseQuery(prefsQueryOptions(client, workspaceSlug, entity));
@@ -254,6 +260,9 @@ function CycleDetailContent({
       hideModule={!project.module_view}
     />
   );
+  const flipSidebar = (): void => {
+    setSidebarCollapsed(!sidebarCollapsed);
+  };
   const analytics = (
     <ResolvedAnalyticsEntry
       workspaceSlug={workspaceSlug}
@@ -418,6 +427,7 @@ function CycleDetailContent({
             {badge}
             {addWorkItem}
             {display}
+            <CycleSidebarToggle collapsed={sidebarCollapsed} onToggle={flipSidebar} />
           </>
         }
         displayControl={display}
@@ -465,20 +475,43 @@ function CycleDetailContent({
         cycleId={cycleId}
         cycleName={cycle.name}
         cycleStatus={cycle.status}
+        narrowActions={
+          <CycleSidebarToggle
+            collapsed={sidebarCollapsed}
+            onToggle={flipSidebar}
+            testId="cycle-sidebar-toggle-narrow"
+          />
+        }
       />
       <CycleMemberDates workspaceSlug={workspaceSlug} projectId={projectId} cycleId={cycleId} />
-      <React.Suspense fallback={renderWithFilters(null)}>
-        <LazyIssueFilters
-          workspaceSlug={workspaceSlug}
-          projectId={projectId}
-          entity={entity}
-          hideCycle={!project.cycle_view}
-          hideModule={!project.module_view}
-          viewsEnabled={project.issue_views_view}
-        >
-          {renderWithFilters}
-        </LazyIssueFilters>
-      </React.Suspense>
+      <div className="flex min-h-0 flex-1 items-start gap-(--space-4)">
+        <div className="min-w-0 flex-1">
+          <React.Suspense fallback={renderWithFilters(null)}>
+            <LazyIssueFilters
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              entity={entity}
+              hideCycle={!project.cycle_view}
+              hideModule={!project.module_view}
+              viewsEnabled={project.issue_views_view}
+            >
+              {renderWithFilters}
+            </LazyIssueFilters>
+          </React.Suspense>
+        </div>
+        {sidebarCollapsed ? null : (
+          <CycleDetailSidebar
+            key={cycleId}
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            cycle={cycle}
+            projectTimeZone={projectTimeZone}
+            estimatesEnabled={project.estimate != null}
+            editable={canEdit}
+            onClose={() => setSidebarCollapsed(true)}
+          />
+        )}
+      </div>
       {createDialog}
     </>
   );

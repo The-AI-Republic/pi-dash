@@ -7,7 +7,8 @@
 // slice C adds the list filters, menu, chips, and predicate; slice E
 // adds the row menu, delete/archive dialogs and mutations, the menu
 // model, and the finished read-only notice; slice F adds the detail
-// trail and its addresses).
+// trail and its addresses; slice G adds the detail sidebar, its dates,
+// progress, toggle, skeleton, state and queries).
 export { cycleDetailKeys, cycleDetailQueryOptions, useCycleDetail } from "./api/cycleDetail.js";
 export {
   CYCLE_ARCHIVE_FAILED_LINE,
@@ -44,6 +45,8 @@ export {
 export { cycleKeys } from "./api/keys.js";
 export { archivedCyclesQueryOptions, cyclesListQueryOptions } from "./api/queries.js";
 export { resetCycleSearchStore, useCycleSearchStore } from "./api/searchStore.js";
+export { useCycleAnalyticsTab, useCycleSidebarCollapsed } from "./api/cycleSidebarState.js";
+export { cycleAnalyticsQueryOptions, cycleProgressQueryOptions } from "./api/sidebarQueries.js";
 export {
   CYCLE_MEMBER_DATES_LABEL,
   CycleMemberDates,
@@ -55,6 +58,7 @@ export { CycleDateSpan, type CycleDateSpanProps } from "./components/CycleDateSp
 export { CycleDeleteDialog, type CycleDeleteDialogProps } from "./components/CycleDeleteDialog.js";
 export { CycleDetailCrumbs, type CycleDetailCrumbsProps } from "./components/CycleDetailCrumbs.js";
 export { CycleDetailGate, type CycleDetailGateProps } from "./components/CycleDetailGate.js";
+export { CycleDetailSidebar, type CycleDetailSidebarProps } from "./components/CycleDetailSidebar.js";
 export { CycleFilterChips, type CycleFilterChipsProps } from "./components/CycleFilterChips.js";
 export {
   CYCLE_FILTER_DIMENSIONS,
@@ -68,6 +72,20 @@ export { CyclePeekPanel, type CyclePeekPanelProps } from "./components/CyclePeek
 export { CycleProgressRing, type CycleProgressRingProps } from "./components/CycleProgressRing.js";
 export { CycleRow, type CycleRowProps } from "./components/CycleRow.js";
 export { CycleRowMenu, type CycleRowMenuProps } from "./components/CycleRowMenu.js";
+export {
+  CYCLE_DATES_EMPTY_LABEL,
+  CYCLE_DATES_UPDATED_TITLE,
+  CycleSidebarDates,
+  type CycleSidebarDatesProps,
+} from "./components/CycleSidebarDates.js";
+export { CycleSidebarProgress, type CycleSidebarProgressProps } from "./components/CycleSidebarProgress.js";
+export { CycleSidebarSkeleton, type CycleSidebarSkeletonProps } from "./components/CycleSidebarSkeleton.js";
+export {
+  CYCLE_SIDEBAR_COLLAPSE_LABEL,
+  CYCLE_SIDEBAR_EXPAND_LABEL,
+  CycleSidebarToggle,
+  type CycleSidebarToggleProps,
+} from "./components/CycleSidebarToggle.js";
 export { FinishedCycleNotice, type FinishedCycleNoticeProps } from "./components/FinishedCycleNotice.js";
 export { CyclesFeatureGate, type CyclesFeatureGateProps } from "./components/CyclesFeatureGate.js";
 export { CyclesListBody, type CyclesListBodyProps } from "./components/CyclesListBody.js";
@@ -151,6 +169,39 @@ export {
   type CycleProgressInput,
 } from "./lib/cycleProgress.js";
 export { filterCyclesByQuery, matchesCycleQuery } from "./lib/cycleSearch.js";
+export {
+  BREAKDOWN_FILTER_STEMS,
+  breakdownEntryActive,
+  breakdownTabKey,
+  completionChartPoints,
+  CYCLE_BREAKDOWN_TABS,
+  CYCLE_PROGRESS_EMPTY_TEXT,
+  CYCLE_PROGRESS_MEASURES,
+  CYCLE_SIDEBAR_COLLAPSED_KEY,
+  cycleProgressChartVisible,
+  cycleProgressEmptyText,
+  DEFAULT_BREAKDOWN_TAB,
+  measureLabel,
+  pointsPairText,
+  progressGrandTotal,
+  progressShare,
+  readBreakdownTab,
+  readSidebarCollapsed,
+  selectAssigneeRows,
+  selectLabelRows,
+  selectStateGroupRows,
+  showPointsRow,
+  toggleBreakdownCondition,
+  workItemsPairText,
+  writeBreakdownTab,
+  writeSidebarCollapsed,
+  type CycleBreakdownTab,
+  type CycleDistributionRow,
+  type CyclePointsSnapshot,
+  type CycleProgressMeasure,
+  type CycleStateGroupRow,
+  type SidebarFlagStorage,
+} from "./lib/cycleSidebar.js";
 export {
   CYCLES_CRUMB,
   cycleDetailPath,

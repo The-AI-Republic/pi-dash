@@ -16,6 +16,9 @@ const mocks = vi.hoisted(() => ({
   projects: vi.fn(),
   cycle: vi.fn(),
   roles: { current: { data: {} as Record<string, number>, isPending: false } },
+  projectRow: { current: { data: { timezone: "America/New_York" } as { timezone?: string } | undefined } },
+  sidebarCollapsed: { current: false },
+  setSidebarCollapsed: vi.fn(),
   layout: { current: "list" },
   filter: { current: null as null | Record<string, unknown> },
   completedNote: { current: false },
@@ -67,10 +70,45 @@ vi.mock("../../../../../../features/cycles/components/CycleDetailCrumbs.js", () 
       data-project={String(props.projectName ?? "")}
       data-cycle={String(props.cycleName ?? "")}
       data-status={String(props.cycleStatus ?? "")}
-    />
+    >
+      {props.narrowActions as never}
+    </div>
   ),
 }));
-vi.mock("../../../../../../features/auth/queries.js", () => ({ useProjectRoles: () => mocks.roles.current }));
+vi.mock("../../../../../../features/cycles/api/cycleSidebarState.js", () => ({
+  useCycleSidebarCollapsed: () => [mocks.sidebarCollapsed.current, mocks.setSidebarCollapsed],
+}));
+vi.mock("../../../../../../features/cycles/components/CycleDetailSidebar.js", () => ({
+  CycleDetailSidebar: (props: Record<string, unknown>) => (
+    <div
+      data-testid="detail-sidebar"
+      data-cycle={String((props.cycle as { name: string }).name ?? "")}
+      data-timezone={String(props.projectTimeZone ?? "")}
+      data-estimates={String(props.estimatesEnabled ?? false)}
+      data-editable={String(props.editable ?? false)}
+    >
+      <button type="button" onClick={props.onClose as () => void}>
+        close sidebar
+      </button>
+    </div>
+  ),
+}));
+vi.mock("../../../../../../features/cycles/components/CycleSidebarToggle.js", () => ({
+  CycleSidebarToggle: (props: Record<string, unknown>) => (
+    <button
+      type="button"
+      data-testid={String(props.testId ?? "cycle-sidebar-toggle")}
+      data-collapsed={String(props.collapsed ?? false)}
+      onClick={props.onToggle as () => void}
+    >
+      toggle
+    </button>
+  ),
+}));
+vi.mock("../../../../../../features/auth/queries.js", () => ({
+  useProjectRoles: () => mocks.roles.current,
+  useProjectRow: () => mocks.projectRow.current,
+}));
 vi.mock("../../../../../../features/projects/index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../../../features/projects/index.js")>()),
   projectsQueryOptions: mocks.projects,
@@ -339,6 +377,8 @@ beforeEach(() => {
   mocks.progress.current = { data: undefined };
   mocks.parsed.current = [];
   mocks.roles.current = { data: { [PROJECT]: 15 }, isPending: false };
+  mocks.projectRow.current = { data: { timezone: "America/New_York" } };
+  mocks.sidebarCollapsed.current = false;
   mocks.page.mockReturnValue({ queryKey: ["page"], queryFn: async () => pageSeed() });
   mocks.prefs.mockReturnValue({
     queryKey: ["prefs"],
@@ -750,5 +790,54 @@ describe("cycle detail route", () => {
     expect(reset).toHaveBeenCalled();
     rerender(React.createElement(ErrorComponent, { error: "offline", reset }));
     expect(screen.getByText("Something went wrong.")).toBeInTheDocument();
+  });
+
+  it("mounts the sidebar expanded with its wiring and both toggles", async () => {
+    renderRoute();
+    const sidebar = await screen.findByTestId("detail-sidebar");
+    expect(sidebar).toHaveAttribute("data-cycle", "Sprint 1");
+    expect(sidebar).toHaveAttribute("data-timezone", "America/New_York");
+    expect(sidebar).toHaveAttribute("data-estimates", "false");
+    expect(sidebar).toHaveAttribute("data-editable", "true");
+    expect(await screen.findByTestId("cycle-sidebar-toggle")).toHaveAttribute("data-collapsed", "false");
+    expect(await screen.findByTestId("cycle-sidebar-toggle-narrow")).toHaveAttribute("data-collapsed", "false");
+  });
+
+  it("hides the sidebar while collapsed", async () => {
+    mocks.sidebarCollapsed.current = true;
+    renderRoute();
+    expect(await screen.findByTestId("layout-root")).toBeInTheDocument();
+    expect(screen.queryByTestId("detail-sidebar")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("cycle-sidebar-toggle")).toHaveAttribute("data-collapsed", "true");
+  });
+
+  it("flips collapse from the toggles and the panel close", async () => {
+    renderRoute();
+    fireEvent.click(await screen.findByTestId("cycle-sidebar-toggle"));
+    expect(mocks.setSidebarCollapsed).toHaveBeenLastCalledWith(true);
+    fireEvent.click(await screen.findByTestId("cycle-sidebar-toggle-narrow"));
+    expect(mocks.setSidebarCollapsed).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "close sidebar" }));
+    expect(mocks.setSidebarCollapsed).toHaveBeenLastCalledWith(true);
+    expect(mocks.setSidebarCollapsed).toHaveBeenCalledTimes(3);
+  });
+
+  it("enables estimates when the project carries an estimate system", async () => {
+    mocks.projects.mockReturnValue({
+      queryKey: ["projects"],
+      queryFn: async () => [projectSeed({ estimate: "eid-1" })],
+    });
+    renderRoute();
+    expect(await screen.findByTestId("detail-sidebar")).toHaveAttribute("data-estimates", "true");
+  });
+
+  it("falls back to UTC without a project row or timezone", async () => {
+    mocks.projectRow.current = { data: undefined };
+    const first = renderRoute();
+    expect(await screen.findByTestId("detail-sidebar")).toHaveAttribute("data-timezone", "UTC");
+    first.unmount();
+    mocks.projectRow.current = { data: {} };
+    renderRoute();
+    expect(await screen.findByTestId("detail-sidebar")).toHaveAttribute("data-timezone", "UTC");
   });
 });

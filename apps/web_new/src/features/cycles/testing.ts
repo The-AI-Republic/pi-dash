@@ -3,7 +3,17 @@
 // See the LICENSE file for details.
 // Cycles test fixtures. Tests only; never imported by production code.
 
-import type { CycleRow, ProjectDetails, TransportResponse } from "@pidash/api-client";
+import type {
+  CycleDistribution,
+  CycleProgress,
+  CycleRow,
+  CycleUserProperties,
+  Estimate,
+  EstimateList,
+  ProjectDetails,
+  TransportResponse,
+  WorkspaceMemberList,
+} from "@pidash/api-client";
 
 export const CYCLES_WS_ID = "123e4567-e89b-12d3-a456-426614174000";
 export const CYCLES_PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
@@ -81,6 +91,132 @@ export function makeProjectDetails(overrides: Partial<ProjectDetails> = {}): Pro
     default_agent_executor: "local_runner",
     ...overrides,
   };
+}
+
+/** Progress snapshot (GET .../cycles/<id>/progress/), the sidebar counts read. */
+export function makeCycleProgress(overrides: Partial<CycleProgress> = {}): CycleProgress {
+  return {
+    total_issues: 3,
+    backlog_issues: 1,
+    unstarted_issues: 1,
+    started_issues: 0,
+    completed_issues: 1,
+    cancelled_issues: 0,
+    backlog_estimate_points: 2,
+    unstarted_estimate_points: 0,
+    started_estimate_points: 0,
+    completed_estimate_points: 0,
+    cancelled_estimate_points: 0,
+    total_estimate_points: 2,
+    ...overrides,
+  };
+}
+
+/** Breakdown distributions (GET .../analytics?type=), the entries read. */
+export function makeCycleDistribution(overrides: Partial<CycleDistribution> = {}): CycleDistribution {
+  return {
+    assignees: [
+      {
+        display_name: "Ada Lovelace",
+        assignee_id: "aaaaaaaa-0000-4000-8000-000000000001",
+        avatar_url: null,
+        total_issues: 2,
+        total_estimates: 4,
+      },
+    ],
+    labels: [
+      {
+        label_name: "Bug",
+        label_id: "bbbbbbbb-0000-4000-8000-000000000002",
+        color: "#e5484d",
+        total_issues: 1,
+        total_estimates: 2,
+      },
+    ],
+    completion_chart: {
+      "2026-10-01": 3,
+      "2026-10-02": 2,
+      "2026-10-03": 1,
+      "2026-10-20": null,
+    },
+    ...overrides,
+  };
+}
+
+/** Cycle user-properties record (GET .../user-properties/), the prefs read. */
+export function makeCycleUserProperties(overrides: Partial<CycleUserProperties> = {}): CycleUserProperties {
+  return {
+    id: "623e4567-e89b-12d3-a456-426614174006",
+    workspace: CYCLES_WS_ID,
+    project: CYCLES_PROJECT_ID,
+    cycle: CYCLES_CYCLE_ID,
+    user: "723e4567-e89b-12d3-a456-426614174007",
+    filters: {},
+    display_filters: {},
+    display_properties: {},
+    rich_filters: {},
+    created_by: null,
+    updated_by: null,
+    created_at: "2026-01-02T03:04:05Z",
+    updated_at: "2026-02-03T04:05:06Z",
+    ...overrides,
+  };
+}
+
+/** Estimate system row (GET .../estimates/), the Points-gate read. */
+export function makeEstimate(overrides: Partial<Estimate> = {}): Estimate {
+  return {
+    id: "823e4567-e89b-12d3-a456-426614174008",
+    workspace: CYCLES_WS_ID,
+    project: CYCLES_PROJECT_ID,
+    name: "Points",
+    description: "",
+    type: "points",
+    last_used: true,
+    points: [],
+    created_at: "2026-01-02T03:04:05Z",
+    updated_at: "2026-02-03T04:05:06Z",
+    created_by: null,
+    updated_by: null,
+    ...overrides,
+  };
+}
+
+/** Estimate list helper; the active system is the last-used row. */
+export function makeEstimateList(estimates: Estimate[]): EstimateList {
+  return estimates;
+}
+
+/** Workspace member directory (GET .../members/), the avatar read. */
+export function makeWorkspaceMembers(): WorkspaceMemberList {
+  return [
+    {
+      id: "923e4567-e89b-12d3-a456-426614174009",
+      member: {
+        id: "aaaaaaaa-0000-4000-8000-000000000001",
+        first_name: "Ada",
+        last_name: "Lovelace",
+        avatar: "",
+        avatar_url: null,
+        display_name: "Ada Lovelace",
+        is_bot: false,
+      },
+      role: 15,
+    },
+    {
+      id: "a23e4567-e89b-12d3-a456-42661417400a",
+      member: {
+        id: "aaaaaaaa-0000-4000-8000-000000000003",
+        first_name: "Grace",
+        last_name: "Hopper",
+        avatar: "",
+        avatar_url: "https://cdn.test/grace.png",
+        display_name: "Grace Hopper",
+        is_bot: false,
+      },
+      role: 15,
+    },
+  ];
 }
 
 /** Project retrieve row (GET .../projects/<id>/), the feature-gate read. */
