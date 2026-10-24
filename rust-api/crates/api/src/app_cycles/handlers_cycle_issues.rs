@@ -439,9 +439,15 @@ fn flat_row_fields(group_by: Option<&str>, sub_group_by: Option<&str>) -> Vec<St
 }
 
 /// Scalar selects for the list rows: the D-26 `annotation_selects` set
-/// verbatim (`app_issues`, from `apply_annotations` + the grouper array
+/// (`app_issues`, from `apply_annotations` + the grouper array
 /// subqueries) — `cycle_id` / `link_count` / `attachment_count` /
 /// manager-guarded `sub_issues_count` plus the three `Coalesce` arrays.
+/// The three counts use plain `COUNT`, not `NULLIF`: the cycle view
+/// annotates with the scalar `Func(F("id"), function="Count")` shape
+/// (`issue.py:84-104`), whose subquery always returns one row, so an
+/// empty match renders `0` (the `scalar_counts = true` case in
+/// `app_issues`). `NULLIF` belongs only to the grouped
+/// `Subquery(...values().annotate(count=Count()))` shape.
 /// `skip_array` drops one array for its m2m group path (the grouper rule).
 fn cycle_row_selects(skip_array: Option<&str>) -> String {
     let mut selects = String::from(
@@ -450,12 +456,12 @@ fn cycle_row_selects(skip_array: Option<&str>) -> String {
         issue.target_date, issue.sequence_id, issue.project_id, issue.parent_id,
         (SELECT ci.cycle_id FROM cycle_issues ci
           WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1) AS cycle_id,
-        (SELECT NULLIF(COUNT(*), 0) FROM issue_links il
+        (SELECT COUNT(*) FROM issue_links il
           WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS link_count,
-        (SELECT NULLIF(COUNT(*), 0) FROM file_assets fa
+        (SELECT COUNT(*) FROM file_assets fa
           WHERE fa.issue_id = issue.id AND fa.entity_type = 'ISSUE_ATTACHMENT'
             AND fa.deleted_at IS NULL) AS attachment_count,
-        (SELECT NULLIF(COUNT(*), 0) FROM issues c
+        (SELECT COUNT(*) FROM issues c
            LEFT JOIN states cs ON cs.id = c.state_id AND cs.deleted_at IS NULL
            JOIN projects cp ON cp.id = c.project_id
           WHERE c.parent_id = issue.id AND c.deleted_at IS NULL
@@ -1771,6 +1777,25 @@ mod tests {
             "AS module_ids",
         ] {
             assert!(selects.contains(alias), "missing {alias}");
+        }
+        // Scalar `Func(... "Count")` shape (`issue.py:84-104`): plain
+        // `COUNT`, never `NULLIF`, so empty renders `0` (PIDASHCONV-1416).
+        assert!(
+            !selects.contains("NULLIF"),
+            "cycle counts must not NULLIF: {selects}"
+        );
+        for alias in [
+            "AS link_count",
+            "AS attachment_count",
+            "AS sub_issues_count",
+        ] {
+            let head = selects.split(alias).next().expect("alias");
+            assert!(
+                head.rsplit("(SELECT ")
+                    .next()
+                    .is_some_and(|frag| frag.trim_start().starts_with("COUNT(*)")),
+                "missing plain COUNT for {alias}"
+            );
         }
         assert!(!cycle_row_selects(Some("label_ids")).contains("AS label_ids"));
         assert!(!cycle_row_selects(Some("assignee_ids")).contains("AS assignee_ids"));
