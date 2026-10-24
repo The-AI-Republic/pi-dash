@@ -1350,7 +1350,7 @@ describe("WebNewDriver states tab rows", () => {
     const grip = new GeneralFakeLocator();
     grip.boundingBox.mockResolvedValue({ x: 10, y: 100, width: 20, height: 20 });
     const row = new GeneralFakeLocator(
-      {},
+      { attr: { "data-dragging": "true" } },
       { testId: (testId) => (testId === "state-row-grip" ? grip : generalAbsent()) }
     );
     const target = new GeneralFakeLocator();
@@ -1367,11 +1367,69 @@ describe("WebNewDriver states tab rows", () => {
     const mouse = stub.pageObject.mouse;
     expect(mouse.move).toHaveBeenCalledWith(20, 110);
     expect(mouse.down).toHaveBeenCalledTimes(1);
+    // Press-local micro-moves ignite the drag before the long traverse.
+    expect(mouse.move).toHaveBeenCalledWith(22, 110, { steps: 2 });
+    expect(mouse.move).toHaveBeenCalledWith(25, 110, { steps: 2 });
     expect(mouse.move).toHaveBeenCalledWith(35, 58, { steps: 6 });
     expect(mouse.move).toHaveBeenCalledWith(50, 6, { steps: 6 });
     expect(mouse.up).toHaveBeenCalledTimes(1);
     await driver.settingsStatesDragBelow("one", "two");
     expect(mouse.move).toHaveBeenCalledWith(50, 34, { steps: 6 });
+  });
+
+  it("centers the target before revealing and hovering the source", async () => {
+    const grip = new GeneralFakeLocator();
+    grip.boundingBox.mockResolvedValue({ x: 10, y: 100, width: 20, height: 20 });
+    const row = new GeneralFakeLocator(
+      { attr: { "data-dragging": "true" } },
+      { testId: (testId) => (testId === "state-row-grip" ? grip : generalAbsent()) }
+    );
+    const target = new GeneralFakeLocator();
+    target.boundingBox.mockResolvedValue({ x: 0, y: 0, width: 100, height: 40 });
+    let calls = 0;
+    const stub = generalSettingsPageDouble({
+      locator: () => {
+        calls += 1;
+        return calls % 2 === 1 ? row : target;
+      },
+    });
+    await new WebNewDriver(stub.page).settingsStatesDragBelow("one", "two");
+    // Nothing may scroll between the hover and the gesture: centering
+    // after the hover hides the hover-only grip (PSET-031 cross-group
+    // "no geometry"), and a nearest-only reveal can leave the drop
+    // point off-viewport (PSET-031 failed move). The target centers
+    // first, the source reveals minimally, the hover lands last.
+    expect(row.hover).toHaveBeenCalledTimes(1);
+    expect(grip.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 15_000 });
+    const order = (mock: { invocationCallOrder: number[] }, fallback: number) =>
+      mock.invocationCallOrder[0] ?? fallback;
+    expect(order(target.evaluate.mock, Number.MAX_SAFE_INTEGER)).toBeLessThan(
+      order(row.scrollIntoViewIfNeeded.mock, Number.MAX_SAFE_INTEGER)
+    );
+    expect(order(row.scrollIntoViewIfNeeded.mock, Number.MAX_SAFE_INTEGER)).toBeLessThan(
+      order(row.hover.mock, Number.MIN_SAFE_INTEGER)
+    );
+  });
+
+  it("fails loud when the drag never ignites and releases the button", async () => {
+    const grip = new GeneralFakeLocator();
+    grip.boundingBox.mockResolvedValue({ x: 10, y: 100, width: 20, height: 20 });
+    const row = new GeneralFakeLocator(
+      { attr: { "data-dragging": "false" } },
+      { testId: (testId) => (testId === "state-row-grip" ? grip : generalAbsent()) }
+    );
+    const target = new GeneralFakeLocator();
+    target.boundingBox.mockResolvedValue({ x: 0, y: 0, width: 100, height: 40 });
+    let calls = 0;
+    const stub = generalSettingsPageDouble({
+      locator: () => {
+        calls += 1;
+        return calls % 2 === 1 ? row : target;
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsStatesDragBelow("one", "two")).rejects.toThrow();
+    expect(stub.pageObject.mouse.up).toHaveBeenCalledTimes(1);
   });
 
   it("refuses a drag with no geometry instead of gesturing blindly", async () => {

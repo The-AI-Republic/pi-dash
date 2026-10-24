@@ -219,15 +219,30 @@ test(
         // error toast this step asserts.
         await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBeNull();
         await driver.settingsStatesAttemptSubmit();
-        await expect
-          .poll(
-            async () => {
-              const toast = await driver.rulesLastToast();
-              return toast ? `${toast.title} ${toast.message}` : "";
-            },
-            { timeout: 15_000 }
-          )
-          .toContain("already exists");
+        if (driver.target === "web_new") {
+          // Intended (NEWFRONT-606): web_new answers a duplicate create
+          // with its own notice copy instead of the oracle's server
+          // message; the inventory pins the refusal, not the wording.
+          await expect
+            .poll(
+              async () => {
+                const toast = await driver.rulesLastToast();
+                return toast ? `${toast.title} ${toast.message}` : "";
+              },
+              { timeout: 15_000 }
+            )
+            .toContain("Another state exists with the same name");
+        } else {
+          await expect
+            .poll(
+              async () => {
+                const toast = await driver.rulesLastToast();
+                return toast ? `${toast.title} ${toast.message}` : "";
+              },
+              { timeout: 15_000 }
+            )
+            .toContain("already exists");
+        }
         expect(await driver.settingsStatesFormVisible()).toBe(true);
         await driver.settingsStatesCancelForm();
       });
@@ -514,15 +529,30 @@ test(
       await test.step("a state holding work items is rejected with move-items guidance", async () => {
         await driver.settingsStatesDelete(busy);
         await driver.settingsStatesAttemptDeleteConfirm();
-        await expect
-          .poll(
-            async () => {
-              const toast = await driver.rulesLastToast();
-              return toast ? `${toast.title} ${toast.message}` : "";
-            },
-            { timeout: 15_000 }
-          )
-          .toContain("move them");
+        if (driver.target === "web_new") {
+          // Intended (NEWFRONT-606): web_new guides with its own notice
+          // copy ("...work items. Move them..."); the inventory pins the
+          // guidance, not the oracle's exact wording.
+          await expect
+            .poll(
+              async () => {
+                const toast = await driver.rulesLastToast();
+                return toast ? `${toast.title} ${toast.message}` : "";
+              },
+              { timeout: 15_000 }
+            )
+            .toContain("Move them");
+        } else {
+          await expect
+            .poll(
+              async () => {
+                const toast = await driver.rulesLastToast();
+                return toast ? `${toast.title} ${toast.message}` : "";
+              },
+              { timeout: 15_000 }
+            )
+            .toContain("move them");
+        }
         expect((await serverListStates(seed.workspaceSlug, projectId, session)).some((s) => s.name === busy)).toBe(
           true
         );
