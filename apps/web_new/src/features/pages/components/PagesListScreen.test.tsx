@@ -290,12 +290,21 @@ describe("PagesListScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
     fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "zzz" } });
     expect(await screen.findByTestId("pages-no-results")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "ada" } });
+    fireEvent.change(screen.getByLabelText("Custom creation date"), { target: { value: "2026-10-20" } });
+    expect(screen.getByPlaceholderText("Search")).toHaveValue("ada");
     view.rerender(
       <QueryClientProvider client={client}>
         <PagesListScreen workspaceSlug="acme" projectId="723e4567-e89b-12d3-a456-426614174006" tab="public" />
       </QueryClientProvider>
     );
     expect(await screen.findByRole("link", { name: "Alpha" })).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search pages")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pages-filter-panel")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    expect(screen.getByPlaceholderText("Search")).toHaveValue("");
+    expect(screen.getByLabelText("Custom creation date")).toHaveValue("");
     fireEvent.click(screen.getByRole("button", { name: "Date modified" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Name" }));
     expect(screen.getByRole("button", { name: "Name" })).toBeInTheDocument();
