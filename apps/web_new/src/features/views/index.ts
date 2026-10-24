@@ -33,12 +33,10 @@ export {
   showsPrivateLock,
 } from "./detail/model.js";
 export { projectViewDetailQueryOptions, workspaceViewDetailQueryOptions } from "./api/detail.js";
-export { WorkspaceViewHeader } from "./detail/WorkspaceViewHeader.js";
-export type { WorkspaceViewHeaderProps } from "./detail/WorkspaceViewHeader.js";
-export { WorkspaceViewScreen } from "./detail/WorkspaceViewScreen.js";
-export type { WorkspaceViewScreenProps } from "./detail/WorkspaceViewScreen.js";
-export { WorkspaceViewSwitcher, workspaceSwitcherOptions } from "./detail/WorkspaceViewSwitcher.js";
-export type { WorkspaceViewSwitcherProps } from "./detail/WorkspaceViewSwitcher.js";
+// The workspace detail screens stay out of this barrel: eager route files
+// import the barrel, and Rollup keeps re-exported stateful modules in the
+// initial chunk (NEWFRONT-879). Reach the screen through detail/lazy.js;
+// same-feature readers import the detail modules directly.
 export { WorkspaceViewsListScreen } from "./components/WorkspaceViewsListScreen.js";
 export type { WorkspaceViewsListScreenProps } from "./components/WorkspaceViewsListScreen.js";
 export { WorkspaceViewMenu, selectWorkspaceViewMenuEntries } from "./components/WorkspaceViewMenu.js";
