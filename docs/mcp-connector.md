@@ -52,6 +52,83 @@ a client to handle; a broken one is not. Clients should treat `url` as optional.
 There is no per-comment anchor in the UI, so comment tools link to the parent
 issue rather than to the individual comment.
 
+## Listing work items (`pidash_list_issues`)
+
+`pidash_list_issues` wraps
+`GET /api/v1/workspaces/<slug>/projects/<project>/work-items/`. That endpoint
+already pages, filters and counts. The tool must pass those query parameters
+through and must not drop the paging fields from the response. If the tool only
+returns one page and a `count` equal to the page length, an agent can't count
+or enumerate a project with more than one page of issues. It also reads a
+partial answer as a complete one.
+
+### Parameters
+
+| Tool parameter | REST query parameter | Notes                                                                                                                                                         |
+| -------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `limit`        | `per_page`           | Page size. The REST maximum is 1000; the tool may cap it lower.                                                                                               |
+| `cursor`       | `cursor`             | Opaque. Pass back the `next_cursor` from the previous response unchanged.                                                                                     |
+| `order_by`     | `order_by`           | Unchanged. Keep `order_by` the same while walking pages.                                                                                                      |
+| `state`        | `state`              | State name (case-insensitive) or UUID. An unknown name is a 400 that lists the project's valid states; surface it rather than returning an empty list.        |
+| `state_group`  | `state_group`        | `backlog`, `unstarted`, `started`, `review`, `test`, `completed`, `cancelled`.                                                                                |
+| `parent`       | `parent`             | Parent identifier (`PROJ-12`) or UUID, or `null` for top-level issues only.                                                                                   |
+| `priority`     | `priority`           | `urgent`, `high`, `medium`, `low`, `none`.                                                                                                                    |
+| `labels`       | `labels`             | Label name or UUID.                                                                                                                                           |
+| `assignees`    | `assignees`          | User UUIDs.                                                                                                                                                   |
+| `fields`       | `fields`             | Comma-separated result fields, e.g. `id,sequence_id,name,state,priority,parent`. Leaving out `description_html` cuts a 100-issue page from ~650 kB to ~25 kB. |
+
+Every filter takes a comma-separated list. Values within one filter OR
+together, and different filters AND together. For example, `state=Backlog,Todo`
+with `priority=high` returns high-priority issues that are in either Backlog or
+Todo.
+
+Filters and `cursor` apply to a single project. When `project_id` is omitted
+(the workspace-wide form), the tool should reject them with an error instead
+of silently ignoring them.
+
+### Response
+
+The tool returns these fields from the REST envelope:
+
+| Field         | REST source         | Meaning                                                                                       |
+| ------------- | ------------------- | --------------------------------------------------------------------------------------------- |
+| `results`     | `results`           | The current page.                                                                             |
+| `count`       | `count`             | Number of results **on this page**. Not the total.                                            |
+| `total_count` | `total_count`       | Total number of issues matching the filters, across all pages. Use this to answer "how many". |
+| `has_more`    | `next_page_results` | `true` when another page exists.                                                              |
+| `next_cursor` | `next_cursor`       | Cursor for the next page. Only meaningful when `has_more` is `true`.                          |
+
+The field descriptions should say plainly that `count` is the page length and
+`total_count` is the total, so a model reading the schema doesn't mistake one
+for the other.
+
+For example, `pidash_list_issues(project_id="NEWFRONT", state="Backlog",
+fields="id,sequence_id,name")` answers "how many Backlog issues are there?"
+from `total_count` on the first call. Following `next_cursor` until `has_more`
+is `false` returns every one of them.
+
+The `pidash` CLI already exposes this surface as `pidash issue list --project
+<PROJ> --state … --state-group … --parent … --priority … --label … --fields …
+--cursor … --per-page …`. It prints the envelope verbatim, so it is the
+reference for what the tool should return.
+
+## Creating work items: descriptions (`pidash_create_issue`, `pidash_update_issue`)
+
+The work-item write endpoints accept a description three ways, in this order
+of precedence:
+
+1. `description_markdown`: markdown that the server renders to the editor's
+   HTML. Headings, nested and task lists, code blocks and tables keep their
+   structure.
+2. `description_html`: HTML, stored as given after sanitising.
+3. `description`: legacy key, rendered like `description_markdown` when
+   neither of the keys above is set.
+
+The tools' `description` parameter is documented as markdown, so the tool must
+forward it as `description_markdown`. It must not wrap the text in `<p>…</p>`
+and send it as `description_html`. Doing that stores the raw markdown as one
+paragraph, so `## Heading` and `- item` show up as literal text in the web UI.
+
 ## Schedulers (read-only)
 
 Schedulers — workspace-level scheduler definitions installed onto projects,
