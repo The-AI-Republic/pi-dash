@@ -10,7 +10,7 @@ use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::http::{
     AckEntry, AttachBody, CredentialsHandle, HttpLoop, InboundEnvelope, MachineClient, PollStatus,
-    RunnerCloudClient, RunnerCredentials, SharedHttpTransport,
+    RunnerCloudClient, RunnerCredentials, SharedHttpTransport, TransportError,
 };
 use crate::cloud::protocol::{
     ClientMsg, FailureReason, RunnerStatus, ServerMsg, TokenUsage as WireTokenUsage, WIRE_VERSION,
@@ -240,6 +240,19 @@ impl Supervisor {
             }
         };
 
+        // Wake from sleep / network change: retry every cloud connection
+        // now instead of waiting out a backoff of up to 6 hours.
+        let triggers_handle = if opts.offline {
+            None
+        } else {
+            let kick_ctx = spawn_ctx.clone();
+            Some(crate::daemon::reconnect_triggers::spawn(move |trigger| {
+                if let Ok(n) = kick_ctx.kick_reconnect(None) {
+                    tracing::debug!(trigger, runners = n, "reconnect kicked");
+                }
+            }))
+        };
+
         let shutdown = state.shutdown_notified();
         let sig = crate::util::signal::shutdown();
         tokio::select! {
@@ -289,6 +302,9 @@ impl Supervisor {
             h.abort();
         }
         if let Some(h) = machine_handle {
+            h.abort();
+        }
+        if let Some(h) = triggers_handle {
             h.abort();
         }
         ipc_handle.abort();
@@ -359,6 +375,31 @@ impl RunnerSpawnCtx {
 
     pub(crate) fn cloud_url(&self) -> String {
         self.daemon.cloud_url.clone()
+    }
+
+    /// Cut reconnect waits short and restart the backoff schedule
+    /// (PDASHOSS01-306): for the runner named `runner`, or for every runner
+    /// plus the machine control session when `None`. Returns how many
+    /// runners were kicked; errors on an unknown runner name.
+    pub(crate) fn kick_reconnect(&self, runner: Option<&str>) -> Result<usize> {
+        let instances = self.instances.read().expect("runner registry poisoned");
+        match runner {
+            Some(name) => {
+                let inst = instances
+                    .values()
+                    .find(|i| i.name == name)
+                    .ok_or_else(|| anyhow::anyhow!("no configured runner named {name:?}"))?;
+                inst.state.force_reconnect();
+                Ok(1)
+            }
+            None => {
+                for inst in instances.values() {
+                    inst.state.force_reconnect();
+                }
+                self.daemon_state.force_reconnect();
+                Ok(instances.len())
+            }
+        }
     }
 
     /// Hot-add: bring a freshly configured runner up in-process.
@@ -473,6 +514,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
     let inst_remove_tx = inst.remove_tx.clone();
     let live_mailboxes = ctx.mailboxes.clone();
     let live_hello_runners = ctx.hello_runners.clone();
+    let live_instances = ctx.instances.clone();
     let daemon_paths = ctx.paths.clone();
     // The working dir reported to the cloud is this runner's single, exclusive
     // work dir.
@@ -491,6 +533,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             remove_tx: inst_remove_tx,
             live_mailboxes,
             live_hello_runners,
+            live_instances,
             current_run: None,
             current_chat: None,
             local_chat_active: inst_chat_active,
@@ -522,18 +565,34 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             attach_body_for_instance(inst, attach_working_dir),
         )
         .with_state(inst.state.clone())
-        .with_teardown_rx(inst.remove_tx.subscribe());
+        .with_teardown_rx(inst.remove_tx.subscribe())
+        .with_reconnect_kick(inst.state.reconnect_notified());
         let close_client = client.clone();
         let local_state = inst.state.clone();
         let daemon_state = ctx.daemon_state.clone();
+        let purge_mailbox = inst.mailbox_tx.clone();
+        let runner_name = inst.name.clone();
+        let runner_id = inst.runner_id;
         let http_handle = tokio::spawn(async move {
             if let Err(e) = http_loop.run().await {
-                if e.is_expected_teardown() {
-                    tracing::info!("http loop exited after runner teardown: {e:#}");
-                } else {
-                    tracing::error!("http loop exited: {e:#}");
-                }
                 local_state.set_connected(false).await;
+                if let TransportError::RunnerDeletedInCloud { confirmations } = e {
+                    purge_cloud_deleted_runner(
+                        &purge_mailbox,
+                        &runner_name,
+                        runner_id,
+                        confirmations,
+                    )
+                    .await;
+                    return;
+                }
+                if e.is_expected_teardown() {
+                    // Removed locally: no further requests for this runner,
+                    // not even a courtesy session close.
+                    tracing::info!("http loop exited after runner teardown: {e:#}");
+                    return;
+                }
+                tracing::error!("http loop exited: {e:#}");
                 let _ = tokio::time::timeout(Duration::from_secs(2), close_client.close_session())
                     .await;
                 if e.requires_daemon_restart() {
@@ -547,12 +606,53 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
         tasks.http_loop = Some(http_handle);
 
         let refresh_state = inst.state.clone();
+        let refresh_teardown = inst.remove_tx.subscribe();
         let refresh_handle = tokio::spawn(async move {
-            refresh_loop(client, refresh_state).await;
+            refresh_loop(client, refresh_state, refresh_teardown).await;
         });
         tasks.refresh = Some(refresh_handle);
     }
     tasks
+}
+
+/// The cloud confirmed (PDASHOSS01-306) that this runner was deleted while
+/// the daemon could not receive the RemoveRunner frame. Run the same local
+/// teardown the frame would have: hand the runner loop a synthesized
+/// `RemoveRunner`, which cancels any run or chat, stops the heartbeat,
+/// deletes the runner's data dir and strips its `[[runner]]` block. The
+/// HttpLoop has already exited, so nothing contacts the cloud for this id
+/// again.
+async fn purge_cloud_deleted_runner(
+    mailbox: &mpsc::Sender<InboundEnvelope>,
+    name: &str,
+    runner_id: uuid::Uuid,
+    confirmations: u32,
+) {
+    tracing::warn!(
+        "runner {name} ({runner_id}) was deleted in the cloud; removed locally after \
+         {confirmations} confirmations"
+    );
+    let envelope = crate::cloud::protocol::Envelope::for_runner(
+        runner_id,
+        ServerMsg::RemoveRunner {
+            runner_id,
+            reason: Some(format!(
+                "deleted in the cloud (confirmed {confirmations} times)"
+            )),
+        },
+    );
+    if let Err(e) = mailbox
+        .send(InboundEnvelope {
+            stream_id: None,
+            env: envelope,
+        })
+        .await
+    {
+        tracing::warn!(
+            "could not hand the local removal of {name} ({runner_id}) to its runner \
+             loop: {e}. Run `pidash runner remove {name} --local-only --yes` to clean it up."
+        );
+    }
 }
 
 /// On daemon shutdown, send `RunFailed{DaemonRestart}` for every
@@ -987,7 +1087,11 @@ fn attach_body_for_instance(
     }
 }
 
-async fn refresh_loop(client: RunnerCloudClient, state: StateHandle) {
+async fn refresh_loop(
+    client: RunnerCloudClient,
+    state: StateHandle,
+    mut teardown: tokio::sync::watch::Receiver<bool>,
+) {
     // Acquire the shutdown Notify ONCE and pin it across the whole loop
     // so a `notify_one()` that fires between iterations isn't dropped on
     // the floor. Re-acquiring per-iteration would race: each iteration
@@ -1011,6 +1115,8 @@ async fn refresh_loop(client: RunnerCloudClient, state: StateHandle) {
         tokio::select! {
             biased;
             _ = &mut shutdown_fut => return,
+            // A removed runner refreshes nothing.
+            _ = teardown.wait_for(|removed| *removed) => return,
             _ = tokio::time::sleep(sleep_for) => {}
         }
         if let Err(e) = client.refresh().await {
@@ -1086,6 +1192,9 @@ struct RunnerLoop {
     remove_tx: tokio::sync::watch::Sender<bool>,
     live_mailboxes: Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<InboundEnvelope>>>>,
     live_hello_runners: Arc<RwLock<HelloRunnerMap>>,
+    /// The IPC registry. A removed runner is dropped from it so
+    /// `pidash status` stops listing it.
+    live_instances: Arc<std::sync::RwLock<HashMap<uuid::Uuid, RunnerInstance>>>,
     /// In-flight run, if any. Replaced on each Assign and cleared as soon as
     /// the worker task signals completion via `done_rx` — driven by
     /// `tokio::select!` so a new Assign isn't rejected while we wait for the
@@ -1774,18 +1883,21 @@ impl RunnerLoop {
                         .write()
                         .await
                         .remove(&self.runner_paths.runner_id);
+                    self.live_instances
+                        .write()
+                        .expect("runner registry poisoned")
+                        .remove(&self.runner_paths.runner_id);
                     // Best-effort cleanup of this runner's local data
                     // dir. The on-disk state is keyed by runner_id and
                     // is dead weight once the cloud-side row is gone.
+                    // The working directory (the user's checkout) is
+                    // never deleted — not even when it was configured
+                    // inside the data dir.
                     let runner_dir = self.runner_paths.base_dir().to_path_buf();
-                    if runner_dir.exists()
-                        && let Err(e) = std::fs::remove_dir_all(&runner_dir)
-                    {
-                        tracing::warn!(
-                            "failed to delete {:?}: {e:#} (file removal is best-effort)",
-                            runner_dir,
-                        );
-                    }
+                    remove_runner_data_dir(
+                        &runner_dir,
+                        &self.runner_config.workspace.working_dir,
+                    );
                     // Strip the matching `[[runner]]` block from
                     // config.toml under the host-wide config lock so a
                     // concurrent `pidash runner add` can't lose its
@@ -1853,6 +1965,32 @@ impl RunnerLoop {
         }
         self.state.set_connected(false).await;
         Ok(())
+    }
+}
+
+/// Delete a removed runner's data dir, keeping its working directory.
+/// Normally the two are disjoint (the default working dir lives under
+/// `data_dir/workspaces/`); if the working dir sits inside the data dir the
+/// data dir is left alone rather than risk the user's checkout.
+fn remove_runner_data_dir(runner_dir: &std::path::Path, working_dir: &std::path::Path) {
+    if !runner_dir.exists() {
+        return;
+    }
+    let runner_dir_cmp = canonical_for_compare(runner_dir);
+    let working_dir_cmp = canonical_for_compare(working_dir);
+    if working_dir_cmp.starts_with(&runner_dir_cmp) {
+        tracing::warn!(
+            "not deleting {:?}: it contains this runner's working directory {:?}",
+            runner_dir,
+            working_dir,
+        );
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(runner_dir) {
+        tracing::warn!(
+            "failed to delete {:?}: {e:#} (file removal is best-effort)",
+            runner_dir,
+        );
     }
 }
 
@@ -3925,6 +4063,152 @@ mod tests {
             muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
+    }
+
+    fn spawn_ctx_for(paths: &Paths, insts: &[&RunnerInstance]) -> RunnerSpawnCtx {
+        RunnerSpawnCtx {
+            transport: None,
+            shared_machine_token: None,
+            paths: paths.clone(),
+            daemon: DaemonConfig::default(),
+            mailboxes: Arc::new(RwLock::new(
+                insts
+                    .iter()
+                    .map(|i| (i.runner_id, i.mailbox_tx.clone()))
+                    .collect(),
+            )),
+            hello_runners: Arc::new(RwLock::new(
+                insts
+                    .iter()
+                    .map(|i| {
+                        (
+                            i.runner_id,
+                            (
+                                i.out.clone(),
+                                i.state.clone(),
+                                i.config.project_slug.clone(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            )),
+            daemon_state: StateHandle::new(crate::config::schema::Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![],
+                cli: None,
+            }),
+            instances: Arc::new(std::sync::RwLock::new(
+                insts.iter().map(|i| (i.runner_id, (*i).clone())).collect(),
+            )),
+            activation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    /// PDASHOSS01-306: a runner the cloud confirmed deleted is torn down
+    /// locally exactly like a RemoveRunner frame — config block and data
+    /// dir gone, working dir untouched, loop stopped, not listed by IPC.
+    #[tokio::test]
+    async fn purge_of_cloud_deleted_runner_removes_it_locally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let wd_gone = tmp.path().join("wd-gone");
+        std::fs::create_dir_all(&wd_gone).unwrap();
+        std::fs::write(wd_gone.join("user-file.txt"), "keep me").unwrap();
+        let gone_cfg = runner_config("gone", "WEB", wd_gone.clone());
+        let keep_cfg = runner_config("keep", "API", tmp.path().join("wd-keep"));
+        crate::config::file::write_config(
+            &paths,
+            &Config {
+                version: 2,
+                daemon: DaemonConfig::default(),
+                runners: vec![gone_cfg.clone(), keep_cfg.clone()],
+                cli: None,
+            },
+        )
+        .unwrap();
+
+        let inst = RunnerInstance::new_offline(gone_cfg, &paths, DaemonConfig::default());
+        inst.paths.ensure().unwrap();
+        let data_dir = inst.paths.base_dir().to_path_buf();
+        std::fs::write(data_dir.join("state.json"), "{}").unwrap();
+        assert!(data_dir.exists());
+
+        let ctx = spawn_ctx_for(&paths, &[&inst]);
+        let mut remove_rx = inst.remove_tx.subscribe();
+        let tasks = spawn_instance_tasks(&inst, &ctx).await;
+        let runner_loop = tasks.runner_loop.expect("runner loop spawned");
+
+        purge_cloud_deleted_runner(&inst.mailbox_tx, &inst.name, inst.runner_id, 10).await;
+
+        tokio::time::timeout(Duration::from_secs(5), runner_loop)
+            .await
+            .expect("runner loop must stop")
+            .unwrap();
+        assert!(*remove_rx.borrow_and_update(), "teardown latch set");
+        let cfg = crate::config::file::load_config(&paths).unwrap();
+        let names: Vec<_> = cfg.runners.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["keep"], "only the deleted runner's block is stripped");
+        assert!(!data_dir.exists(), "data dir deleted");
+        assert_eq!(
+            std::fs::read_to_string(wd_gone.join("user-file.txt")).unwrap(),
+            "keep me",
+            "working dir untouched"
+        );
+        assert!(
+            !ctx.instances.read().unwrap().contains_key(&inst.runner_id),
+            "no longer listed by `pidash status`"
+        );
+        assert!(!ctx.mailboxes.read().await.contains_key(&inst.runner_id));
+    }
+
+    #[test]
+    fn data_dir_removal_spares_a_working_dir_inside_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner_dir = tmp.path().join("runners").join("r1");
+        let inside = runner_dir.join("checkout");
+        std::fs::create_dir_all(&inside).unwrap();
+        remove_runner_data_dir(&runner_dir, &inside);
+        assert!(inside.exists(), "working dir inside the data dir is kept");
+
+        let outside = tmp.path().join("workspaces").join("w1");
+        std::fs::create_dir_all(&outside).unwrap();
+        remove_runner_data_dir(&runner_dir, &outside);
+        assert!(!runner_dir.exists());
+        assert!(outside.exists());
+    }
+
+    #[tokio::test]
+    async fn kick_reconnect_targets_one_runner_or_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let a = RunnerInstance::new_offline(
+            runner_config("a", "WEB", tmp.path().join("wa")),
+            &paths,
+            DaemonConfig::default(),
+        );
+        let b = RunnerInstance::new_offline(
+            runner_config("b", "API", tmp.path().join("wb")),
+            &paths,
+            DaemonConfig::default(),
+        );
+        let ctx = spawn_ctx_for(&paths, &[&a, &b]);
+        async fn fired(inst: &RunnerInstance) -> bool {
+            let kick = inst.state.reconnect_notified();
+            tokio::time::timeout(Duration::from_millis(50), kick.notified())
+                .await
+                .is_ok()
+        }
+
+        assert!(ctx.kick_reconnect(Some("nope")).is_err());
+        assert_eq!(ctx.kick_reconnect(Some("a")).unwrap(), 1);
+        assert!(fired(&a).await, "named runner kicked");
+        assert!(!fired(&b).await, "other runner left alone");
+
+        assert_eq!(ctx.kick_reconnect(None).unwrap(), 2);
+        assert!(fired(&a).await, "all runners kicked");
+        assert!(fired(&b).await, "all runners kicked");
     }
 
     #[test]
