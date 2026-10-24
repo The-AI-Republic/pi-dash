@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // Board drag auto-scroll (parity/specs/issues.md §5, ISS-043): edge
 // steps on the requested axes, and no scroll from the safe band.
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, type Mock, vi } from "vitest";
 
 import {
   BOARD_AUTOSCROLL_INTERVAL_MS,
@@ -12,7 +12,9 @@ import {
   type ScrollableNode,
 } from "./autoScroll.js";
 
-function node(): ScrollableNode & { scrollBy: ReturnType<typeof vi.fn> } {
+function node(): ScrollableNode & {
+  scrollBy: Mock<(options: { left?: number; top?: number; behavior?: ScrollBehavior }) => void>;
+} {
   return {
     getBoundingClientRect: () => ({ left: 0, top: 0, right: 800, bottom: 600 }),
     scrollBy: vi.fn(),
