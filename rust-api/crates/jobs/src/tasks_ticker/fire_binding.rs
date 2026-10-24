@@ -180,8 +180,9 @@ pub fn advanced_last_error(current: &str) -> String {
 
 /// Parse one ISO 8601 string the way `parse_iso_utc` does
 /// (`utils/iso_datetime.py:22-34`): `Z` and `+00:00` suffixes, arbitrary
-/// numeric offsets converted to UTC, naive values assumed UTC, `None` (here:
-/// unparseable) on empty input or parse failure.
+/// numeric offsets (including `:SS[.ffffff]` tails) converted to UTC,
+/// naive values assumed UTC, `None` (here: unparseable) on empty input
+/// or parse failure.
 fn parse_iso_utc(value: &str) -> Option<DateTime<Utc>> {
     if value.is_empty() {
         return None;
@@ -200,17 +201,94 @@ fn parse_iso_utc(value: &str) -> Option<DateTime<Utc>> {
             return Some(aware.with_timezone(&Utc));
         }
     }
-    // Naive → assume UTC. `%.f` matches with or without a fraction.
-    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
-        if let Ok(naive) = NaiveDateTime::parse_from_str(&normalized, format) {
-            return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
-        }
+    // Offsets with seconds are valid `fromisoformat` input (and what
+    // `isoformat()` stores when offset seconds are non-zero) but invalid
+    // RFC 3339, so they reach here: convert manually (PIDASHCONV-1302).
+    if let Some(utc) = parse_iso_utc_with_offset_seconds(&normalized) {
+        return Some(utc);
+    }
+    // Naive → assume UTC.
+    if let Some(naive) = parse_naive_datetime(&normalized) {
+        return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
     }
     if let Ok(date) = NaiveDate::parse_from_str(&normalized, "%Y-%m-%d") {
         let naive = date.and_hms_opt(0, 0, 0)?;
         return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
     }
     None
+}
+
+/// Parse a naive `YYYY-MM-DD[T ]HH:MM:SS[.ffffff]` stem. `%.f` matches
+/// with or without a fraction.
+fn parse_naive_datetime(stem: &str) -> Option<NaiveDateTime> {
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(stem, format) {
+            return Some(naive);
+        }
+    }
+    None
+}
+
+/// Exactly two ASCII digits as a number (`fromisoformat` rejects any
+/// other offset-field width).
+fn two_digits(field: &str) -> Option<i64> {
+    if field.len() == 2 && field.bytes().all(|b| b.is_ascii_digit()) {
+        field.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Parse an ISO 8601 string whose UTC offset carries seconds, the way
+/// `datetime.fromisoformat` does (`utils/iso_datetime.py:19-33`):
+/// a naive stem plus a `±HH:MM:SS` tail with an optional `.ffffff` part.
+/// `fromisoformat` sums the offset fields without range-checking them,
+/// truncates a sub-second tail past 6 digits, and rejects only totals at
+/// or past 24 hours. `None` on any other shape — including a plain
+/// `±HH:MM` tail, which the RFC 3339 path above already accepted.
+fn parse_iso_utc_with_offset_seconds(normalized: &str) -> Option<DateTime<Utc>> {
+    // The offset sign is the last `+`/`-` past the `YYYY-MM-DD` date stem;
+    // time digits, `.`, `:` and the `T`/space separator carry no sign.
+    let sign_at = normalized
+        .bytes()
+        .rposition(|b| b == b'+' || b == b'-')
+        .filter(|at| *at > 10)?;
+    let (stem, tail) = normalized.split_at(sign_at);
+    let negative = tail.as_bytes()[0] == b'-';
+    let fields: Vec<&str> = tail[1..].split(':').collect();
+    let [hours, minutes, rest] = fields.as_slice() else {
+        return None;
+    };
+    let (seconds, fraction) = match rest.split_once('.') {
+        Some((seconds, fraction)) => {
+            if fraction.is_empty() || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            (seconds, fraction)
+        }
+        None => (*rest, ""),
+    };
+    let hours = two_digits(hours)?;
+    let minutes = two_digits(minutes)?;
+    let seconds = two_digits(seconds)?;
+    // The truncated fraction, right-padded to microseconds.
+    let mut micros: i64 = 0;
+    for byte in fraction.bytes().take(6) {
+        micros = micros * 10 + i64::from(byte - b'0');
+    }
+    for _ in fraction.len().min(6)..6 {
+        micros *= 10;
+    }
+    // `fromisoformat` sums the fields without range-checking them; only a
+    // total at or past 24 hours is a `ValueError`.
+    let total_us = ((hours * 60 + minutes) * 60 + seconds) * 1_000_000 + micros;
+    if total_us.abs() >= 24 * 3_600 * 1_000_000 {
+        return None;
+    }
+    let offset_us = if negative { -total_us } else { total_us };
+    let naive = parse_naive_datetime(stem)?;
+    let utc_naive = naive.checked_sub_signed(chrono::Duration::microseconds(offset_us))?;
+    Some(DateTime::from_naive_utc_and_offset(utc_naive, Utc))
 }
 
 /// Coerce a JSON `rdates`/`exdates` column the way `coerce_iso_datetimes` does
@@ -1054,6 +1132,50 @@ mod tests {
         assert!(coerce_iso_datetimes(&json!([])).is_empty());
         assert!(coerce_iso_datetimes(&json!(null)).is_empty());
         assert!(coerce_iso_datetimes(&json!({})).is_empty());
+    }
+
+    // Offsets with seconds (`utils/iso_datetime.py:19-33` reads them with
+    // `datetime.fromisoformat`): both backends store `parsed.isoformat()`,
+    // and Python 3.12 renders `:SS[.ffffff]` in the offset whenever they
+    // are non-zero, so stored rdates/exdates legitimately carry them
+    // (PIDASHCONV-1302). `fromisoformat` sums the offset fields without
+    // range-checking them, truncates a sub-second tail past 6 digits, and
+    // rejects only totals at or past 24 hours (`ValueError` → skipped).
+    #[test]
+    fn coerce_iso_datetimes_accepts_offset_seconds() {
+        let raw = json!([
+            "2026-11-01T10:00:00+05:30:15",
+            "2026-11-01T10:00:00+05:30:15.500000",
+            "2026-11-01T15:30:15-05:30:15",
+            "2026-11-01 10:00:00+05:30:15",
+            "2026-11-01T10:00:00+05:30:15.5000009",
+            "2026-11-01T10:00:00+05:30:60",
+        ]);
+        let out = coerce_iso_datetimes(&raw);
+        let second = Utc.with_ymd_and_hms(2026, 11, 1, 4, 29, 45).unwrap();
+        let micro = Utc.with_ymd_and_hms(2026, 11, 1, 4, 29, 44).unwrap()
+            + chrono::Duration::microseconds(500_000);
+        assert_eq!(
+            out,
+            vec![
+                second,
+                micro,
+                Utc.with_ymd_and_hms(2026, 11, 1, 21, 0, 30).unwrap(),
+                second,
+                micro,
+                Utc.with_ymd_and_hms(2026, 11, 1, 4, 29, 0).unwrap(),
+            ]
+        );
+        // A 24-hour-or-more offset is a `ValueError` in `fromisoformat`,
+        // so it stays skipped — as do malformed tails.
+        let skipped = json!([
+            "2026-11-01T10:00:00+24:00:15",
+            "2026-11-01T10:00:00-24:00:15",
+            "2026-11-01T10:00:00+05:30:1",
+            "2026-11-01T10:00:00+05:30:15.",
+            "2026-11-01T10:00:00+5:30:15",
+        ]);
+        assert!(coerce_iso_datetimes(&skipped).is_empty());
     }
 
     fn parse(sql: &str) -> sqlparser::ast::Statement {

@@ -820,9 +820,11 @@ fn csrf_secret_from_headers(headers: &axum::http::HeaderMap) -> Result<String, S
         .get("cookie")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
+    // `parse_cookie` builds a dict, so a later duplicate overwrites an
+    // earlier one: the LAST `csrftoken` pair wins (PIDASHCONV-1235).
     let secret = parse_cookies(cookie_header)
         .into_iter()
-        .find(|(name, _)| *name == "csrftoken")
+        .rfind(|(name, _)| *name == "csrftoken")
         .map(|(_, value)| value.to_owned());
     let Some(secret) = secret else {
         return Err("CSRF cookie not set.".to_owned());
@@ -2313,12 +2315,14 @@ async fn load_state(
 }
 
 /// `issue.labels` (`context.py:536`): label names, newest first
-/// (`Label.Meta.ordering`), through + target soft-delete filtered.
+/// (`Label.Meta.ordering`). The M2M manager never filters the link
+/// table's `deleted_at`, so soft-deleted links still render and
+/// re-added labels repeat once per historical row (PB-2031).
 async fn load_labels(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<Vec<String>, Denial> {
     let rows: Vec<(String,)> = sqlx::query_as(
         r#"SELECT l.name FROM issue_labels il
            JOIN labels l ON l.id = il.label_id
-           WHERE il.issue_id = $1 AND il.deleted_at IS NULL AND l.deleted_at IS NULL
+           WHERE il.issue_id = $1 AND l.deleted_at IS NULL
            ORDER BY l.created_at DESC"#,
     )
     .bind(issue_id)
@@ -2329,13 +2333,16 @@ async fn load_labels(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<Vec<S
 }
 
 /// `issue.assignees` (`context.py:537`): display name, else email, else
-/// empty (`context.py:257-265`).
+/// empty (`context.py:257-265`). The M2M manager never filters the
+/// link table's `deleted_at`, so soft-deleted assignments still render
+/// and re-added assignees repeat once per historical row (PB-2031);
+/// newest user first (`User.Meta.ordering`, `-created_at`).
 async fn load_assignees(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<Vec<String>, Denial> {
     let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
         r#"SELECT u.display_name, u.email FROM issue_assignees ia
            JOIN users u ON u.id = ia.assignee_id
-           WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL
-           ORDER BY u.id"#,
+           WHERE ia.issue_id = $1
+           ORDER BY u.created_at DESC"#,
     )
     .bind(issue_id)
     .fetch_all(pool)
@@ -2900,8 +2907,10 @@ fn sorted_pretty(value: &Value) -> String {
     // matching CPython `json.dumps(indent=2)` for JSON scalars. Python
     // renders `True/False/None`; payloads crossing this path are JSON
     // column values, which carry no such scalars beyond what serde
-    // already normalizes.
-    serde_json::to_string_pretty(&sort(value)).unwrap_or_else(|_| "{}".to_owned())
+    // already normalizes. The `ensure_ascii` pass matches Python's
+    // default escaping of non-ASCII (PIDASHCONV-1234).
+    let pretty = serde_json::to_string_pretty(&sort(value)).unwrap_or_else(|_| "{}".to_owned());
+    context::ensure_ascii_json(&pretty)
 }
 
 /// `_scheduler_context` (`views.py:463-483`): the binding must live in
@@ -3115,6 +3124,23 @@ mod tests {
         assert_eq!(
             sorted_pretty(&payload),
             "{\n  \"a\": {\n    \"c\": 3,\n    \"d\": 4\n  },\n  \"z\": 1\n}"
+        );
+    }
+
+    #[test]
+    fn parent_payload_escapes_non_ascii_like_ensure_ascii() {
+        // PIDASHCONV-1234: preview parity with `json.dumps(payload,
+        // indent=2, sort_keys=True)` — lowercase `\uXXXX`, surrogate
+        // pairs above the BMP, never raw UTF-8.
+        let payload = serde_json::json!({"summary": "fix — done ✓"});
+        assert_eq!(
+            sorted_pretty(&payload),
+            "{\n  \"summary\": \"fix \\u2014 done \\u2713\"\n}"
+        );
+        let astral = serde_json::json!({"note": "ship 🚀"});
+        assert_eq!(
+            sorted_pretty(&astral),
+            "{\n  \"note\": \"ship \\ud83d\\ude80\"\n}"
         );
     }
 

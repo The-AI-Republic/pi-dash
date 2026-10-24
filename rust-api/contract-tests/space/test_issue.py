@@ -121,6 +121,24 @@ def test_comment_create_shape(user_client, world):
     assert body["access"] == "EXTERNAL"
 
 
+def test_comment_create_on_soft_deleted_issue_returns_201(user_client, world, db):
+    # PIDASHCONV-1260: the create has no issue lookup and the serializer
+    # reads issue/project/workspace through the unfiltered _base_manager
+    # (views/issue.py:257-294), so a comment posted after the issue was
+    # soft-deleted is still a 201 with issue_detail, plus the activity and
+    # the public-member row — never a 500 with committed orphan rows.
+    db.execute("UPDATE issues SET deleted_at = now() WHERE id = %s", (world["issue"]["id"],))
+    response = user_client.post(_comments_url(world), json={"comment_html": "<p>late note</p>"})
+    assert response.status_code == 201
+    body = response.json()
+    assert body["issue_detail"]["id"] == world["issue"]["id"]
+    member = db.fetchone(
+        "SELECT id FROM project_public_members WHERE project_id = %s AND member_id = %s",
+        (world["project"]["id"], world["owner"]["id"]),
+    )
+    assert member is not None
+
+
 def test_comment_retrieve_patch_delete_owned(user_client, world):
     comment_id = world["comment"]["id"]
     got = user_client.get(_comments_url(world, comment_id))
@@ -197,6 +215,25 @@ def test_issue_reaction_create_and_delete(user_client, world, db):
     )
     assert row["deleted_at"] is not None
     assert str(row["updated_by_id"]) == world["owner"]["id"]
+
+
+def test_issue_reaction_public_member_stamps_creator(other_client, other_user, world, db):
+    # PIDASHCONV-1259: a non-member's write auto-creates a
+    # ProjectPublicMember row via get_or_create(member=request.user), and
+    # BaseModel.save stamps created_by to the request user while updated_by
+    # stays NULL on create (db/models/base.py:23-43). The Rust port
+    # inserted the row without created_by_id.
+    url = f"{BASE}/anchor/{world['anchor']}/issues/{world['issue']['id']}/reactions/"
+    created = other_client.post(url, json={"reaction": "rocket"})
+    assert created.status_code == 201
+    row = db.fetchone(
+        "SELECT created_by_id, updated_by_id FROM project_public_members"
+        " WHERE project_id = %s AND member_id = %s AND deleted_at IS NULL",
+        (world["project"]["id"], other_user["id"]),
+    )
+    assert row is not None
+    assert str(row["created_by_id"]) == other_user["id"]
+    assert row["updated_by_id"] is None
 
 
 def test_issue_reaction_list_requires_auth(anon_client, world):

@@ -1703,9 +1703,12 @@ pub async fn enqueue_task(
 /// `save_user_data` (`adapter/base.py:220-234`): login enrichment plus the
 /// activation branch. `user_activation_email.delay(site, user.id)` fires
 /// while the row still shows inactive; the update then stamps the token
-/// rotation (`User.save`: `token_updated_at` set ⇒ `token = 64 hex`) and
-/// marks the user active. `ip` / `user_agent` bind NULL when absent —
-/// the documented NOT NULL 500 hazard.
+/// rotation (`User.save`: `token_updated_at` set ⇒ `token = 64 hex`),
+/// refreshes `updated_at`, backfills a blank `display_name` from the
+/// email local part, syncs `is_staff` from `is_superuser`
+/// (`user.py:169-187`; the github twin is PIDASHCONV-1081), and marks the
+/// user active. `ip` / `user_agent` bind NULL when absent — the
+/// documented NOT NULL 500 hazard.
 pub async fn save_user_data(
     pool: &sqlx::PgPool,
     user: &UserRow,
@@ -1731,7 +1734,9 @@ pub async fn save_user_data(
         "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
          \"last_login_time\" = $3, \"last_login_ip\" = $4, \
          \"last_login_uagent\" = $5, \"token_updated_at\" = $6, \
-         \"is_active\" = TRUE, \"token\" = $7 WHERE \"id\" = $8",
+         \"is_active\" = TRUE, \"token\" = $7, \"updated_at\" = $2, \
+         \"display_name\" = CASE WHEN \"display_name\" = '' THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
+         \"is_staff\" = \"is_staff\" OR \"is_superuser\" WHERE \"id\" = $8",
     )
     .bind(PROVIDER)
     .bind(now)
@@ -2988,5 +2993,83 @@ mod tests {
             }
         }
         assert_eq!(project_rows, 0, "no project invites seeded");
+    }
+
+    /// Returning-user `save_user_data` applies the `User.save()` effects
+    /// (PIDASHCONV-1364): a blank `display_name` backfills from the email
+    /// local part, `is_staff` syncs from `is_superuser`, and `updated_at`
+    /// refreshes — the `user.py:169-187` semantics behind `base.py:233`.
+    /// Fails on the pre-fix UPDATE (login stamps only).
+    #[tokio::test]
+    async fn google_kernel_save_user_data_applies_save_effects() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go1364-{tag}@example.test");
+        let user_id = uuid::Uuid::new_v4();
+        let stale = chrono::Utc::now() - chrono::Duration::days(7);
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $5, '', '', TRUE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, '', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(&email)
+        .bind(chrono::Utc::now())
+        .bind(stale)
+        .execute(&pool)
+        .await
+        .expect("seed returning user");
+        let user = UserRow {
+            id: user_id,
+            password: "pbkdf2_sha256$600000$kernelseed$kernelhash".to_owned(),
+            email: Some(email.clone()),
+            is_active: true,
+            is_superuser: true,
+            first_name: "Kernel".to_owned(),
+            last_name: "User".to_owned(),
+            display_name: String::new(),
+            avatar: String::new(),
+            avatar_asset_id: None,
+        };
+        save_user_data(
+            &pool,
+            &user,
+            "http://app.example.com",
+            Some("127.0.0.1"),
+            Some("kernel-agent"),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("save_user_data succeeds");
+        let row: (String, bool, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            r#"SELECT "display_name", "is_staff", "updated_at" FROM "users" WHERE "id" = $1"#,
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back user");
+        sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .ok();
+        assert_eq!(
+            row.0,
+            email.split('@').next().unwrap_or_default(),
+            "display_name backfills from the email local part"
+        );
+        assert!(row.1, "is_staff syncs from is_superuser");
+        assert!(row.2 > stale, "updated_at refreshes on the login save");
     }
 }

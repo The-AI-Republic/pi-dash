@@ -20,7 +20,9 @@ worker (``pidash-api worker``) must be running against the same
 Every path the turn walk covers is exercised: model resolution (missing
 config, unreachable endpoint, resolved BYOK), the instructions + the 17
 local tool schemas on the wire (toolset), the streamed text, usage
-extraction, the terminal writes and the delta prune, and the cancel key.
+extraction, the terminal writes and the delta prune, the cancel key, and a
+mid-stream seam fault failing the turn at once (PIDASHCONV-1254, via a
+turn-scoped trigger on the delta writes).
 BYOK ciphertext is Fernet under ``ASSISTANT_ENCRYPTION_KEY`` — the same
 backend the Rust handlers decrypt with (``assistant/crypto.py``
 ``FernetBackend``), so the seeded row is what the worker reads.
@@ -40,6 +42,7 @@ from psycopg.rows import dict_row
 from _harness import redis as redis_helper
 from _harness import rust_queue
 from _harness import seed as seed_helpers
+from _harness.db import insert_row
 from _harness.db import wait_for_condition as wait_for
 
 RUN_TURN = "assistant.run_turn"
@@ -205,11 +208,18 @@ class _StubProvider:
     ``interval`` seconds (``["Hello", " world"]`` by default) ending with
     ``data: [DONE]``. Every request body is recorded so the wire shape
     (tools, instructions, stream flag) can be asserted.
+
+    ``tool_call`` (``(name, args)``) makes the *first* streaming request emit
+    a single tool call instead of text (PIDASHCONV-1250): one delta carrying
+    the complete call, closed by a ``tool_calls`` finish. Later requests
+    stream ``chunks`` as usual, so the turn completes after the tool runs.
     """
 
-    def __init__(self, chunks=("Hello", " world"), interval=0.2):
+    def __init__(self, chunks=("Hello", " world"), interval=0.2, tool_call=None):
         self.chunks = list(chunks)
         self.interval = interval
+        self.tool_call = tool_call
+        self._tool_call_sent = False
         self.requests = []
         self._server = None
         self._thread = None
@@ -235,6 +245,40 @@ class _StubProvider:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.end_headers()
+                    if stub.tool_call is not None and not stub._tool_call_sent:
+                        stub._tool_call_sent = True
+                        name, args = stub.tool_call
+                        call_delta = {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_stateless_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json.dumps(args),
+                                    },
+                                }
+                            ],
+                        }
+                        for delta, finish in ((call_delta, None), ({}, "tool_calls")):
+                            time.sleep(stub.interval)
+                            self.wfile.write(
+                                (
+                                    'data: {"id":"stub","object":"chat.completion.chunk",'
+                                    '"created":0,"model":"oracle-stub","choices":[{"index":0,'
+                                    '"delta":'
+                                    + json.dumps(delta)
+                                    + ',"finish_reason":'
+                                    + json.dumps(finish)
+                                    + "}]}\n\n"
+                                ).encode()
+                            )
+                            self.wfile.flush()
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                        return
                     for chunk in stub.chunks:
                         time.sleep(stub.interval)
                         self.wfile.write(
@@ -543,3 +587,524 @@ def test_slow_stream_fails_at_soft_limit(db_conn):
         assert "assistant_delta" not in kinds, "deltas are pruned on failure"
     finally:
         stub.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Stateless-issue tool visibility (PIDASHCONV-1250)
+# --------------------------------------------------------------------------- #
+
+
+def _seed_stateless_issue(db_conn, user, workspace):
+    """Project (the turn user is an admin member of) + one ``state_id`` NULL issue.
+
+    Column sets mirror ``issue_chain`` (every NOT NULL projects/issues column
+    without a database default); the issue simply carries no state.
+    """
+    project = seed_helpers.project(db_conn, workspace["id"], "Stateless Tools")
+    seed_helpers.project_member(
+        db_conn, project["id"], workspace["id"], user["id"], role=20
+    )
+    issue = insert_row(
+        db_conn,
+        "issues",
+        {
+            "workspace_id": str(workspace["id"]),
+            "project_id": str(project["id"]),
+            "state_id": None,
+            "name": "stateless tool-target issue",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 1,
+            "is_draft": False,
+            "sort_order": 65535,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    return project, issue
+
+
+def _tool_returns(model_messages, tool_name):
+    """``tool-return`` parts for ``tool_name`` across the stored messages."""
+    found = []
+    for message in model_messages or []:
+        for part in (message.get("parts") or []):
+            if part.get("part_kind") == "tool-return" and part.get("tool_name") == tool_name:
+                found.append(part)
+    return found
+
+
+def test_turn_tools_see_stateless_issue(db_conn):
+    """A turn calling ``get_issue`` on a ``state_id`` NULL issue gets it back.
+
+    Django renders the ``issue_objects`` triage exclusion null-safely (``NOT
+    (group = 'triage' AND group IS NOT NULL)``), so stateless rows stay
+    visible to every read tool. The Django oracle of this test lives in
+    ``assistant/test_tasks_turn.py``.
+    """
+    user, workspace = _seed_member(db_conn, "stateless")
+    _project, issue = _seed_stateless_issue(db_conn, user, workspace)
+    stub = _StubProvider(
+        chunks=("done",),
+        interval=0.1,
+        tool_call=("get_issue", {"issue_id": str(issue["id"])}),
+    )
+    base = stub.start()
+    try:
+        _configure_llm(db_conn, user["id"], base)
+        _thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        _run_and_settle(db_conn, turn_id)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "completed"
+            else None,
+            what="stateless-issue turn completed",
+        )
+        returns = _tool_returns(row["model_messages"], "get_issue")
+        assert returns, (
+            "no get_issue tool-return in model_messages: "
+            f"{json.dumps(row['model_messages'])[:2000]}"
+        )
+        content = returns[0]["content"]
+        if isinstance(content, str):
+            content = json.loads(content)
+        assert content["id"] == str(issue["id"]), (
+            f"get_issue missed the stateless issue: {str(content)[:500]}"
+        )
+    finally:
+        stub.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Seam fault injection: a trigger fails one turn's delta writes (PIDASHCONV-1254)
+# --------------------------------------------------------------------------- #
+
+#: The trigger's RAISE text. It matches no ``_classify_error`` marker, so a
+#: mid-stream seam fault classifies ``internal`` on both backends (mirrors
+#: ``assistant/test_turn_errors.py``; modules stay independent).
+SEAM_FAULT_MESSAGE = "seam fault injection: assistant_delta blocked"
+
+
+def _install_delta_fault(db_conn, tag: str, turn_id: str):
+    """Fail this turn's ``assistant_delta`` writes with a turn-scoped trigger.
+
+    ``BEFORE INSERT ON assistant_event ... WHEN (kind, turn_id)``: only this
+    turn's deltas raise; every other write (other turns, other kinds — in
+    particular the ``turn_failed`` event the failure path emits) passes.
+    Names carry the unique tag so parallel runs never share a trigger. Both
+    interpolated values are generated hex/UUIDs, never user input.
+    """
+    fn = f"seam_fault_{tag}"
+    trg = f"seam_fault_{tag}_trg"
+    with db_conn.cursor() as cur:
+        cur.execute(
+            f"CREATE OR REPLACE FUNCTION {fn}() RETURNS trigger LANGUAGE plpgsql AS "
+            f"$$ BEGIN RAISE EXCEPTION '{SEAM_FAULT_MESSAGE}'; END $$"
+        )
+        cur.execute(f"DROP TRIGGER IF EXISTS {trg} ON assistant_event")
+        cur.execute(
+            f"CREATE TRIGGER {trg} BEFORE INSERT ON assistant_event FOR EACH ROW "
+            f"WHEN (NEW.kind = 'assistant_delta' AND NEW.turn_id = '{turn_id}') "
+            f"EXECUTE FUNCTION {fn}()"
+        )
+    db_conn.commit()
+    return fn, trg
+
+
+def _remove_delta_fault(db_conn, fn: str, trg: str):
+    with db_conn.cursor() as cur:
+        cur.execute(f"DROP TRIGGER IF EXISTS {trg} ON assistant_event")
+        cur.execute(f"DROP FUNCTION IF EXISTS {fn}()")
+    db_conn.commit()
+
+
+def test_midstream_seam_failure_fails_turn_at_once(db_conn):
+    """A DB error from a mid-stream row write fails the turn at once.
+
+    The trigger fails the first ``assistant_delta`` INSERT — the black-box
+    shape of ``emit_delta`` raising out of the stream loop. The driver must
+    take the same path as a provider error (report, fail the open row,
+    classify ``internal``, fail the turn with ``turn_failed``) — immediately,
+    not at the 390s sweep. Before the PIDASHCONV-1254 fix the turn stayed
+    RUNNING and this test timed out waiting for ``failed``.
+    """
+    stub = _StubProvider(chunks=("Hello",))
+    base = stub.start()
+    tag = uuid.uuid4().hex[:8]
+    fn = trg = None
+    try:
+        user, workspace = _seed_member(db_conn, f"seam{tag}")
+        _configure_llm(db_conn, user["id"], base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+        fn, trg = _install_delta_fault(db_conn, tag, turn_id)
+
+        t0 = time.monotonic()
+        celery_id = _publish(turn_id)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="seam-fault turn failed",
+        )
+        elapsed = time.monotonic() - t0
+        assert elapsed < SWEEP_CUTOFF_SECS, (
+            f"failed after {elapsed:.0f}s: the sweep won, not the run"
+        )
+        rust_queue.wait_for_settled(celery_id, what="seam-fault turn settled")
+
+        def _failure_writes_complete():
+            kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
+            if "turn_failed" in kinds and "assistant_delta" not in kinds:
+                return kinds
+            return None
+
+        kinds = wait_for(_failure_writes_complete, what="seam-fault failure writes")
+        assert row["error_code"] == "internal"
+        assert row["error_detail"] == "The assistant hit an unexpected error."
+        assert row["completed_at"] is not None
+        assert row["started_at"] is not None
+
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT display_content, status FROM assistant_message "
+                "WHERE turn_id = %s AND kind = 'assistant' ORDER BY seq",
+                (turn_id,),
+            )
+            streamed = cur.fetchall()
+        assert streamed, "the streamed chunk wrote an assistant row"
+        assert "".join(r["display_content"] for r in streamed) == "Hello"
+        assert all(r["status"] == "failed" for r in streamed)
+
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT display_content, status FROM assistant_message "
+                "WHERE turn_id = %s AND kind = 'error'",
+                (turn_id,),
+            )
+            err = cur.fetchone()
+        assert err is not None and err["status"] == "failed"
+        assert err["display_content"] == row["error_detail"]
+
+        failed = next(e for e in _turn_events(db_conn, turn_id) if e["kind"] == "turn_failed")
+        assert failed["payload"] == {
+            "turn_id": turn_id,
+            "error_code": "internal",
+            "detail": "The assistant hit an unexpected error.",
+        }
+        assert "assistant_delta" not in kinds, "deltas are pruned on failure"
+    finally:
+        if fn is not None:
+            _remove_delta_fault(db_conn, fn, trg)
+        stub.stop()
+# create_issue post-save orchestration (PIDASHCONV-1251)
+# --------------------------------------------------------------------------- #
+
+TICKING_STATE = "In Progress"
+TICKING_GROUP = "started"
+
+BOUNCE_STRIPPED = (
+    "Agent run skipped \u2014 no eligible runner."
+    "No runner is registered in this pod that can serve this issue. "
+    "Add a runner under your account, or assign this issue to a workspace "
+    "member whose runner is registered here."
+)
+
+
+def _seed_ticking_project(db_conn, user, workspace):
+    """Project with ticking enabled, one ``In Progress`` state, member access.
+
+    Returns (project_id, state_id). The local-runner executor is explicit:
+    the seed default (``""``) is not a runnable executor.
+    """
+    seed = seed_helpers.Seed(db_conn)
+    project_id = seed.project(workspace["id"])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET agent_ticking_enabled=TRUE, "
+            "agent_default_interval_seconds=10800, "
+            "agent_review_default_interval_seconds=10800, "
+            "agent_test_default_interval_seconds=10800, "
+            "agent_default_max_ticks=20, default_agent_executor='local_runner' "
+            "WHERE id = %s",
+            (project_id,),
+        )
+    state_id = seed.state(project_id, workspace["id"], name=TICKING_STATE, group=TICKING_GROUP)
+    seed.project_member(project_id, workspace["id"], user["id"], role=15)
+    db_conn.commit()
+    return project_id, state_id
+
+
+def _seed_pod(db_conn, workspace, project_id):
+    pod_id = seed_helpers.Seed(db_conn).pod(workspace["id"], project_id)
+    db_conn.commit()
+    return pod_id
+
+
+def _seed_runner(db_conn, user, workspace, pod_id):
+    runner_id = seed_helpers.Seed(db_conn).runner(user["id"], workspace["id"], pod_id)
+    db_conn.commit()
+    return runner_id
+
+
+def _issue_rows(db_conn, project_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT * FROM issues WHERE project_id = %s AND deleted_at IS NULL "
+            "ORDER BY created_at",
+            (project_id,),
+        )
+        return cur.fetchall()
+
+
+def _ticker_rows(db_conn, issue_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT * FROM issue_agent_ticker WHERE issue_id = %s", (issue_id,))
+        return cur.fetchall()
+
+
+def _run_rows(db_conn, issue_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT * FROM agent_run WHERE work_item_id = %s ORDER BY created_at",
+            (issue_id,),
+        )
+        return cur.fetchall()
+
+
+def _comment_rows(db_conn, issue_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT * FROM issue_comments WHERE issue_id = %s ORDER BY created_at",
+            (issue_id,),
+        )
+        return cur.fetchall()
+
+
+def _run_event_count(db_conn, run_id):
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM agent_run_event WHERE agent_run_id = %s", (run_id,))
+        return cur.fetchone()[0]
+
+
+class _ScriptedStub:
+    """OpenAI stub whose first reply is one tool call (SSE, the
+    ``tool_local.json`` capture shape), every later reply text.
+
+    ``tool_args`` is the tool's argument object; the call id is fixed
+    (``call_1``) so the exchange is deterministic.
+    """
+
+    def __init__(self, tool_name: str, tool_args: dict, text: str = "Done"):
+        self.tool_name = tool_name
+        self.tool_args = tool_args
+        self.text = text
+        self.requests = []
+        self._server = None
+        self._thread = None
+
+    def start(self):
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length) if length else b""
+                try:
+                    payload = json.loads(body or b"{}")
+                except ValueError:
+                    payload = {}
+                stub.requests.append(payload)
+                first = len(stub.requests) == 1
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                if first:
+                    self.wfile.write(
+                        (
+                            'data: {"id":"stub","object":"chat.completion.chunk",'
+                            '"created":0,"model":"oracle-stub","choices":[{"index":0,'
+                            '"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+                            '"type":"function","function":{"name":'
+                            + json.dumps(stub.tool_name)
+                            + ',"arguments":'
+                            + json.dumps(json.dumps(stub.tool_args))
+                            + '}}]},"finish_reason":null}]}\n\n'
+                        ).encode()
+                    )
+                    self.wfile.write(
+                        b'data: {"id":"stub","object":"chat.completion.chunk",'
+                        b'"created":0,"model":"oracle-stub","choices":[{"index":0,'
+                        b'"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+                    )
+                else:
+                    self.wfile.write(
+                        (
+                            'data: {"id":"stub","object":"chat.completion.chunk",'
+                            '"created":0,"model":"oracle-stub","choices":[{"index":0,'
+                            '"delta":{"content":' + json.dumps(stub.text) + "},"
+                            '"finish_reason":null}]}\n\n'
+                        ).encode()
+                    )
+                    self.wfile.write(
+                        b'data: {"id":"stub","object":"chat.completion.chunk",'
+                        b'"created":0,"model":"oracle-stub","choices":[{"index":0,'
+                        b'"delta":{},"finish_reason":"stop"}]}\n\n'
+                    )
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return f"http://127.0.0.1:{port}/v1"
+
+    def stop(self):
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+
+
+def _terminal_turn(db_conn, turn_id):
+    row = _turn_row(db_conn, turn_id)
+    db_conn.commit()
+    if row and row["status"] in ("completed", "failed", "cancelled"):
+        return row
+    return None
+
+
+def _drive_create_issue(db_conn, tag, *, pod=False, runner=False):
+    """Seed, drive one ``create_issue`` tool call, wait for the terminal
+    turn. Returns (user, project_id, state_id, pod_id, turn_id)."""
+    user, workspace = _seed_member(db_conn, f"create-{tag}")
+    project_id, state_id = _seed_ticking_project(db_conn, user, workspace)
+    pod_id = _seed_pod(db_conn, workspace, project_id) if pod else None
+    if runner:
+        assert pod_id is not None
+        _seed_runner(db_conn, user, workspace, pod_id)
+    _thread_id, turn_id, _message_id = _seed_turn_trio(db_conn, user, workspace)
+    stub = _ScriptedStub(
+        "create_issue",
+        {
+            "project_id": str(project_id),
+            "name": f"transition probe {tag}",
+            "state_id": str(state_id),
+        },
+    )
+    base = stub.start()
+    try:
+        _configure_llm(db_conn, user["id"], base)
+        _publish(turn_id)
+        row = wait_for(
+            lambda: _terminal_turn(db_conn, turn_id),
+            what="create_issue turn terminal",
+        )
+        assert row["status"] == "completed", (
+            f"turn {row['status']}: {row['error_code']} {row['error_detail']}"
+        )
+    finally:
+        stub.stop()
+    return user, project_id, state_id, pod_id, turn_id
+
+
+def _assert_tool_created_issue(db_conn, project_id, state_id, tag):
+    issues = _issue_rows(db_conn, project_id)
+    assert len(issues) == 1, "the tool call created exactly one issue"
+    issue = issues[0]
+    assert issue["name"] == f"transition probe {tag}"
+    assert str(issue["state_id"]) == str(state_id)
+    assert issue["sequence_id"] == 1
+    return issue
+
+
+def _assert_ticker_armed(db_conn, issue, user_id):
+    tickers = _ticker_rows(db_conn, issue["id"])
+    assert len(tickers) == 1, "the entered-bucket fire arms exactly one ticker"
+    ticker = tickers[0]
+    assert ticker["enabled"] is True
+    assert ticker["disarm_reason"] == ""
+    assert ticker["next_run_at"] is not None
+    assert ticker["used"] == 0
+    assert ticker["granted"] == 0
+    assert ticker["waited"] == 0
+    assert ticker["pending_entry"] is False
+    assert ticker["pending_entry_free"] is False
+    assert ticker["pending_entry_actor_id"] is None
+    assert ticker["pending_entry_trigger"] == ""
+    assert ticker["resume_parent_run_id"] is None
+    assert str(ticker["created_by_id"]) == str(user_id)
+    return ticker
+
+
+def test_create_issue_arms_ticker_without_pod(db_conn):
+    """No pod: the fire arms the clock, no entry run (``no-pod-available``)."""
+    user, project_id, state_id, _pod_id, _turn_id = _drive_create_issue(db_conn, "nopod")
+    issue = _assert_tool_created_issue(db_conn, project_id, state_id, "nopod")
+    _assert_ticker_armed(db_conn, issue, user["id"])
+    assert _run_rows(db_conn, issue["id"]) == []
+    assert _comment_rows(db_conn, issue["id"]) == []
+
+
+def test_create_issue_bounces_without_runner(db_conn):
+    """Pod without a runner: the bounce posts, the ticker disarms, no run."""
+    user, project_id, state_id, _pod_id, _turn_id = _drive_create_issue(
+        db_conn, "bounce", pod=True
+    )
+    issue = _assert_tool_created_issue(db_conn, project_id, state_id, "bounce")
+    assert str(issue["state_id"]) == str(state_id), "the issue stays in place"
+    tickers = _ticker_rows(db_conn, issue["id"])
+    assert len(tickers) == 1
+    ticker = tickers[0]
+    assert ticker["enabled"] is False
+    assert ticker["disarm_reason"] == "left_ticking_state"
+    assert ticker["next_run_at"] is None
+    assert str(ticker["created_by_id"]) == str(user["id"])
+    comments = _comment_rows(db_conn, issue["id"])
+    assert len(comments) == 1, "the bounce posts exactly one comment"
+    assert comments[0]["comment_stripped"] == BOUNCE_STRIPPED
+    assert _run_rows(db_conn, issue["id"]) == []
+
+
+def test_create_issue_dispatches_entry_run(db_conn):
+    """Pod with a user-owned runner: an entry run dispatches immediately."""
+    user, project_id, state_id, pod_id, _turn_id = _drive_create_issue(
+        db_conn, "dispatch", pod=True, runner=True
+    )
+    issue = _assert_tool_created_issue(db_conn, project_id, state_id, "dispatch")
+    _assert_ticker_armed(db_conn, issue, user["id"])
+    runs = _run_rows(db_conn, issue["id"])
+    assert len(runs) == 1, "the immediate dispatch creates exactly one entry run"
+    run = runs[0]
+    assert run["status"] == "queued"
+    assert run["trigger"] == "state_transition"
+    assert run["phase_kind"] == "coding-task"
+    assert run["executor_kind"] == "local_runner"
+    assert str(run["created_by_id"]) == str(user["id"])
+    assert str(run["pod_id"]) == str(pod_id)
+    assert str(run["work_item_id"]) == str(issue["id"])
+    assert run["parent_run_id"] is None
+    assert run["runner_id"] is None
+    assert run["pinned_runner_id"] is None
+    assert run["scheduler_binding_id"] is None
+    assert run["error"] == ""
+    assert run["error_code"] == ""
+    assert run["dispatch_attempts"] == 0
+    assert run["run_config"] == {"repo_ref": None, "repo_url": None, "git_work_branch": None}
+    assert run["required_capabilities"] == []
+    assert run["tool_plan"] == {}
+    assert run["agent_metadata"] == {}
+    assert "transition probe dispatch" in run["prompt"]
+    assert _run_event_count(db_conn, run["id"]) == 0
+    assert _comment_rows(db_conn, issue["id"]) == []

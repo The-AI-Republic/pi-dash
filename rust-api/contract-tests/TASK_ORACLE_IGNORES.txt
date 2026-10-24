@@ -18,6 +18,12 @@
 #                                             a worker, static tests need the
 #                                             pinned-main worktree that job
 #                                             provisions)
+#   assistant/test_update_issue_completion.py -> worker-plane oracle job in
+#                                             rust-api-contract-tests.yml
+#                                             (PIDASHCONV-1252; needs HTTP plus
+#                                             a worker on the Django half; the
+#                                             Rust half has no serve-booting CI
+#                                             job yet and is verified locally)
 #   loop/test_worker.py                    -> no CI coverage (local gate only)
 #   orchestration/test_beat_schedule.py    -> no CI coverage (local gate only)
 #   orchestration/test_ticker_tasks.py     -> no CI coverage (local gate only)
@@ -27,6 +33,15 @@
 # the HTTP matrix job shape.)
 assistant/test_tasks_turn.py
 assistant/test_turn_errors.py
+assistant/test_update_issue_completion.py
+# PIDASHCONV-1251: the create_issue post-save orchestration oracle. It
+# publishes assistant.run_turn in Celery wire format and waits for a
+# worker to drive a scripted tool call, so the HTTP matrix cannot run
+# it on either backend; its coverage is the worker-plane oracle job
+# in rust-api-contract-tests.yml (this selection), and the Rust
+# mirror is tasks_assistant/test_rust_replay.py in
+# rust-api-contract-tests-tasks-assistant-rust.yml.
+assistant/test_create_issue_transition.py
 loop/test_worker.py
 orchestration/test_beat_schedule.py
 orchestration/test_ticker_tasks.py
@@ -63,3 +78,11 @@ loop/test_fire_rust_replay.py
 # .github/workflows/rust-api-contract-tests-app-cycles-origin.yml, which runs
 # each configuration against live Django (oracle validity) and against Rust.
 app_cycles/test_activity_origin.py
+# PIDASHCONV-1232: the R1/R2/R3 review-continuation parent-payload oracle and
+# its Rust replay. The oracle publishes fire_tick in Celery wire format and
+# waits for the Django worker; the replay seeds rust_job_queue and waits for
+# `pidash-api worker`. The HTTP matrix boots no worker on either backend, so
+# neither file can run there; no CI coverage (local gate only), like the
+# orchestration/test_ticker_tasks.py sibling.
+orchestration/test_review_parent_payload.py
+orchestration/test_review_parent_payload_rust.py

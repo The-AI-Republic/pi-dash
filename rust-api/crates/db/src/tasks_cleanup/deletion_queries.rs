@@ -60,71 +60,175 @@ pub const HARD_DELETE_NAMED_TABLES: [&str; 18] = [
 
 /// `(app_label, model_name)` entry map for `soft_delete_related_objects`.
 ///
-/// Mirrors `apps.get_model(app_label, model_name)`: Django's `model_name`
-/// is the lowercased class name. Every Pi Dash model ported here lives in
-/// the `db` app (`pi_dash/db/apps.py` has no explicit label, so Django
-/// derives `db`). An unknown pair is a loud error at the services layer
-/// (the `apps.get_model` `LookupError` equivalent) — never a silent skip.
+/// Mirrors `apps.get_model(app_label, model_name)`: Django matches
+/// `model_name` case-insensitively (the lowercased class name) and
+/// `app_label` exactly. Models span the `db`, `license` and `runner`
+/// apps. An unknown pair is a loud error at the services layer (the
+/// `apps.get_model` `LookupError` equivalent) — never a silent skip.
+///
+/// Every row but the trailing aliases is generated from `_meta`, in the
+/// same maintenance class as [`HARD_DELETE_SWEEP_TABLES`]: a migration
+/// adding a soft-delete model must extend it. Regenerate from a Django
+/// shell with:
+///
+/// ```python
+/// from django.apps import apps
+/// for m in sorted(
+///     apps.get_models(include_auto_created=False),
+///     key=lambda m: (m._meta.app_label, m._meta.model_name),
+/// ):
+///     if hasattr(m, "deleted_at"):
+///         print(m._meta.app_label, m._meta.model_name, m._meta.db_table)
+/// ```
+///
+/// The trailing rows are not `_meta` soft-delete models: `("db", "user")`
+/// is a real model without `deleted_at` (kept for the deliberate entry
+/// asymmetry the replay tests pin — Django's task raises `AttributeError`
+/// while the Rust worker walks it to null audit FKs); `apilog` and
+/// `cldevicecode` are legacy hand aliases nothing enqueues (kept, not
+/// extended).
 const ENTRY_TABLES: &[(&str, &str, &str)] = &[
-    ("db", "apiToken", "api_tokens"),
-    ("db", "apilog", "api_activity_logs"),
+    ("db", "analyticview", "analytic_views"),
     ("db", "apiactivitylog", "api_activity_logs"),
     ("db", "apitoken", "api_tokens"),
-    ("db", "analyticview", "analytic_views"),
-    ("db", "cldevicecode", "cli_device_codes"),
     ("db", "clidevicecode", "cli_device_codes"),
+    ("db", "commentreaction", "comment_reactions"),
     ("db", "cycle", "cycles"),
     ("db", "cycleissue", "cycle_issues"),
-    ("db", "cycleuserproperty", "cycle_user_properties"),
-    ("db", "dashboard", "dashboards"),
+    ("db", "cycleuserproperties", "cycle_user_properties"),
+    ("db", "deployboard", "deploy_boards"),
+    ("db", "description", "descriptions"),
+    ("db", "descriptionversion", "description_versions"),
+    ("db", "device", "devices"),
+    ("db", "devicesession", "device_sessions"),
+    ("db", "draftissue", "draft_issues"),
+    ("db", "draftissueassignee", "draft_issue_assignees"),
+    ("db", "draftissuecycle", "draft_issue_cycles"),
+    ("db", "draftissuelabel", "draft_issue_labels"),
+    ("db", "draftissuemodule", "draft_issue_modules"),
     ("db", "emailnotificationlog", "email_notification_logs"),
     ("db", "estimate", "estimates"),
     ("db", "estimatepoint", "estimate_points"),
-    ("db", "exporter", "exporters"),
     ("db", "exporterhistory", "exporters"),
     ("db", "fileasset", "file_assets"),
+    ("db", "gitcodereviewlink", "git_code_review_links"),
+    ("db", "gitcommentsync", "git_comment_syncs"),
+    ("db", "githubappinstallation", "github_app_installations"),
+    (
+        "db",
+        "githubappinstallsession",
+        "github_app_install_sessions",
+    ),
+    ("db", "githubcommentsync", "github_comment_syncs"),
+    ("db", "githubissuesync", "github_issue_syncs"),
+    ("db", "githubpullrequestlink", "github_pull_request_links"),
+    ("db", "githubrepository", "github_repositories"),
+    ("db", "githubrepositorysync", "github_repository_syncs"),
+    ("db", "githubwebhookdelivery", "github_webhook_deliveries"),
+    ("db", "gitissuesync", "git_issue_syncs"),
+    ("db", "gitprovideraccount", "git_provider_accounts"),
+    ("db", "gitrepository", "git_repositories"),
+    ("db", "gitrepositorybinding", "git_repository_bindings"),
+    ("db", "gitwebhookdelivery", "git_webhook_deliveries"),
+    ("db", "gitwebhookregistration", "git_webhook_registrations"),
+    ("db", "importer", "importers"),
     ("db", "intake", "intakes"),
     ("db", "intakeissue", "intake_issues"),
+    ("db", "integration", "integrations"),
     ("db", "issue", "issues"),
     ("db", "issueactivity", "issue_activities"),
+    ("db", "issueagentticker", "issue_agent_ticker"),
     ("db", "issueassignee", "issue_assignees"),
-    ("db", "issuelabel", "issue_labels"),
-    ("db", "issuerelation", "issue_relations"),
-    ("db", "issuesequence", "issue_sequences"),
-    ("db", "issuesubscriber", "issue_subscribers"),
-    ("db", "issueversion", "issue_versions"),
+    ("db", "issueattachment", "issue_attachments"),
+    ("db", "issueblocker", "issue_blockers"),
     ("db", "issuecomment", "issue_comments"),
     (
         "db",
         "issuedescriptionversion",
         "issue_description_versions",
     ),
+    ("db", "issuelabel", "issue_labels"),
     ("db", "issuelink", "issue_links"),
+    ("db", "issuemention", "issue_mentions"),
     ("db", "issuereaction", "issue_reactions"),
+    ("db", "issuerelation", "issue_relations"),
+    ("db", "issuesequence", "issue_sequences"),
+    ("db", "issuesubscriber", "issue_subscribers"),
+    ("db", "issuetype", "issue_types"),
+    ("db", "issueversion", "issue_versions"),
     ("db", "issueview", "issue_views"),
+    ("db", "issuevote", "issue_votes"),
     ("db", "label", "labels"),
     ("db", "loopjob", "loop_jobs"),
+    ("db", "looptarget", "loop_targets"),
+    ("db", "loopuserpreference", "loop_user_preferences"),
     ("db", "module", "modules"),
     ("db", "moduleissue", "module_issues"),
-    ("db", "moduleuserproperty", "module_user_properties"),
+    ("db", "modulelink", "module_links"),
+    ("db", "modulemember", "module_members"),
+    ("db", "moduleuserproperties", "module_user_properties"),
+    ("db", "notification", "notifications"),
     ("db", "page", "pages"),
     ("db", "pagelabel", "page_labels"),
+    ("db", "pagelog", "page_logs"),
     ("db", "pageversion", "page_versions"),
     ("db", "project", "projects"),
     ("db", "projectdeployboard", "project_deploy_boards"),
     ("db", "projectidentifier", "project_identifiers"),
+    ("db", "projectissuetype", "project_issue_types"),
     ("db", "projectmember", "project_members"),
     ("db", "projectmemberinvite", "project_member_invites"),
     ("db", "projectpage", "project_pages"),
     ("db", "projectpublicmember", "project_public_members"),
     ("db", "projectuserproperty", "project_user_properties"),
+    ("db", "projectwebhook", "project_webhooks"),
+    ("db", "scheduler", "schedulers"),
+    ("db", "schedulerbinding", "scheduler_bindings"),
+    ("db", "slackprojectsync", "slack_project_syncs"),
+    ("db", "socialloginconnection", "social_login_connections"),
     ("db", "state", "states"),
-    ("db", "user", "users"),
+    ("db", "sticky", "stickies"),
+    ("db", "team", "teams"),
     ("db", "userfavorite", "user_favorites"),
+    (
+        "db",
+        "usernotificationpreference",
+        "user_notification_preferences",
+    ),
+    ("db", "userrecentvisit", "user_recent_visits"),
+    ("db", "webhook", "webhooks"),
     ("db", "webhooklog", "webhook_logs"),
     ("db", "workspace", "workspaces"),
+    (
+        "db",
+        "workspacehomepreference",
+        "workspace_home_preferences",
+    ),
+    ("db", "workspaceintegration", "workspace_integrations"),
+    ("db", "workspacejoinrequest", "workspace_join_requests"),
     ("db", "workspacemember", "workspace_members"),
     ("db", "workspacememberinvite", "workspace_member_invites"),
+    ("db", "workspacetheme", "workspace_themes"),
+    ("db", "workspaceuserlink", "workspace_user_links"),
+    (
+        "db",
+        "workspaceuserpreference",
+        "workspace_user_preferences",
+    ),
+    ("db", "workspaceuserproperties", "workspace_user_properties"),
+    ("license", "changelog", "changelogs"),
+    ("license", "instance", "instances"),
+    ("license", "instanceadmin", "instance_admins"),
+    (
+        "license",
+        "instanceconfiguration",
+        "instance_configurations",
+    ),
+    ("runner", "pod", "pod"),
+    // Legacy aliases (not `_meta` soft-delete models; see above).
+    ("db", "apilog", "api_activity_logs"),
+    ("db", "cldevicecode", "cli_device_codes"),
+    ("db", "user", "users"),
 ];
 
 /// The `apps.get_models()` sweep order (`deletion_task.py:183-188`):
@@ -262,11 +366,14 @@ pub const HARD_DELETE_SWEEP_TABLES: [&str; 113] = [
 ];
 
 /// Resolve the entry table for `(app_label, model_name)`, or `None` when
-/// Django's `apps.get_model` would raise `LookupError`.
+/// Django's `apps.get_model` would raise `LookupError`. Like Django,
+/// `model_name` matches case-insensitively while `app_label` matches
+/// exactly.
 pub fn entry_table_for(app_label: &str, model_name: &str) -> Option<&'static str> {
+    let lowered = model_name.to_lowercase();
     ENTRY_TABLES
         .iter()
-        .find(|(app, model, _)| *app == app_label && *model == model_name)
+        .find(|(app, model, _)| *app == app_label && *model == lowered)
         .map(|(_, _, table)| *table)
 }
 
@@ -1667,6 +1774,43 @@ mod tests {
         );
         assert_eq!(entry_table_for("db", "nosuchmodel"), None);
         assert_eq!(entry_table_for("other", "issue"), None);
+    }
+
+    #[test]
+    fn entry_map_matches_model_name_case_insensitively() {
+        // `AppConfig.get_model` lowercases `model_name` but matches
+        // `app_label` exactly (PIDASHCONV-1293).
+        assert_eq!(entry_table_for("db", "DraftIssue"), Some("draft_issues"));
+        assert_eq!(entry_table_for("db", "APITOKEN"), Some("api_tokens"));
+        assert_eq!(entry_table_for("db", "apiToken"), Some("api_tokens"));
+        assert_eq!(entry_table_for("DB", "issue"), None);
+    }
+
+    #[test]
+    fn entry_map_covers_every_sweep_table() {
+        // Every `deleted_at` table the hard-delete sweep visits must be
+        // reachable as a soft-delete entry (PIDASHCONV-1293): a missing
+        // row fails the job as `UnknownModel` where Django's
+        // `apps.get_model` resolves.
+        let tables: HashSet<&str> = ENTRY_TABLES.iter().map(|(_, _, table)| *table).collect();
+        for table in HARD_DELETE_SWEEP_TABLES {
+            assert!(
+                tables.contains(table),
+                "sweep table {table} has no ENTRY_TABLES row"
+            );
+        }
+    }
+
+    #[test]
+    fn entry_map_keys_are_unique_and_lowercase() {
+        // The generator emits `(app_label, model_name)` keys sorted and
+        // lowercase; a duplicate or mixed-case key means the mirror and
+        // the case-insensitive lookup drifted (PIDASHCONV-1293).
+        let mut seen = HashSet::new();
+        for (app, model, _) in ENTRY_TABLES {
+            assert_eq!(*model, model.to_lowercase(), "mixed-case key {app}.{model}");
+            assert!(seen.insert((*app, *model)), "duplicate key {app}.{model}");
+        }
     }
 
     #[test]

@@ -41,8 +41,8 @@
 //!   (despite the "Process workspace and project invitations" comment),
 //!   so `complete_login_or_signup` skips the callback.
 //! * `is_signup = bool(user)` is inverted as written (`base.py:297`): a
-//!   brand-new user reports `False`, so IDP sync also runs for new users
-//!   when `ENABLE_GITEA_SYNC` is set.
+//!   brand-new user reports `False`, so IDP sync runs for new users only,
+//!   never existing ones, when `ENABLE_GITEA_SYNC` is set.
 //! * New-user avatar assignments persist only via the later
 //!   `save_user_data` save (no save follows the avatar block itself).
 //!
@@ -137,11 +137,23 @@ pub fn urlencode_pairs(pairs: &[(String, String)]) -> String {
 
 /// Ordered error params: `exc.get_error_dict()` (`error.py:88-92`) plus an
 /// optional `next_path` echo appended last (`app/gitea.py`, `space/gitea.py`).
-pub fn error_params(code: i32, name: &str, next_path: Option<&str>) -> Vec<(String, String)> {
-    let mut out = vec![
-        ("error_code".to_owned(), code.to_string()),
-        ("error_message".to_owned(), name.to_owned()),
-    ];
+pub fn error_params(
+    exc: &AuthenticationException,
+    next_path: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = exc
+        .get_error_dict()
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key,
+                match value {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                },
+            )
+        })
+        .collect();
     if let Some(next) = next_path {
         out.push(("next_path".to_owned(), next.to_owned()));
     }
@@ -347,43 +359,33 @@ pub fn request_is_secure(headers: &HeaderMap) -> bool {
         .is_some_and(|proto| proto.split(',').next().unwrap_or("").trim() == "https")
 }
 
+/// `HostSettings` view over the boot-resolved `Settings`
+/// (`authentication/utils/host.py:19-67` over D-16's kernel).
+fn host_settings(
+    settings: &pidash_db::config::Settings,
+) -> pidash_services::auth_session::shapes::HostSettings<'_> {
+    let urls = &settings.urls;
+    pidash_services::auth_session::shapes::HostSettings {
+        web_url: urls.web_url.as_deref(),
+        app_base_url: urls.app_base_url.as_deref(),
+        admin_base_url: urls.admin_base_url.as_deref(),
+        space_base_url: urls.space_base_url.as_deref(),
+        admin_base_path: Some(urls.admin_base_path.as_str()),
+        space_base_path: Some(urls.space_base_path.as_str()),
+    }
+}
+
 /// App/space base hosts from settings (`authentication/utils/host.py:19-67`
 /// via the D-16 `base_host` kernel). `is_app` returns `APP_BASE_URL` when
 /// set, else the `WEB_URL or APP_BASE_URL` origin; `is_space` appends the
 /// space base path to `SPACE_BASE_URL` when set, else to the origin.
 pub fn app_base(settings: &pidash_db::config::Settings) -> String {
-    let urls = &settings.urls;
-    pidash_services::auth_session::shapes::base_host(
-        &pidash_services::auth_session::shapes::HostSettings {
-            web_url: urls.web_url.as_deref(),
-            app_base_url: urls.app_base_url.as_deref(),
-            admin_base_url: urls.admin_base_url.as_deref(),
-            space_base_url: urls.space_base_url.as_deref(),
-            admin_base_path: Some(urls.admin_base_path.as_str()),
-            space_base_path: Some(urls.space_base_path.as_str()),
-        },
-        false,
-        false,
-        true,
-    )
+    pidash_services::auth_session::shapes::base_host(&host_settings(settings), false, false, true)
 }
 
 /// Space base host from settings (same kernel, `is_space=True`).
 pub fn space_base(settings: &pidash_db::config::Settings) -> String {
-    let urls = &settings.urls;
-    pidash_services::auth_session::shapes::base_host(
-        &pidash_services::auth_session::shapes::HostSettings {
-            web_url: urls.web_url.as_deref(),
-            app_base_url: urls.app_base_url.as_deref(),
-            admin_base_url: urls.admin_base_url.as_deref(),
-            space_base_url: urls.space_base_url.as_deref(),
-            admin_base_path: Some(urls.admin_base_path.as_str()),
-            space_base_path: Some(urls.space_base_path.as_str()),
-        },
-        false,
-        true,
-        false,
-    )
+    pidash_services::auth_session::shapes::base_host(&host_settings(settings), false, true, false)
 }
 
 /// Handler failure with its exact status + body.
@@ -769,8 +771,9 @@ pub async fn find_user_by_email(
 }
 
 /// `Adapter.__check_signup` (`base.py:103-121`): when `ENABLE_SIGNUP` is
-/// `"0"` and no `WorkspaceMemberInvite` row carries the email, signup
-/// raises `SIGNUP_DISABLED` (5015) with the email as payload.
+/// `"0"` and no live `WorkspaceMemberInvite` row carries the email,
+/// signup raises `SIGNUP_DISABLED` (5015) with the email as payload. The
+/// default manager excludes soft-deleted invites.
 pub async fn check_signup(
     pool: &sqlx::PgPool,
     secret_key: &str,
@@ -797,21 +800,22 @@ pub async fn check_signup(
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspace_member_invites WHERE email = $1 LIMIT 1"#)
-            .bind(email)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| {
-                AuthenticationException::new(
-                    5015,
-                    "SIGNUP_DISABLED",
-                    vec![(
-                        "email".to_owned(),
-                        serde_json::Value::String(email.to_owned()),
-                    )],
-                )
-            })?;
+    let invited: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT id FROM workspace_member_invites WHERE email = $1 AND deleted_at IS NULL LIMIT 1"#,
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| {
+        AuthenticationException::new(
+            5015,
+            "SIGNUP_DISABLED",
+            vec![(
+                "email".to_owned(),
+                serde_json::Value::String(email.to_owned()),
+            )],
+        )
+    })?;
     if invited.is_none() {
         return Err(AuthenticationException::new(
             5015,
@@ -911,9 +915,12 @@ pub async fn insert_user(
 /// `save_user_data` (`base.py:220-234`): login enrichment plus the
 /// activation branch. The UPDATE writes the D-16 `SAVE_USER_DATA_FIELDS`
 /// plus the avatar pair the signup block assigned in memory (persisted only
-/// by this save) and the rotated `token` (`User.save()` rotates whenever
-/// `token_updated_at` is set — always, here). Returns whether the
-/// activation email must fire (`not user.is_active` before the save).
+/// by this save), the rotated `token` (`User.save()` rotates whenever
+/// `token_updated_at` is set — always, here), the refreshed `updated_at`,
+/// the blank-`display_name` backfill from the email local part, and the
+/// `is_staff`-from-`is_superuser` sync (`user.py:169-187`; PIDASHCONV-1364,
+/// the github twin is PIDASHCONV-1081). Returns whether the activation
+/// email must fire (`not user.is_active` before the save).
 #[allow(clippy::too_many_arguments)]
 pub async fn save_user_data(
     pool: &sqlx::PgPool,
@@ -933,7 +940,9 @@ pub async fn save_user_data(
              token = $3,
              last_login_ip = $4, last_login_uagent = $5,
              avatar = $6, avatar_asset_id = $7,
-             is_active = TRUE
+             is_active = TRUE, updated_at = $2,
+             display_name = CASE WHEN display_name = '' THEN split_part(email, '@', 1) ELSE display_name END,
+             is_staff = is_staff OR is_superuser
            WHERE id = $1"#,
     )
     .bind(user_id)
@@ -2110,6 +2119,7 @@ pub async fn authenticate_user(
     inputs: &RequestInputs,
     code: &str,
     redirect_uri: &str,
+    site: &str,
     with_callback: bool,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<AuthenticatedUser, AuthError> {
@@ -2138,64 +2148,11 @@ pub async fn authenticate_user(
     let user_id;
     let password_field;
     if let Some(row) = existing {
+        // Existing users never sync: `check_sync_enabled() and not
+        // is_signup` (`base.py:345`) with the inverted flag runs for NEW
+        // users only (PB-1024).
         user_id = row.id;
         password_field = row.password.clone();
-        let sync_enabled = config_value(
-            pool,
-            secret_key,
-            "ENABLE_GITEA_SYNC",
-            env_default("ENABLE_GITEA_SYNC"),
-        )
-        .await
-        .map(|v| v.as_deref() == Some("1"))
-        .unwrap_or(false);
-        if sync_enabled && !is_signup {
-            let first = user_json
-                .get("user")
-                .and_then(|u| u.get("first_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let last = user_json
-                .get("user")
-                .and_then(|u| u.get("last_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            delete_old_avatar(
-                &client,
-                pool,
-                storage,
-                if inputs.is_secure { "https" } else { "http" },
-                &inputs.host,
-                user_id,
-                row.avatar_asset_id,
-                now,
-            )
-            .await;
-            let avatar_url = user_json
-                .get("user")
-                .and_then(|u| u.get("avatar"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let (avatar, asset) = match download_and_upload_avatar(
-                &client,
-                pool,
-                storage,
-                if inputs.is_secure { "https" } else { "http" },
-                &inputs.host,
-                avatar_url,
-                user_id,
-                file_size_max,
-                now,
-            )
-            .await
-            {
-                Some(asset_id) => (avatar_url.to_owned(), Some(asset_id)),
-                None => (avatar_url.to_owned(), None),
-            };
-            sync_user_data(pool, user_id, first, last, &email, &avatar, asset)
-                .await
-                .map_err(|_| AuthError::Server(Denial::ServerError))?;
-        }
     } else {
         check_signup(pool, secret_key, &email)
             .await
@@ -2247,7 +2204,7 @@ pub async fn authenticate_user(
             .unwrap_or("");
         // In-memory avatar assignment, persisted by `save_user_data`
         // below (`base.py:330-340` has no save of its own).
-        let (avatar, asset) = if avatar_url.is_empty() {
+        let (mut avatar, mut asset) = if avatar_url.is_empty() {
             (String::new(), None)
         } else {
             match download_and_upload_avatar(
@@ -2270,6 +2227,51 @@ pub async fn authenticate_user(
         create_profile(pool, user_id, now)
             .await
             .map_err(|_| AuthError::Server(Denial::ServerError))?;
+        // IDP sync (`base.py:345`): `check_sync_enabled() and not
+        // is_signup` — with the inverted flag this runs for NEW users
+        // only, never existing ones (PB-1024). Django order: after
+        // create + profile, before `save_user_data`.
+        let sync_enabled = config_value(
+            pool,
+            secret_key,
+            "ENABLE_GITEA_SYNC",
+            env_default("ENABLE_GITEA_SYNC"),
+        )
+        .await
+        .map(|v| v.as_deref() == Some("1"))
+        .unwrap_or(false);
+        if sync_enabled && !is_signup {
+            delete_old_avatar(
+                &client,
+                pool,
+                storage,
+                if inputs.is_secure { "https" } else { "http" },
+                &inputs.host,
+                user_id,
+                asset,
+                now,
+            )
+            .await;
+            (avatar, asset) = match download_and_upload_avatar(
+                &client,
+                pool,
+                storage,
+                if inputs.is_secure { "https" } else { "http" },
+                &inputs.host,
+                avatar_url,
+                user_id,
+                file_size_max,
+                now,
+            )
+            .await
+            {
+                Some(asset_id) => (avatar_url.to_owned(), Some(asset_id)),
+                None => (avatar_url.to_owned(), None),
+            };
+            sync_user_data(pool, user_id, first, last, &email, &avatar, asset)
+                .await
+                .map_err(|_| AuthError::Server(Denial::ServerError))?;
+        }
         let rotated = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
@@ -2326,12 +2328,7 @@ pub async fn authenticate_user(
     .await
     .map_err(|_| AuthError::Server(Denial::ServerError))?;
     if !row.is_active {
-        let site = if inputs.is_secure {
-            format!("https://{}", inputs.host)
-        } else {
-            format!("http://{}", inputs.host)
-        };
-        enqueue_activation_email(pool, &site, user_id)
+        enqueue_activation_email(pool, site, user_id)
             .await
             .map_err(|_| AuthError::Server(Denial::ServerError))?;
     }
@@ -2519,7 +2516,7 @@ async fn app_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(exc.error_code, &exc.error_message, echo_raw);
+        let params = error_params(&exc, echo_raw);
         return redirect(app_callback_error_location(
             session.host.as_deref(),
             &params,
@@ -2533,11 +2530,7 @@ async fn app_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(
-            exc.error_code,
-            &exc.error_message,
-            validated_echo.as_deref(),
-        );
+        let params = error_params(&exc, validated_echo.as_deref());
         return redirect(app_callback_error_location(
             session.host.as_deref(),
             &params,
@@ -2548,6 +2541,14 @@ async fn app_callback(
         Err(response) => return response,
     };
     let inputs = request_inputs(&headers);
+    // `current_site` for the activation mail (`base_host(request)`,
+    // `base.py:230`).
+    let site = pidash_services::auth_session::shapes::base_host(
+        &host_settings(&settings),
+        false,
+        false,
+        false,
+    );
     let redirect_uri = redirect_uri_for(inputs.is_secure, &inputs.host);
     let now = chrono::Utc::now();
     let authenticated = authenticate_user(
@@ -2559,6 +2560,7 @@ async fn app_callback(
         &inputs,
         &code,
         &redirect_uri,
+        &site,
         true,
         now,
     )
@@ -2566,11 +2568,7 @@ async fn app_callback(
     let user = match authenticated {
         Ok(user) => user,
         Err(AuthError::Provider(exc)) => {
-            let params = error_params(
-                exc.error_code,
-                &exc.error_message,
-                validated_echo.as_deref(),
-            );
+            let params = error_params(&exc, validated_echo.as_deref());
             return redirect(app_callback_error_location(
                 session.host.as_deref(),
                 &params,
@@ -2702,11 +2700,7 @@ async fn space_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(
-            exc.error_code,
-            &exc.error_message,
-            validated_next.as_deref(),
-        );
+        let params = error_params(&exc, validated_next.as_deref());
         return redirect(space_error_location(&base, &params));
     }
     let Some(code) = code else {
@@ -2715,11 +2709,7 @@ async fn space_callback(
             GITEA_PROVIDER_ERROR_NAME,
             Vec::new(),
         );
-        let params = error_params(
-            exc.error_code,
-            &exc.error_message,
-            validated_next.as_deref(),
-        );
+        let params = error_params(&exc, validated_next.as_deref());
         return redirect(space_error_location(&base, &params));
     };
     let pool = match pool_or_500(&state) {
@@ -2727,6 +2717,14 @@ async fn space_callback(
         Err(response) => return response,
     };
     let inputs = request_inputs(&headers);
+    // `current_site` for the activation mail (`base_host(request)`,
+    // `base.py:230`).
+    let site = pidash_services::auth_session::shapes::base_host(
+        &host_settings(&settings),
+        false,
+        false,
+        false,
+    );
     let redirect_uri = redirect_uri_for(inputs.is_secure, &inputs.host);
     let now = chrono::Utc::now();
     let authenticated = authenticate_user(
@@ -2738,6 +2736,7 @@ async fn space_callback(
         &inputs,
         &code,
         &redirect_uri,
+        &site,
         false,
         now,
     )
@@ -2745,11 +2744,7 @@ async fn space_callback(
     let user = match authenticated {
         Ok(user) => user,
         Err(AuthError::Provider(exc)) => {
-            let params = error_params(
-                exc.error_code,
-                &exc.error_message,
-                validated_next.as_deref(),
-            );
+            let params = error_params(&exc, validated_next.as_deref());
             return redirect(space_error_location(&base, &params));
         }
         Err(AuthError::Server(denial)) => return denial.into_response(),
@@ -2850,7 +2845,10 @@ mod tests {
         // F11 app-gitea quirk: `urljoin(None, "?error...")` is the bare ref.
         let location = app_callback_error_location(
             None,
-            &error_params(5123, "GITEA_OAUTH_PROVIDER_ERROR", None),
+            &error_params(
+                &AuthenticationException::new(5123, "GITEA_OAUTH_PROVIDER_ERROR", Vec::new()),
+                None,
+            ),
         );
         assert!(location.starts_with("?error_code=5123"), "{location}");
         assert!(location.contains("error_message=GITEA_OAUTH_PROVIDER_ERROR"));
@@ -2862,7 +2860,10 @@ mod tests {
         // empty path — the golden pins `""`, not `"/"`.
         let location = app_error_location(
             "http://app.example",
-            &error_params(5112, "GITEA_NOT_CONFIGURED", Some("/x")),
+            &error_params(
+                &AuthenticationException::new(5112, "GITEA_NOT_CONFIGURED", Vec::new()),
+                Some("/x"),
+            ),
         );
         assert_eq!(
             location,
@@ -2874,7 +2875,10 @@ mod tests {
     fn urljoin_keeps_trailing_slash_base_path() {
         let location = app_error_location(
             "http://app.example/",
-            &error_params(5000, "INSTANCE_NOT_CONFIGURED", None),
+            &error_params(
+                &AuthenticationException::new(5000, "INSTANCE_NOT_CONFIGURED", Vec::new()),
+                None,
+            ),
         );
         assert_eq!(
             location,
@@ -2900,7 +2904,10 @@ mod tests {
         // Space twin never urljoins: the base path survives verbatim.
         let location = space_error_location(
             "http://space.example/spaces/",
-            &error_params(5112, "GITEA_NOT_CONFIGURED", Some("/x")),
+            &error_params(
+                &AuthenticationException::new(5112, "GITEA_NOT_CONFIGURED", Vec::new()),
+                Some("/x"),
+            ),
         );
         assert_eq!(
             location,
@@ -2922,12 +2929,22 @@ mod tests {
 
     #[test]
     fn error_params_order_matches_get_error_dict() {
-        let params = error_params(5000, "INSTANCE_NOT_CONFIGURED", Some("/x"));
+        let params = error_params(
+            &AuthenticationException::new(
+                5015,
+                "SIGNUP_DISABLED",
+                vec![(
+                    "email".to_owned(),
+                    serde_json::Value::String("new@example.test".to_owned()),
+                )],
+            ),
+            Some("/x"),
+        );
         let keys: Vec<&str> = params.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["error_code", "error_message", "next_path"]);
+        assert_eq!(keys, ["error_code", "error_message", "email", "next_path"]);
         assert_eq!(
             urlencode_pairs(&params),
-            "error_code=5000&error_message=INSTANCE_NOT_CONFIGURED&next_path=%2Fx"
+            "error_code=5015&error_message=SIGNUP_DISABLED&email=new%40example.test&next_path=%2Fx"
         );
     }
 
