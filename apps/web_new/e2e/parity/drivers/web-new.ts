@@ -18336,6 +18336,295 @@ export class WebNewDriver implements ParityDriver {
     return (await content.getByTestId("gantt-bar").count()) > 0;
   }
 
+  // --- Modules cross-cutting (NEWFRONT-807, MOD-038/039/042/043).
+  // --- Deep links and the access wall, the no-live freshness read,
+  // --- desktop and edition negatives. Same interface as the oracle
+  // --- driver; every hook reads the new app's own markup.
+
+  /** Open the list and wait until one of its settled bodies shows. */
+  async modulesXOpenModulesList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules`, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.modulesListWaitSettled();
+  }
+
+  async modulesXListGateVisible(): Promise<boolean> {
+    return this.isShown(this.modulesGate());
+  }
+
+  async modulesXGateManageFeaturesState(): Promise<{ visible: boolean; disabled: boolean }> {
+    if (!(await this.isShown(this.modulesGate()))) return { visible: false, disabled: false };
+    const button = this.modulesGate().getByRole("button", { name: "Manage features", exact: true });
+    if ((await button.count()) === 0) return { visible: false, disabled: false };
+    return { visible: await this.isShown(button), disabled: await button.isDisabled() };
+  }
+
+  async modulesXListNames(): Promise<string[]> {
+    await this.modulesListWaitSettled();
+    const layout = await this.currentModulesLayout();
+    if (layout === "board") return this.modulesListBoardCardNames();
+    if (layout === "timeline") return this.modulesListTimelineNames();
+    return this.modulesListVisibleNames();
+  }
+
+  /** The create/update dialog's form: the one visible open marker. */
+  private modulesXDialogForm(): Locator {
+    return this.page.getByTestId("module-dialog-form").last();
+  }
+
+  async modulesXModuleDialogOpen(): Promise<boolean> {
+    return this.isShown(this.modulesXDialogForm());
+  }
+
+  async modulesXFillCreateName(name: string): Promise<void> {
+    const field = this.modulesXDialogForm().getByLabel("Title", { exact: true });
+    await field.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await field.fill(name, { timeout: WebNewDriver.WAIT_MS });
+    const settled = await field.inputValue({ timeout: WebNewDriver.WAIT_MS });
+    if (settled !== name) throw new Error(`[parity] module title held ${JSON.stringify(settled)} after fill.`);
+  }
+
+  async modulesXSubmitCreate(): Promise<void> {
+    const form = this.modulesXDialogForm();
+    await form.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const submit = form.getByRole("button", { name: "Create Module", exact: true });
+    await submit.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const answered = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          /\/projects\/[^/]+\/modules\/?$/.test(new URL(response.url()).pathname),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await submit.click({ timeout: WebNewDriver.WAIT_MS });
+    await answered;
+  }
+
+  /** Describe the focused control the way the tab-order scenario reads it. */
+  private async modulesXFocusDescriptor(): Promise<string> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      if (!active || active.tagName === "BODY") return "body";
+      const tag = active.tagName.toLowerCase();
+      const label = active.getAttribute("aria-label");
+      if (label !== null && label.trim() !== "") return `${tag}:${label.trim()}`;
+      const placeholder = active.getAttribute("placeholder");
+      if (placeholder !== null && placeholder.trim() !== "") return `${tag}:${placeholder.trim()}`;
+      const text = (active.textContent ?? "").replace(/\s+/g, " ").trim();
+      if (text !== "") return `${tag}:${text.slice(0, 40)}`;
+      const role = active.getAttribute("role");
+      return role === null ? tag : `${tag}[${role}]`;
+    });
+  }
+
+  async modulesXDialogFocused(): Promise<string> {
+    return this.modulesXFocusDescriptor();
+  }
+
+  async modulesXDialogTabSequence(): Promise<string[]> {
+    const stops: string[] = [];
+    for (let step = 0; step < 12; step += 1) {
+      stops.push(await this.modulesXFocusDescriptor());
+      await this.page.keyboard.press("Tab");
+      await this.page.waitForTimeout(120);
+    }
+    return stops;
+  }
+
+  /** The row (or card) that carries `name`, from its own name hook. */
+  private modulesXItemForName(name: string): Locator {
+    return this.page
+      .locator('[data-testid="modules-row"], [data-testid="modules-board-card"]')
+      .filter({ has: this.page.getByText(name, { exact: true }) })
+      .first();
+  }
+
+  async modulesXOpenEditDialogFromRow(name: string): Promise<void> {
+    const item = this.modulesXItemForName(name);
+    await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await item.click({ button: "right", timeout: WebNewDriver.WAIT_MS });
+    const edit = this.page.getByRole("menuitem", { name: "Edit", exact: true });
+    await edit.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await edit.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.modulesXDialogForm().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  // --- Deep links (MOD-038) ---
+
+  async modulesXOpenModuleDetail(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.page.waitForLoadState("domcontentloaded");
+    // One of three verdicts settles: the page, the missing-module view, or
+    // the project access wall.
+    await this.page
+      .locator(
+        '[data-testid="module-detail-screen"], [data-testid="modules-gone-away"], [data-testid="project-access-wall"]'
+      )
+      .last()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** The module name the sidebar (detail or peek) shows, or null. */
+  private async modulesXSidebarName(scope: Locator): Promise<string | null> {
+    const field = scope.getByTestId("modules-sidebar-name").first();
+    if ((await field.count()) === 0) return null;
+    if (!(await field.isVisible().catch(() => false))) return null;
+    const value = await field.inputValue().catch(() => "");
+    return value.trim() === "" ? null : value.trim();
+  }
+
+  async modulesXDetailName(): Promise<string | null> {
+    if (!(await this.isShown(this.page.getByTestId("module-detail-screen")))) return null;
+    return this.modulesXSidebarName(this.page.getByTestId("module-detail-screen").last());
+  }
+
+  async modulesXDetailMissingVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("modules-gone-away"));
+  }
+
+  async modulesXMissingModuleBackToList(): Promise<void> {
+    await this.page
+      .getByTestId("modules-gone-away")
+      .getByRole("button", { name: "Back to modules", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.modulesListWaitSettled();
+  }
+
+  async modulesXProjectAccessWallVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("project-access-wall"));
+  }
+
+  async modulesXOpenModulesListWithPeek(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules?peekModule=${moduleId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.modulesListWaitSettled();
+    // The panel body lands once its own detail read settles; a panel that
+    // is still loading is not a failure of the open, the read just waits.
+    await this.page
+      .locator('[data-testid="modules-sidebar-name"], [data-testid="modules-gone-away"]')
+      .last()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async modulesXPeekName(): Promise<string | null> {
+    // The peek renders the sidebar over the list; the detail page has no
+    // peek, so a peek name only counts while the list screen owns the page.
+    if (!(await this.isShown(this.page.getByTestId("modules-list-screen")))) return null;
+    return this.modulesXSidebarName(this.page.getByTestId("modules-list-screen").last());
+  }
+
+  // --- Keyboard and list search (MOD-040) ---
+
+  async modulesXOpenListSearch(): Promise<void> {
+    await this.modulesOpenSearch();
+  }
+
+  async modulesXFillListSearch(text: string): Promise<void> {
+    await this.modulesSearchInput().fill(text, { timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async modulesXListSearchState(): Promise<{ expanded: boolean; query: string }> {
+    const expanded = await this.isShown(this.modulesSearchField());
+    if (!expanded) return { expanded: false, query: "" };
+    const query = await this.modulesSearchInput()
+      .inputValue({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => "");
+    return { expanded, query };
+  }
+
+  // --- Layout, board and analytics reads (MOD-042/043) ---
+
+  async modulesXSwitchModulesLayout(layout: "list" | "board" | "timeline"): Promise<void> {
+    await this.modulesSetLayout(layout);
+  }
+
+  async modulesXBoardNames(): Promise<string[]> {
+    await this.modulesListWaitSettled();
+    const names = await this.modulesListBoardCardNames();
+    if (names.length > 0) return names;
+    return this.modulesListVisibleNames();
+  }
+
+  /** Pathname of every module-owned request while one list entry loads. */
+  async modulesXEntryRequestPaths(workspaceSlug: string, projectId: string): Promise<string[]> {
+    const seen = new Set<string>();
+    const listener = (request: { url(): string }): void => {
+      let path: string;
+      try {
+        path = new URL(request.url()).pathname;
+      } catch {
+        return;
+      }
+      if (!/module/i.test(path) && !/favorite/i.test(path)) return;
+      seen.add(path);
+    };
+    this.page.on("request", listener);
+    try {
+      await this.modulesXOpenModulesList(workspaceSlug, projectId);
+      await this.page.waitForTimeout(1_000);
+    } finally {
+      this.page.off("request", listener);
+    }
+    return [...seen].sort();
+  }
+
+  async modulesXRowFavoriteToggleVisible(): Promise<boolean> {
+    const row = this.page.locator('[data-testid="modules-row"]').first();
+    if ((await row.count()) === 0) return false;
+    const star = row.getByRole("button", { name: /favorite/i });
+    if ((await star.count()) === 0) return false;
+    return this.isShown(star.first());
+  }
+
+  async modulesXFiltersMenuOpens(): Promise<boolean> {
+    const trigger = this.modulesFilterTrigger();
+    if ((await trigger.count()) === 0) return false;
+    if (!(await this.isShown(this.modulesFilterPanel()))) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.modulesFilterPanel()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return this.isShown(this.modulesFilterPanel());
+  }
+
+  async modulesXAnalyticsSidebarVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("modules-analytics-sidebar"));
+  }
+
+  async modulesXEditionGateMarkersPresent(scope: "list" | "detail"): Promise<boolean> {
+    void scope;
+    // Upgrade, plan and desktop-shell offers are the markers a build-gated
+    // surface would add; a module screen shows none of them.
+    const root = this.page.locator("main");
+    for (const role of ["button", "link", "menuitem"] as const) {
+      const found = root.getByRole(role, { name: /upgrade|premium|enterprise|contact sales|go to cloud/i });
+      const total = await found.count();
+      for (let index = 0; index < total; index += 1) {
+        if (
+          await found
+            .nth(index)
+            .isVisible()
+            .catch(() => false)
+        )
+          return true;
+      }
+    }
+    for (const heading of ["Available on", "Not available in your plan", "Desktop app", "Offline mode"]) {
+      if (await this.isShown(root.getByRole("heading", { name: heading }).first())) return true;
+    }
+    return false;
+  }
+
   // --- Pages realtime collaboration + live server (NEWFRONT-319,
   // --- PAGE-065-071). Stage 0 oracle stubs; the pages build slice lands them.
 

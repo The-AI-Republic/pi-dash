@@ -14,7 +14,7 @@ import { queryOptions } from "@tanstack/react-query";
 import * as z from "zod/mini";
 import type { ApiClient } from "@pidash/api-client";
 
-import { REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
+import { fetchOnMountOptions } from "../../issues/index.js";
 import { moduleKeys } from "./keys.js";
 
 /**
@@ -63,14 +63,16 @@ export function moduleProjectTimeZone(facts: ModuleProjectFacts | undefined): st
 }
 
 /**
- * One project row for the modules list. Same freshness as other project
- * reference reads; no focus refetch — the area is fetch-on-mount.
+ * One project row for the modules list. Fetch-on-mount like every module
+ * read (§8.5, MOD-039): the modules switch and the zone are read when the
+ * list mounts and otherwise stay as they were, so a settings change made
+ * elsewhere appears on the next load rather than arriving mid-session.
  */
 export function moduleProjectFactsQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string) {
-  return queryOptions({
-    queryKey: moduleKeys.projectFacts(workspaceSlug, projectId),
-    queryFn: () => getModuleProjectFacts(client, workspaceSlug, projectId),
-    staleTime: REFERENCE_STALE_TIME_MS,
-    refetchOnWindowFocus: false,
-  });
+  return queryOptions(
+    fetchOnMountOptions({
+      queryKey: moduleKeys.projectFacts(workspaceSlug, projectId),
+      queryFn: () => getModuleProjectFacts(client, workspaceSlug, projectId),
+    })
+  );
 }
