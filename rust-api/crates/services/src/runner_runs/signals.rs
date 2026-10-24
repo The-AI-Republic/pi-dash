@@ -13,10 +13,15 @@
 //! `ensure_default_pod_for_project`; the real identifier is
 //! `create_default_pod_for_new_project` (split-review correction).
 //!
+//! Lift note (PIDASHCONV-1268): this module is the single copy of the
+//! receiver, moved here from the api crate so the jobs entry point
+//! (dummy-data `create_project`) can call it too. The api
+//! project-create handlers call this same copy.
+//!
 //! The fallible core lives in
 //! [`pidash_db::runner_runs::pod`](pidash_db::runner_runs::pod)
 //! (PIDASHCONV-1297) so the worker seed path — which cannot depend on
-//! this crate — calls the same SQL; this module keeps the
+//! the api crate — calls the same SQL; this module keeps the
 //! swallow-and-log receiver shape and re-exports the shared items.
 
 use sqlx::PgPool;

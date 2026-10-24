@@ -96,10 +96,10 @@
 //! * Malformed JSON bodies 400 as `{"Detail": "JSON parse error"}`; the
 //!   Python message text (CPython's `json` error) is not reproduced.
 //!
-//! D-15 runner web handlers: runs, approvals, metrics, signals (stage 5, PIDASHCONV-542).
+//! D-15 runner web handlers: runs, approvals, metrics (stage 5, PIDASHCONV-542).
 //!
 //! Ports `apps/api/pi_dash/runner/views/runs.py:1-695`,
-//! `views/approvals.py:1-105`, `views/metrics.py:1-105` and `signals.py:1-66`
+//! `views/approvals.py:1-105` and `views/metrics.py:1-105`
 //! (routes `runner/web_urls.py` under `/api/runners/` plus `runner/urls.py`
 //! `metrics/` under `/api/v1/runner/`).
 //!
@@ -107,9 +107,12 @@
 //!   re-tick, detail (`+include_events`), cancel, release-pin.
 //! * [`approvals`] — creator-routed approval list + decide.
 //! * [`metrics`] — the five Prometheus gauges (AllowAny, `text/plain`).
-//! * [`signals`] — `create_default_pod_for_new_project` as an explicit
-//!   post-commit fn (the project-creation owner wires the call; that
-//!   wiring belongs to that domain's split, not this issue).
+//!
+//! The default-pod signal (`create_default_pod_for_new_project`,
+//! `runner/signals.py:32-66`) lives in
+//! `pidash_services::runner_runs::signals` — the single copy (lifted
+//! from this module, PIDASHCONV-1268, so the jobs dummy-data path can
+//! call it too); the project-create handlers call that copy.
 //!
 //! Fixture: `rust-api/fixtures/runner_runs/fx-run-08-handlers-web.golden.json`
 //! (FX-RUN-08; trace: `rust-api/fixtures/runner_runs/TRACE.md`). Contract:
@@ -182,7 +185,6 @@ pub mod dispatch;
 pub mod metrics;
 pub mod run_endpoints;
 pub mod runs;
-pub mod signals;
 pub mod sse;
 
 use axum::extract::State;
@@ -1833,7 +1835,7 @@ mod ports_tests {
 }
 
 // ---------------------------------------------------------------------------
-// L7 web handlers (runs + approvals + metrics + signals, PIDASHCONV-542)
+// L7 web handlers (runs + approvals + metrics, PIDASHCONV-542)
 // ---------------------------------------------------------------------------
 
 /// Whether `raw` matches a Django `<uuid:>` path segment: the converter
