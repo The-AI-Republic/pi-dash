@@ -2186,11 +2186,16 @@ async fn sub_issues_get(
     };
     let (pool, gate) = resolve_entity_gate(&state, &slug, &project_raw, extension, false).await?;
     let order_param = query_last(&query, "order_by").unwrap_or_else(|| "-created_at".to_owned());
-    let order = sub_issues_order(&order_param).map_err(IntoResponse::into_response)?;
+    let (order, order_joins) =
+        sub_issues_order(&order_param).map_err(IntoResponse::into_response)?;
     let mut binder = Binder::new();
     let selects = queries_core::sub_issues_selects();
     let from_where = queries_core::sub_issues_from_where(&mut binder, &slug, parent_id);
-    let inner = format!("SELECT {selects} {from_where} {order}");
+    // The cycle-name traversal joins ride on the row query, so a
+    // multi-linked child fans out into one row per link like Django (the
+    // distribution below counts the fanned rows too).
+    let row_where = super::with_order_joins(&from_where, &order_joins);
+    let inner = format!("SELECT {selects} {row_where} {order}");
     let rows = fetch_json_rows(&pool, &inner, binder.values())
         .await
         .map_err(IntoResponse::into_response)?;
@@ -2242,9 +2247,12 @@ async fn sub_issues_get(
 /// skips the port explicitly and falls back to the model ordering
 /// (`-created_at` — the same statement); an unknown field is Django's
 /// `FieldError` → generic 500.
-fn sub_issues_order(order_by_param: &str) -> Result<String, Denial> {
+fn sub_issues_order(order_by_param: &str) -> Result<(String, String), Denial> {
     if order_by_param.is_empty() {
-        return Ok(queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned());
+        return Ok((
+            queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
+            String::new(),
+        ));
     }
     let spec = order_sql(order_by_param, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
@@ -2262,24 +2270,31 @@ fn sub_issues_order(order_by_param: &str) -> Result<String, Denial> {
         let sql = spec
             .order_by_sql
             .replace("created_at DESC", "issue.created_at DESC");
-        return Ok(format!("ORDER BY {sql}"));
+        return Ok((format!("ORDER BY {sql}"), String::new()));
     }
+    // The sub-issue list annotates `Coalesce(..., 0)` counts, so its count
+    // keys order `0`-style.
     if out == "min_values" || out == "-min_values" {
-        let (expr, descending) = order_key(out, order_by_param)?;
-        return Ok(format!(
-            "ORDER BY {expr} {}, issue.created_at DESC",
-            if descending { "DESC" } else { "ASC" }
+        let key = order_key(out, order_by_param, None, false)?;
+        return Ok((
+            format!(
+                "ORDER BY {expr} {}, issue.created_at DESC",
+                if key.descending { "DESC" } else { "ASC" },
+                expr = key.expr,
+            ),
+            key.joins,
         ));
     }
-    let (expr, descending) = order_key(out, order_by_param)?;
+    let key = order_key(out, order_by_param, None, false)?;
     let mut sql = format!(
         "ORDER BY {expr} {}",
-        if descending { "DESC" } else { "ASC" }
+        if key.descending { "DESC" } else { "ASC" },
+        expr = key.expr,
     );
     if !order_by_param.contains("created_at") {
         sql.push_str(", issue.created_at DESC");
     }
-    Ok(sql)
+    Ok((sql, key.joins))
 }
 
 /// Insertion-ordered string→list buckets (what `defaultdict(list)` renders).
@@ -2918,19 +2933,30 @@ mod tests {
     fn sub_issues_order_branches() {
         assert_eq!(
             sub_issues_order("").unwrap(),
-            queries_core::SUB_ISSUES_DEFAULT_ORDER
+            (
+                queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
+                String::new()
+            )
         );
         assert_eq!(
             sub_issues_order("-created_at").unwrap(),
-            "ORDER BY issue.\"created_at\" DESC"
+            (
+                "ORDER BY issue.\"created_at\" DESC".to_owned(),
+                String::new()
+            )
         );
         let priority = sub_issues_order("priority").unwrap();
-        assert!(priority.contains("WHEN issue.priority = 'urgent'"));
-        assert!(priority.contains("issue.created_at DESC"));
-        assert!(!priority.contains(" created_at DESC"));
+        assert!(priority.0.contains("WHEN issue.priority = 'urgent'"));
+        assert!(priority.0.contains("issue.created_at DESC"));
+        assert!(!priority.0.contains(" created_at DESC"));
+        assert!(priority.1.is_empty());
         let min = sub_issues_order("-labels__name").unwrap();
-        assert!(min.contains("MIN(l.name)"));
-        assert!(min.contains("issue.created_at DESC"));
+        assert!(min.0.contains("MIN(l.name)"));
+        assert!(min.0.contains("issue.created_at DESC"));
+        assert!(min.1.is_empty());
+        let crossed = sub_issues_order("issue_cycle__cycle__name").unwrap();
+        assert!(crossed.0.contains("__order_c.name ASC"));
+        assert!(crossed.1.contains("LEFT JOIN cycle_issues AS __order_ci"));
         assert!(sub_issues_order("nope").is_err());
     }
 

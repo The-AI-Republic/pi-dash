@@ -393,8 +393,17 @@ pub async fn archived_list(
     let order_spec = order_sql(&params.order_by, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
     });
-    let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
+    // The archive list annotates the grouped `Subquery` count form
+    // (empty counts render `NULL`), so its count keys order `NULL`-style.
+    // Its `FROM` always carries the unfiltered `issue_cycle` bridge join,
+    // which the cycle-name traversal reuses like Django.
+    let key = order_key(
+        &order_spec.out_param,
+        &params.order_by,
+        Some("issue_cycle"),
+        true,
+    )?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
     let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw)
         .map_err(|error| Denial::BadDetail(error.detail()))?;
@@ -419,10 +428,11 @@ pub async fn archived_list(
             &filtered,
             &group,
             sub_group_by.clone(),
-            &key_expr,
+            &key.expr,
             direction,
             per_page,
             cursor,
+            &key.joins,
         )
         .await;
     }
@@ -431,7 +441,7 @@ pub async fn archived_list(
     flat_paginated_response(
         &list_context,
         &filtered,
-        &key_expr,
+        &key.expr,
         direction,
         per_page,
         cursor,
@@ -439,6 +449,7 @@ pub async fn archived_list(
         fields,
         false,
         None,
+        &key.joins,
     )
     .await
 }
