@@ -11,7 +11,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { SchedulerBinding } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
   params: { ws: "acme", projectId: "223e4567-e89b-12d3-a456-426614174001" },
@@ -215,7 +215,7 @@ describe("schedulers settings route", () => {
   it("offers an empty installed set while the install list is still unsettled", async () => {
     harness.bindings = { data: undefined, refetch: vi.fn() } as unknown as {
       data: SchedulerBinding[];
-      refetch: ReturnType<typeof vi.fn>;
+      refetch: Mock<() => void>;
     };
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("install-dialog")).toBeInTheDocument());

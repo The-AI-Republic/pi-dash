@@ -13,7 +13,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { CycleRow } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
 const notify = vi.hoisted(() => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
@@ -210,11 +210,11 @@ afterEach(() => {
 const CURRENT_PROJECT = { id: CYCLES_PROJECT_ID, name: "Website relaunch", identifier: "WEB" };
 
 function renderCreate(options: { open?: boolean; onOpenChange?: (open: boolean) => void } = {}): {
-  onOpenChange: ReturnType<typeof vi.fn>;
+  onOpenChange: Mock<(open: boolean) => void>;
   queryClient: QueryClient;
   rerenderOpen: (open: boolean) => void;
 } {
-  const onOpenChange = (options.onOpenChange ?? vi.fn()) as ReturnType<typeof vi.fn>;
+  const onOpenChange = (options.onOpenChange ?? vi.fn()) as Mock<(open: boolean) => void>;
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const ui = (open: boolean): React.ReactElement => (
     <QueryClientProvider client={queryClient}>
@@ -234,8 +234,8 @@ function renderCreate(options: { open?: boolean; onOpenChange?: (open: boolean) 
 function renderUpdate(
   cycle: CycleRow,
   options: { open?: boolean; onOpenChange?: (open: boolean) => void } = {}
-): { onOpenChange: ReturnType<typeof vi.fn>; queryClient: QueryClient } {
-  const onOpenChange = (options.onOpenChange ?? vi.fn()) as ReturnType<typeof vi.fn>;
+): { onOpenChange: Mock<(open: boolean) => void>; queryClient: QueryClient } {
+  const onOpenChange = (options.onOpenChange ?? vi.fn()) as Mock<(open: boolean) => void>;
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>

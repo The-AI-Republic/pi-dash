@@ -5,7 +5,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { OpenhubApp } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { APP_INSTALLED_BADGE, APP_NEEDS_CONNECTION_BADGE, AppCard } from "./AppCard.js";
@@ -17,9 +17,9 @@ function card(overrides: Partial<OpenhubApp> = {}): OpenhubApp {
 }
 
 function handlers(): {
-  onInstall: ReturnType<typeof vi.fn>;
-  onConnect: ReturnType<typeof vi.fn>;
-  onUninstall: ReturnType<typeof vi.fn>;
+  onInstall: Mock<(app: OpenhubApp) => Promise<void>>;
+  onConnect: Mock<(app: OpenhubApp) => Promise<void>>;
+  onUninstall: Mock<(app: OpenhubApp) => Promise<void>>;
 } {
   return { onInstall: vi.fn(async () => {}), onConnect: vi.fn(async () => {}), onUninstall: vi.fn(async () => {}) };
 }

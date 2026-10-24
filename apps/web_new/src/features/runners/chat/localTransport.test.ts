@@ -7,7 +7,7 @@
 // before the page re-reads history, the thread id is kept for resume, a
 // second turn is refused in memory, and a terminal frame releases the
 // session even while nobody is subscribed.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 
 import type { LocalChatApi, LocalChatFrame, LocalChatSessionRecord } from "../../../core/platform/index.js";
 import {
@@ -61,7 +61,7 @@ interface Harness {
   api: LocalChatApi;
   fire: (frame: LocalChatFrame) => void;
   fail: (event: { chat_session_id: string; message: string }) => void;
-  ensureRuntime: ReturnType<typeof vi.fn>;
+  ensureRuntime: Mock<() => Promise<void>>;
 }
 
 function harness(overrides: Partial<LocalChatApi> = {}): Harness {

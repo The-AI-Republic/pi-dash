@@ -42,6 +42,7 @@ afterEach(() => {
   resetAppClient();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.resetAllMocks();
 });
 
 describe("DesktopUnavailableCard", () => {

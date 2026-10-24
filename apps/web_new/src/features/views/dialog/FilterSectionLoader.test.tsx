@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 
 const loader = vi.hoisted(() => ({ loadRichFilterBuilder: vi.fn() }));
 vi.mock("../../issues/index.js", async (importOriginal) => ({
@@ -34,7 +34,9 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve, reject };
 }
 
-function fakeModule(useRichFilterBuilder: ReturnType<typeof vi.fn>): RichFilterBuilderModule {
+function fakeModule(
+  useRichFilterBuilder: Mock<RichFilterBuilderModule["useRichFilterBuilder"]>
+): RichFilterBuilderModule {
   return {
     useRichFilterBuilder,
     serializeRichExpression: () => ({}),
@@ -47,7 +49,7 @@ function fakeModule(useRichFilterBuilder: ReturnType<typeof vi.fn>): RichFilterB
   };
 }
 
-function fakeBuilder(): ReturnType<typeof vi.fn> {
+function fakeBuilder(): Mock<RichFilterBuilderModule["useRichFilterBuilder"]> {
   return vi.fn(
     (): RichFilterBuilderParts => ({
       control: <span data-testid="fake-filter-control" />,
