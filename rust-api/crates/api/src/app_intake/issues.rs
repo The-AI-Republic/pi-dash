@@ -3489,9 +3489,10 @@ async fn soft_delete_bridge(
 // * QUIRK-create-no-intake (`:265`): create looks the intake up with
 //   `.first()` and dereferences `.id` unguarded, so a missing intake row
 //   is a 500, not the list's 404. Ported as-is.
-// * QUIRK-order-by-passthrough (`:198`): the raw `order_by` param is
-//   interpolated into `ORDER BY`; an unknown field raises at execution
-//   and answers the 500 envelope. Ported as-is.
+// * QUIRK-order-by-rejection (`:198`): an unknown `order_by` field is
+//   Django's `FieldError` path (PIDASHCONV-1426) — rejected before SQL
+//   rendering, answering the 500 envelope; user text never reaches the
+//   statement. Ported as-is.
 // * QUIRK-status-coercion (`:200-202`): a non-numeric status token fails
 //   `IntegerField` coercion at execution (500); an explicit `?status=`
 //   with only `"null"` tokens leaves no filter (all statuses list).
