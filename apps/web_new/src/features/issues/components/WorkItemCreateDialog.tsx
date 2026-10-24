@@ -882,7 +882,9 @@ export function WorkItemCreateDialog({
     }
     // Creation obeys the same transition rules as an edit (ISS-233): a
     // state the workflow refuses is reported here instead of being filed.
-    const refusal = projectId === "" ? null : createStateRefusal({ projectId, stateId: named.stateId });
+    // The form only reaches here under a project (a draft never does), so
+    // there is a project to ask.
+    const refusal = createStateRefusal({ projectId, stateId: named.stateId });
     if (refusal !== null) {
       setStateError(refusal.reason);
       return false;

@@ -183,6 +183,30 @@ describe("relation row workflow gate (ISS-233)", () => {
   });
 });
 
+describe("relation row with no states", () => {
+  it("opens an empty state list instead of failing when the project has none", async () => {
+    const user = userEvent.setup();
+    const { transport } = stubTransport({});
+    createAppClient("https://api.test", transport as never);
+    render(
+      <QueryClientProvider client={newQueryClient()}>
+        <RelationRow
+          workspaceSlug={WS}
+          projectIdentifier="WEB"
+          row={relatedRow()}
+          canEdit
+          onOpen={vi.fn()}
+          onEdit={vi.fn()}
+          onRemove={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    await user.click(screen.getByRole("button", { name: "Select state" }));
+    expect(await screen.findByText("No matching results")).toBeInTheDocument();
+  });
+});
+
 describe("relation row project badge", () => {
   it("uses the project identifier passed by the widget", () => {
     renderRow();
