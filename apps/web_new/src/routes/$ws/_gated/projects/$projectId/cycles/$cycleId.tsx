@@ -61,6 +61,7 @@ import { isConditionComplete, parseRichExpression } from "../../../../../../feat
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { LazyIssueFilters, preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
+import { stripPeekParams } from "../../../../../../features/issues/peek/peekUrl.js";
 import type { ListLayoutOverlays } from "../../../../../../features/issues/list/ListLayout.js";
 import { selectCreatableProjects } from "../../../../../../features/issues/create/createProjects.js";
 import type { WorkItemCreateProject } from "../../../../../../features/issues/components/WorkItemCreateDialog.js";
@@ -142,9 +143,8 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
     const search = Route.useSearch();
     const navigate = useNavigate();
     const setPeekKey = (key: string | null): void => {
-      const next = { ...search };
-      if (key === null) delete next.peekIssueId;
-      else next.peekIssueId = key;
+      const base = stripPeekParams({ ...search });
+      const next = key === null ? base : { ...base, peekIssueId: key };
       void navigate({ to: ".", search: next, replace: true } as never);
     };
     return (
@@ -155,6 +155,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
           cycleId={params.cycleId}
           peekKey={search.peekIssueId ?? null}
           onPeekChange={setPeekKey}
+          peekProjectId={search.peekProjectId ?? null}
           compact={search.layout === "compact"}
         />
       </CycleDetailGate>
@@ -168,6 +169,7 @@ interface CycleDetailContentProps {
   cycleId: string;
   peekKey: string | null;
   onPeekChange: (key: string | null) => void;
+  peekProjectId: string | null;
   compact: boolean;
 }
 
@@ -181,6 +183,7 @@ function CycleDetailContent({
   cycleId,
   peekKey,
   onPeekChange,
+  peekProjectId,
   compact,
 }: CycleDetailContentProps): React.ReactElement {
   const client = getAppClient();
@@ -395,6 +398,7 @@ function CycleDetailContent({
                 cycleId={cycleId}
                 peekKey={peekKey}
                 onPeekChange={onPeekChange}
+                peekProjectId={peekProjectId}
               />
             );
           }
@@ -412,6 +416,7 @@ function CycleDetailContent({
               completedCycle={finished}
               peekKey={peekKey}
               onPeekChange={onPeekChange}
+              peekProjectId={peekProjectId}
               compact={compact}
               onRegisterOverlays={setOverlays}
             />

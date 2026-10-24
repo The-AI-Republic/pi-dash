@@ -263,6 +263,33 @@ export { SaveIndicator } from "./detail/SaveIndicator.js";
 export { useSavePipeline } from "./detail/savePipeline.js";
 export type { SavePipeline, SaveStatus } from "./detail/savePipeline.js";
 export { useDetailUiStore } from "./detail/store.js";
+export { IssuePeek, keepPeekOnClick, peekIdentifierOf, peekKeyOf, peekLinkKeyOf } from "./peek/IssuePeek.js";
+export type { IssuePeekProps, PeekKey } from "./peek/IssuePeek.js";
+export { ResolvingIssuePeek } from "./peek/ResolvingIssuePeek.js";
+export type { ResolvingIssuePeekProps } from "./peek/ResolvingIssuePeek.js";
+export { PeekChrome } from "./peek/PeekChrome.js";
+export type { PeekChromeProps } from "./peek/PeekChrome.js";
+export { PeekModeToggle, peekModeLabel, PEEK_MODES } from "./peek/PeekModeToggle.js";
+export type { PeekMode, PeekModeToggleProps } from "./peek/PeekModeToggle.js";
+export {
+  PEEK_LOADING_LABEL,
+  PEEK_MISSING_BODY,
+  PEEK_MISSING_TITLE,
+  PeekErrorPanel,
+  PeekLoadingPanel,
+} from "./peek/peekStates.js";
+export type { PeekStatusPanelProps } from "./peek/peekStates.js";
+export { isIssueKey, resolvePeekTarget } from "./peek/peekTarget.js";
+export type { PeekRows, PeekTarget } from "./peek/peekTarget.js";
+export {
+  nestingSearchFor,
+  parseNestingLevel,
+  PEEK_ISSUE_PARAM,
+  PEEK_NESTING_PARAM,
+  PEEK_PROJECT_PARAM,
+  stripPeekParams,
+} from "./peek/peekUrl.js";
+export { CARD_COPY_COPIED, CARD_COPY_FAILED, copyCardLink } from "./peek/peekLink.js";
 export { IssueList } from "./components/IssueList.js";
 export type { IssueListProps } from "./components/IssueList.js";
 export { CalendarLayout } from "./calendar/CalendarLayout.js";

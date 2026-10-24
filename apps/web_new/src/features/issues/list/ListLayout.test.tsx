@@ -177,7 +177,7 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
           onChange={() => props.onSelectionToggle?.(props.issue.id, false)}
         />
       )}
-      <button type="button" onClick={() => props.onOpenPeek(`WEB-${props.issue.sequence_id}`, props.issue.name)}>
+      <button type="button" onClick={() => props.onOpenPeek(props.issue.id, props.issue.name)}>
         {props.issue.name}
       </button>
       <button type="button" onClick={() => props.onOpenPeek("WEB-99", "Nested child")}>
@@ -228,6 +228,15 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
           onChange={() => props.onSelectionToggle?.(child.id, false)}
         />
       ))}
+    </div>
+  ),
+}));
+vi.mock("../peek/ResolvingIssuePeek.js", () => ({
+  ResolvingIssuePeek: (props: { peeked: string; peekProjectId?: string | null; onClose: () => void }) => (
+    <div aria-label="Work item preview" data-peeked={props.peeked} data-peek-project={props.peekProjectId ?? ""}>
+      <button type="button" onClick={props.onClose}>
+        Close preview
+      </button>
     </div>
   ),
 }));
@@ -733,23 +742,21 @@ describe("ListLayout", () => {
     expect(screen.getByTestId("add-existing-modal")).toBeInTheDocument();
   });
 
-  it("opens peek and clears it via Escape or the close control", async () => {
+  it("opens the full peek and clears it via the close control", async () => {
     const onPeekChange = vi.fn();
     const user = userEvent.setup();
     const { view } = renderLayout({ peekKey: null, onPeekChange });
     await user.click(screen.getByRole("button", { name: "Fix login" }));
-    expect(onPeekChange).toHaveBeenCalledWith("WEB-42");
+    expect(onPeekChange).toHaveBeenCalledWith(ISSUE);
     expect(screen.queryByLabelText("Work item preview")).not.toBeInTheDocument();
     view.unmount();
-    renderLayout({ peekKey: "WEB-42", onPeekChange });
-    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
-    // The peek is a lazy chunk: its Escape listener attaches on mount, so
-    // retry the key until the mounted peek has answered (a single fire can
-    // land between the lazy render and the effect under load).
-    await waitFor(() => {
-      fireEvent.keyDown(document, { key: "Escape" });
-      expect(onPeekChange).toHaveBeenCalledWith(null);
-    });
+    renderLayout({ peekKey: ISSUE, onPeekChange, peekProjectId: null });
+    const panel = await screen.findByLabelText("Work item preview");
+    expect(panel).toHaveAttribute("data-peeked", ISSUE);
+    // Escape belongs to the peek itself (tested there); the layout only
+    // forwards the panel's close callback to the controlled key.
+    await user.click(screen.getByRole("button", { name: "Close preview" }));
+    expect(onPeekChange).toHaveBeenCalledWith(null);
   });
 
   it("supports uncontrolled peek state", async () => {
@@ -761,17 +768,22 @@ describe("ListLayout", () => {
     expect(screen.queryByLabelText("Work item preview")).not.toBeInTheDocument();
   });
 
-  it("opens peek for a nested row key that is not in the top-level pages", async () => {
+  it("mounts the resolving peek for a nested row key outside the top-level pages", async () => {
     renderLayout();
     fireEvent.click(screen.getByRole("button", { name: "Nested child" }));
-    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
-    expect(screen.getByLabelText("Work item title")).toHaveValue("Nested child");
+    expect(await screen.findByLabelText("Work item preview")).toHaveAttribute("data-peeked", "WEB-99");
   });
 
-  it("opens peek with a blank title when the key matches no loaded row", async () => {
+  it("mounts the resolving peek for a key that matches no loaded row", async () => {
     renderLayout({ peekKey: "WEB-404" });
-    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
-    expect(screen.getByLabelText("Work item title")).toHaveValue("");
+    expect(await screen.findByLabelText("Work item preview")).toHaveAttribute("data-peeked", "WEB-404");
+  });
+
+  it("hands the peeked project through to the resolving peek", async () => {
+    renderLayout({ peekKey: "issue-9", peekProjectId: "project-9" });
+    const panel = await screen.findByLabelText("Work item preview");
+    expect(panel).toHaveAttribute("data-peeked", "issue-9");
+    expect(panel).toHaveAttribute("data-peek-project", "project-9");
   });
 
   it("passes compact density through and keeps the flat sentinel inside the scroll region", () => {

@@ -176,17 +176,18 @@ vi.mock("../list/mutations.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../list/mutations.js")>()),
   attachCreatedIssue: mocks.attach,
 }));
-vi.mock("./KanbanPeek.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./KanbanPeek.js")>()),
-  copyCardLink: mocks.copy,
-  KanbanPeek: (props: { issue: { name: string }; onClose: () => void }) => (
+vi.mock("../peek/ResolvingIssuePeek.js", () => ({
+  ResolvingIssuePeek: (props: { peeked: string; onClose: () => void }) => (
     <div data-testid="issue-preview">
-      <span data-testid="issue-peek-key">{`WEB-${props.issue.name === "Fix login" ? 42 : 43}`}</span>
+      <span data-testid="issue-peek-key">{props.peeked}</span>
       <button type="button" onClick={props.onClose}>
         Close preview
       </button>
     </div>
   ),
+}));
+vi.mock("../peek/peekLink.js", () => ({
+  copyCardLink: mocks.copy,
 }));
 vi.mock("../../../shared/shell/narrowViewport.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../shared/shell/narrowViewport.js")>()),
@@ -472,11 +473,11 @@ describe("KanbanBoard", () => {
     expect(screen.queryByText("Empty")).not.toBeInTheDocument();
   });
 
-  it("opens the peek on a wide viewport through the controlled key", async () => {
+  it("opens the peek on a wide viewport with the work-item id", async () => {
     const user = userEvent.setup();
     const { onPeekChange } = setup();
     await user.click(within(column("Todo")).getAllByTestId("kanban-card-link")[0] as HTMLElement);
-    expect(onPeekChange).toHaveBeenCalledWith("WEB-42");
+    expect(onPeekChange).toHaveBeenCalledWith(ISSUE);
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
@@ -503,19 +504,26 @@ describe("KanbanBoard", () => {
     expect(onPeekChange).not.toHaveBeenCalled();
   });
 
-  it("renders the peek panel for a controlled key and closes it through the callback", async () => {
+  it("renders the peek panel for a controlled id and closes it through the callback", async () => {
     const user = userEvent.setup();
-    const { onPeekChange } = setup({ peekKey: "WEB-42" });
-    expect(screen.getByTestId("issue-preview")).toBeInTheDocument();
+    const { onPeekChange } = setup({ peekKey: ISSUE });
+    expect(await screen.findByTestId("issue-preview")).toBeInTheDocument();
+    expect(screen.getByTestId("issue-peek-key")).toHaveTextContent(ISSUE);
+    expect(screen.getAllByTestId("kanban-card")[0]).toHaveAttribute("data-peeked", "true");
     await user.click(screen.getByRole("button", { name: "Close preview" }));
     expect(onPeekChange).toHaveBeenCalledWith(null);
+  });
+
+  it("lifts the card for a deep-linked key while accepting ids on open", () => {
+    setup({ peekKey: "WEB-42" });
+    expect(screen.getAllByTestId("kanban-card")[0]).toHaveAttribute("data-peeked", "true");
   });
 
   it("keeps its own peek selection when the host does not control it", async () => {
     const user = userEvent.setup();
     setup({ peekKey: undefined, onPeekChange: undefined });
     await user.click(within(column("Todo")).getAllByTestId("kanban-card-link")[0] as HTMLElement);
-    expect(screen.getByTestId("issue-peek-key")).toHaveTextContent("WEB-42");
+    expect(await screen.findByTestId("issue-peek-key")).toHaveTextContent(ISSUE);
     expect(screen.getAllByTestId("kanban-card")[0]).toHaveAttribute("data-peeked", "true");
   });
 
@@ -633,9 +641,10 @@ describe("KanbanBoard", () => {
     expect(screen.getAllByTestId("kanban-lane")).toHaveLength(3);
   });
 
-  it("keeps a peek key that matches no visible card closed", () => {
+  it("mounts the resolving peek for a key that matches no visible card", async () => {
     setup({ peekKey: "WEB-999" });
-    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("issue-preview")).toBeInTheDocument();
+    expect(screen.getByTestId("issue-peek-key")).toHaveTextContent("WEB-999");
   });
 
   it("strips the module membership from the create and attaches the route target", async () => {

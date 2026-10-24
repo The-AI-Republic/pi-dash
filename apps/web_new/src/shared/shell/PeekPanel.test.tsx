@@ -130,4 +130,189 @@ describe("PeekPanel", () => {
     expect(screen.getByRole("heading", { level: 4, name: "Cycle 7" })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Work item title" })).not.toBeInTheDocument();
   });
+
+  it("skips the title block for loading and error bodies", () => {
+    setup({ hideTitle: true, children: <p>Loading body</p> });
+    expect(screen.queryByRole("textbox", { name: "Work item title" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
+    expect(screen.getByText("Loading body")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close preview" })).toBeInTheDocument();
+  });
+
+  it("centers the modal layout behind a backdrop", () => {
+    setup({ layout: "modal" });
+    const panel = screen.getByTestId("issue-preview");
+    expect(panel).toHaveAttribute("data-peek-layout", "modal");
+    expect(panel.className).toContain("max-h-[92vh]");
+    expect(screen.getByTestId("peek-backdrop")).toBeInTheDocument();
+  });
+
+  it("fills the viewport in the full layout", () => {
+    setup({ layout: "full" });
+    const panel = screen.getByTestId("issue-preview");
+    expect(panel).toHaveAttribute("data-peek-layout", "full");
+    expect(panel.className).toContain("inset-0");
+    expect(screen.queryByTestId("peek-backdrop")).not.toBeInTheDocument();
+  });
+
+  it("paints a stacked panel above its parent", () => {
+    setup({ stacked: true });
+    expect(screen.getByTestId("issue-preview").className).toContain("z-50");
+  });
+
+  it("paints a stacked modal above its parent", () => {
+    setup({ layout: "modal", stacked: true });
+    expect(screen.getByTestId("issue-preview").className).toContain("z-[60]");
+    expect(screen.getByTestId("peek-backdrop").className).toContain("z-[55]");
+  });
+
+  it("paints a stacked full panel above its parent", () => {
+    setup({ layout: "full", stacked: true });
+    expect(screen.getByTestId("issue-preview").className).toContain("z-[60]");
+  });
+
+  it("stands Escape down while suppressed", () => {
+    const { onClose } = setup({ suppressEscape: true });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("stands Escape down while an input holds focus", async () => {
+    const user = userEvent.setup();
+    const { onClose } = setup();
+    await user.click(screen.getByRole("textbox", { name: "Work item title" }));
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("stands Escape down while a dialog is open", () => {
+    const { onClose } = setup();
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    document.body.appendChild(dialog);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    dialog.remove();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("reverts the title draft on Escape instead of closing", async () => {
+    const user = userEvent.setup();
+    const { onClose, onCommitTitle } = setup();
+    const field = screen.getByRole("textbox", { name: "Work item title" });
+    await user.clear(field);
+    await user.type(field, "Abandoned draft");
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(field).toHaveValue("Parity first issue");
+    expect(onCommitTitle).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).not.toBe(field);
+  });
+
+  it("closes on outside presses and ignores presses inside", () => {
+    const onOutsideClick = vi.fn();
+    setup({ onOutsideClick, children: <button type="button">Inside</button> });
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Inside" }));
+    expect(onOutsideClick).not.toHaveBeenCalled();
+    fireEvent.pointerDown(document.body);
+    expect(onOutsideClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores outside presses without a handler", () => {
+    const { onClose } = setup();
+    fireEvent.pointerDown(document.body);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("stands outside presses down while a menu is open", () => {
+    const onOutsideClick = vi.fn();
+    setup({ onOutsideClick });
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    const item = document.createElement("button");
+    item.textContent = "Delete";
+    menu.appendChild(item);
+    document.body.appendChild(menu);
+    fireEvent.pointerDown(item);
+    expect(onOutsideClick).not.toHaveBeenCalled();
+    fireEvent.pointerDown(document.body);
+    expect(onOutsideClick).not.toHaveBeenCalled();
+    menu.remove();
+    fireEvent.pointerDown(document.body);
+    expect(onOutsideClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores presses on the toast stack", () => {
+    const onOutsideClick = vi.fn();
+    setup({ onOutsideClick });
+    const stack = document.createElement("div");
+    stack.setAttribute("data-testid", "toast-stack");
+    const toast = document.createElement("div");
+    toast.textContent = "Copied";
+    stack.appendChild(toast);
+    document.body.appendChild(stack);
+    fireEvent.pointerDown(toast);
+    expect(onOutsideClick).not.toHaveBeenCalled();
+    stack.remove();
+  });
+
+  it("closes on presses against the document node itself", () => {
+    const onOutsideClick = vi.fn();
+    setup({ onOutsideClick });
+    fireEvent.pointerDown(document);
+    expect(onOutsideClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the outside listener on unmount", () => {
+    const onOutsideClick = vi.fn();
+    const { unmount } = setup({ onOutsideClick });
+    unmount();
+    fireEvent.pointerDown(document.body);
+    expect(onOutsideClick).not.toHaveBeenCalled();
+  });
+});
+
+describe("peek guards", () => {
+  it("blocks Escape on editable focus and open pickers", async () => {
+    const { peekEscapeBlocked } = await import("./PeekPanel.js");
+    const { unmount } = setup();
+    expect(peekEscapeBlocked()).toBe(false);
+    const editor = document.createElement("div");
+    // jsdom never flips isContentEditable itself; pin the editable bit
+    // the way a mounted rich editor carries it.
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+    editor.setAttribute("tabindex", "-1");
+    document.body.appendChild(editor);
+    editor.focus();
+    expect(peekEscapeBlocked()).toBe(true);
+    editor.remove();
+    const picker = document.createElement("div");
+    picker.setAttribute("role", "listbox");
+    document.body.appendChild(picker);
+    expect(peekEscapeBlocked()).toBe(true);
+    picker.remove();
+    expect(peekEscapeBlocked()).toBe(false);
+    unmount();
+  });
+
+  it("stands the Escape guard down when nothing holds focus", async () => {
+    const { peekEscapeBlocked } = await import("./PeekPanel.js");
+    Object.defineProperty(document, "activeElement", { value: null, configurable: true });
+    try {
+      expect(peekEscapeBlocked()).toBe(false);
+    } finally {
+      delete (document as unknown as Record<string, unknown>).activeElement;
+    }
+  });
+
+  it("reports non-elements and selects as they are", async () => {
+    const { peekEscapeBlocked, peekOutsideBlocked } = await import("./PeekPanel.js");
+    expect(peekOutsideBlocked(null)).toBe(false);
+    const select = document.createElement("select");
+    document.body.appendChild(select);
+    select.focus();
+    expect(peekEscapeBlocked()).toBe(true);
+    select.remove();
+  });
 });

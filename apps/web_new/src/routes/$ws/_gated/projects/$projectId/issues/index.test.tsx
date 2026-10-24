@@ -803,6 +803,7 @@ describe("project issues screen", () => {
       "entity",
       "onPeekChange",
       "peekKey",
+      "peekProjectId",
       "prefs",
       "projectId",
       "projectIdentifier",
@@ -815,11 +816,17 @@ describe("project issues screen", () => {
   it("passes the peek param to the board and writes peek changes back to the URL", async () => {
     const navigate = vi.fn();
     routeNavigate.fn = navigate;
-    renderScreen({ peekIssueId: "WEB-42", layout: "compact" }, 1, [issueRow()], {
-      displayFilters: { layout: "kanban", group_by: null, order_by: "sort_order" },
-    });
+    renderScreen(
+      { peekIssueId: "WEB-42", peekProjectId: "project-9", peekNestingLevel: "1", layout: "compact" },
+      1,
+      [issueRow()],
+      {
+        displayFilters: { layout: "kanban", group_by: null, order_by: "sort_order" },
+      }
+    );
     await screen.findByTestId("kanban-layout", undefined, LAZY_WAIT);
     expect(kanbanProps.current?.["peekKey"]).toBe("WEB-42");
+    expect(kanbanProps.current?.["peekProjectId"]).toBe("project-9");
     const change = kanbanProps.current?.["onPeekChange"] as (key: string | null) => void;
     change("WEB-43");
     expect(navigate).toHaveBeenCalledWith({
