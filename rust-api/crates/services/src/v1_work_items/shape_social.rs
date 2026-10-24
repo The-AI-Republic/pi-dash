@@ -239,6 +239,11 @@ pub const MAX_SPEAKER_LABEL_CHARS: usize = 128;
 /// `:566`).
 pub const MAX_LABEL_ITEM_CHARS: usize = 32;
 
+/// `labels` list cap (the `ArrayField(size=8)`, `:566`): DRF maps it via
+/// `ArrayMaxLengthValidator`, probed live on Django main (9 items → 400
+/// `{"labels":["List contains 9 items, it should contain no more than 8."]}`).
+pub const MAX_LABELS: usize = 8;
+
 /// `IntegerField` over-long-string guard (`fields.py`, shared with
 /// `FloatField`): code points, checked before parsing.
 pub const MAX_INTEGER_STRING_CHARS: usize = 1000;
@@ -870,8 +875,9 @@ enum LabelsOutcome {
 }
 
 /// Every failure `labels` (`ListField`, the `ArrayField` mapping) validation
-/// can produce, in check order. The `ArrayField(size=8)` cap is NOT mapped —
-/// DRF ignores it.
+/// can produce, in check order. The `ArrayField(size=8)` cap IS mapped —
+/// DRF copies the model field's validators onto the `ListField`
+/// (`ArrayMaxLengthValidator`), which runs after child validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LabelsError {
     /// Explicit JSON null.
@@ -880,14 +886,16 @@ enum LabelsError {
     NotAList(&'static str),
     /// Per-index child failures, in enumeration order.
     Items(Vec<(usize, Vec<String>)>),
+    /// List-level cap breach; carries the item count for the message.
+    TooMany(usize),
 }
 
 /// Port of DRF `ListField` validation for `labels` (the `ArrayField` mapping,
 /// `serializers.py:939,1303` + `fields.py:ListField` + child `CharField` with
 /// the base field's `max_length=32`, no blank, no null): absent → skip, null
 /// → null failure, non-list → `not_a_list`, else per-item child validation
-/// collecting `{index: [messages]}` (`run_child_validation`). `value=None` is
-/// the absent key.
+/// collecting `{index: [messages]}` (`run_child_validation`), then the
+/// `ArrayField(size=8)` max-length validator. `value=None` is the absent key.
 fn validate_labels(value: Option<&Value>) -> Result<LabelsOutcome, LabelsError> {
     let Some(value) = value else {
         // Never required (`blank=True, default=list`).
@@ -912,6 +920,11 @@ fn validate_labels(value: Option<&Value>) -> Result<LabelsOutcome, LabelsError> 
     }
     if !failures.is_empty() {
         return Err(LabelsError::Items(failures));
+    }
+    // DRF runs field validators only after `to_internal_value` succeeds, so
+    // per-item errors take precedence over the list cap.
+    if items.len() > MAX_LABELS {
+        return Err(LabelsError::TooMany(items.len()));
     }
     Ok(LabelsOutcome::List(validated))
 }
@@ -1190,6 +1203,17 @@ pub fn validate_comment_create(
                 indexed.insert(idx.to_string(), Value::Array(details));
             }
             errors.push(("labels", Value::Object(indexed)));
+            None
+        }
+        Err(LabelsError::TooMany(count)) => {
+            // `ArrayMaxLengthValidator` `ngettext` wording; `count > 8`
+            // always, so only the plural form is reachable.
+            errors.push(field_entry(
+                "labels",
+                format!(
+                    "List contains {count} items, it should contain no more than {MAX_LABELS}."
+                ),
+            ));
             None
         }
     };
@@ -2738,6 +2762,29 @@ mod tests {
         assert_eq!(
             create(&body, false).expect_err("null labels fails").body(),
             r#"{"labels":["This field may not be null."]}"#
+        );
+        // The `ArrayField(size=8)` cap: 8 pass, 9 fail with the
+        // `ArrayMaxLengthValidator` body (probed live on Django main).
+        let eight: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h"];
+        let body = serde_json::json!({"labels": eight});
+        assert_eq!(
+            create(&body, false).expect("8 labels pass").labels,
+            Some(eight.iter().map(ToString::to_string).collect())
+        );
+        let nine: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+        let body = serde_json::json!({"labels": nine});
+        assert_eq!(
+            create(&body, false).expect_err("9 labels fail").body(),
+            r#"{"labels":["List contains 9 items, it should contain no more than 8."]}"#
+        );
+        // Per-item errors take precedence: 9 items with a blank child fail
+        // as child errors, never as the list cap.
+        let body = serde_json::json!({"labels": ["", "b", "c", "d", "e", "f", "g", "h", "i"]});
+        assert_eq!(
+            create(&body, false)
+                .expect_err("blank child fails first")
+                .body(),
+            r#"{"labels":{"0":["This field may not be blank."]}}"#
         );
     }
 
