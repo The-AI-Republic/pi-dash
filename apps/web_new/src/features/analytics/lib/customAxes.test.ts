@@ -85,6 +85,7 @@ describe("custom picker catalogue", () => {
 describe("custom picker exclusion", () => {
   it("offers every dimension on x while no split is chosen", () => {
     expect(selectCustomXOptions(null).map((entry) => entry.label)).toEqual(CUSTOM_AXES.map((entry) => entry.label));
+    expect(selectCustomXOptions(null).map((entry) => entry.label)).toContain("Estimate point");
   });
 
   it("removes the active split from the x options", () => {

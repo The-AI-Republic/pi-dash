@@ -135,7 +135,7 @@ function entryTestId(key: string): string {
 
 describe("CycleSidebarProgress", () => {
   it("renders counts, chart and state entries without estimates", async () => {
-    renderProgress();
+    renderProgress({ progress: makeCycleProgress({ total_estimate_points: 0 }) });
     expect(screen.getByTestId("cycle-progress-work-items").textContent).toBe("1/3");
     expect(screen.queryByTestId("cycle-progress-points")).toBeNull();
     expect(screen.queryByTestId("cycle-progress-measure")).toBeNull();
@@ -207,6 +207,90 @@ describe("CycleSidebarProgress", () => {
     await userEvent.click(screen.getByTestId("cycle-progress-measure"));
     await userEvent.click(screen.getByRole("option", { name: "Work items" }));
     expect(screen.getByTestId("cycle-progress-measure")).toHaveTextContent("Work items");
+    expect((await screen.findByTestId(entryTestId("backlog"))).textContent).toContain("33%");
+  });
+
+  it("hides the measure entirely for categories systems", () => {
+    renderProgress({ estimatesEnabled: true, estimateType: "categories" });
+    expect(screen.queryByTestId("cycle-progress-measure")).toBeNull();
+    expect(screen.queryByTestId("cycle-progress-points")).toBeNull();
+    expect(screen.getByTestId("cycle-progress-work-items").textContent).toBe("1/3");
+  });
+
+  it("offers the measure for an enabled time system", () => {
+    renderProgress({ estimatesEnabled: true, estimateType: "time" });
+    expect(screen.getByTestId("cycle-progress-measure")).toHaveTextContent("Work items");
+  });
+
+  it("snaps back to counts when estimates are turned off with point data present", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    function Host({ estimatesEnabled }: { estimatesEnabled: boolean }): React.ReactElement {
+      return (
+        <CycleSidebarProgress
+          workspaceSlug={WS}
+          projectId={CYCLES_PROJECT_ID}
+          cycle={datedCycle()}
+          projectTimeZone="UTC"
+          estimatesEnabled={estimatesEnabled}
+          estimateType="points"
+          progress={makeCycleProgress()}
+          issuesAnalytics={makeCycleDistribution()}
+          pointsAnalytics={pointsAnalytics()}
+          tab="States"
+          onTabChange={() => {}}
+        />
+      );
+    }
+    const view = render(
+      <QueryClientProvider client={client}>
+        <Host estimatesEnabled />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByTestId("cycle-progress-measure"));
+    await userEvent.click(screen.getByRole("option", { name: "Estimates" }));
+    expect(screen.getByTestId("cycle-progress-measure")).toHaveTextContent("Estimates");
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <Host estimatesEnabled={false} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("cycle-progress-measure")).toHaveTextContent("Work items");
+    expect((await screen.findByTestId(entryTestId("backlog"))).textContent).toContain("33%");
+  });
+
+  it("keeps counts when the measure is unavailable after a prior points choice", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    function Host({ estimateType }: { estimateType: string }): React.ReactElement {
+      return (
+        <CycleSidebarProgress
+          workspaceSlug={WS}
+          projectId={CYCLES_PROJECT_ID}
+          cycle={datedCycle()}
+          projectTimeZone="UTC"
+          estimatesEnabled
+          estimateType={estimateType}
+          progress={makeCycleProgress()}
+          issuesAnalytics={makeCycleDistribution()}
+          pointsAnalytics={pointsAnalytics()}
+          tab="States"
+          onTabChange={() => {}}
+        />
+      );
+    }
+    const view = render(
+      <QueryClientProvider client={client}>
+        <Host estimateType="points" />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByTestId("cycle-progress-measure"));
+    await userEvent.click(screen.getByRole("option", { name: "Estimates" }));
+    expect(screen.getByTestId("cycle-progress-measure")).toHaveTextContent("Estimates");
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <Host estimateType="categories" />
+      </QueryClientProvider>
+    );
+    expect(screen.queryByTestId("cycle-progress-measure")).toBeNull();
     expect((await screen.findByTestId(entryTestId("backlog"))).textContent).toContain("33%");
   });
 

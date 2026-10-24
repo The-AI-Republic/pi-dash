@@ -175,6 +175,20 @@ describe("buildCustomChartModel", () => {
     expect(model.fills).toEqual([PALETTE[0], PALETTE[1]]);
   });
 
+  it("keeps one estimate bar per stored value with its raw label", () => {
+    const model = buildCustomChartModel(
+      input({
+        xAxis: "ESTIMATE_POINTS",
+        rows: [row(1, "1", 2), row(3, "3", 1)],
+      })
+    );
+    expect(model.bars).toEqual([
+      { label: "1", values: [2] },
+      { label: "3", values: [1] },
+    ]);
+    expect(model.segments).toEqual([{ name: "Count", color: PALETTE[0] }]);
+  });
+
   it("stacks one segment per schema key in schema order", () => {
     const model = buildCustomChartModel(
       input({

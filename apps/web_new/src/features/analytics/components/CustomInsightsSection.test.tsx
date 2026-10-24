@@ -176,6 +176,39 @@ describe("CustomInsightsSection", () => {
     await waitFor(() => expect(screen.getByTestId("mock-chart-bar").dataset["bars"]).toBe(expectedLabelBars));
   });
 
+  it("groups by the estimate axis with one raw-label bar per stored value", async () => {
+    const user = userEvent.setup();
+    contractMocks.getAnalyticsChart.mockImplementation(
+      async (_client: unknown, _slug: string, query: Record<string, unknown>) =>
+        query["xAxis"] === "ESTIMATE_POINTS"
+          ? {
+              data: [
+                { key: 3, name: "3", count: 1 },
+                { key: 1, name: "1", count: 1 },
+              ],
+              schema: {},
+            }
+          : { data: PRIORITY_ROWS, schema: {} }
+    );
+    renderSection();
+    await screen.findByTestId("mock-chart-bar");
+    await selectOption(user, 1, "Estimate point");
+    await waitFor(() =>
+      expect(contractMocks.getAnalyticsChart).toHaveBeenCalledWith(expect.anything(), "acme", {
+        type: "custom-work-items",
+        xAxis: "ESTIMATE_POINTS",
+        yAxis: "WORK_ITEM_COUNT",
+        projectIds: [],
+      })
+    );
+    const expectedEstimateBars = JSON.stringify([
+      { label: "3", values: [1] },
+      { label: "1", values: [1] },
+    ]);
+    await waitFor(() => expect(screen.getByTestId("mock-chart-bar").dataset["bars"]).toBe(expectedEstimateBars));
+    expect(screen.getByTestId("analytics-custom-trigger-0")).toHaveTextContent("Work item");
+  });
+
   it("re-picking the metric fires no new read", async () => {
     const user = userEvent.setup();
     contractMocks.getAnalyticsChart.mockResolvedValue({ data: PRIORITY_ROWS, schema: {} });
