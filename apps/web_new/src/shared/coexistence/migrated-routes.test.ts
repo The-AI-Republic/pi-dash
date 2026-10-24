@@ -192,6 +192,39 @@ describe("bundled list", () => {
     expect(resolveLinkKind("/acme/settings/unknown")).toBe("anchor");
   });
 
+  it("serves the runner area and AI dev machines from web_new", () => {
+    for (const path of [
+      "/acme/runners",
+      "/acme/runners/",
+      "/acme/runners/approvals",
+      "/acme/runners/runs",
+      "/acme/runners/runs/00000000-0000-0000-0000-000000000000",
+      "/acme/runners/chat/00000000-0000-0000-0000-000000000000",
+      "/acme/runners/detail/00000000-0000-0000-0000-000000000000",
+      "/acme/ai-dev-machines",
+      "/acme/ai-dev-machines/00000000-0000-0000-0000-000000000000",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/runners",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/runners/runs",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/runners/detail/x",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(true);
+    }
+    // The project runner subtree is scoped to the runners segment: sibling
+    // project pages and other workspaces' runner-looking segments stay on
+    // the old app.
+    for (const path of [
+      "/acme/projects/00000000-0000-0000-0000-000000000000",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/issues",
+      "/acme/runner",
+      "/acme/runs",
+      "/acme/ai-dev-machine",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(false);
+    }
+    expect(resolveLinkKind("/acme/runners/approvals")).toBe("router");
+    expect(resolveLinkKind("/acme/runner")).toBe("anchor");
+  });
+
   it("keeps workspace matching out of reserved top-level names and the bare root", () => {
     for (const name of [
       "api",
@@ -281,6 +314,23 @@ describe("parity with the Caddy generator", () => {
     "/acme/settings/api-tokens",
     "/acme/settings/account",
     "/acme/settings/unknown",
+    // Runner area (RUN gate): the workspace runner shell and its subtree,
+    // AI dev machines, and the per-project runner subtree.
+    "/acme/runners",
+    "/acme/runners/",
+    "/acme/runners/approvals",
+    "/acme/runners/runs/1",
+    "/acme/runners/chat/1",
+    "/acme/runner",
+    "/acme/runs",
+    "/acme/ai-dev-machines",
+    "/acme/ai-dev-machines/1",
+    "/acme/ai-dev-machine",
+    "/acme/projects/1/runners",
+    "/acme/projects/1/runners/runs",
+    "/acme/projects/1/runners/",
+    "/acme/projects/1/runners/runs/1",
+    "/acme/projects/1/issues",
     "/acme.dev",
     "/acme.dev/projects",
     "/foo",
