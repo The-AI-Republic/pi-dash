@@ -4,17 +4,23 @@
 // The two board-specific failure illustrations (SPC-003, SPC-004). They are
 // distinct from the generic not-found page and never render board chrome.
 // Heading levels are deliberate: the anchor case is a missing resource (h3),
-// the board case is the page's primary failure (h1).
+// the board case is the page's primary failure (h1). Both keep their own
+// title and crawler directive but carry the generic board description and
+// social tags (SPC-007): the board head mounts beside them, and the newest
+// head claim wins, so a tag-less claim here would strip the fallback tags.
 
 import * as React from "react";
 
 import { useDocumentHead } from "../../../shared/shell/document.js";
+import { buildSpaceBoardHead } from "../lib/boardHead.js";
 
 export const SPACE_ANCHOR_NOT_FOUND_ART = "/illustrations/not-found.svg";
 export const SPACE_BOARD_ERROR_ART = "/illustrations/instance-failure.svg";
 
+const FALLBACK_HEAD_TAGS = buildSpaceBoardHead(undefined).tags;
+
 export function SpaceAnchorNotFound(): React.ReactElement {
-  useDocumentHead({ title: "Pi Dash — Board not found", robots: "noindex, nofollow" });
+  useDocumentHead({ title: "Pi Dash — Board not found", robots: "noindex, nofollow", tags: FALLBACK_HEAD_TAGS });
   return (
     <main
       data-testid="space-anchor-not-found"
@@ -30,7 +36,7 @@ export function SpaceAnchorNotFound(): React.ReactElement {
 }
 
 export function SpaceBoardError(): React.ReactElement {
-  useDocumentHead({ title: "Pi Dash — Board error", robots: "noindex, nofollow" });
+  useDocumentHead({ title: "Pi Dash — Board error", robots: "noindex, nofollow", tags: FALLBACK_HEAD_TAGS });
   return (
     <section
       data-testid="space-board-error"
