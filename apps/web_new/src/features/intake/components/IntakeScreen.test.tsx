@@ -52,7 +52,7 @@ function jsonResponse(url: string, status: number, body: unknown): TransportResp
   return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) } as TransportResponse;
 }
 
-function projectRow(inboxView = true, name = "Apollo", guestViewAll = false) {
+function projectRow(inboxView = true, name = "Apollo", guestViewAll = false, anchor: string | null = null) {
   return {
     id: PROJECT_ID,
     name,
@@ -77,6 +77,7 @@ function projectRow(inboxView = true, name = "Apollo", guestViewAll = false) {
     updated_by: null,
     agent_executor_options: [],
     default_agent_executor: "local_runner",
+    anchor,
   };
 }
 
@@ -161,6 +162,7 @@ interface Server {
   inboxView: boolean;
   projectName: string;
   guestViewAll?: boolean;
+  anchor?: string | null;
   pending: FakeRow[];
   closed: FakeRow[];
   listRequests: string[];
@@ -241,7 +243,11 @@ function installServer(server: Server): void {
     const path = parsed.pathname;
     if (path.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
     if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/`) {
-      return jsonResponse(url, 200, projectRow(server.inboxView, server.projectName, server.guestViewAll ?? false));
+      return jsonResponse(
+        url,
+        200,
+        projectRow(server.inboxView, server.projectName, server.guestViewAll ?? false, server.anchor ?? null)
+      );
     }
     if (path.endsWith("/project-roles/")) {
       if (server.rolesFail) return jsonResponse(url, 500, { error: "boom" });
@@ -371,6 +377,14 @@ describe("IntakeScreen shell (INT-001/INT-003)", () => {
     await screen.findByText("Alpha");
     expect(await screen.findByTestId("intake-detail")).toBeInTheDocument();
     expect(screen.queryByTestId("intake-placeholder")).toBeNull();
+  });
+
+  it("passes the project's publication state through to the request comments", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    server.anchor = "public-board";
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    expect(await screen.findByRole("radiogroup", { name: "Comment visibility" })).toBeInTheDocument();
   });
 
   it("names the document after the project plus Intake", async () => {
