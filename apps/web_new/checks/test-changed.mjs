@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Runs the web_new unit tests a change can affect, not the whole suite.
-// Vitest's --changed follows the import graph from the files that differ from
+// `vitest related` follows the import graph from the files that differ from
 // the base (including @pidash/kit and @pidash/api-client sources, which
-// vitest.config.ts aliases in). A few inputs reach every test without being
-// imported (test setup, configs, dependencies); touching one of those runs the
-// whole suite instead. Agents run this locally (`pnpm --filter web_new
-// test:changed`), CI runs it on PRs, and pushes to web-new-dev still run the
-// full suite.
+// vitest.config.ts aliases in). Configs, package manifests and the test setup
+// file reach every test without an import edge; vitest would answer a change
+// to one of them by running the whole suite, so they are left out of the list
+// and do not widen the run. The full suite on every push to web-new-dev
+// covers them. Agents run this locally (`pnpm --filter web_new
+// test:changed`) and CI runs it on PRs.
 //
 // Usage: node checks/test-changed.mjs [--base <ref>] [--full] [vitest args...]
 //   --base <ref>  diff against this ref (default: merge base of HEAD and
@@ -22,18 +23,19 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const webNewDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_BASE_BRANCH = "origin/web-new-dev";
 
-// Repo-relative paths whose change can affect any test without an import edge.
-const FULL_SUITE_PATHS = [
-  /^pnpm-lock\.yaml$/,
-  /^package\.json$/,
-  /^(apps\/web_new|packages\/kit|packages\/api-client)\/package\.json$/,
-  /^apps\/web_new\/(vitest|vite)\.config\.ts$/,
-  /^apps\/web_new\/tsconfig\.json$/,
+// Repo-relative paths that reach tests without an import edge. Vitest's
+// forceRerunTriggers (package.json, vite/vitest configs, setup files) would
+// turn any of them into a whole-suite run, so they are not passed on.
+const NO_IMPORT_EDGE_PATHS = [
+  /(^|\/)package\.json$/,
+  /(^|\/)pnpm-lock\.yaml$/,
+  /(^|\/)(vitest|vite)\.config\.[cm]?[jt]s$/,
+  /(^|\/)tsconfig(\.[^/]*)?\.json$/,
   /^apps\/web_new\/src\/test-setup\.ts$/,
 ];
 
-function fullSuiteReasons(files) {
-  return files.filter((file) => FULL_SUITE_PATHS.some((pattern) => pattern.test(file)));
+function skippedFiles(files) {
+  return files.filter((file) => NO_IMPORT_EDGE_PATHS.some((pattern) => pattern.test(file)));
 }
 
 function parseArgs(argv) {
@@ -51,12 +53,13 @@ function parseArgs(argv) {
   return opts;
 }
 
-// Decide what to run. Pure, so the self-test covers every branch.
-function planRun({ base, full, vitestArgs, changedFiles }) {
-  if (full) return { mode: "full", reasons: ["--full"], args: ["run", ...vitestArgs] };
-  const reasons = fullSuiteReasons(changedFiles);
-  if (reasons.length > 0) return { mode: "full", reasons, args: ["run", ...vitestArgs] };
-  return { mode: "changed", reasons: [], args: ["run", "--changed", base, "--passWithNoTests", ...vitestArgs] };
+// Decide what to run. Pure, so the self-test covers every branch. Paths are
+// repo-relative; vitest gets them absolute, as its import graph holds them.
+function planRun({ full, vitestArgs, changedFiles, root }) {
+  if (full) return { mode: "full", skipped: [], args: ["run", ...vitestArgs] };
+  const skipped = skippedFiles(changedFiles);
+  const related = changedFiles.filter((file) => !skipped.includes(file)).map((file) => resolve(root, file));
+  return { mode: "changed", skipped, args: ["related", "--run", "--passWithNoTests", ...vitestArgs, ...related] };
 }
 
 function defaultGit(args) {
@@ -69,20 +72,27 @@ function defaultRunVitest(args) {
 }
 
 // Files that differ from base: committed, staged, unstaged and untracked.
-function changedFilesSince(base, git) {
-  const root = git(["rev-parse", "--show-toplevel"]);
+function changedFilesSince(base, git, root = git(["rev-parse", "--show-toplevel"])) {
   const tracked = git(["-C", root, "diff", "--name-only", base]);
   const untracked = git(["-C", root, "ls-files", "--others", "--exclude-standard"]);
   return [...new Set(`${tracked}\n${untracked}`.split("\n").filter(Boolean))];
 }
 
-function main(argv = process.argv.slice(2), { git = defaultGit, runVitest = defaultRunVitest, log = console.log } = {}) {
+function main(
+  argv = process.argv.slice(2),
+  { git = defaultGit, runVitest = defaultRunVitest, log = console.log } = {}
+) {
   const opts = parseArgs(argv);
+  if (opts.full) {
+    log("test:changed: full suite (--full)");
+    return runVitest(planRun({ ...opts, changedFiles: [], root: "" }).args);
+  }
   const base = opts.base ?? git(["merge-base", "HEAD", DEFAULT_BASE_BRANCH]);
-  const changedFiles = opts.full ? [] : changedFilesSince(base, git);
-  const plan = planRun({ ...opts, base, changedFiles });
-  if (plan.mode === "full") log(`test:changed: full suite (${plan.reasons.join(", ")})`);
-  else log(`test:changed: tests affected by ${changedFiles.length} file(s) changed since ${base}`);
+  const root = git(["rev-parse", "--show-toplevel"]);
+  const changedFiles = changedFilesSince(base, git, root);
+  const plan = planRun({ ...opts, changedFiles, root });
+  log(`test:changed: tests affected by ${changedFiles.length} file(s) changed since ${base}`);
+  if (plan.skipped.length > 0) log(`test:changed: no import edge, left to CI's full suite: ${plan.skipped.join(", ")}`);
   return runVitest(plan.args);
 }
 
@@ -99,4 +109,4 @@ if (isCliEntry()) {
   process.exit(main());
 }
 
-export { changedFilesSince, fullSuiteReasons, isCliEntry, main, parseArgs, planRun };
+export { changedFilesSince, isCliEntry, main, parseArgs, planRun, skippedFiles };

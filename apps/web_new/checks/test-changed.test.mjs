@@ -1,14 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Self-test for the changed-tests runner: which changes force the whole suite,
-// how arguments reach vitest, and how the changed-file list is gathered.
+// Self-test for the changed-tests runner: which changes are left out of the
+// run, how arguments reach vitest, and how the changed-file list is gathered.
 import { describe, expect, it } from "vitest";
 
-import { changedFilesSince, fullSuiteReasons, isCliEntry, main, parseArgs, planRun } from "./test-changed.mjs";
+import { changedFilesSince, isCliEntry, main, parseArgs, planRun, skippedFiles } from "./test-changed.mjs";
 
-describe("fullSuiteReasons", () => {
-  it("flags inputs that reach every test without an import edge", () => {
+describe("skippedFiles", () => {
+  it("leaves out inputs that reach tests without an import edge", () => {
     const files = [
       "pnpm-lock.yaml",
       "package.json",
@@ -18,27 +18,32 @@ describe("fullSuiteReasons", () => {
       "apps/web_new/vitest.config.ts",
       "apps/web_new/vite.config.ts",
       "apps/web_new/tsconfig.json",
+      "packages/kit/tsconfig.build.json",
       "apps/web_new/src/test-setup.ts",
     ];
-    expect(fullSuiteReasons(files)).toEqual(files);
+    expect(skippedFiles(files)).toEqual(files);
   });
 
-  it("leaves ordinary source, kit and api-client changes to the import graph", () => {
+  it("keeps ordinary source, test, kit and api-client changes for the import graph", () => {
     expect(
-      fullSuiteReasons([
+      skippedFiles([
         "apps/web_new/src/features/issues/create/createApi.ts",
+        "apps/web_new/e2e/parity/drivers/web-new-modules-shell.test.ts",
         "packages/kit/src/components/Button.tsx",
         "packages/api-client/src/index.ts",
-        "apps/web/package.json",
         ".ai_design/new_frontend_implementation/parity/inventory/drafts.md",
-      ]),
+      ])
     ).toEqual([]);
   });
 });
 
 describe("parseArgs", () => {
   it("reads --base in both spellings, --full, and passes the rest to vitest", () => {
-    expect(parseArgs(["--base", "abc", "--coverage"])).toEqual({ base: "abc", full: false, vitestArgs: ["--coverage"] });
+    expect(parseArgs(["--base", "abc", "--coverage"])).toEqual({
+      base: "abc",
+      full: false,
+      vitestArgs: ["--coverage"],
+    });
     expect(parseArgs(["--base=HEAD^1", "--full"])).toEqual({ base: "HEAD^1", full: true, vitestArgs: [] });
     expect(parseArgs([])).toEqual({ base: null, full: false, vitestArgs: [] });
   });
@@ -49,26 +54,35 @@ describe("parseArgs", () => {
 });
 
 describe("planRun", () => {
-  it("runs only affected tests for an ordinary change", () => {
-    expect(planRun({ base: "b1", full: false, vitestArgs: ["--coverage"], changedFiles: ["apps/web_new/src/a.ts"] })).toEqual({
+  it("passes the changed files to vitest related as absolute paths", () => {
+    expect(
+      planRun({ full: false, vitestArgs: ["--coverage"], changedFiles: ["apps/web_new/src/a.ts"], root: "/repo" })
+    ).toEqual({
       mode: "changed",
-      reasons: [],
-      args: ["run", "--changed", "b1", "--passWithNoTests", "--coverage"],
+      skipped: [],
+      args: ["related", "--run", "--passWithNoTests", "--coverage", "/repo/apps/web_new/src/a.ts"],
     });
   });
 
-  it("runs the whole suite when a full-suite input changed", () => {
-    expect(planRun({ base: "b1", full: false, vitestArgs: [], changedFiles: ["src/x.ts", "pnpm-lock.yaml"] })).toEqual({
-      mode: "full",
-      reasons: ["pnpm-lock.yaml"],
-      args: ["run"],
+  it("runs only the source changes when a config or manifest changed too", () => {
+    expect(
+      planRun({
+        full: false,
+        vitestArgs: [],
+        changedFiles: ["apps/web_new/vitest.config.ts", "apps/web_new/src/x.ts", "pnpm-lock.yaml"],
+        root: "/repo",
+      })
+    ).toEqual({
+      mode: "changed",
+      skipped: ["apps/web_new/vitest.config.ts", "pnpm-lock.yaml"],
+      args: ["related", "--run", "--passWithNoTests", "/repo/apps/web_new/src/x.ts"],
     });
   });
 
   it("runs the whole suite on --full", () => {
-    expect(planRun({ base: "b1", full: true, vitestArgs: ["--coverage"], changedFiles: [] })).toEqual({
+    expect(planRun({ full: true, vitestArgs: ["--coverage"], changedFiles: [], root: "" })).toEqual({
       mode: "full",
-      reasons: ["--full"],
+      skipped: [],
       args: ["run", "--coverage"],
     });
   });
@@ -92,7 +106,11 @@ describe("changedFilesSince", () => {
   it("merges tracked and untracked changes without duplicates or blanks", () => {
     const { git, calls } = fakeGit({ diff: "a.ts\nb.ts", untracked: "b.ts\nc.ts" });
     expect(changedFilesSince("base1", git)).toEqual(["a.ts", "b.ts", "c.ts"]);
-    expect(calls).toEqual(["rev-parse --show-toplevel", "-C /repo diff --name-only base1", "-C /repo ls-files --others --exclude-standard"]);
+    expect(calls).toEqual([
+      "rev-parse --show-toplevel",
+      "-C /repo diff --name-only base1",
+      "-C /repo ls-files --others --exclude-standard",
+    ]);
   });
 
   it("returns nothing when nothing changed", () => {
@@ -105,20 +123,33 @@ describe("main", () => {
     const { git, calls } = fakeGit({ diff: "apps/web_new/src/a.ts" });
     const runs = [];
     const logs = [];
-    const status = main(["--coverage"], { git, runVitest: (args) => (runs.push(args), 0), log: (line) => logs.push(line) });
+    const status = main(["--coverage"], {
+      git,
+      runVitest: (args) => (runs.push(args), 0),
+      log: (line) => logs.push(line),
+    });
     expect(status).toBe(0);
     expect(calls[0]).toBe("merge-base HEAD origin/web-new-dev");
-    expect(runs).toEqual([["run", "--changed", "mb123", "--passWithNoTests", "--coverage"]]);
+    expect(runs).toEqual([["related", "--run", "--passWithNoTests", "--coverage", "/repo/apps/web_new/src/a.ts"]]);
     expect(logs).toEqual(["test:changed: tests affected by 1 file(s) changed since mb123"]);
   });
 
-  it("uses an explicit base, reports why it runs the whole suite, and returns vitest's status", () => {
+  it("uses an explicit base, reports the files it leaves out, and returns vitest's status", () => {
     const { git, calls } = fakeGit({ diff: "apps/web_new/vitest.config.ts" });
+    const runs = [];
     const logs = [];
-    const status = main(["--base", "HEAD^1"], { git, runVitest: () => 1, log: (line) => logs.push(line) });
+    const status = main(["--base", "HEAD^1"], {
+      git,
+      runVitest: (args) => (runs.push(args), 1),
+      log: (line) => logs.push(line),
+    });
     expect(status).toBe(1);
     expect(calls).not.toContain("merge-base HEAD origin/web-new-dev");
-    expect(logs).toEqual(["test:changed: full suite (apps/web_new/vitest.config.ts)"]);
+    expect(runs).toEqual([["related", "--run", "--passWithNoTests"]]);
+    expect(logs).toEqual([
+      "test:changed: tests affected by 1 file(s) changed since HEAD^1",
+      "test:changed: no import edge, left to CI's full suite: apps/web_new/vitest.config.ts",
+    ]);
   });
 
   it("skips the diff entirely on --full", () => {
@@ -135,7 +166,7 @@ describe("main with the real git", () => {
     const runs = [];
     main(["--base", "HEAD"], { runVitest: (args) => (runs.push(args), 0), log: () => {} });
     expect(runs).toHaveLength(1);
-    expect(runs[0][0]).toBe("run");
+    expect(runs[0].slice(0, 2)).toEqual(["related", "--run"]);
   });
 });
 
