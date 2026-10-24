@@ -537,12 +537,10 @@ export type { ViewSnapshot } from "./filters/rich/views.js";
 // lazy filter row beneath the view header. The query helper stays eager:
 // it only adds the date bridge over the already-eager legacy dimensions
 // (the expression import is type-only), so the size gate is unaffected.
-// The global list screen itself stays out of this barrel: eager route
-// modules import the barrel for their loaders, and a static re-export
-// would drag the screen — the create dialog, sanitizer and virtual list —
-// into the initial chunk (NEWFRONT-871, size gate). Consumers deep-import
-// "./global/GlobalIssuesScreen.js" and "./global/queries.js".
 export { withRichFilters } from "./filters/rich/query.js";
+export { GlobalIssuesScreen } from "./global/GlobalIssuesScreen.js";
+export type { GlobalIssuesScreenProps } from "./global/GlobalIssuesScreen.js";
+export { GLOBAL_ISSUES_PAGE_SIZE, globalIssuesQueryOptions } from "./global/queries.js";
 export type { IssueFiltersProps } from "./filters/rich/IssueFilters.js";
 export { EntityListScreen } from "./list/EntityListScreen.js";
 export type { EntityListScreenProps } from "./list/EntityListScreen.js";
