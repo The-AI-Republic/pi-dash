@@ -120,6 +120,15 @@ describe("decodeEmojiValue", () => {
     const long = Array(300_000).fill("65").join("-");
     expect(decodeEmojiValue(long)).toBe(long);
   });
+
+  it("leaves an out-of-range hexadecimal code point untouched", () => {
+    expect(decodeEmojiValue("11000f")).toBe("11000f");
+  });
+
+  it("leaves an absurdly long hexadecimal list alone instead of overflowing", () => {
+    const long = Array(300_000).fill("1f600").join("-");
+    expect(decodeEmojiValue(long)).toBe(long);
+  });
 });
 
 describe("projectMarkText", () => {

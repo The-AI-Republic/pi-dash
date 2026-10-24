@@ -214,6 +214,9 @@ describe("creation filters", () => {
     const row = makePageRow({ created_at: "2026-10-23T09:00:00Z", is_favorite: true, owned_by: "user-1" });
     expect(matchesPageFilters(row, EMPTY_PAGE_FILTERS, NOW)).toBe(true);
     expect(matchesPageFilters(row, { ...EMPTY_PAGE_FILTERS, favorites: true }, NOW)).toBe(true);
+    expect(matchesPageFilters({ ...row, is_favorite: false }, { ...EMPTY_PAGE_FILTERS, favorites: true }, NOW)).toBe(
+      false
+    );
     expect(matchesPageFilters(row, { ...EMPTY_PAGE_FILTERS, favorites: true, creator: "user-2" }, NOW)).toBe(false);
     expect(matchesPageFilters(row, { ...EMPTY_PAGE_FILTERS, created: "last_30_days" }, NOW)).toBe(true);
     expect(matchesPageFilters(row, { ...EMPTY_PAGE_FILTERS, created: "1_week_ago" }, NOW)).toBe(false);
