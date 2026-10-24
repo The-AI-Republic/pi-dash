@@ -30,7 +30,10 @@
     "/{ws}/settings/webhooks",
     "/{ws}/settings/webhooks/*",
     "/{ws}/settings/projects",
-    "/{ws}/settings/projects/*"
+    "/{ws}/settings/projects/*",
+    "/{ws}/runners/*",
+    "/{ws}/ai-dev-machines/*",
+    "/{ws}/projects/{projectId}/runners/*"
   ],
   "reservedTopLevel": [
     "404",
