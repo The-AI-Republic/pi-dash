@@ -1616,6 +1616,115 @@ def test_rust_issue_activity_closed_to_writes_state_row_and_notifies(db_conn):
     assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
 
 
+def _seed_triage_state_world(db_conn, slug):
+    """Issue + triage state + Todo state + one notified subscriber (PIDASHCONV-1278).
+
+    Mirrors the oracle seed in ``test_webhook_tasks.py``: the
+    subscriber is an active project member with a preferences row, so
+    ``notifications`` writes exactly one ``notifications`` row for
+    them.
+    """
+    chain = seed_helpers.issue_chain(db_conn, slug)
+    owner, workspace, project, issue = (
+        chain["owner"],
+        chain["workspace"],
+        chain["project"],
+        chain["issue"],
+    )
+    triage_state = seed_helpers.state(
+        db_conn,
+        project["id"],
+        workspace["id"],
+        name="Triage",
+        group="triage",
+        is_triage=True,
+    )
+    todo_state = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], name="Todo", group="unstarted"
+    )
+    sub = seed_helpers.user(db_conn, f"{slug}-subscriber")
+    seed_helpers.project_member(db_conn, project["id"], workspace["id"], sub["id"])
+    seed_helpers.issue_subscriber(
+        db_conn, project["id"], workspace["id"], issue["id"], sub["id"]
+    )
+    seed_helpers.notification_preference(db_conn, sub["id"])
+    return {
+        "owner": owner,
+        "workspace": workspace,
+        "project": project,
+        "issue": issue,
+        "triage_state": triage_state,
+        "todo_state": todo_state,
+        "subscriber": sub,
+    }
+
+
+def test_rust_issue_activity_triage_state_resolves_to_null(db_conn):
+    """triage → Todo, Rust side: the triage side of the state row is NULL (PIDASHCONV-1278).
+
+    Mirrors ``test_issue_activity_triage_state_resolves_to_null``
+    (same triage → Todo payload): the Rust worker must exclude
+    ``group="triage"`` from the states snapshot
+    (``activity_dispatch.rs``), like Django's ``StateManager``, so
+    ``track_state`` stores ``old_value``/``old_identifier`` NULL.
+    Settlement plus the row diffs is the proof: with the Django
+    worker stopped, a forward could never produce local rows.
+    """
+    world = _seed_triage_state_world(db_conn, "rusttriagestate")
+    issue, owner, project = world["issue"], world["owner"], world["project"]
+    triage_state, todo_state = world["triage_state"], world["todo_state"]
+    sub = world["subscriber"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "notifications", "email_notification_logs"])
+
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"state_id": str(todo_state["id"])}),
+            "current_instance": json.dumps({"state_id": str(triage_state["id"])}),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="triage-state issue_activities row",
+    )
+    assert row["field"] == "state"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "updated the state to"
+    assert row["old_value"] is None
+    assert row["old_identifier"] is None
+    assert row["new_value"] == todo_state["name"]
+    assert row["new_identifier"] == str(todo_state["id"])
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+    (note,) = wait_for(
+        lambda: _added_rows(db_conn, "notifications", before) or None,
+        what="triage-state notifications row",
+    )
+    assert note["receiver_id"] == str(sub["id"])
+    assert note["entity_identifier"] == str(issue["id"])
+    assert note["sender"] == "in_app:issue_activities:subscribed"
+    assert note["title"] == "updated the state to"
+    assert note["triggered_by_id"] == str(owner["id"])
+    activity_block = note["data"]["issue_activity"]
+    assert activity_block["old_value"] == "None"
+    assert activity_block["old_identifier"] is None
+    assert activity_block["new_value"] == todo_state["name"]
+    assert activity_block["new_identifier"] == str(todo_state["id"])
+    assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
+
+
 @pytest.mark.parametrize(
     "family",
     [socket.AF_INET, socket.AF_INET6],
