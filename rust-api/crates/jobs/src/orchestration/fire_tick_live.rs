@@ -32,8 +32,9 @@ use super::fire_tick_seam::{
     DispatchJobsError, StateView,
 };
 use super::live_inputs::{
-    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, CallCache, JobsMatcher,
+    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
 };
+use crate::admission::RedisAdmissionCache;
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
 /// Live [`FireTickSeam`]: pool + dispatch settings + the injected
@@ -124,7 +125,7 @@ impl FireTickSeam for LiveFireTickSeam {
             let deps = StoreDeps {
                 cloud,
                 managed,
-                cache: CallCache::default(),
+                cache: RedisAdmissionCache::from_env(),
                 has_usable_llm_config: gate_fn(verdicts),
                 toolsets,
                 llm_profile: profile_fn(presence),

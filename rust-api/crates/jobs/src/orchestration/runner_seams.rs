@@ -4,15 +4,15 @@
 //! (PIDASHCONV-862).
 //!
 //! The bin owns the `RunnerRunsSeams` provider but cannot build the
-//! jobs [`StoreDeps`] inputs: the `AdmissionCache` impls are
-//! `pub(crate)` in api and the `H`/`E`/`P` closures have no
-//! production factory. This module closes the gap with public
-//! executors over (`pool`, settings, `run_id`) that build their own
-//! inputs per call:
+//! jobs [`StoreDeps`] inputs: the api `AdmissionCache` impl is
+//! `pub(crate)` and the `H`/`E`/`P` closures have no production
+//! factory. This module closes the gap with public executors over
+//! (`pool`, settings, `run_id`) that build their own inputs per call:
 //!
 //! * [`complete_project_move_handoff_live`]: prefetches the source
-//!   run's creator presence, builds [`StoreDeps`] over a per-call
-//!   [`RunnerSeamCache`], and runs the jobs handoff driver.
+//!   run's creator presence, builds [`StoreDeps`] over the shared
+//!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache],
+//!   and runs the jobs handoff driver.
 //! * [`maybe_apply_deferred_pause_live`]: same shape for the
 //!   deferred cap-hit pause (the pause path never reads presence,
 //!   so the map stays empty).
@@ -22,11 +22,9 @@
 //!   and executes the write — the executor the planner's docs call
 //!   for.
 //!
-//! [`RunnerSeamCache`] mirrors the api `RequestCache` exactly (a
-//! `Mutex<HashMap>`; the sync [`AdmissionCache`] trait cannot reach
-//! the async Redis client, and the drivers consult it only when
-//! building a cloud-executor run). Presence reads
-//! `assistant_user_llm_config` the way the assistant gate reads it.
+//! Admission counts against the shared Redis buckets (PIDASHCONV-1487),
+//! the same buckets the HTTP plane and the Django worker use. Presence
+//! reads `assistant_user_llm_config` the way the assistant gate reads it.
 //!
 //! Post-commit terminal effects the drivers return pending are
 //! enqueued into `rust_job_queue` here (the D-15 pipeline entry),
@@ -34,7 +32,7 @@
 //! bin provider maps each executor to `()` with no further work.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::Value;
@@ -48,7 +46,7 @@ use pidash_db::tasks_ticker::jitter_seconds;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
-use pidash_services::dispatch::{AdmissionCache, LlmProfile};
+use pidash_services::dispatch::LlmProfile;
 #[cfg(test)]
 use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
@@ -61,56 +59,9 @@ use super::fire_tick_seam::{
     create_ticker_sql, emit_logs, lock_ticker_by_issue_sql, map_policy, map_ticker,
     maybe_apply_deferred_pause as drive_pause, save_clock_sql, DispatchJobsError,
 };
+use crate::admission::RedisAdmissionCache;
 use crate::queue::enqueue;
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
-
-// ---------------------------------------------------------------------------
-// Per-call admission cache
-// ---------------------------------------------------------------------------
-
-/// Per-call admission cache: [`RunnerSeamCache::default`] per
-/// executor call, the same call-scoped shape as the L6 drivers'
-/// caches and the api `RequestCache`.
-#[derive(Debug, Default)]
-pub struct RunnerSeamCache {
-    buckets: Mutex<HashMap<String, i64>>,
-}
-
-/// The [`AdmissionCache::Error`] for [`RunnerSeamCache`] (a poisoned
-/// mutex).
-#[derive(Debug)]
-pub struct CacheError(String);
-
-impl std::fmt::Display for CacheError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for CacheError {}
-
-impl AdmissionCache for RunnerSeamCache {
-    type Error = CacheError;
-
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-        self.buckets
-            .lock()
-            .map(|buckets| buckets.get(key).copied())
-            .map_err(|error| CacheError(error.to_string()))
-    }
-
-    fn add_or_incr(&self, key: &str, _timeout_secs: i64) -> Result<(), Self::Error> {
-        self.buckets
-            .lock()
-            .map(|mut buckets| {
-                buckets
-                    .entry(key.to_owned())
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
-            })
-            .map_err(|error| CacheError(error.to_string()))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Presence prefetch (the 861 live-inputs shape, scoped to one run)
@@ -222,7 +173,7 @@ async fn drain_terminal_effects(
 
 /// `complete_project_move_handoff(run_id)` with live inputs: the
 /// source run's creator presence, the installed assistant seam's
-/// llm-gate verdicts over it, a per-call [`RunnerSeamCache`], and
+/// llm-gate verdicts over it, the shared [`RedisAdmissionCache`], and
 /// `now`. Answers the replacement run id (`None` on every early-out:
 /// unknown run, non-terminal source, no marker, moved again, no pod).
 pub async fn complete_project_move_handoff_live(
@@ -240,7 +191,7 @@ pub async fn complete_project_move_handoff_live(
     let deps = StoreDeps {
         cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RunnerSeamCache::default(),
+        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: gate_fn(verdicts),
         toolsets,
         llm_profile: profile_fn(presence),
@@ -267,7 +218,7 @@ pub async fn maybe_apply_deferred_pause_live(
     let deps = StoreDeps {
         cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RunnerSeamCache::default(),
+        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
         toolsets,
         llm_profile: profile_fn(presence),
@@ -453,17 +404,6 @@ mod tests {
             .expect("SQL parses")
             .pop()
             .expect("one statement")
-    }
-
-    #[test]
-    fn cache_counts_like_request_cache() {
-        let cache = RunnerSeamCache::default();
-        assert_eq!(cache.bucket_count("k").unwrap(), None);
-        cache.add_or_incr("k", 60).unwrap();
-        assert_eq!(cache.bucket_count("k").unwrap(), Some(1));
-        cache.add_or_incr("k", 60).unwrap();
-        assert_eq!(cache.bucket_count("k").unwrap(), Some(2));
-        assert_eq!(cache.bucket_count("other").unwrap(), None);
     }
 
     #[test]
