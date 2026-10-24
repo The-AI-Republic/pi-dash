@@ -76,6 +76,7 @@ const BACKLOG = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LABEL = "b23e4567-e89b-12d3-a456-42661417400a";
 const V1 = "c23e4567-e89b-12d3-a456-42661417400c";
 const COMMENT = "f23e4567-e89b-12d3-a456-42661417400f";
+const CREATED = "f23e4567-e89b-12d3-a456-426614174010";
 
 const ME_PAYLOAD = {
   id: ME,
@@ -227,6 +228,7 @@ interface DetailServer {
   detailStatus: number;
   detail: IntakeIssueDetail;
   writes: Array<{ url: string; body: unknown }>;
+  postedComments?: IssueComment[];
 }
 
 function versionsEnvelope(hourAgo: string) {
@@ -347,11 +349,20 @@ function harness(server: DetailServer, options: { meStatus?: number; searchHits?
     if (url.endsWith(`/projects/${PROJECT}/issue-labels/`)) return ok(LABELS);
     if (url.includes("/reactions/")) return ok([]);
     if (url.includes("activity_type=issue-property")) return ok([]);
-    if (url.includes("activity_type=issue-comment")) return ok([commentRow()]);
+    if (url.includes("activity_type=issue-comment"))
+      return ok([commentRow(), ...(server.postedComments ?? []).map((comment) => ({ ...comment }))]);
     if (url.includes(`/issues/${ISSUE}/comments/`) && init.method === "POST") {
-      const body = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
+      const body = JSON.parse(init.body ?? "{}") as { comment_html?: string; access?: IssueComment["access"] };
       server.writes.push({ url, body });
-      return ok({ data: commentRow() });
+      const created = {
+        ...commentRow(),
+        id: CREATED,
+        comment_html: body.comment_html ?? "",
+        comment_stripped: (body.comment_html ?? "").replace(/<[^>]*>/g, ""),
+        access: body.access ?? "INTERNAL",
+      };
+      server.postedComments = [...(server.postedComments ?? []), created];
+      return ok({ data: created });
     }
     if (url.includes("/attachments/")) return ok([ATTACHMENT]);
     if (url.endsWith("/api/users/me/")) {
@@ -491,6 +502,24 @@ describe("IntakeDetail content (INT-019/024)", () => {
     } finally {
       delete edition.flags[WORKLOG_FLAG];
     }
+  });
+
+  it("posts from intake through the ordinary comment endpoint and shows the new row (CMT-018)", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+
+    await screen.findByText("Intake thread words");
+    const composer = screen.getByRole("group", { name: "Add comment" });
+    fireEvent.change(within(composer).getByLabelText("Add comment"), { target: { value: "Fresh intake words" } });
+    fireEvent.keyDown(within(composer).getByLabelText("Add comment"), { key: "Enter" });
+
+    await waitFor(() => expect(server.writes).toHaveLength(1));
+    expect(server.writes[0]!.url).toBe(
+      `https://api.test/api/workspaces/${SLUG}/projects/${PROJECT}/issues/${ISSUE}/comments/`
+    );
+    expect(server.writes[0]!.body).toEqual({ comment_html: "<p>Fresh intake words</p>", access: "INTERNAL" });
+    expect(await screen.findByText("Fresh intake words")).toBeInTheDocument();
   });
 
   it("shows the access switch on a published intake project", async () => {
