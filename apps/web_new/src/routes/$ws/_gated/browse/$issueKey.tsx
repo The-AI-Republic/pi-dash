@@ -30,6 +30,8 @@ import { IssueDetailRoot } from "../../../../features/issues/detail/IssueDetailR
 import { IssuePropertiesSidebar } from "../../../../features/issues/detail/sidebar/index.js";
 import { SubIssuesWidget } from "../../../../features/issues/subIssues/SubIssuesWidget.js";
 import { IssueRunAIAction } from "../../../../features/issues/detail/IssueAgentActions.js";
+import { AgentStatusPanel } from "../../../../features/issues/detail/agent/AgentStatusPanel.js";
+import { DetailHeaderActions } from "../../../../features/issues/detail/DetailHeaderActions.js";
 import {
   AttachmentsWidget,
   type AttachmentsWidgetHandle,
