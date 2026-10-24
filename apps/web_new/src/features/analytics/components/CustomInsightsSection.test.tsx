@@ -76,6 +76,10 @@ describe("CustomInsightsSection", () => {
     expect(screen.getByRole("heading", { name: "Custom Insights" })).toBeInTheDocument();
     expect(screen.getByTestId("analytics-custom-trigger-1")).toHaveTextContent("Priority");
     expect(screen.getByTestId("analytics-custom-skeleton")).toBeInTheDocument();
+    const table = screen.getByTestId("analytics-custom-table");
+    expect(table.querySelectorAll("tbody tr")).toHaveLength(5);
+    expect(table.querySelectorAll("tbody td > span[style*='height'][style*='20px']")).toHaveLength(10);
+    expect(within(table).queryByRole("button", { name: "Export as csv" })).not.toBeInTheDocument();
     expect(screen.queryByTestId("mock-chart-bar")).not.toBeInTheDocument();
     expect(screen.queryByTestId("analytics-section-guidance")).not.toBeInTheDocument();
   });
@@ -309,5 +313,101 @@ describe("CustomInsightsSection", () => {
     const guidance = await screen.findByTestId("analytics-section-guidance");
     expect(guidance).toHaveTextContent(GUIDANCE);
     expect(screen.queryByTestId("mock-chart-bar")).not.toBeInTheDocument();
+  });
+});
+
+describe("CustomInsightsSection table (ANL-012, ANL-016, ANL-017)", () => {
+  function readBlob(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(blob);
+    });
+  }
+
+  it("repeats the plotted rows under the x-axis and Count headers", async () => {
+    contractMocks.getAnalyticsChart.mockResolvedValue({ data: PRIORITY_ROWS, schema: {} });
+    renderSection(["a"]);
+    await screen.findByTestId("mock-chart-bar");
+    const table = screen.getByTestId("analytics-custom-table");
+    expect(
+      within(table)
+        .getAllByRole("columnheader")
+        .map((cell) => cell.textContent)
+    ).toEqual(["Priority", "Count"]);
+    expect(within(table).getByTestId("analytics-table-count")).toHaveTextContent("2 Priority");
+    expect(
+      within(table)
+        .getAllByRole("row")
+        .slice(1)
+        .map((row) => row.textContent)
+    ).toEqual(["Urgent1", "High2"]);
+  });
+
+  it("adds one exported column per split schema key", async () => {
+    contractMocks.getAnalyticsChart.mockResolvedValue({
+      data: [{ key: "urgent", name: "urgent", count: 2, s1: 1, s2: 1 }],
+      schema: { s2: "Done", s1: "Backlog" },
+    });
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByTestId("mock-chart-bar");
+    await selectOption(user, 2, "State name");
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("analytics-custom-table"))
+          .getAllByRole("columnheader")
+          .map((cell) => cell.textContent)
+      ).toEqual(["Priority", "Count", "Done", "Backlog"])
+    );
+  });
+
+  it("expands search, filters the display first column and clears on close", async () => {
+    contractMocks.getAnalyticsChart.mockResolvedValue({ data: PRIORITY_ROWS, schema: {} });
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByTestId("mock-chart-bar");
+    const table = screen.getByTestId("analytics-custom-table");
+    await user.click(within(table).getByRole("button", { name: "Search" }));
+    await user.type(within(table).getByPlaceholderText("Search"), "urgent");
+    const visible = within(table).getAllByRole("row").slice(1);
+    expect(visible).toHaveLength(1);
+    expect(visible[0]?.textContent).toBe("Urgent1");
+    await user.click(within(table).getByRole("button", { name: "Close search" }));
+    expect(within(table).queryByPlaceholderText("Search")).not.toBeInTheDocument();
+    expect(within(table).getAllByRole("row").slice(1)).toHaveLength(2);
+  });
+
+  it("exports only the filtered rows with display headers and values", async () => {
+    contractMocks.getAnalyticsChart.mockResolvedValue({ data: PRIORITY_ROWS, schema: {} });
+    const user = userEvent.setup();
+    const createObjectUrl = vi.fn((_blob: Blob) => "blob:csv");
+    Object.assign(URL, { createObjectURL: createObjectUrl, revokeObjectURL: vi.fn() });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    renderSection(["a"]);
+    await screen.findByTestId("mock-chart-bar");
+    const table = screen.getByTestId("analytics-custom-table");
+    await user.click(within(table).getByRole("button", { name: "Search" }));
+    await user.type(within(table).getByPlaceholderText("Search"), "urgent");
+    await user.click(within(table).getByRole("button", { name: "Export as csv" }));
+    const blob = createObjectUrl.mock.calls[0]?.[0] as Blob;
+    expect(await readBlob(blob)).toBe("Priority,Count\r\nUrgent,1\r\n");
+  });
+
+  it("does not download when the filter leaves no rows", async () => {
+    contractMocks.getAnalyticsChart.mockResolvedValue({ data: PRIORITY_ROWS, schema: {} });
+    const user = userEvent.setup();
+    const createObjectUrl = vi.fn((_blob: Blob) => "blob:csv");
+    Object.assign(URL, { createObjectURL: createObjectUrl, revokeObjectURL: vi.fn() });
+    renderSection();
+    await screen.findByTestId("mock-chart-bar");
+    const table = screen.getByTestId("analytics-custom-table");
+    await user.click(within(table).getByRole("button", { name: "Search" }));
+    await user.type(within(table).getByPlaceholderText("Search"), "no match");
+    expect(within(table).getAllByRole("row")).toHaveLength(2);
+    expect(within(table).getByTestId("analytics-section-guidance")).toHaveTextContent(GUIDANCE);
+    await user.click(within(table).getByRole("button", { name: "Export as csv" }));
+    expect(createObjectUrl).not.toHaveBeenCalled();
   });
 });
