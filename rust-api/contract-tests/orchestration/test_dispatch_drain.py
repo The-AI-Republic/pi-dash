@@ -163,6 +163,19 @@ def test_fire_tick_continuation_assigns(api_client, broker):
         return tick and tick["last_tick_at"] is not None
 
     db.wait_for_condition(_claimed, what="fire_tick claimed")
+
+    def _assigned():
+        # The claim commits before the dispatch (test_ticker_tasks.py
+        # documents the window): poll the converged assigned row, not
+        # the claim mark. Pre-fix this times out (run stuck queued).
+        row = _fetchone(
+            "SELECT id, status FROM agent_run WHERE work_item_id=%s AND status IN"
+            " ('queued','assigned') ORDER BY created_at DESC LIMIT 1",
+            (issue,),
+        )
+        return row is not None and row["status"] == "assigned"
+
+    db.wait_for_condition(_assigned, what="fire_tick continuation assigned")
     new_run = _fetchone(
         "SELECT id FROM agent_run WHERE work_item_id=%s AND status IN"
         " ('queued','assigned') ORDER BY created_at DESC LIMIT 1",
@@ -286,6 +299,21 @@ def test_sweep_handoff_assigns_replacement(db_conn, broker):
             ) is not None
 
         db.wait_for_condition(_replaced, what="handoff replacement created")
+
+        def _replacement_assigned():
+            # The replacement row commits before its on_commit target
+            # drain lands: poll the converged assigned row. Pre-fix
+            # this times out (replacement stuck queued).
+            row = _fetchone(
+                "SELECT status FROM agent_run"
+                " WHERE work_item_id=%s AND parent_run_id=%s",
+                (issue, src_run),
+            )
+            return row is not None and row["status"] == "assigned"
+
+        db.wait_for_condition(
+            _replacement_assigned, what="handoff replacement assigned"
+        )
         replacement = _fetchone(
             "SELECT id, pod_id FROM agent_run"
             " WHERE work_item_id=%s AND parent_run_id=%s",
