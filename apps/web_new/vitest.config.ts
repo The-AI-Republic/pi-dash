@@ -31,11 +31,10 @@ export default defineConfig({
     // `// @vitest-environment jsdom` pragma on their first line.
     environment: "node",
     setupFiles: ["./src/test-setup.ts"],
-    // Fork workers and keep the pool small: the reporter RPC runs in the main
-    // process and times out at 60s when a large run saturates it. See
+    // Keep the worker pool below Vitest's cpus - 1 default: the reporter and
+    // coverage work share the main process, and a saturated main process can
+    // miss the worker RPC's 60s deadline after every test has passed. See
     // src/testing/testRunConcurrency.ts.
-    pool: "forks",
-    minWorkers: 1,
     maxWorkers: FULL_RUN_MAX_WORKERS,
     // A full run is ~7 000 tests; on a busy host the tail of the per-test
     // distribution is queueing time, not test work (measured p99.9 8.4 s at
