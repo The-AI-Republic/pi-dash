@@ -16,7 +16,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { CycleRow as CycleRowData } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -397,5 +397,36 @@ describe("CyclesListBody", () => {
     expect(screen.getByTestId("cycles-list-layout-trigger")).toHaveTextContent("List layout");
     expect(screen.queryByTestId("cycle-group-upcoming-gallery")).not.toBeInTheDocument();
     expect(screen.getByText("November push")).toBeInTheDocument();
+  });
+
+  it("returns to list rows when a gallery choice is followed by widening the viewport", async () => {
+    const media = {
+      matches: true,
+      listeners: [] as Array<(event: { matches: boolean }) => void>,
+    };
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      get matches() {
+        return media.matches;
+      },
+      media: query,
+      addEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+        media.listeners.push(listener);
+      },
+      removeEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+        media.listeners = media.listeners.filter((entry) => entry !== listener);
+      },
+    }));
+    renderBody();
+    await screen.findByText("November push");
+    fireEvent.click(screen.getByTestId("cycles-list-layout-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Gallery layout" }));
+    expect(screen.getByTestId("cycle-group-upcoming-gallery")).toBeInTheDocument();
+    act(() => {
+      media.matches = false;
+      for (const listener of media.listeners) listener({ matches: false });
+    });
+    expect(screen.queryByTestId("cycles-list-layout-menu")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-group-upcoming-gallery")).not.toBeInTheDocument();
+    for (const row of screen.getAllByTestId("cycle-row")) expect(row.className).not.toContain("rounded-");
   });
 });

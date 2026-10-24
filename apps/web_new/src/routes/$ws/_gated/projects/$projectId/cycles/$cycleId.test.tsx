@@ -620,6 +620,11 @@ describe("cycle detail route", () => {
       const view = renderRoute();
       const rendered = await screen.findByTestId(layout.testId);
       if (layout.editable) expect(rendered).toHaveAttribute("data-can-edit", "false");
+      if (layout.editable) expect(rendered).toHaveAttribute("data-cycle", CYCLE);
+      if (layout.kind === "spreadsheet") expect(rendered).toHaveAttribute("data-scope", "cycle");
+      if (layout.kind === "gantt_chart") expect(rendered).toHaveAttribute("data-count", "2");
+      expect(screen.getByTestId("layout-root")).toHaveAttribute("data-total", "2");
+      expect(screen.getByTestId("layout-root")).toHaveAttribute("data-result", "2");
       expect(screen.getByTestId("cycle-detail-badge")).toHaveTextContent("2");
       expect(screen.getByTestId("analytics-entry")).toHaveAttribute("data-total", "2");
       expect(screen.getByTestId("detail-sidebar")).toHaveAttribute("data-editable", "false");

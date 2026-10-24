@@ -19,6 +19,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { usePickerWorkspaceMembers } from "../../../shared/pickers/reference.js";
+import { useNarrowViewport } from "../../../shared/shell/index.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
 import { isProjectAuthorized } from "../../projects/index.js";
 import { cyclesListQueryOptions } from "../api/queries.js";
@@ -77,8 +78,12 @@ export function CyclesListBody({
     completed: false,
   });
   // Narrow-screen row presentation (CYC-048): pure display state,
-  // chosen from the layout menu below the toolbar.
-  const [listLayout, setListLayout] = React.useState<CycleListLayout>(DEFAULT_CYCLE_LIST_LAYOUT);
+  // chosen from the layout menu below the toolbar. Wide viewports always
+  // render list rows, so a choice made while narrow does not survive a
+  // resize back to wide.
+  const narrow = useNarrowViewport();
+  const [selectedLayout, setSelectedLayout] = React.useState<CycleListLayout>(DEFAULT_CYCLE_LIST_LAYOUT);
+  const listLayout = narrow ? selectedLayout : DEFAULT_CYCLE_LIST_LAYOUT;
 
   const groups = React.useMemo(() => {
     const matching = filterCyclesByQuery(cycles.data ?? [], query);
@@ -130,7 +135,7 @@ export function CyclesListBody({
         {filterControl}
         {headerActions}
       </div>
-      <CycleListLayoutMenu layout={listLayout} onLayoutChange={setListLayout} />
+      <CycleListLayoutMenu layout={listLayout} onLayoutChange={setSelectedLayout} />
       {chips}
       {hero ?? (
         <ActiveCycleHero
