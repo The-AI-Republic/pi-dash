@@ -427,6 +427,24 @@ describe("ModuleSaveDialog — create", () => {
     expect(titleField()).toHaveValue("");
   });
 
+  it("swallows an outside press while a write flies so the form survives", async () => {
+    let release: () => void = () => undefined;
+    harness.blockWrite = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { onOpenChange } = renderDialog();
+    fireEvent.change(titleField(), { target: { value: "Pending" } });
+    submit("Create Module");
+    await screen.findByRole("button", { name: "Creating module…" });
+    await userEvent.click(document.querySelector("[data-base-ui-backdrop]") ?? document.body);
+    // Only the click-away is held back; Escape still closes.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(titleField()).toHaveValue("Pending");
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape", code: "Escape" });
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    release();
+  });
+
   it("keeps the dialog up while a write flies, then closes on success", async () => {
     let release: () => void = () => undefined;
     harness.blockWrite = new Promise<void>((resolve) => {
