@@ -110,3 +110,26 @@ describe("IntakeShell header create control (INT-013)", () => {
     expect(screen.queryByTestId("intake-header-create")).toBeNull();
   });
 });
+
+describe("IntakeShell narrow viewport (INT-030)", () => {
+  it("floats the list as an overlay above the content while open", () => {
+    render(<IntakeShell {...BASE} narrow mobileListOpen detail={<p>request detail</p>} />);
+    const overlay = screen.getByTestId("intake-list-overlay");
+    expect(overlay).toContainElement(screen.getByTestId("intake-list-pane"));
+    expect(screen.getByTestId("intake-content-pane")).toBeInTheDocument();
+    expect(screen.getByText("request detail")).toBeInTheDocument();
+  });
+
+  it("drops the list entirely while the overlay is shut", () => {
+    render(<IntakeShell {...BASE} narrow mobileListOpen={false} detail={<p>request detail</p>} />);
+    expect(screen.queryByTestId("intake-list-overlay")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("intake-list-pane")).not.toBeInTheDocument();
+    expect(screen.getByText("request detail")).toBeInTheDocument();
+  });
+
+  it("ignores the overlay switch on wide viewports", () => {
+    render(<IntakeShell {...BASE} mobileListOpen={false} />);
+    expect(screen.queryByTestId("intake-list-overlay")).not.toBeInTheDocument();
+    expect(screen.getByTestId("intake-list-pane")).toBeInTheDocument();
+  });
+});

@@ -52,7 +52,7 @@ function jsonResponse(url: string, status: number, body: unknown): TransportResp
   return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) } as TransportResponse;
 }
 
-function projectRow(inboxView = true, name = "Apollo") {
+function projectRow(inboxView = true, name = "Apollo", guestViewAll = false) {
   return {
     id: PROJECT_ID,
     name,
@@ -68,7 +68,7 @@ function projectRow(inboxView = true, name = "Apollo") {
     page_view: false,
     inbox_view: inboxView,
     is_default: false,
-    guest_view_all_features: false,
+    guest_view_all_features: guestViewAll,
     project_lead: null,
     network: 0,
     created_at: "2026-01-02T03:04:05Z",
@@ -160,6 +160,7 @@ function directoryRow(memberId: string, rowId: string, displayName: string, emai
 interface Server {
   inboxView: boolean;
   projectName: string;
+  guestViewAll?: boolean;
   pending: FakeRow[];
   closed: FakeRow[];
   listRequests: string[];
@@ -240,7 +241,7 @@ function installServer(server: Server): void {
     const path = parsed.pathname;
     if (path.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
     if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/`) {
-      return jsonResponse(url, 200, projectRow(server.inboxView, server.projectName));
+      return jsonResponse(url, 200, projectRow(server.inboxView, server.projectName, server.guestViewAll ?? false));
     }
     if (path.endsWith("/project-roles/")) {
       if (server.rolesFail) return jsonResponse(url, 500, { error: "boom" });
@@ -938,5 +939,177 @@ describe("IntakeScreen order (INT-011)", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Ascending" }));
     await waitFor(() => expect(lastListParams().get("order_by")).toBe("issue__sequence_id"));
     expect(screen.getAllByTestId("intake-row-title").map((node) => node.textContent)).toEqual(["Beta", "Alpha"]);
+  });
+});
+
+describe("IntakeScreen narrow viewport (INT-030)", () => {
+  function stubNarrow(narrow: boolean): void {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: narrow,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    }));
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the mobile chrome with the list open on narrow viewports", async () => {
+    stubNarrow(true);
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("intake-detail-header")).not.toBeInTheDocument();
+    expect(screen.getByTestId("intake-list-overlay")).toContainElement(screen.getByTestId("intake-list-pane"));
+    expect(screen.getAllByTestId("intake-row-title").map((node) => node.textContent)).toEqual(["Alpha", "Beta"]);
+  });
+
+  it("toggles the list shut and open from the mobile header", async () => {
+    stubNarrow(true);
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByTestId("intake-mobile-header");
+    const toggle = screen.getByRole("button", { name: "Request list" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId("intake-list-pane")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Request list" })).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Request list" }));
+    expect(screen.getByTestId("intake-list-pane")).toBeInTheDocument();
+  });
+
+  it("closes the overlay when a row is picked", async () => {
+    stubNarrow(true);
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    const onSearchChange = renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByTestId("intake-mobile-header");
+    fireEvent.click(screen.getByText("Beta"));
+    expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open", inboxIssueId: ISSUE_2 });
+    expect(screen.queryByTestId("intake-list-pane")).not.toBeInTheDocument();
+  });
+
+  it("reopens the overlay when the selection clears", async () => {
+    stubNarrow(true);
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    const { rerender } = renderScreenWithRerender({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByTestId("intake-mobile-header");
+    fireEvent.click(screen.getByRole("button", { name: "Request list" }));
+    expect(screen.queryByTestId("intake-list-pane")).not.toBeInTheDocument();
+    rerender({ currentTab: "open" });
+    expect(await screen.findByTestId("intake-list-pane")).toBeInTheDocument();
+  });
+
+  it("keeps the triage actions reachable from the mobile menu", async () => {
+    stubNarrow(true);
+    const user = userEvent.setup();
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByTestId("intake-mobile-header");
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual(
+      expect.arrayContaining(["Snooze", "Mark as duplicate", "Accept", "Decline", "Delete"])
+    );
+  });
+
+  it("stays two-pane on wide viewports", async () => {
+    stubNarrow(false);
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("intake-mobile-header")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("intake-list-overlay")).not.toBeInTheDocument();
+    expect(screen.getByTestId("intake-list-pane")).toBeInTheDocument();
+  });
+});
+
+describe("IntakeScreen guest visibility (INT-032)", () => {
+  function listTitles(): string[] {
+    return screen.getAllByTestId("intake-row-title").map((node) => node.textContent ?? "");
+  }
+
+  function creatorParams(): Array<string | null> {
+    return server.listRequests.map((search) => new URLSearchParams(search).get("created_by"));
+  }
+
+  it("shows a guest only their own requests and sends no creator filter", async () => {
+    server.roles = { [PROJECT_ID]: 5 };
+    server.pending = [{ issueId: ISSUE_1, name: "Mine" }];
+    installServer(server);
+    renderScreen({ currentTab: "open" });
+    await waitFor(() => expect(listTitles()).toEqual(["Mine"]));
+    expect(server.listRequests.length).toBeGreaterThan(0);
+    expect(creatorParams()).toEqual(server.listRequests.map(() => null));
+  });
+
+  it("opens a guest's own request", async () => {
+    server.roles = { [PROJECT_ID]: 5 };
+    server.pending = [{ issueId: ISSUE_1, name: "Mine" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await waitFor(() => expect(listTitles()).toEqual(["Mine"]));
+    expect(await screen.findByTestId("intake-detail")).toBeInTheDocument();
+  });
+
+  it("falls back to the scoped list when a guest opens another's request", async () => {
+    server.roles = { [PROJECT_ID]: 5 };
+    server.pending = [{ issueId: ISSUE_1, name: "Mine" }];
+    server.detailStatus = 403;
+    installServer(server);
+    const onSearchChange = renderScreen({ currentTab: "open", inboxIssueId: ISSUE_2 });
+    await screen.findByText("Mine");
+    await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open" }, { replace: true }));
+    await waitFor(() => expect(server.listRequests.length).toBeGreaterThan(1));
+    expect(listTitles()).toEqual(["Mine"]);
+  });
+
+  it("shows a guest every request once the project lets guests view all", async () => {
+    server.roles = { [PROJECT_ID]: 5 };
+    server.guestViewAll = true;
+    server.pending = [
+      { issueId: ISSUE_1, name: "Mine" },
+      { issueId: ISSUE_2, name: "Theirs" },
+    ];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_2 });
+    await waitFor(() => expect(listTitles()).toEqual(["Mine", "Theirs"]));
+    expect(await screen.findByTestId("intake-detail")).toBeInTheDocument();
+  });
+
+  it("shows a member every request", async () => {
+    server.roles = { [PROJECT_ID]: 15 };
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_2 });
+    await waitFor(() => expect(listTitles()).toEqual(["Alpha", "Beta"]));
+    expect(await screen.findByTestId("intake-detail")).toBeInTheDocument();
+  });
+
+  it("shows an admin every request", async () => {
+    server.roles = { [PROJECT_ID]: 20 };
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await waitFor(() => expect(listTitles()).toEqual(["Alpha", "Beta"]));
+    expect(await screen.findByTestId("intake-detail")).toBeInTheDocument();
   });
 });

@@ -66,6 +66,14 @@ export {
 export type { IntakeDeleteDialogProps } from "./components/IntakeDeleteDialog.js";
 export { IntakeChips } from "./components/IntakeChips.js";
 export type { IntakeChipsProps } from "./components/IntakeChips.js";
+export { IntakeDuplicateIndicator } from "./components/IntakeDuplicateIndicator.js";
+export type { IntakeDuplicateIndicatorProps } from "./components/IntakeDuplicateIndicator.js";
+export { MOBILE_LIST_TOGGLE_LABEL, IntakeMobileHeader } from "./components/IntakeMobileHeader.js";
+export type { IntakeMobileHeaderProps } from "./components/IntakeMobileHeader.js";
+export { INTAKE_IN_APP_SOURCE, IntakeSourcePill, intakeSourcePillLabel } from "./components/IntakeSourcePill.js";
+export type { IntakeSourcePillProps } from "./components/IntakeSourcePill.js";
+export { intakeMobileMenuItems } from "./components/intakeMobileMenuItems.js";
+export type { IntakeMobileMenuInput } from "./components/intakeMobileMenuItems.js";
 export { IntakeDateFilter } from "./components/IntakeDateFilter.js";
 export type { IntakeDateFilterProps } from "./components/IntakeDateFilter.js";
 export { IntakeDetail } from "./components/IntakeDetail.js";
@@ -109,8 +117,9 @@ export {
   TRIAGE_ACCEPT_LABEL,
   TRIAGE_DECLINE_LABEL,
   IntakeTriageActions,
+  IntakeTriageDialogs,
 } from "./components/IntakeTriageActions.js";
-export type { IntakeTriageActionsProps } from "./components/IntakeTriageActions.js";
+export type { IntakeTriageActionsProps, IntakeTriageDialogsProps } from "./components/IntakeTriageActions.js";
 export { IntakeGate } from "./components/IntakeGate.js";
 export type { IntakeGateProps } from "./components/IntakeGate.js";
 export { INTAKE_PAGE_SKELETON_COUNT, IntakeListPager } from "./components/IntakeListPager.js";

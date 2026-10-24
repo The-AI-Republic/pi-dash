@@ -63,6 +63,35 @@ export function IntakeTriageActions({
       >
         {TRIAGE_DECLINE_LABEL}
       </Button>
+      <IntakeTriageDialogs
+        controls={controls}
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        projectName={projectName}
+        projectIdentifier={projectIdentifier}
+        issueId={issueId}
+      />
+    </>
+  );
+}
+
+export type IntakeTriageDialogsProps = IntakeTriageActionsProps;
+
+/**
+ * The five triage dialogs without the buttons (INT-030). The mobile
+ * header fires the same controls object from its menu entries, so it
+ * mounts only the dialogs; the buttons stay a desktop-header control.
+ */
+export function IntakeTriageDialogs({
+  controls,
+  workspaceSlug,
+  projectId,
+  projectName,
+  projectIdentifier,
+  issueId,
+}: IntakeTriageDialogsProps): React.ReactElement {
+  return (
+    <>
       <WorkItemCreateDialog
         open={controls.openDialog === "accept"}
         onOpenChange={(open) => {

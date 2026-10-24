@@ -30,6 +30,17 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
   return { ...original, ...uploadMocks };
 });
 
+const editionHarness = vi.hoisted(() => ({ flags: {} as Record<string, boolean> }));
+vi.mock("../../../core/edition/index.js", async (importOriginal) => {
+  const original = await importOriginal<Record<string, unknown>>();
+  return {
+    ...original,
+    get edition() {
+      return { id: "test", flags: editionHarness.flags };
+    },
+  };
+});
+
 vi.mock("../../../shared/editor/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/editor/index.js")>();
   // Mirrors the real editor: the starting HTML is read once, at mount,
@@ -80,6 +91,7 @@ vi.mock("../../../shared/editor/index.js", async (importOriginal) => {
 
 import { formatDayLong } from "../../issues/dropdowns/calendar.js";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { ISSUE_DEDUPE_FLAG } from "../../../core/edition/index.js";
 import { setSessionClient } from "../../../core/session/queries.js";
 import {
   INTAKE_CREATED_BODY,
@@ -130,6 +142,8 @@ interface StubOptions {
   triageMissing?: boolean;
   /** Answer the instance read with an LLM-configured instance. */
   instanceLlm?: boolean;
+  /** Answer duplicate-search reads with these hits (default none). */
+  searchHits?: unknown[];
 }
 
 function createdDetail(name: string) {
@@ -353,6 +367,7 @@ function installServer(options: StubOptions = {}) {
     // The profile read backs the date picker's week start; a miss falls
     // back to the Sunday default without failing the dialog.
     if (path.endsWith("/api/users/me/profile/")) return jsonResponse(url, 404, { error: "missing" });
+    if (path.endsWith("/search-issues/")) return jsonResponse(url, 200, options.searchHits ?? []);
     throw new Error(`unexpected request: ${method} ${url}`);
   }) as never);
   setSessionClient(client);
@@ -409,6 +424,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  editionHarness.flags = {};
   resetAppClient();
 });
 
@@ -673,5 +689,53 @@ describe("IntakeCreateDialog attachments (INT-017)", () => {
     fireEvent.click(submitButton());
     await waitFor(() => expect(notifyMocks.notifySuccess).toHaveBeenCalled());
     expect(postsTo(calls, "/bulk/")).toHaveLength(0);
+  });
+});
+
+describe("IntakeCreateDialog duplicate detection (INT-018)", () => {
+  function searchHit(id: string, name: string) {
+    return {
+      name,
+      id,
+      start_date: null,
+      sequence_id: 9,
+      project__name: "Apollo",
+      project__identifier: "APO",
+      project_id: PROJECT,
+      workspace__slug: WS,
+      state__name: null,
+      state__group: null,
+      state__color: null,
+    };
+  }
+
+  function searchesTo(calls: Call[]) {
+    return calls.filter((call) => call.method === "GET" && call.url.includes("/search-issues/"));
+  }
+
+  it("renders no indicator and issues no search traffic in OSS", async () => {
+    const { calls } = renderDialog();
+    await screen.findByRole("heading", { name: INTAKE_CREATE_DIALOG_TITLE });
+    fireEvent.change(titleField(), { target: { value: "Password reset loop" } });
+    // Any debounced lookup would have fired by now; the seam issues none.
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(screen.queryByTestId("intake-duplicate-indicator")).not.toBeInTheDocument();
+    expect(searchesTo(calls)).toHaveLength(0);
+  });
+
+  it("renders the indicator and opens the comparison with the seam on", async () => {
+    editionHarness.flags = { [ISSUE_DEDUPE_FLAG]: true };
+    const { calls } = renderDialog({
+      searchHits: [searchHit("123e4567-e89b-12d3-a456-426614174009", "Password reset loop")],
+    });
+    await screen.findByRole("heading", { name: INTAKE_CREATE_DIALOG_TITLE });
+    fireEvent.change(titleField(), { target: { value: "Password reset loop" } });
+    const indicator = await screen.findByTestId("intake-duplicate-indicator", undefined, { timeout: 5000 });
+    expect(searchesTo(calls)).toHaveLength(1);
+    const button = within(indicator).getByRole("button", { name: "1 possible duplicate" });
+    fireEvent.click(button);
+    expect(within(indicator).getByRole("complementary", { name: "Possible duplicates" })).toHaveTextContent(
+      "Password reset loop"
+    );
   });
 });
