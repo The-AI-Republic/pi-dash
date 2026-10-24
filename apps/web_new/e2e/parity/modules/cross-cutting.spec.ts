@@ -44,6 +44,7 @@ import {
   type AuthedSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
+import { entryTrafficViolations } from "./entryTraffic";
 
 const ROW_036 = ["MOD-036"];
 const ROW_037 = ["MOD-037"];
@@ -732,17 +733,9 @@ test(
       const paths = await driver.modulesXEntryRequestPaths(world.workspaceSlug, world.projectId);
       const listPath = `/api/workspaces/${world.workspaceSlug}/projects/${world.projectId}/modules/`;
       expect(paths.map((path) => path.replace(/\/+$/, ""))).toContain(listPath.replace(/\/+$/, ""));
-      const allowed = [
-        /\/modules\/?$/,
-        /\/modules\/[0-9a-f-]+\/?$/,
-        /archived-modules/,
-        /module-links/,
-        /user-favorite-modules/,
-        /modules\/[0-9a-f-]+\/issues/,
-      ];
-      const unknown = paths.filter((path) => !allowed.some((pattern) => pattern.test(path)));
-      expect(unknown).toEqual([]);
-      expect(paths.filter((path) => /desktop|\bee\b|license|billing|premium|upgrade/i.test(path))).toEqual([]);
+      // The spy returns every API path, so an edition- or desktop-owned
+      // endpoint reached on entry is reported here rather than hidden.
+      expect(entryTrafficViolations(paths)).toEqual({ prohibited: [], unknownModule: [] });
     });
 
     await test.step("no desktop-shell markers appear on the module surfaces", async () => {
@@ -824,16 +817,7 @@ test(
 
     await test.step("list entry talks only to the known module endpoints", async () => {
       const paths = await driver.modulesXEntryRequestPaths(world.workspaceSlug, world.projectId);
-      const allowed = [
-        /\/modules\/?$/,
-        /\/modules\/[0-9a-f-]+\/?$/,
-        /archived-modules/,
-        /module-links/,
-        /user-favorite-modules/,
-        /modules\/[0-9a-f-]+\/issues/,
-      ];
-      const unknown = paths.filter((path) => !allowed.some((pattern) => pattern.test(path)));
-      expect(unknown).toEqual([]);
+      expect(entryTrafficViolations(paths)).toEqual({ prohibited: [], unknownModule: [] });
     });
   }
 );

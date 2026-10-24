@@ -18570,7 +18570,13 @@ export class WebNewDriver implements ParityDriver {
     return this.modulesListVisibleNames();
   }
 
-  /** Pathname of every module-owned request while one list entry loads. */
+  /**
+   * Pathname of every API request while one list entry loads. Nothing is
+   * filtered out here: the scenario's allowlist is the gate, so a billing,
+   * license, upgrade or desktop endpoint reached by module traffic must
+   * reach it rather than be dropped by the spy. Asset and document
+   * requests are not endpoints and stay out.
+   */
   async modulesXEntryRequestPaths(workspaceSlug: string, projectId: string): Promise<string[]> {
     const seen = new Set<string>();
     const listener = (request: { url(): string }): void => {
@@ -18580,7 +18586,7 @@ export class WebNewDriver implements ParityDriver {
       } catch {
         return;
       }
-      if (!/module/i.test(path) && !/favorite/i.test(path)) return;
+      if (!path.startsWith("/api/")) return;
       seen.add(path);
     };
     this.page.on("request", listener);
@@ -18611,10 +18617,6 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ timeout: WebNewDriver.WAIT_MS })
       .catch(() => undefined);
     return this.isShown(this.modulesFilterPanel());
-  }
-
-  async modulesXAnalyticsSidebarVisible(): Promise<boolean> {
-    return this.isShown(this.page.getByTestId("modules-analytics-sidebar"));
   }
 
   async modulesXEditionGateMarkersPresent(scope: "list" | "detail"): Promise<boolean> {

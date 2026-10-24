@@ -11,6 +11,7 @@
 import type { Locator, Page } from "@playwright/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { entryTrafficViolations } from "../modules/entryTraffic";
 import { WebNewDriver } from "./web-new";
 
 interface Answer {
@@ -382,7 +383,7 @@ describe("the layout and analytics reads", () => {
 });
 
 describe("the traffic allowlist (MOD-042/043)", () => {
-  it("collects only module-owned paths from one list entry and detaches", async () => {
+  it("returns every API path from one list entry and detaches", async () => {
     const fake = new FakePage({ [SETTLED]: { count: 1 } });
     const driver = new WebNewDriver(fake.asPage());
     const open = vi.spyOn(driver, "modulesXOpenModulesList").mockImplementation(async () => {
@@ -390,12 +391,53 @@ describe("the traffic allowlist (MOD-042/043)", () => {
       fake.emitRequest("https://api.test/api/workspaces/acme/user-favorite-modules/");
       fake.emitRequest("https://api.test/api/workspaces/acme/projects/p1/");
       fake.emitRequest("https://api.test/api/billing/subscriptions/");
+      fake.emitRequest("https://api.test/api/workspaces/acme/projects/p1/modules/?limit=1");
+      fake.emitRequest("https://api.test/assets/logo.svg");
       fake.emitRequest("not a url");
     });
     const paths = await driver.modulesXEntryRequestPaths("acme", "p1");
     expect(open).toHaveBeenCalledWith("acme", "p1");
-    expect(paths).toEqual(["/api/workspaces/acme/projects/p1/modules/", "/api/workspaces/acme/user-favorite-modules/"]);
+    // Frame reads and the billing path survive the spy: nothing is
+    // filtered here, so the scenario's rules see the whole entry. Query
+    // strings and non-API requests are not part of the endpoint set.
+    expect(paths).toEqual([
+      "/api/billing/subscriptions/",
+      "/api/workspaces/acme/projects/p1/",
+      "/api/workspaces/acme/projects/p1/modules/",
+      "/api/workspaces/acme/user-favorite-modules/",
+    ]);
     expect(fake.requests).toHaveLength(0);
+  });
+
+  it("reports module traffic the spec does not name as an unknown endpoint", async () => {
+    const paths = [
+      "/api/workspaces/acme/projects/p1/modules/",
+      "/api/workspaces/acme/projects/p1/archived-modules/",
+      "/api/workspaces/acme/projects/p1/module-links/",
+      "/api/workspaces/acme/projects/p1/modules/1/issues/",
+      "/api/workspaces/acme/projects/p1/",
+    ];
+    expect(entryTrafficViolations(paths)).toEqual({ prohibited: [], unknownModule: [] });
+    expect(entryTrafficViolations([...paths, "/api/workspaces/acme/projects/p1/module-extras/"])).toEqual({
+      prohibited: [],
+      unknownModule: ["/api/workspaces/acme/projects/p1/module-extras/"],
+    });
+  });
+
+  it("fails an entry that reaches a billing, license, plan or desktop endpoint", async () => {
+    const clean = ["/api/workspaces/acme/projects/p1/modules/", "/api/workspaces/acme/projects/p1/"];
+    expect(entryTrafficViolations(clean).prohibited).toEqual([]);
+    for (const path of [
+      "/api/billing/subscriptions/",
+      "/api/instances/licenses/",
+      "/api/workspaces/acme/premium/",
+      "/api/workspaces/acme/projects/p1/upgrade/",
+      "/api/desktop/sync/",
+      "/api/tauri/updates/",
+      "/api/workspaces/acme/projects/p1/plans/",
+    ]) {
+      expect(entryTrafficViolations([...clean, path]).prohibited, path).toEqual([path]);
+    }
   });
 });
 
