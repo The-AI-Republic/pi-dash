@@ -133,19 +133,16 @@ use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
 use pidash_db::app_project::models::project::ProjectLookup;
 use pidash_db::config::RunnerSettings;
 use pidash_db::dispatch::AgentRunStatus;
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
 use pidash_db::runner_sessions::machine_outbox::{self, MachineOutboxError};
 use pidash_db::runner_sessions::models::runner_session;
 use pidash_db::runner_sessions::outbox as runner_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::runner_sessions::RunnerSession;
-use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_services::app_issues::issue_move::{
     CREATE_ADVISORY_LOCK_SQL, CREATE_SAVE_DEFAULT_STATE_SQL, CREATE_SAVE_FALLBACK_STATE_SQL,
@@ -163,20 +160,11 @@ use pidash_services::app_issues::{
     SOURCE_ISSUE_SQL, WORKSPACE_SLUG_SQL,
 };
 use pidash_services::app_issues::{HandoffRunRow, RepointTarget};
-use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::orchestration::blockers::{has_open_blockers_sql, summary_sql, BlockerRow};
-use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
-    create_project_move_handoff_run, AdmissionError, CreationError, CreationSeam, ExecutionError,
-    ExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, HandoffCreateRequest, IssueView,
-    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RenderedTurn, RunView,
-    RunnerView, StateView, STATE_SELECT_SQL,
+    create_project_move_handoff_run, CreationSeam, HandoffCreateRequest,
 };
-use pidash_services::orchestration::entries::{
-    capture_prior_state, fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest,
-    NewSchedulerRun, PreflightSeam, SchedulerView, WorkspaceView, PRIOR_STATE_SELECT_SQL,
-};
-use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
+use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
 use pidash_services::runner_sessions::drain::{
     drain_pod_log, next_for_runner_sql, plan_assignment, AssignmentFacts, DrainEffect,
     ASSIGN_RUN_UPDATE_SQL, DRAIN_POD_BY_ID_LOOKUP_SQL, DRAIN_POD_IDLE_RUNNERS_SQL,
@@ -189,7 +177,6 @@ use pidash_services::v1_work_items::queries_search as q;
 use pidash_services::v1_work_items::shape_issue::{
     BlockerSummary, IssueRow as ApiIssueRow, RepresentationInput, SummaryItem,
 };
-use pidash_types::dispatch::AgentExecutorKind;
 
 use crate::orchestration::{
     drain_creation_outboxes, handoff_store, split_outboxes, CreationDrainError, CreationOutboxes,
@@ -1029,8 +1016,7 @@ async fn move_inner(
     );
     let now = Utc::now();
     // The pre-save snapshot, before the move's own write.
-    let mut signal = MoveSignalSeam { pool: &pre.pool };
-    let prev = capture_prior_state(&mut signal, Some(*pk))
+    let prev = crate::issue_transition::capture_prior_state_pool(&pre.pool, Some(*pk))
         .await
         .map_err(|_| Denial::ServerError)?;
     let store = PoolMoveStore::new(&pre.pool, SpanCreationDeps::from_state(state));
@@ -1110,7 +1096,9 @@ async fn move_inner(
             }
             run_post_commit(state, &pre.pool, &moved.post_commit).await?;
             fire_after_move(
+                state,
                 &pre.pool,
+                pre.actor.id,
                 *pk,
                 prev,
                 moved.issue.row.state_id,
@@ -1322,8 +1310,12 @@ fn redis_client(state: &AppState) -> Option<redis::Client> {
 /// always changes here, `dispatch_immediate` is false exactly when
 /// handoff runs exist, `moved_by_run` stays `None`. A handler failure
 /// answers `Failed` with the verbatim log line — the move stands.
+/// Drives the one live seam (PIDASHCONV-1216), like every other save path.
+#[allow(clippy::too_many_arguments)]
 async fn fire_after_move(
+    state: &AppState,
     pool: &PgPool,
+    actor_id: Uuid,
     issue_id: Uuid,
     prev_state_id: Option<Uuid>,
     current_state_id: Option<Uuid>,
@@ -1331,12 +1323,11 @@ async fn fire_after_move(
     created_by: Option<Uuid>,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
-    let mut seam = MoveSignalSeam { pool };
-    let mut preflight = MovePreflight;
-    let outcome = fire_state_transition(
-        &mut seam,
-        &mut preflight,
-        &FireRequest {
+    let outcome = crate::issue_transition::fire_issue_transition(
+        state,
+        pool,
+        actor_id,
+        FireRequest {
             issue_id,
             prev_state_id,
             current_state_id,
@@ -2355,303 +2346,6 @@ impl MoveStore for PoolMoveStore<'_> {
             })
         })
         .transpose()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Move signal seam (594)
-// ---------------------------------------------------------------------------
-
-/// The 594 [`EntriesSeam`] for the move's save: `state` + `prior_state_id`
-/// are live (they cover the capture and the driver's non-trigger early
-/// return — every gate seed, the backlog norm); the ticker/creation
-/// surface answers store errors, which the fire swallows by design
-/// (counter + the verbatim log line) while the move stands. The archive
-/// handler's precedent, with the live lookups this path needs.
-struct MoveSignalSeam<'a> {
-    pool: &'a PgPool,
-}
-
-/// A creation-runtime method the move's fire reached past a ticking
-/// transition without the D-11/D-12 runtime. The fire maps it to
-/// `Failed` (logged); the move stands.
-fn move_seam_gap<T>(method: &str) -> Result<T, CreationError> {
-    Err(CreationError::Db(format!(
-        "move signal seam: {method} needs the D-12 creation runtime"
-    )))
-}
-
-impl CreationSeam for MoveSignalSeam<'_> {
-    async fn issue(&mut self, _issue_id: Uuid) -> Result<IssueView, CreationError> {
-        move_seam_gap("issue")
-    }
-
-    async fn project(&mut self, _project_id: Uuid) -> Result<ProjectView, CreationError> {
-        move_seam_gap("project")
-    }
-
-    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
-        let Some(state_id) = state_id else {
-            return Ok(None);
-        };
-        let row: Option<(Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
-            .bind(state_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        row.map(|(id, name, group)| StateView { id, name, group })
-            .ok_or_else(|| CreationError::MissingRow("state".to_owned()))
-            .map(Some)
-    }
-
-    async fn latest_prior_run(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("latest_prior_run")
-    }
-
-    async fn active_run_for(&mut self, _issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("active_run_for")
-    }
-
-    async fn run(&mut self, _run_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("run")
-    }
-
-    async fn runner(&mut self, _runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        move_seam_gap("runner")
-    }
-
-    async fn assigned_pod(&mut self, _pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
-        move_seam_gap("assigned_pod")
-    }
-
-    async fn default_pod_for_project(
-        &mut self,
-        _project_id: Uuid,
-    ) -> Result<Option<PodView>, CreationError> {
-        move_seam_gap("default_pod_for_project")
-    }
-
-    async fn resume_parent_run_id(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<Uuid>, CreationError> {
-        move_seam_gap("resume_parent_run_id")
-    }
-
-    async fn work_item_id_for_run(&mut self, _run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        move_seam_gap("work_item_id_for_run")
-    }
-
-    async fn lock_issue_for_handoff(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<LockedIssue>, CreationError> {
-        move_seam_gap("lock_issue_for_handoff")
-    }
-
-    async fn lock_run_for_handoff(
-        &mut self,
-        _run_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("lock_run_for_handoff")
-    }
-
-    async fn user_flags(&mut self, _user_id: Uuid) -> Result<UserFlags, CreationError> {
-        move_seam_gap("user_flags")
-    }
-
-    async fn insert_run(&mut self, _row: &NewAgentRun) -> Result<RunView, CreationError> {
-        move_seam_gap("insert_run")
-    }
-
-    async fn save_prompt(
-        &mut self,
-        _run_id: Uuid,
-        _prompt: &str,
-        _manifest: &Value,
-    ) -> Result<(), CreationError> {
-        move_seam_gap("save_prompt")
-    }
-
-    async fn save_run_config(
-        &mut self,
-        _run_id: Uuid,
-        _config: &Value,
-    ) -> Result<(), CreationError> {
-        move_seam_gap("save_run_config")
-    }
-
-    async fn execution_fields(
-        &mut self,
-        _req: &ExecutionRequest,
-    ) -> Result<ExecutionFields, ExecutionError> {
-        Err(ExecutionError::Store(CreationError::Db(
-            "move signal seam: execution_fields needs the D-12 creation runtime".to_owned(),
-        )))
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        _workspace_id: Uuid,
-        _executor_kind: AgentExecutorKind,
-        _automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError> {
-        move_seam_gap("lock_cloud_creation_capacity")
-    }
-
-    fn dispatch_after_commit(&mut self, _run_id: Uuid) {}
-
-    async fn render_bundle(
-        &mut self,
-        _issue_id: Uuid,
-        _run_id: Uuid,
-        _parent_run_id: Option<Uuid>,
-        _trigger: &str,
-        _created_by_id: Uuid,
-    ) -> Result<RenderBundle, CreationError> {
-        move_seam_gap("render_bundle")
-    }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        String::new()
-    }
-}
-
-impl FinalizeAgentRunSeam for MoveSignalSeam<'_> {
-    async fn finalize_failed_run(
-        &mut self,
-        _run_id: Uuid,
-        _error_code: &str,
-        _error: &str,
-        _now: DateTime<Utc>,
-    ) -> Result<RunView, CreationError> {
-        move_seam_gap("finalize_failed_run")
-    }
-}
-
-impl EntriesSeam for MoveSignalSeam<'_> {
-    async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        Ok(row.and_then(|(_, state_id)| state_id))
-    }
-
-    async fn queued_follow_up(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("queued_follow_up")
-    }
-
-    async fn lock_ticker(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        move_seam_gap("lock_ticker")
-    }
-
-    async fn save_ticker(
-        &mut self,
-        _row: &IssueAgentTicker,
-        _write: ClockWrite,
-    ) -> Result<(), CreationError> {
-        move_seam_gap("save_ticker")
-    }
-
-    fn set_rollback(&mut self) {}
-
-    async fn clock_policy(
-        &mut self,
-        _project_id: Uuid,
-    ) -> Result<ProjectClockPolicy, CreationError> {
-        move_seam_gap("clock_policy")
-    }
-
-    async fn binding(&mut self, _binding_id: Uuid) -> Result<BindingView, CreationError> {
-        move_seam_gap("binding")
-    }
-
-    async fn scheduler_override_pod(
-        &mut self,
-        _pod_id: Uuid,
-        _project_id: Option<Uuid>,
-    ) -> Result<Option<PodView>, CreationError> {
-        move_seam_gap("scheduler_override_pod")
-    }
-
-    async fn workspace(&mut self, _workspace_id: Uuid) -> Result<WorkspaceView, CreationError> {
-        move_seam_gap("workspace")
-    }
-
-    async fn scheduler_row(&mut self, _scheduler_id: Uuid) -> Result<SchedulerView, CreationError> {
-        move_seam_gap("scheduler_row")
-    }
-
-    async fn scheduler_override_rows(
-        &mut self,
-        _workspace_id: Uuid,
-    ) -> Result<Vec<OverrideRow>, CreationError> {
-        move_seam_gap("scheduler_override_rows")
-    }
-
-    async fn project_role_facts(
-        &mut self,
-        _user_id: Uuid,
-        _workspace_slug: &str,
-        _project_id: Uuid,
-    ) -> Result<ProjectRoleFacts, CreationError> {
-        move_seam_gap("project_role_facts")
-    }
-
-    async fn has_usable_llm_config(&mut self, _user_id: Uuid) -> Result<bool, CreationError> {
-        move_seam_gap("has_usable_llm_config")
-    }
-
-    async fn agent_system_user(
-        &mut self,
-    ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError> {
-        move_seam_gap("agent_system_user")
-    }
-
-    async fn insert_scheduler_run(
-        &mut self,
-        _row: &NewSchedulerRun,
-    ) -> Result<RunView, CreationError> {
-        move_seam_gap("insert_scheduler_run")
-    }
-
-    fn compose_scheduler_turn(
-        &mut self,
-        _context: &Value,
-        _index: &OverrideIndex,
-        _workspace_id: Option<&str>,
-        _executor_kind: Option<&str>,
-        _tool_catalog_version: i64,
-    ) -> Result<RenderedTurn, String> {
-        Err("move signal seam: compose_scheduler_turn needs the D-12 creation runtime".to_owned())
-    }
-}
-
-/// Preflight for the move's fire: the L8 eligibility check is unmerged,
-/// so any dispatch decision fails closed (the entry aborts loudly, the
-/// move stands).
-struct MovePreflight;
-
-impl PreflightSeam for MovePreflight {
-    async fn preflight_eligibility_or_bounce(
-        &mut self,
-        _issue_id: Uuid,
-        _creator_id: Uuid,
-        _pod_id: Uuid,
-        _triggered_by: &str,
-    ) -> Result<bool, CreationError> {
-        move_seam_gap("preflight_eligibility_or_bounce")
     }
 }
 
