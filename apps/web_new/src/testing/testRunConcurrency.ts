@@ -3,15 +3,19 @@
 // See the LICENSE file for details.
 
 /**
- * Resource limits for a test run.
+ * Resource limits for a full test run.
  *
  * Vitest's worker-to-main RPC gives the main process 60 seconds to answer an
- * `onTaskUpdate` call. A full run on a loaded host can keep the main process
- * busy long enough to miss that deadline while every assertion passes, which
- * turns the run's exit code into an infrastructure failure. Fork workers keep
- * the test isolates out of the main process, and the caps keep both test
- * execution and v8 coverage processing within the host's capacity instead of
- * queueing work the reporter then has to wait for.
+ * `onTaskUpdate` call, and that deadline is hardcoded in birpc: Vitest 3
+ * passes no `timeout`, so it cannot be raised from configuration. On a large
+ * run the main process also carries the reporters and the v8 coverage work,
+ * and on a shared host it can miss the deadline while every assertion passes.
+ * The run then exits 1 with an infrastructure error instead of a test result.
+ *
+ * Bounding the pool is the available lever. Vitest's defaults here are three
+ * forks (`cpus - 1` on a four-vCPU host) and a coverage processing
+ * concurrency of `min(20, cpus)` (four). The caps below leave the main
+ * process room to answer the RPC without changing what any test asserts.
  */
 export const FULL_RUN_MAX_WORKERS = 2;
 
