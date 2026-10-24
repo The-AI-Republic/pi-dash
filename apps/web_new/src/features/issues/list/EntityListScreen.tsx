@@ -70,6 +70,8 @@ export interface EntityListScreenProps {
   completedModule?: boolean | undefined;
   peekKey: string | null;
   onPeekChange: (key: string | null) => void;
+  /** Peeked project from the URL, when it differs from the route (ISS-167). */
+  peekProjectId?: string | null | undefined;
   compact: boolean;
   /** Trailing desktop header controls the host appends after Display. */
   extraHeaderActions?: React.ReactNode;
@@ -87,6 +89,7 @@ export function EntityListScreen({
   completedModule,
   peekKey,
   onPeekChange,
+  peekProjectId = null,
   compact,
   extraHeaderActions,
 }: EntityListScreenProps): React.ReactElement {
@@ -315,6 +318,7 @@ export function EntityListScreen({
               completedModule={resolvedCompletedModule}
               peekKey={peekKey}
               onPeekChange={onPeekChange}
+              peekProjectId={peekProjectId}
               compact={compact}
               onRegisterOverlays={setOverlays}
             />

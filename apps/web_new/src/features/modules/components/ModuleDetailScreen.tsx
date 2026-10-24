@@ -33,6 +33,8 @@ export interface ModuleDetailScreenProps {
   moduleId: string;
   peekKey: string | null;
   onPeekChange: (key: string | null) => void;
+  /** Peeked project from the URL, when it differs from the route (ISS-167). */
+  peekProjectId?: string | null | undefined;
   compact: boolean;
 }
 
@@ -42,6 +44,7 @@ export function ModuleDetailScreen({
   moduleId,
   peekKey,
   onPeekChange,
+  peekProjectId = null,
   compact,
 }: ModuleDetailScreenProps): React.ReactElement {
   const client = getAppClient();
@@ -96,6 +99,7 @@ export function ModuleDetailScreen({
             completedModule={isCompletedModule(module.status)}
             peekKey={peekKey}
             onPeekChange={onPeekChange}
+            peekProjectId={peekProjectId}
             compact={compact}
             extraHeaderActions={
               <>

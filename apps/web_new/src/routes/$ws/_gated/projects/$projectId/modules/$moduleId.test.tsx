@@ -142,7 +142,7 @@ describe("module detail route", () => {
   });
 
   it("writes and clears the peek param with replace", async () => {
-    renderRoute({ peekIssueId: "WEB-7", layout: "compact" });
+    renderRoute({ peekIssueId: "WEB-7", peekProjectId: "project-9", peekNestingLevel: "1", layout: "compact" });
     fireEvent.click(await screen.findByRole("button", { name: "open" }));
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: ".",

@@ -327,4 +327,17 @@ describe("DetailMainColumn", () => {
     expect(meta).not.toContainElement(screen.getByText("activity slot"));
     expect(screen.queryByRole("button", { name: /Edited by/ })).not.toBeInTheDocument();
   });
+
+  it("hides the title field when the host renders it", () => {
+    renderColumn({ showTitle: false });
+    expect(screen.queryByRole("textbox", { name: TITLE_LABEL })).not.toBeInTheDocument();
+    expect(descriptionView()).toBeInTheDocument();
+  });
+
+  it("reads the indicator from an injected pipeline", () => {
+    renderColumn({
+      pipeline: { status: "saving", markSaving: vi.fn(), markSaved: vi.fn() },
+    });
+    expect(screen.getByText("Saving…")).toBeInTheDocument();
+  });
 });

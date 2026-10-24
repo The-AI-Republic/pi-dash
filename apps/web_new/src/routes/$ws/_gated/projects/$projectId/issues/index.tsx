@@ -47,6 +47,7 @@ const LazyCalendarEntry = React.lazy(() =>
 // The empty cards ride their own chunk; the route awaits it with the list
 // leaves in `beforeLoad` so the layout mounts once (Quality gates).
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
+import { stripPeekParams } from "../../../../../../features/issues/peek/peekUrl.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
 // The list layout is a separate chunk so the route stays inside the
@@ -159,10 +160,12 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     const queryClient = context.queryClient;
     const navigate = useNavigate();
     const peekKey = search.peekIssueId ?? null;
+    const peekProjectId = search.peekProjectId ?? null;
     const setPeekKey = (key: string | null): void => {
-      const next = { ...search };
-      if (key === null) delete next.peekIssueId;
-      else next.peekIssueId = key;
+      // Closing strips every peek param; opening replaces the selection
+      // (and any stale nesting) without pushing history (ISS-167).
+      const base = stripPeekParams({ ...search });
+      const next = key === null ? base : { ...base, peekIssueId: key };
       void navigate({ to: ".", search: next, replace: true } as never);
     };
 
@@ -352,6 +355,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
                   richFilters={preferences.rich_filters}
                   peekKey={peekKey}
                   onPeekChange={setPeekKey}
+                  peekProjectId={peekProjectId}
                 />
               );
             }
@@ -367,6 +371,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
                 richFilters={preferences.rich_filters}
                 peekKey={peekKey}
                 onPeekChange={setPeekKey}
+                peekProjectId={peekProjectId}
                 weekStart={weekStart}
                 compact={search.layout === "compact"}
               />

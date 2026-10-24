@@ -22,6 +22,7 @@ import { loadIssueListLeaves, primeIssueListLeaves } from "../../../../../../fea
 import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
 import { preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
+import { stripPeekParams } from "../../../../../../features/issues/peek/peekUrl.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 
 // Start the leaf and filter chunks with the route module so the first
@@ -79,9 +80,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
     const search = Route.useSearch();
     const navigate = useNavigate();
     const setPeekKey = (key: string | null): void => {
-      const next = { ...search };
-      if (key === null) delete next.peekIssueId;
-      else next.peekIssueId = key;
+      // Closing strips every peek param, nesting included (ISS-167).
+      const base = stripPeekParams({ ...search });
+      const next = key === null ? base : { ...base, peekIssueId: key };
       void navigate({ to: ".", search: next, replace: true } as never);
     };
     return (
@@ -93,6 +94,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
             moduleId={params.moduleId}
             peekKey={search.peekIssueId ?? null}
             onPeekChange={setPeekKey}
+            peekProjectId={search.peekProjectId ?? null}
             compact={search.layout === "compact"}
           />
         </React.Suspense>

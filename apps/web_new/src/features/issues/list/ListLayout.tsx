@@ -50,7 +50,9 @@ import type { CreateFormInitialValues } from "../create/createForm.js";
 const LazyAddExistingModal = React.lazy(() =>
   import("./AddExistingModal.js").then((module) => ({ default: module.AddExistingModal }))
 );
-const LazyListPeek = React.lazy(() => import("./ListPeek.js").then((module) => ({ default: module.ListPeek })));
+const LazyIssuePeek = React.lazy(() =>
+  import("../peek/ResolvingIssuePeek.js").then((module) => ({ default: module.ResolvingIssuePeek }))
+);
 const LazyCreateDialog = React.lazy(() =>
   import("../components/WorkItemCreateDialog.js").then((module) => ({ default: module.WorkItemCreateDialog }))
 );
@@ -98,6 +100,8 @@ export interface ListLayoutProps {
   /** Controlled peek key (the route owns the URL param). */
   peekKey?: string | null | undefined;
   onPeekChange?: ((key: string | null) => void) | undefined;
+  /** Peeked project from the URL, when it differs from the route (ISS-167). */
+  peekProjectId?: string | null | undefined;
   /** Compact density from the layout search param. */
   compact?: boolean | undefined;
   /**
@@ -196,6 +200,7 @@ export function ListLayout({
   completedModule = false,
   peekKey: controlledPeekKey,
   onPeekChange,
+  peekProjectId = null,
   compact = false,
   onRegisterOverlays,
   richFilters = {},
@@ -229,10 +234,6 @@ export function ListLayout({
   const estimateEnabled = projectDetails !== null && projectDetails.estimate !== null;
   const [uncontrolledPeekKey, setUncontrolledPeekKey] = React.useState<string | null>(null);
   const peekKey = controlledPeekKey === undefined ? uncontrolledPeekKey : controlledPeekKey;
-  // Children live inside their parent row's state, so a deep row's peek
-  // cannot resolve through the top-level page rows. The opener hands over
-  // the title, which keeps the peek usable at the three-level cap.
-  const [peekTitleHint, setPeekTitleHint] = React.useState<string | null>(null);
   const [createState, setCreateState] = React.useState<CreateModalState | null>(null);
   const [addExistingOpen, setAddExistingOpen] = React.useState(false);
   const editAllowed = permissions.canEdit && (canEdit ?? true);
@@ -310,18 +311,12 @@ export function ListLayout({
   const bulk = useBulkMutations({ workspaceSlug, projectId });
   const bulkEnabled = isBulkOperationsEnabled();
   const selectedCount = selection.selectedIds.size;
-  const peekIssue =
-    peekKey === null ? null : (allRows.find((row) => `${projectIdentifier}-${row.sequence_id}` === peekKey) ?? null);
-  const peekTitle = peekIssue?.name ?? peekTitleHint;
-
   function setPeek(key: string | null): void {
-    if (key === null) setPeekTitleHint(null);
     if (controlledPeekKey === undefined) setUncontrolledPeekKey(key);
     onPeekChange?.(key);
   }
 
-  function openPeek(key: string, title: string): void {
-    setPeekTitleHint(title);
+  function openPeek(key: string): void {
     setPeek(key);
   }
 
@@ -459,15 +454,15 @@ export function ListLayout({
     >
       {peekKey === null ? null : (
         <React.Suspense fallback={null}>
-          <LazyListPeek
-            issueKey={peekKey}
-            title={peekTitle ?? ""}
-            onClose={closePeek}
+          <LazyIssuePeek
+            key={peekKey}
             workspaceSlug={workspaceSlug}
             projectId={projectId}
             projectIdentifier={projectIdentifier}
-            issue={peekIssue}
-            canWrite={!readOnly}
+            peeked={peekKey}
+            peekProjectId={peekProjectId}
+            rows={allRows}
+            onClose={closePeek}
           />
         </React.Suspense>
       )}
