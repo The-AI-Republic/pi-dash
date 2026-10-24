@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Peek target resolution (parity/specs/issues.md §14, ISS-165/167). The
-// peek param names either a list key ("PROJ-123", what layout clicks
-// write) or a raw issue id (what deep links carry). Rows the opener
+// peek param names either a list key ("PROJ-123", kept for links written
+// before opens switched to ids) or a raw issue id (what layout clicks
+// and deep links carry). Rows the opener
 // already holds resolve keys without a fetch; anything that is not
 // key-shaped reads as an id under the peeked (or route) project, while
 // an unmatched key needs the lite lookup before the detail read.
@@ -41,6 +42,10 @@ export interface PeekRows {
 export function resolvePeekTarget(peeked: string, scope: PeekRows): PeekTarget | null {
   const trimmed = peeked.trim();
   if (trimmed === "") return null;
+  // Layout clicks hand over an id; a held row pins the peek to that
+  // row's own project, which may differ from the route's.
+  const held = scope.rows.find((entry) => entry.id === trimmed);
+  if (held !== undefined) return { issueId: held.id, projectId: held.project_id, issueKey: null };
   const row = scope.rows.find((entry) => `${scope.projectIdentifier}-${entry.sequence_id}` === trimmed);
   if (row !== undefined) return { issueId: row.id, projectId: row.project_id, issueKey: trimmed };
   if (!isIssueKey(trimmed)) {

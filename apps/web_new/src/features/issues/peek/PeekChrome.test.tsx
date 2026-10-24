@@ -61,6 +61,14 @@ describe("PeekChrome", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("stands outside presses down while a nested peek is up", () => {
+    const { onClose } = setup({ suppressOutsideClick: true });
+    fireEvent.pointerDown(document.body);
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("renders a heading title for read-only surfaces", () => {
     setup({ titleAsHeading: true });
     expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();

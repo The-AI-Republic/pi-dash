@@ -28,6 +28,7 @@ import {
   PEEK_MISSING_TITLE,
   peekIdentifierOf,
   peekKeyOf,
+  peekLinkKeyOf,
 } from "./IssuePeek.js";
 
 const SLUG = "acme";
@@ -545,6 +546,20 @@ describe("peekKeyOf", () => {
   });
 });
 
+describe("peekLinkKeyOf", () => {
+  it("links through the opener key once the opener knew it", () => {
+    expect(peekLinkKeyOf("WEB-1", undefined, 1)).toBe("WEB-1");
+  });
+
+  it("derives the key from a loaded project for id links", () => {
+    expect(peekLinkKeyOf(null, "WEB", 7)).toBe("WEB-7");
+  });
+
+  it("stays unresolved without a key or a loaded project", () => {
+    expect(peekLinkKeyOf(null, undefined, 7)).toBeNull();
+  });
+});
+
 describe("peekIdentifierOf", () => {
   it("prefers the loaded project, then the key prefix, then the fallback", () => {
     expect(peekIdentifierOf("WEB-1", "WEB", "ZZZ")).toBe("WEB");
@@ -870,6 +885,37 @@ describe("IssuePeek nesting", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("keeps the parent up for presses inside the stacked child", async () => {
+    const user = userEvent.setup();
+    const { onClose } = renderPeek({ details: {}, child: true });
+    await screen.findByRole("textbox", { name: "Work item title" });
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    await user.click(await within(widgets).findByRole("link", { name: /Every inspector/ }));
+    await waitFor(() => {
+      const live = screen.getByTestId(NESTED_PEEK_TEST_ID);
+      expect(within(live).queryByRole("textbox", { name: "Work item title" })).not.toBeNull();
+    });
+    const nested = screen.getByTestId(NESTED_PEEK_TEST_ID);
+    fireEvent.pointerDown(within(nested).getByRole("textbox", { name: "Work item title" }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId(NESTED_PEEK_TEST_ID)).toBeInTheDocument();
+    expect(screen.getByTestId("issue-preview")).toBeInTheDocument();
+  });
+
+  it("closes the child on an outside press and leaves the parent up", async () => {
+    const user = userEvent.setup();
+    const { onClose } = renderPeek({ details: {}, child: true });
+    await screen.findByRole("textbox", { name: "Work item title" });
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    await user.click(await within(widgets).findByRole("link", { name: /Every inspector/ }));
+    await screen.findByTestId(NESTED_PEEK_TEST_ID);
+    fireEvent.pointerDown(document.body);
+    await waitFor(() => {
+      expect(screen.queryByTestId(NESTED_PEEK_TEST_ID)).not.toBeInTheDocument();
+    });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("shows the nested skeleton while the child loads", async () => {
     const user = userEvent.setup();
     const { releaseChild } = renderPeek({ details: {}, child: true, holdChild: true });
@@ -956,8 +1002,17 @@ describe("IssuePeek deep links", () => {
     expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
   });
 
-  it("falls back to the route code without a key or project", async () => {
+  it("keeps the full-screen link disabled without a key or a loaded project", async () => {
     renderPeek({ details: "error", projectStatus: 500, issueKey: null, projectIdentifier: "ZZZ" });
-    expect(await screen.findByTestId("peek-fullscreen-link")).toHaveAttribute("href", "/acme/browse/ZZZ-1");
+    const link = await screen.findByTestId("peek-fullscreen-link");
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(link).not.toHaveAttribute("href");
+  });
+
+  it("enables the full-screen link once the project code loads for a UUID link", async () => {
+    renderPeek({ details: {}, issueKey: null });
+    const link = await screen.findByTestId("peek-fullscreen-link");
+    expect(link).not.toHaveAttribute("aria-disabled");
+    expect(link).toHaveAttribute("href", "/acme/browse/WEB-1");
   });
 });

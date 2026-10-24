@@ -29,6 +29,8 @@ export interface PeekChromeProps {
   onClose: () => void;
   /** Caller-known Escape suppression (a nested peek above this one). */
   suppressEscape?: boolean | undefined;
+  /** Caller-known outside-press suppression (a nested peek above this one). */
+  suppressOutsideClick?: boolean | undefined;
   /** Embedded hosts disable Escape and outside-click close. */
   embedded?: boolean | undefined;
   /** Test handle for the panel; nested panels take their own. */
@@ -48,6 +50,7 @@ export function PeekChrome({
   actions,
   onClose,
   suppressEscape = false,
+  suppressOutsideClick = false,
   embedded = false,
   testId,
   stacked = false,
@@ -63,7 +66,7 @@ export function PeekChrome({
       titleAsHeading={titleAsHeading}
       onClose={onClose}
       suppressEscape={suppressEscape || embedded}
-      {...(embedded ? {} : { onOutsideClick: onClose })}
+      {...(embedded || suppressOutsideClick ? {} : { onOutsideClick: onClose })}
       {...(testId === undefined ? {} : { testId })}
       {...(onCommitTitle === undefined ? {} : { onCommitTitle })}
       actions={

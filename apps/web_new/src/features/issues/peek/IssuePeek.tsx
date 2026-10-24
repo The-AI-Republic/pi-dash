@@ -105,6 +105,21 @@ export function peekKeyOf(
   return { key: issueKey ?? `${identifier}-${sequenceId}`, identifier };
 }
 
+/**
+ * The key the open-full-page control may link to, or null while it is
+ * still unresolved (ISS-169): the opener's key, or the sequence under a
+ * loaded project code. The route fallback is a guess that can point at
+ * another project, so it never enables navigation by itself.
+ */
+export function peekLinkKeyOf(
+  issueKey: string | null,
+  projectCode: string | undefined,
+  sequenceId: number
+): string | null {
+  if (issueKey !== null) return issueKey;
+  return projectCode === undefined ? null : `${projectCode}-${sequenceId}`;
+}
+
 /** Clicks that keep the peek up: modified clicks and non-primary buttons. */
 export function keepPeekOnClick(event: {
   metaKey: boolean;
@@ -248,6 +263,7 @@ export function IssuePeek({
   const readOnly = !editable || archived || issue.is_synced;
   const writable = editable && !archived && !issue.is_synced;
   const resolved = peekKeyOf(issueKey, project?.identifier, projectIdentifier, issue.sequence_id);
+  const linkKey = peekLinkKeyOf(issueKey, project?.identifier, issue.sequence_id);
 
   const commitTitle = (next: string): void => {
     pipeline.markSaving();
@@ -381,6 +397,7 @@ export function IssuePeek({
         {...(readOnly ? {} : { onCommitTitle: commitTitle })}
         onClose={onClose}
         suppressEscape={nested !== null}
+        suppressOutsideClick={nested !== null}
         embedded={embedded}
         {...(testId === undefined ? {} : { testId })}
         stacked={stacked}
@@ -396,26 +413,38 @@ export function IssuePeek({
               menu={menu}
               onSubscriptionChanged={refreshDetail}
             />
-            <Link
-              to="/$ws/browse/$issueKey"
-              params={{ ws: workspaceSlug, issueKey: resolved.key }}
-              data-testid="peek-fullscreen-link"
-              aria-label="Open full page"
-              className="text-body inline-flex rounded-(--radius-control) p-(--space-2) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
-              onClick={(event) => {
-                // Modified clicks open a new tab and leave the peek up;
-                // a plain click clears the peek before navigating on.
-                if (keepPeekOnClick(event)) return;
-                event.preventDefault();
-                onClose();
-                void navigate({
-                  to: "/$ws/browse/$issueKey",
-                  params: { ws: workspaceSlug, issueKey: resolved.key },
-                });
-              }}
-            >
-              <ArrowUpRight size={16} strokeWidth={1.5} aria-hidden="true" />
-            </Link>
+            {linkKey === null ? (
+              <span
+                role="link"
+                aria-disabled="true"
+                aria-label="Open full page"
+                data-testid="peek-fullscreen-link"
+                className="text-body inline-flex rounded-(--radius-control) p-(--space-2) text-(--text-muted) opacity-50"
+              >
+                <ArrowUpRight size={16} strokeWidth={1.5} aria-hidden="true" />
+              </span>
+            ) : (
+              <Link
+                to="/$ws/browse/$issueKey"
+                params={{ ws: workspaceSlug, issueKey: linkKey }}
+                data-testid="peek-fullscreen-link"
+                aria-label="Open full page"
+                className="text-body inline-flex rounded-(--radius-control) p-(--space-2) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
+                onClick={(event) => {
+                  // Modified clicks open a new tab and leave the peek up;
+                  // a plain click clears the peek before navigating on.
+                  if (keepPeekOnClick(event)) return;
+                  event.preventDefault();
+                  onClose();
+                  void navigate({
+                    to: "/$ws/browse/$issueKey",
+                    params: { ws: workspaceSlug, issueKey: linkKey },
+                  });
+                }}
+              >
+                <ArrowUpRight size={16} strokeWidth={1.5} aria-hidden="true" />
+              </Link>
+            )}
           </>
         }
       >

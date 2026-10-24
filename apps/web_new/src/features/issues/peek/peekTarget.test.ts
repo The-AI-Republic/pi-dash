@@ -52,6 +52,14 @@ describe("resolvePeekTarget", () => {
     });
   });
 
+  it("pins an id that a held row owns to that row's project", () => {
+    expect(resolvePeekTarget("issue-2", scope)).toEqual({
+      issueId: "issue-2",
+      projectId: "project-2",
+      issueKey: null,
+    });
+  });
+
   it("prefers the peeked project for a raw id", () => {
     expect(resolvePeekTarget("123e4567-e89b-12d3-a456-426614174000", { ...scope, peekProjectId: "project-2" })).toEqual(
       {

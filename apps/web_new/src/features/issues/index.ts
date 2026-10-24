@@ -263,7 +263,7 @@ export { SaveIndicator } from "./detail/SaveIndicator.js";
 export { useSavePipeline } from "./detail/savePipeline.js";
 export type { SavePipeline, SaveStatus } from "./detail/savePipeline.js";
 export { useDetailUiStore } from "./detail/store.js";
-export { IssuePeek, keepPeekOnClick, peekIdentifierOf, peekKeyOf } from "./peek/IssuePeek.js";
+export { IssuePeek, keepPeekOnClick, peekIdentifierOf, peekKeyOf, peekLinkKeyOf } from "./peek/IssuePeek.js";
 export type { IssuePeekProps, PeekKey } from "./peek/IssuePeek.js";
 export { ResolvingIssuePeek } from "./peek/ResolvingIssuePeek.js";
 export type { ResolvingIssuePeekProps } from "./peek/ResolvingIssuePeek.js";

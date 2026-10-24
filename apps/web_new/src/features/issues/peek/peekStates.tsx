@@ -18,7 +18,7 @@ import type { PeekMode } from "./PeekModeToggle.js";
 export const PEEK_LOADING_LABEL = "Loading work item";
 
 /** Generic failure message; every fetch failure collapses into it (ISS-171). */
-export const PEEK_MISSING_TITLE = "This work item isn't available";
+export const PEEK_MISSING_TITLE = "Work item does not exist";
 export const PEEK_MISSING_BODY = "It may have been deleted or archived, or you may not have access to it.";
 
 export interface PeekStatusPanelProps {
@@ -26,6 +26,8 @@ export interface PeekStatusPanelProps {
   onClose: () => void;
   /** Caller-known Escape suppression (a nested peek above this one). */
   suppressEscape?: boolean | undefined;
+  /** Caller-known outside-press suppression (a nested peek above this one). */
+  suppressOutsideClick?: boolean | undefined;
   /** Embedded hosts disable the outside-click close. */
   embedded?: boolean | undefined;
   /** Test handle for the panel; nested panels take their own. */
@@ -38,6 +40,7 @@ function StatusShell({
   mode,
   onClose,
   suppressEscape = false,
+  suppressOutsideClick = false,
   embedded = false,
   testId,
   stacked = false,
@@ -52,7 +55,7 @@ function StatusShell({
       titleLabel="Work item title"
       onClose={onClose}
       suppressEscape={embedded || suppressEscape}
-      {...(embedded ? {} : { onOutsideClick: onClose })}
+      {...(embedded || suppressOutsideClick ? {} : { onOutsideClick: onClose })}
       {...(testId === undefined ? {} : { testId })}
     >
       {children}

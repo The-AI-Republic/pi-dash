@@ -98,8 +98,9 @@ export interface ListLayoutProps {
   /** Completed module pages render read-only. */
   completedModule?: boolean | undefined;
   /** Controlled peek key (the route owns the URL param). */
+  /** Controlled peeked work-item id (the route owns the URL param). */
   peekKey?: string | null | undefined;
-  onPeekChange?: ((key: string | null) => void) | undefined;
+  onPeekChange?: ((issueId: string | null) => void) | undefined;
   /** Peeked project from the URL, when it differs from the route (ISS-167). */
   peekProjectId?: string | null | undefined;
   /** Compact density from the layout search param. */
@@ -311,13 +312,13 @@ export function ListLayout({
   const bulk = useBulkMutations({ workspaceSlug, projectId });
   const bulkEnabled = isBulkOperationsEnabled();
   const selectedCount = selection.selectedIds.size;
-  function setPeek(key: string | null): void {
-    if (controlledPeekKey === undefined) setUncontrolledPeekKey(key);
-    onPeekChange?.(key);
+  function setPeek(issueId: string | null): void {
+    if (controlledPeekKey === undefined) setUncontrolledPeekKey(issueId);
+    onPeekChange?.(issueId);
   }
 
-  function openPeek(key: string): void {
-    setPeek(key);
+  function openPeek(issueId: string): void {
+    setPeek(issueId);
   }
 
   function closePeek(): void {

@@ -177,7 +177,7 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
           onChange={() => props.onSelectionToggle?.(props.issue.id, false)}
         />
       )}
-      <button type="button" onClick={() => props.onOpenPeek(`WEB-${props.issue.sequence_id}`, props.issue.name)}>
+      <button type="button" onClick={() => props.onOpenPeek(props.issue.id, props.issue.name)}>
         {props.issue.name}
       </button>
       <button type="button" onClick={() => props.onOpenPeek("WEB-99", "Nested child")}>
@@ -747,12 +747,12 @@ describe("ListLayout", () => {
     const user = userEvent.setup();
     const { view } = renderLayout({ peekKey: null, onPeekChange });
     await user.click(screen.getByRole("button", { name: "Fix login" }));
-    expect(onPeekChange).toHaveBeenCalledWith("WEB-42");
+    expect(onPeekChange).toHaveBeenCalledWith(ISSUE);
     expect(screen.queryByLabelText("Work item preview")).not.toBeInTheDocument();
     view.unmount();
-    renderLayout({ peekKey: "WEB-42", onPeekChange, peekProjectId: null });
+    renderLayout({ peekKey: ISSUE, onPeekChange, peekProjectId: null });
     const panel = await screen.findByLabelText("Work item preview");
-    expect(panel).toHaveAttribute("data-peeked", "WEB-42");
+    expect(panel).toHaveAttribute("data-peeked", ISSUE);
     // Escape belongs to the peek itself (tested there); the layout only
     // forwards the panel's close callback to the controlled key.
     await user.click(screen.getByRole("button", { name: "Close preview" }));

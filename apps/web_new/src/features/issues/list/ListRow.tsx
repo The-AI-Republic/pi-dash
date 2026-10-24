@@ -90,8 +90,8 @@ export interface ListRowProps {
   /** Whether the project has an estimate system configured. */
   estimateEnabled: boolean;
   highlightedId: string | null;
-  /** Opens the peek panel for the row's key. */
-  onOpenPeek: (issueKey: string, title: string) => void;
+  /** Opens the peek panel for the row's work-item id. */
+  onOpenPeek: (issueId: string, title: string) => void;
   /** href for the row anchor; the route builds it. */
   hrefFor: (issue: IssueListItem) => string;
   /** Row density from the layout search param (list vs compact). */
@@ -153,7 +153,6 @@ function SubIssueToggle({
   expanded,
   fetching,
   depth,
-  projectIdentifier,
   onToggle,
   onOpenPeek,
   showSubIssues,
@@ -162,9 +161,8 @@ function SubIssueToggle({
   expanded: boolean;
   fetching: boolean;
   depth: number;
-  projectIdentifier: string;
   onToggle: () => void;
-  onOpenPeek: (issueKey: string, title: string) => void;
+  onOpenPeek: (issueId: string, title: string) => void;
   showSubIssues: boolean;
 }): React.ReactElement {
   const atCap = depth >= MAX_INLINE_DEPTH;
@@ -178,7 +176,7 @@ function SubIssueToggle({
         <button
           type="button"
           aria-label={`Open sub-work items of ${issue.name} in preview`}
-          onClick={() => onOpenPeek(issueKey(projectIdentifier, issue), issue.name)}
+          onClick={() => onOpenPeek(issue.id, issue.name)}
           className="grid size-4 place-items-center rounded-(--radius-control) text-(--text-muted) hover:bg-(--subtle)"
         >
           <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
@@ -297,7 +295,6 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
         expanded={expanded}
         fetching={query.isFetching}
         depth={depth}
-        projectIdentifier={projectIdentifierFor?.(issue) ?? projectIdentifier}
         onToggle={toggleExpanded}
         onOpenPeek={onOpenPeek}
         showSubIssues={showSubIssues}
@@ -311,7 +308,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
         onClick={(event) => {
           if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
           event.preventDefault();
-          if (!temp) onOpenPeek(key, issue.name);
+          if (!temp) onOpenPeek(issue.id, issue.name);
         }}
       >
         {props.properties["key"] === false ? null : (
