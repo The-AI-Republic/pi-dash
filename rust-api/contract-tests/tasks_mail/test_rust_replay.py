@@ -306,6 +306,94 @@ def test_rust_stack_ignores_soft_deleted_logs(smtp_sink, db_conn):
         )
 
 
+# PIDASHCONV-1287: case-for-case mirror of the Django oracle's
+# test_mention_mail_html_normalized_like_bs4 (test_mail_tasks.py) — same
+# mention payload, same bs4-normalized fragment in the HTML part, same
+# no-literal-entities text/plain part — plus the local-execution pins
+# (settle, no broker message). The two suites together are the
+# Django-vs-Rust equivalence proof for mention normalization.
+MENTION_HTML_TEMPLATE = (
+    '<p>a&nbsp;&nbsp;b<br>c <img src="x.png"> it&#39;s &quot;q&quot; '
+    '<mention-component entity_identifier="{user_id}" '
+    'label="x"></mention-component></p>'
+)
+MENTION_HTML_EXPECTED = (
+    '<p>a\xa0\xa0b<br/>c <img src="x.png"/> it\'s "q" @{display}</p>'
+)
+
+
+def _mail_parts(mail):
+    """Decode the text/plain + text/html parts (transfer-encoding agnostic).
+
+    Both planes send valid UTF-8 wire bytes (Django: 8bit), so the sink's
+    `str` re-encodes exactly; parsing bytes (not `str`) keeps `get_content`
+    from mangling 8bit parts. Bytes the sender emitted outside UTF-8 stay
+    U+FFFD and fail the assertions below, as they should.
+    """
+    from email import message_from_bytes, policy
+
+    html_part, text_part = None, None
+    raw_bytes = mail["raw"].encode("utf-8")
+    for part in message_from_bytes(raw_bytes, policy=policy.default).walk():
+        ctype = part.get_content_type()
+        if ctype == "text/html":
+            html_part = part.get_content()
+        elif ctype == "text/plain":
+            text_part = part.get_content()
+    assert html_part is not None, "mail has no text/html part"
+    assert text_part is not None, "mail has no text/plain part"
+    return html_part, text_part
+
+
+def test_rust_send_mention_mail_normalized_like_bs4(smtp_sink, db_conn):
+    """A stacked mention mail delivers bs4-normalized on the Rust worker."""
+    from datetime import datetime, timezone
+
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"mailmen{tag}")
+    receiver = seed_helpers.user(db_conn, f"contract-rust-mention-{tag}")
+    mentioned = seed_helpers.user(db_conn, f"Bob-{tag}")
+    issue_id = str(chain["issue"]["id"])
+    log_id = seed_helpers.email_log(
+        db_conn,
+        receiver["id"],
+        chain["owner"]["id"],
+        issue_id,
+        data={
+            "issue_activity": {
+                "field": "mention",
+                "old_value": "",
+                "new_value": MENTION_HTML_TEMPLATE.format(user_id=mentioned["id"]),
+                "activity_time": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )["id"]
+    _seed_base_api(issue_id)
+    smtp_sink.clear()
+    _publish_and_observe_local(STACK, {})
+    assert _processed_at(db_conn, log_id) is not None, (
+        f"stack did not mark processed_at on {log_id}"
+    )
+    delivered = smtp_sink.wait_for_count(1, what="rust mention mail")
+    matches = [m for m in delivered if receiver["email"] in m["rcpt_tos"]]
+    assert matches, "rust stack sent no mail to the mention receiver"
+    html_part, text_part = _mail_parts(matches[0])
+    expected = MENTION_HTML_EXPECTED.format(display=mentioned["display_name"])
+    assert expected in html_part, (
+        f"HTML part misses the normalized fragment:\n{expected!r}\n"
+        f"HTML head: {html_part[:600]!r}"
+    )
+    assert f"@{mentioned['display_name']}" in text_part
+    assert 'it\'s "q"' in text_part
+    assert "\xa0\xa0" in text_part
+    for leaked in ("&nbsp;", "&#39;", "&quot;"):
+        assert leaked not in text_part, f"text/plain leaks {leaked}"
+    rust_queue.wait_for_queue_drain(what="fanned-out mention send settled")
+    assert _sent_at(db_conn, log_id) is not None, (
+        f"fanned-out send did not mark sent_at on {log_id}"
+    )
+
+
 # The four auth mail tasks (PIDASHCONV-1103): case-for-case mirror of the
 # Django oracle's AUTH_MAIL_CASES (test_mail_tasks.py) — same args, same
 # subjects, same body markers — plus the local-execution pins (settle,
