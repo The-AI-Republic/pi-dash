@@ -435,7 +435,10 @@ describe("install dialog", () => {
       role: (role) =>
         role === "radio"
           ? fake({
-              items: [fake({ checked: true, text: "Create issues" }), fake({ checked: false, text: "Apply fix" })],
+              items: [
+                fake({ checked: true, locate: () => fake({ text: "Create issues" }) }),
+                fake({ checked: false, locate: () => fake({ text: "Apply fix" }) }),
+              ],
             })
           : absent(),
       locate: () => fake({ text: "Files an issue." }),
