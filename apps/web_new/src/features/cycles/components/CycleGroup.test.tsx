@@ -42,4 +42,35 @@ describe("CycleGroup", () => {
     render(<CycleGroup group="upcoming" count={0} expanded onToggle={() => undefined} />);
     expect(screen.getByRole("button", { name: "Upcoming cycle 0" })).toBeInTheDocument();
   });
+
+  it("lists rows plain by default with no gallery wrapper", () => {
+    render(
+      <CycleGroup group="upcoming" count={1} expanded onToggle={() => undefined}>
+        <span>row</span>
+      </CycleGroup>
+    );
+    expect(screen.queryByTestId("cycle-group-upcoming-gallery")).not.toBeInTheDocument();
+    expect(screen.getByText("row")).toBeInTheDocument();
+  });
+
+  it("wraps the same rows in the gallery grid without touching the heading", () => {
+    const onToggle = vi.fn();
+    render(
+      <CycleGroup group="completed" count={1} expanded onToggle={onToggle} layout="gallery">
+        <span>row</span>
+      </CycleGroup>
+    );
+    const gallery = screen.getByTestId("cycle-group-completed-gallery");
+    expect(gallery).toHaveTextContent("row");
+    expect(screen.getByRole("button", { name: "Completed cycle 1" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("hides the gallery while collapsed", () => {
+    render(
+      <CycleGroup group="completed" count={1} expanded={false} onToggle={() => undefined} layout="gallery">
+        <span>row</span>
+      </CycleGroup>
+    );
+    expect(screen.queryByTestId("cycle-group-completed-gallery")).not.toBeInTheDocument();
+  });
 });

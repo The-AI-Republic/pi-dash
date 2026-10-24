@@ -8,7 +8,9 @@
 // draft and upcoming rows, the creator avatar on the active row,
 // creator plus assignees elsewhere. The favorite star is the working
 // toggle (CYC-029). The row menu trigger (slice E) sits beside the
-// quick-look eye.
+// quick-look eye. The eye and the inline transfer action stay
+// reachable without hover on narrow screens (CYC-048), and the row
+// renders as a card inside the narrow-screen gallery.
 
 import { Link } from "@tanstack/react-router";
 import { Avatar, Badge, IconButton } from "@pidash/kit";
@@ -47,6 +49,8 @@ export interface CycleRowProps {
   canMutate: boolean;
   /** The project in the address: the row menu's edit dialog label. */
   currentProject: CycleProjectRef;
+  /** Card framing inside the narrow-screen gallery (CYC-048); a plain row by default. */
+  presentation?: "row" | "card" | undefined;
 }
 
 function memberAvatar(entry: CycleMemberEntry, key: string): React.ReactElement {
@@ -64,6 +68,7 @@ export function CycleRow({
   onPeek,
   canMutate,
   currentProject,
+  presentation = "row",
 }: CycleRowProps): React.ReactElement {
   const group = groupOfCycle(cycle.status);
   const isCurrent = group === null;
@@ -76,7 +81,11 @@ export function CycleRow({
     <div
       data-testid="cycle-row"
       data-cycle-id={cycle.id}
-      className="group flex items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-3)"
+      className={
+        presentation === "card"
+          ? "group flex items-center gap-(--space-3) rounded-(--radius-control) border border-(--border) bg-(--surface) px-(--space-4) py-(--space-3)"
+          : "group flex items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-3)"
+      }
     >
       <Link
         to={cycleDetailPath(workspaceSlug, projectId, cycle.id)}
@@ -121,7 +130,7 @@ export function CycleRow({
         label={`Quick look at ${cycle.name}`}
         size="small"
         onClick={() => onPeek(cycle.id)}
-        className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100"
+        className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 pointer-coarse:opacity-100"
       >
         <Eye size={16} strokeWidth={1.5} aria-hidden="true" />
       </IconButton>
@@ -140,7 +149,7 @@ export function CycleRow({
           label={`Transfer ${transferableWorkCount(cycle)} work items`}
           variant="secondary"
           size="small"
-          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100"
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 pointer-coarse:opacity-100"
         />
       ) : null}
     </div>

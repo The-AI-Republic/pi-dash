@@ -45,6 +45,18 @@ describe("Toast", () => {
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
   });
 
+  it("stacks a second toast fired while another is visible (NEWFRONT-264)", async () => {
+    const manager = setup();
+    showToast(manager, { title: "Cycle updated successfully.", timeout: 0 });
+    await screen.findByText("Cycle updated successfully.");
+    showToast(manager, { title: "Error!", description: "You already have a cycle on the given dates.", timeout: 0 });
+    // Both notices render: the rejection is never swallowed by the
+    // success still on screen.
+    expect(await screen.findByText("Error!")).toBeInTheDocument();
+    expect(screen.getByText("Cycle updated successfully.")).toBeInTheDocument();
+    expect(screen.getAllByTestId("toast-notification")).toHaveLength(2);
+  });
+
   it("hides the close button until the toast expands, then dismisses", async () => {
     const user = userEvent.setup();
     const manager = setup();
