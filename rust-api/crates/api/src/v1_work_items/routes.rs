@@ -7,8 +7,8 @@
 //! (handlers G, PIDASHCONV-679), and the search and move routes
 //! (handlers E, PIDASHCONV-677).
 //!
-//! Ports `apps/api/pi_dash/api/urls/work_item.py:133-151` (the four action
-//! paths), `urls/work_item.py:60-77,154-171` (the eight link/comment paths:
+//! Ports `apps/api/pi_dash/api/urls/work_item.py:133-157` (the four action
+//! paths plus release-pin, PDASHOSS01-272), `urls/work_item.py:60-77,154-171` (the eight link/comment paths:
 //! four `work-items/` routes plus their deprecated `issues/` twins, which
 //! share the view classes and therefore the handlers),
 //! `urls/work_item.py:218-236` (the four PR/review-link paths),
@@ -34,7 +34,9 @@ use axum::Router;
 
 use crate::state::AppState;
 
-use super::handlers_actions::{owned_action, post_retick, post_run_ai, post_wait, post_yield};
+use super::handlers_actions::{
+    owned_action, post_release_pin, post_retick, post_run_ai, post_wait, post_yield,
+};
 use super::handlers_activity::{
     delete_attachment, get_activity_detail, get_activity_list, get_attachment, get_attachment_list,
     owned_activity, owned_attachment_detail, owned_attachment_list, patch_attachment,
@@ -206,6 +208,12 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/",
             owned_action(axum::routing::post(post_yield)),
+        )
+        // `work_item.py:153-157` — agent-run release-pin (post,
+        // PDASHOSS01-272).
+        .route(
+            "/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/",
+            owned_action(axum::routing::post(post_release_pin)),
         )
         // Activities (IssueActivityListAPIEndpoint `views/issue.py:2124-2175`).
         .route(
@@ -459,6 +467,10 @@ mod tests {
             (
                 "POST",
                 format!("/api/v1/workspaces/acme/agent-runs/{rid}/yield/"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/acme/agent-runs/{rid}/release-pin/"),
             ),
             (
                 "GET",
@@ -847,6 +859,15 @@ mod tests {
             status("POST", "/api/v1/workspaces/acme/work-items/CT-1/",).await,
             StatusCode::BAD_GATEWAY
         );
+        // PDASHOSS01-272: release-pin owns POST only.
+        assert_eq!(
+            status(
+                "GET",
+                "/api/v1/workspaces/acme/agent-runs/33333333-3333-3333-3333-333333333333/release-pin/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
         assert_eq!(
             status(
                 "DELETE",
@@ -874,6 +895,14 @@ mod tests {
             status(
                 "POST",
                 "/api/v1/workspaces/acme/agent-runs/not-a-uuid/yield/",
+            )
+            .await,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(
+                "POST",
+                "/api/v1/workspaces/acme/agent-runs/not-a-uuid/release-pin/",
             )
             .await,
             StatusCode::BAD_GATEWAY

@@ -1,26 +1,26 @@
 {
   "_trace": "live GET /api/schema/ (+ ?format=json) against Django with ENABLE_DRF_SPECTACULAR=1 (routes pi_dash/urls.py:31-44); securityScheme rendered from utils/openapi/auth.py:15-34 (APIKeyAuthenticationExtension.get_security_definition)",
-  "_method": "httpx GETs to http://127.0.0.1:18890 (scratch DB pidash_1090_dj, ENABLE_DRF_SPECTACULAR=1); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs",
+  "_method": "httpx GETs to http://127.0.0.1:18272 (scratch DB from .env272, ENABLE_DRF_SPECTACULAR=1); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs",
   "openapi_version": "3.0.3",
   "default_rendering": {
     "url": "/api/schema/",
     "status": 200,
     "content_type": "application/vnd.oai.openapi; charset=utf-8",
-    "body_bytes": 830731,
-    "body_sha256": "574b92976f8f6a7ad19fbee064ab14792781bb166d00ad5c9fa42c7347b7cabf",
+    "body_bytes": 831849,
+    "body_sha256": "077979519c2087dbb9b92c485154912c5677cfb7910c7493819bced125b5a821",
     "note": "YAML by default; content-type has NO +json suffix"
   },
   "json_rendering": {
     "url": "/api/schema/?format=json",
     "status": 200,
     "content_type": "application/vnd.oai.openapi+json",
-    "body_bytes": 1397521,
-    "body_sha256": "9760cb0b3c7c0885b37f020ebc848b7e69b87f1fb02bdd1db0c9578131b669f7"
+    "body_bytes": 1399650,
+    "body_sha256": "a72976b0743a141da84f0a74ebcbfd5b5c20ff05afdd5c75bb85901e60f5c27b"
   },
   "doc_equality_proof": {
     "parsed_equal": true,
-    "yaml_paths": 125,
-    "json_paths": 125
+    "yaml_paths": 126,
+    "json_paths": 126
   },
   "route_map_matches_golden": true,
   "security_schemes": {
@@ -1100,6 +1100,53 @@
               }
             },
             "description": "Current user profile"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/agent-runs/{run_id}/release-pin/": {
+      "post": {
+        "operationId": "release_agent_run_pin",
+        "tags": [
+          "Work Items"
+        ],
+        "summary": "Release a queued run's runner pin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workspace slug",
+            "required": true,
+            "examples": {
+              "ExampleWorkspace": {
+                "value": "my-workspace",
+                "summary": "Example workspace",
+                "description": "A typical workspace slug"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pin released"
+          },
+          "404": {
+            "description": "Run not found"
+          },
+          "409": {
+            "description": "Run is not a pinned, queued local run"
           }
         }
       }

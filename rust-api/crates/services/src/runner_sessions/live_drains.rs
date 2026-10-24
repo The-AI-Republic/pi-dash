@@ -201,6 +201,123 @@ pub enum DrainError {
 }
 
 // ---------------------------------------------------------------------------
+// Claim (`next_assignable_for_runner`, PDASHOSS01-272)
+// ---------------------------------------------------------------------------
+
+/// `next_assignable_for_runner(runner, pod)`: the next run `runner`
+/// should take, breaking an over-budget pin when that is the run that
+/// wins. Every drain executor claims through this one function (the
+/// public drains below and the private api copies), so the pin wait
+/// budget cannot drift between them.
+///
+/// One selection, not a primary plus a fallback: the runner's own
+/// pinned work still comes first (rank 0), and the unpinned pod queue
+/// plus any pin that has outlived the pod's budget compete on
+/// `created_at` (rank 1). The pin is cleared — together with the
+/// parent's stale `thread_id`, exactly as the release-pin hatches do —
+/// only for the run that is actually claimed.
+///
+/// Runs on the caller's transaction connection; the returned row is
+/// locked `FOR UPDATE SKIP LOCKED` and carries the
+/// [`next_for_runner_sql`](drain_kernel::next_for_runner_sql)
+/// projection (its `pinned_runner_id` is the pre-release value).
+/// `Ok(None)` for a non-private runner without issuing a query (the
+/// `qs.none()` arm), or when nothing is claimable.
+#[allow(clippy::too_many_arguments)]
+pub async fn claim_next_assignable(
+    conn: &mut sqlx::PgConnection,
+    pod_id: Uuid,
+    runner_id: Uuid,
+    owner_id: Uuid,
+    provisioning: &str,
+    visibility: i32,
+    instance_budget_secs: i64,
+) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
+    let Some(plain_sql) = drain_kernel::next_for_runner_sql(provisioning, visibility) else {
+        return Ok(None);
+    };
+    let mut releasable: Vec<Uuid> = Vec::new();
+    let mut budget_secs = 0;
+    if let Some(candidates_sql) =
+        drain_kernel::releasable_overbudget_pin_ids_sql(provisioning, visibility)
+    {
+        let pod_override: Option<Option<i32>> =
+            sqlx::query_scalar(drain_kernel::POD_PIN_WAIT_BUDGET_SQL)
+                .bind(pod_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        budget_secs = drain_kernel::effective_pin_wait_budget_secs(
+            pod_override.flatten().map(i64::from),
+            instance_budget_secs,
+        );
+        if budget_secs > 0 {
+            let now = now_micros();
+            releasable = sqlx::query_scalar(&candidates_sql)
+                .bind(pod_id)
+                .bind(runner_id)
+                .bind(owner_id)
+                .bind(now - chrono::Duration::seconds(budget_secs))
+                .bind(alive_threshold(now))
+                .fetch_all(&mut *conn)
+                .await?;
+        }
+    }
+    let run = if releasable.is_empty() {
+        sqlx::query(&plain_sql)
+            .bind(pod_id)
+            .bind(runner_id)
+            .bind(owner_id)
+            .fetch_optional(&mut *conn)
+            .await?
+    } else {
+        let widened_sql =
+            drain_kernel::next_for_runner_with_releasable_sql(provisioning, visibility)
+                .expect("same visibility gate as next_for_runner_sql");
+        sqlx::query(&widened_sql)
+            .bind(pod_id)
+            .bind(runner_id)
+            .bind(owner_id)
+            .bind(&releasable)
+            .fetch_optional(&mut *conn)
+            .await?
+    };
+    let Some(run) = run else {
+        return Ok(None);
+    };
+    let pinned_runner_id: Option<Uuid> = run.try_get("pinned_runner_id")?;
+    if let (true, Some(previous_runner_id)) = (
+        drain_kernel::is_overbudget_takeover(pinned_runner_id, runner_id),
+        pinned_runner_id,
+    ) {
+        let run_id: Uuid = run.try_get("id")?;
+        let parent_run_id: Option<Uuid> = run.try_get("parent_run_id")?;
+        let created_at: DateTime<Utc> = run.try_get("created_at")?;
+        if let Some(parent_run_id) = parent_run_id {
+            sqlx::query(drain_kernel::CLEAR_PARENT_THREAD_ID_SQL)
+                .bind(parent_run_id)
+                .execute(&mut *conn)
+                .await?;
+        }
+        sqlx::query(&super::offline_recovery::clear_pin_sql())
+            .bind(run_id)
+            .execute(&mut *conn)
+            .await?;
+        let waited_secs = (now_micros() - created_at).num_seconds();
+        tracing::info!(
+            "{}",
+            drain_kernel::released_pin_log(
+                &run_id,
+                &previous_runner_id,
+                &runner_id,
+                budget_secs,
+                waited_secs
+            )
+        );
+    }
+    Ok(Some(run))
+}
+
+// ---------------------------------------------------------------------------
 // Executors
 // ---------------------------------------------------------------------------
 
@@ -249,17 +366,16 @@ async fn drain_for_runner(
     let provisioning: String = locked.try_get("provisioning")?;
     let visibility: i16 = locked.try_get("visibility")?;
     // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
-        tx.commit().await?;
-        return Ok(false);
-    };
-    let run = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let run = claim_next_assignable(
+        &mut tx,
+        pod_id,
+        runner_id,
+        owner_id,
+        &provisioning,
+        i32::from(visibility),
+        runner.pin_wait_budget_secs,
+    )
+    .await?;
     let Some(run) = run else {
         tx.commit().await?;
         return Ok(false);
@@ -342,17 +458,16 @@ async fn drain_pod(
         let owner_id: Uuid = runner_row.try_get("owner_id")?;
         let provisioning: String = runner_row.try_get("provisioning")?;
         let visibility: i16 = runner_row.try_get("visibility")?;
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let run = claim_next_assignable(
+            &mut tx,
+            pod_id,
+            runner_id,
+            owner_id,
+            &provisioning,
+            i32::from(visibility),
+            runner.pin_wait_budget_secs,
+        )
+        .await?;
         let Some(run) = run else {
             continue;
         };
@@ -421,6 +536,7 @@ mod tests {
             min_runner_version: None,
             agent_stall_threshold_secs: 360,
             agent_observability_stale_secs: 90,
+            pin_wait_budget_secs: 600,
         }
     }
 

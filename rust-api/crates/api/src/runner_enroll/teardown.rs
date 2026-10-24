@@ -2540,18 +2540,17 @@ async fn drain_pod(pool: &PgPool, state: &AppState, pod_id: Uuid) -> Result<(), 
         let provisioning: String = runner.try_get(7).map_err(|_| ())?;
         let visibility: i16 = runner.try_get(8).map_err(|_| ())?;
         // Non-private runners issue no query (the `qs.none()` arm).
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ())?;
+        let run = pidash_services::runner_sessions::claim_next_assignable(
+            &mut tx,
+            pod_id,
+            runner_id,
+            owner_id,
+            &provisioning,
+            i32::from(visibility),
+            state.settings().runner.pin_wait_budget_secs,
+        )
+        .await
+        .map_err(|_| ())?;
         let Some(run) = run else {
             continue;
         };

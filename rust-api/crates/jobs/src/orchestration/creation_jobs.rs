@@ -276,6 +276,7 @@ pub(crate) fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
         prompt: row.try_get("prompt")?,
         prompt_manifest: row.try_get("prompt_manifest")?,
         ended_at: row.try_get("ended_at")?,
+        started_at: row.try_get("started_at")?,
     })
 }
 
