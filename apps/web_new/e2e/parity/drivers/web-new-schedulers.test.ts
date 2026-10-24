@@ -239,6 +239,22 @@ describe("install dialog", () => {
     await expect(driver.schedulerProjectInstallMode()).resolves.toBe("create");
   });
 
+  it("fails loudly when tabs mount with no selection", async () => {
+    const selected = fake({ text: "" });
+    vi.spyOn(selected, "innerText").mockRejectedValueOnce(new Error("timeout"));
+    const dialog = fake({
+      byText: () => absent(),
+      role: (role, options) =>
+        role !== "tab"
+          ? absent()
+          : options?.["selected"] === true
+            ? fake({ first: () => selected })
+            : fake({ count: 2 }),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerProjectInstallMode()).rejects.toThrow("no selected tab");
+  });
+
   it("reads options as name plus handle and selects by handle", async () => {
     const selectOption = vi.fn(async () => undefined);
     const options = fake({
@@ -253,7 +269,7 @@ describe("install dialog", () => {
       { name: "Weekly", handle: "weekly", selected: false },
     ]);
     await driver.schedulerProjectInstallSelect("weekly");
-    expect(selectOption).toHaveBeenCalledWith("s2");
+    expect(selectOption).toHaveBeenCalledWith("s2", { timeout: 30_000 });
   });
 
   it("throws when the chosen handle is not offered", async () => {
@@ -290,12 +306,42 @@ describe("install dialog", () => {
     await expect(driver.schedulerProjectInstallErrors()).resolves.toEqual(["Start time is required."]);
   });
 
+  it("opens the Advanced disclosure before filling a hidden raw rule", async () => {
+    const raw = fake({ visible: false });
+    const disclosure = fake({});
+    const dialog = fake({
+      byLabel: (label) => (label === "Recurrence (RRULE)" ? raw : absent()),
+      role: (role, roleOptions) =>
+        role === "button" && (roleOptions as { name?: string } | undefined)?.name === "Advanced: rule text"
+          ? disclosure
+          : absent(),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=WEEKLY" });
+    expect(disclosure.click).toHaveBeenCalledTimes(1);
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=WEEKLY", { timeout: 30_000 });
+  });
+
+  it("fills the raw rule directly when it already shows", async () => {
+    const raw = fake({ visible: true });
+    const dialog = fake({
+      byLabel: (label) => (label === "Recurrence (RRULE)" ? raw : absent()),
+      role: () => absent(),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=WEEKLY" });
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=WEEKLY", { timeout: 30_000 });
+  });
+
   it("reads the outcome modes and the current help line", async () => {
     const group = fake({
       role: (role) =>
         role === "radio"
           ? fake({
-              items: [fake({ checked: true, text: "Create issues" }), fake({ checked: false, text: "Apply fix" })],
+              items: [
+                fake({ checked: true, locate: () => fake({ text: "Create issues" }) }),
+                fake({ checked: false, locate: () => fake({ text: "Apply fix" }) }),
+              ],
             })
           : absent(),
       locate: () => fake({ text: "Files an issue." }),

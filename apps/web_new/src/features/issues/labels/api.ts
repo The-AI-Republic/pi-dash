@@ -216,8 +216,8 @@ export interface LabelMoveInput {
 
 /**
  * Move a label (drag group/reorder) with an optimistic placement. A
- * refused save rolls back silently with no notice (pinned bug
- * NEWFRONT-408); only the restore runs.
+ * refused save rolls back with a notice (Intended per PSET-039; the
+ * oracle's silent stuck drop is pinned bug NEWFRONT-408).
  */
 export function useMoveLabel(workspaceSlug: string, projectId: string) {
   const queryClient = useQueryClient();
@@ -235,6 +235,9 @@ export function useMoveLabel(workspaceSlug: string, projectId: string) {
           queryClient.setQueryData<LabelList>(key, (cached) => applyLabelPatch(cached, updated.id, updated));
         }
       );
+    },
+    onError: (error) => {
+      notifyError(LABEL_UPDATE_FAILED_TITLE, labelFailureDetail(error));
     },
   });
 }

@@ -23,6 +23,11 @@ import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/permi
 const harness = vi.hoisted(() => ({ role: 20 as number }));
 const notify = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useNavigate: () => vi.fn(),
+}));
+
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   notifySuccess: notify.success,

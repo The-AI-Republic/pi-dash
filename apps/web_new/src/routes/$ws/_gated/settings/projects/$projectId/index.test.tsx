@@ -18,6 +18,7 @@ const harness = vi.hoisted(() => ({
   params: { ws: "acme", projectId: "223e4567-e89b-12d3-a456-426614174001" },
   role: 20,
   workspaceRole: 20,
+  projectPending: false,
 }));
 
 vi.mock("../../../../../../shared/shell/index.js", async (importOriginal) => ({
@@ -28,10 +29,12 @@ vi.mock("../../../../../../shared/shell/index.js", async (importOriginal) => ({
 vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useProjectRow: () => ({
-    status: "success",
-    data: { id: harness.params.projectId, name: "Website relaunch", identifier: "WEB", logo_props: {} },
-    isPending: false,
-    isSuccess: true,
+    status: harness.projectPending ? "pending" : "success",
+    data: harness.projectPending
+      ? undefined
+      : { id: harness.params.projectId, name: "Website relaunch", identifier: "WEB", logo_props: {} },
+    isPending: harness.projectPending,
+    isSuccess: !harness.projectPending,
   }),
   useProjectRoles: () => ({
     status: "success",
@@ -136,6 +139,7 @@ afterEach(() => {
   resetAppClient();
   harness.role = 20;
   harness.workspaceRole = 20;
+  harness.projectPending = false;
   vi.restoreAllMocks();
 });
 
@@ -150,6 +154,15 @@ describe("general settings route", () => {
     expect(screen.getByRole("heading", { level: 1, name: "General" })).toBeInTheDocument();
     expect(await screen.findByTestId("project-settings-general")).toBeInTheDocument();
     expect(screen.getByTestId("project-settings-tab-general")).toHaveAttribute("data-active", "true");
+  });
+
+  it("paints the general skeleton while the shell's project read is unresolved", async () => {
+    // PSET-005's stalled-details leg: the shell holds on its own reads,
+    // so the tab's loader must come from the route's fallback.
+    harness.projectPending = true;
+    renderRoute();
+    await waitFor(() => expect(screen.getByTestId("project-settings-general-skeleton")).toBeInTheDocument());
+    expect(screen.queryByTestId("project-settings-general")).not.toBeInTheDocument();
   });
 
   it("keeps the page open for a guest while the rail narrows to general and members", async () => {

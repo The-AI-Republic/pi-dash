@@ -78,6 +78,17 @@ test(
       expect(created).toMatch(/^Created on\s+\S/);
     });
 
+    if (driver.target === "web_new") {
+      // TARGET (main#503/main#523, NEWFRONT-606): the tab shows the
+      // AI-context placeholder and renders no cover banner anywhere.
+      await test.step("the tab carries the AI-context placeholder and no cover banner", async () => {
+        expect(await driver.settingsGeneralDescriptionPlaceholder()).toBe(
+          "Project Context (Will be shown to AI agents)"
+        );
+        expect(await driver.settingsGeneralCoverVisible()).toBe(false);
+      });
+    }
+
     await test.step("text fields match the server record", async () => {
       expect(await driver.settingsGeneralFieldValue("name")).toBe(String(record["name"] ?? ""));
       expect(await driver.settingsGeneralFieldValue("description")).toBe(String(record["description"] ?? ""));

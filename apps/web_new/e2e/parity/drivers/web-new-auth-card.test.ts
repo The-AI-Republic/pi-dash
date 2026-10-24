@@ -163,7 +163,7 @@ describe("signOutViaCommandPalette", () => {
     const palette = element({ filter: () => option, locator: () => option });
     const page = {
       getByPlaceholder: () => element({ isVisible: async () => false }),
-      getByRole: () => element(),
+      getByRole: (role: string) => (role === "progressbar" ? element({ count: async () => 0 }) : element()),
       getByLabel: () => element(),
       getByTestId: () => element({ count: async () => 0 }),
       locator: (selector: string) => {
@@ -184,6 +184,112 @@ describe("signOutViaCommandPalette", () => {
     await expect(driver.signOutViaCommandPalette()).rejects.toThrow("sign-out never reached the entry");
 
     expect(optionClick).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["https://parity.test/create-workspace", "https://parity.test/onboarding/"])(
+    "drops the session when the entry bounces to a menuless landing (%s)",
+    async (landingUrl) => {
+      // A user with no workspace lands on workspace creation or
+      // onboarding, whose chrome carries no sign-out entry (PSET-003).
+      const clearCookies = vi.fn(async () => undefined);
+      const goto = vi.fn(async () => undefined);
+      const page = {
+        goto,
+        url: () => landingUrl,
+        context: () => ({ clearCookies }),
+        getByPlaceholder: () => element({ isVisible: async () => false }),
+        getByRole: () => element({ count: async () => 0 }),
+        keyboard: { press: async () => undefined },
+      } as unknown as Page;
+      const driver = new WebNewDriver(page);
+      vi.spyOn(driver as unknown as { waitForSignedOut: () => Promise<void> }, "waitForSignedOut").mockImplementation(
+        async () => undefined
+      );
+
+      await driver.signOutViaCommandPalette();
+
+      expect(clearCookies).toHaveBeenCalledTimes(1);
+      expect(goto).toHaveBeenCalledWith("/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+    }
+  );
+
+  it("takes the session-drop path when onboarding paints late mid-loop", async () => {
+    // The bounce can outlast the first probe; a late paint still drops
+    // the session instead of retrying a menu the page has none of.
+    let probes = 0;
+    const triggerWait = vi.fn(async () => {
+      throw new Error("timeout");
+    });
+    const clearCookies = vi.fn(async () => undefined);
+    const page = {
+      goto: vi.fn(async () => undefined),
+      url: () => "https://parity.test/parity-ws/",
+      context: () => ({ clearCookies }),
+      locator: () => element({ waitFor: triggerWait }),
+      getByPlaceholder: () => element({ isVisible: async () => false }),
+      getByRole: (role: string) => {
+        if (role !== "progressbar") return element({});
+        probes += 1;
+        return element({ count: async () => (probes >= 2 ? 1 : 0) });
+      },
+      keyboard: { press: async () => undefined },
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+    vi.spyOn(driver as unknown as { dismissTourIfShown: () => Promise<void> }, "dismissTourIfShown").mockImplementation(
+      async () => undefined
+    );
+    vi.spyOn(driver as unknown as { waitForSignedOut: () => Promise<void> }, "waitForSignedOut").mockImplementation(
+      async () => undefined
+    );
+
+    await driver.signOutViaCommandPalette();
+
+    expect(clearCookies).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("openEntry", () => {
+  it("returns when a slow bounce lands mid-wait", async () => {
+    // The workspaceless newcomer's fall to /create-workspace can land
+    // after the first URL check but before the card wait gives up; the
+    // bounced landing is the entry working, not a failure (PSET-003).
+    const seen: string[] = [];
+    const page = {
+      goto: vi.fn(async () => undefined),
+      reload: vi.fn(async () => undefined),
+      url: () => {
+        seen.push("url");
+        return seen.length > 1 ? "https://parity.test/create-workspace" : "https://parity.test/";
+      },
+      locator: () =>
+        element({
+          waitFor: vi.fn(async () => {
+            throw new Error("timeout");
+          }),
+        }),
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+
+    await driver.openEntry();
+
+    expect(seen).toHaveLength(2);
+  });
+
+  it("fails when the card never paints on /", async () => {
+    const page = {
+      goto: vi.fn(async () => undefined),
+      reload: vi.fn(async () => undefined),
+      url: () => "https://parity.test/",
+      locator: () =>
+        element({
+          waitFor: vi.fn(async () => {
+            throw new Error("timeout");
+          }),
+        }),
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.openEntry()).rejects.toThrow("timeout");
   });
 });
 

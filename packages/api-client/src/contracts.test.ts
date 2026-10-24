@@ -1183,6 +1183,42 @@ describe("project contracts", () => {
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(404);
   });
+
+  it("resolves an archived row from the rich list after a retrieve 404", async () => {
+    // PSET-010: retrieve hides archived projects while the list keeps
+    // them, so the detail read falls back to the list row.
+    const { intake_count: _listOnly, ...Detail } = project;
+    const archived = {
+      ...Detail,
+      archived_at: "2026-10-01T00:00:00Z",
+      timezone: "UTC",
+      agent_executor_options: [{ kind: "local_runner", available: true, reason_code: "" }],
+      default_agent_executor: "local_runner",
+    };
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/projects/details/")
+        ? fakeResponse({ body: JSON.stringify([archived]) })
+        : fakeResponse({ status: 404, body: '{"error":"Project does not exist"}' })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getProject(client, "acme", UUID);
+    expect(parsed.identifier).toBe("WEB");
+    expect(parsed.archived_at).toBe("2026-10-01T00:00:00Z");
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  it("rethrows the retrieve 404 when the list misses the id too", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/projects/details/")
+        ? fakeResponse({ body: "[]" })
+        : fakeResponse({ status: 404, body: '{"error":"Project does not exist"}' })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const failure = await getProject(client, "acme", UUID).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(404);
+    expect((failure as ApiError).message).toBe("Project does not exist");
+  });
 });
 
 describe("reference contracts", () => {
@@ -2620,6 +2656,42 @@ describe("project lifecycle contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport });
     const error = await getProjectSettingsDetail(client, "acme", UUID2).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("resolves an archived General tab row from the rich list after a retrieve 404", async () => {
+    // PSET-010: archived settings stay reachable from the list row.
+    const row = {
+      ...details,
+      archived_at: "2026-10-01T00:00:00Z",
+      agent_ticking_enabled: true,
+      agent_default_max_ticks: 10,
+      agent_default_interval_seconds: 60,
+      agent_review_default_interval_seconds: 60,
+      agent_test_default_interval_seconds: 60,
+    };
+    const transport = stubbedApi((call) =>
+      call.url.endsWith("/projects/details/")
+        ? { status: 200, body: [row] }
+        : { status: 404, body: { error: "Project does not exist" } }
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getProjectSettingsDetail(client, "acme", UUID2);
+    expect(parsed.identifier).toBe("CT");
+    expect(parsed.archived_at).toBe("2026-10-01T00:00:00Z");
+    expect(parsed.agent_default_max_ticks).toBe(10);
+  });
+
+  it("rethrows the retrieve 404 when the list misses the General tab id too", async () => {
+    const transport = stubbedApi((call) =>
+      call.url.endsWith("/projects/details/")
+        ? { status: 200, body: [] }
+        : { status: 404, body: { error: "Project does not exist" } }
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await getProjectSettingsDetail(client, "acme", UUID2).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(404);
+    expect((error as ApiError).message).toBe("Project does not exist");
   });
 
   it("patches the agent policy and parses the policy columns back", async () => {

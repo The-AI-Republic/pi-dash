@@ -2207,6 +2207,8 @@ export interface ParityDriver {
   createProjectErrorText(): Promise<string | null>;
   /** Whether the open create form shows its prefilled cover image. */
   createFormCoverVisible(): Promise<boolean>;
+  /** Creation-dialog description placeholder text (target main#503). */
+  createFormDescriptionPlaceholder(): Promise<string>;
   /** Whether the open create form shows its prefilled project icon. */
   createFormIconVisible(): Promise<boolean>;
 
@@ -9241,6 +9243,29 @@ export interface SpaceBoardStability {
   worklogSidebarTotal(): Promise<string | null>;
   /** Sidebar worklog entry texts in display order. */
   worklogSidebarEntryTexts(): Promise<string[]>;
+
+  // --- Project settings AI Workers (PSET-064, NEWFRONT-387/606). New-app
+  // --- first: the old app has no such tab, so the web driver throws.
+  /** Open the lost-runner rule tab; settles on the form or a denial view. */
+  aiWorkersOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Current rule label on the picker trigger. */
+  aiWorkersRuleValue(): Promise<string>;
+  /** Rule option labels in display order. */
+  aiWorkersRuleOptions(): Promise<string[]>;
+  /** Pick a rule by its label. */
+  aiWorkersSetRule(label: string): Promise<void>;
+  /** Explainer caption under the picker. */
+  aiWorkersDescription(): Promise<string>;
+  /** Save the form and settle. */
+  aiWorkersSave(): Promise<void>;
+  /** Save control presence (admin-only). */
+  aiWorkersSaveVisible(): Promise<boolean>;
+  /** Whether the form reads dimmed (member read-only). */
+  aiWorkersFormDimmed(): Promise<boolean>;
+  /** Whether the rule picker is disabled. */
+  aiWorkersRuleDisabled(): Promise<boolean>;
+  /** Whether the loading skeleton shows. */
+  aiWorkersSkeletonVisible(): Promise<boolean>;
 }
 
 /** One Apps catalog card (NEWFRONT-439, CLOUD-028). */
@@ -10476,6 +10501,8 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralFill(field: SettingsGeneralField, value: string): Promise<void>;
   /** Whether the cover banner renders on the tab. */
   settingsGeneralCoverVisible(): Promise<boolean>;
+  /** General-tab description placeholder text (target main#503). */
+  settingsGeneralDescriptionPlaceholder(): Promise<string>;
   /** Banner headline text (project name plus identifier line). */
   settingsGeneralHeaderText(): Promise<string>;
   /** Visibility network label as rendered. */
@@ -10526,6 +10553,8 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralCoverPickGallery(index: number): Promise<void>;
   /** Upload a cover file through the picker's upload tab. */
   settingsGeneralCoverUpload(file: { name: string; mime: string; bytes: string }): Promise<void>;
+  /** Open the archive confirmation from the danger zone (PSET-010; submit reuses the shared archive-dialog methods). */
+  settingsGeneralOpenArchive(workspaceSlug: string, projectId: string): Promise<void>;
   /** Open the delete confirmation from the danger zone (phrase fill and submit reuse the shared delete-dialog methods). */
   settingsGeneralOpenDelete(): Promise<void>;
   /** Fill the project-name confirmation inside the delete dialog (scoped: the form behind shares the placeholder). */

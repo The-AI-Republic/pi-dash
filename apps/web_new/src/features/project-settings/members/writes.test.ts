@@ -126,10 +126,12 @@ describe("invite role caps (PSET-022)", () => {
     expect(rolesForWorkspaceRole(20).map((option) => option.label)).toEqual(["Admin"]);
   });
 
-  it("narrows an editor's choices to Guest for a guest target", () => {
-    expect(rolesForTarget(5, 15).map((option) => option.label)).toEqual(["Guest"]);
-    expect(rolesForTarget(15, 5).map((option) => option.label)).toEqual(["Guest"]);
-    expect(rolesForTarget(15, 15).map((option) => option.label)).toEqual(["Guest", "Member", "Admin"]);
+  it("caps a workspace guest at Guest while a demoted project guest still offers every role", () => {
+    // The cap follows the workspace role only: restoring a demotion
+    // needs Member and Admin offered to a project guest (PSET-023).
+    expect(rolesForTarget(5).map((option) => option.label)).toEqual(["Guest"]);
+    expect(rolesForTarget(15).map((option) => option.label)).toEqual(["Guest", "Member", "Admin"]);
+    expect(rolesForTarget(20).map((option) => option.label)).toEqual(["Guest", "Member", "Admin"]);
   });
 });
 

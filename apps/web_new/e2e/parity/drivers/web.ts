@@ -10121,6 +10121,12 @@ export class WebDriver implements ParityDriver {
     return this.isShown(this.modalScope().getByRole("img", { name: "Project cover image" }));
   }
 
+  async createFormDescriptionPlaceholder(): Promise<string> {
+    const box = this.modalScope().locator("textarea").first();
+    await box.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return (await box.getAttribute("placeholder")) ?? "";
+  }
+
   async createFormIconVisible(): Promise<boolean> {
     // The icon picker label holds the prefilled emoji glyph or icon and
     // stays empty until a logo value exists.
@@ -54913,6 +54919,12 @@ export class WebDriver implements ParityDriver {
     return (await this.page.locator('[data-testid="general-banner"] img').count()) > 0;
   }
 
+  async settingsGeneralDescriptionPlaceholder(): Promise<string> {
+    const box = this.page.locator("#description").first();
+    await box.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return (await box.getAttribute("placeholder")) ?? "";
+  }
+
   async settingsGeneralHeaderText(): Promise<string> {
     const banner = this.page.locator('[data-testid="general-banner"]').first();
     await banner.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
@@ -58228,6 +58240,11 @@ export class WebDriver implements ParityDriver {
     await this.generalCoverPanel().waitFor({ state: "hidden", timeout: 60_000 });
   }
 
+  async settingsGeneralOpenArchive(workspaceSlug: string, projectId: string): Promise<void> {
+    // The oracle opens archive from the General tab already.
+    await this.openArchiveProjectDialog(workspaceSlug, projectId);
+  }
+
   async settingsGeneralOpenDelete(): Promise<void> {
     await this.page.locator('[data-testid="general-delete-open"]').click({ timeout: WebDriver.OPEN_MS });
     await this.page
@@ -59300,5 +59317,42 @@ export class WebDriver implements ParityDriver {
     } catch {
       return false;
     }
+  }
+
+  // --- Project settings AI Workers (PSET-064, NEWFRONT-606). The old app
+  // --- has no such tab: new-app-first surface, unreachable on this
+  // --- driver (the spec skips the oracle legs), so every method throws.
+  private aiWorkersMissing(): never {
+    throw new Error("[parity] the old app has no AI Workers tab (new-app-first PSET-064).");
+  }
+  async aiWorkersOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersRuleValue(): Promise<string> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersRuleOptions(): Promise<string[]> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersSetRule(_label: string): Promise<void> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersDescription(): Promise<string> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersSave(): Promise<void> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersSaveVisible(): Promise<boolean> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersFormDimmed(): Promise<boolean> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersRuleDisabled(): Promise<boolean> {
+    this.aiWorkersMissing();
+  }
+  async aiWorkersSkeletonVisible(): Promise<boolean> {
+    this.aiWorkersMissing();
   }
 }
