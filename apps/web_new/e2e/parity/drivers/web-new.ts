@@ -11176,10 +11176,14 @@ export class WebNewDriver implements ParityDriver {
     const total = await radios.count();
     const options: { label: string; checked: boolean }[] = [];
     for (let i = 0; i < total; i++) {
+      // Native void inputs carry no text; the wrapping label holds the
+      // mode name (the oracle's radios are non-void, so its driver reads
+      // innerText directly).
       options.push({
         label: (
           (await radios
             .nth(i)
+            .locator("xpath=ancestor::label[1]")
             .innerText()
             .catch(() => "")) ?? ""
         ).trim(),
