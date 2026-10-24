@@ -84,6 +84,13 @@ describe("projectMark", () => {
       glyph: "🛰️",
     });
   });
+
+  it("decodes the contract's hexadecimal page mark", () => {
+    expect(projectMark({ in_use: "emoji", emoji: { value: "1f600" } })).toEqual({
+      kind: "emoji",
+      glyph: "😀",
+    });
+  });
 });
 
 describe("decodeEmojiValue", () => {
@@ -95,6 +102,8 @@ describe("decodeEmojiValue", () => {
   it("decodes one or more code points", () => {
     expect(decodeEmojiValue("127793")).toBe("🌱");
     expect(decodeEmojiValue("128640-8205-128752")).toBe("🚀‍🛰");
+    expect(decodeEmojiValue("1f600")).toBe("😀");
+    expect(decodeEmojiValue("1f680-200d-1f6f0")).toBe("🚀‍🛰");
   });
 
   it("leaves a value that cannot decode untouched", () => {
@@ -109,6 +118,15 @@ describe("decodeEmojiValue", () => {
 
   it("leaves an absurdly long list alone instead of overflowing", () => {
     const long = Array(300_000).fill("65").join("-");
+    expect(decodeEmojiValue(long)).toBe(long);
+  });
+
+  it("leaves an out-of-range hexadecimal code point untouched", () => {
+    expect(decodeEmojiValue("11000f")).toBe("11000f");
+  });
+
+  it("leaves an absurdly long hexadecimal list alone instead of overflowing", () => {
+    const long = Array(300_000).fill("1f600").join("-");
     expect(decodeEmojiValue(long)).toBe(long);
   });
 });
