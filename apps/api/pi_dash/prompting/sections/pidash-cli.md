@@ -9,7 +9,7 @@ customizable: locked
 
 ### Environment
 
-The CLI reads the following from the process environment — never pass them as flags, and never print, log, or commit their values:
+The CLI reads the following from the process environment — never pass them as flags, and never print, log, or otherwise record their values in any output:
 
 - `PIDASH_API_URL` — base URL of this Pi Dash instance.
 - `PIDASH_WORKSPACE_SLUG` — the workspace the issue lives in.
@@ -49,7 +49,7 @@ On success every command prints a single JSON document to stdout and exits `0`. 
 
 #### Comments
 
-Comments are the human ↔ agent conversation channel. Use them to ask clarifying questions, post blocker notices, share PR links, and announce completion. **Comments are not for tracking your own progress — that's what the workpad is for.**
+Comments are the human ↔ agent conversation channel. Use them to ask clarifying questions, post blocker notices, share links to deliverables, and announce completion. **Comments are not for tracking your own progress — that's what the workpad is for.**
 
 - `pidash comment list <identifier>` — list comments on the issue. Each entry has `id` (UUID), `comment_html`, `comment_stripped`, `labels`, `actor_detail`, `speaker_type`, `speaker_label`, `speaker_agent_run_id`, and timestamps. Read these in chronological order to pick up any human replies since your last run.
 - `pidash comment add <identifier> --body-file <path> --as-agent "<agent name>" --agent-run-id "{{ run.id }}" [--fold]` — post a new comment from a file and mark it as spoken by this AI agent run. `--body <markdown>` works for one-liners. Prefer `--body-file` for anything multi-line — shell quoting of markdown is error-prone. When you post any issue comment during this run, always include `--as-agent` and `--agent-run-id`; use your actual runtime name if you know it (`Codex`, `Claude Code`, etc.), otherwise use `AI Agent`.
@@ -113,7 +113,7 @@ Schedulers are the workspace's recurring agent jobs — a prompt plus a cadence,
 
 {% if run.kind != "scheduler" %}#### Run outcome
 
-- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--stop-ticking] [--note "<one line>"]` — report this run's outcome. Call it once, as your **last** `pidash` command, after any state move. The outcome is informational: `done` means "this run's turn is done", and `waiting_on_external` (waiting on CI, a merge, or a dependency issue) applies in **every** stage. No outcome stops the issue's ticking clock, and a run that reports nothing keeps ticking too. `--stop-ticking` is the only run-side signal that stops it — send it when the issue is finished or parked on a human, never while CI, a merge, or a dependency wait remains. See "Ending the run" for what each outcome means and exactly when to stop the clock.
+- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--stop-ticking] [--note "<one line>"]` — report this run's outcome. Call it once, as your **last** `pidash` command, after any state move. The outcome is informational: `done` means "this run's turn is done", and `waiting_on_external` (waiting on an external process — automated checks, the deliverable being accepted — or a dependency issue) applies in **every** stage. No outcome stops the issue's ticking clock, and a run that reports nothing keeps ticking too. `--stop-ticking` is the only run-side signal that stops it — send it when the issue is finished or parked on a human, never while an external-process or dependency wait remains. See "Ending the run" for what each outcome means and exactly when to stop the clock.
 
 {% endif %}#### Debugging
 
@@ -142,7 +142,7 @@ pidash comment add {{ issue.identifier }} --body-file ./.pidash-blocked.md --as-
 pidash issue patch {{ issue.identifier }} --state "Blocked"
 ```
 
-{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether you opened a PR or finished a `noncode` task (investigation, status check, comment-only response), move to the `review` group and report the outcome. The runner never moves an issue to `completed`/Done; a human closes it:
+{% if run.kind == "coding-task" %}End a successful run (workpad already written via `pidash workpad update`) — whether the task produced a durable deliverable or only an answer (investigation, status check, comment-only response), move to the `review` group and report the outcome. The runner never moves an issue to `completed`/Done; a human closes it:
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Review"
@@ -154,16 +154,16 @@ pidash run yield --outcome done   # turn done — the issue moved on; review run
 pidash issue patch {{ issue.identifier }} --state "In Test"      # approved
 pidash issue patch {{ issue.identifier }} --state "In Progress"  # changes needed
 pidash run yield --outcome done                                  # after either move: your turn is done
-pidash run yield --outcome waiting_on_external                   # staying: waiting on CI or the PR — keep ticking
+pidash run yield --outcome waiting_on_external                   # staying: waiting on an external process — keep ticking
 pidash run yield --outcome waiting_on_human --stop-ticking       # staying: waiting on a human reviewer
 ```
-{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test and stops the clock so a human takes it from there (unless the project explicitly lets agents merge and close — then merge and move it to Done instead); **defects** send it back to In Progress with the open items listed (see "Test cycle" Step 3 and "Available states"):
+{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test and stops the clock so a human takes it from there (unless the project explicitly lets agents accept and close — then accept the deliverable and move it to Done instead); **defects** send it back to In Progress with the open items listed (see "Test cycle" Step 3 and "Available states"):
 
 ```sh
 pidash run yield --outcome done --stop-ticking                   # pass — leave In Test; a human takes it from here
 pidash issue patch {{ issue.identifier }} --state "In Progress"  # defects
 pidash run yield --outcome done                                  # after the move: your turn is done
-pidash run yield --outcome waiting_on_external                   # nothing changed — CI or a dependency still pending
+pidash run yield --outcome waiting_on_external                   # nothing changed — an external process or a dependency still pending
 ```
 {% endif %}{% else %}File a finding as a new issue under this project:
 
@@ -182,11 +182,11 @@ pidash issue create --project {{ project.identifier }} --title "<short summary>"
 _(state list unavailable — call `pidash state list` to retrieve it before moving state)_
 {% endif %}
 
-Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description.{% if run.kind == "coding-task" %} The mapping that trips runs up most often: a finished issue — a `code_change` that opened a PR **or** a finished `noncode` task — is awaiting a human → `review` group ("In Review"). The runner never moves an issue to `completed` ("Done"); that's a human's call. Use `cancelled` for "this will not be done".{% endif %}
+Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description.{% if run.kind == "coding-task" %} The mapping that trips runs up most often: a finished issue — deliverable produced **or** question answered — is awaiting a human → `review` group ("In Review"). The runner never moves an issue to `completed` ("Done"); that's a human's call. Use `cancelled` for "this will not be done".{% endif %}
 
 ### Conventions
 
 - All writes are real and immediate. There is no undo. Confirm intent against your workpad plan before mutating.
 - Never retry the same `pidash` command more than twice. On non-zero exit, read the JSON on stderr, decide whether the failure is retryable, back off, and record the outcome in the workpad.
-- Never print, log, commit, or comment on the value of `PIDASH_TOKEN` or anything else whose name begins with `PIDASH_`. If you see the token echoed anywhere, stop and record it in the workpad.
+- Never print, log, or comment on the value of `PIDASH_TOKEN` or anything else whose name begins with `PIDASH_`, and never include it in any deliverable. If you see the token echoed anywhere, stop and record it in the workpad.
 - When pasting `pidash` JSON back into the workpad for audit, enclose it in a fenced ` ``` ` block.

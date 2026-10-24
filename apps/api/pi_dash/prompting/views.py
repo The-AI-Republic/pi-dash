@@ -35,7 +35,7 @@ from rest_framework.views import APIView
 
 from pi_dash.db.models.issue import Issue
 from pi_dash.db.models.workspace import Workspace, WorkspaceMember
-from pi_dash.prompting import recipes, registry
+from pi_dash.prompting import recipes, registry, work_types
 from pi_dash.prompting.composer import (
     SOURCE_DEFAULT,
     SOURCE_WORKSPACE,
@@ -99,15 +99,31 @@ def _resolve_scope(request) -> str:
     return SCOPE_WORKSPACE if scope == SCOPE_WORKSPACE else SCOPE_USER
 
 
-def _section_breakdown(kind: str, *, workspace, user) -> list:
-    """Resolve every section in ``kind``'s recipe and attach ``needs_attention``
-    from the override row that actually resolved.
+def _resolve_work_type(raw: str | None):
+    """Validate an optional ``work_type`` request value.
+
+    Returns ``(key, error_response)``: the effective work-type key (default
+    when absent), or a 400 naming the known work types.
+    """
+    key = raw or work_types.DEFAULT_WORK_TYPE
+    if key not in work_types.WORK_TYPES:
+        return None, Response(
+            {"error": f"unknown work type {key!r}", "work_types": sorted(work_types.WORK_TYPES)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return key, None
+
+
+def _section_breakdown(kind: str, *, workspace, user, work_type: str) -> list:
+    """Resolve every section in ``kind``'s recipe (expanded for ``work_type``)
+    and attach ``needs_attention`` from the override row that actually
+    resolved.
 
     Bulk-loads overrides once (no per-section query) via the composer's index.
     """
     override_index = load_override_index(workspace, user)
     out = []
-    for key in recipes.recipe_for(kind):
+    for key in work_types.expand(recipes.recipe_for(kind), work_type):
         section = registry.get_section(key)
         resolved = resolve_section(
             key,
@@ -165,13 +181,17 @@ class PromptSectionListEndpoint(APIView):
                 {"error": f"unknown kind {kind!r}", "kinds": list(recipes.all_kinds())},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        work_type, err = _resolve_work_type(request.query_params.get("work_type"))
+        if err is not None:
+            return err
         scope = _resolve_scope(request)
         user = request.user if scope == SCOPE_USER else None
-        breakdown = _section_breakdown(kind, workspace=workspace, user=user)
+        breakdown = _section_breakdown(kind, workspace=workspace, user=user, work_type=work_type)
         return Response(
             {
                 "kind": kind,
                 "scope": scope,
+                "work_type": work_type,
                 "sections": ResolvedSectionSerializer(breakdown, many=True).data,
             }
         )
@@ -337,22 +357,26 @@ class PromptCompiledEndpoint(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        work_type, err = _resolve_work_type(request.query_params.get("work_type"))
+        if err is not None:
+            return err
         scope = _resolve_scope(request)
         user = request.user if scope == SCOPE_USER else None
-        compiled = compile_template(kind, workspace=workspace, project=None, user=user)
+        compiled = compile_template(kind, workspace=workspace, project=None, user=user, work_type=work_type)
         # The per-section breakdown is served by the section-list endpoint the
         # page already calls; the compiled endpoint only needs the assembled
         # template body, so we don't re-resolve and re-serialize sections here.
         payload = {
             "kind": kind,
             "scope": scope,
+            "work_type": work_type,
             "template_body": compiled.template_body,
         }
         # Dual compilation (§9.1): when resolving for a user who has overrides,
         # also surface the workspace-only template that automatic runs (ticks,
         # scheduler beats) would use, so the seam is visible.
         if user is not None and any(r.source.startswith("user:") for r in compiled.resolved):
-            automatic = compile_template(kind, workspace=workspace, project=None, user=None)
+            automatic = compile_template(kind, workspace=workspace, project=None, user=None, work_type=work_type)
             payload["automatic_template_body"] = automatic.template_body
         return Response(payload)
 
@@ -385,8 +409,18 @@ class PromptPreviewEndpoint(APIView):
 
         if kind == recipes.KIND_SCHEDULER:
             context, project, err = self._scheduler_context(request, workspace)
+            issue = None
         else:
-            context, project, err = self._issue_context(request, workspace, kind)
+            context, project, err, issue = self._issue_context(request, workspace, kind)
+        if err is not None:
+            return err
+
+        # The work type to preview with: explicit request value, else the
+        # issue's effective work type (scheduler previews use the default).
+        raw_work_type = request.data.get("work_type")
+        if raw_work_type is None and issue is not None:
+            raw_work_type = work_types.effective_work_type(issue)
+        work_type, err = _resolve_work_type(raw_work_type)
         if err is not None:
             return err
 
@@ -401,7 +435,7 @@ class PromptPreviewEndpoint(APIView):
                     {"error": "body is required to preview a draft"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            if section_key not in recipes.recipe_for(kind):
+            if section_key not in work_types.expand(recipes.recipe_for(kind), work_type):
                 return Response(
                     {"error": f"section {section_key!r} is not part of the {kind!r} prompt"},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -430,13 +464,14 @@ class PromptPreviewEndpoint(APIView):
                 user=user,
                 context=context,
                 draft_overrides=draft_overrides,
+                work_type=work_type,
             )
         except PromptRenderError as exc:
             return Response(
                 {"error": "render failed", "detail": str(exc)},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
-        return Response({"kind": kind, "prompt": composed.text})
+        return Response({"kind": kind, "work_type": work_type, "prompt": composed.text})
 
     def _issue_context(self, request, workspace, kind):
         issue_id = request.data.get("issue_id")
@@ -448,17 +483,18 @@ class PromptPreviewEndpoint(APIView):
                     {"error": "issue_id is required for this kind"},
                     status=status.HTTP_400_BAD_REQUEST,
                 ),
+                None,
             )
         try:
             issue = Issue.objects.select_related("project", "workspace", "state").get(id=issue_id, workspace=workspace)
         except (Issue.DoesNotExist, ValueError, DjangoValidationError):
-            return None, None, Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
+            return None, None, Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND), None
         context = build_context(issue, _FakeRun(run_id=uuid.uuid4()))
         # Honor the requested kind even if it differs from the issue's state-
         # derived kind, so a preview of the review prompt against an In Progress
         # issue still reads as a review prompt.
         context["run"]["kind"] = kind
-        return context, issue.project, None
+        return context, issue.project, None, issue
 
     def _scheduler_context(self, request, workspace):
         from pi_dash.db.models.scheduler import SchedulerBinding
