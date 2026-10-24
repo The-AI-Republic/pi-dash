@@ -64,6 +64,7 @@ comment base URL) park a ``failed`` row per worker design
 
 from __future__ import annotations
 
+import os
 import uuid
 
 import pytest
@@ -410,3 +411,101 @@ def test_rust_legacy_sync_one_unknown_id_is_noop(database_url):
         "n"
     ]
     assert after == before
+
+
+GITLAB_PLAIN_PAT = "contract-test-gitlab-pat-1470"
+
+
+def _worker_secret_key() -> str:
+    value = os.environ.get("SECRET_KEY")
+    if not value:
+        raise pytest.skip("SECRET_KEY is not set — must match the worker's")
+    return value
+
+
+@pytest.fixture()
+def gitlab_binding(database_url, chain, rscope) -> dict:
+    """Enabled GitLab binding with a Fernet-encrypted token (production shape).
+
+    Requires the Rust worker to boot with ``seed.GITLAB_SELFHOST`` in
+    GITLAB_ALLOWED_HOSTS (same worker env as the Django oracle leg in
+    ``test_gitlab_sync.py``).
+    """
+    token = seed.encrypt_token_for_worker(GITLAB_PLAIN_PAT, _worker_secret_key())
+    assert token and token != GITLAB_PLAIN_PAT
+    return seed.gitlab_binding(database_url, chain, rscope, token=token)
+
+
+def test_rust_sync_one_allowed_selfhosted_passes_gate(database_url, gitlab_binding):
+    """PIDASHCONV-1470 replay: the Rust worker passes the allowlist gate.
+
+    Mirror of ``test_gitlab_sync.py::test_sync_one_allowed_selfhosted_passes_gate``:
+    the unresolvable self-host is allowed, so the attempt reaches the
+    transport (DNS fails there): a recorded, non-empty error with no gate
+    text, and the account stays connected. Before the fix the default
+    config refused the host (``GitLab host is not allowed`` + degraded).
+    """
+    binding_id = gitlab_binding["binding_id"]
+    account_id = gitlab_binding["account_id"]
+
+    _publish_and_drain(SYNC_ONE, args=[binding_id])
+
+    row = db.wait_for(
+        database_url,
+        "SELECT last_sync_error, last_synced_at FROM git_repository_bindings WHERE id = %s"
+        " AND last_sync_error <> ''",
+        (binding_id,),
+    )
+    assert row is not None, "enabled GitLab binding shows no sync attempt"
+    assert "not allowed" not in row["last_sync_error"], row["last_sync_error"]
+    assert "must use HTTPS" not in row["last_sync_error"], row["last_sync_error"]
+    assert "gitlab-allowed.invalid" in row["last_sync_error"], row["last_sync_error"]
+    assert row["last_synced_at"] is None
+
+    account = db.fetchone(
+        database_url,
+        "SELECT status, last_check_error FROM git_provider_accounts WHERE id = %s",
+        (account_id,),
+    )
+    assert account["status"] == "connected", account
+    assert account["last_check_error"] == "", account
+
+    assert (
+        db.fetchone(
+            database_url,
+            "SELECT count(*) AS n FROM git_issue_syncs WHERE binding_id = %s",
+            (binding_id,),
+        )["n"]
+        == 0
+    )
+
+
+def test_rust_post_completion_allowed_selfhosted_passes_gate(
+    database_url, chain, rscope, gitlab_binding
+):
+    """PIDASHCONV-1470 replay: the completion comment passes the gate too."""
+    sync_id = seed.git_issue_sync(
+        database_url,
+        chain,
+        rscope,
+        binding_id=gitlab_binding["binding_id"],
+        issue_id=str(chain["issue"]["id"]),
+        external_iid="424242",
+        metadata={},
+        provider="gitlab",
+    )
+    _publish_and_drain(POST_COMMENT, args=[sync_id])
+
+    row = db.wait_for(
+        database_url,
+        "SELECT metadata FROM git_issue_syncs WHERE id = %s"
+        " AND metadata ? 'completion_comment_error'",
+        (sync_id,),
+    )
+    assert row is not None, "expected completion_comment_error after DNS failure"
+    error = row["metadata"]["completion_comment_error"]
+    assert "not allowed" not in error, error
+    assert "must use HTTPS" not in error, error
+    assert "gitlab-allowed.invalid" in error, error
+    assert error != ""
+    assert "completion_comment_id" not in row["metadata"]
