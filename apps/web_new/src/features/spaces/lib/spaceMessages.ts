@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // Public-board message catalog (parity/specs/space.md SPC-065). Every
 // string the space chrome renders — navbar, badge, account controls,
-// loaders, failure surfaces, progress and notices — is read through
+// filters, loaders, failure surfaces, progress and notices — is read through
 // spaceMessage by a stable key, never inlined at the call site. The
 // open build ships English only; fuller builds register per-tag packs
 // and the selector prefers the pack entry, falling back to English
@@ -54,6 +54,22 @@ export const SPACE_MESSAGE_KEYS = [
   "notice.commentDeleteFailure.body",
   "notice.attachmentFailure.title",
   "notice.attachmentFailure.body",
+  "filters.open",
+  "filters.search",
+  "filters.priority",
+  "filters.state",
+  "filters.labels",
+  "filters.priority.urgent",
+  "filters.priority.high",
+  "filters.priority.medium",
+  "filters.priority.low",
+  "filters.priority.none",
+  "filters.noMatches",
+  "filters.showMore",
+  "filters.showLess",
+  "filters.removeValue",
+  "filters.clearFacet",
+  "filters.clearAll",
 ] as const;
 
 export type SpaceMessageKey = (typeof SPACE_MESSAGE_KEYS)[number];
@@ -99,6 +115,25 @@ const ENGLISH: Record<SpaceMessageKey, string> = {
   "notice.commentDeleteFailure.body": "The comment could not be deleted. Please try again.",
   "notice.attachmentFailure.title": "Couldn't attach the file",
   "notice.attachmentFailure.body": "The upload failed. Please try again.",
+  // Filter labels the parity suite pins (filters.spec.ts, SPC-034/035):
+  // these spellings are the board's interface contract, translated
+  // through this catalog like every other chrome string.
+  "filters.open": "Filters",
+  "filters.search": "Search",
+  "filters.priority": "Priority",
+  "filters.state": "State",
+  "filters.labels": "Labels",
+  "filters.priority.urgent": "Urgent",
+  "filters.priority.high": "High",
+  "filters.priority.medium": "Medium",
+  "filters.priority.low": "Low",
+  "filters.priority.none": "None",
+  "filters.noMatches": "No matches found",
+  "filters.showMore": "Show more",
+  "filters.showLess": "Show less",
+  "filters.removeValue": "Remove filter",
+  "filters.clearFacet": "Clear facet",
+  "filters.clearAll": "Clear all",
 };
 
 /** A locale pack: translated entries for a subset of the stable keys. */

@@ -1,14 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// One published board (SPC-001, SPC-003, SPC-004, SPC-016, SPC-020–026).
-// Settings are the gate: while they load the navbar placeholder and an empty
-// body show; a 404 swaps to the anchor illustration; any other failure swaps
-// to the board-error illustration. Once settings resolve, issues and states
-// load under the real navbar, whose switcher offers only the publisher-enabled
-// layouts; the settled layout and the filters live in the address. Every
-// branch mounts the board's document head (SPC-007) so the tags settle before
-// content is announced.
+// One published board (SPC-001, SPC-003, SPC-004, SPC-016, SPC-020–026,
+// SPC-034–039). Settings are the gate: while they load the navbar
+// placeholder and an empty body show; a 404 swaps to the anchor
+// illustration; any other failure swaps to the board-error illustration.
+// Once settings resolve, issues and states load under the real navbar,
+// whose switcher offers only the publisher-enabled layouts and whose
+// Filters control offers the active layout's facets; the settled layout
+// and the filters live in the address, and the applied pills render above
+// the layouts. Every branch mounts the board's document head (SPC-007) so
+// the tags settle before content is announced.
 
 import { useQuery } from "@tanstack/react-query";
 import type { SpaceBoardIssuePage, SpaceBoardSettings } from "@pidash/api-client";
@@ -16,6 +18,9 @@ import * as React from "react";
 
 import { spaceRuntime } from "../api/client.js";
 import { spaceIssuesQueryOptions, spaceSettingsQueryOptions, spaceStatesQueryOptions } from "../api/queries.js";
+import { AppliedFilters } from "../filters/AppliedFilters.js";
+import { SpaceFilterPanel } from "../filters/SpaceFilterPanel.js";
+import { useSpaceFilterNav } from "../filters/useSpaceFilterNav.js";
 import { BoardLayouts } from "../layouts/BoardLayouts.js";
 import { LayoutSwitcher } from "../layouts/LayoutSwitcher.js";
 import { useSettledSpaceLayout } from "../layouts/useSettledSpaceLayout.js";
@@ -115,6 +120,7 @@ function ResolvedBoard({
   const issues = useQuery(spaceIssuesQueryOptions(spaceRuntime.client, anchor, filters));
   const states = useQuery(spaceStatesQueryOptions(spaceRuntime.client, anchor));
   const { offered, active, select } = useSettledSpaceLayout(anchor, search, settings.view_props);
+  const filterNav = useSpaceFilterNav(anchor, search, filters);
   const identifier = settings.project_details?.identifier ?? "";
   return (
     <div data-testid="space-board">
@@ -125,6 +131,9 @@ function ResolvedBoard({
         accountSlot={<SpaceAccountSlot anchor={anchor} search={search} />}
       >
         <LayoutSwitcher offered={offered} active={active} onSelect={select} />
+        {states.data === undefined ? null : (
+          <SpaceFilterPanel layout={active} filters={filters} states={states.data} onToggle={filterNav.toggleValue} />
+        )}
         <SpaceThemeSwitch />
       </BoardNavbar>
       {issues.isError || states.isError ? (
@@ -133,6 +142,13 @@ function ResolvedBoard({
         <BoardLoading />
       ) : (
         <>
+          <AppliedFilters
+            filters={filters}
+            states={states.data}
+            onRemoveValue={filterNav.removeValue}
+            onClearFacet={filterNav.clearFacet}
+            onClearAll={filterNav.clearAll}
+          />
           <BoardContent
             anchor={anchor}
             layout={active}

@@ -43,6 +43,19 @@ describe("spaceMessage", () => {
     expect(new Set<string>(SPACE_MESSAGE_KEYS).size).toBe(SPACE_MESSAGE_KEYS.length);
   });
 
+  it("pins the oracle-visible filter labels (SPC-034/035)", () => {
+    expect(spaceMessage("filters.open")).toBe("Filters");
+    expect(spaceMessage("filters.search")).toBe("Search");
+    expect(spaceMessage("filters.priority")).toBe("Priority");
+    expect(spaceMessage("filters.state")).toBe("State");
+    expect(spaceMessage("filters.labels")).toBe("Labels");
+    expect(spaceMessage("filters.clearAll")).toBe("Clear all");
+    expect(spaceMessage("filters.noMatches")).toBe("No matches found");
+    expect(
+      (["urgent", "high", "medium", "low", "none"] as const).map((level) => spaceMessage(`filters.priority.${level}`))
+    ).toEqual(["Urgent", "High", "Medium", "Low", "None"]);
+  });
+
   it("covers the whole key union", () => {
     const keys: readonly SpaceMessageKey[] = SPACE_MESSAGE_KEYS;
     expect(keys).toContain("theme.switchToDark");

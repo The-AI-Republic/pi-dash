@@ -368,6 +368,80 @@ describe("BoardScreen", () => {
     expect(await screen.findByText("Anonymous visitors can read this")).toBeInTheDocument();
     expect(screen.queryByTestId("space-product-badge")).not.toBeInTheDocument();
   });
+
+  it("shows the Filters control once states settle and hides it while they load (SPC-034)", async () => {
+    renderBoard({ states: () => new Promise(() => undefined) });
+    expect(await screen.findByTestId("space-board-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("space-filters-button")).not.toBeInTheDocument();
+  });
+
+  it("pushes a picked panel value under its singular key (SPC-034/035)", async () => {
+    renderBoard({}, ANCHOR, { board: "list" });
+    await screen.findByTestId("space-list-layout");
+    await userEvent.click(screen.getByTestId("space-filters-button"));
+    await screen.findByTestId("space-filters-panel");
+    const high = screen.getAllByTestId("space-filter-option").find((row) => row.getAttribute("data-value") === "high");
+    if (!high) throw new Error("missing High option");
+    await userEvent.click(high);
+    expect(navigation.navigate).toHaveBeenCalledWith({
+      href: "/spaces/issues/anchor-1/?board=list&priority=high",
+    });
+  });
+
+  it("renders applied pills from the address and removes one through its pill (SPC-035)", async () => {
+    renderBoard({}, ANCHOR, { board: "list", priority: ["high", "urgent"] });
+    await screen.findByTestId("space-list-layout");
+    const strip = screen.getByTestId("space-applied-filters");
+    expect(within(strip).getAllByTestId("space-applied-pill")).toHaveLength(2);
+    const remove = within(strip)
+      .getAllByTestId("space-applied-remove")
+      .find((entry) => entry.getAttribute("data-value") === "high");
+    if (!remove) throw new Error("missing High remove");
+    await userEvent.click(remove);
+    expect(navigation.navigate).toHaveBeenCalledWith({
+      href: "/spaces/issues/anchor-1/?board=list&priority=urgent",
+    });
+  });
+
+  it("clears every facet through the strip and keeps the view and the open issue (SPC-035/036)", async () => {
+    renderBoard({}, ANCHOR, { board: "kanban", peekId: "p1", priority: ["high"], state: [STATE_ID] });
+    await screen.findByTestId("space-board-layout");
+    expect(screen.getByTestId("space-applied-filters")).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("space-applied-clear-all"));
+    expect(navigation.navigate).toHaveBeenCalledWith({
+      href: "/spaces/issues/anchor-1/?board=kanban&peekId=p1",
+    });
+  });
+
+  it("sends an address-only label filter on the first fetch and shells it without pills (SPC-037)", async () => {
+    const label = "55555555-5555-4555-8555-555555555555";
+    const requests = renderBoard({}, ANCHOR, { board: "list", labels: [label] });
+    await screen.findByTestId("space-list-layout");
+    const issues = requests.filter((url) => url.includes("/issues/"));
+    expect(issues).toHaveLength(1);
+    expect(new URL(issues[0] ?? "", "https://api.test").searchParams.get("labels")).toBe(label);
+    const shells = within(screen.getByTestId("space-applied-filters")).getAllByTestId("space-applied-facet");
+    expect(shells.map((entry) => entry.getAttribute("data-facet"))).toEqual(["labels"]);
+    expect(screen.queryByTestId("space-applied-pill")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("space-applied-clear"));
+    expect(navigation.navigate).toHaveBeenCalledWith({ href: "/spaces/issues/anchor-1/?board=list" });
+  });
+
+  it("renders no pill for a state id the states fetch does not know, but still sends it (SPC-035/036)", async () => {
+    const unknown = "66666666-6666-4666-8666-666666666666";
+    const requests = renderBoard({}, ANCHOR, { board: "list", state: [unknown] });
+    await screen.findByTestId("space-list-layout");
+    const issues = requests.filter((url) => url.includes("/issues/"));
+    expect(new URL(issues[0] ?? "", "https://api.test").searchParams.get("state")).toBe(unknown);
+    expect(screen.queryByTestId("space-applied-pill")).not.toBeInTheDocument();
+    expect(screen.getByTestId("space-applied-clear")).toBeInTheDocument();
+  });
+
+  it("offers no text search on the board while the panel is closed (SPC-039)", async () => {
+    renderBoard({}, ANCHOR, { board: "list" });
+    await screen.findByTestId("space-list-layout");
+    expect(screen.queryAllByRole("textbox")).toEqual([]);
+  });
 });
 
 describe("boardFiltersOf", () => {
