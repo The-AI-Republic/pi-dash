@@ -11328,6 +11328,8 @@ export interface SchedulerRecurrenceFacts {
   interval: string | null;
   /** Selected repeat unit value. */
   unit: string | null;
+  /** Every repeat unit the control offers, in display order. */
+  unitOptions: string[];
   /** Weekly chips with their pressed state. */
   weekdays: SchedulerRecurrenceWeekday[];
   /** Selected monthly form ("day" or "weekday"), or null outside monthly. */

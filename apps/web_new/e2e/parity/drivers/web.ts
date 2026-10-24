@@ -16133,6 +16133,7 @@ export class WebDriver implements ParityDriver {
       visible: false,
       interval: null,
       unit: null,
+      unitOptions: [],
       weekdays: [],
       monthlyPattern: null,
       dayOfMonth: null,

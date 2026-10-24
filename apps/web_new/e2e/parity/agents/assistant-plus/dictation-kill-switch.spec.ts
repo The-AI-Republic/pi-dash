@@ -117,12 +117,13 @@ test(
       await expect
         .poll(() => driver.assistantDictationHint(), { timeout: 60_000 })
         .toMatch(/Recording — release to transcribe/);
+      const uploadsBefore = (await driver.assistantTranscribeRequests()).length;
       await driver.settingsProfileStubDictationEnabled(false);
       await driver.assistantRefocus();
       await expect.poll(() => driver.assistantMicVisible(), { timeout: 30_000 }).toBe(false);
       await driver.assistantMicUp();
       // Nothing may upload after the switch turned the cell off.
-      expect(await driver.assistantTranscribeRequests()).toEqual([]);
+      expect((await driver.assistantTranscribeRequests()).length).toBe(uploadsBefore);
       expect(await driver.assistantDraftValue()).toBe("");
     });
 
@@ -151,6 +152,30 @@ test(
         .poll(() => driver.settingsProfileDictationFacts(), { timeout: 30_000 })
         .toMatchObject({ sectionVisible: false, removeVisible: false });
       expect((await serverAssistantSttGet(ownerSession)).has_api_key).toBe(false);
+    });
+
+    await test.step("a disabled transcribe answer re-reads the config and hides the mic", async () => {
+      if (driver.target !== "web_new") return;
+      // The switch flips after the tab loaded: the composer still shows the
+      // mic from its cached read, so the only signal is the refusal itself.
+      // Serving `dictation_disabled` from the upload must make the hook
+      // re-read the speech config, and that read now reports the switch off.
+      await serverAssistantSttPut(ownerSession, DUMMY_STT);
+      await driver.settingsProfileStubDictationEnabled(true);
+      await driver.assistantOpenThread(workspaceSlug, thread.id);
+      await expect.poll(() => driver.assistantMicLabel(), { timeout: 60_000 }).toBe("Hold to dictate");
+      const before = await driver.assistantSpeechConfigReads();
+      const uploadsBefore = (await driver.assistantTranscribeRequests()).length;
+      await driver.settingsProfileStubDictationEnabled(false);
+      await driver.assistantFailTranscribe(404, { error: "dictation_disabled" });
+      await driver.assistantMicHold(2_500);
+      await expect.poll(() => driver.assistantSpeechConfigReads(), { timeout: 30_000 }).toBeGreaterThan(before);
+      await expect.poll(() => driver.assistantMicVisible(), { timeout: 30_000 }).toBe(false);
+      expect(await driver.assistantMicLabel()).toBeNull();
+      expect(await driver.assistantDictationHint()).toBeNull();
+      expect((await driver.assistantTranscribeRequests()).length).toBe(uploadsBefore + 1);
+      expect(await driver.assistantDraftValue()).toBe("");
+      await driver.assistantClearTranscribeStubs();
     });
 
     await test.step("the saved key still offers dictation while the flag is on", async () => {

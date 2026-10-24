@@ -10995,12 +10995,20 @@ export class WebNewDriver implements ParityDriver {
     // The textarea keeps the serialized rule even while the disclosure is
     // collapsed, so its value is the current rule regardless of visibility.
     const rawValue = (await rawField.count()) > 0 ? await rawField.first().inputValue() : null;
+    const unitOptions =
+      (await unitSelect.count()) > 0
+        ? await unitSelect
+            .first()
+            .locator("option")
+            .evaluateAll((nodes) => nodes.map((node) => (node as HTMLOptionElement).value))
+        : [];
     const sentence = await this.schedulerHumanizer(dialog).catch(() => "");
     if (!visible) {
       return {
         visible: false,
         interval: null,
         unit: null,
+        unitOptions,
         weekdays: [],
         monthlyPattern: null,
         dayOfMonth: null,
@@ -11043,6 +11051,7 @@ export class WebNewDriver implements ParityDriver {
       visible,
       interval: await maybeValue(dialog.getByLabel("Repeat interval")),
       unit: await unitSelect.first().inputValue(),
+      unitOptions,
       weekdays,
       monthlyPattern: await maybeValue(dialog.getByLabel("Monthly pattern")),
       dayOfMonth: await maybeValue(dialog.getByLabel("Day of the month")),

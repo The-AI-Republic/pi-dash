@@ -33,6 +33,7 @@ interface Options {
   fill?: (value: string) => Promise<void>;
   getAttribute?: (name: string) => Promise<string | null>;
   selectOption?: (value: string) => Promise<void>;
+  evaluateAll?: (fn: (nodes: unknown[]) => unknown) => Promise<unknown>;
 }
 
 class FakeLocator {
@@ -40,6 +41,7 @@ class FakeLocator {
   readonly click: ReturnType<typeof vi.fn>;
   readonly fill: ReturnType<typeof vi.fn>;
   readonly selectOption: ReturnType<typeof vi.fn>;
+  readonly evaluateAll: ReturnType<typeof vi.fn>;
   readonly waitFor = vi.fn(async () => undefined);
 
   constructor(options: Options = {}) {
@@ -47,6 +49,7 @@ class FakeLocator {
     this.click = vi.fn(options.click ?? (async () => undefined));
     this.fill = vi.fn(options.fill ?? (async () => undefined));
     this.selectOption = vi.fn(options.selectOption ?? (async () => undefined));
+    this.evaluateAll = vi.fn(options.evaluateAll ?? (async () => []));
   }
 
   count(): Promise<number> {
@@ -504,7 +507,22 @@ describe("recurrence builder", () => {
           "Recurrence (RRULE)": raw,
         };
         const value = values[label];
-        return value === undefined ? absent() : fake({ count: 1, visible: true, input: value });
+        if (value === undefined) return absent();
+        if (label !== "Repeat unit") return fake({ count: 1, visible: true, input: value });
+        // The unit select exposes its option list so the scenario can prove
+        // no sub-daily cadence is offered.
+        return fake({
+          count: 1,
+          visible: true,
+          input: value,
+          locate: (selector: string) =>
+            selector === "option"
+              ? fake({
+                  evaluateAll: async (fn: (nodes: unknown[]) => unknown) =>
+                    fn(["none", "day", "week", "month", "year"].map((unit) => ({ value: unit }))),
+                })
+              : absent(),
+        });
       },
       locate: (selector: string) => {
         const line = fake({ text: "every 2 weeks on Monday, Friday" });
@@ -518,6 +536,7 @@ describe("recurrence builder", () => {
       visible: true,
       interval: "2",
       unit: "week",
+      unitOptions: ["none", "day", "week", "month", "year"],
       weekdays: [
         { name: "Sunday", pressed: false },
         { name: "Monday", pressed: true },
