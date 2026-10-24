@@ -43,6 +43,7 @@
 //! (needs the crate's `tls-rustls-insecure` feature).
 
 use redis::AsyncCommands;
+use std::time::Duration;
 
 /// Open a [`redis::Client`] with Django's TLS policy: `rediss://` (and
 /// `valkeys://`) URLs connect without certificate verification, exactly
@@ -59,22 +60,51 @@ pub fn open_client(url: &str) -> Result<redis::Client, redis::RedisError> {
     redis::Client::open(url)
 }
 
-/// Timeout-free shared Redis client. `Clone` shares the underlying client
-/// (each operation multiplexes a connection from it); store one in
-/// `AppState` and clone it into handlers.
+/// Django's `REDIS_SOCKET_CONNECT_TIMEOUT` default (`2.0` s,
+/// `pi_dash/settings/redis.py` `async_redis_instance`), used when the
+/// resolved setting is not a positive finite float.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Django's `REDIS_SOCKET_TIMEOUT` default (`5.0` s), used when the
+/// resolved setting is not a positive finite float.
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Resolve a `Settings.redis` float-seconds timeout, falling back to the
+/// Django default for a non-positive or non-finite value (same guard as
+/// the outbox `connect_blocking` helpers).
+fn redis_timeout(setting_secs: f64, default: Duration) -> Duration {
+    if setting_secs.is_finite() && setting_secs > 0.0 {
+        Duration::try_from_secs_f64(setting_secs).unwrap_or(default)
+    } else {
+        default
+    }
+}
+
+/// Shared Redis client with Django-parity subscribe timeouts. `Clone`
+/// shares the underlying client (each operation multiplexes a connection
+/// from it); store one in `AppState` and clone it into handlers.
+/// [`RedisHandle::subscribe`] wraps its connect and subscribe phases in
+/// [`tokio::time::timeout`] using these timeouts; the multiplexed
+/// operations keep redis-rs's own connection config.
 #[derive(Debug, Clone)]
 pub struct RedisHandle {
     client: redis::Client,
+    connect_timeout: Duration,
+    response_timeout: Duration,
 }
 
 impl RedisHandle {
     /// Build from an explicit URL (`redis://` or `rediss://`). Parsing only;
     /// no connection is opened until the first operation. `rediss://`
     /// URLs skip certificate verification via [`open_client`], matching
-    /// Django's `ssl_cert_reqs=None`.
+    /// Django's `ssl_cert_reqs=None`. Subscribe timeouts are Django's
+    /// defaults (2.0 s / 5.0 s): every caller of this constructor is a
+    /// test; production builds via [`RedisHandle::from_settings`].
     pub fn from_url(url: &str) -> Result<Self, redis::RedisError> {
         Ok(Self {
             client: open_client(url)?,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
         })
     }
 
@@ -82,14 +112,27 @@ impl RedisHandle {
     /// `None` when `REDIS_URL` is unset or empty (cache disabled); a present
     /// but unparsable URL also degrades to `None` with a warn log, so a typo
     /// fails handlers soft (per-site policy above) instead of failing boot.
+    /// Subscribe timeouts come from `Settings.redis`
+    /// (`REDIS_SOCKET_CONNECT_TIMEOUT` / `REDIS_SOCKET_TIMEOUT`, Django's
+    /// 2.0 s / 5.0 s defaults).
     pub fn from_settings(settings: &crate::config::Settings) -> Option<Self> {
         let url = settings
             .redis
             .url
             .as_deref()
             .filter(|url| !url.is_empty())?;
-        match Self::from_url(url) {
-            Ok(handle) => Some(handle),
+        match open_client(url) {
+            Ok(client) => Some(Self {
+                client,
+                connect_timeout: redis_timeout(
+                    settings.redis.socket_connect_timeout_secs,
+                    DEFAULT_CONNECT_TIMEOUT,
+                ),
+                response_timeout: redis_timeout(
+                    settings.redis.socket_timeout_secs,
+                    DEFAULT_RESPONSE_TIMEOUT,
+                ),
+            }),
             Err(error) => {
                 tracing::warn!(%error, "redis: REDIS_URL unparsable; continuing without cache");
                 None
@@ -135,9 +178,38 @@ impl RedisHandle {
     /// `SUBSCRIBE channel` (SSE live tail). The returned `PubSub` is already
     /// subscribed; the caller awaits [`RedisHandle::next_payload`] and closes
     /// it when the stream ends.
+    ///
+    /// redis-rs's `get_async_pubsub` applies no timeout (the connection-config
+    /// timeouts only cover multiplexed connections), so both phases are
+    /// wrapped in [`tokio::time::timeout`]: the pubsub connect in
+    /// `REDIS_SOCKET_CONNECT_TIMEOUT`, the `SUBSCRIBE` reply in
+    /// `REDIS_SOCKET_TIMEOUT` — the same client-side bounds Django's
+    /// `async_redis_instance` enforces. An elapsed timeout surfaces as an
+    /// `Io` error, so the callers' existing error paths apply unchanged.
     pub async fn subscribe(&self, channel: &str) -> Result<redis::aio::PubSub, redis::RedisError> {
-        let mut pubsub = self.client.get_async_pubsub().await?;
-        pubsub.subscribe(channel).await?;
+        let mut pubsub = match tokio::time::timeout(
+            self.connect_timeout,
+            self.client.get_async_pubsub(),
+        )
+        .await
+        {
+            Ok(connected) => connected?,
+            Err(_) => {
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::Io,
+                    "pubsub connect timed out",
+                )));
+            }
+        };
+        match tokio::time::timeout(self.response_timeout, pubsub.subscribe(channel)).await {
+            Ok(subscribed) => subscribed?,
+            Err(_) => {
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::Io,
+                    "pubsub subscribe timed out",
+                )));
+            }
+        }
         Ok(pubsub)
     }
 
@@ -357,5 +429,162 @@ mod tests {
             .invalidate_matching("invalidate-matching-test:*")
             .await
             .expect("cleanup");
+    }
+
+    /// Spawn a silent TCP server: accepts connections on an ephemeral port
+    /// and never replies (a blackholed Redis). A fixed port cannot be
+    /// assumed unused on a shared runner (PIDASHCONV-1283).
+    async fn spawn_silent_server() -> (tokio::task::JoinHandle<()>, u16) {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                // Hold the connection open, draining whatever the client
+                // sends, and never reply — the handshake (and SUBSCRIBE)
+                // waits forever.
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = socket.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        (task, port)
+    }
+
+    /// Spawn a fake server that answers redis-rs's `CLIENT SETINFO`
+    /// handshake with `+OK` but never replies to `SUBSCRIBE` (a Redis
+    /// frozen mid-subscribe, e.g. `DEBUG SLEEP`). Each `SETINFO` occurrence
+    /// in the inbound stream earns one `+OK`; everything else stays silent.
+    async fn spawn_handshake_only_server() -> (tokio::task::JoinHandle<()>, u16) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    let mut answered = 0usize;
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = socket.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        seen.extend_from_slice(&buf[..n]);
+                        let setinfos = seen
+                            .windows(b"SETINFO".len())
+                            .filter(|w| *w == b"SETINFO")
+                            .count();
+                        while answered < setinfos {
+                            if socket.write_all(b"+OK\r\n").await.is_err() {
+                                return;
+                            }
+                            answered += 1;
+                        }
+                    }
+                });
+            }
+        });
+        (task, port)
+    }
+
+    #[tokio::test]
+    async fn subscribe_against_silent_server_fails_fast() {
+        // Django's async client carries `socket_connect_timeout=2.0` /
+        // `socket_timeout=5.0` (`pi_dash/settings/redis.py`
+        // `async_redis_instance`), so a stalled Redis fails a runner
+        // long-poll or SSE stream in seconds. `subscribe` must match:
+        // against a server that accepts and never replies it returns an
+        // `Io` error (the callers' existing error paths apply) instead of
+        // hanging to the OS TCP timeout. Pre-fix this test hangs.
+        let (_task, port) = spawn_silent_server().await;
+        let handle =
+            RedisHandle::from_url(&format!("redis://127.0.0.1:{port}/")).expect("url parses");
+        let started = std::time::Instant::now();
+        let error = match handle.subscribe("assistant:thread:x").await {
+            Ok(_) => panic!("silent server must fail, not hang"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error.kind(), redis::ErrorKind::Io),
+            "elapsed must map to Io, got {:?}",
+            error.kind()
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "must fail in seconds, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_honours_settings_timeouts() {
+        // The timeouts come from `Settings.redis`, not hardcoded: small
+        // settings fail well under the 2.0 s default connect timeout.
+        // Pre-fix this test hangs.
+        let (_task, port) = spawn_silent_server().await;
+        let mut settings = Settings::test_defaults();
+        settings.redis.url = Some(format!("redis://127.0.0.1:{port}/"));
+        settings.redis.socket_connect_timeout_secs = 0.2;
+        settings.redis.socket_timeout_secs = 0.3;
+        let handle = RedisHandle::from_settings(&settings).expect("handle builds");
+        let started = std::time::Instant::now();
+        let error = match handle.subscribe("assistant:thread:x").await {
+            Ok(_) => panic!("silent server must fail, not hang"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error.kind(), redis::ErrorKind::Io),
+            "elapsed must map to Io, got {:?}",
+            error.kind()
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "0.2 s setting must fail in under a second, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_response_stall_trips_response_timeout() {
+        // The `SUBSCRIBE` reply has its own arm: a server that answers the
+        // connect handshake but stalls the subscribe reply must trip the
+        // response timeout, not the (long) connect timeout. Pre-fix this
+        // test hangs.
+        let (_task, port) = spawn_handshake_only_server().await;
+        let mut settings = Settings::test_defaults();
+        settings.redis.url = Some(format!("redis://127.0.0.1:{port}/"));
+        settings.redis.socket_connect_timeout_secs = 20.0;
+        settings.redis.socket_timeout_secs = 0.3;
+        let handle = RedisHandle::from_settings(&settings).expect("handle builds");
+        let started = std::time::Instant::now();
+        let error = match handle.subscribe("assistant:thread:x").await {
+            Ok(_) => panic!("stalled reply must fail, not hang"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error.kind(), redis::ErrorKind::Io),
+            "elapsed must map to Io, got {:?}",
+            error.kind()
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "0.3 s response setting must fail in seconds, took {:?}",
+            started.elapsed()
+        );
     }
 }
