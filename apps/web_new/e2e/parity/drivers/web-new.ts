@@ -346,10 +346,9 @@ function schedulerOriginLabel(label: string): string {
 
 /** Definition validation copy the oracle spells differently. */
 function schedulerDefinitionError(label: string): string {
-  return label.replace(
-    "Use lowercase letters, numbers, and single dashes.",
-    "Use lowercase letters, numbers, and dashes only."
-  );
+  return label
+    .replace("Use lowercase letters, numbers, and single dashes.", "Use lowercase letters, numbers, and dashes only.")
+    .replace("Enter a handle.", "Slug is required.");
 }
 
 /** The delete confirmation's consequence sentence in oracle vocabulary. */
@@ -10188,11 +10187,15 @@ export class WebNewDriver implements ParityDriver {
     await dialog
       .getByRole("heading", { name: "New Scheduler", exact: true })
       .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The tab is a button carrying aria-selected; Playwright has no
+    // isSelected read, so the selected state comes off that attribute.
     const createTab = dialog.getByRole("tab", { name: "Create new", exact: true });
-    if ((await createTab.count()) > 0 && !(await createTab.isSelected().catch(() => false))) {
+    if ((await createTab.count()) > 0 && (await createTab.getAttribute("aria-selected")) !== "true") {
       await createTab.click();
     }
-    await dialog.getByLabel("Handle").waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The project-side create form names the handle field "Slug" (the
+    // catalog dialog calls the same field "Handle").
+    await dialog.getByLabel("Slug").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async schedulerProjectCreateSubmit(): Promise<void> {
@@ -10220,7 +10223,10 @@ export class WebNewDriver implements ParityDriver {
     // no-matches note as well as for project rows. Only rows with a
     // checkbox are options; waiting for any <li> would hand back the
     // placeholder as a project before the install detection settles.
-    const items = panel.locator("li").filter({ has: panel.locator('input[type="checkbox"]') });
+    // The filter's `has` locator is resolved against the page, so it must
+    // be page-rooted: a panel-rooted one is already narrowed to the panel's
+    // subtree and no <li> contains it, leaving every row filtered out.
+    const items = panel.locator("li").filter({ has: this.page.locator('input[type="checkbox"]') });
     await items
       .first()
       .or(panel.getByText("No projects match your search.", { exact: false }))
@@ -11238,7 +11244,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async schedulerProjectCreateErrors(): Promise<string[]> {
-    return this.schedulerModalErrors(this.schedulerDialog());
+    return (await this.schedulerModalErrors(this.schedulerDialog())).map(schedulerDefinitionError);
   }
 
   async schedulerCloseProjectCreate(): Promise<void> {

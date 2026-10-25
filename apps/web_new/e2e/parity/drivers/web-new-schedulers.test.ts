@@ -1933,6 +1933,27 @@ describe("scheduler bulk install", () => {
     ]);
   });
 
+  it("scopes the picker row filter to a page-rooted checkbox locator", async () => {
+    const checkboxProbe = fake({ count: 1 });
+    const pageLocator = vi.fn((selector: string) => (selector === 'input[type="checkbox"]' ? checkboxProbe : absent()));
+    const alpha = fake({
+      text: "Bulk Alpha\nAG6A",
+      role: (role: string) => (role === "checkbox" ? fake({ checked: false, disabled: false }) : absent()),
+    });
+    const filter = vi.fn(() => fake({ items: [alpha] }));
+    const items = fake({ items: [alpha], filter });
+    const panel = fake({ locate: (selector: string) => (selector === "li" ? items : absent()) });
+    const dialog = fake({
+      locate: (selector: string) => (selector === "div[data-prevent-outside-click]" ? panel : absent()),
+    });
+    const page = pageOf({ locator: pageLocator, getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerInstallPickerOptions();
+    // `has` resolves against the page, so a panel-rooted locator would be
+    // narrowed to the panel's own subtree and match no row at all.
+    expect(pageLocator).toHaveBeenCalledWith('input[type="checkbox"]');
+    expect(filter).toHaveBeenCalledWith({ has: checkboxProbe });
+  });
+
   it("searches and toggles projects in the picker", async () => {
     const search = fake();
     const checkbox = fake({ click: vi.fn(async () => undefined) });
@@ -2014,8 +2035,9 @@ describe("project scheduler create", () => {
   it("opens create and switches to the create tab when install is preselected", async () => {
     const create = fake({ click: vi.fn(async () => undefined) });
     const tabClick = vi.fn(async () => undefined);
-    const tab = fake({ count: 1, selected: false, click: tabClick });
-    const handle = fake({ count: 1, waitFor: vi.fn(async () => undefined) });
+    const attribute = vi.fn(async (name: string) => (name === "aria-selected" ? "false" : null));
+    const tab = fake({ count: 1, getAttribute: attribute, click: tabClick });
+    const slug = fake({ count: 1, waitFor: vi.fn(async () => undefined) });
     const dialog = fake({
       role: (role: string, options?: Record<string, unknown>) =>
         role === "heading" && options?.["name"] === "New Scheduler"
@@ -2023,7 +2045,7 @@ describe("project scheduler create", () => {
           : role === "tab"
             ? tab
             : absent(),
-      byLabel: (label: string) => (label === "Handle" ? handle : absent()),
+      byLabel: (label: string) => (label === "Slug" ? slug : absent()),
     });
     const page = pageOf({
       getByRole: (role: string, options?: Record<string, unknown>) =>
@@ -2031,21 +2053,43 @@ describe("project scheduler create", () => {
     });
     await new WebNewDriver(page).schedulerOpenProjectCreate();
     expect(create.click).toHaveBeenCalled();
+    expect(attribute).toHaveBeenCalledWith("aria-selected");
     expect(tabClick).toHaveBeenCalled();
+    expect(slug.waitFor).toHaveBeenCalled();
   });
 
   it("leaves an already selected create tab and a create-first dialog alone", async () => {
-    const tab = fake({ count: 1, selected: true, click: vi.fn(async () => undefined) });
+    const tab = fake({
+      count: 1,
+      getAttribute: async (name: string) => (name === "aria-selected" ? "true" : null),
+      click: vi.fn(async () => undefined),
+    });
     const dialog = fake({
       role: (role: string) => (role === "tab" ? tab : fake({ waitFor: vi.fn(async () => undefined) })),
-      byLabel: () => fake({ count: 1, waitFor: vi.fn(async () => undefined) }),
+      byLabel: (label: string) =>
+        label === "Slug" ? fake({ count: 1, waitFor: vi.fn(async () => undefined) }) : absent(),
     });
     await new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => dialog }) })).schedulerOpenProjectCreate();
     expect(tab.click).not.toHaveBeenCalled();
+  });
 
+  it("clicks the create tab when the tab reports no aria-selected value", async () => {
+    const tabClick = vi.fn(async () => undefined);
+    const tab = fake({ count: 1, getAttribute: async () => null, click: tabClick });
+    const dialog = fake({
+      role: (role: string) => (role === "tab" ? tab : fake({ waitFor: vi.fn(async () => undefined) })),
+      byLabel: (label: string) =>
+        label === "Slug" ? fake({ count: 1, waitFor: vi.fn(async () => undefined) }) : absent(),
+    });
+    await new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => dialog }) })).schedulerOpenProjectCreate();
+    expect(tabClick).toHaveBeenCalled();
+  });
+
+  it("opens a create-first dialog with no tab strip", async () => {
     const noTab = fake({
       role: () => absent(),
-      byLabel: () => fake({ count: 1, waitFor: vi.fn(async () => undefined) }),
+      byLabel: (label: string) =>
+        label === "Slug" ? fake({ count: 1, waitFor: vi.fn(async () => undefined) }) : absent(),
     });
     await new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => noTab }) })).schedulerOpenProjectCreate();
   });
@@ -2055,6 +2099,25 @@ describe("project scheduler create", () => {
     const dialog = fake({ locate: () => submit });
     await new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => dialog }) })).schedulerProjectCreateSubmit();
     expect(submit.click).toHaveBeenCalled();
+  });
+
+  it("maps the project create refusal onto the oracle vocabulary", async () => {
+    const errors = fake({
+      items: [
+        fake({ text: "Enter a handle.", visible: true }),
+        fake({ text: "Enter the base prompt.", visible: true }),
+        fake({ text: "Use lowercase letters, numbers, and single dashes.", visible: true }),
+        fake({ text: "Hidden refusal.", visible: false }),
+      ],
+    });
+    const dialog = fake({ locate: (selector: string) => (selector === '[role="alert"]' ? errors : absent()) });
+    await expect(
+      new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => dialog }) })).schedulerProjectCreateErrors()
+    ).resolves.toEqual([
+      "Slug is required.",
+      "Enter the base prompt.",
+      "Use lowercase letters, numbers, and dashes only.",
+    ]);
   });
 });
 
