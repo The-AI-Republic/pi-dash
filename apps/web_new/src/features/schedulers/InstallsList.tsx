@@ -20,7 +20,7 @@ import { useProjectRoles } from "../auth/index.js";
 import { isProjectAdmin, projectDetailsQueryOptions } from "../projects/index.js";
 import { useDocumentHead } from "../../shared/shell/index.js";
 import { useSchedulerBindings, useToggleSchedulerBinding } from "./installData.js";
-import { describeRrule } from "./schedule.js";
+import { describeStoredRrule } from "./schedule.js";
 
 export interface InstallsListProps {
   workspaceSlug: string;
@@ -53,7 +53,7 @@ export function formatRunTimestamp(value: string | null): string {
 
 /** Container time for the row; the rule's raw text is the cell's tooltip. */
 export function scheduleText(binding: Pick<SchedulerBinding, "rrule">): string {
-  return describeRrule(binding.rrule);
+  return describeStoredRrule(binding.rrule);
 }
 
 function InstallsSkeleton(): React.ReactElement {

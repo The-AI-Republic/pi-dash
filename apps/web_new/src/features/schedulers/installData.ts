@@ -133,26 +133,43 @@ export interface ToggleBindingRequest {
   enabled: boolean;
 }
 
+interface ToggleContext {
+  previousList: SchedulerBindingList | undefined;
+  previousDetail: SchedulerBindingDetail | undefined;
+}
+
 export function useToggleSchedulerBinding(workspaceSlug: string) {
   const queryClient = useQueryClient();
-  return useMutation<void, Error, ToggleBindingRequest, { previous: SchedulerBindingList | undefined }>({
-    mutationFn: async ({ projectId, bindingId, enabled }) => {
-      await updateSchedulerBinding(getAppClient(), workspaceSlug, projectId, bindingId, { enabled });
-    },
+  return useMutation<SchedulerBindingDetail, Error, ToggleBindingRequest, ToggleContext>({
+    mutationFn: ({ projectId, bindingId, enabled }) =>
+      updateSchedulerBinding(getAppClient(), workspaceSlug, projectId, bindingId, { enabled }),
     onMutate: async ({ projectId, bindingId, enabled }) => {
-      const key = bindingKeys.list(workspaceSlug, projectId);
-      await queryClient.cancelQueries({ queryKey: key });
-      const previous = queryClient.getQueryData<SchedulerBindingList>(key);
-      queryClient.setQueryData<SchedulerBindingList>(key, (current) =>
+      const listKey = bindingKeys.list(workspaceSlug, projectId);
+      const detailKey = bindingKeys.detail(workspaceSlug, projectId, bindingId);
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: listKey }),
+        queryClient.cancelQueries({ queryKey: detailKey }),
+      ]);
+      const previousList = queryClient.getQueryData<SchedulerBindingList>(listKey);
+      const previousDetail = queryClient.getQueryData<SchedulerBindingDetail>(detailKey);
+      queryClient.setQueryData<SchedulerBindingList>(listKey, (current) =>
         current?.map((binding) => (binding.id === bindingId ? { ...binding, enabled } : binding))
       );
-      return { previous };
+      queryClient.setQueryData<SchedulerBindingDetail>(detailKey, (current) =>
+        current === undefined ? current : { ...current, enabled }
+      );
+      return { previousList, previousDetail };
     },
-    onError: (error, { projectId }, context) => {
-      queryClient.setQueryData<SchedulerBindingList>(bindingKeys.list(workspaceSlug, projectId), context?.previous);
+    onError: (error, { projectId, bindingId }, context) => {
+      queryClient.setQueryData<SchedulerBindingList>(bindingKeys.list(workspaceSlug, projectId), context?.previousList);
+      queryClient.setQueryData<SchedulerBindingDetail>(
+        bindingKeys.detail(workspaceSlug, projectId, bindingId),
+        context?.previousDetail
+      );
       notifyError("Something went wrong", error.message);
     },
-    onSuccess: (_data, { enabled }) => {
+    onSuccess: (data, { projectId, bindingId, enabled }) => {
+      queryClient.setQueryData(bindingKeys.detail(workspaceSlug, projectId, bindingId), data);
       notifySuccess(
         "Install updated",
         enabled ? "It will fire on the next scheduled tick." : "It will not fire until re-enabled."

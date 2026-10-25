@@ -58,7 +58,7 @@ vi.mock("@tanstack/react-router", () => ({
   },
 }));
 
-import { useDocumentHead } from "../../shared/shell/index.js";
+import { notifyError, useDocumentHead } from "../../shared/shell/index.js";
 import { BindingDetailBody, BindingDetailPage } from "./BindingDetailPage.js";
 
 const SLUG = "acme";
@@ -243,6 +243,16 @@ describe("BindingDetailBody", () => {
     expect(await screen.findByText("Disabled for the whole workspace")).toBeInTheDocument();
   });
 
+  it("still renders the detail for a workspace-disabled definition", async () => {
+    setup({ detail: binding({ scheduler_is_enabled: false, rrule: "" }) });
+    expect(await screen.findByRole("heading", { name: "Configuration" })).toBeInTheDocument();
+    expect(screen.getByText("Disabled for the whole workspace")).toBeInTheDocument();
+    expect(screen.queryByText(/This scheduler install is not available/)).not.toBeInTheDocument();
+    const grid = screen.getByRole("heading", { name: "Configuration" }).nextElementSibling;
+    if (grid === null) throw new Error("grid missing");
+    expect(within(grid as HTMLElement).getByText("Once at dtstart")).toBeInTheDocument();
+  });
+
   it("badges a completed finite series once reported", async () => {
     setup({ detail: binding({ series_exhausted: true } as Partial<SchedulerBindingDetail>) });
     expect(await screen.findByText("Completed")).toBeInTheDocument();
@@ -312,6 +322,41 @@ describe("BindingDetailBody", () => {
         enabled: false,
       })
     );
+  });
+
+  it("flips the switch optimistically before the round trip lands", async () => {
+    let release: (value: SchedulerBindingDetail) => void = () => undefined;
+    contracts.updateSchedulerBinding.mockReturnValue(
+      new Promise<SchedulerBindingDetail>((resolve) => {
+        release = resolve;
+      })
+    );
+    const { user, queryClient } = setup({});
+    const toggle = await screen.findByRole("switch", { name: "Disable scheduler" });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    await user.click(toggle);
+    await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<{ enabled: boolean }>(["ws", SLUG, "scheduler-bindings", PROJECT, "detail", BINDING])
+          ?.enabled
+      ).toBe(false)
+    );
+    release(binding({ enabled: false }));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+    expect(toggle).toBeEnabled();
+    const grid = screen.getByRole("heading", { name: "Configuration" }).nextElementSibling;
+    if (grid === null) throw new Error("grid missing");
+    expect(within(grid as HTMLElement).getByText("Disabled")).toBeInTheDocument();
+  });
+
+  it("rolls the switch back when the server refuses the flip", async () => {
+    contracts.updateSchedulerBinding.mockRejectedValue(new Error("Admins only"));
+    const { user } = setup({});
+    const toggle = await screen.findByRole("switch", { name: "Disable scheduler" });
+    await user.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    expect(notifyError).toHaveBeenCalledWith("Something went wrong", "Admins only");
   });
 
   it("opens the uninstall confirmation from the header", async () => {

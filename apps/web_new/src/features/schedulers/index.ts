@@ -57,6 +57,7 @@ export {
   browserTimeZone,
   defaultStartLocal,
   describeRrule,
+  describeStoredRrule,
   emptySchedule,
   hasScheduleErrors,
   isoToLocalStart,

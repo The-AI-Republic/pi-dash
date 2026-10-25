@@ -225,3 +225,13 @@ export function describeRrule(rrule: string): string {
   const onMonthDay = monthDays === undefined ? "" : ` on day ${monthDays.replace(/,/g, ", ")}`;
   return `${head}${onMonthDay}${clockSentence(parts)}${countSentence(parts)}${untilSentence(parts)}`;
 }
+
+/**
+ * The stored-schedule reading used by list rows, the detail grid and the
+ * calendar drawer. Those surfaces name the API's own anchor for a blank
+ * rule ("Once at dtstart"); the builder dialog keeps its friendlier
+ * sentence from describeRrule.
+ */
+export function describeStoredRrule(rrule: string): string {
+  return rrule.trim() === "" ? "Once at dtstart" : describeRrule(rrule);
+}

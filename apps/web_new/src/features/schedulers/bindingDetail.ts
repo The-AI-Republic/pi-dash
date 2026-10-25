@@ -10,7 +10,7 @@
 
 import type { AgentRun, SchedulerBindingDetail, WorkspaceMember } from "@pidash/api-client";
 
-import { describeRrule } from "./schedule.js";
+import { describeStoredRrule } from "./schedule.js";
 
 /**
  * The scheduler a definition came from. Renders the raw API value the
@@ -101,7 +101,7 @@ export interface ConfigRow {
  */
 export function configRows(binding: SchedulerBindingDetail, installedBy: string | null): ConfigRow[] {
   const rows: ConfigRow[] = [
-    { label: "Schedule", value: describeRrule(binding.rrule), title: binding.rrule },
+    { label: "Schedule", value: describeStoredRrule(binding.rrule), title: binding.rrule },
     { label: "Starts at", value: formatMoment(binding.dtstart) },
     { label: "Time zone", value: displayTimeZone(binding.tzid) },
     { label: "Next run", value: formatMoment(binding.next_run_at) },

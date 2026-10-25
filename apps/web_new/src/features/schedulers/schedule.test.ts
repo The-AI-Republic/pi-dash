@@ -8,6 +8,7 @@ import {
   browserTimeZone,
   defaultStartLocal,
   describeRrule,
+  describeStoredRrule,
   emptySchedule,
   hasScheduleErrors,
   isoToLocalStart,
@@ -165,5 +166,17 @@ describe("describeRrule", () => {
     expect(describeRrule("FREQ=DAILY;;BYHOUR=9")).toBe("every day at 09:00");
     expect(describeRrule("FREQ=DAILY;UNTIL=garbage")).toBe("every day");
     expect(describeRrule("FREQ=DAILY;COUNT=0")).toBe("every day");
+  });
+});
+
+describe("describeStoredRrule", () => {
+  it("names the API's own anchor for a blank stored rule", () => {
+    expect(describeStoredRrule("")).toBe("Once at dtstart");
+    expect(describeStoredRrule("   ")).toBe("Once at dtstart");
+  });
+
+  it("delegates every non-blank rule to the plain-language reading", () => {
+    expect(describeStoredRrule("FREQ=DAILY")).toBe("every day");
+    expect(describeStoredRrule("FREQ=NOPE")).toBe("FREQ=NOPE");
   });
 });
