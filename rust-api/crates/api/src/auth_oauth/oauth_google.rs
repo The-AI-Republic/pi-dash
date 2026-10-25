@@ -1025,9 +1025,8 @@ pub async fn create_user(
     sqlx::query(
         "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \
          \"mobile_number\", \"email\", \"display_name\", \"first_name\", \
-         \"last_name\", \"avatar\", \"avatar_asset_id\", \"cover_image\", \
-         \"cover_image_asset_id\", \"date_joined\", \"created_at\", \
-         \"updated_at\", \"last_location\", \"created_location\", \
+         \"last_name\", \"avatar\", \"avatar_asset_id\", \"date_joined\", \
+         \"created_at\", \"updated_at\", \"last_location\", \"created_location\", \
          \"is_superuser\", \"is_managed\", \"is_password_expired\", \
          \"is_active\", \"is_staff\", \"is_email_verified\", \
          \"is_password_autoset\", \"is_password_reset_required\", \"token\", \
@@ -1037,7 +1036,7 @@ pub async fn create_user(
          \"user_timezone\", \"is_email_valid\", \"masked_at\") \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
          $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, \
-         $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)",
+         $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)",
     )
     .bind(id)
     .bind(password.clone())
@@ -1049,8 +1048,6 @@ pub async fn create_user(
     .bind(first_name.clone())
     .bind(last_name.clone())
     .bind(String::new())
-    .bind(None::<uuid::Uuid>)
-    .bind(None::<String>)
     .bind(None::<uuid::Uuid>)
     .bind(now)
     .bind(now)

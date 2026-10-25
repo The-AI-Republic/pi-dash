@@ -453,7 +453,6 @@ struct UserShape {
     avatar_asset_project: Option<Uuid>,
     avatar_asset_issue: Option<Uuid>,
     avatar_asset_workspace_slug: Option<String>,
-    cover_image: Option<String>,
     date_joined: Option<DateTime<Utc>>,
     display_name: Option<String>,
     email: Option<String>,
@@ -466,7 +465,7 @@ struct UserShape {
     last_login_medium: Option<String>,
 }
 
-const USER_SHAPE_SELECT: &str = "u.id AS id, u.first_name AS first_name, u.last_name AS last_name, u.avatar AS avatar, u.avatar_asset_id AS avatar_asset_id, fa.id AS avatar_asset_row, fa.entity_type AS avatar_asset_entity, fa.workspace_id AS avatar_asset_workspace, fa.project_id AS avatar_asset_project, fa.issue_id AS avatar_asset_issue, w.slug AS avatar_asset_workspace_slug, u.cover_image AS cover_image, u.date_joined AS date_joined, u.display_name AS display_name, u.email AS email, u.is_active AS is_active, u.is_bot AS is_bot, u.is_email_verified AS is_email_verified, u.user_timezone AS user_timezone, u.username AS username, u.is_password_autoset AS is_password_autoset, u.last_login_medium AS last_login_medium";
+const USER_SHAPE_SELECT: &str = "u.id AS id, u.first_name AS first_name, u.last_name AS last_name, u.avatar AS avatar, u.avatar_asset_id AS avatar_asset_id, fa.id AS avatar_asset_row, fa.entity_type AS avatar_asset_entity, fa.workspace_id AS avatar_asset_workspace, fa.project_id AS avatar_asset_project, fa.issue_id AS avatar_asset_issue, w.slug AS avatar_asset_workspace_slug, u.date_joined AS date_joined, u.display_name AS display_name, u.email AS email, u.is_active AS is_active, u.is_bot AS is_bot, u.is_email_verified AS is_email_verified, u.user_timezone AS user_timezone, u.username AS username, u.is_password_autoset AS is_password_autoset, u.last_login_medium AS last_login_medium";
 
 async fn fetch_user(pool: &PgPool, user_id: &Uuid) -> Result<Option<UserShape>, Denial> {
     // Both joins are deliberately unscoped: the forward-FK descriptor reads
@@ -511,7 +510,6 @@ fn render_me(user: &UserShape, tz: &Tz) -> Result<Value, Denial> {
         id: &owned_id,
         avatar: user.avatar.as_deref().unwrap_or(""),
         avatar_url: owned_avatar_url.as_deref(),
-        cover_image: user.cover_image.as_deref(),
         date_joined: &owned_date_joined,
         display_name: user.display_name.as_deref().unwrap_or(""),
         email: user.email.as_deref().unwrap_or(""),
@@ -1102,7 +1100,6 @@ async fn list_admins(
             avatar_asset_project: row.u_avatar_asset_project,
             avatar_asset_issue: row.u_avatar_asset_issue,
             avatar_asset_workspace_slug: row.u_avatar_asset_workspace_slug.clone(),
-            cover_image: None,
             date_joined: None,
             display_name: row.u_display_name.clone(),
             email: row.u_email.clone(),
@@ -1895,14 +1892,14 @@ async fn insert_signup_user(
     sqlx::query(
         "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \"mobile_number\", \
          \"email\", \"display_name\", \"first_name\", \"last_name\", \"avatar\", \"avatar_asset_id\", \
-         \"cover_image\", \"cover_image_asset_id\", \"date_joined\", \"created_at\", \"updated_at\", \
+         \"date_joined\", \"created_at\", \"updated_at\", \
          \"last_location\", \"created_location\", \"is_superuser\", \"is_managed\", \
          \"is_password_expired\", \"is_active\", \"is_staff\", \"is_email_verified\", \
          \"is_password_autoset\", \"is_password_reset_required\", \"token\", \"last_active\", \
          \"last_login_time\", \"last_logout_time\", \"last_login_ip\", \"last_logout_ip\", \
          \"last_login_medium\", \"last_login_uagent\", \"token_updated_at\", \"is_bot\", \"bot_type\", \
          \"user_timezone\", \"is_email_valid\", \"masked_at\") \
-         VALUES ($1, $2, NULL, $3, NULL, $4, $5, $6, $7, '', NULL, NULL, NULL, $8, $8, $8, \
+         VALUES ($1, $2, NULL, $3, NULL, $4, $5, $6, $7, '', NULL, $8, $8, $8, \
          '', '', FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, '', $8, NULL, NULL, '', '', \
          'email', '', NULL, FALSE, NULL, 'UTC', FALSE, NULL)",
     )
@@ -2742,7 +2739,6 @@ mod tests {
             avatar_asset_project: None,
             avatar_asset_issue: None,
             avatar_asset_workspace_slug: None,
-            cover_image: None,
             date_joined: Some(
                 DateTime::parse_from_rfc3339("2026-01-15T12:30:45Z")
                     .expect("fixture datetime")
@@ -2761,7 +2757,7 @@ mod tests {
     }
 
     #[test]
-    fn me_shape_carries_the_sixteen_meta_keys() {
+    fn me_shape_carries_the_fifteen_meta_keys() {
         let user = shape_fixture();
         let body = render_me(&user, &chrono_tz::UTC).expect("renders");
         let keys: std::collections::BTreeSet<&str> = body
@@ -2774,7 +2770,6 @@ mod tests {
             "id",
             "avatar",
             "avatar_url",
-            "cover_image",
             "date_joined",
             "display_name",
             "email",

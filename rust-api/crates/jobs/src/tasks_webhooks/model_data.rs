@@ -22,9 +22,8 @@
 //!   whether or not link rows exist. The renderers below never emit them.
 //! * QUIRK-ND-2 (annotation fields): `total_members`, `total_issues`,
 //!   `sub_issues_count`, `is_member` and siblings have no model attribute
-//!   on a bare `.get()` instance, so DRF skips them (`SkipField`) while
-//!   `cover_image_url` (a real property) renders. The renderers emit
-//!   exactly the resolving subset the golden pins.
+//!   on a bare `.get()` instance, so DRF skips them (`SkipField`). The
+//!   renderers emit exactly the resolving subset the golden pins.
 //! * QUIRK-ND-3 (`issue_comment.url`): rendered by `issue_web_url` and
 //!   *omitted* (not null) when the web base URL is unconfigured or any
 //!   identifier part is missing (`to_representation` pops `None`).
@@ -193,7 +192,7 @@ pub fn asset_url(
     issue_id: Option<&Uuid>,
 ) -> Option<String> {
     match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Some(format!("/api/assets/v2/static/{asset_id}/"))
         }
         Some("ISSUE_ATTACHMENT") => {
@@ -254,9 +253,9 @@ async fn workspace_slug(pool: &PgPool, id: Uuid) -> Result<Option<String>, sqlx:
     Ok(row.and_then(|row| row.try_get("slug").ok()))
 }
 
-/// Resolve `avatar_url` / `cover_image_url`: the asset FK wins when set
+/// Resolve `avatar_url`: the asset FK wins when set
 /// (`avatar_asset.asset_url`, possibly `None`), else the text field when
-/// truthy, else `None` (`User.avatar_url`, `Project.cover_image_url`).
+/// truthy, else `None` (`User.avatar_url`).
 async fn image_url(
     pool: &PgPool,
     asset_id: Option<Uuid>,
@@ -350,8 +349,6 @@ pub fn render_user(row: &UserRow, avatar_url: Option<&str>) -> Map<String, Value
 /// `projects` columns `ProjectSerializer` reads, in render order.
 pub struct ProjectRow {
     pub id: Uuid,
-    pub cover_image_asset_id: Option<Uuid>,
-    pub cover_image: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
@@ -399,7 +396,7 @@ pub struct ProjectRow {
 
 async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sqlx::Error> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, cover_image_asset_id, cover_image, created_at, updated_at, deleted_at, \
+        "SELECT id, created_at, updated_at, deleted_at, \
          name, description, description_text, description_html, network, identifier, emoji, \
          icon_prop, module_view, cycle_view, issue_views_view, page_view, intake_view, \
          is_time_tracking_enabled, is_issue_type_enabled, is_default, guest_view_all_features, \
@@ -425,8 +422,6 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
     let network: i16 = row.try_get("network")?;
     Ok(Some(ProjectRow {
         id: row.get("id"),
-        cover_image_asset_id: row.try_get("cover_image_asset_id").unwrap_or(None),
-        cover_image: row.try_get("cover_image").unwrap_or(None),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         deleted_at: row.try_get("deleted_at").unwrap_or(None),
@@ -473,16 +468,11 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
     }))
 }
 
-/// Render `ProjectSerializer`: `id`, the one resolving declared field
-/// (`cover_image_url`; the annotation siblings skip per QUIRK-ND-2), then
-/// every model field in model order.
-pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<String, Value> {
-    let mut out = Map::with_capacity(47);
+/// Render `ProjectSerializer`: `id` (the declared annotation fields skip
+/// per QUIRK-ND-2), then every model field in model order.
+pub fn render_project(row: &ProjectRow) -> Map<String, Value> {
+    let mut out = Map::with_capacity(44);
     out.insert("id".to_owned(), uuid_value(&row.id));
-    out.insert(
-        "cover_image_url".to_owned(),
-        cover_image_url.map_or(Value::Null, |u| Value::String(u.to_owned())),
-    );
     out.insert(
         "created_at".to_owned(),
         Value::String(drf_datetime(&row.created_at)),
@@ -540,7 +530,6 @@ pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<St
         "members_can_edit_states".to_owned(),
         Value::from(row.members_can_edit_states),
     );
-    out.insert("cover_image".to_owned(), opt_str(&row.cover_image));
     out.insert("archive_in".to_owned(), Value::from(row.archive_in));
     out.insert("close_in".to_owned(), Value::from(row.close_in));
     out.insert("logo_props".to_owned(), row.logo_props.clone());
@@ -585,10 +574,6 @@ pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<St
         opt_uuid(&row.default_assignee_id),
     );
     out.insert("project_lead".to_owned(), opt_uuid(&row.project_lead_id));
-    out.insert(
-        "cover_image_asset".to_owned(),
-        opt_uuid(&row.cover_image_asset_id),
-    );
     out.insert("estimate".to_owned(), opt_uuid(&row.estimate_id));
     out.insert("default_state".to_owned(), opt_uuid(&row.default_state_id));
     out
@@ -1562,11 +1547,7 @@ pub async fn get_model_data(
                 .await
                 .map_err(map_store)?
                 .ok_or_else(missing)?;
-            let cover = row.cover_image.clone().unwrap_or_default();
-            let url = image_url(pool, row.cover_image_asset_id, &cover)
-                .await
-                .map_err(map_store)?;
-            Ok(Value::Object(render_project(&row, url.as_deref())))
+            Ok(Value::Object(render_project(&row)))
         }
         "issue" => {
             let row = fetch_issue(pool, id, true)
@@ -1789,8 +1770,6 @@ mod tests {
     fn project_row(g: &Value) -> ProjectRow {
         ProjectRow {
             id: uid(&g["id"]),
-            cover_image_asset_id: uid_opt(&g["cover_image_asset"]),
-            cover_image: str_opt(&g["cover_image"]),
             created_at: dt(&g["created_at"]),
             updated_at: dt(&g["updated_at"]),
             deleted_at: dt_opt(&g["deleted_at"]),
@@ -1846,15 +1825,11 @@ mod tests {
     }
 
     #[test]
-    fn project_renders_golden_with_cover_url_only() {
+    fn project_renders_golden_model_fields_only() {
         let g = golden("project");
         let row = project_row(&g);
-        assert_render(
-            "project",
-            render_project(&row, str_opt(&g["cover_image_url"]).as_deref()),
-        );
-        // QUIRK-ND-2: the annotation siblings skip; only the resolving
-        // declared field renders.
+        assert_render("project", render_project(&row));
+        // QUIRK-ND-2: the declared annotation fields skip.
         for skipped in [
             "total_members",
             "total_cycles",

@@ -374,7 +374,6 @@
       "is_default",
       "guest_view_all_features",
       "members_can_edit_states",
-      "cover_image",
       "archive_in",
       "close_in",
       "logo_props",
@@ -395,7 +394,6 @@
       "workspace",
       "default_assignee",
       "project_lead",
-      "cover_image_asset",
       "estimate",
       "default_state"
     ],
@@ -446,7 +444,6 @@
       "is_default": true,
       "guest_view_all_features": false,
       "members_can_edit_states": true,
-      "cover_image": null,
       "archive_in": 0,
       "close_in": 0,
       "logo_props": {},
@@ -467,7 +464,6 @@
       "workspace": "6cf5d012-6225-4afb-88e7-5e39be396c38",
       "default_assignee": null,
       "project_lead": null,
-      "cover_image_asset": null,
       "estimate": null,
       "default_state": null
     }
@@ -482,7 +478,6 @@
       "members": [
         "c5545f98-21b6-4fac-88e7-af418831335d"
       ],
-      "cover_image_url": null,
       "inbox_view": false,
       "next_work_item_sequence": 1,
       "agent_executor_options": [
@@ -523,7 +518,6 @@
       "is_default": true,
       "guest_view_all_features": false,
       "members_can_edit_states": true,
-      "cover_image": null,
       "archive_in": 0,
       "close_in": 0,
       "logo_props": {},
@@ -544,7 +538,6 @@
       "workspace": "1157cc12-8235-41c1-8dea-0f5892d0c692",
       "default_assignee": null,
       "project_lead": null,
-      "cover_image_asset": null,
       "estimate": null,
       "default_state": null
     },
@@ -555,7 +548,6 @@
       "member_role",
       "anchor",
       "members",
-      "cover_image_url",
       "inbox_view",
       "next_work_item_sequence",
       "agent_executor_options",
@@ -580,7 +572,6 @@
       "is_default",
       "guest_view_all_features",
       "members_can_edit_states",
-      "cover_image",
       "archive_in",
       "close_in",
       "logo_props",
@@ -601,7 +592,6 @@
       "workspace",
       "default_assignee",
       "project_lead",
-      "cover_image_asset",
       "estimate",
       "default_state"
     ],
@@ -669,8 +659,6 @@
       "id": "7913a52c-bc35-4db1-ab27-153547e78ce6",
       "identifier": "A962C417",
       "name": "Alpha 962c4176",
-      "cover_image": null,
-      "cover_image_url": null,
       "logo_props": {},
       "description": "",
       "is_default": true
@@ -679,8 +667,6 @@
       "id",
       "identifier",
       "name",
-      "cover_image",
-      "cover_image_url",
       "logo_props",
       "description",
       "is_default"
@@ -733,7 +719,6 @@
       "is_default": true,
       "guest_view_all_features": false,
       "members_can_edit_states": true,
-      "cover_image": null,
       "archive_in": 0,
       "close_in": 0,
       "logo_props": {},
@@ -752,7 +737,6 @@
       "created_by": null,
       "updated_by": null,
       "workspace": "1157cc12-8235-41c1-8dea-0f5892d0c692",
-      "cover_image_asset": null,
       "estimate": null,
       "default_state": null
     },
@@ -786,7 +770,6 @@
       "is_default",
       "guest_view_all_features",
       "members_can_edit_states",
-      "cover_image",
       "archive_in",
       "close_in",
       "logo_props",
@@ -805,7 +788,6 @@
       "created_by",
       "updated_by",
       "workspace",
-      "cover_image_asset",
       "estimate",
       "default_state"
     ]

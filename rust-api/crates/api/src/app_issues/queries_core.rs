@@ -119,12 +119,11 @@ pub const ISSUE_LINK_COLUMNS: &str = "issue_links.created_at, issue_links.update
     issue_links.id, issue_links.project_id, issue_links.workspace_id, issue_links.title, \
     issue_links.url, issue_links.issue_id, issue_links.metadata";
 
-/// All 40 concrete `users` columns (`select_related("actor")` /
+/// All 38 concrete `users` columns (`select_related("actor")` /
 /// `select_related("created_by")` order). The auth user has no `deleted_at`.
 pub const USER_COLUMNS: &str = "users.password, users.last_login, users.id, users.username, \
     users.mobile_number, users.email, users.display_name, users.first_name, users.last_name, \
-    users.avatar, users.avatar_asset_id, users.cover_image, users.cover_image_asset_id, \
-    users.date_joined, users.created_at, users.updated_at, users.last_location, \
+    users.avatar, users.avatar_asset_id, users.date_joined, users.created_at, users.updated_at, users.last_location, \
     users.created_location, users.is_superuser, users.is_managed, users.is_password_expired, \
     users.is_active, users.is_staff, users.is_email_verified, users.is_password_autoset, \
     users.is_password_reset_required, users.token, users.last_active, users.last_login_time, \
@@ -132,7 +131,7 @@ pub const USER_COLUMNS: &str = "users.password, users.last_login, users.id, user
     users.last_login_uagent, users.token_updated_at, users.is_bot, users.bot_type, \
     users.user_timezone, users.is_email_valid, users.masked_at";
 
-/// All 46 concrete `projects` columns (`Project.objects.get` order).
+/// All 44 concrete `projects` columns (`Project.objects.get` order).
 pub const PROJECT_COLUMNS: &str = "projects.created_at, projects.updated_at, \
     projects.created_by_id, projects.updated_by_id, projects.deleted_at, projects.id, \
     projects.name, projects.description, projects.description_text, projects.description_html, \
@@ -140,8 +139,8 @@ pub const PROJECT_COLUMNS: &str = "projects.created_at, projects.updated_at, \
     projects.project_lead_id, projects.emoji, projects.icon_prop, projects.module_view, \
     projects.cycle_view, projects.issue_views_view, projects.page_view, projects.intake_view, \
     projects.is_time_tracking_enabled, projects.is_issue_type_enabled, projects.is_default, \
-    projects.guest_view_all_features, projects.members_can_edit_states, projects.cover_image, \
-    projects.cover_image_asset_id, projects.estimate_id, projects.archive_in, projects.close_in, \
+    projects.guest_view_all_features, projects.members_can_edit_states, projects.estimate_id, \
+    projects.archive_in, projects.close_in, \
     projects.logo_props, projects.default_state_id, projects.archived_at, projects.timezone, \
     projects.external_source, projects.external_id, projects.repo_url, projects.base_branch, \
     projects.agent_default_interval_seconds, projects.agent_default_max_ticks, \

@@ -645,8 +645,6 @@ pub const USER_SERIALIZER_FIELDS: &[&str] = &[
     "last_name",
     "avatar",
     "avatar_asset",
-    "cover_image",
-    "cover_image_asset",
     "date_joined",
     "created_at",
     "updated_at",
@@ -1093,7 +1091,7 @@ mod tests {
         let mut got: Vec<&str> = USER_SERIALIZER_FIELDS.to_vec();
         got.sort_unstable();
         assert_eq!(got, want);
-        assert_eq!(USER_SERIALIZER_FIELDS.len(), 39);
+        assert_eq!(USER_SERIALIZER_FIELDS.len(), 37);
         // Render order is `_meta` order minus `password`.
         assert_eq!(USER_SERIALIZER_FIELDS[0], "last_login");
         assert_eq!(

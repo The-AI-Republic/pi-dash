@@ -1767,7 +1767,7 @@ async fn reset_password_space(
 
 /// Read the full `UserSerializer` row in `USER_SERIALIZER_FIELDS` order
 /// (`User._meta` field order minus `password`). Column-by-column decode:
-/// 39 columns exceed sqlx's tuple `FromRow` arity.
+/// 37 columns exceed sqlx's tuple `FromRow` arity.
 async fn user_snapshot(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
@@ -1775,7 +1775,7 @@ async fn user_snapshot(
     use sqlx::Row;
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         "SELECT last_login, id, username, mobile_number, email, display_name, first_name, \
-         last_name, avatar, avatar_asset_id, cover_image, cover_image_asset_id, date_joined, \
+         last_name, avatar, avatar_asset_id, date_joined, \
          created_at, updated_at, last_location, created_location, is_superuser, is_managed, \
          is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, \
          is_password_reset_required, token, last_active, last_login_time, last_logout_time, \
@@ -1812,10 +1812,6 @@ async fn user_snapshot(
                 .unwrap_or_default(),
             avatar_asset: row
                 .try_get::<Option<uuid::Uuid>, _>("avatar_asset_id")?
-                .map(|id| id.to_string()),
-            cover_image: row.try_get("cover_image")?,
-            cover_image_asset: row
-                .try_get::<Option<uuid::Uuid>, _>("cover_image_asset_id")?
                 .map(|id| id.to_string()),
             date_joined: dt(row.try_get("date_joined")?),
             created_at: dt(row.try_get("created_at")?),

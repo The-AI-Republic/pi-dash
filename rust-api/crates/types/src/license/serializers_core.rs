@@ -60,8 +60,8 @@ use serde::Serialize;
 /// * lite user: `id, first_name, last_name, avatar, avatar_url, is_bot,
 ///   display_name, email, last_login_medium`
 /// * admin-me: `Meta.fields` order with the duplicated `is_email_verified`
-///   collapsed (`id, avatar, avatar_url, cover_image, date_joined,
-///   display_name, email, first_name, last_name, is_active, is_bot,
+///   collapsed (`id, avatar, avatar_url, date_joined, display_name,
+///   email, first_name, last_name, is_active, is_bot,
 ///   is_email_verified, user_timezone, username, is_password_autoset`)
 ///
 /// Note: `serde_json::Value` key order depends on workspace feature
@@ -324,14 +324,13 @@ pub fn instance_admin_to_representation<'a>(
     }
 }
 
-/// A `User` row projected onto the sixteen `Meta.fields` entries of
+/// A `User` row projected onto the fifteen `Meta.fields` entries of
 /// `InstanceAdminMeSerializer` (`admin.py:15-32`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdminMeRow<'a> {
     pub id: &'a str,
     pub avatar: &'a str,
     pub avatar_url: Option<&'a str>,
-    pub cover_image: Option<&'a str>,
     pub date_joined: &'a str,
     pub display_name: &'a str,
     pub email: &'a str,
@@ -352,7 +351,6 @@ pub struct AdminMeView<'a> {
     pub id: &'a str,
     pub avatar: &'a str,
     pub avatar_url: Option<&'a str>,
-    pub cover_image: Option<&'a str>,
     pub date_joined: &'a str,
     pub display_name: &'a str,
     pub email: &'a str,
@@ -372,7 +370,6 @@ pub fn instance_admin_me_to_representation<'a>(row: &'a AdminMeRow<'a>) -> Admin
         id: row.id,
         avatar: row.avatar,
         avatar_url: row.avatar_url,
-        cover_image: row.cover_image,
         date_joined: row.date_joined,
         display_name: row.display_name,
         email: row.email,
@@ -693,16 +690,14 @@ mod tests {
         // input_row is a partial projection (only what the fixture author
         // fed in); every output field is a `User` attribute, so the row is
         // rebuilt from the executed output and the replay proves the exact
-        // 15-key shape, the collapsed duplicate, and the Meta order.
+        // 14-key shape, the collapsed duplicate, and the Meta order.
         let golden = fixture("instance_admin_me");
         let output = golden.get("output").expect("output");
         let avatar_url = opt(output, "avatar_url");
-        let cover_image = opt(output, "cover_image");
         let row = AdminMeRow {
             id: req(output, "id"),
             avatar: req(output, "avatar"),
             avatar_url: avatar_url.as_deref(),
-            cover_image: cover_image.as_deref(),
             date_joined: req(output, "date_joined"),
             display_name: req(output, "display_name"),
             email: req(output, "email"),

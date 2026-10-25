@@ -48,7 +48,7 @@
 //!   Python's `str()` would compare and answer the mismatch 400.
 //! * `partial_update` silently drops read-only keys (email included) and
 //!   unknown keys, and a non-object body is the DRF non-mapping 400
-//!   (`non_field_errors`); for `avatar_asset`/`cover_image_asset`
+//!   (`non_field_errors`); for `avatar_asset`
 //!   `null`/`""` clear, a bool answers the `incorrect_type` field
 //!   error, `0` queries the nil UUID (the `does_not_exist` field
 //!   error), and unparseable strings, negative/`>u128` ints, floats,
@@ -102,7 +102,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use std::net::SocketAddr;
 
-use pidash_services::app_workspace::{models_user, queries_user, ser_extras, ser_user, tasks};
+use pidash_services::app_workspace::{models_user, queries_user, ser_user, tasks};
 use pidash_services::auth_session::{guards as throttle_kernel, shapes as auth_shapes};
 
 use super::gates;
@@ -361,8 +361,6 @@ pub struct UserRow {
     pub last_name: String,
     pub avatar: String,
     pub avatar_asset_id: Option<uuid::Uuid>,
-    pub cover_image: Option<String>,
-    pub cover_image_asset_id: Option<uuid::Uuid>,
     pub date_joined: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -396,8 +394,8 @@ pub struct UserRow {
 /// (`ser_user::USER_WIRE_FIELDS`) with the asset FK ids folded in.
 /// `password` is never selected (never rendered, never compared here).
 const USER_ROW_COLUMNS: &str = "id, last_login, username, mobile_number, email, display_name, \
-    first_name, last_name, avatar, avatar_asset_id, cover_image, cover_image_asset_id, \
-    date_joined, created_at, updated_at, last_location, created_location, is_superuser, \
+    first_name, last_name, avatar, avatar_asset_id, date_joined, \
+    created_at, updated_at, last_location, created_location, is_superuser, \
     is_managed, is_password_expired, is_active, is_staff, is_email_verified, \
     is_password_autoset, is_password_reset_required, token, last_active, last_login_time, \
     last_logout_time, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, \
@@ -535,21 +533,6 @@ async fn resolve_avatar_url(
     let asset = fetch_asset(pool, asset_id.expect("checked")).await?;
     let url = render_asset_url(pool, &asset).await?;
     Ok(models_user::user::avatar_url(true, url.as_deref(), avatar).map(str::to_owned))
-}
-
-/// Resolve `User.cover_image_url` (`db/models/user.py:153-162`), same
-/// shape over `cover_image_asset` / `cover_image`.
-async fn resolve_cover_image_url(
-    pool: &PgPool,
-    asset_id: Option<uuid::Uuid>,
-    cover_image: Option<&str>,
-) -> Result<Option<String>, Denial> {
-    if asset_id.is_none() {
-        return Ok(models_user::user::cover_image_url(false, None, cover_image).map(str::to_owned));
-    }
-    let asset = fetch_asset(pool, asset_id.expect("checked")).await?;
-    let url = render_asset_url(pool, &asset).await?;
-    Ok(models_user::user::cover_image_url(true, url.as_deref(), cover_image).map(str::to_owned))
 }
 
 /// One deactivate-scan row: the pk plus the two annotations. The
@@ -762,7 +745,6 @@ const NULL_MESSAGE: &str = "This field may not be null.";
 const INVALID_STRING_MESSAGE: &str = "Not a valid string.";
 const BLANK_MESSAGE: &str = "This field may not be blank.";
 const INVALID_BOOLEAN_MESSAGE: &str = "Must be a valid boolean.";
-const INVALID_URL_MESSAGE: &str = "Enter a valid URL.";
 const NULL_CHARACTERS_MESSAGE: &str = "Null characters are not allowed.";
 
 fn max_length_message(max_length: usize) -> String {
@@ -1529,8 +1511,6 @@ pub struct UserPatch {
     pub last_name: Option<String>,
     pub avatar: Option<String>,
     pub avatar_asset: Option<Option<uuid::Uuid>>,
-    pub cover_image: Option<Option<String>>,
-    pub cover_image_asset: Option<Option<uuid::Uuid>>,
     pub is_password_expired: Option<bool>,
     pub is_password_reset_required: Option<bool>,
     pub bot_type: Option<Option<String>>,
@@ -1629,51 +1609,6 @@ async fn validate_patch_body(
             Err(Err(outcome)) => return Err(Err(outcome)),
         }
     }
-    if let Some(value) = body.get("cover_image") {
-        // `URLField` validators (`MaxLength(800)`, NUL, `URLValidator`)
-        // accumulate: a long invalid URL reports both messages.
-        match char_field(value, true, true, None, INVALID_URL_MESSAGE) {
-            Ok(Some(text)) => {
-                let mut url_errors = Vec::new();
-                if text.chars().count() > 800 {
-                    url_errors.push(max_length_message(800));
-                }
-                if text.contains('\0') {
-                    url_errors.push(NULL_CHARACTERS_MESSAGE.to_owned());
-                }
-                // Django's `URLValidator` skips `EMPTY_VALUES` (`''`
-                // passes after `allow_blank`); only non-blank values
-                // face the validator.
-                if !text.is_empty() && ser_extras::validate_user_link_url(&text).is_err() {
-                    url_errors.push(INVALID_URL_MESSAGE.to_owned());
-                }
-                if url_errors.is_empty() {
-                    patch.cover_image = Some(Some(text));
-                } else {
-                    errors.insert(
-                        "cover_image".to_owned(),
-                        Value::Array(url_errors.into_iter().map(Value::String).collect()),
-                    );
-                }
-            }
-            Ok(None) => patch.cover_image = Some(None),
-            Err(messages) => {
-                errors.insert(
-                    "cover_image".to_owned(),
-                    Value::Array(messages.into_iter().map(Value::String).collect()),
-                );
-            }
-        }
-    }
-    if let Some(value) = body.get("cover_image_asset") {
-        match validate_asset_pk(pool, value).await {
-            Ok(inner) => patch.cover_image_asset = Some(inner),
-            Err(Ok(message)) => {
-                errors.insert("cover_image_asset".to_owned(), field_error(message));
-            }
-            Err(Err(outcome)) => return Err(Err(outcome)),
-        }
-    }
     if let Some(value) = body.get("is_password_expired") {
         match bool_field(value) {
             Ok(flag) => patch.is_password_expired = Some(flag),
@@ -1766,10 +1701,7 @@ pub struct RenderedUser {
     pub last_name: String,
     pub avatar: String,
     pub avatar_asset: Option<String>,
-    pub cover_image: Option<String>,
-    pub cover_image_asset: Option<String>,
     pub avatar_url: Option<String>,
-    pub cover_image_url: Option<String>,
     pub date_joined: String,
     pub created_at: String,
     pub updated_at: String,
@@ -1804,9 +1736,7 @@ impl RenderedUser {
         ser_user::UserMeRow {
             id: &self.id,
             avatar: &self.avatar,
-            cover_image: self.cover_image.as_deref(),
             avatar_url: self.avatar_url.as_deref(),
-            cover_image_url: self.cover_image_url.as_deref(),
             date_joined: &self.date_joined,
             display_name: &self.display_name,
             email: self.email.as_deref(),
@@ -1835,8 +1765,6 @@ impl RenderedUser {
             last_name: &self.last_name,
             avatar: &self.avatar,
             avatar_asset: self.avatar_asset.as_deref(),
-            cover_image: self.cover_image.as_deref(),
-            cover_image_asset: self.cover_image_asset.as_deref(),
             date_joined: &self.date_joined,
             created_at: &self.created_at,
             updated_at: &self.updated_at,
@@ -1888,8 +1816,6 @@ async fn render_user(
     timezone: &chrono_tz::Tz,
 ) -> Result<RenderedUser, Denial> {
     let avatar_url = resolve_avatar_url(pool, row.avatar_asset_id, &row.avatar).await?;
-    let cover_image_url =
-        resolve_cover_image_url(pool, row.cover_image_asset_id, row.cover_image.as_deref()).await?;
     Ok(RenderedUser {
         id: row.id.to_string(),
         last_login: render_datetime_opt(&row.last_login, timezone),
@@ -1901,10 +1827,7 @@ async fn render_user(
         last_name: row.last_name.clone(),
         avatar: row.avatar.clone(),
         avatar_asset: row.avatar_asset_id.map(|id| id.to_string()),
-        cover_image: row.cover_image.clone(),
-        cover_image_asset: row.cover_image_asset_id.map(|id| id.to_string()),
         avatar_url,
-        cover_image_url,
         date_joined: render_datetime(&row.date_joined, timezone),
         created_at: render_datetime(&row.created_at, timezone),
         updated_at: render_datetime(&row.updated_at, timezone),
@@ -2493,8 +2416,6 @@ pub async fn me_partial_update(
         last_name: patch.last_name.unwrap_or_else(|| row.last_name.clone()),
         avatar: patch.avatar.unwrap_or_else(|| row.avatar.clone()),
         avatar_asset_id: patch.avatar_asset.unwrap_or(row.avatar_asset_id),
-        cover_image: patch.cover_image.unwrap_or_else(|| row.cover_image.clone()),
-        cover_image_asset_id: patch.cover_image_asset.unwrap_or(row.cover_image_asset_id),
         is_password_expired: patch.is_password_expired.unwrap_or(row.is_password_expired),
         is_password_reset_required: patch
             .is_password_reset_required
@@ -2522,10 +2443,10 @@ pub async fn me_partial_update(
     };
     let update = sqlx::query(
         "UPDATE users SET last_login = $1, display_name = $2, first_name = $3, last_name = $4, \
-        avatar = $5, avatar_asset_id = $6, cover_image = $7, cover_image_asset_id = $8, \
-        is_password_expired = $9, is_password_reset_required = $10, bot_type = $11, \
-        user_timezone = $12, is_email_valid = $13, masked_at = $14, email = $15, token = $16, \
-        token_updated_at = $17, is_staff = $18, updated_at = $19 WHERE id = $20",
+        avatar = $5, avatar_asset_id = $6, is_password_expired = $7, \
+        is_password_reset_required = $8, bot_type = $9, user_timezone = $10, \
+        is_email_valid = $11, masked_at = $12, email = $13, token = $14, \
+        token_updated_at = $15, is_staff = $16, updated_at = $17 WHERE id = $18",
     )
     .bind(merged.last_login)
     .bind(&merged.display_name)
@@ -2533,8 +2454,6 @@ pub async fn me_partial_update(
     .bind(&merged.last_name)
     .bind(&merged.avatar)
     .bind(merged.avatar_asset_id)
-    .bind(merged.cover_image.as_deref())
-    .bind(merged.cover_image_asset_id)
     .bind(merged.is_password_expired)
     .bind(merged.is_password_reset_required)
     .bind(merged.bot_type.as_deref())
@@ -4104,12 +4023,6 @@ mod tests {
     }
 
     #[test]
-    fn cover_image_url_check_matches_django_validator() {
-        assert!(ser_extras::validate_user_link_url("https://example.com/x").is_ok());
-        assert!(ser_extras::validate_user_link_url("not a url").is_err());
-    }
-
-    #[test]
     fn non_object_patch_body_is_the_drf_mapping_400() {
         for (value, datatype) in [
             (json!(null), "NoneType"),
@@ -4372,10 +4285,7 @@ mod tests {
             last_name: "L".to_owned(),
             avatar: "".to_owned(),
             avatar_asset: None,
-            cover_image: None,
-            cover_image_asset: None,
             avatar_url: None,
-            cover_image_url: None,
             date_joined: "2024-01-01T00:00:00Z".to_owned(),
             created_at: "2024-01-01T00:00:00Z".to_owned(),
             updated_at: "2024-01-02T00:00:00Z".to_owned(),

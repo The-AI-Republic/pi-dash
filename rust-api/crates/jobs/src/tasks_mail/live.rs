@@ -293,7 +293,7 @@ fn avatar_url_for_row(
     let found =
         asset_id.ok_or_else(|| MailDbError::Db(format!("dangling avatar asset {wanted}")))?;
     match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Ok(Some(format!("/api/assets/v2/static/{found}/")))
         }
         Some("ISSUE_ATTACHMENT") => {
@@ -1281,12 +1281,7 @@ mod tests {
             None
         );
         // Static-asset entity types format directly (avatar text ignored).
-        for entity in [
-            "WORKSPACE_LOGO",
-            "USER_AVATAR",
-            "USER_COVER",
-            "PROJECT_COVER",
-        ] {
+        for entity in ["WORKSPACE_LOGO", "USER_AVATAR"] {
             assert_eq!(
                 avatar_url_for_row(
                     "ignored",

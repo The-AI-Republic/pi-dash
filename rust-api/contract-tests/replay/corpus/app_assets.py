@@ -269,8 +269,8 @@ SESSIONS = (
                 route="/api/assets/v2/workspaces/{slug}/restore/{pk}/",
                 auth="admin", expect_status=404,
             ),
-            # Project assets v2: mint -> PROJECT_COVER 500 (ported
-            # bug) -> invalid 400 -> guest mint / outsider 403 ->
+            # Project assets v2: mint -> removed PROJECT_COVER 400
+            # (PDASHOSS01-237) -> invalid 400 -> guest mint / outsider 403 ->
             # round trip (pre-upload 404, confirm, delete).
             Request(
                 "POST", _P + "/",
@@ -289,7 +289,7 @@ SESSIONS = (
                 json={"name": "cover.png", "type": "image/png", "size": 200,
                       "entity_type": "PROJECT_COVER",
                       "entity_identifier": "{project}"},
-                auth="admin", expect_status=500,
+                auth="admin", expect_status=400,
             ),
             Request(
                 "POST", _P + "/",
@@ -333,16 +333,15 @@ SESSIONS = (
                 route="/api/assets/v2/workspaces/{slug}/projects/{project_id}/{pk}/",
                 auth="admin", expect_status=204,
             ),
-            # Bulk attach: one PROJECT_COVER row (a single row keeps
-            # the cover link deterministic — the view saves the cover
-            # per row in queryset order) -> empty 400 -> unknown 404
-            # -> outsider 403.
+            # Bulk attach: one WORKSPACE_LOGO row (no bulk arm — the
+            # PROJECT_COVER arm left with PDASHOSS01-237 — so 204 with no
+            # writes) -> empty 400 -> unknown 404 -> outsider 403.
             Request(
                 "POST", _W + "/",
                 route="/api/assets/v2/workspaces/{slug}/",
                 json={"name": "c1.png", "type": "image/png", "size": 60,
-                      "entity_type": "PROJECT_COVER",
-                      "entity_identifier": "{project}"},
+                      "entity_type": "WORKSPACE_LOGO",
+                      "entity_identifier": "{ws_id}"},
                 auth="admin",
                 capture={"bc": "asset_id", "bkey": "upload_data/fields/key"},
                 body_blank_paths=list(_PRESIGN_BLANKS),

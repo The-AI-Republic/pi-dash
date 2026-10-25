@@ -1169,7 +1169,7 @@ fn render_page_value(
 /// `COALESCE`d avatar, optional avatar asset.
 type ExpandUserLookup = (String, String, Option<String>, String, Option<Uuid>);
 
-/// Resolve an avatar/cover file-asset id to its served URL (the D-19
+/// Resolve an avatar file-asset id to its served URL (the D-19
 /// `resolve_avatar_url` inputs).
 async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>, Denial> {
     let url: Option<Option<String>> =
@@ -1304,12 +1304,12 @@ async fn expand_workspace(pool: &PgPool, workspace_id: &Uuid) -> Result<Value, D
 }
 
 /// `expand=project`: `ProjectLiteSerializer` (`project.py:354-377`): `id`,
-/// `identifier`, `name`, `cover_image`, `icon_prop`, `emoji`,
-/// `description`, `is_default`, `cover_image_url` in field order. A
+/// `identifier`, `name`, `icon_prop`, `emoji`,
+/// `description`, `is_default` in field order. A
 /// missing row renders null.
 async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denial> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "identifier", "name", "cover_image", "icon_prop", "emoji", "description", "is_default", "cover_image_asset_id" FROM "projects" WHERE "id" = $1"#,
+        r#"SELECT "id", "identifier", "name", "icon_prop", "emoji", "description", "is_default" FROM "projects" WHERE "id" = $1"#,
     )
     .bind(project_id)
     .fetch_optional(pool)
@@ -1318,17 +1318,8 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
     let Some(row) = row else {
         return Ok(Value::Null);
     };
-    let cover_asset: Option<Uuid> = row_uuid_opt(&row, "cover_image_asset_id")?;
-    let cover_text: Option<String> = row_string_opt(&row, "cover_image")?;
-    // `Project.cover_image_url` (`db/models/project.py:176-185`): the
-    // asset URL wins, then the stored text, else null.
-    let cover_url = match cover_asset {
-        Some(id) => file_asset_url(pool, &id).await?,
-        None => None,
-    };
-    let cover_url = cover_url.or_else(|| cover_text.clone().filter(|text| !text.is_empty()));
     let icon_prop: Option<Value> = row.try_get("icon_prop").map_err(|_| Denial::ServerError)?;
-    let mut map = Map::with_capacity(9);
+    let mut map = Map::with_capacity(7);
     map.insert(
         "id".to_owned(),
         Value::String(row_uuid(&row, "id")?.to_string()),
@@ -1338,10 +1329,6 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
         Value::String(row_string(&row, "identifier")?),
     );
     map.insert("name".to_owned(), Value::String(row_string(&row, "name")?));
-    map.insert(
-        "cover_image".to_owned(),
-        cover_text.map(Value::String).unwrap_or(Value::Null),
-    );
     map.insert("icon_prop".to_owned(), icon_prop.unwrap_or(Value::Null));
     map.insert(
         "emoji".to_owned(),
@@ -1356,10 +1343,6 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
     map.insert(
         "is_default".to_owned(),
         Value::Bool(row_bool(&row, "is_default")?),
-    );
-    map.insert(
-        "cover_image_url".to_owned(),
-        cover_url.map(Value::String).unwrap_or(Value::Null),
     );
     Ok(Value::Object(map))
 }

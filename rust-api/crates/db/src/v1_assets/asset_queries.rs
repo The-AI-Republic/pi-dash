@@ -11,9 +11,8 @@
 //!   the handler issue.
 //! * Unit 2 — `entity_asset_delete` user lookups (`:60-73`, server twin
 //!   `:258-271`): `User.objects.get(id=asset.user_id)` plus the
-//!   full-row `user.save()` that clears `avatar_asset_id` (`USER_AVATAR`)
-//!   or `cover_image_asset_id` (`USER_COVER`); any other entity type is
-//!   a no-op that leaves the profile untouched.
+//!   full-row `user.save()` that clears `avatar_asset_id` (`USER_AVATAR`);
+//!   any other entity type is a no-op that leaves the profile untouched.
 //! * Unit 3 — generic asset lookups: `get(id, workspace__slug,
 //!   is_deleted=False)` (`:430` get, `:608` patch — one shared builder),
 //!   the external-dedupe
@@ -90,9 +89,8 @@ const WORKSPACE_TABLE: &str = "workspaces";
 /// `users` columns in Django `_meta` field order, captured from live
 /// Django 4.2 `str(User.objects.filter(id=…).query)` output:
 /// `AbstractBaseUser` (`password`, `last_login`), the pk `id`, then
-/// `user.py:56-133` declaration order (`avatar_asset_id` /
-/// `cover_image_asset_id` are the `avatar_asset` / `cover_image_asset`
-/// FK attnames). There is no `deleted_at` column (see the module docs,
+/// `user.py:56-133` declaration order (`avatar_asset_id` is the
+/// `avatar_asset` FK attname). There is no `deleted_at` column (see the module docs,
 /// correction 4).
 pub const USER_COLUMNS: &[&str] = &[
     "password",
@@ -106,8 +104,6 @@ pub const USER_COLUMNS: &[&str] = &[
     "last_name",
     "avatar",
     "avatar_asset_id",
-    "cover_image",
-    "cover_image_asset_id",
     "date_joined",
     "created_at",
     "updated_at",
@@ -140,8 +136,6 @@ pub const USER_COLUMNS: &[&str] = &[
 /// `USER_AVATAR` entity type (`db/models/asset.py:38`,
 /// [`file_asset::ENTITY_TYPES`]).
 pub const USER_AVATAR: &str = "USER_AVATAR";
-/// `USER_COVER` entity type (`db/models/asset.py:39`).
-pub const USER_COVER: &str = "USER_COVER";
 
 /// Column cleared by [`entity_clear_target`]: the `users` FK nulled
 /// before the full-row save, or no-op for unhandled entity types
@@ -150,21 +144,18 @@ pub const USER_COVER: &str = "USER_COVER";
 pub enum EntityClearTarget {
     /// `user.avatar_asset_id = None` (`USER_AVATAR`).
     AvatarAssetId,
-    /// `user.cover_image_asset_id = None` (`USER_COVER`).
-    CoverImageAssetId,
     /// Any other entity type (including `None`): profile untouched.
     NoOp,
 }
 
 /// `entity_asset_delete` branch rule (`asset.py:60-73`, server twin
-/// `:258-271`): `USER_AVATAR` clears the avatar FK, `USER_COVER`
-/// clears the cover FK, everything else is a silent no-op. Pure
+/// `:258-271`): `USER_AVATAR` clears the avatar FK, everything else is
+/// a silent no-op. Pure
 /// function over the stored `entity_type` string; the SQL side is
 /// [`entity_user_select_sql`] + [`entity_user_save_sql`].
 pub fn entity_clear_target(entity_type: Option<&str>) -> EntityClearTarget {
     match entity_type {
         Some(USER_AVATAR) => EntityClearTarget::AvatarAssetId,
-        Some(USER_COVER) => EntityClearTarget::CoverImageAssetId,
         _ => EntityClearTarget::NoOp,
     }
 }
@@ -298,9 +289,9 @@ pub fn entity_user_select_sql() -> String {
 /// twins `:261-262,:267-268`): `user.save()` with no `update_fields`
 /// is a **full-row** save — every non-pk column in `_meta` order, pk
 /// in `WHERE`. The builder emits exactly that: `SET` over
-/// [`USER_COLUMNS`] minus `id` (`$1`–`$39`), `WHERE "users"."id" =
-/// $40`. Handlers bind the fetched row with
-/// [`EntityClearTarget::AvatarAssetId`] / `CoverImageAssetId` nulled;
+/// [`USER_COLUMNS`] minus `id` (`$1`–`$37`), `WHERE "users"."id" =
+/// $38`. Handlers bind the fetched row with
+/// [`EntityClearTarget::AvatarAssetId`] nulled;
 /// [`EntityClearTarget::NoOp`] binds the row unchanged (and the
 /// handler skips the statement entirely — the view returns without
 /// touching the profile).
@@ -469,16 +460,16 @@ mod tests {
         assert!(!sql.contains("deleted_at"), "{sql}");
         assert!(!sql.contains("ORDER BY"), "{sql}");
         // Spot-check the captured _meta column order (password, pk,
-        // avatar/cover FK attnames).
+        // avatar FK attname); the dropped cover columns stay out.
         for col in [
             "\"users\".\"password\"",
             "\"users\".\"avatar_asset_id\"",
-            "\"users\".\"cover_image_asset_id\"",
             "\"users\".\"masked_at\"",
         ] {
             assert!(sql.contains(col), "{sql}");
         }
-        assert_eq!(USER_COLUMNS.len(), 40, "users column count drift");
+        assert!(!sql.contains("cover_image"), "{sql}");
+        assert_eq!(USER_COLUMNS.len(), 38, "users column count drift");
     }
 
     #[test]
@@ -487,16 +478,13 @@ mod tests {
             entity_clear_target(Some("USER_AVATAR")),
             EntityClearTarget::AvatarAssetId
         );
-        assert_eq!(
-            entity_clear_target(Some("USER_COVER")),
-            EntityClearTarget::CoverImageAssetId
-        );
-        // Anything else — including None and the seven other entity
-        // types — leaves the profile untouched.
+        // Anything else — including None, the other entity types and
+        // the removed USER_COVER — leaves the profile untouched.
         for other in [
             None,
             Some("ISSUE_ATTACHMENT"),
             Some("WORKSPACE_LOGO"),
+            Some("USER_COVER"),
             Some(""),
         ] {
             assert_eq!(entity_clear_target(other), EntityClearTarget::NoOp);
@@ -507,11 +495,11 @@ mod tests {
     fn entity_user_save_is_full_row_with_pk_last() {
         let sql = entity_user_save_sql();
         assert!(sql.starts_with("UPDATE \"users\" SET "), "{sql}");
-        // Every non-pk column bound in USER_COLUMNS order ($1-$39),
-        // pk last ($40) — Django save() shape.
+        // Every non-pk column bound in USER_COLUMNS order ($1-$37),
+        // pk last ($38) — Django save() shape.
         assert!(sql.contains("\"password\" = $1"), "{sql}");
-        assert!(sql.contains("\"masked_at\" = $39"), "{sql}");
-        assert!(sql.contains("WHERE \"users\".\"id\" = ($40)"), "{sql}");
+        assert!(sql.contains("\"masked_at\" = $37"), "{sql}");
+        assert!(sql.contains("WHERE \"users\".\"id\" = ($38)"), "{sql}");
         assert!(!sql.contains("\"id\" = $"), "{sql}");
     }
 

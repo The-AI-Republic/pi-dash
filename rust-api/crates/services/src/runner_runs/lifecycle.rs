@@ -1965,7 +1965,7 @@ mod tests {
             vec![
                 ("\"agent_run\"".to_owned(), 41),
                 ("\"issues\"".to_owned(), 34),
-                ("\"projects\"".to_owned(), 46),
+                ("\"projects\"".to_owned(), 44),
                 ("\"states\"".to_owned(), 18),
             ]
         );
@@ -1985,7 +1985,7 @@ mod tests {
             vec![
                 ("\"agent_run\"".to_owned(), 41),
                 ("\"issues\"".to_owned(), 34),
-                ("\"projects\"".to_owned(), 46),
+                ("\"projects\"".to_owned(), 44),
             ]
         );
         assert!(

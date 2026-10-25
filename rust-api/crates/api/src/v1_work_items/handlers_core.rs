@@ -4292,10 +4292,9 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
         }
     }
     match entity_type.as_deref() {
-        Some("WORKSPACE_LOGO")
-        | Some("USER_AVATAR")
-        | Some("USER_COVER")
-        | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
+        Some("WORKSPACE_LOGO") | Some("USER_AVATAR") => {
+            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
+        }
         Some("ISSUE_ATTACHMENT") => {
             let slug = workspace_slug(pool, workspace_id).await?;
             Ok(slug.map(|s| {
@@ -4354,15 +4353,15 @@ async fn expand_state(pool: &PgPool, state_id: &Uuid) -> Result<Option<Value>, D
 }
 
 /// `expand=project`: `ProjectLiteSerializer` (`project.py:354-377`):
-/// `id`, `identifier`, `name`, `cover_image`, `icon_prop`, `emoji`,
-/// `description`, `is_default`, `cover_image_url` in field order.
+/// `id`, `identifier`, `name`, `icon_prop`, `emoji`,
+/// `description`, `is_default` in field order.
 /// `Project.objects` is the plain manager — no liveness scope, so
 /// soft-deleted rows still render (Django `getattr` mechanics). A
 /// hard-missing row renders `{}` via `None`. Mirrors the
 /// `handlers_social` fetch.
 async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Value>, Denial> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "identifier", "name", "cover_image", "icon_prop", "emoji", "description", "is_default", "cover_image_asset_id" FROM "projects" WHERE "id" = $1"#,
+        r#"SELECT "id", "identifier", "name", "icon_prop", "emoji", "description", "is_default" FROM "projects" WHERE "id" = $1"#,
     )
     .bind(project_id)
     .fetch_optional(pool)
@@ -4371,17 +4370,8 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Value
     let Some(row) = row else {
         return Ok(None);
     };
-    let cover_asset: Option<Uuid> = row_uuid_opt(&row, "cover_image_asset_id")?;
-    let cover_text: Option<String> = row_string_opt(&row, "cover_image")?;
-    // `Project.cover_image_url` (`db/models/project.py:176-185`): the
-    // asset URL wins, then the stored text, else null.
-    let cover_url = match cover_asset {
-        Some(id) => file_asset_url(pool, &id).await?,
-        None => None,
-    };
-    let cover_url = cover_url.or_else(|| cover_text.clone().filter(|text| !text.is_empty()));
     let icon_prop: Option<Value> = row.try_get("icon_prop").map_err(|_| Denial::ServerError)?;
-    let mut map = Map::with_capacity(9);
+    let mut map = Map::with_capacity(7);
     map.insert(
         "id".to_owned(),
         Value::String(row_uuid(&row, "id")?.to_string()),
@@ -4391,10 +4381,6 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Value
         Value::String(row_string(&row, "identifier")?),
     );
     map.insert("name".to_owned(), Value::String(row_string(&row, "name")?));
-    map.insert(
-        "cover_image".to_owned(),
-        cover_text.map(Value::String).unwrap_or(Value::Null),
-    );
     map.insert("icon_prop".to_owned(), icon_prop.unwrap_or(Value::Null));
     map.insert(
         "emoji".to_owned(),
@@ -4409,10 +4395,6 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Value
     map.insert(
         "is_default".to_owned(),
         Value::Bool(row.try_get("is_default").map_err(|_| Denial::ServerError)?),
-    );
-    map.insert(
-        "cover_image_url".to_owned(),
-        cover_url.map(Value::String).unwrap_or(Value::Null),
     );
     Ok(Some(Value::Object(map)))
 }

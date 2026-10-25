@@ -480,10 +480,10 @@ where
         }
         let id = Uuid::new_v4();
         let at = Utc::now();
-        // AGENT_USER_INSERT_SQL order (40 cols): password, last_login,
+        // AGENT_USER_INSERT_SQL order (38 cols): password, last_login,
         // id, username, mobile_number, email, display_name, first_name,
-        // last_name, avatar, avatar_asset_id, cover_image,
-        // cover_image_asset_id, date_joined, created_at, updated_at,
+        // last_name, avatar, avatar_asset_id, date_joined, created_at,
+        // updated_at,
         // last_location, created_location, is_superuser, is_managed,
         // is_password_expired, is_active, is_staff, is_email_verified,
         // is_password_autoset, is_password_reset_required, token,
@@ -504,8 +504,6 @@ where
             .bind(AGENT_USER_FIRST_NAME)
             .bind(AGENT_USER_LAST_NAME)
             .bind("")
-            .bind(None::<Uuid>)
-            .bind(None::<String>)
             .bind(None::<Uuid>)
             .bind(at)
             .bind(at)

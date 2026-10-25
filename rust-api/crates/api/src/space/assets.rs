@@ -126,17 +126,15 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-/// All ten `EntityTypeContext` values (`db/models/asset.py:33-43`):
+/// All eight `EntityTypeContext` values (`db/models/asset.py:33-41`):
 /// POST accepts any of them (`views/asset.py:83`).
 const ENTITY_TYPES: &[&str] = &[
     "ISSUE_ATTACHMENT",
     "ISSUE_DESCRIPTION",
     "COMMENT_DESCRIPTION",
     "PAGE_DESCRIPTION",
-    "USER_COVER",
     "USER_AVATAR",
     "WORKSPACE_LOGO",
-    "PROJECT_COVER",
     "DRAFT_ISSUE_ATTACHMENT",
     "DRAFT_ISSUE_DESCRIPTION",
 ];
@@ -713,7 +711,7 @@ fn asset_url_for(
     asset_id: &Uuid,
 ) -> Value {
     match entity_type {
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
+        "WORKSPACE_LOGO" | "USER_AVATAR" => {
             Value::String(format!("/api/assets/v2/static/{asset_id}/"))
         }
         "ISSUE_ATTACHMENT" => Value::String(format!(

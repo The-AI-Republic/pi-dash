@@ -134,7 +134,6 @@ impl NewAsset {
     pub fn with_entity_field(mut self, entity_type: Option<&str>, entity_id: Uuid) -> Self {
         match entity_type.and_then(logic::entity_id_field) {
             Some("workspace_id") => self.workspace_id = entity_id,
-            Some("project_id") => self.project_id = Some(entity_id),
             Some("user_id") => self.user_id = Some(entity_id),
             Some("issue_id") => self.issue_id = Some(entity_id),
             Some("page_id") => self.page_id = Some(entity_id),
@@ -2202,11 +2201,12 @@ mod tests {
                 .workspace_id,
             eid
         );
+        // The removed PROJECT_COVER sets no column (PDASHOSS01-237).
         assert_eq!(
             base.clone()
                 .with_entity_field(Some("PROJECT_COVER"), eid)
                 .project_id,
-            Some(eid)
+            None
         );
         assert_eq!(
             base.clone()

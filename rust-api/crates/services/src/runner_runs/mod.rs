@@ -429,8 +429,6 @@ pub(crate) const PROJECT_COLUMNS: &[&str] = &[
     "is_default",
     "guest_view_all_features",
     "members_can_edit_states",
-    "cover_image",
-    "cover_image_asset_id",
     "estimate_id",
     "archive_in",
     "close_in",
@@ -588,7 +586,7 @@ mod tests {
             ]
         );
         assert!(ISSUE_COLUMNS.contains(&"sequence_id"));
-        assert_eq!(PROJECT_COLUMNS.len(), 46);
+        assert_eq!(PROJECT_COLUMNS.len(), 44);
         assert_eq!(
             &PROJECT_COLUMNS[..6],
             [
@@ -601,7 +599,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            &PROJECT_COLUMNS[44..],
+            &PROJECT_COLUMNS[42..],
             ["agent_ticking_enabled", "default_agent_executor"]
         );
         assert!(PROJECT_COLUMNS.contains(&"agent_default_max_ticks"));

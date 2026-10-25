@@ -887,7 +887,7 @@ fn file_asset_url(
     asset_id: &Uuid,
 ) -> Value {
     match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Value::String(format!("/api/assets/v2/static/{asset_id}/"))
         }
         Some("ISSUE_ATTACHMENT") => {

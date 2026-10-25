@@ -809,12 +809,7 @@ impl NotificationRow {
 /// raw `avatar` string when non-empty, else null. Same rule as the
 /// license handlers' port.
 fn avatar_url(asset_id: Option<Uuid>, asset_entity: Option<&str>, avatar: &str) -> Option<String> {
-    if asset_id.is_some()
-        && matches!(
-            asset_entity,
-            Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER")
-        )
-    {
+    if asset_id.is_some() && matches!(asset_entity, Some("WORKSPACE_LOGO" | "USER_AVATAR")) {
         return asset_id.map(|asset| format!("/api/assets/v2/static/{asset}/"));
     }
     if avatar.is_empty() {

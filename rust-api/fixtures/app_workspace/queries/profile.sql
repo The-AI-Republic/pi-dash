@@ -44,8 +44,8 @@
 --   pending_issues (:329-341: state__group IN ('backlog','unstarted',
 --   'started') LITERAL trio (:332-336) — excludes review/test, NOT the
 --   CLOSED complement — PORT); values(id, logo_props, 4 counts) (:343-351).
---   user_data 8 keys (:356-365): email, first_name, last_name, avatar_url,
---   cover_image_url, date_joined, user_timezone, display_name.
+--   user_data 7 keys (:356-364): email, first_name, last_name, avatar_url,
+--   date_joined, user_timezone, display_name.
 -- R4 user-activity (:371-394, EntityPermission): ?project= multi (:375);
 --   filters ~Q(field IN 4) (:378: same exclusion as export-CSV), slug (:379),
 --   requester project scope (:380-381) + project__archived_at NULL (:382 —
@@ -119,7 +119,7 @@ FROM projects p WHERE p.workspace_id = (SELECT id FROM workspaces WHERE slug = :
   AND p.archived_at IS NULL
   AND EXISTS(SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.member_id = :user AND pm.is_active)
 GROUP BY p.id; -- user_data: SELECT email,first_name,last_name,avatar_url,
---   cover_image_url,date_joined,user_timezone,display_name FROM users WHERE id = :uid;
+--   date_joined,user_timezone,display_name FROM users WHERE id = :uid;
 -- R5-Q2 priority (always-true HAVING + Case order):
 SELECT priority, COUNT(*) AS priority_count,
   CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2

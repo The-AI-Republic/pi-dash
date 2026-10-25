@@ -109,7 +109,6 @@ pub struct ProjectInsert {
     pub is_default: bool,
     pub description: String,
     pub network: i16,
-    pub cover_image: Option<String>,
     pub logo_props: Value,
     pub default_agent_executor: String,
 }
@@ -661,7 +660,6 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
                         is_default: !store.default_project_exists(workspace_id).await?,
                         description: seed_str(row, "description").unwrap_or("").to_owned(),
                         network: row.get("network").and_then(Value::as_i64).unwrap_or(2) as i16,
-                        cover_image: seed_str(row, "cover_image").map(str::to_owned),
                         logo_props: row
                             .get("logo_props")
                             .cloned()
@@ -1477,8 +1475,8 @@ impl SeedStore for PgSeedStore {
         // normalization; every other column at its model default.
         let id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO users (password, last_login, id, username, mobile_number, email,
-               display_name, first_name, last_name, avatar, avatar_asset_id, cover_image,
-               cover_image_asset_id, date_joined, created_at, updated_at, last_location,
+               display_name, first_name, last_name, avatar, avatar_asset_id,
+               date_joined, created_at, updated_at, last_location,
                created_location, is_superuser, is_managed, is_password_expired, is_active,
                is_staff, is_email_verified, is_password_autoset, is_password_reset_required,
                token, user_timezone,
@@ -1486,8 +1484,8 @@ impl SeedStore for PgSeedStore {
                last_login_medium, last_login_uagent, token_updated_at, is_bot, bot_type,
                is_email_valid, masked_at)
              VALUES ($1, NULL, $2, $3, NULL, $4,
-               'Pi Dash', 'Pi Dash', '', '', NULL, NULL,
-               NULL, $5, $5, $5, '',
+               'Pi Dash', 'Pi Dash', '', '', NULL,
+               $5, $5, $5, '',
                '', false, false, false, true,
                false, false, true, false, '', 'UTC',
                $5, NULL, NULL, '', '',
@@ -1554,10 +1552,10 @@ impl SeedStore for PgSeedStore {
             "INSERT INTO projects (created_at, updated_at, id, name, description,
                description_text, description_html, network, identifier, created_by_id,
                default_assignee_id, project_lead_id, updated_by_id, workspace_id, emoji,
-               cycle_view, module_view, cover_image, issue_views_view, page_view,
+               cycle_view, module_view, issue_views_view, page_view,
                estimate_id, icon_prop, intake_view, archive_in, close_in, default_state_id,
                logo_props, archived_at, is_time_tracking_enabled, is_issue_type_enabled,
-               deleted_at, guest_view_all_features, timezone, cover_image_asset_id,
+               deleted_at, guest_view_all_features, timezone,
                external_id, external_source, members_can_edit_states, repo_url, base_branch,
                agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled,
                is_default, agent_review_default_interval_seconds, default_agent_executor,
@@ -1565,13 +1563,13 @@ impl SeedStore for PgSeedStore {
              VALUES ($1, $1, $2, $3, $4,
                NULL, NULL, $5, $6, $7,
                NULL, NULL, NULL, $8, NULL,
-               true, true, $9, true, true,
+               true, true, true, true,
                NULL, NULL, false, 0, 0, NULL,
-               $10, NULL, false, false,
-               NULL, false, $11, NULL,
+               $9, NULL, false, false,
+               NULL, false, $10,
                NULL, NULL, true, '', 'main',
                10800, 10, true,
-               $12, 10800, $13,
+               $11, 10800, $12,
                10800)
              RETURNING id",
         )
@@ -1583,7 +1581,6 @@ impl SeedStore for PgSeedStore {
         .bind(&project.identifier)
         .bind(actor)
         .bind(workspace_id)
-        .bind(project.cover_image.as_deref())
         .bind(sqlx::types::Json(project.logo_props.clone()))
         .bind(project.timezone.clone())
         .bind(project.is_default)
@@ -2817,7 +2814,7 @@ mod tests {
         vec![
             (
                 "projects.json",
-                r##"[{"id": 1, "description": "", "network": 2, "cover_image": null, "logo_props": {}}]"##,
+                r##"[{"id": 1, "description": "", "network": 2, "logo_props": {}}]"##,
             ),
             (
                 "states.json",

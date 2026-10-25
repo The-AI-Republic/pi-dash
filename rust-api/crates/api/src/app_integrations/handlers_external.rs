@@ -7,9 +7,8 @@
 //!   (`GPTIntegrationEndpoint.post`, `:148-181`)
 //! * `POST workspaces/<slug>/ai-assistant/`
 //!   (`WorkspaceGPTIntegrationEndpoint.post`, `:184-212`)
-//! * `GET unsplash/` (`UnsplashEndpoint.get`, `:215-243`)
 //!
-//! Only these three paths+methods are registered, so the edge serves
+//! Only these two paths+methods are registered, so the edge serves
 //! exactly this family from Rust while every sibling path keeps proxying
 //! to Django — route registration is the cutover granularity, no flag
 //! needed. Every other method on the owned paths proxies too, so Django
@@ -17,8 +16,7 @@
 //! (the loop-handlers precedent).
 //!
 //! Layering: provider tables, config branches, task/prompt falsy logic,
-//! the Gemini model rewrite, `response_html`, and the Unsplash URL
-//! builders live in [`pidash_services::app_integrations::external`];
+//! the Gemini model rewrite, and `response_html` live in [`pidash_services::app_integrations::external`];
 //! the `allow_permission` gates live in [`super::gates`]. This module
 //! owns the HTTP shell (routes, session auth), the membership-row and
 //! lite-detail SQL, the config-row reads, the DRF error rendering, and
@@ -35,12 +33,10 @@
 //! allow-style 403.
 //!
 //! Fixture ids: FX-EXT-01 (`fx-ext-01-llm.json`), FX-PERM-01
-//! (`fx-perm-01-permission-matrix.json`, the three external rows).
+//! (`fx-perm-01-permission-matrix.json`, the external rows).
 //!
 //! Ported bugs (translate, don't redesign — also listed in the PR):
 //!
-//! * B3 (`base.py:235`): the Unsplash search URL renders `page=${page}`
-//!   with a stray `$`; ported byte-for-byte.
 //! * B5 (`base.py:159,163`): `task`/`prompt` default to `False`; a falsy
 //!   prompt reaches `get_llm_response` as falsy, so the concatenation
 //!   raises `TypeError`, which the `except Exception` swallows — the
@@ -52,10 +48,9 @@
 //!   unsupported-provider 400 instead, since the configured default
 //!   (`"openai"`) makes `None` unreachable outside a NULL DB row.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
@@ -78,13 +73,10 @@ pub const PROJECT_ASSISTANT_PATH: &str =
     "/api/workspaces/{slug}/projects/{project_id}/ai-assistant/";
 /// `app/urls/external.py:20-23`.
 pub const WORKSPACE_ASSISTANT_PATH: &str = "/api/workspaces/{slug}/ai-assistant/";
-/// `app/urls/external.py:13`.
-pub const UNSPLASH_PATH: &str = "/api/unsplash/";
-
-/// Register the three external routes. Nothing else: sibling paths stay
+/// Register the two external routes. Nothing else: sibling paths stay
 /// unmatched and proxy to Django.
 pub fn routes() -> Router<AppState> {
-    use axum::routing::{get, post};
+    use axum::routing::post;
     Router::new()
         .route(
             PROJECT_ASSISTANT_PATH,
@@ -94,7 +86,6 @@ pub fn routes() -> Router<AppState> {
             WORKSPACE_ASSISTANT_PATH,
             owned_post(post(post_workspace_assistant)),
         )
-        .route(UNSPLASH_PATH, owned_get(get(get_unsplash)))
 }
 
 /// A POST-owned path: the POST handler serves from Rust, everything
@@ -107,22 +98,6 @@ fn owned_post(
         .put(crate::edge::proxy)
         .patch(crate::edge::proxy)
         .delete(crate::edge::proxy)
-        .options(crate::edge::proxy)
-}
-
-/// A GET-owned path: the GET handler serves from Rust, everything else
-/// falls through to Django. `HEAD` proxies explicitly: axum would
-/// auto-serve it from `get`, but Django defines no `head` and 405s after
-/// auth.
-fn owned_get(
-    get_handler: axum::routing::MethodRouter<AppState>,
-) -> axum::routing::MethodRouter<AppState> {
-    get_handler
-        .post(crate::edge::proxy)
-        .put(crate::edge::proxy)
-        .patch(crate::edge::proxy)
-        .delete(crate::edge::proxy)
-        .head(crate::edge::proxy)
         .options(crate::edge::proxy)
 }
 
@@ -474,9 +449,6 @@ struct ProjectLite {
     id: Uuid,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_asset_id: Option<Uuid>,
-    cover_asset_entity: Option<String>,
     logo_props: Value,
     description: String,
     is_default: bool,
@@ -492,19 +464,8 @@ type WorkspaceRow = (
     Option<String>,
 );
 
-/// One `projects` + `file_assets` row for [`fetch_project`].
-#[allow(clippy::type_complexity)]
-type ProjectRow = (
-    Uuid,
-    String,
-    String,
-    Option<String>,
-    Option<Uuid>,
-    Option<String>,
-    Value,
-    Option<String>,
-    bool,
-);
+/// One `projects` row for [`fetch_project`].
+type ProjectRow = (Uuid, String, String, Value, Option<String>, bool);
 
 /// `Workspace.objects.get(slug=slug)` (`:170`) — 404 when missing
 /// (`handle_exception`: `{"error":"The required object does not exist."}`).
@@ -532,33 +493,20 @@ async fn fetch_workspace(pool: &sqlx::PgPool, slug: &str) -> Result<WorkspaceLit
 /// `Project.objects.get(pk=project_id)` (`:171`) — 404 when missing.
 async fn fetch_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<ProjectLite, Denial> {
     let row: Option<ProjectRow> = sqlx::query_as(
-        r#"SELECT p.id, p.identifier, p.name, p.cover_image, p.cover_image_asset_id,
-                  fa.entity_type, p.logo_props, p.description, p.is_default
-           FROM projects p LEFT JOIN file_assets fa ON fa.id = p.cover_image_asset_id
+        r#"SELECT p.id, p.identifier, p.name, p.logo_props, p.description, p.is_default
+           FROM projects p
            WHERE p.id = $1 AND p.deleted_at IS NULL"#,
     )
     .bind(project_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let (
-        id,
-        identifier,
-        name,
-        cover_image,
-        cover_asset_id,
-        cover_asset_entity,
-        logo_props,
-        description,
-        is_default,
-    ) = row.ok_or(Denial::NotFound)?;
+    let (id, identifier, name, logo_props, description, is_default) =
+        row.ok_or(Denial::NotFound)?;
     Ok(ProjectLite {
         id,
         identifier,
         name,
-        cover_image,
-        cover_asset_id,
-        cover_asset_entity,
         logo_props,
         description: description.unwrap_or_default(),
         is_default,
@@ -578,19 +526,6 @@ fn logo_url(row: &WorkspaceLite) -> Value {
     }
 }
 
-/// `cover_image_url` (`db/models/project.py:176-183`): the cover asset's
-/// URL, else the `cover_image` text, else null.
-fn cover_image_url(row: &ProjectLite) -> Value {
-    match (row.cover_asset_id, row.cover_asset_entity.as_deref()) {
-        (Some(id), Some("PROJECT_COVER")) => Value::String(format!("/api/assets/v2/static/{id}/")),
-        (Some(_), _) => Value::Null,
-        (None, _) => match row.cover_image.as_deref() {
-            Some(cover) => Value::String(cover.to_owned()),
-            None => Value::Null,
-        },
-    }
-}
-
 /// `WorkspaceLiteSerializer` order: `name`, `slug`, `id`, `logo_url`.
 fn workspace_detail(row: &WorkspaceLite) -> Value {
     let mut map = serde_json::Map::with_capacity(4);
@@ -602,24 +537,15 @@ fn workspace_detail(row: &WorkspaceLite) -> Value {
 }
 
 /// `ProjectLiteSerializer` order: `id`, `identifier`, `name`,
-/// `cover_image`, `cover_image_url`, `logo_props`, `description`,
-/// `is_default`.
+/// `logo_props`, `description`, `is_default`.
 fn project_detail(row: &ProjectLite) -> Value {
-    let mut map = serde_json::Map::with_capacity(8);
+    let mut map = serde_json::Map::with_capacity(6);
     map.insert("id".to_owned(), Value::String(row.id.to_string()));
     map.insert(
         "identifier".to_owned(),
         Value::String(row.identifier.clone()),
     );
     map.insert("name".to_owned(), Value::String(row.name.clone()));
-    map.insert(
-        "cover_image".to_owned(),
-        row.cover_image
-            .clone()
-            .map(Value::String)
-            .unwrap_or(Value::Null),
-    );
-    map.insert("cover_image_url".to_owned(), cover_image_url(row));
     map.insert("logo_props".to_owned(), row.logo_props.clone());
     map.insert(
         "description".to_owned(),
@@ -819,81 +745,6 @@ async fn post_workspace_assistant(
     json_response(&Value::Object(map))
 }
 
-/// `GET unsplash/` (`UnsplashEndpoint.get`, `base.py:215-243`): no
-/// decorator, so any authenticated caller reaches the body
-/// (FX-PERM-01: `Authenticated`). Without an access key the endpoint
-/// answers `[]` (`:226-227`); otherwise it proxies api.unsplash.com
-/// and relays the payload with the upstream status verbatim
-/// (`:242-243`).
-async fn get_unsplash(
-    State(state): State<AppState>,
-    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let pool = match pool_of(&state) {
-        Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    if let Err(denial) = actor(&state, &pool, extension).await {
-        return denial.into_response();
-    }
-    let row = gate_for("GET", "unsplash/").expect("unsplash gate");
-    debug_assert!(matches!(row.gate, super::gates::Gate::Authenticated));
-    let access_key = match config_value(
-        &pool,
-        &state.settings().secret_key,
-        "UNSPLASH_ACCESS_KEY",
-        env_default("UNSPLASH_ACCESS_KEY", None),
-    )
-    .await
-    {
-        Ok(key) => key,
-        Err(denial) => return denial.into_response(),
-    };
-    let access_key = access_key.unwrap_or_default();
-    if access_key.is_empty() {
-        return json_response(&Vec::<Value>::new());
-    }
-    let url = external::unsplash_url(
-        &access_key,
-        params.get("query").map(String::as_str),
-        params.get("page").map(String::as_str),
-        params.get("per_page").map(String::as_str),
-    );
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let response = match client
-        .get(url)
-        .header(header::CONTENT_TYPE.as_str(), "application/json")
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let status =
-        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let payload: Value = match serde_json::from_slice(&bytes) {
-        Ok(payload) => payload,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let body = serde_json::to_string(&payload).expect("upstream payload serializes");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("unsplash relay")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -901,7 +752,6 @@ mod tests {
     #[test]
     fn owned_paths_match_django_urls() {
         // `app/urls/external.py:12-24`, under the `api/` include.
-        assert_eq!(UNSPLASH_PATH, "/api/unsplash/");
         assert_eq!(
             PROJECT_ASSISTANT_PATH,
             "/api/workspaces/{slug}/projects/{project_id}/ai-assistant/"
@@ -913,13 +763,11 @@ mod tests {
     }
 
     #[test]
-    fn gates_cover_all_three_routes() {
+    fn gates_cover_both_routes() {
         // FX-PERM-01 rows: project assistant is PROJECT ADMIN/MEMBER,
-        // workspace assistant is WORKSPACE ADMIN/MEMBER, unsplash is
-        // Authenticated (no decorator).
+        // workspace assistant is WORKSPACE ADMIN/MEMBER.
         assert!(gate_for("POST", "workspaces/<slug>/projects/<id>/ai-assistant/").is_some());
         assert!(gate_for("POST", "workspaces/<slug>/ai-assistant/").is_some());
-        assert!(gate_for("GET", "unsplash/").is_some());
     }
 
     #[test]
@@ -1005,9 +853,6 @@ mod tests {
             id: Uuid::nil(),
             identifier: "CT00001".to_owned(),
             name: "P".to_owned(),
-            cover_image: None,
-            cover_asset_id: None,
-            cover_asset_entity: None,
             logo_props: serde_json::json!({}),
             description: "".to_owned(),
             is_default: false,
@@ -1025,8 +870,6 @@ mod tests {
                 "id",
                 "identifier",
                 "name",
-                "cover_image",
-                "cover_image_url",
                 "logo_props",
                 "description",
                 "is_default"

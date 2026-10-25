@@ -1,13 +1,13 @@
-"""Contract tests: external integrations (Unsplash, AI assistants).
+"""Contract tests: external integrations (AI assistants).
 
 Paths (``app/urls/external.py``):
-  GET  /api/unsplash/
   POST /api/workspaces/<slug>/projects/<id>/ai-assistant/
   POST /api/workspaces/<slug>/ai-assistant/
 
-Without an ``UNSPLASH_ACCESS_KEY`` the endpoint answers ``[]`` (the keyed
-path proxies api.unsplash.com and is covered by the Django test-client
-suite). The GPT endpoints require an ``LLM_API_KEY`` on the server — inert
+``GET /api/unsplash/`` was removed with the cover-image feature
+(PDASHOSS01-237): it matches no URL pattern, so Django answers its resolver
+404 before authentication, and Rust registers no route for it (the edge
+proxies the miss to Django). The GPT endpoints require an ``LLM_API_KEY`` on the server — inert
 dummy in CI — so the suite pins the task-validation branch and the
 provider-error envelope; the success shape needs a real provider key and is
 covered client-side.
@@ -22,16 +22,25 @@ from .conftest import ANON, DENIED, proj_url, ws_url
 pytestmark = pytest.mark.contract
 
 
-def test_unsplash_without_key_returns_empty(admin):
-    response = admin.get("/api/unsplash/")
-    assert response.status_code == 200
-    assert response.json() == []
+def _assert_resolver_404(response):
+    # The harness serves Django with ``DEBUG = True`` (technical HTML 404);
+    # production ``handler404`` answers ``{"error": "Page not found."}``.
+    assert response.status_code == 404, response.text[:200]
+    content_type = response.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        assert response.json() == {"error": "Page not found."}, response.text
+    else:
+        assert content_type.startswith("text/html"), content_type
 
 
-def test_unsplash_query_params_ignored_without_key(admin):
-    response = admin.get("/api/unsplash/", params={"query": "cats", "page": 2, "per_page": 5})
-    assert response.status_code == 200
-    assert response.json() == []
+@pytest.mark.parametrize("params", [None, {"query": "cats", "page": 2, "per_page": 5}])
+def test_unsplash_route_removed(admin, params):
+    _assert_resolver_404(admin.get("/api/unsplash/", params=params))
+
+
+def test_unsplash_route_removed_anonymous(anon):
+    # The resolver 404 precedes authentication.
+    _assert_resolver_404(anon.get("/api/unsplash/"))
 
 
 def test_workspace_assistant_requires_task(admin, world):
@@ -82,7 +91,6 @@ def test_project_assistant_cross_tenant_denied(other_admin, world):
 
 def test_anonymous_rejected(anon, world):
     for response in (
-        anon.get("/api/unsplash/"),
         anon.post(ws_url(world, "ai-assistant"), json={"task": "x"}),
         anon.post(proj_url(world, "ai-assistant"), json={"task": "x"}),
     ):

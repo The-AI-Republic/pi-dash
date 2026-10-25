@@ -692,12 +692,12 @@ async fn create_user(
             "last_logout_time", "last_login_ip", "last_logout_ip", "last_login_medium",
             "last_login_uagent", "token_updated_at", "is_bot", "bot_type",
             "user_timezone", "is_email_valid", "masked_at", "display_name",
-            "mobile_number", "cover_image")
+            "mobile_number")
            VALUES ($1,$2,$3,$4,'','', '', $5, $5, $5, '', '',
             false,false,false, true,false,false,false,false, '', NULL, NULL,
             NULL, '', '', 'email', '', NULL, false, NULL,
             'UTC', false, NULL, $6,
-            NULL, NULL)"#,
+            NULL)"#,
     )
     .bind(id)
     .bind(encode_password(password))

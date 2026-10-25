@@ -931,7 +931,7 @@ fn asset_url(
     issue_id: Option<&str>,
 ) -> Result<Option<String>, Denial> {
     match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
         }
         Some("ISSUE_ATTACHMENT") => {

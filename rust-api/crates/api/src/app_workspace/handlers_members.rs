@@ -2388,7 +2388,7 @@ struct ProjectMemberRow {
 fn asset_url_for_row(row: &MemberFullRow) -> Result<Option<String>, Denial> {
     let asset_id = row.fa_id.expect("attached asset");
     match row.fa_entity_type.as_deref() {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
         }
         Some("ISSUE_ATTACHMENT") => {

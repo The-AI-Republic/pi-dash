@@ -211,10 +211,8 @@ pub mod file_asset {
         "ISSUE_DESCRIPTION",
         "COMMENT_DESCRIPTION",
         "PAGE_DESCRIPTION",
-        "USER_COVER",
         "USER_AVATAR",
         "WORKSPACE_LOGO",
-        "PROJECT_COVER",
         "DRAFT_ISSUE_ATTACHMENT",
         "DRAFT_ISSUE_DESCRIPTION",
     ];

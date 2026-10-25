@@ -2658,10 +2658,7 @@ async fn resolve_logo_url(
         return Err(Denial::ServerError);
     };
     let entity_type = entity_type.unwrap_or_default();
-    if matches!(
-        entity_type.as_str(),
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER"
-    ) {
+    if matches!(entity_type.as_str(), "WORKSPACE_LOGO" | "USER_AVATAR") {
         return Ok(Some(format!("/api/assets/v2/static/{asset_id}/")));
     }
     if entity_type == "ISSUE_ATTACHMENT" {

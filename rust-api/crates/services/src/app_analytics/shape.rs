@@ -354,16 +354,14 @@ pub const IMPORTER_FIELDS: [&str; 19] = [
 ];
 
 /// `project_detail` mirrors the app `ProjectLiteSerializer`
-/// (`app/serializers/project.py:120-133`, 8 keys in `Meta.fields` order).
+/// (`app/serializers/project.py:120-133`, 6 keys in `Meta.fields` order).
 /// This is NOT the space-app lite shape (`space/serializer/project.py`,
 /// `icon_prop`/`emoji`); the importer nests the app serializer
 /// (`importer.py:8,15`).
-pub const IMPORTER_PROJECT_DETAIL_FIELDS: [&str; 8] = [
+pub const IMPORTER_PROJECT_DETAIL_FIELDS: [&str; 6] = [
     "id",
     "identifier",
     "name",
-    "cover_image",
-    "cover_image_url",
     "logo_props",
     "description",
     "is_default",
@@ -374,8 +372,6 @@ pub struct ImporterProjectDetailView<'a> {
     pub id: &'a str,
     pub identifier: &'a str,
     pub name: &'a str,
-    pub cover_image: Option<&'a str>,
-    pub cover_image_url: Option<&'a str>,
     pub logo_props: &'a Value,
     pub description: &'a str,
     pub is_default: bool,
@@ -1040,8 +1036,6 @@ mod tests {
                 id: "proj-1",
                 identifier: "AN",
                 name: "Analytics Project",
-                cover_image: None,
-                cover_image_url: None,
                 logo_props: &logo_props,
                 description: "",
                 is_default: false,
@@ -1084,7 +1078,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         // Nested details render the app lite shapes byte-for-byte: the app
-        // `ProjectLiteSerializer` 8 keys (`project.py:120-133`), not the
+        // `ProjectLiteSerializer` 6 keys (`project.py:120-133`), not the
         // space-app `icon_prop`/`emoji` set; the app `WorkspaceLiteSerializer`
         // 4 keys (`workspace.py:79-83`) including `logo_url`.
         assert_eq!(
@@ -1101,7 +1095,6 @@ mod tests {
                 .map(|name| (*name).to_owned())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(produced["project_detail"]["cover_image_url"], Value::Null);
         assert_eq!(produced["project_detail"]["logo_props"], json!({}));
         assert_eq!(produced["project_detail"]["is_default"], json!(false));
         assert_eq!(produced["workspace_detail"]["logo_url"], Value::Null);

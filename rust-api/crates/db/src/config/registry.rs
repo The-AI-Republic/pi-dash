@@ -224,7 +224,6 @@ fn resolver_entries(into: &mut HashMap<String, ConfigEntry>) {
         // Deprecated, use LLM_MODEL.
         ("GPT_ENGINE", db(V::from("gpt-3.5-turbo"))),
         // Misc.
-        ("UNSPLASH_ACCESS_KEY", sdb(V::from(""))),
         // Read from the env only (never seeded).
         ("SLACK_CLIENT_ID", env(V::Null)),
         // Analytics (never seeded; always env).
@@ -461,7 +460,6 @@ mod tests {
         "LLM_API_KEY",
         "LLM_MODEL",
         "LLM_PROVIDER",
-        "UNSPLASH_ACCESS_KEY",
     ];
 
     fn registry() -> ConfigRegistry {

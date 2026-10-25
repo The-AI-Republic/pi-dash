@@ -83,8 +83,9 @@
 //! * BUG-logo-delete-get (`v2.py:289-291`): the workspace-logo delete
 //!   branch reads through `.get(...)` then checks `if workspace is None` —
 //!   dead code; a missing row raises (404), it never returns silently.
-//! * BUG-avatar-cover-clear (`v2.py:45,63,257,279`): the avatar/logo clear
-//!   writes `""` while the cover clear writes `None`. Ported as-is.
+//! * `USER_COVER` / `PROJECT_COVER` were removed from `EntityTypeContext`
+//!   (PDASHOSS01-237): the posts answer the entity-type 400 for them and
+//!   legacy cover rows take the no-op save/delete arm.
 //! * BUG-size-no-max (`v2.py:113,317`): `size` has no upper check; only
 //!   `min()` against the limit.
 
@@ -449,7 +450,6 @@ struct AssetRow {
     attributes: Option<Value>,
     asset_key: String,
     workspace_id: Option<Uuid>,
-    project_id: Option<Uuid>,
 }
 
 fn asset_row(row: &sqlx::postgres::PgRow) -> Result<AssetRow, sqlx::Error> {
@@ -460,13 +460,12 @@ fn asset_row(row: &sqlx::postgres::PgRow) -> Result<AssetRow, sqlx::Error> {
         attributes: row.try_get("attributes")?,
         asset_key: row.try_get("asset")?,
         workspace_id: row.try_get("workspace_id")?,
-        project_id: row.try_get("project_id")?,
     })
 }
 
 /// `FileAsset.asset_url` (`db/models/asset.py:80-98`) for the entity types
-/// the user post mints: always the static branch (`USER_AVATAR` /
-/// `USER_COVER`, `asset.py:81-87`).
+/// the user post mints: always the static branch (`USER_AVATAR`,
+/// `asset.py:79-83`).
 fn static_asset_url(asset_id: &Uuid) -> Value {
     Value::String(format!("/api/assets/v2/static/{asset_id}/"))
 }
@@ -474,9 +473,8 @@ fn static_asset_url(asset_id: &Uuid) -> Value {
 /// `FileAsset.asset_url` (`db/models/asset.py:80-98`) for the entity types
 /// the workspace post mints. The issue/project branches dereference
 /// `self.workspace.slug` — the slug is already resolved here —
-/// `project_id` is always unset on this path (the create never passes it
-/// except through the `PROJECT_COVER` spread, which takes the static
-/// branch), so it renders as `None` exactly like the f-string; `issue_id`
+/// `project_id` is always unset on this path (the create never passes
+/// it), so it renders as `None` exactly like the f-string; `issue_id`
 /// is the spread identifier for the two issue entity types (already
 /// validated as a storable uuid by the INSERT reaching this line) and
 /// `None` otherwise. `DRAFT_ISSUE_ATTACHMENT` falls through every branch
@@ -488,7 +486,7 @@ fn workspace_asset_url(
     asset_id: &Uuid,
 ) -> Value {
     match entity_type {
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
+        "WORKSPACE_LOGO" | "USER_AVATAR" => {
             static_asset_url(asset_id)
         }
         "ISSUE_ATTACHMENT" => Value::String(format!(
@@ -598,38 +596,12 @@ async fn user_entity_save(
             .map_err(|_| server_error())?;
             Ok(())
         }
-        q::UserSaveAction::SetCover => {
-            let prev: Option<(Option<Uuid>,)> =
-                sqlx::query_as(r#"SELECT "cover_image_asset_id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            let Some((prev,)) = prev else {
-                return Err(does_not_exist());
-            };
-            if let Some(prev_id) = prev {
-                asset_delete(pool, &prev_id)
-                    .await
-                    .map_err(|_| server_error())?;
-            }
-            // `user.cover_image = None` (asymmetry with avatar — ported).
-            sqlx::query(
-                r#"UPDATE "users" SET "cover_image" = NULL, "cover_image_asset_id" = $1 WHERE "id" = $2"#,
-            )
-            .bind(asset_id)
-            .bind(owner_id)
-            .execute(pool)
-            .await
-            .map_err(|_| server_error())?;
-            Ok(())
-        }
         q::UserSaveAction::Noop => Ok(()),
     }
 }
 
 /// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`): clears the
-/// link FK only (the `avatar`/`cover_image` strings are untouched here).
+/// link FK only (the `avatar` string is untouched here).
 #[allow(clippy::result_large_err)]
 async fn user_entity_delete(
     pool: &sqlx::PgPool,
@@ -646,21 +618,6 @@ async fn user_entity_delete(
                     .map_err(|_| server_error())?;
             row.ok_or_else(does_not_exist)?;
             sqlx::query(r#"UPDATE "users" SET "avatar_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(owner_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
-            Ok(())
-        }
-        q::UserDeleteAction::ClearCover => {
-            let row: Option<(Uuid,)> =
-                sqlx::query_as(r#"SELECT "id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            row.ok_or_else(does_not_exist)?;
-            sqlx::query(r#"UPDATE "users" SET "cover_image_asset_id" = NULL WHERE "id" = $1"#)
                 .bind(owner_id)
                 .execute(pool)
                 .await
@@ -710,34 +667,6 @@ async fn workspace_entity_save(
             .map_err(|_| server_error())?;
             Ok(())
         }
-        q::WorkspaceSaveAction::SetCover => {
-            let Some(project_id) = asset.project_id else {
-                return Ok(());
-            };
-            let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-                r#"SELECT "cover_image_asset_id" FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-            )
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-            let Some((prev,)) = row else { return Ok(()) };
-            if let Some(prev_id) = prev {
-                asset_delete(pool, &prev_id)
-                    .await
-                    .map_err(|_| server_error())?;
-            }
-            sqlx::query(
-                r#"UPDATE "projects" SET "cover_image" = $1, "cover_image_asset_id" = $2 WHERE "id" = $3"#,
-            )
-            .bind("")
-            .bind(asset_id)
-            .bind(project_id)
-            .execute(pool)
-            .await
-            .map_err(|_| server_error())?;
-            Ok(())
-        }
         q::WorkspaceSaveAction::Noop => Ok(()),
     }
 }
@@ -769,25 +698,6 @@ async fn workspace_entity_delete(
             row.ok_or_else(does_not_exist)?;
             sqlx::query(r#"UPDATE "workspaces" SET "logo_asset_id" = NULL WHERE "id" = $1"#)
                 .bind(workspace_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
-            Ok(())
-        }
-        q::WorkspaceDeleteAction::ClearCover => {
-            let Some(project_id) = asset.project_id else {
-                return Ok(());
-            };
-            let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-                r#"SELECT "cover_image_asset_id" FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-            )
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-            let Some(_) = row else { return Ok(()) };
-            sqlx::query(r#"UPDATE "projects" SET "cover_image_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(project_id)
                 .execute(pool)
                 .await
                 .map_err(|_| server_error())?;
@@ -1420,13 +1330,8 @@ async fn workspace_get(
 // StaticFileAssetEndpoint
 // ---------------------------------------------------------------------------
 
-/// Entity types the static fetch serves (`v2.py:449-454`).
-const STATIC_ENTITY_TYPES: &[&str] = &[
-    "USER_AVATAR",
-    "USER_COVER",
-    "WORKSPACE_LOGO",
-    "PROJECT_COVER",
-];
+/// Entity types the static fetch serves (`v2.py:387-390`).
+const STATIC_ENTITY_TYPES: &[&str] = &["USER_AVATAR", "WORKSPACE_LOGO"];
 
 /// `StaticFileAssetEndpoint.get` (`v2.py:437-465`): the only `AllowAny`
 /// route in the domain — no auth of any kind.
@@ -2100,12 +2005,7 @@ mod tests {
             .parse()
             .expect("uuid");
         // Image types take the static branch.
-        for entity in [
-            "WORKSPACE_LOGO",
-            "USER_AVATAR",
-            "USER_COVER",
-            "PROJECT_COVER",
-        ] {
+        for entity in ["WORKSPACE_LOGO", "USER_AVATAR"] {
             assert_eq!(
                 workspace_asset_url(entity, "acme", "None", &id),
                 Value::String(format!("/api/assets/v2/static/{id}/")),
@@ -2139,11 +2039,14 @@ mod tests {
                 "{entity}"
             );
         }
-        // Anything else renders null.
-        assert_eq!(
-            workspace_asset_url("DRAFT_ISSUE_ATTACHMENT", "acme", "None", &id),
-            Value::Null
-        );
+        // Anything else (incl. the removed cover types) renders null.
+        for entity in ["DRAFT_ISSUE_ATTACHMENT", "USER_COVER", "PROJECT_COVER"] {
+            assert_eq!(
+                workspace_asset_url(entity, "acme", "None", &id),
+                Value::Null,
+                "{entity}"
+            );
+        }
     }
 
     #[test]
@@ -2160,16 +2063,8 @@ mod tests {
     }
 
     #[test]
-    fn static_allowlist_is_the_four_image_types() {
-        assert_eq!(
-            STATIC_ENTITY_TYPES,
-            &[
-                "USER_AVATAR",
-                "USER_COVER",
-                "WORKSPACE_LOGO",
-                "PROJECT_COVER"
-            ]
-        );
+    fn static_allowlist_is_the_two_image_types() {
+        assert_eq!(STATIC_ENTITY_TYPES, &["USER_AVATAR", "WORKSPACE_LOGO"]);
         // The static route is the one AllowAny gate in the domain.
         assert_eq!(
             guards::gate_for(guards::AssetEndpoint::StaticGet),

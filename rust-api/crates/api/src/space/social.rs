@@ -748,7 +748,7 @@ fn display_name_sql() -> String {
     "SELECT display_name FROM users WHERE id = $1".to_string()
 }
 
-/// `SELECT` for the logo/cover asset row behind `*_url` properties (the
+/// `SELECT` for the logo/avatar asset row behind `*_url` properties (the
 /// project_meta shape).
 fn logo_asset_sql() -> String {
     "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"deleted_at\" IS NULL AND \"a\".\"id\" = $1)".to_string()
@@ -765,7 +765,7 @@ fn asset_url(
     issue_id: Option<&str>,
 ) -> Option<String> {
     match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             Some(format!("/api/assets/v2/static/{asset_id}/"))
         }
         Some("ISSUE_ATTACHMENT") => {
@@ -795,11 +795,11 @@ fn asset_url(
     }
 }
 
-/// Resolve a logo/cover/avatar URL the way the model properties do: the
+/// Resolve a logo/avatar URL the way the model properties do: the
 /// asset's `asset_url` when the FK is set (even when that computes to
 /// `None`), else the raw string column, else `None`. Empty strings are
 /// falsy in Python (`if self.avatar`), so they render `None` too.
-async fn logo_or_cover_url(
+async fn logo_or_avatar_url(
     pool: &sqlx::PgPool,
     raw: Option<String>,
     asset_id: Option<String>,
@@ -850,14 +850,14 @@ async fn render_actor_detail(
     let o = obj(&row)?;
     let avatar = opt_str(o, "avatar")?;
     let avatar_url =
-        logo_or_cover_url(pool, avatar.clone(), opt_str(o, "avatar_asset_id")?).await?;
+        logo_or_avatar_url(pool, avatar.clone(), opt_str(o, "avatar_asset_id")?).await?;
     Ok(ActorDetailView {
         id: req_str(o, "id")?,
         first_name: opt_str(o, "first_name")?.unwrap_or_default(),
         last_name: opt_str(o, "last_name")?.unwrap_or_default(),
         // `avatar` is the raw column: DRF renders `""` verbatim. Only the
         // `avatar_url` property folds falsy values to `None`
-        // (`db/models/user.py:143-151`, via `logo_or_cover_url` above).
+        // (`db/models/user.py:143-151`, via `logo_or_avatar_url` above).
         avatar,
         avatar_url,
         is_bot: req_bool(o, "is_bot")?,
@@ -949,8 +949,6 @@ struct ProjectLiteView {
     id: String,
     identifier: String,
     name: String,
-    cover_image: Option<String>,
-    cover_image_url: Option<String>,
     logo_props: Value,
     description: Option<String>,
     is_default: bool,
@@ -1213,24 +1211,16 @@ async fn render_project_lite(
     };
     let row = fetch_optional_object(
         pool,
-        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
+        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
         &[uuid_param(project_id)?],
     )
     .await?
     .ok_or(HandlerError::ServerError)?;
     let o = obj(&row)?;
-    let cover_image_url = logo_or_cover_url(
-        pool,
-        opt_str(o, "cover_image")?,
-        opt_str(o, "cover_image_asset_id")?,
-    )
-    .await?;
     Ok(ProjectLiteView {
         id: req_str(o, "id")?,
         identifier: req_str(o, "identifier")?,
         name: req_str(o, "name")?,
-        cover_image: opt_str(o, "cover_image")?,
-        cover_image_url,
         logo_props: req_json(o, "logo_props")?,
         description: opt_str(o, "description")?,
         is_default: req_bool(o, "is_default")?,
@@ -1256,7 +1246,7 @@ async fn render_workspace_lite(
     .ok_or(HandlerError::ServerError)?;
     let o = obj(&row)?;
     let logo_url =
-        logo_or_cover_url(pool, opt_str(o, "logo")?, opt_str(o, "logo_asset_id")?).await?;
+        logo_or_avatar_url(pool, opt_str(o, "logo")?, opt_str(o, "logo_asset_id")?).await?;
     Ok(WorkspaceLiteView {
         name: req_str(o, "name")?,
         slug: req_str(o, "slug")?,
@@ -3602,8 +3592,6 @@ mod tests {
                 id: "p".to_owned(),
                 identifier: "CT1".to_owned(),
                 name: "n".to_owned(),
-                cover_image: None,
-                cover_image_url: None,
                 logo_props: Value::Object(Default::default()),
                 description: None,
                 is_default: false,
@@ -3714,8 +3702,6 @@ mod tests {
                 id: "p".to_owned(),
                 identifier: "CT1".to_owned(),
                 name: "n".to_owned(),
-                cover_image: None,
-                cover_image_url: None,
                 logo_props: Value::Object(Default::default()),
                 description: None,
                 is_default: false,
