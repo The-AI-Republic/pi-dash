@@ -286,8 +286,9 @@
           InstallValidate checks for files in use and starts it again
           afterwards; see that script for the details. It is embedded as the
           PidashLifecycleRun property (pidash-msi-lifecycle.wxi, regenerated
-          by update-msi-lifecycle.ps1) because Stop runs before the new files
-          exist and rollback runs after they are gone.
+          by runner/tests/pidash_msi_lifecycle_test.ps1 -Update) because Stop
+          runs before the new files exist and rollback runs after they are
+          gone.
 
           Every action goes through WixQuietExec64 where possible so the
           helper's output lands in the verbose MSI log. All are best-effort:

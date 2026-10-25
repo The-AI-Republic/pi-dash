@@ -24,7 +24,8 @@
 #
 # The MSI embeds this script rather than installing it: Stop runs before the
 # new files exist and rollback runs after they are gone. After editing, run
-# update-msi-lifecycle.ps1 to regenerate pidash-msi-lifecycle.wxi.
+# runner/tests/pidash_msi_lifecycle_test.ps1 -Update to regenerate
+# pidash-msi-lifecycle.wxi.
 
 param(
     [Parameter(Mandatory = $true)]
