@@ -53,20 +53,14 @@ function PageAssetsEmpty(): React.ReactElement {
 function PageAssetRowView({ asset }: { asset: PageAssetRow }): React.ReactElement {
   // The assets oracle reads a row as an anchor holding the name paragraph,
   // with the download anchor nested inside it (§6.7 driver contract). The
-  // two destinations stay independent in behaviour: a click on the
-  // download action never also activates the row's view link.
-  const guardRow = (event: React.MouseEvent<HTMLAnchorElement>): void => {
-    if (event.target instanceof Element && event.target.closest("[data-asset-download]") !== null) {
-      event.preventDefault();
-    }
-  };
+  // download action stops its click from bubbling to the row, so choosing
+  // the download never also activates the row's view link.
   return (
     <a
       href={asset.viewHref}
       target="_blank"
       rel="noreferrer"
       data-testid="page-asset-row"
-      onClick={guardRow}
       className="group/asset flex items-center gap-(--space-2) rounded-(--radius-control) p-(--space-1) hover:bg-(--subtle)"
     >
       {asset.thumbnailHref === null ? null : (
