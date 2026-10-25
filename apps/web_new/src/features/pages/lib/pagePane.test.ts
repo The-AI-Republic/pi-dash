@@ -128,6 +128,9 @@ describe("parsePageDocument", () => {
     expect(
       parsePageDocument('<attachment-component src="asset-8"></attachment-component>', SCOPE).assets[0]?.name
     ).toBe("asset-8");
+    expect(
+      parsePageDocument('<attachment-component src="https://x.test/"></attachment-component>', SCOPE).assets[0]?.name
+    ).toBe("Attachment");
   });
 
   it("skips pictures with no source", () => {
@@ -189,6 +192,8 @@ describe("asset URLs", () => {
     expect(assetFileName("https://x.test/a/")).toBe("a");
     expect(assetFileName("https://x.test/")).toBe("");
     expect(assetFileName("https://x.test/a/%E0%A4%A")).toBe("%E0%A4%A");
+    // An address the URL parser rejects falls back to its literal tail.
+    expect(assetFileName("https://[bad/a/hill.png")).toBe("hill.png");
   });
 });
 

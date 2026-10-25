@@ -97,10 +97,15 @@ function normalizeSource(src: string): string {
   return src.trim();
 }
 
+/** Last segment of a path, or the empty string when it names no file. */
+function lastPathSegment(path: string): string {
+  const segments = path.split("/").filter((segment) => segment !== "");
+  return segments.length === 0 ? "" : (segments[segments.length - 1] as string);
+}
+
 /** File name a stored source ends with, without its query or fragments. */
 export function assetFileName(source: string): string {
-  const stored = normalizeSource(source);
-  const withoutQuery = stored.split(/[?#]/)[0] ?? "";
+  const withoutQuery = normalizeSource(source).replace(/[?#].*$/, "");
   // An absolute address names a file by its path, never by its host.
   let path = withoutQuery;
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(withoutQuery)) {
@@ -110,7 +115,7 @@ export function assetFileName(source: string): string {
       path = withoutQuery;
     }
   }
-  const tail = path.replace(/\/+$/, "").split("/").pop() ?? "";
+  const tail = lastPathSegment(path);
   try {
     return decodeURIComponent(tail);
   } catch {
@@ -148,10 +153,17 @@ export function pageAssetDownloadHref(source: string, scope: PageAssetScope): st
     : `/api/assets/v2/workspaces/${scope.workspaceSlug}/projects/${scope.projectId}/download/${assetId}/`;
 }
 
+/**
+ * The stored source on a picture or attachment node. Both keep it on
+ * `src`: a plain image a URL, a stored editor node its asset id.
+ */
 function imageSourceOf(element: Element): string {
-  if (element.tagName.toLowerCase() === "img") return normalizeSource(element.getAttribute("src") ?? "");
-  // Stored editor pictures keep their asset id (or URL) on `src`.
   return normalizeSource(element.getAttribute("src") ?? "");
+}
+
+/** An element's text; DOM nodes always carry one, even when it is empty. */
+function elementText(element: Element): string {
+  return element.textContent as string;
 }
 
 function assetRowOf(element: Element, scope: PageAssetScope): PageAssetRow | null {
@@ -194,8 +206,8 @@ export function parsePageDocument(html: string, scope: PageAssetScope): PageDocu
     // Nested blocks (a list item's paragraph, a quote's paragraph) are
     // counted once, at their innermost text block.
     if (block.querySelector(selector) !== null) continue;
-    if ((block.textContent ?? "").trim() === "") continue;
-    const text = (block.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (elementText(block).trim() === "") continue;
+    const text = elementText(block).replace(/\s+/g, " ").trim();
     const tag = block.tagName.toLowerCase();
     const level = Number(tag.slice(1));
     if (tag.startsWith("h") && (level === 1 || level === 2 || level === 3)) {

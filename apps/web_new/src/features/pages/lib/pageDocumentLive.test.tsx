@@ -15,12 +15,12 @@ import { useLivePageDocument, type LivePageDocument } from "./pageDocumentLive.j
 
 const SCOPE = { workspaceSlug: "acme", projectId: null };
 
-function Harness({ html }: { html: string }): React.ReactElement {
+function Harness({ html, noCanvas = false }: { html: string; noCanvas?: boolean }): React.ReactElement {
   const canvasRef = React.useRef<HTMLDivElement | null>(null);
   const live = useLivePageDocument(canvasRef, html, SCOPE);
   return (
     <div>
-      <div ref={canvasRef} data-testid="canvas" />
+      {noCanvas ? null : <div ref={canvasRef} data-testid="canvas" />}
       <output data-testid="state">{JSON.stringify(live)}</output>
       <button type="button" onClick={() => live.scrollToHeading({ level: 2, text: "Mid", levelIndex: 2 })}>
         scroll
@@ -81,11 +81,65 @@ describe("useLivePageDocument", () => {
     expect(scroll).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
   });
 
+  it("leaves the stored document in place where no observer exists", () => {
+    const saved = globalThis.MutationObserver;
+    // @ts-expect-error -- a runtime without MutationObserver.
+    globalThis.MutationObserver = undefined;
+    try {
+      render(<Harness html="<h1>Stored</h1>" />);
+      paint("<h1>Painted</h1>");
+      expect(state().document.headings).toEqual([{ level: 1, text: "Stored", levelIndex: 1 }]);
+    } finally {
+      globalThis.MutationObserver = saved;
+    }
+  });
+
+  it("drops a queued re-read when the canvas goes away", () => {
+    const observers: Array<() => void> = [];
+    class CapturedObserver {
+      public constructor(private readonly callback: () => void) {
+        observers.push(callback);
+      }
+      public observe(): void {
+        return undefined;
+      }
+      public disconnect(): void {
+        return undefined;
+      }
+    }
+    const saved = globalThis.MutationObserver;
+    const cancel = vi.spyOn(globalThis, "cancelAnimationFrame");
+    // @ts-expect-error -- a stand-in observer that hands over its callback.
+    globalThis.MutationObserver = CapturedObserver;
+    try {
+      const { unmount } = render(<Harness html="<h1>Stored</h1>" />);
+      act(() => {
+        // A second change inside the same frame joins the pending read.
+        observers[0]?.();
+        observers[0]?.();
+      });
+      unmount();
+      expect(cancel).toHaveBeenCalled();
+    } finally {
+      globalThis.MutationObserver = saved;
+      cancel.mockRestore();
+    }
+  });
+
   it("does nothing when the heading or the canvas is gone", () => {
     render(<Harness html="<h1>Top</h1>" />);
     act(() => {
       screen.getByRole("button", { name: "scroll" }).click();
     });
     expect(screen.getByTestId("canvas").querySelectorAll("h2")).toHaveLength(0);
+  });
+
+  it("does nothing before a canvas mounts", () => {
+    render(<Harness html="<h1>Top</h1>" noCanvas />);
+    expect(() => {
+      act(() => {
+        screen.getByRole("button", { name: "scroll" }).click();
+      });
+    }).not.toThrow();
   });
 });

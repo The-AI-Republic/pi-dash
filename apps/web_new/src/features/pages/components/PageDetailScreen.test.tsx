@@ -406,6 +406,14 @@ describe("PageDetailScreen deep links", () => {
     expect(changes.at(-1)).toEqual({ paneTab: "outline" });
   });
 
+  it("opens the outline without scrolling from the preview's bar strip", async () => {
+    harness.page = record({ description_html: "<h1>Launch</h1>" });
+    const { changes } = renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    fireEvent.click(await screen.findByRole("button", { name: "Open outline" }));
+    expect(changes.at(-1)).toEqual({ paneTab: "outline" });
+  });
+
   it("lists the stored headings in the outline and the stored counts on the info tab", async () => {
     harness.page = record({ description_html: "<h1>Launch</h1><h2>Scope</h2><p>Two words</p>" });
     renderScreen({ paneTab: "outline" });
@@ -420,6 +428,14 @@ describe("PageDetailScreen deep links", () => {
     const link = edited.querySelector("a");
     expect(link?.textContent).toBe("Ada Byron");
     expect(link?.getAttribute("href")).toBe(`/acme/profile/${PAGES_USER_ID}/`);
+  });
+
+  it("attributes an unsaved-by row to its creator", async () => {
+    harness.page = record({ updated_by: null, created_by: PAGES_USER_ID });
+    renderScreen({ paneTab: "info" });
+    await screen.findByRole("textbox", { name: "Page title" });
+    const edited = screen.getByText("Edited by").nextElementSibling as HTMLElement;
+    expect(edited.querySelector("a")?.textContent).toBe("Ada Byron");
   });
 
   it("closes the pane while keeping an open snapshot key", async () => {
