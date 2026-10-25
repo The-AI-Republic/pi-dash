@@ -18,11 +18,11 @@ vi.mock("../lib/spaceNotices.js", () => ({
   notifySpaceCopyFailure: notices.copyFailure,
 }));
 
-import { createClient, type ApiClient } from "@pidash/api-client";
+import { ApiError, createClient, type ApiClient } from "@pidash/api-client";
 
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { STATES, TODO_ID } from "../layouts/testFixtures.js";
-import { SpaceIssuePeek } from "./SpaceIssuePeek.js";
+import { isGoneError, SpaceIssuePeek } from "./SpaceIssuePeek.js";
 
 const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
 const ANCHOR = "anchor-1";
@@ -72,6 +72,7 @@ interface SetupOptions {
   embedded?: boolean;
   /** Keep nodes already in body (the focus-origin scenario). */
   preserveBody?: boolean;
+  baseUrl?: string;
 }
 
 function setup(options: SetupOptions = {}) {
@@ -81,7 +82,7 @@ function setup(options: SetupOptions = {}) {
     }
     throw new Error(`unexpected request ${url}`);
   };
-  const client: ApiClient = createClient({ baseUrl: "https://api.test", transport });
+  const client: ApiClient = createClient({ baseUrl: options.baseUrl ?? "https://api.test", transport });
   runtime.client = client;
   runtime.queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (options.preserveBody !== true) {
@@ -197,6 +198,26 @@ describe("SpaceIssuePeek shell (SPC-040/041)", () => {
     expect(screen.getByTestId("space-peek")).toBeInTheDocument();
   });
 
+  it("stands down when nothing focusable opened it", async () => {
+    const active = vi.spyOn(document, "activeElement", "get").mockReturnValue(null);
+    const view = setup();
+    await screen.findByTestId("space-peek-key");
+    view.unmount();
+    expect(active).toHaveBeenCalled();
+  });
+
+  it("does not focus an opener that left the document", async () => {
+    document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    const view = setup({ preserveBody: true });
+    await screen.findByTestId("space-peek-key");
+    opener.remove();
+    view.unmount();
+    expect(document.activeElement).not.toBe(opener);
+  });
+
   it("returns focus to the opener when it unmounts", async () => {
     document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
     const opener = document.createElement("button");
@@ -207,6 +228,16 @@ describe("SpaceIssuePeek shell (SPC-040/041)", () => {
     view.unmount();
     expect(document.activeElement).toBe(opener);
     opener.remove();
+  });
+});
+
+describe("isGoneError", () => {
+  it("recognises only 403 and 404 API refusals", () => {
+    expect(isGoneError(new ApiError({ status: 404, code: "not_found", message: "missing" }))).toBe(true);
+    expect(isGoneError(new ApiError({ status: 403, code: "forbidden", message: "private" }))).toBe(true);
+    expect(isGoneError(new ApiError({ status: 500, code: "server", message: "down" }))).toBe(false);
+    expect(isGoneError(new Error("offline"))).toBe(false);
+    expect(isGoneError("nope")).toBe(false);
   });
 });
 
@@ -244,6 +275,22 @@ describe("SpaceIssuePeek content (SPC-043/044)", () => {
     await screen.findByTestId("space-peek-key");
     const image = screen.getByRole("img", { name: "A chart" });
     expect(image.getAttribute("src")).toBe("https://api.test/api/public/assets/v2/anchor/anchor-1/asset-1/");
+  });
+
+  it("keeps asset addresses relative when the client has no base URL", async () => {
+    setup({
+      baseUrl: "",
+      body: () =>
+        reply(
+          200,
+          detail({ description_html: '<p><image-component src="asset-1" alt="A chart"></image-component></p>' })
+        ),
+    });
+    await screen.findByTestId("space-peek-key");
+    expect(screen.getByRole("img", { name: "A chart" })).toHaveAttribute(
+      "src",
+      "/api/public/assets/v2/anchor/anchor-1/asset-1/"
+    );
   });
 });
 
@@ -286,6 +333,16 @@ describe("SpaceIssuePeek loading and failure (SPC-040/046)", () => {
     await waitFor(() => {
       expect(forbidden.onInvalid).toHaveBeenCalled();
     });
+  });
+
+  it("shows its own error for a network failure rather than dropping peekId", async () => {
+    const { onInvalid } = setup({
+      body: () => {
+        throw new Error("offline");
+      },
+    });
+    expect(await screen.findByTestId("space-peek-error")).toBeInTheDocument();
+    expect(onInvalid).not.toHaveBeenCalled();
   });
 
   it("shows its own error with a retry for other failures", async () => {
@@ -348,6 +405,16 @@ describe("SpaceIssuePeek copy link (SPC-045)", () => {
     await waitFor(() => {
       expect(notices.copyFailure).toHaveBeenCalled();
     });
+  });
+
+  it("raises the failure notice when clipboard access disappears after the probe", async () => {
+    const user = userEvent.setup();
+    stubClipboard("granted");
+    setup();
+    const copy = await screen.findByRole("button", { name: "Copy link" });
+    Reflect.deleteProperty(globalThis.navigator, "clipboard");
+    await user.click(copy);
+    expect(notices.copyFailure).toHaveBeenCalled();
   });
 
   it("offers no copy action in the full presentation", async () => {

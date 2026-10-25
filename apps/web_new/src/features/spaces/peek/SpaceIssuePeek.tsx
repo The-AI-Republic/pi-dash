@@ -49,7 +49,7 @@ export interface SpaceIssuePeekProps {
 }
 
 /** Status code of a detail refusal that means "not this board's issue". */
-function isGoneError(error: unknown): boolean {
+export function isGoneError(error: unknown): boolean {
   if (!isApiError(error)) return false;
   return error.status === 403 || error.status === 404;
 }
@@ -123,7 +123,6 @@ export function SpaceIssuePeek({
   }, []);
 
   const copyOffered = clipboardAllowed && presentation !== "full";
-  const loading = issue === undefined && !detail.isError;
 
   return (
     <PeekPanel
@@ -156,22 +155,24 @@ export function SpaceIssuePeek({
         </>
       }
     >
-      {loading ? (
-        <SpacePeekSkeleton full={presentation === "full"} />
-      ) : detail.isError ? (
-        <div data-testid="space-peek-error" className="flex flex-col items-start gap-(--space-3)">
-          <p className="text-body text-(--text)">{spaceMessage("peek.detailFailure")}</p>
-          <Button
-            variant="secondary"
-            size="small"
-            onClick={() => {
-              void detail.refetch();
-            }}
-          >
-            {spaceMessage("peek.retry")}
-          </Button>
-        </div>
-      ) : issue === undefined ? null : (
+      {issue === undefined ? (
+        detail.isError ? (
+          <div data-testid="space-peek-error" className="flex flex-col items-start gap-(--space-3)">
+            <p className="text-body text-(--text)">{spaceMessage("peek.detailFailure")}</p>
+            <Button
+              variant="secondary"
+              size="small"
+              onClick={() => {
+                void detail.refetch();
+              }}
+            >
+              {spaceMessage("peek.retry")}
+            </Button>
+          </div>
+        ) : (
+          <SpacePeekSkeleton full={presentation === "full"} />
+        )
+      ) : (
         <SpaceIssuePeekBody issue={issue} states={states} full={presentation === "full"} resolveAsset={resolveAsset} />
       )}
     </PeekPanel>
