@@ -412,12 +412,13 @@ state fields. Project admin to change; same unreachable viewer half as
 above. Oracle: `prompts/auto-close.spec.ts`. (AGT-035)
 
 The custom month dialog behind either duration picker accepts only whole
-months in a bounded range: the numeric input requires an in-range value with
-an out-of-range message, cancelling resets, and submitting forwards to the
-row handler and closes. No API — it feeds the project update. Notes carried:
-fractional input never submits (native step validation blocks it with the
-dialog left open) and the dialog seeds its input statically rather than from
-the current value. Oracle: `prompts/custom-month.spec.ts`. (AGT-036)
+months in a bounded range: the numeric input carries required bounds, so
+zero, over-range and fractional counts never submit and the dialog stays
+open without app error text; an empty field is the one value that shows the
+range message. Cancelling resets, and submitting a valid whole month
+forwards to the row handler and closes. The dialog seeds its input
+statically rather than from the current value. No API — it feeds the project
+update. Oracle: `prompts/custom-month.spec.ts`. (AGT-036)
 
 The automations page gates on project admin — non-admins see a
 not-authorized view with dimmed content — funnels every row change through
