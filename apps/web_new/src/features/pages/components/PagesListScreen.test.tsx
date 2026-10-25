@@ -421,6 +421,24 @@ describe("PagesListScreen", () => {
     expect(await screen.findByTestId("pages-no-results")).toBeInTheDocument();
     expect(screen.queryByTestId("page-row")).not.toBeInTheDocument();
     expect(harness.pagesCalls).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(await screen.findByRole("link", { name: "Alpha" })).toBeInTheDocument();
+    expect(harness.pagesCalls).toBe(1);
+  });
+
+  it("offers clear-filters in the no-results state and restores the rows", async () => {
+    harness.pages = [makePageRow({ name: "Alpha", created_at: "2026-09-01T12:00:00Z" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.click(screen.getByRole("button", { name: "Today" }));
+    expect(await screen.findByTestId("pages-no-results")).toBeInTheDocument();
+    expect(screen.queryByTestId("page-row")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(await screen.findByRole("link", { name: "Alpha" })).toBeInTheDocument();
+    expect(harness.pagesCalls).toBe(1);
   });
 
   it("applies a favorites filter and restores rows by clearing it", async () => {
