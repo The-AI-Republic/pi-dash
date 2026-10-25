@@ -257,7 +257,7 @@ test(
     const viewed: string[] = [];
     try {
       await patchIssue(seed.workspaceSlug, seed.projectId, smallChild.id, session, { parent_id: smallParent.id });
-      await test.step("a small parent loads in one request with no control", async () => {
+      await test.step("a small parent paints every child with no control", async () => {
         await driver.openIssueDetail(seed.workspaceSlug, smallParent.seq);
         await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(smallParent.name);
         await expect.poll(() => driver.widgetProgress("Sub-work items"), { timeout: 30_000 }).toBe("0/1 Done");

@@ -34,7 +34,14 @@ import {
 import { specTags, specTitle } from "../helpers/tags";
 
 /** Eligibility answers the stubbed runner read attaches, by runner name. */
-type Eligibility = { assignable: boolean; code: string; busy?: boolean; queueDepth?: number };
+type Eligibility = {
+  assignable: boolean;
+  code: string;
+  busy?: boolean;
+  queueDepth?: number;
+  /** Age of the planted heartbeat; omit for a runner that never connected. */
+  heartbeatAgoMs?: number;
+};
 
 /**
  * Answer the project runner read with eligibility answers the backend
@@ -57,6 +64,10 @@ async function stubRunnerEligibility(page: Page, answers: Record<string, Eligibi
         not_assignable_code: answer.code,
         is_busy: answer.busy ?? row["status"] === "busy",
         queue_depth: answer.queueDepth ?? 0,
+        last_heartbeat_at:
+          answer.heartbeatAgoMs === undefined
+            ? row["last_heartbeat_at"]
+            : new Date(Date.now() - answer.heartbeatAgoMs).toISOString(),
       };
     });
     await route.fulfill({ response, json: body });
@@ -196,7 +207,9 @@ test(
       await stubRunnerEligibility(driver.page, {
         [online.name]: { assignable: true, code: "" },
         [busy.name]: { assignable: true, code: "", busy: true, queueDepth: 2 },
-        [offline.name]: { assignable: false, code: "runner_owner_not_on_issue" },
+        // The offline runner connected two hours ago, so its status line
+        // names the age of its last heartbeat.
+        [offline.name]: { assignable: false, code: "runner_owner_not_on_issue", heartbeatAgoMs: 2 * 60 * 60 * 1000 },
         [revoked.name]: { assignable: false, code: "runner_revoked" },
       });
       await driver.openEntry();
@@ -229,7 +242,12 @@ test(
         expect(options.some((text) => new RegExp(`${busy.name} · busy · 2 waiting · Parity Oracle`).test(text))).toBe(
           true
         );
-        expect(options.some((text) => new RegExp(`${offline.name} · offline · Parity Oracle`).test(text))).toBe(true);
+        expect(
+          options.some((text) => new RegExp(`${offline.name} · offline · last seen 2 h ago · Parity Oracle`).test(text))
+        ).toBe(true);
+        // A runner the server refuses keeps its status line: the reason
+        // rides a trailing note, not the caption.
+        expect(options.some((text) => new RegExp(`${revoked.name} · revoked · Parity Oracle`).test(text))).toBe(true);
       });
 
       await test.step("an ineligible runner disables with the coded reason", async () => {
@@ -259,10 +277,25 @@ test(
         const written = writtenTargets[0];
         expect(written?.assigned_runner_id).not.toBeNull();
         await driver.page.reload();
-        await expect.poll(() => driver.propertyValueText("Runs on"), { timeout: 60_000 }).toContain(busy.name);
-        expect(await driver.propertyValueText("Runs on")).toContain(auto?.name ?? "");
-        // Nothing is waiting yet, so the trigger carries no badge.
-        expect(await driver.propertyValueText("Runs on")).not.toContain(" ahead");
+        // One snapshot per poll: the selection hydrates a render after the
+        // sidebar paints, so reading the runner and the pod separately
+        // would assert against a half-updated trigger.
+        await expect
+          .poll(
+            async () => {
+              const text = await driver.propertyValueText("Runs on");
+              return text.includes(busy.name) && text.includes(auto?.name ?? "");
+            },
+            { timeout: 60_000 }
+          )
+          .toBe(true);
+        // Nothing is waiting yet, so the trigger carries no badge. Every
+        // label the badge can take is excluded, not just the queued one.
+        const idleTrigger = await driver.propertyValueText("Runs on");
+        for (const badge of [" ahead", "Offline", "Busy", "Not permitted", "Dispatching"]) {
+          expect(idleTrigger).not.toContain(badge);
+        }
+        expect(idleTrigger).toContain(busy.name);
       });
 
       await test.step("a queued run puts the waiting badge on the trigger", async () => {
@@ -322,10 +355,21 @@ test(
         });
         await driver.page.reload();
         await expect.poll(() => driver.propertyRowPresent("Runs on"), { timeout: 60_000 }).toBe(true);
-        await expect.poll(() => driver.propertyValueText("Runs on"), { timeout: 30_000 }).toContain("2 ahead");
-        const trigger = await driver.propertyValueText("Runs on");
-        expect(trigger).toContain(busy.name);
-        expect(trigger).toContain(auto?.name ?? "");
+        // The badge can paint before the stored target hydrates, so both
+        // must be read in one snapshot rather than asserted one at a time.
+        await expect
+          .poll(
+            async () => {
+              const text = await driver.propertyValueText("Runs on");
+              return {
+                runner: text.includes(busy.name),
+                pod: text.includes(auto?.name ?? ""),
+                badge: text.includes("2 ahead"),
+              };
+            },
+            { timeout: 30_000 }
+          )
+          .toEqual({ runner: true, pod: true, badge: true });
       });
     } finally {
       await driver.page.unrouteAll({ behavior: "wait" }).catch(() => {});
