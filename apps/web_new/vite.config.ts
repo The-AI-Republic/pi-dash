@@ -1,14 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig, type ProxyOptions } from "vite";
+import { defineConfig, type Plugin, type ProxyOptions } from "vite";
 
 import { hostedBaseUrlFromEnv } from "./src/core/platform/hostedBaseUrl.js";
+import { withIssuesScreenPreload } from "./src/features/instance/modulePreload.js";
 import { publicSiteOriginFromEnv } from "./src/core/platform/publicSiteOrigin.js";
 import { resolveEditionModule } from "./tools/edition-module.mjs";
 
@@ -63,6 +65,30 @@ const rewriteRedirectToDevOrigin: NonNullable<ProxyOptions["configure"]> = (prox
     proxyRes.headers["location"] = target.toString();
   });
 };
+// Desktop warm start (NEWFRONT-906): start the issues screen chunk with the
+// document instead of waiting for the router to load its lazy route module.
+// The chunk stays out of the initial-JS closure (the size gate follows
+// manifest imports, not these links), and the web build keeps its current
+// startup payload.
+function preloadIssuesScreenOnDesktop(buildTarget: "web" | "desktop"): Plugin {
+  return {
+    name: "pi-dash-preload-issues-screen",
+    apply: "build",
+    closeBundle() {
+      if (buildTarget !== "desktop") return;
+      const dir = resolve(here, `dist/${buildTarget}`);
+      const manifestPath = resolve(dir, ".vite/manifest.json");
+      const indexPath = resolve(dir, "index.html");
+      if (!existsSync(manifestPath) || !existsSync(indexPath)) return;
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, { file?: string }>;
+      const screen = manifest["src/routes/$ws/_gated/projects/$projectId/issues/IssuesListContent.tsx"];
+      if (typeof screen?.file !== "string") return;
+      const html = readFileSync(indexPath, "utf8");
+      writeFileSync(indexPath, withIssuesScreenPreload(html, screen.file));
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const buildTarget = mode === "desktop" || target === "desktop" ? "desktop" : "web";
   return {
@@ -108,6 +134,7 @@ export default defineConfig(({ mode }) => {
         },
       }),
       tailwindcss(),
+      preloadIssuesScreenOnDesktop(buildTarget),
     ],
     server: {
       port: 3010,
