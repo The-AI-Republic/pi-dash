@@ -115,7 +115,7 @@ describe("pages collection contracts", () => {
     const rows = await listPages(client, WS, PROJECT);
     expect(calls[0]?.method).toBe("GET");
     expect(calls[0]?.url).toBe(BASE);
-    expect(calls[0]?.query).toEqual({ parent: undefined, search: undefined });
+    expect(calls[0]?.query).toEqual({ parent: undefined, search: undefined, include_archived: undefined });
     expect(rows[0]?.name).toBe("Meeting notes");
     expect(rows[0]?.parent).toBeNull();
   });
@@ -123,7 +123,13 @@ describe("pages collection contracts", () => {
   it("passes parent and search for a children read", async () => {
     const { client, calls } = stubClient({ json: () => [] });
     await listPages(client, WS, PROJECT, { parent: PAGE, search: "budget" });
-    expect(calls[0]?.query).toEqual({ parent: PAGE, search: "budget" });
+    expect(calls[0]?.query).toEqual({ parent: PAGE, search: "budget", include_archived: undefined });
+  });
+
+  it("asks for shelved rows when the archived tab needs them", async () => {
+    const { client, calls } = stubClient({ json: () => [] });
+    await listPages(client, WS, PROJECT, { includeArchived: true });
+    expect(calls[0]?.query).toEqual({ parent: undefined, search: undefined, include_archived: true });
   });
 
   it("parses a top-level row that names its empty child set", async () => {

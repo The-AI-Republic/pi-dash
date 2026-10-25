@@ -165,11 +165,9 @@ export function pageMoveRefusal(
   return null;
 }
 
-/** Human message for a refused move; null when the move is legal. */
-export function pageMoveRefusalMessage(refusal: PageMoveRefusal | null): string | null {
+/** Human message for a refused move. */
+export function pageMoveRefusalMessage(refusal: PageMoveRefusal): string {
   switch (refusal) {
-    case null:
-      return null;
     case "self":
       return "A page cannot be moved under itself.";
     case "descendant":
@@ -265,16 +263,6 @@ export function restoreDetaches(rows: readonly PageRow[], page: Pick<PageRow, "p
   if (parentId === null) return false;
   const parent = rows.find((row) => row.id === parentId);
   return parent !== undefined && parent.archived_at !== null;
-}
-
-/**
- * The visibility of a child created from `source` (PAGE-084). A sub-page
- * inherits nothing else, but an open child of a restricted parent would be
- * visible to people who cannot see the parent, so a restricted source
- * yields a restricted child.
- */
-export function subPageAccess(source: Pick<PageRow, "access">): number {
-  return source.access === 1 ? 1 : 0;
 }
 
 /**

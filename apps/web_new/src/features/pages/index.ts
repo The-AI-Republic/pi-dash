@@ -291,7 +291,6 @@ export {
   pageParentPath,
   pageTreeRoots,
   restoreDetaches,
-  subPageAccess,
   PAGE_ACTION_ADD_SUB_PAGE,
   PAGE_ACTION_MOVE_TO,
   PAGE_MOVE_DIALOG_TITLE,

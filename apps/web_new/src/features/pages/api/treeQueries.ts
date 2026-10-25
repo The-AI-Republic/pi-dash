@@ -14,10 +14,16 @@ import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import { pageChildCount, pageParentId } from "../lib/pageNested.js";
 import { pageKeys } from "./keys.js";
 
-export function pageChildrenQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string, pageId: string) {
+export function pageChildrenQueryOptions(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  includeArchived = false
+) {
   return queryOptions({
-    queryKey: pageKeys.children(workspaceSlug, projectId, pageId),
-    queryFn: () => listPages(client, workspaceSlug, projectId, { parent: pageId }),
+    queryKey: pageKeys.children(workspaceSlug, projectId, pageId, includeArchived),
+    queryFn: () => listPages(client, workspaceSlug, projectId, { parent: pageId, includeArchived }),
     staleTime: LIST_STALE_TIME_MS,
   });
 }
@@ -42,7 +48,7 @@ export interface PageForest {
  * invisible pages and their counts.
  */
 export async function readPageForest(client: ApiClient, workspaceSlug: string, projectId: string): Promise<PageForest> {
-  const roots = await listPages(client, workspaceSlug, projectId);
+  const roots = await listPages(client, workspaceSlug, projectId, { includeArchived: true });
   const rows: PageRow[] = [...roots];
   const seen = new Set(rows.map((row) => row.id));
   const frontier = roots.filter((row) => pageChildCount(row) > 0);
@@ -54,7 +60,7 @@ export async function readPageForest(client: ApiClient, workspaceSlug: string, p
     }
     const batch = frontier.splice(0, frontier.length);
     const childLists = await Promise.all(
-      batch.map((parent) => listPages(client, workspaceSlug, projectId, { parent: parent.id }))
+      batch.map((parent) => listPages(client, workspaceSlug, projectId, { parent: parent.id, includeArchived: true }))
     );
     for (const children of childLists) {
       for (const child of children) {

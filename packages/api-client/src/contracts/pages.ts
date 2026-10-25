@@ -149,6 +149,8 @@ export interface PageListQuery {
   parent?: string | undefined;
   /** Name search (the only server-side search field). */
   search?: string | undefined;
+  /** Include shelved rows in the collection/children read. */
+  includeArchived?: boolean | undefined;
 }
 
 const pagesPath = (slug: string, projectId: string): string => `/api/workspaces/${slug}/projects/${projectId}/pages/`;
@@ -164,7 +166,11 @@ export async function listPages(
 ): Promise<PageRows> {
   const path = pagesPath(slug, projectId);
   const body = await client.getJson<unknown>(path, {
-    query: { parent: query.parent, search: query.search },
+    query: {
+      parent: query.parent,
+      search: query.search,
+      include_archived: query.includeArchived === true ? true : undefined,
+    },
   });
   return client.parse(PageRows, body, `GET ${path}`);
 }

@@ -69,7 +69,7 @@ export function PageNestedMoveDialog({
   }, [pool, page.id, query]);
 
   const refusal = pageMoveRefusal(pool, page.id, target);
-  const refusalMessage = pageMoveRefusalMessage(refusal);
+  const refusalMessage = refusal === null ? null : pageMoveRefusalMessage(refusal);
   const title = pageDisplayTitle(page.name);
 
   return (
@@ -90,9 +90,7 @@ export function PageNestedMoveDialog({
             type="button"
             loading={pending}
             disabled={pending || refusalMessage !== null}
-            onClick={() => {
-              if (refusalMessage === null) onConfirm(target);
-            }}
+            onClick={() => onConfirm(target)}
           >
             {pending ? "Moving…" : "Move page"}
           </Button>

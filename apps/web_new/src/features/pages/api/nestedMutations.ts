@@ -45,8 +45,8 @@ export function moveFailureMessage(error: unknown): string {
 
 /**
  * Create a child page under `parentId` and open it (PAGE-084). The child
- * inherits only the parent link and the source's visibility; nothing else
- * is copied. A successful write refreshes the parent's cached children and
+ * inherits only the parent link; the caller supplies PAGE-007's quick-create
+ * visibility. A successful write refreshes the parent's cached children and
  * the collection, so the parent's count increases without a manual reload.
  */
 export function useAddSubPage(workspaceSlug: string, projectId: string) {
@@ -61,7 +61,9 @@ export function useAddSubPage(workspaceSlug: string, projectId: string) {
       notifyError(PAGE_CREATE_FAILED_TITLE);
     },
     onSettled: (_data, _error, variables) => {
-      void queryClient.invalidateQueries({ queryKey: pageKeys.children(workspaceSlug, projectId, variables.parentId) });
+      void queryClient.invalidateQueries({
+        queryKey: [...pageKeys.all(workspaceSlug), "children", projectId, variables.parentId],
+      });
       void queryClient.invalidateQueries({ queryKey: pageKeys.all(workspaceSlug) });
     },
   });

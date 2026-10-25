@@ -3,10 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Nested tree writes (parity/specs/pages.md §11.7, PAGE-084/087/088): the
-// sub-page create inherits the source's parent and visibility and refreshes
-// the parent's children, the reparent moves one page and reports the
-// server's refusal verbatim, and the subtree archive chooses the
-// restore-to-top notice from the caller's collection.
+// sub-page create sends the source parent plus the caller's quick-create
+// visibility and refreshes the parent's children, the reparent moves one
+// page and reports the server's refusal verbatim, and the subtree archive
+// chooses the restore-to-top notice from the caller's collection.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
@@ -100,7 +100,9 @@ describe("useAddSubPage", () => {
       PAGES_PROJECT_ID,
       expect.objectContaining({ name: PAGE_SUB_PAGE_NAME, parent: PARENT, access: PAGE_ACCESS_PRIVATE })
     );
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.children(SLUG, PAGES_PROJECT_ID, PARENT) });
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: [...pageKeys.all(SLUG), "children", PAGES_PROJECT_ID, PARENT],
+    });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
     expect(hook.result.current.data?.name).toBe(PAGE_SUB_PAGE_NAME);
     expect(hook.result.current.data).toBeDefined();

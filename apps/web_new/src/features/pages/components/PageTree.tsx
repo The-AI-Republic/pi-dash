@@ -16,9 +16,18 @@ import { ChevronRight, GripVertical, Loader2 } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { notifyError } from "../../../shared/shell/toaster.js";
 import { pageChildrenQueryOptions } from "../api/treeQueries.js";
-import type { PageCreatorOption } from "../lib/pageList.js";
-import { flattenPageTree, pageChildCount, type PageTreeEntry } from "../lib/pageNested.js";
+import type { PageCreatorOption, PageSort } from "../lib/pageList.js";
+import { sortPageSiblings } from "../lib/pageList.js";
+import {
+  flattenPageTree,
+  pageChildCount,
+  pageMoveRefusal,
+  pageMoveRefusalMessage,
+  PAGE_MOVE_REFUSED_TITLE,
+  type PageTreeEntry,
+} from "../lib/pageNested.js";
 import { pageDisplayTitle } from "../lib/pageList.js";
 import { togglePageExpanded, usePageExpansion } from "../lib/pageTreeState.js";
 import { PageRowConnected } from "./PageRowConnected.js";
@@ -59,6 +68,10 @@ export interface PageTreeProps {
   rows: readonly PageRowData[];
   /** Every page the caller has loaded, for move legality. */
   pool: readonly PageRowData[];
+  /** The active list sort; each sibling list keeps favourite-first. */
+  sort: PageSort;
+  /** Children of an archived parent are shelved too (PAGE-088). */
+  includeArchivedChildren?: boolean;
   showStar: boolean;
   canDuplicate: boolean;
   currentUserId: string | null;
@@ -79,7 +92,12 @@ export interface PageTreeProps {
   onRequestMove: (page: PageRowData) => void;
 }
 
-function useTreeChildren(workspaceSlug: string, projectId: string, wanted: readonly string[]) {
+function useTreeChildren(
+  workspaceSlug: string,
+  projectId: string,
+  wanted: readonly string[],
+  includeArchived: boolean
+) {
   // The options array keeps one identity per wanted set: a fresh object per
   // render makes useQueries resubscribe on every commit.
   const wantedKey = wanted.join(",");
@@ -88,16 +106,15 @@ function useTreeChildren(workspaceSlug: string, projectId: string, wanted: reado
       wantedKey
         .split(",")
         .filter((id) => id !== "")
-        .map((pageId) => pageChildrenQueryOptions(getAppClient(), workspaceSlug, projectId, pageId)),
+        .map((pageId) => pageChildrenQueryOptions(getAppClient(), workspaceSlug, projectId, pageId, includeArchived)),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- wantedKey is the identity
-    [workspaceSlug, projectId, wantedKey]
+    [workspaceSlug, projectId, wantedKey, includeArchived]
   );
   const results = useQueries({ queries });
   const children = new Map<string, readonly PageRowData[]>();
   const pending = new Set<string>();
   wanted.forEach((pageId, index) => {
-    const result = results[index];
-    if (result === undefined) return;
+    const result = results[index]!;
     if (result.data !== undefined) children.set(pageId, result.data);
     if (result.isPending) pending.add(pageId);
   });
@@ -110,6 +127,8 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
     projectId,
     rows,
     pool,
+    sort,
+    includeArchivedChildren = false,
     showStar,
     canDuplicate,
     currentUserId,
@@ -136,7 +155,7 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
   const rootIds = React.useMemo(() => new Set(rows.map((row) => row.id)), [rows]);
   const [wantedKey, setWantedKey] = React.useState("");
   const wanted = React.useMemo(() => (wantedKey === "" ? [] : wantedKey.split(",")), [wantedKey]);
-  const { children, pending } = useTreeChildren(workspaceSlug, projectId, wanted);
+  const { children, pending } = useTreeChildren(workspaceSlug, projectId, wanted, includeArchivedChildren);
   // Once a parent's children arrive they become eligible to expand too, so
   // the recursion deepens one read at a time without needing the whole tree.
   const visibleIds = React.useMemo(() => {
@@ -155,14 +174,23 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
     const active = new Map<string, readonly PageRowData[]>();
     for (const pageId of wanted) {
       const list = children.get(pageId);
-      if (list !== undefined) active.set(pageId, list);
+      if (list !== undefined) active.set(pageId, sortPageSiblings(list, sort));
     }
     return active;
-  }, [children, wanted]);
+  }, [children, wanted, sort]);
   const entries = React.useMemo(
     () => flattenPageTree(rows, { expanded, children: activeChildren, pending }),
     [rows, expanded, activeChildren, pending]
   );
+  // A loaded child is not in the top-level collection, so resolve drops
+  // from everything on screen plus whatever the caller already held.
+  const movePool = React.useMemo(() => {
+    const byId = new Map<string, PageRowData>();
+    for (const row of pool) byId.set(row.id, row);
+    for (const entry of entries) byId.set(entry.page.id, entry.page);
+    for (const list of children.values()) for (const row of list) byId.set(row.id, row);
+    return [...byId.values()];
+  }, [pool, entries, children]);
 
   const ownerOf = (page: PageRowData): PageCreatorOption | null =>
     owners.find((creator) => creator.id === page.owned_by) ?? null;
@@ -170,9 +198,15 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
   function drop(pageId: string, over: string | null | undefined): void {
     setDragOver(undefined);
     const targetId = dropTargetId(over);
-    if (targetId === pageId) return;
-    const page = pool.find((row) => row.id === pageId);
+    const page = movePool.find((row) => row.id === pageId);
     if (page === undefined) return;
+    const own = viewerIsAdmin || (currentUserId !== null && page.owned_by === currentUserId);
+    if (!canMove || !own) return;
+    const refusal = pageMoveRefusal(movePool, pageId, targetId);
+    if (refusal !== null) {
+      notifyError(PAGE_MOVE_REFUSED_TITLE, pageMoveRefusalMessage(refusal));
+      return;
+    }
     onMovePage(page, targetId);
   }
 
@@ -196,16 +230,16 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
         const { page, depth } = entry;
         const title = pageDisplayTitle(page.name);
         const manage = viewerIsAdmin || (currentUserId !== null && page.owned_by === currentUserId);
-        const rowCanMove = canMove && manage;
+        const rowCanDrag = canMove && manage;
         return (
           <div
             key={page.id}
             data-testid="page-tree-item"
             data-page-id={page.id}
             data-depth={depth}
-            draggable={rowCanMove}
+            draggable={rowCanDrag}
             onDragStart={
-              rowCanMove
+              rowCanDrag
                 ? (event) => {
                     event.dataTransfer.setData(PAGE_DRAG_MIME, page.id);
                     event.dataTransfer.effectAllowed = "move";
@@ -213,7 +247,7 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
                 : undefined
             }
             onDragOver={
-              rowCanMove
+              canMove
                 ? (event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -222,7 +256,7 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
                 : undefined
             }
             onDrop={
-              rowCanMove
+              canMove
                 ? (event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -236,7 +270,7 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
             style={{ marginInlineStart: `calc(${depth} * var(--space-4))` }}
           >
             <div className="flex min-w-0 items-start gap-(--space-1)">
-              {rowCanMove ? (
+              {rowCanDrag ? (
                 <span aria-hidden="true" className="mt-(--space-3) inline-flex text-(--text-muted)">
                   <GripVertical size={14} strokeWidth={1.5} />
                 </span>
@@ -288,7 +322,7 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
                       : undefined
                   }
                   onRequestNestedMove={
-                    rowCanMove
+                    canMove && manage
                       ? () => {
                           onRequestMove(page);
                         }

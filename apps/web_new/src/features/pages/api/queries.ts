@@ -16,7 +16,9 @@ import { pageKeys } from "./keys.js";
 export function pagesListQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string) {
   return queryOptions({
     queryKey: pageKeys.list(workspaceSlug, projectId),
-    queryFn: () => listPages(client, workspaceSlug, projectId),
+    // The one collection serves every tab, including Archived, so it asks
+    // for shelved rows too; the tab partition is still client-side.
+    queryFn: () => listPages(client, workspaceSlug, projectId, { includeArchived: true }),
     staleTime: LIST_STALE_TIME_MS,
   });
 }

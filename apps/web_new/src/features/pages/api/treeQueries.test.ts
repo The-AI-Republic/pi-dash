@@ -47,7 +47,21 @@ describe("pageChildrenQueryOptions", () => {
     expect(options.queryKey).toEqual(pageKeys.children("acme", "project", "page-1"));
     listPagesMock.mockResolvedValueOnce([row("Child")]);
     await options.queryFn?.({} as never);
-    expect(listPagesMock).toHaveBeenCalledWith(expect.anything(), "acme", "project", { parent: "page-1" });
+    expect(listPagesMock).toHaveBeenCalledWith(expect.anything(), "acme", "project", {
+      parent: "page-1",
+      includeArchived: false,
+    });
+  });
+
+  it("asks for archived children and keeps their cache key separate", async () => {
+    const options = pageChildrenQueryOptions(fakeClient(), "acme", "project", "page-1", true);
+    expect(options.queryKey).toEqual(pageKeys.children("acme", "project", "page-1", true));
+    listPagesMock.mockResolvedValueOnce([row("Shelved child", { archived_at: "2026-10-20" })]);
+    await options.queryFn?.({} as never);
+    expect(listPagesMock).toHaveBeenCalledWith(expect.anything(), "acme", "project", {
+      parent: "page-1",
+      includeArchived: true,
+    });
   });
 });
 
@@ -67,6 +81,7 @@ describe("readPageForest", () => {
     expect(forest.complete).toBe(true);
     expect(forest.rows.map((page) => page.id)).toEqual(["root", "leaf", "child", "grand"]);
     expect(listPagesMock.mock.calls.map((call) => call[3]?.parent).sort()).toEqual([undefined, "child", "root"].sort());
+    expect(listPagesMock.mock.calls.every((call) => call[3]?.includeArchived === true)).toBe(true);
   });
 
   it("skips a child already seen so a malformed cycle terminates", async () => {

@@ -35,6 +35,8 @@ import { listPages } from "@pidash/api-client";
 import { PAGES_PROJECT_ID, PAGES_USER_ID, jsonResponse, makePageRow } from "../testing.js";
 import { childCountLabel, draggedPageId, dropTargetId, expandLabel, PAGE_DRAG_MIME, PageTree } from "./PageTree.js";
 import { resetPageExpansion } from "../lib/pageTreeState.js";
+import { notifyError } from "../../../shared/shell/toaster.js";
+import { PAGE_MOVE_REFUSED_TITLE, pageMoveRefusalMessage } from "../lib/pageNested.js";
 
 vi.mock("@pidash/api-client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@pidash/api-client")>()),
@@ -81,6 +83,7 @@ function renderTree(overrides: Partial<React.ComponentProps<typeof PageTree>> = 
     projectId: PAGES_PROJECT_ID,
     rows: [parent],
     pool: [parent, child, grand],
+    sort: { key: "name", direction: "ascending" },
     showStar: false,
     canDuplicate: true,
     currentUserId: PAGES_USER_ID,
@@ -206,6 +209,75 @@ describe("PageTree", () => {
     expect(onMovePage).toHaveBeenCalledWith(parent, other.id);
   });
 
+  it("moves a loaded child row, which is not in the top-level pool", async () => {
+    listPagesMock.mockResolvedValue([child]);
+    const other = makePageRow({ id: "323e4567-e89b-12d3-a456-426614174105", name: "Other" });
+    const onMovePage = vi.fn();
+    renderTree({ onMovePage, rows: [parent, other], pool: [parent, other] });
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Handbook" }));
+    await screen.findByText("Policies");
+    const source = screen.getByText("Policies").closest('[data-testid="page-tree-item"]') as HTMLElement;
+    const target = screen.getByText("Other").closest('[data-testid="page-tree-item"]') as HTMLElement;
+    const transfer: Record<string, string> = {};
+    const dataTransfer = {
+      getData: (type: string) => transfer[type] ?? "",
+      setData: (type: string, value: string) => {
+        transfer[type] = value;
+      },
+      effectAllowed: "",
+    };
+    fireEvent.dragStart(source, { dataTransfer });
+    fireEvent.dragOver(target, { dataTransfer });
+    fireEvent.drop(target, { dataTransfer });
+    expect(onMovePage).toHaveBeenCalledWith(child, other.id);
+  });
+
+  it("drops onto a colleague-owned page instead of falling through to the top level", () => {
+    const colleague = "523e4567-e89b-12d3-a456-426614174198";
+    const other = makePageRow({ id: "323e4567-e89b-12d3-a456-426614174106", name: "Theirs", owned_by: colleague });
+    const onMovePage = vi.fn();
+    renderTree({ onMovePage, rows: [parent, other], pool: [parent, other] });
+    const items = screen.getAllByTestId("page-tree-item");
+    const transfer: Record<string, string> = {};
+    const dataTransfer = {
+      getData: (type: string) => transfer[type] ?? "",
+      setData: (type: string, value: string) => {
+        transfer[type] = value;
+      },
+      effectAllowed: "",
+    };
+    fireEvent.dragStart(items[0] as HTMLElement, { dataTransfer });
+    fireEvent.dragOver(items[1] as HTMLElement, { dataTransfer });
+    fireEvent.drop(items[1] as HTMLElement, { dataTransfer });
+    expect(onMovePage).toHaveBeenCalledWith(parent, other.id);
+    expect(onMovePage).not.toHaveBeenCalledWith(parent, null);
+  });
+
+  it("sorts each child list by the active sort with favourites first", async () => {
+    const alpha = makePageRow({
+      id: "323e4567-e89b-12d3-a456-426614174107",
+      name: "Alpha",
+      parent: PARENT,
+      parent_id: PARENT,
+    });
+    const beta = makePageRow({
+      id: "323e4567-e89b-12d3-a456-426614174108",
+      name: "Beta",
+      parent: PARENT,
+      parent_id: PARENT,
+      is_favorite: true,
+    });
+    listPagesMock.mockResolvedValue([alpha, beta]);
+    renderTree({ sort: { key: "name", direction: "ascending" } });
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Handbook" }));
+    await screen.findByText("Beta");
+    expect(screen.getAllByTestId("page-tree-item").map((item) => item.textContent)).toEqual([
+      expect.stringContaining("Handbook"),
+      expect.stringContaining("Beta"),
+      expect.stringContaining("Alpha"),
+    ]);
+  });
+
   it("marks the container as a drop target while a legal drag passes over it", () => {
     const onMovePage = vi.fn();
     renderTree({ onMovePage });
@@ -254,6 +326,63 @@ describe("PageTree", () => {
     };
     const rootItem = screen.getByTestId("page-tree-item");
     fireEvent.dragStart(rootItem, { dataTransfer });
+    fireEvent.drop(rootItem, { dataTransfer });
+    expect(onMovePage).not.toHaveBeenCalled();
+    expect(notifyError).toHaveBeenCalledWith(PAGE_MOVE_REFUSED_TITLE, pageMoveRefusalMessage("self"));
+  });
+
+  it("refuses a drop onto an archived page with the archived message", () => {
+    const shelved = makePageRow({
+      id: "323e4567-e89b-12d3-a456-426614174109",
+      name: "Shelved",
+      archived_at: "2026-10-20",
+    });
+    const onMovePage = vi.fn();
+    renderTree({ onMovePage, rows: [parent, shelved], pool: [parent, shelved] });
+    const items = screen.getAllByTestId("page-tree-item");
+    const transfer: Record<string, string> = {};
+    const dataTransfer = {
+      getData: (type: string) => transfer[type] ?? "",
+      setData: (type: string, value: string) => {
+        transfer[type] = value;
+      },
+      effectAllowed: "",
+    };
+    fireEvent.dragStart(items[0] as HTMLElement, { dataTransfer });
+    fireEvent.dragOver(items[1] as HTMLElement, { dataTransfer });
+    fireEvent.drop(items[1] as HTMLElement, { dataTransfer });
+    expect(onMovePage).not.toHaveBeenCalled();
+    expect(notifyError).toHaveBeenCalledWith(PAGE_MOVE_REFUSED_TITLE, pageMoveRefusalMessage("archived"));
+  });
+
+  it("ignores a drag that carries no page id", () => {
+    const onMovePage = vi.fn();
+    renderTree({ onMovePage });
+    const dataTransfer = { getData: () => "", setData: vi.fn(), effectAllowed: "" };
+    fireEvent.drop(screen.getByTestId("page-tree-item"), { dataTransfer });
+    fireEvent.drop(screen.getByTestId("pages-tree"), { dataTransfer });
+    expect(onMovePage).not.toHaveBeenCalled();
+  });
+
+  it("ignores a drop whose dragged page is not loaded", () => {
+    const onMovePage = vi.fn();
+    renderTree({ onMovePage });
+    const dataTransfer = {
+      getData: () => "323e4567-e89b-12d3-a456-426614174999",
+      setData: vi.fn(),
+      effectAllowed: "",
+    };
+    fireEvent.drop(screen.getByTestId("pages-tree"), { dataTransfer });
+    expect(onMovePage).not.toHaveBeenCalled();
+  });
+
+  it("does not let a colleague drag or drop your row", () => {
+    const colleague = "523e4567-e89b-12d3-a456-426614174197";
+    const onMovePage = vi.fn();
+    renderTree({ onMovePage, currentUserId: colleague, viewerIsAdmin: false, canMove: true });
+    const rootItem = screen.getByTestId("page-tree-item");
+    expect(rootItem).not.toHaveAttribute("draggable", "true");
+    const dataTransfer = { getData: () => PARENT, setData: vi.fn(), effectAllowed: "" };
     fireEvent.drop(rootItem, { dataTransfer });
     expect(onMovePage).not.toHaveBeenCalled();
   });

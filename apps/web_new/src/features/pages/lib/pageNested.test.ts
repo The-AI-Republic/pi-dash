@@ -27,7 +27,6 @@ import {
   pageParentPath,
   PAGE_RESTRICTED_ANCESTOR,
   restoreDetaches,
-  subPageAccess,
 } from "./pageNested.js";
 
 let nextId = 0;
@@ -174,6 +173,11 @@ describe("ancestry and breadcrumbs", () => {
     expect(pageAncestors([{ ...a, parent: b.id, parent_id: b.id }, b], a.id)).toHaveLength(1);
   });
 
+  it("treats a page absent from the pool as having no resolvable ancestors", () => {
+    // The sidebar sibling list can be narrower than the caller's forest.
+    expect(pageAncestors([top], "123e4567-e89b-12d3-a456-426614174999")).toEqual([]);
+  });
+
   it("builds the parent path used as a search result's secondary line", () => {
     expect(pageParentPath(pool, leaf.id)).toBe("Handbook / Policies");
     expect(pageParentPath(pool, top.id)).toBeNull();
@@ -196,7 +200,6 @@ describe("move rules", () => {
   it("allows another live page and the top level", () => {
     expect(pageMoveRefusal(pool, leaf.id, other.id)).toBeNull();
     expect(pageMoveRefusal(pool, leaf.id, null)).toBeNull();
-    expect(pageMoveRefusalMessage(null)).toBeNull();
   });
 
   it("refuses itself, a descendant and an archived target with a message each", () => {
@@ -243,10 +246,5 @@ describe("archive, restore and delete", () => {
     expect(pageDeleteRehomedMessage(0)).toBeNull();
     expect(pageDeleteRehomedMessage(1)).toBe("1 sub-page will move to the top level.");
     expect(pageDeleteRehomedMessage(4)).toBe("4 sub-pages will move to the top level.");
-  });
-
-  it("keeps a sub-page of a restricted source restricted", () => {
-    expect(subPageAccess({ access: 0 })).toBe(0);
-    expect(subPageAccess({ access: 1 })).toBe(1);
   });
 });

@@ -60,7 +60,7 @@ import { PageCreateDialogEntry, PagesQuickCreate } from "./PagesCreateEntry.js";
 import { PageRowConnected } from "./PageRowConnected.js";
 import { PageNestedMoveDialog } from "./PageNestedMoveDialog.js";
 import { PageTree } from "./PageTree.js";
-import { pageDiscoveryRows, pageTreeRoots, subPageAccess, type PageNestedRow } from "../lib/pageNested.js";
+import { pageDiscoveryRows, pageTreeRoots, type PageNestedRow } from "../lib/pageNested.js";
 import { edition, isPageMoveEnabled } from "../../../core/edition/index.js";
 import { registerCommands, registerPalettePages } from "../../../shared/commands/index.js";
 import { buildPageJumpCommand } from "../palette/pageJumpCommands.js";
@@ -144,22 +144,25 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   const searchActiveEarly = client.query.trim() !== "";
   const filtersActiveEarly = hasPageFilters(client.filters);
   const discoveryActive = searchActiveEarly || filtersActiveEarly;
+  // The archived tab also needs the whole shelved forest: its children are
+  // not top-level rows, and a restore notice needs the still-archived parent.
+  const forestActive = discoveryActive || tab === "archived";
   // Discovery (search/filters/favourites) spans every depth, so it reads
   // the whole visible forest; the plain list stays on the one top-level
   // collection and the tree reads children lazily per expanded parent.
   const forest = useQuery({
-    ...pageForestQueryOptions(getAppClient(), workspaceSlug, projectId, discoveryActive),
-    enabled: discoveryActive && project.isSuccess && !gateOff,
+    ...pageForestQueryOptions(getAppClient(), workspaceSlug, projectId, forestActive),
+    enabled: forestActive && project.isSuccess && !gateOff,
   });
-  const discoveryPool = discoveryActive ? (forest.data?.rows ?? rows) : rows;
-  const activeRows = discoveryActive ? discoveryPool : rows;
+  const discoveryPool = forestActive ? (forest.data?.rows ?? rows) : rows;
+  const activeRows = forestActive ? discoveryPool : rows;
   const visible = React.useMemo(
     () => visiblePageRows(activeRows, tab, client.sort, client.query, client.filters, now),
     [activeRows, tab, client.sort, client.query, client.filters, now]
   );
   const tabbedPool = React.useMemo(
-    () => (discoveryActive ? activeRows.filter((row) => pageInTab(row, tab)) : tabRows),
-    [discoveryActive, activeRows, tab, tabRows]
+    () => (forestActive ? activeRows.filter((row) => pageInTab(row, tab)) : tabRows),
+    [forestActive, activeRows, tab, tabRows]
   );
   const treeRoots = React.useMemo(
     () => pageTreeRoots(activeRows, tabbedPool, (pool) => sortPageRows(pool, client.sort)),
@@ -202,7 +205,9 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   const addSubPage = useAddSubPage(workspaceSlug, projectId);
   const createSubPage = (parent: PageRowData): void => {
     addSubPage.mutate(
-      { parentId: parent.id, access: subPageAccess(parent) },
+      // PAGE-007's quick-create path: visibility comes from the active tab,
+      // never from the source page (PAGE-084, "no other inherited field").
+      { parentId: parent.id, access: quickCreateAccess(tab) },
       { onSuccess: (created) => goToPage(created.id) }
     );
   };
@@ -266,6 +271,13 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
           archiveSubtree(page, archived);
         }}
         onAddSubPage={canCreate ? () => createSubPage(page) : undefined}
+        onRequestNestedMove={
+          canCreate && (viewerIsAdmin || (currentUserId !== null && page.owned_by === currentUserId))
+            ? () => {
+                setMoveTarget(page);
+              }
+            : undefined
+        }
         onOpenInNewTab={() => {
           openInNewTab(page.id);
         }}
@@ -364,7 +376,9 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
                   workspaceSlug={workspaceSlug}
                   projectId={projectId}
                   rows={treeRoots}
-                  pool={rows}
+                  pool={discoveryPool}
+                  sort={client.sort}
+                  includeArchivedChildren={tab === "archived"}
                   showStar={canStar}
                   canDuplicate={canCreate}
                   currentUserId={currentUserId}
@@ -398,9 +412,7 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
           {moveTarget === null ? null : (
             <PageNestedMoveDialog
               open
-              onOpenChange={(next) => {
-                if (!next) setMoveTarget(null);
-              }}
+              onOpenChange={() => setMoveTarget(null)}
               page={moveTarget}
               pool={movePool}
               pending={reparent.isPending}

@@ -16,8 +16,8 @@ export const pageKeys = {
    * so each entry is its own cached list; a write that changes parenthood
    * invalidates the whole nested subtree.
    */
-  children: (workspaceSlug: string, projectId: string, pageId: string) =>
-    [...pageKeys.all(workspaceSlug), "children", projectId, pageId] as const,
+  children: (workspaceSlug: string, projectId: string, pageId: string, includeArchived = false) =>
+    [...pageKeys.all(workspaceSlug), "children", projectId, pageId, includeArchived ? "archived" : "live"] as const,
   detail: (workspaceSlug: string, projectId: string, pageId: string) =>
     [...pageKeys.all(workspaceSlug), "detail", projectId, pageId] as const,
   versions: (workspaceSlug: string, projectId: string, pageId: string) =>

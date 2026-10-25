@@ -326,6 +326,8 @@ export function PageDetailScreen({
           ? {
               onAddSubPage: () => {
                 addSubPage.mutate(
+                  // The detail has no tab; use PAGE-007's open-tab default
+                  // rather than inheriting the source page's visibility.
                   { parentId: page.id, access: quickCreateAccess("public") },
                   { onSuccess: (created) => goTo(pageDetailHref(workspaceSlug, projectId, created.id)) }
                 );

@@ -733,6 +733,26 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Open in new tab", "Copy link"]);
   });
 
+  it("offers a guest no nested-create or nested-move entry", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 5 };
+    harness.pages = [makePageRow({ name: "Guest page", owned_by: "623e4567-e89b-12d3-a456-426614174098" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Guest page" }));
+    const items = screen.getAllByRole("menuitem").map((item) => item.textContent);
+    expect(items).toContain("Open in new tab");
+    expect(items).not.toContain("Add sub-page");
+    expect(items).not.toContain("Move to…");
+  });
+
+  it("shows the owner as unknown when they are not in the member directory", async () => {
+    harness.pages = [makePageRow({ name: "Orphan owner", owned_by: "623e4567-e89b-12d3-a456-426614174099" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Orphan owner" }));
+    expect(screen.getByRole("menuitem", { name: "Move to…" })).toBeInTheDocument();
+  });
+
   it("gives the page owner the state switches and hides them from a member", async () => {
     harness.roles = { [PAGES_PROJECT_ID]: 15 };
     harness.pages = [makePageRow({ name: "Mine", owned_by: PAGES_USER_ID })];
@@ -842,7 +862,9 @@ describe("PagesListScreen nested tree and discovery (D17, PAGE-084–090)", () =
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Add sub-page" }));
     await waitFor(() => expect(harness.createCalls).toBe(1));
-    expect(harness.createBodies[0]).toMatchObject({ parent: parent.id, name: "Untitled" });
+    // PAGE-007's quick-create path: the active public tab yields access 0,
+    // not the source page's visibility (PAGE-084, no inherited field).
+    expect(harness.createBodies[0]).toMatchObject({ parent: parent.id, name: "Untitled", access: 0 });
     await waitFor(() =>
       expect(routerHarness.navigate).toHaveBeenCalledWith({
         href: `/acme/projects/${PAGES_PROJECT_ID}/pages/${pageId(9)}`,
@@ -949,6 +971,81 @@ describe("PagesListScreen nested tree and discovery (D17, PAGE-084–090)", () =
     fireEvent.click(await screen.findByRole("menuitem", { name: "Add sub-page" }));
     await waitFor(() => expect(harness.createCalls).toBe(1));
     expect(harness.createBodies[0]).toMatchObject({ parent: parent.id });
+  });
+
+  it("offers Move to… on a discovery row and reparents from there", async () => {
+    const parent = makePageRow({ id: pageId(34), name: "Handbook" });
+    const other = makePageRow({ id: pageId(35), name: "Other" });
+    harness.pages = [parent, other];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
+    fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "hand" } });
+    await screen.findByRole("link", { name: "Handbook" });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Move to…" }));
+    expect(await screen.findByTestId("page-move-listbox")).toHaveAttribute("data-ready", "true");
+    fireEvent.click(await screen.findByRole("option", { name: /Other/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Move page" }));
+    await waitFor(() => expect(harness.patchBodies).toHaveLength(1));
+    expect(harness.patchBodies[0]).toEqual({ parent: other.id });
+  });
+
+  it("offers a guest no nested-create or nested-move entry on a discovery row", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 5 };
+    harness.pages = [makePageRow({ id: pageId(38), name: "Guest handbook" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
+    fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "hand" } });
+    await screen.findByRole("link", { name: "Guest handbook" });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Guest handbook" }));
+    const items = screen.getAllByRole("menuitem").map((item) => item.textContent);
+    expect(items).not.toContain("Add sub-page");
+    expect(items).not.toContain("Move to…");
+  });
+
+  it("offers Add sub-page but no Move to… on a colleague's discovery row", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 15 };
+    harness.pages = [
+      makePageRow({
+        id: pageId(39),
+        name: "Their handbook",
+        owned_by: "623e4567-e89b-12d3-a456-426614174005",
+      }),
+    ];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
+    fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "hand" } });
+    await screen.findByRole("link", { name: "Their handbook" });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Their handbook" }));
+    const items = screen.getAllByRole("menuitem").map((item) => item.textContent);
+    expect(items).toContain("Add sub-page");
+    expect(items).not.toContain("Move to…");
+  });
+
+  it("loads the archived tab's whole shelved forest so its subtree is visible", async () => {
+    const parent = makePageRow({
+      id: pageId(36),
+      name: "Shelved handbook",
+      sub_pages_count: 1,
+      archived_at: "2026-10-20",
+    });
+    const child = makePageRow({
+      id: pageId(37),
+      name: "Shelved policy",
+      parent: parent.id,
+      parent_id: parent.id,
+      archived_at: "2026-10-20",
+    });
+    harness.pages = [parent, child];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen("archived");
+    expect(await screen.findByRole("link", { name: "Shelved handbook" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Shelved policy" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Shelved handbook" }));
+    expect(await screen.findByRole("link", { name: "Shelved policy" })).toBeInTheDocument();
   });
 
   it("includes a move target that the loaded forest does not contain", async () => {
