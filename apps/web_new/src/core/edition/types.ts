@@ -137,6 +137,24 @@ export interface SlotComponents {
    * stable across editions; a rename is a breaking change.
    */
   workspaceViewLayouts?: WorkspaceViewLayoutsSlot;
+  /**
+   * Pages navigation pane (PAGE-045, parity/specs/pages.md §6.5, §9.4).
+   * Editions whose editor contributes its own side panels fill this with
+   * the replacement body; the pane shell (tabs, close control, slide) and
+   * the address keys stay the app's. The OSS edition leaves it absent, so
+   * the built-in Outline/Info/Assets bodies render. The name is stable
+   * across editions; a rename is a breaking change.
+   */
+  pageNavigationPane?: ComponentType<PageNavigationPaneSlotProps>;
+}
+
+/** What an edition's replacement pane body receives (PAGE-045). */
+export interface PageNavigationPaneSlotProps {
+  /** The active tab from the address. */
+  tab: "outline" | "info" | "assets";
+  workspaceSlug: string;
+  projectId: string;
+  pageId: string;
 }
 
 /** Access values the slot trades in: 1 shared, 0 owner-only. */

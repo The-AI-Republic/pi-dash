@@ -52,6 +52,7 @@ interface Harness {
   pagesCalls: number;
   pagesHold: Promise<void> | null;
   pageHold: Promise<void> | null;
+  membersHold: Promise<void> | null;
   role: number | null;
   viewer: string;
   versions: Record<string, unknown>[];
@@ -86,6 +87,7 @@ beforeEach(() => {
     pagesCalls: 0,
     pagesHold: null,
     pageHold: null,
+    membersHold: null,
     role: 20,
     viewer: PAGES_USER_ID,
     versions: [],
@@ -174,7 +176,10 @@ beforeEach(() => {
       if (harness.pagesHold !== null) await harness.pagesHold;
       return jsonResponse(url, harness.pagesStatus, harness.pages);
     }
-    if (url.endsWith("/api/workspaces/acme/members/")) return jsonResponse(url, 200, [makeWorkspaceMember()]);
+    if (url.endsWith("/api/workspaces/acme/members/")) {
+      if (harness.membersHold !== null) await harness.membersHold;
+      return jsonResponse(url, 200, [makeWorkspaceMember()]);
+    }
     throw new Error(`unexpected request: ${url}`);
   }) as never);
 });
@@ -387,6 +392,139 @@ describe("PageDetailScreen deep links", () => {
     expect(screen.getByRole("tab", { name: "Outline" })).toHaveAttribute("aria-selected", "true");
     fireEvent.click(screen.getByRole("tab", { name: "Assets" }));
     expect(changes.at(-1)).toEqual({ paneTab: "assets" });
+  });
+
+  it("opens the outline from the header toggle", async () => {
+    const { changes } = renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    fireEvent.click(screen.getByRole("button", { name: "Open navigation pane" }));
+    expect(changes.at(-1)).toEqual({ paneTab: "outline" });
+  });
+
+  it("shows the heading preview at the canvas edge while the pane is shut", async () => {
+    harness.page = record({ description_html: "<h1>Launch</h1><h2>Scope</h2><p>Body</p>" });
+    const { changes } = renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    const preview = await screen.findByRole("button", { name: "Open outline" });
+    expect(preview.querySelectorAll('div[style*="width"]')).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Scope" }));
+    expect(changes.at(-1)).toEqual({ paneTab: "outline" });
+  });
+
+  it("opens the outline without scrolling from the preview's bar strip", async () => {
+    harness.page = record({ description_html: "<h1>Launch</h1>" });
+    const { changes } = renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    fireEvent.click(await screen.findByRole("button", { name: "Open outline" }));
+    expect(changes.at(-1)).toEqual({ paneTab: "outline" });
+  });
+
+  it("lists the stored headings in the outline and the stored counts on the info tab", async () => {
+    harness.page = record({ description_html: "<h1>Launch</h1><h2>Scope</h2><p>Two words</p>" });
+    renderScreen({ paneTab: "outline" });
+    expect(await screen.findByRole("button", { name: "Scope" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Launch" })).toBeInTheDocument();
+  });
+
+  it("holds the canvas until the directory answers, so rows never flash the fallback", async () => {
+    let release: () => void = () => undefined;
+    harness.membersHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    renderScreen({ paneTab: "info" });
+    await screen.findByLabelText("Loading page");
+    expect(screen.queryByText("Edited by")).not.toBeInTheDocument();
+    release();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await waitFor(() => expect(screen.queryByLabelText("Loading page")).not.toBeInTheDocument());
+    const edited = screen.getByText("Edited by").nextElementSibling as HTMLElement;
+    expect(edited.querySelector("a")?.textContent).toBe("Ada Byron");
+  });
+
+  it("gives the screen a definite height and keeps the shut pane out of the scrollport", async () => {
+    renderScreen();
+    const canvas = await screen.findByLabelText("Launch notes");
+    const screenRoot = screen.getByTestId("page-detail-screen");
+    // The pane's shut state is a negative margin; clipping the screen keeps
+    // it from becoming reachable by scrolling the surrounding content.
+    expect(screenRoot).toHaveClass("h-full", "min-h-0", "flex-col", "overflow-x-clip");
+    // The canvas column is the page's own vertical scroller, so the
+    // surrounding content area never becomes the scroller instead.
+    const scroll = screen.getByTestId("page-canvas-scroll");
+    expect(scroll).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+    expect(scroll.contains(canvas)).toBe(true);
+    expect(screen.getByTestId("page-canvas-stage")).toContainElement(scroll);
+  });
+
+  it("pins the heading preview beside the scroller instead of inside the document", async () => {
+    harness.page = record({ description_html: "<h1>Launch</h1><h2>Scope</h2>" });
+    renderScreen();
+    const preview = await screen.findByRole("button", { name: "Open outline" });
+    // Inside the scroller the preview would scroll away with the body; it
+    // belongs to the stage, which does not scroll (PAGE-046).
+    expect(screen.getByTestId("page-canvas-scroll")).not.toContainElement(preview);
+    expect(screen.getByTestId("page-canvas-stage")).toContainElement(preview);
+  });
+
+  it("keeps the title out of the pane's document while it sits on the canvas", async () => {
+    harness.page = record({ name: "Launch notes", description_html: "<h1>Scope</h1><p>Body</p>" });
+    renderScreen({ paneTab: "outline" });
+    const canvas = await screen.findByLabelText("Launch notes");
+    // The title lives inside the measured canvas but outside the body, so
+    // the outline lists the document's headings only (PAGE-046/047).
+    expect(canvas.querySelector('[data-testid="page-detail-title"]')).not.toBeNull();
+    expect(await screen.findByRole("button", { name: "Scope" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Launch notes" })).not.toBeInTheDocument();
+  });
+
+  it("widens the readable canvas measure when the pane opens", async () => {
+    const { rerender } = render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <PageDetailScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          pageId={harness.pageId}
+          search={{}}
+          onSearchChange={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    const canvas = await screen.findByLabelText("Launch notes");
+    const measure = canvas.querySelector<HTMLElement>(".frame-renderer");
+    expect(canvas.tagName).toBe("ARTICLE");
+    expect(canvas.style.width).toBe("");
+    expect(measure?.style.maxWidth).toBe("720px");
+    expect(measure).toHaveClass("w-full");
+    rerender(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <PageDetailScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          pageId={harness.pageId}
+          search={{ paneTab: "outline" }}
+          onSearchChange={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    const openCanvas = await screen.findByLabelText("Launch notes");
+    expect(openCanvas.querySelector<HTMLElement>(".frame-renderer")?.style.maxWidth).toBe("1152px");
+  });
+
+  it("attributes the page to the directory's names with profile links", async () => {
+    renderScreen({ paneTab: "info" });
+    await screen.findByRole("textbox", { name: "Page title" });
+    const edited = screen.getByText("Edited by").nextElementSibling as HTMLElement;
+    const link = edited.querySelector("a");
+    expect(link?.textContent).toBe("Ada Byron");
+    expect(link?.getAttribute("href")).toBe(`/acme/profile/${PAGES_USER_ID}/`);
+  });
+
+  it("attributes an unsaved-by row to its creator", async () => {
+    harness.page = record({ updated_by: null, created_by: PAGES_USER_ID });
+    renderScreen({ paneTab: "info" });
+    await screen.findByRole("textbox", { name: "Page title" });
+    const edited = screen.getByText("Edited by").nextElementSibling as HTMLElement;
+    expect(edited.querySelector("a")?.textContent).toBe("Ada Byron");
   });
 
   it("closes the pane while keeping an open snapshot key", async () => {
