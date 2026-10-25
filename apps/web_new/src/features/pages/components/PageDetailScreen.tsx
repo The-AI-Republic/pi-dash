@@ -10,7 +10,8 @@
 // menu entries and collaboration client mount here in later slices; this
 // shell owns their seams and the URL protocol they share.
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { PageVersionDetail } from "@pidash/api-client";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
@@ -24,6 +25,7 @@ import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { pageDetailQueryOptions, pageVersionQueryOptions, pageVersionsQueryOptions } from "../api/detailQueries.js";
 import { usePageMark, usePageRename } from "../api/detailMutations.js";
 import { pagesListQueryOptions } from "../api/queries.js";
+import { pageKeys } from "../api/keys.js";
 import { isPageBodyReady, markPageBodyReady } from "../lib/pageBodyCache.js";
 import {
   closeVersionSearch,
@@ -38,12 +40,16 @@ import {
   type PageDetailSearch,
   type PagePaneTab,
 } from "../lib/pageDetail.js";
+import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
+import { applyPageRestore, PAGE_VERSION_RESTORE_FAILED, PAGE_VERSION_RESTORE_SUCCESS } from "../lib/pageRestore.js";
+import { snapshotBodyHtml } from "../lib/versionContent.js";
 import { copyPageLink } from "../lib/share.js";
 import { usePageSyncStatus } from "../lib/pageSync.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
 import { PageDetailPanel } from "./PageDetailPanel.js";
 import { PageDetailHeader } from "./PageDetailHeader.js";
 import { PageCanvasHeader } from "./PageCanvasHeader.js";
+import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 import { PageEditorSurface, PAGE_BODY_LABEL } from "./PageEditorSurface.js";
 import { PageHeadingPreview } from "./PageHeadingPreview.js";
 import { PageNavigationPane } from "./PageNavigationPane.js";
@@ -68,6 +74,7 @@ export function PageDetailScreen({
   onSearchChange,
 }: PageDetailScreenProps): React.ReactElement {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const client = getAppClient();
   const project = useProjectRow(workspaceSlug, projectId);
   const roles = useProjectRoles(workspaceSlug);
@@ -82,9 +89,12 @@ export function PageDetailScreen({
     ...pageVersionsQueryOptions(client, workspaceSlug, projectId, pageId),
     enabled: paneOpen && search.paneTab === "info" && record.isSuccess,
   });
+  // One read of the address's version key: the overlay and both of its
+  // actions below work from this narrowed value, never from a re-read.
+  const openVersionId = search.version;
   const snapshot = useQuery({
-    ...pageVersionQueryOptions(client, workspaceSlug, projectId, pageId, search.version ?? ""),
-    enabled: search.version !== undefined && record.isSuccess,
+    ...pageVersionQueryOptions(client, workspaceSlug, projectId, pageId, openVersionId ?? ""),
+    enabled: openVersionId !== undefined && record.isSuccess,
   });
 
   const listRow = pages.data?.find((row) => row.id === pageId);
@@ -108,6 +118,9 @@ export function PageDetailScreen({
   // the member directory answers; waiting for it here keeps the fallback
   // label for departed members from flashing on every load (PAGE-050).
   const directory = usePaletteWorkspaceMembers(workspaceSlug);
+  // The timeline names each snapshot's author from the same directory the
+  // attribution rows use (PAGE-051).
+  const versionMembers = pageActorMembers(directory.data);
 
   const body = resolvePageDetailBody({
     pending: record.isPending || me.isPending || roles.isPending || directory.isPending,
@@ -190,6 +203,39 @@ export function PageDetailScreen({
     onSearchChange(closeVersionSearch(search));
   };
 
+  // A failed snapshot read keeps its address; asking again drops the
+  // rejected answer so the read flies afresh and the skeleton returns
+  // (PAGE-054). Only a mounted overlay can ask, so it always names one.
+  const retryVersion = (versionId: string): void => {
+    void queryClient.invalidateQueries({
+      queryKey: pageKeys.version(workspaceSlug, projectId, pageId, versionId),
+    });
+  };
+
+  // Restore is the live document taking the snapshot's body: the editor
+  // reports the write through its own update, so the draft seam and the
+  // pane see it as a typed edit and the reader never leaves the page
+  // (PAGE-053). Without a live editor there is nothing to write into and
+  // the reader is told so instead.
+  const editorHandle = React.useRef<PageEditorHandle | null>(null);
+  const onEditorHandle = React.useCallback((handle: PageEditorHandle | null) => {
+    editorHandle.current = handle;
+  }, []);
+  const restoreVersion = React.useCallback(
+    (opened: PageVersionDetail) => {
+      if (!applyPageRestore(editorHandle.current, snapshotBodyHtml(opened))) {
+        notifyError(PAGE_VERSION_RESTORE_FAILED);
+        return;
+      }
+      notifySuccess(PAGE_VERSION_RESTORE_SUCCESS);
+      // The restore is a new save, so the history and its timeline are
+      // stale from here on.
+      void queryClient.invalidateQueries({ queryKey: pageKeys.versions(workspaceSlug, projectId, pageId) });
+      closeVersion();
+    },
+    [queryClient, workspaceSlug, projectId, pageId, closeVersion]
+  );
+
   if (body === "spinner") {
     return <PageDetailSpinner />;
   }
@@ -207,7 +253,7 @@ export function PageDetailScreen({
     updatedAt: page.updated_at,
     ownedBy: page.owned_by,
     createdAt: page.created_at,
-    members: pageActorMembers(directory.data),
+    members: versionMembers,
   });
 
   return (
@@ -271,6 +317,7 @@ export function PageDetailScreen({
                     onMarkPick={saveMark}
                     showBar
                     bodyPending={!bodyReady}
+                    onHandle={onEditorHandle}
                   />
                 ) : (
                   <>
@@ -307,20 +354,24 @@ export function PageDetailScreen({
           document={paneDocument}
           actors={actors}
           versions={search.paneTab === "info" ? versions.data : undefined}
+          versionMembers={versionMembers}
           onSelectTab={openPaneTab}
           onClose={closePane}
           onSelectVersion={selectVersion}
+          onSelectCurrentVersion={closeVersion}
           onSelectHeading={live.scrollToHeading}
         />
       </div>
-      {search.version !== undefined ? (
+      {openVersionId === undefined ? null : (
         <PageVersionOverlay
-          versionId={search.version}
+          versionId={openVersionId}
           snapshot={snapshot.data}
           failed={snapshot.isError}
           onClose={closeVersion}
+          onRetry={() => retryVersion(openVersionId)}
+          restore={capabilities.canEdit ? { onRestore: restoreVersion } : null}
         />
-      ) : null}
+      )}
     </div>
   );
 }

@@ -5,10 +5,11 @@
 // Detail shell integration (parity/specs/pages.md §4, PAGE-022–025,
 // 079–080): one visit-tracked record read beside the shared collection,
 // the spinner, the panel, the title with its placeholder, read-only
-// locked/shelved pages, the pane and the snapshot overlay.
+// locked/shelved pages, the pane, the snapshot overlay and the restore
+// that writes a snapshot back into the live editor (PAGE-053).
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { PageDetail, PageRow } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,10 +33,19 @@ vi.mock("../../../shared/shell/toaster.js", () => ({
   notifySuccess: vi.fn(),
   notifyError: vi.fn(),
 }));
+// The restore write stays the real one; the spy only lets a test choose
+// the refused answer, which a mounted editor in jsdom cannot produce.
+vi.mock("../lib/pageRestore.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/pageRestore.js")>();
+  return { ...actual, applyPageRestore: vi.fn(actual.applyPageRestore) };
+});
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { PAGES_USER_ID, jsonResponse, makePageRow, makeProjectRow, makeWorkspaceMember } from "../testing.js";
 import { resetPageBodyCache } from "../lib/pageBodyCache.js";
 import type { PageDetailSearch } from "../lib/pageDetail.js";
+import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
+import { getPageBodyDraft } from "../lib/pageBodyDraft.js";
+import { applyPageRestore } from "../lib/pageRestore.js";
 import { PageDetailScreen } from "./PageDetailScreen.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -58,8 +68,11 @@ interface Harness {
   viewer: string;
   versions: Record<string, unknown>[];
   versionsStatus: number;
+  versionsCalls: number;
   versionStatus: number;
   versionHold: Promise<void> | null;
+  versionDetailCalls: number;
+  versionJson: Record<string, unknown>;
   projectPageView: boolean;
   projectStatus: number;
 }
@@ -94,8 +107,11 @@ beforeEach(() => {
     viewer: PAGES_USER_ID,
     versions: [],
     versionsStatus: 200,
+    versionsCalls: 0,
     versionStatus: 200,
     versionHold: null,
+    versionDetailCalls: 0,
+    versionJson: {},
     projectPageView: true,
     projectStatus: 200,
   };
@@ -143,6 +159,7 @@ beforeEach(() => {
       `/api/workspaces/acme/projects/[0-9a-f-]+/pages/[0-9a-f-]+/versions/([0-9a-f-]+)/$`
     ).exec(url);
     if (versionDetail !== null) {
+      harness.versionDetailCalls += 1;
       if (harness.versionHold !== null) await harness.versionHold;
       return jsonResponse(url, harness.versionStatus, {
         id: versionDetail[1],
@@ -151,7 +168,7 @@ beforeEach(() => {
         last_saved_at: "2026-10-20T12:00:00Z",
         description_binary: null,
         description_html: "<p>Stored snapshot body</p>",
-        description_json: {},
+        description_json: harness.versionJson,
         owned_by: PAGES_USER_ID,
         created_at: "2026-10-20T12:00:00Z",
         updated_at: "2026-10-20T12:00:00Z",
@@ -161,6 +178,7 @@ beforeEach(() => {
     }
     const versionList = new RegExp(`/api/workspaces/acme/projects/[0-9a-f-]+/pages/[0-9a-f-]+/versions/$`).exec(url);
     if (versionList !== null) {
+      harness.versionsCalls += 1;
       return jsonResponse(url, harness.versionsStatus, harness.versions);
     }
     const recordRead = new RegExp(`/api/workspaces/acme/projects/[0-9a-f-]+/pages/([0-9a-f-]+)/$`).exec(url);
@@ -191,6 +209,9 @@ beforeEach(() => {
 afterEach(() => {
   resetAppClient();
   document.title = "";
+  vi.mocked(applyPageRestore).mockClear();
+  vi.mocked(notifySuccess).mockClear();
+  vi.mocked(notifyError).mockClear();
 });
 
 function renderScreen(search: PageDetailSearch = {}): {
@@ -212,6 +233,18 @@ function renderScreen(search: PageDetailSearch = {}): {
   );
   return { changes };
 }
+
+const SNAPSHOT_ROW = {
+  id: "11111111-1111-4111-8111-111111111111",
+  workspace: "123e4567-e89b-12d3-a456-426614174000",
+  page: "33333333-3333-4333-8333-333333333333",
+  last_saved_at: "2026-10-20T12:00:00Z",
+  owned_by: PAGES_USER_ID,
+  created_at: "2026-10-20T12:00:00Z",
+  updated_at: "2026-10-20T12:00:00Z",
+  created_by: null,
+  updated_by: null,
+};
 
 describe("PageDetailScreen loading and panel", () => {
   it("spins while the record is unresolved and then paints the editor", async () => {
@@ -727,6 +760,170 @@ describe("PageDetailScreen deep links", () => {
     const { changes } = renderScreen({ paneTab: "info" });
     fireEvent.click(await screen.findByRole("link", { name: /Oct 20, 2026/ }));
     expect(changes.at(-1)).toEqual({ paneTab: "info", version: "11111111-1111-4111-8111-111111111111" });
+  });
+
+  it("names the snapshot's author in the timeline", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    renderScreen({ paneTab: "info" });
+    const link = await screen.findByRole("link", { name: /Oct 20, 2026/ });
+    await waitFor(() => expect(link).toHaveTextContent("Ada Byron"));
+  });
+
+  it("prefers the structured snapshot content over the stored markup", async () => {
+    harness.versionJson = {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Structured snapshot body" }] }],
+    };
+    renderScreen({ version: SNAPSHOT_ROW.id });
+    expect(await screen.findByText("Structured snapshot body")).toBeInTheDocument();
+    expect(screen.queryByText("Stored snapshot body")).not.toBeInTheDocument();
+  });
+
+  it("shows the error panel when the snapshot read fails", async () => {
+    harness.versionStatus = 500;
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    expect(await screen.findByRole("heading", { name: "Something went wrong!" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    const overlay = screen.getByRole("dialog", { name: "Version snapshot" });
+    expect(within(overlay).getByRole("heading", { level: 6 })).toHaveTextContent("Loading version details");
+  });
+
+  it("refetches the snapshot from the error panel's retry", async () => {
+    harness.versionStatus = 500;
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    await screen.findByRole("heading", { name: "Something went wrong!" });
+    const before = harness.versionDetailCalls;
+    harness.versionStatus = 200;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Stored snapshot body")).toBeInTheDocument();
+    expect(harness.versionDetailCalls).toBeGreaterThan(before);
+  });
+
+  it("leaves the snapshot from the timeline's current row", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    const { changes } = renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    await screen.findByText("Stored snapshot body");
+    fireEvent.click(await screen.findByRole("link", { name: "Current version" }));
+    expect(changes.at(-1)).toEqual({ paneTab: "info" });
+  });
+
+  it("restores the snapshot into the live editor in place and closes the overlay", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    harness.versionJson = {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Snapshot words" }] }],
+    };
+    const { changes } = renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    const editor = await screen.findByLabelText("Page body");
+    await waitFor(() => expect(editor).toHaveAttribute("contenteditable", "true"));
+    const beforeList = harness.versionsCalls;
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(editor).toHaveTextContent("Snapshot words"));
+    expect(editor).not.toHaveTextContent("Draft body");
+    await waitFor(() => expect(getPageBodyDraft(harness.pageId)).toContain("Snapshot words"));
+    expect(changes.at(-1)).toEqual({ paneTab: "info" });
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Page version restored."));
+    await waitFor(() => expect(harness.versionsCalls).toBeGreaterThan(beforeList));
+    expect(router.navigate).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the stored markup when the snapshot has no known structure", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    const editor = await screen.findByLabelText("Page body");
+    await waitFor(() => expect(editor).toHaveAttribute("contenteditable", "true"));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(editor).toHaveTextContent("Stored snapshot body"));
+  });
+
+  it("restores the editor's own formatting: underline and alignment survive the write", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    harness.versionJson = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { textAlign: "center" },
+          content: [{ type: "text", marks: [{ type: "underline" }], text: "Aligned underline" }],
+        },
+      ],
+    };
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    const body = await screen.findByLabelText("Version body");
+    await waitFor(() => expect(body.querySelector("u")).toHaveTextContent("Aligned underline"));
+    expect(body.querySelector("p")).toHaveStyle({ textAlign: "center" });
+    const editor = await screen.findByLabelText("Page body");
+    await waitFor(() => expect(editor).toHaveAttribute("contenteditable", "true"));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(editor.querySelector("u")).toHaveTextContent("Aligned underline"));
+    expect(editor.querySelector("p")).toHaveStyle({ textAlign: "center" });
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Page version restored."));
+  });
+
+  it("keeps a snapshot link's stored target and rel through display and restore", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    harness.versionJson = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { textAlign: null },
+          content: [
+            {
+              type: "text",
+              marks: [
+                {
+                  type: "link",
+                  attrs: {
+                    href: "https://example.test/linked",
+                    target: "_blank",
+                    rel: "noopener noreferrer nofollow",
+                    class: null,
+                  },
+                },
+              ],
+              text: "Linked words",
+            },
+          ],
+        },
+      ],
+    };
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    const body = await screen.findByLabelText("Version body");
+    await waitFor(() => expect(body.querySelector("a")).toHaveTextContent("Linked words"));
+    const shown = body.querySelector("a");
+    expect(shown?.getAttribute("href")).toBe("https://example.test/linked");
+    expect(shown?.getAttribute("target")).toBe("_blank");
+    expect(shown?.getAttribute("rel")).toBe("noopener noreferrer nofollow");
+    const editor = await screen.findByLabelText("Page body");
+    await waitFor(() => expect(editor).toHaveAttribute("contenteditable", "true"));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(editor.querySelector("a")).toHaveTextContent("Linked words"));
+    const restored = editor.querySelector("a");
+    expect(restored?.getAttribute("target")).toBe("_blank");
+    expect(restored?.getAttribute("rel")).toBe("noopener noreferrer nofollow");
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Page version restored."));
+  });
+
+  it("reports a refused restore and leaves the overlay and address alone", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    vi.mocked(applyPageRestore).mockReturnValueOnce(false);
+    const { changes } = renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    await screen.findByText("Stored snapshot body");
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(notifyError).toHaveBeenCalledWith("Page version could not be restored.");
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(changes).toEqual([]);
+    expect(screen.getByRole("dialog", { name: "Version snapshot" })).toBeInTheDocument();
+  });
+
+  it("never offers restore to a read-only viewer", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    harness.page = record({ is_locked: true });
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    expect(await screen.findByText("Stored snapshot body")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
   });
 
   it("keeps the detail readable with the feature off and skips the collection read", async () => {

@@ -28,7 +28,7 @@ import {
   PAGE_NAVIGATION_LABEL,
   PAGE_PANE_CLOSE,
 } from "./PageNavigationPane.js";
-import { PAGE_PANE_WIDTH_PX, type PageActorRow, type PageDocument } from "../lib/pagePane.js";
+import { PAGE_PANE_WIDTH_PX, type PageActorMember, type PageActorRow, type PageDocument } from "../lib/pagePane.js";
 
 const VERSIONS: PageVersion[] = [
   {
@@ -62,6 +62,8 @@ const DOCUMENT: PageDocument = {
   ],
 };
 
+const MEMBERS: PageActorMember[] = [{ id: "44444444-4444-4444-8444-444444444444", name: "Ada Byron", avatarUrl: null }];
+
 const ACTORS: PageActorRow[] = [
   {
     role: "edited",
@@ -92,11 +94,13 @@ function renderPane(
   onSelectTab: ReturnType<typeof vi.fn>;
   onClose: ReturnType<typeof vi.fn>;
   onSelectVersion: ReturnType<typeof vi.fn>;
+  onSelectCurrentVersion: ReturnType<typeof vi.fn>;
   onSelectHeading: ReturnType<typeof vi.fn>;
 } {
   const onSelectTab = vi.fn();
   const onClose = vi.fn();
   const onSelectVersion = vi.fn();
+  const onSelectCurrentVersion = vi.fn();
   const onSelectHeading = vi.fn();
   render(
     <PageNavigationPane
@@ -107,14 +111,16 @@ function renderPane(
       document={DOCUMENT}
       actors={ACTORS}
       versions={versions === null ? undefined : versions}
+      versionMembers={MEMBERS}
       onSelectTab={onSelectTab}
       onClose={onClose}
       onSelectVersion={onSelectVersion}
+      onSelectCurrentVersion={onSelectCurrentVersion}
       onSelectHeading={onSelectHeading}
       {...overrides}
     />
   );
-  return { onSelectTab, onClose, onSelectVersion, onSelectHeading };
+  return { onSelectTab, onClose, onSelectVersion, onSelectCurrentVersion, onSelectHeading };
 }
 
 describe("PageNavigationPane", () => {
@@ -230,5 +236,43 @@ describe("PageNavigationPane", () => {
   it("marks the open snapshot as current", () => {
     renderPane({ search: { paneTab: "info", version: VERSIONS[0]?.id } });
     expect(screen.getByRole("link", { name: /Oct 20, 2026/ })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("points the current row at the live document, never at the open snapshot", () => {
+    const versionId = VERSIONS[0]?.id ?? "";
+    const { onSelectCurrentVersion } = renderPane({ search: { paneTab: "info", version: versionId } });
+    const current = screen.getByRole("link", { name: PAGE_CURRENT_VERSION_LABEL });
+    expect(current.getAttribute("href")).toBe(`/acme/projects/project-1/pages/page-1?paneTab=info`);
+    fireEvent.click(current);
+    expect(onSelectCurrentVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the live row current while no snapshot is open", () => {
+    renderPane({ search: { paneTab: "info" } });
+    const current = screen.getByRole("link", { name: PAGE_CURRENT_VERSION_LABEL });
+    expect(current).toHaveAttribute("aria-current", "true");
+    expect(current.getAttribute("data-version-id")).toBeNull();
+    expect(screen.getByRole("link", { name: /Oct 20, 2026/ })).not.toHaveAttribute("aria-current");
+  });
+
+  it("selects the live row to leave the snapshot", () => {
+    const { onSelectCurrentVersion, onSelectVersion } = renderPane({
+      search: { paneTab: "info", version: VERSIONS[0]?.id },
+    });
+    fireEvent.click(screen.getByRole("link", { name: PAGE_CURRENT_VERSION_LABEL }));
+    expect(onSelectCurrentVersion).toHaveBeenCalledTimes(1);
+    expect(onSelectVersion).not.toHaveBeenCalled();
+  });
+
+  it("names the snapshot's author from the directory", () => {
+    renderPane({ search: { paneTab: "info" } });
+    const link = screen.getByRole("link", { name: /Oct 20, 2026/ });
+    expect(link).toHaveTextContent("Ada Byron");
+  });
+
+  it("adds no author text while the directory has not answered", () => {
+    renderPane({ search: { paneTab: "info" }, versionMembers: undefined });
+    const link = screen.getByRole("link", { name: /Oct 20, 2026/ });
+    expect(link).toHaveTextContent(/^Oct 20, 2026/);
   });
 });

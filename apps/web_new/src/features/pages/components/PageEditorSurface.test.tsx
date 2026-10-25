@@ -4,15 +4,16 @@
 // See the LICENSE file for details.
 // Editable page canvas (parity/specs/pages.md §5, PAGE-026–032): the
 // title's Enter reaches the body's start, the bar drives the editor, the
-// editor reports its formatting state back, and the cold-document
-// skeleton holds the body area until the document is known.
+// editor reports its formatting state back, the cold-document skeleton
+// holds the body area until the document is known, and the canvas hands
+// its command handle to a caller outside it (the version restore).
 
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { resetPageBodyDrafts, setPageBodyDraft } from "../lib/pageBodyDraft.js";
+import { getPageBodyDraft, resetPageBodyDrafts, setPageBodyDraft } from "../lib/pageBodyDraft.js";
 import { PageEditorSurface, PAGE_BODY_LABEL, PAGE_BODY_PLACEHOLDER } from "./PageEditorSurface.js";
 
 const EDITOR_TEST_TIMEOUT = 30_000;
@@ -157,6 +158,30 @@ describe(
       fireEvent.click(screen.getByTestId("page-mark-trigger"));
       fireEvent.click(await screen.findByRole("button", { name: "Remove mark" }));
       expect(onMarkPick).toHaveBeenCalledWith({});
+    });
+
+    it("hands the live editor handle out and withdraws it on unmount", async () => {
+      const onHandle = vi.fn();
+      const view = mount({ onHandle });
+      await body();
+      const handle = onHandle.mock.calls.at(-1)?.[0];
+      expect(handle).not.toBeNull();
+      view.unmount();
+      expect(onHandle.mock.calls.at(-1)).toEqual([null]);
+    });
+
+    it("writes a restored body into the editor and reports it as an edit", async () => {
+      const onHandle = vi.fn();
+      mount({ onHandle });
+      const editable = await body();
+      const handle = onHandle.mock.calls.at(-1)?.[0];
+      expect(handle).not.toBeNull();
+      act(() => {
+        handle.replaceBody("<p>Snapshot words</p>");
+      });
+      await vi.waitFor(() => expect(editable).toHaveTextContent("Snapshot words"));
+      expect(editable).not.toHaveTextContent("Stored words");
+      await vi.waitFor(() => expect(getPageBodyDraft("page-1")).toContain("Snapshot words"));
     });
 
     it("restyles the caret's block from the typography selector", async () => {

@@ -675,22 +675,44 @@ profile (§13.3). A deactivated or missing member renders a textual fallback
 replaced by a deactivated-user label, and it is not a broken link).
 
 Below them, the **version timeline**: a current-version row first, then
-dated entries newest-first, each with timestamp and author, the active
-entry highlighted. The first row is labelled `Current version` (pinned),
-points at no snapshot (an id-less entry, never a link) and is always the
-active row on the live document; selecting a dated entry writes `version`
-to the URL and opens the version overlay.
+dated entries newest-first, each with timestamp and author (the snapshot's
+owner, named from the workspace directory, with the deactivated-user
+fallback of §6.9), the active entry highlighted. The first row is
+labelled `Current version` (pinned), points at no snapshot (an id-less
+entry, never a stored snapshot id) and is the active row on the live
+document; selecting it (or closing the overlay) leaves any snapshot
+behind. Selecting a dated entry writes `version` to the URL and opens the
+version overlay.
 
 **Version overlay** (PAGE-052–054): a full-canvas overlay above the editor
 showing the snapshot's timestamp with a read-only marker, the frozen
 content rendered from the snapshot (structured JSON preferred, HTML
 fallback), skeleton blocks while the snapshot read is in flight, and a
-load-failure panel with a retry action. Restore appears only with edit
-permission: it writes the snapshot into the live editor in place — the
-document is replaced through the live document, the user stays on the
-page, and a success notice confirms; failures report by notice. Read-only
+load-failure panel with a retry action. The structured form is preferred
+exactly when the whole stored document uses nodes the app renders (doc,
+paragraph, heading, text, hard break, bullet/ordered lists with items,
+quote, code block, divider); otherwise the stored markup renders, so an
+unfamiliar node degrades to the server's own rendering rather than to a
+blank body. A retry asks for the snapshot again and the skeleton returns
+while the new read flies. Restore appears only with edit permission: it
+writes the snapshot into the live editor in place — the document is
+replaced through the live document, the user stays on the page, and a
+success notice confirms; failures report by notice. Read-only
 viewers can view snapshots and never see restore. Closing the overlay
 removes `version` from the URL and returns to the live document.
+
+The restore control sits in the overlay header beside the close control,
+appears only once the snapshot is loaded (a failed read shows the error
+panel and nothing else), and writes the same body the overlay is
+showing — the structured render when the document is known, the stored
+markup otherwise. The write is the editor's own whole-document
+replacement, reported as an ordinary edit, so the draft the save path
+persists, the live outline and statistics all follow it, and the address
+does not change. The overlay then closes (the `version` key is dropped)
+and the history read is refreshed, because the restore itself is a new
+save. A refused or impossible write (no live editor to take it) shows the
+failure notice and leaves the overlay open. Pinned copy: `Restore`,
+`Page version restored.`, `Page version could not be restored.`
 
 ## 7. Header actions and options menu (PAGE-055, PAGE-056, PAGE-057, PAGE-058, PAGE-059, PAGE-060)
 
@@ -1573,7 +1595,7 @@ label from this table that it does not assert.
 | Detail menu                      | `Full width`, `Sticky toolbar`, `Copy markdown`, `Version history`, `Make a copy`, `Archive`, `Restore`, `Make private`, `Make public`, `Export`                                                                                                                    | PAGE-060                     |
 | Detail toasts                    | `Markdown copied to clipboard.`, `Page exported successfully.`                                                                                                                                                                                                      | PAGE-044, PAGE-074           |
 | Pane tabs                        | `Outline`, `Info`, `Assets`                                                                                                                                                                                                                                         | PAGE-045                     |
-| Version timeline                 | `Current version` (the id-less first row; never a link)                                                                                                                                                                                                             | PAGE-051                     |
+| Version timeline                 | `Current version` (the id-less first row; its link never names a snapshot)                                                                                                                                                                                           | PAGE-051                     |
 | Archive marker                   | exactly `Archived at Mon D, YYYY`                                                                                                                                                                                                                                   | PAGE-059                     |
 | Attribution fallback             | `Deactivated user`                                                                                                                                                                                                                                                  | PAGE-050                     |
 | Sync badge                       | `Connection lost`, `Syncing...`, both read from the badge as it appears; the badge disappears once synced                                                                                                                                                           | PAGE-061, PAGE-067           |

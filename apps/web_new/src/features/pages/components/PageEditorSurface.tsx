@@ -49,6 +49,12 @@ export interface PageEditorSurfaceProps {
    * document is known (PAGE-079); the header and bar render throughout.
    */
   bodyPending?: boolean | undefined;
+  /**
+   * The live editor handle, so a caller outside the canvas can write the
+   * body (the version overlay's restore, PAGE-053). Reported as null
+   * before the editor chunk resolves.
+   */
+  onHandle?: ((handle: PageEditorHandle | null) => void) | undefined;
 }
 
 export function PageEditorSurface({
@@ -60,6 +66,7 @@ export function PageEditorSurface({
   onMarkPick,
   showBar,
   bodyPending = false,
+  onHandle,
 }: PageEditorSurfaceProps): React.ReactElement {
   const handleRef = React.useRef<PageEditorHandle | null>(null);
   const [state, setState] = React.useState<PageFormattingState>(EMPTY_FORMATTING_STATE);
@@ -69,10 +76,24 @@ export function PageEditorSurface({
   React.useEffect(() => setTitleDraft(name), [name]);
   const initialHtml = React.useMemo(() => getPageBodyDraft(pageId) ?? descriptionHtml, [pageId, descriptionHtml]);
 
+  const onHandleRef = React.useRef(onHandle);
+  onHandleRef.current = onHandle;
+
   const onReady = React.useCallback((handle: PageEditorHandle) => {
     handleRef.current = handle;
     setState(handle.readState());
+    onHandleRef.current?.(handle);
   }, []);
+
+  // A caller that outlives the editor (a restore open while the editor
+  // unmounts) must not keep a handle to a dead document.
+  React.useEffect(
+    () => () => {
+      handleRef.current = null;
+      onHandleRef.current?.(null);
+    },
+    []
+  );
 
   const onChange = React.useCallback(
     (html: string) => {
