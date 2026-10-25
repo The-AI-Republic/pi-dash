@@ -146,15 +146,17 @@ store). `src/core/` holds `api` (the singleton HTTP client), `query`,
   failure and must be re-run, not patched by skipping tests.
 - Scheduled full suite (`checks/full-suite.mjs`): the scheduler has 45 minutes
   for web_new. That suite is ~19 000 tests and needs roughly 72 CPU-minutes,
-  so it fits only if the host gives it about 2 free cores for the whole
-  window; measured on 2026-10-24, the shared 4-vCPU host was running other
-  worktrees at load 15-18 and granted it ~1.2 cores. The runner asks vitest
-  for 16 forked workers instead of the CPU-count default so the suite keeps
-  more files in flight while cores are shared. Measured on 2026-10-25 at load
-  ~29 on 4 vCPUs, one 16-worker run completed 1 672 files and 19 072 tests in
-  38 min. If the scheduler starts timing out again, check the host's load and
-  free cores before blaming a test file; the default reporter's tail names
-  the file that was still in flight when the run was stopped.
+  so the result depends on how many cores the shared host actually grants it.
+  Measured on 2026-10-24, the shared 4-vCPU host was running other worktrees
+  at load 15-18 and granted it ~1.2 cores. The runner therefore oversubscribes
+  vitest's fork pool when the host has memory for it: 16 workers on a 4-vCPU
+  host with 30 GiB completed 1 672 files and 19 072 tests in 38 min at load
+  ~29, while the same pool on an 8-core / 8 GiB host spent 2.5 GiB and turned
+  green files into `Test timed out`. The pool is sized at 1.5 GiB per worker
+  and is never raised above vitest's CPU-count default when memory cannot
+  support it. If the scheduler starts timing out again, check the host's load
+  and free memory before blaming a test file; the default reporter's tail
+  names the file that was still in flight when the run was stopped.
 - Contract (`PIDASH_CONTRACT_BASE_URL=…`): api-client suites against a
   scratch Django seeded with `packages/api-client/contract/seed-contracts.py`.
 - E2E smoke (`pnpm --filter web_new test:e2e`, env-gated): Playwright,

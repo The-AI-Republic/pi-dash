@@ -9,11 +9,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { classify, countsOf, excerpt, failuresOf, isCliEntry, main, parseArgs, uniqueFiles } from "./full-suite.mjs";
+import {
+  classify,
+  countsOf,
+  excerpt,
+  failuresOf,
+  isCliEntry,
+  main,
+  parseArgs,
+  uniqueFiles,
+  workerArgs,
+} from "./full-suite.mjs";
 
 const ROOT = "/repo";
 const LOAD = "(file failed to load)";
 const WEB_WORKERS = "--maxWorkers=16";
+const SCHEDULER_HOST = { cpus: 4, memoryGiB: 30 };
 
 function report(files, extra = {}) {
   const tests = files.flatMap((file) => file.assertionResults ?? []);
@@ -60,6 +71,20 @@ describe("parseArgs", () => {
   it("refuses a flag without a value and unknown arguments", () => {
     expect(() => parseArgs(["--since"])).toThrow("--since needs a value");
     expect(() => parseArgs(["--full"])).toThrow("unknown argument --full");
+  });
+});
+
+describe("workerArgs", () => {
+  it("oversubscribes a small CPU pool when memory has room", () => {
+    expect(workerArgs(SCHEDULER_HOST)).toEqual([WEB_WORKERS]);
+    expect(workerArgs({ cpus: 4, memoryGiB: 12 })).toEqual(["--maxWorkers=8"]);
+    expect(workerArgs({ cpus: 2, memoryGiB: 24 })).toEqual([WEB_WORKERS]);
+  });
+
+  it("leaves vitest's default pool alone when memory is the constraint", () => {
+    expect(workerArgs({ cpus: 8, memoryGiB: 8 })).toEqual([]);
+    expect(workerArgs({ cpus: 4, memoryGiB: 4 })).toEqual([]);
+    expect(workerArgs({ cpus: 16, memoryGiB: 64 })).toEqual([]);
   });
 });
 
@@ -191,6 +216,7 @@ function run(argv, { runs = green, install, git = fakeGit() } = {}) {
     git: git.git,
     root: ROOT,
     tmp,
+    host: SCHEDULER_HOST,
     write: (file, text) => (written[file] = JSON.parse(text)),
     log: (line) => logs.push(line),
   });

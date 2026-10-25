@@ -20,21 +20,13 @@
 // install); the summary then holds only { error }.
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const SUITES = [
-  // The scheduled run is the only place the whole web_new suite runs, and it
-  // shares its host with other agent worktrees. Vitest sizes one process's
-  // fork pool from the CPU count alone (4 on that host), and when those cores
-  // are contended the pool spends much of the run waiting: the run that
-  // produced NEWFRONT-893 spent 62 min of wall time on ~72 min of CPU work,
-  // i.e. 1.2 cores. An explicit larger pool keeps more files in flight and
-  // recovered 1.9 cores in a 240-file sample (459 s against 715 s at the
-  // default size). 16 workers is bounded and every file still runs once.
-  { name: "web_new", dir: "apps/web_new", args: ["--maxWorkers=16"] },
+  { name: "web_new", dir: "apps/web_new" },
   { name: "kit", dir: "packages/kit" },
   { name: "api-client", dir: "packages/api-client" },
 ];
@@ -42,6 +34,23 @@ const EXCERPT_LINES = 30;
 // A suite still running after this is stopped and reported as a crash.
 const SUITE_TIMEOUT_MS = 45 * 60 * 1000;
 const LOAD_FAILURE = "(file failed to load)";
+// A forked worker needs its own V8 heap and module graph. Reserving this much
+// memory per worker keeps a larger pool from forcing the host into swap, where
+// files that normally pass start tripping their individual 30 s test timeouts.
+const WORKER_MEMORY_GIB = 1.5;
+const WORKER_CAP = 16;
+
+// Vitest uses one forked worker per CPU by default. A larger pool helps the
+// shared 4-vCPU scheduler host, where the suite spends much of its wall time
+// waiting on contended cores, but the same pool doubles the footprint on an
+// 8-core / 8 GiB host and turns green tests into `Test timed out`. Oversubscribe
+// only as far as the host's memory can support, and otherwise leave vitest's
+// default untouched.
+function workerArgs({ cpus, memoryGiB }) {
+  const memoryWorkers = Math.floor(memoryGiB / WORKER_MEMORY_GIB);
+  const workers = Math.min(WORKER_CAP, Math.max(cpus, memoryWorkers));
+  return workers > cpus ? [`--maxWorkers=${workers}`] : [];
+}
 
 function parseArgs(argv) {
   const opts = { since: null, out: null, install: true };
@@ -152,7 +161,7 @@ function readReport(file) {
 // and a crash, if any. A crash is a run that timed out, wrote no report, or
 // failed (non-zero exit, or success: false for unhandled errors or no test
 // files) without a failing test to show for it. It keeps the output's tail.
-function runSuite(suite, files, { sh, tmp, root }) {
+function runSuite(suite, files, { sh, tmp, root, host }) {
   const out = join(tmp, `${suite.name}-${files ? "rerun" : "all"}.json`);
   // The default reporter is what makes a timeout diagnosable: with only the
   // JSON reporter every line of test output goes to the report file, which a
@@ -165,7 +174,7 @@ function runSuite(suite, files, { sh, tmp, root }) {
     "--reporter=default",
     "--reporter=json",
     `--outputFile=${out}`,
-    ...(suite.args ?? []),
+    ...(suite.name === "web_new" ? workerArgs(host) : []),
     ...(files ?? []).map((file) => resolve(root, file)),
   ];
   const result = sh("pnpm", args, resolve(root, suite.dir), { timeoutMs: SUITE_TIMEOUT_MS });
@@ -205,7 +214,7 @@ function emit(summary, opts, write) {
   else process.stdout.write(json);
 }
 
-function runAll(opts, { sh, git, root, tmp, write, log }) {
+function runAll(opts, { sh, git, root, tmp, write, log, host }) {
   if (opts.install) {
     const install = sh("pnpm", ["install", "--frozen-lockfile"], root, { timeoutMs: SUITE_TIMEOUT_MS });
     if (install.status !== 0 || install.timedOut) throw new Error(`pnpm install failed:\n${tail(install.output)}`);
@@ -219,7 +228,7 @@ function runAll(opts, { sh, git, root, tmp, write, log }) {
   };
   for (const suite of SUITES) {
     log(`full-suite: running ${suite.name}`);
-    const first = runSuite(suite, null, { sh, tmp, root });
+    const first = runSuite(suite, null, { sh, tmp, root, host });
     const entry = {
       name: suite.name,
       counts: countsOf(first.report),
@@ -231,7 +240,7 @@ function runAll(opts, { sh, git, root, tmp, write, log }) {
     if (failed.length > 0) {
       const files = uniqueFiles(failed);
       log(`full-suite: re-running ${files.length} failing ${suite.name} file(s)`);
-      const rerun = runSuite(suite, files, { sh, tmp, root });
+      const rerun = runSuite(suite, files, { sh, tmp, root, host });
       entry.rerunCrash = rerun.crash;
       const commits = new Map(files.map((file) => [file, commitLog(git, since, file)]));
       entry.failures = classify(failed, failuresOf(rerun.report, root), rerun.crash !== null).map((failure) => ({
@@ -249,14 +258,22 @@ function runAll(opts, { sh, git, root, tmp, write, log }) {
 
 function main(
   argv = process.argv.slice(2),
-  { sh = defaultSh, git = defaultGit, root = repoDir, tmp = null, write = writeFileSync, log = console.error } = {}
+  {
+    sh = defaultSh,
+    git = defaultGit,
+    root = repoDir,
+    tmp = null,
+    write = writeFileSync,
+    log = console.error,
+    host = { cpus: availableParallelism(), memoryGiB: totalmem() / 1024 ** 3 },
+  } = {}
 ) {
   let opts = { out: null };
   let status;
   const dir = tmp ?? mkdtempSync(join(tmpdir(), "full-suite-"));
   try {
     opts = parseArgs(argv);
-    status = runAll(opts, { sh, git, root, tmp: dir, write, log });
+    status = runAll(opts, { sh, git, root, tmp: dir, write, log, host });
   } catch (error) {
     log(`full-suite: error: ${error.message}`);
     emit({ error: error.message }, opts, write);
@@ -277,4 +294,4 @@ if (isCliEntry()) {
   process.exit(main());
 }
 
-export { classify, countsOf, excerpt, failuresOf, isCliEntry, main, parseArgs, uniqueFiles };
+export { classify, countsOf, excerpt, failuresOf, isCliEntry, main, parseArgs, uniqueFiles, workerArgs };
