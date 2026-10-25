@@ -129,13 +129,24 @@ export function ArchivedIssuesScreen({
   const projectIdentifier = project.identifier;
   const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at !== null });
   const filtered = isFilteredEmpty({
-    mode: "visit",
+    // Archived expressions come from the stored record, so a restored
+    // condition that hides every row must show the no-match card even
+    // though this visit did not add it (spec §2.4, ARCH-033).
+    mode: "stored",
     hasCompleteCondition: parts.hasCompleteCondition,
     addedThisVisit: parts.addedThisVisit,
     visibleCount: pages.total,
   });
   const estimateEnabled = projectDetails !== null && projectDetails.estimate !== null;
   const flags = { hideCycle: !project.cycle_view, hideModule: !project.module_view };
+
+  // The peek composes the list row with the archive-scoped detail read
+  // (spec §2.5): the detail serializer omits the membership and count
+  // annotations only the list carries, so hand the peek its row.
+  const peekRow =
+    peekIssueId === null
+      ? null
+      : (pages.sections.flatMap((section) => section.rows).find((row) => row.id === peekIssueId) ?? null);
 
   const openPeek = (issueId: string): void => {
     onPeekChange?.(issueId === peekIssueId ? null : issueId);
@@ -271,6 +282,7 @@ export function ArchivedIssuesScreen({
           projectId={projectId}
           projectIdentifier={projectIdentifier}
           issueId={peekIssueId}
+          row={peekRow}
           onClose={() => onPeekChange?.(null)}
         />
       )}

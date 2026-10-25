@@ -11,6 +11,7 @@ import {
   EPIC_SUB_ISSUE_COUNT_LABEL,
   GROUP_DIMENSION_LABELS,
   GROUP_NONE_LABEL,
+  archivedDisplayMatrix,
   groupDimensionLabel,
   isPropertyShown,
   layoutDisplayMatrix,
@@ -98,6 +99,14 @@ describe("layoutDisplayMatrix", () => {
       orderBy: ["sort_order", "-created_at", "-updated_at", "start_date", "-priority"],
       switches: ["sub_issue"],
     });
+  });
+
+  it("limits the archived panel to the spec §2.3 grouping and ordering", () => {
+    const matrix = archivedDisplayMatrix();
+    expect(matrix.groupBy).toEqual(["state", "cycle", "module", "priority", "labels", "assignees", "created_by", null]);
+    expect(matrix.orderBy).toEqual(["sort_order", "-created_at", "-updated_at", "start_date", "-priority"]);
+    expect(matrix.subGroupBy).toBeNull();
+    expect(matrix.switches).toEqual(["show_empty_groups"]);
   });
 
   it("labels every matrix key", () => {

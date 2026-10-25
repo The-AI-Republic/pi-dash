@@ -170,7 +170,7 @@ afterEach(() => {
 });
 
 describe("archivedIssueForDetail", () => {
-  it("supplies empty annotation-backed fields the live detail reader expects", () => {
+  it("supplies empty annotation-backed fields when no list row is in hand", () => {
     const issue = archivedIssueForDetail(archivedRow() as never);
     expect(issue.cycle_id).toBeNull();
     expect(issue.module_ids).toEqual([]);
@@ -180,6 +180,35 @@ describe("archivedIssueForDetail", () => {
     expect(issue.attachment_count).toBeNull();
     expect(issue.link_count).toBeNull();
     expect(issue.is_epic).toBe(false);
+  });
+
+  it("keeps the memberships and counts only the archived list row carries", () => {
+    const cycle = "323e4567-e89b-12d3-a456-426614174002";
+    const module = "523e4567-e89b-12d3-a456-426614174004";
+    const label = "623e4567-e89b-12d3-a456-426614174005";
+    const assignee = USER;
+    const issue = archivedIssueForDetail(
+      archivedRow() as never,
+      {
+        ...(archivedRow() as never as Record<string, unknown>),
+        cycle_id: cycle,
+        module_ids: [module],
+        label_ids: [label],
+        assignee_ids: [assignee],
+        sub_issues_count: 2,
+        attachment_count: 1,
+        link_count: 3,
+        is_epic: true,
+      } as never
+    );
+    expect(issue.cycle_id).toBe(cycle);
+    expect(issue.module_ids).toEqual([module]);
+    expect(issue.label_ids).toEqual([label]);
+    expect(issue.assignee_ids).toEqual([assignee]);
+    expect(issue.sub_issues_count).toBe(2);
+    expect(issue.attachment_count).toBe(1);
+    expect(issue.link_count).toBe(3);
+    expect(issue.is_epic).toBe(true);
   });
 });
 

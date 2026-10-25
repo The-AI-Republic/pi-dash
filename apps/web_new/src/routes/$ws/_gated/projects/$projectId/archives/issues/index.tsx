@@ -14,6 +14,7 @@ import { ArchivesShell } from "../../../../../../../features/archives/components
 import { archivesRouteTitle } from "../../../../../../../features/archives/tabs.js";
 import { useProjectRow } from "../../../../../../../features/auth/queries.js";
 import { ArchivedIssuesScreen } from "../../../../../../../features/issues/contexts/ArchivedIssuesScreen.js";
+import { useProjectScopeReset } from "../../../../../../../features/issues/contexts/useProjectScopeReset.js";
 import { parseIssueSearch } from "../../../../../../../features/issues/filters/search.js";
 import { useDocumentHead } from "../../../../../../../shared/shell/document.js";
 
@@ -44,10 +45,29 @@ function ArchivedIssuesTab(): React.ReactElement {
     }
     void navigate({ to: ".", search: next, replace: true } as never);
   };
+  // The tab body and its stored expression belong to one project. A
+  // project switch re-mounts the body and drops any selection carried
+  // over from the previous project's address (spec §2.2/§2.5).
+  const scope = `${ws}/${projectId}`;
+  useProjectScopeReset(scope, () => {
+    if (
+      search.peekIssueId === undefined &&
+      search.peekProjectId === undefined &&
+      search.peekNestingLevel === undefined
+    ) {
+      return;
+    }
+    const next = { ...search };
+    delete next.peekIssueId;
+    delete next.peekProjectId;
+    delete next.peekNestingLevel;
+    void navigate({ to: ".", search: next, replace: true } as never);
+  });
   return (
     <ArchivesShell workspaceSlug={ws} projectId={projectId} activeTab="issues">
       <React.Suspense fallback={null}>
         <ArchivedIssuesScreen
+          key={scope}
           workspaceSlug={ws}
           projectId={projectId}
           peekIssueId={search.peekIssueId ?? null}

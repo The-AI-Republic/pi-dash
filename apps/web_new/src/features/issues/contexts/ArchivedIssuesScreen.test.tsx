@@ -18,8 +18,8 @@ const mocks = vi.hoisted(() => ({ navigate: vi.fn() }));
 // The peek's own reads and rendering belong to its suite; here the screen
 // only owns whether it mounts and what selection it hands the address.
 vi.mock("../peek/ArchivedIssuePeek.js", () => ({
-  ArchivedIssuePeek: (props: { issueId: string; onClose: () => void }) => (
-    <div data-testid="archived-peek" data-issue={props.issueId}>
+  ArchivedIssuePeek: (props: { issueId: string; row?: { cycle_id: string | null } | null; onClose: () => void }) => (
+    <div data-testid="archived-peek" data-issue={props.issueId} data-cycle={props.row?.cycle_id ?? ""}>
       <button type="button" onClick={props.onClose}>
         close archived peek
       </button>
@@ -68,6 +68,20 @@ function project(id = PROJECT): Project {
   };
 }
 
+function seedStoredExpression(expression: Record<string, unknown>): void {
+  window.localStorage.setItem(
+    ARCHIVED_FILTER_STORAGE_KEY,
+    JSON.stringify([
+      {
+        key: "ARCHIVED",
+        workspaceSlug: SLUG,
+        viewId: PROJECT,
+        filters: { richFilters: expression },
+      },
+    ])
+  );
+}
+
 function archived(rows = 0): IssueListResponse {
   return {
     grouped_by: null,
@@ -105,7 +119,7 @@ function archived(rows = 0): IssueListResponse {
               created_by: null,
               updated_by: null,
               is_draft: false,
-              archived_at: "2026-01-03T00:00:00Z",
+              archived_at: "2026-01-03",
             },
           ],
   };
@@ -215,27 +229,22 @@ describe("ArchivedIssuesScreen", () => {
     expect(screen.queryByText("No archived work items yet")).not.toBeInTheDocument();
   });
 
-  it("keeps the first-run card for a stored expression until this visit adds one", async () => {
+  it("shows the no-match card for a stored expression that hides every row", async () => {
+    seedStoredExpression({ state_group__in: "cancelled" });
     renderScreen({ stored: { state_group__in: "cancelled" } });
-    expect(await screen.findByText("No archived work items yet")).toBeInTheDocument();
-    expect(screen.queryByText("No matching results.")).not.toBeInTheDocument();
+    expect(await screen.findByText("No matching results.")).toBeInTheDocument();
+    expect(screen.getByTestId("issues-empty-state")).toHaveAttribute("data-context", "archived-filtered");
+    expect(
+      within(screen.getByTestId("issues-empty-state")).getByRole("button", { name: "Clear filters" })
+    ).toBeEnabled();
+    expect(screen.queryByText("No archived work items yet")).not.toBeInTheDocument();
   });
 
   it("seeds the row and its read from the window-local expression (ISS-071)", async () => {
-    window.localStorage.setItem(
-      ARCHIVED_FILTER_STORAGE_KEY,
-      JSON.stringify([
-        {
-          key: "ARCHIVED",
-          workspaceSlug: SLUG,
-          viewId: PROJECT,
-          filters: { richFilters: { state_group__in: "cancelled" } },
-        },
-      ])
-    );
+    seedStoredExpression({ state_group__in: "cancelled" });
     renderScreen({ stored: { state_group__in: "cancelled" } });
     expect(await screen.findByTestId("rich-condition")).toHaveTextContent("State Group");
-    expect(screen.getByText("No archived work items yet")).toBeInTheDocument();
+    expect(screen.getByText("No matching results.")).toBeInTheDocument();
   });
 
   it("switches to the filtered card once a condition is added here, and clears back", async () => {
@@ -277,6 +286,18 @@ describe("ArchivedIssuesScreen", () => {
     renderScreen({ projects: [{ ...project(), member_role: 5 }] });
     expect(await screen.findByText("No archived work items yet")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Set automation" })).toBeDisabled();
+  });
+
+  it("hands the peek the list row so its memberships survive the detail read", async () => {
+    const cycle = "323e4567-e89b-12d3-a456-426614174002";
+    const page = archived(1);
+    const [first] = page.results;
+    if (first === undefined) throw new Error("fixture row missing");
+    page.results[0] = { ...first, cycle_id: cycle, module_ids: [], label_ids: [], assignee_ids: [] };
+    renderScreen({ rows: 1, page, peekIssueId: "423e4567-e89b-12d3-a456-426614174003", onPeekChange: () => undefined });
+    const peek = await screen.findByTestId("archived-peek");
+    expect(peek).toHaveAttribute("data-issue", "423e4567-e89b-12d3-a456-426614174003");
+    expect(peek).toHaveAttribute("data-cycle", cycle);
   });
 
   it("opens the peek for the clicked row and closes it back through the address", async () => {

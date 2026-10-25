@@ -126,6 +126,19 @@ const FULL_ORDERS: readonly string[] = [
   "target_date",
 ];
 
+const ARCHIVED_GROUP: readonly (string | null)[] = [
+  "state",
+  "cycle",
+  "module",
+  "priority",
+  "labels",
+  "assignees",
+  "created_by",
+  null,
+];
+
+const ARCHIVED_ORDERS: readonly string[] = ["sort_order", "-created_at", "-updated_at", "start_date", "-priority"];
+
 const SHEET_ORDERS: readonly string[] = ["sort_order", "-created_at", "-updated_at", "start_date", "-priority"];
 
 const ALL_PILLS: readonly string[] = [
@@ -205,9 +218,9 @@ export function layoutDisplayMatrix(layout: LayoutKind): LayoutDisplayMatrix {
 export function archivedDisplayMatrix(): LayoutDisplayMatrix {
   return {
     properties: ALL_PILLS,
-    groupBy: LIST_GROUP,
+    groupBy: ARCHIVED_GROUP,
     subGroupBy: null,
-    orderBy: FULL_ORDERS,
+    orderBy: ARCHIVED_ORDERS,
     switches: ["show_empty_groups"],
   };
 }
