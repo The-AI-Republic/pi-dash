@@ -19226,74 +19226,182 @@ export class WebNewDriver implements ParityDriver {
     if ((await label.count()) === 0) return "";
     return ((await label.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
-  async modulesRowDateText(_name: string): Promise<string> {
-    return todo("modulesRowDateText");
+  private modulesExactName(name: string): RegExp {
+    return new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
   }
-  async modulesRowDateDisabled(_name: string): Promise<boolean> {
-    return todo("modulesRowDateDisabled");
+  private modulesRowRoot(name: string): Locator {
+    // Scope to the name span so a module called "Alpha 2" never answers
+    // for "Alpha"; the row wrapper also carries the name as data.
+    const exact = this.modulesExactName(name);
+    return this.page
+      .locator('[data-testid="modules-row"]')
+      .filter({ has: this.page.locator('[data-testid="modules-row-name"]', { hasText: exact }) });
   }
-  async modulesRowOpenDates(_name: string): Promise<void> {
-    return todo("modulesRowOpenDates");
+  private modulesCardRoot(name: string): Locator {
+    const exact = this.modulesExactName(name);
+    return this.page
+      .locator('[data-testid="modules-board-card"]')
+      .filter({ has: this.page.locator('[data-testid="modules-board-card-name"]', { hasText: exact }) });
+  }
+  private modulesDatesCalendar(): Locator {
+    // The row and card calendars share the month/year caption and the
+    // day grid; only one is ever open at a time.
+    return this.page.locator(
+      '[data-testid="modules-row-dates-calendar"], [data-testid="modules-card-dates-control-calendar"]'
+    );
+  }
+  async modulesRowDateText(name: string): Promise<string> {
+    const trigger = this.modulesRowRoot(name).getByTestId("modules-row-dates-trigger");
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await trigger.innerText()).trim().replace(/\s+/g, " ");
+  }
+  async modulesRowDateDisabled(name: string): Promise<boolean> {
+    const trigger = this.modulesRowRoot(name).getByTestId("modules-row-dates-trigger");
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return trigger.isDisabled();
+  }
+  async modulesRowOpenDates(name: string): Promise<void> {
+    // The trigger toggles, so an already-open calendar is left alone:
+    // clicking again would shut it.
+    if (!(await this.modulesCalendarVisible())) {
+      await this.modulesRowRoot(name).getByTestId("modules-row-dates-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.modulesDatesCalendar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesCalendarVisible(): Promise<boolean> {
-    return todo("modulesCalendarVisible");
+    const calendar = this.modulesDatesCalendar();
+    if ((await calendar.count()) === 0) return false;
+    return calendar.first().isVisible();
   }
-  async modulesCalendarPickDay(_day: number): Promise<void> {
-    return todo("modulesCalendarPickDay");
+  async modulesCalendarPickDay(day: number): Promise<void> {
+    // The caption selects read back the month the grid shows, so the
+    // click lands on the intended cell even across month boundaries.
+    const calendar = this.modulesDatesCalendar().first();
+    await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const month0 = Number(await calendar.getByLabel("Month").inputValue());
+    const year = Number(await calendar.getByLabel("Year").inputValue());
+    const iso = `${year}-${String(month0 + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    await calendar.locator(`button[data-day="${iso}"]`).click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async modulesCalendarGotoMonth(_monthLabel: string, _yearLabel: string): Promise<void> {
-    return todo("modulesCalendarGotoMonth");
+  async modulesCalendarGotoMonth(monthLabel: string, yearLabel: string): Promise<void> {
+    const calendar = this.modulesDatesCalendar().first();
+    await calendar.getByLabel("Month").selectOption({ label: monthLabel }, { timeout: WebNewDriver.WAIT_MS });
+    await calendar.getByLabel("Year").selectOption({ label: yearLabel }, { timeout: WebNewDriver.WAIT_MS });
+    const shown = async (): Promise<[string, string]> => {
+      const month = (await calendar.getByLabel("Month").locator("option:checked").innerText()).trim();
+      const year = (await calendar.getByLabel("Year").locator("option:checked").innerText()).trim();
+      return [month, year];
+    };
+    await expect.poll(shown, { timeout: WebNewDriver.WAIT_MS }).toEqual([monthLabel, yearLabel]);
   }
-  async modulesCardDateText(_name: string): Promise<string> {
-    return todo("modulesCardDateText");
+  async modulesCardDateText(name: string): Promise<string> {
+    const trigger = this.modulesCardRoot(name).getByTestId("modules-card-dates-control-trigger");
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await trigger.innerText()).trim().replace(/\s+/g, " ");
   }
-  async modulesCardDateDisabled(_name: string): Promise<boolean> {
-    return todo("modulesCardDateDisabled");
+  async modulesCardDateDisabled(name: string): Promise<boolean> {
+    const trigger = this.modulesCardRoot(name).getByTestId("modules-card-dates-control-trigger");
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return trigger.isDisabled();
   }
-  async modulesCardOpenDates(_name: string): Promise<void> {
-    return todo("modulesCardOpenDates");
+  async modulesCardOpenDates(name: string): Promise<void> {
+    if (!(await this.modulesCalendarVisible())) {
+      await this.modulesCardRoot(name)
+        .getByTestId("modules-card-dates-control-trigger")
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.modulesDatesCalendar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesLastToast(): Promise<ModulesToast | null> {
-    return todo("modulesLastToast");
+    // The kit renders newest-first inside the toast stack, so the first
+    // card is the latest notice; a blank card (mid-dismiss) reads as
+    // none, and the await poll retries past it.
+    const cards = this.page.locator('[data-testid="toast-notification"]');
+    if ((await cards.count()) === 0) return null;
+    const newest = cards.first();
+    const title = (await newest.getByTestId("toast-title").first().innerText()).trim().replace(/\s+/g, " ");
+    const message = (await newest.getByTestId("toast-description").first().innerText()).trim().replace(/\s+/g, " ");
+    if (title === "" && message === "") return null;
+    return { title, message };
   }
-  async modulesAwaitToast(_text: string): Promise<void> {
-    return todo("modulesAwaitToast");
+  async modulesAwaitToast(text: string): Promise<void> {
+    await expect
+      .poll(async () => this.modulesLastToast(), { timeout: WebNewDriver.WAIT_MS })
+      .toMatchObject({ message: expect.stringContaining(text) } as Partial<ModulesToast>);
   }
-  async modulesPillText(_name: string): Promise<string> {
-    return todo("modulesPillText");
+  async modulesPillText(name: string): Promise<string> {
+    const pill = this.modulesRowRoot(name).getByTestId("modules-row-status");
+    await pill.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await pill.innerText()).trim();
   }
-  async modulesPillColor(_name: string): Promise<string> {
-    return todo("modulesPillColor");
+  async modulesPillColor(name: string): Promise<string> {
+    const pill = this.modulesRowRoot(name).getByTestId("modules-row-status");
+    await pill.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await pill.getAttribute("data-status-color")) ?? "";
   }
-  async modulesStatusDisabled(_name: string): Promise<boolean> {
-    return todo("modulesStatusDisabled");
+  async modulesStatusDisabled(name: string): Promise<boolean> {
+    const pill = this.modulesRowRoot(name).getByTestId("modules-row-status");
+    await pill.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return pill.isDisabled();
   }
-  async modulesOpenStatus(_name: string): Promise<void> {
-    return todo("modulesOpenStatus");
+  async modulesOpenStatus(name: string): Promise<void> {
+    // Opening twice would toggle the menu shut, so a visible menu is kept.
+    if ((await this.page.getByRole("menuitem").count()) === 0) {
+      await this.modulesRowRoot(name).getByTestId("modules-row-status").click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesStatusOptions(): Promise<string[]> {
-    return todo("modulesStatusOptions");
+    const options = this.page.getByRole("menuitem");
+    const count = await options.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      labels.push((await options.nth(index).innerText()).trim().replace(/\s+/g, " "));
+    }
+    return labels;
   }
-  async modulesPickStatus(_label: string): Promise<void> {
-    return todo("modulesPickStatus");
+  async modulesPickStatus(label: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: label }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator('[data-testid="modules-row-status"]')
+      .filter({ hasText: label })
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async modulesLeadState(_name: string): Promise<"avatar" | "none"> {
-    return todo("modulesLeadState");
+  async modulesLeadState(name: string): Promise<"avatar" | "none"> {
+    const lead = this.modulesRowRoot(name).getByTestId("modules-row-lead");
+    await lead.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await lead.getAttribute("data-lead-kind")) === "avatar" ? "avatar" : "none";
   }
-  async modulesLeadTooltip(_name: string): Promise<string | null> {
-    return todo("modulesLeadTooltip");
+  async modulesLeadTooltip(name: string): Promise<string | null> {
+    if ((await this.modulesLeadState(name)) !== "none") return null;
+    const marker = this.modulesRowRoot(name).getByTestId("modules-row-lead");
+    await marker.hover({ timeout: WebNewDriver.WAIT_MS });
+    const tip = this.page.getByRole("tooltip").first();
+    await tip.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const text = (await tip.innerText()).trim();
+    return text === "" ? null : text;
   }
-  async modulesStarVisible(_name: string): Promise<boolean> {
-    return todo("modulesStarVisible");
+  async modulesStarVisible(name: string): Promise<boolean> {
+    const root = this.modulesRowRoot(name);
+    await root.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await root.getByTestId("modules-row-star").count()) > 0;
   }
-  async modulesStarSelected(_name: string): Promise<boolean> {
-    return todo("modulesStarSelected");
+  async modulesStarSelected(name: string): Promise<boolean> {
+    const star = this.modulesRowRoot(name).getByTestId("modules-row-star");
+    await star.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await star.getAttribute("aria-pressed")) === "true";
   }
-  async modulesToggleStar(_name: string): Promise<void> {
-    return todo("modulesToggleStar");
+  async modulesToggleStar(name: string): Promise<void> {
+    await this.modulesRowRoot(name).getByTestId("modules-row-star").click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(async () => this.modulesLastToast(), { timeout: WebNewDriver.WAIT_MS }).not.toBeNull();
   }
   async modulesFavoritesExpanded(): Promise<boolean> {
-    return todo("modulesFavoritesExpanded");
+    // The section mounts only once a favorite exists; before the first
+    // favorite there is no toggle at all, which reads as collapsed.
+    const toggle = this.page.getByTestId("favorites-section-toggle");
+    if ((await toggle.count()) === 0) return false;
+    return (await toggle.first().getAttribute("aria-expanded")) === "true";
   }
   /** The live or archived row whose own name span carries exactly `name`. */
   private modulesMenuRow(name: string): Locator {

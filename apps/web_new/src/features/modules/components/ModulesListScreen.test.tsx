@@ -63,6 +63,7 @@ interface Harness {
   projectDelayMs: number;
   projectStatus: number;
   roles: Record<string, number>;
+  rolesStatus: number;
   modulesDelayMs: number;
   modulesStatus: number;
   meStatus: number;
@@ -160,6 +161,7 @@ beforeEach(() => {
     projectDelayMs: 0,
     projectStatus: 200,
     roles: { [MODULES_PROJECT_ID]: 20 },
+    rolesStatus: 200,
     modulesDelayMs: 0,
     modulesStatus: 200,
     meStatus: 200,
@@ -174,7 +176,7 @@ beforeEach(() => {
       if (harness.projectDelayMs > 0) await sleep(harness.projectDelayMs);
       return jsonResponse(url, harness.projectStatus, harness.project);
     }
-    if (url.endsWith("/project-roles/")) return jsonResponse(url, 200, harness.roles);
+    if (url.endsWith("/project-roles/")) return jsonResponse(url, harness.rolesStatus, harness.roles);
     if (url.endsWith("/api/workspaces/acme/members/")) {
       return jsonResponse(url, 200, [
         directoryMember(ME_ID, "Rich Owner", "123e4567-e89b-12d3-a456-426614174101"),
@@ -607,6 +609,18 @@ describe("ModulesListScreen", () => {
         "Pat Member",
       ]);
     });
+  });
+
+  it("locks the row accessories while the role read fails", async () => {
+    // An unreadable standing fails closed: the rows settle read-only
+    // with no star rather than guessing the viewer may edit.
+    harness.rolesStatus = 500;
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    const row = screen.getAllByTestId("modules-row")[0]!;
+    expect(within(row).getByTestId("modules-row-dates-trigger")).toBeDisabled();
+    expect(within(row).getByTestId("modules-row-status")).toBeDisabled();
+    expect(within(row).queryByTestId("modules-row-star")).not.toBeInTheDocument();
   });
 
   it("keeps the controls usable before the viewer resolves, without a You row", async () => {

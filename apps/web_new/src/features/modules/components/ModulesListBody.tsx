@@ -23,6 +23,7 @@ import * as React from "react";
 
 import type { ModulesLayout } from "../lib/moduleLayouts.js";
 import { resolveModuleLead } from "../lib/moduleIdentity.js";
+import { canEditModule, canShowModuleStar } from "../lib/modulePermissions.js";
 import { moduleBoardGridClass } from "../lib/modulePeek.js";
 import {
   DEFAULT_MODULE_SORT,
@@ -33,6 +34,10 @@ import {
   type ModuleSort,
 } from "../lib/moduleListControls.js";
 import { useModuleListContext } from "./moduleListContext.js";
+import { ModuleDateControl } from "./accessories/ModuleDateControl.js";
+import { ModuleRowAccessories } from "./accessories/ModuleRowAccessories.js";
+import { ModuleStarButton } from "./accessories/ModuleStarButton.js";
+import { ModuleStatusControl } from "./accessories/ModuleStatusControl.js";
 import { ModuleBoardCard } from "./ModuleBoardCard.js";
 import { ModuleListRow, moduleRowHoverClass } from "./ModuleListRow.js";
 import { ModulesNoMatch } from "./ModulesNoMatch.js";
@@ -69,6 +74,11 @@ export interface ModulesListBodyProps extends Partial<ModulesListNarrowing> {
    * absent, every card shows the no-lead mark.
    */
   members?: readonly WorkspaceMember[] | undefined;
+  /**
+   * The viewer's project role number (§4); the accessories read their
+   * standing from it. Absent, rows and cards render read-only.
+   */
+  memberRole?: number | null | undefined;
 }
 
 export interface ModuleBodyRowOptions {
@@ -77,9 +87,14 @@ export interface ModuleBodyRowOptions {
   onOpenPeek: ((moduleId: string) => void) | undefined;
   rowMenu: ((module: ModuleRow) => React.ReactNode) | undefined;
   members: readonly WorkspaceMember[] | undefined;
+  memberRole: number | null | undefined;
 }
 
-/** One rendered module in the list or board layout; later slices extend both. */
+/**
+ * One rendered module in the list or board layout. Slice E fills the
+ * accessory slots: the row's trailing group (dates, status, lead, star)
+ * and the card's status, date and favorite slots (§4, MOD-013–016).
+ */
 export function renderModule(
   layout: ModulesLayout,
   workspaceSlug: string,
@@ -91,15 +106,48 @@ export function renderModule(
   // The quick menu (slice H) rides the rowMenu slot on every layout: the
   // card mounts it once, the list row mounts it twice — the narrow-screen
   // trigger in `menu`, the hover-revealed desktop trigger in `trailing` —
-  // with exactly one visible per breakpoint.
+  // with exactly one visible per breakpoint. Slice E's accessories share
+  // `trailing`, ahead of the desktop trigger.
   const menu = options?.rowMenu?.(module);
+  const standing = { memberRole: options?.memberRole ?? null, archived: options?.archived ?? false };
   if (layout === "board") {
     const lead = resolveModuleLead(module, options?.members);
+    const cardEditable = canEditModule(standing);
     return (
       <ModuleBoardCard
         key={module.id}
         {...shared}
         lead={lead.kind === "avatar" ? lead.person : null}
+        statusControl={
+          <ModuleStatusControl
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            module={module}
+            disabled={!cardEditable}
+            testId="modules-card-status-pill"
+          />
+        }
+        dates={
+          <ModuleDateControl
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            module={module}
+            disabled={!cardEditable}
+            testId="modules-card-dates-control"
+          />
+        }
+        {...(canShowModuleStar(standing)
+          ? {
+              favorite: (
+                <ModuleStarButton
+                  workspaceSlug={workspaceSlug}
+                  projectId={projectId}
+                  module={module}
+                  testId="modules-card-star"
+                />
+              ),
+            }
+          : {})}
         onOpenPeek={options?.onOpenPeek}
         {...(menu === undefined ? {} : { menu })}
       />
@@ -121,7 +169,19 @@ export function renderModule(
       archived={options?.archived}
       alwaysShowActions={options?.alwaysShowActions}
       onOpenPeek={options?.onOpenPeek}
-      trailing={desktopMenu}
+      trailing={
+        <>
+          <ModuleRowAccessories
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            module={module}
+            memberRole={standing.memberRole}
+            archived={standing.archived}
+            members={options?.members}
+          />
+          {desktopMenu}
+        </>
+      }
       {...(menu === undefined ? {} : { menu })}
     />
   );
@@ -142,6 +202,7 @@ export function ModulesListBody({
   alwaysShowActions,
   rowMenu,
   members,
+  memberRole,
 }: ModulesListBodyProps): React.ReactElement {
   // The screen provides the list context; props stay available so a host
   // (the archived body, tests) can drive the body on its own.
@@ -166,7 +227,7 @@ export function ModulesListBody({
     );
   }
 
-  const rowOptions: ModuleBodyRowOptions = { archived, alwaysShowActions, onOpenPeek, rowMenu, members };
+  const rowOptions: ModuleBodyRowOptions = { archived, alwaysShowActions, onOpenPeek, rowMenu, members, memberRole };
   const listClass = layout === "board" ? moduleBoardGridClass({ peekOpen: peekModuleId !== null }) : "flex flex-col";
   return (
     <div

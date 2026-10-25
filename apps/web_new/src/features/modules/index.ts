@@ -23,6 +23,15 @@ export {
   moduleViewEnabled,
 } from "./api/projectFacts.js";
 export { modulesListQueryOptions } from "./api/queries.js";
+export { ModuleDateControl, type ModuleDateControlProps } from "./components/accessories/ModuleDateControl.js";
+export {
+  ModuleLeadMark,
+  MODULE_NO_LEAD_TOOLTIP,
+  type ModuleLeadMarkProps,
+} from "./components/accessories/ModuleLeadMark.js";
+export { ModuleRowAccessories, type ModuleRowAccessoriesProps } from "./components/accessories/ModuleRowAccessories.js";
+export { ModuleStarButton, type ModuleStarButtonProps } from "./components/accessories/ModuleStarButton.js";
+export { ModuleStatusControl, type ModuleStatusControlProps } from "./components/accessories/ModuleStatusControl.js";
 export { ModuleBoardCard, type ModuleCardLead, type ModuleBoardCardProps } from "./components/ModuleBoardCard.js";
 export { ModulePeekPanel, modulePeekSummary, type ModulePeekPanelProps } from "./components/ModulePeekPanel.js";
 export {
@@ -371,6 +380,7 @@ export {
   moduleInstantDay,
   moduleInstantReading,
   moduleOffsetChip,
+  moduleRangeClick,
   moduleRangeDurationDays,
   moduleRangeReading,
   moduleZoneOffsetMinutes,
@@ -378,6 +388,23 @@ export {
   userZoneDiffers,
   type ModuleDateRange,
   type ModuleInstantReading,
+  type ModuleRangePick,
   type ModuleZoneDay,
   type ModuleZoneReading,
 } from "./lib/moduleDates.js";
+export { canEditModule, canShowModuleStar, type ModuleStanding } from "./lib/modulePermissions.js";
+export {
+  applyModuleInlinePatch,
+  useModuleInlineSave,
+  type ModuleInlinePatch,
+  type ModuleInlineSave,
+  type ModuleInlineSaveTarget,
+} from "./lib/useModuleInlineSave.js";
+export {
+  flipModuleFavorite,
+  flipModuleFavoriteInList,
+  MODULE_FAVORITE_ADDED,
+  MODULE_FAVORITE_REMOVED,
+  useModuleFavorite,
+  type ModuleFavoriteTarget,
+} from "./lib/useModuleFavorite.js";

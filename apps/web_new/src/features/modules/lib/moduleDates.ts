@@ -51,6 +51,32 @@ export function formatModuleDay(day: ModuleZoneDay): string {
   return `${MONTH_SHORT[day.month - 1]} ${String(day.day).padStart(2, "0")}, ${day.year}`;
 }
 
+/** The row/card calendar selection: one picked day, or an open range end. */
+export interface ModuleRangePick {
+  start: string | null;
+  end: string | null;
+}
+
+/**
+ * Next selection after a row/card calendar click (§4.1). An empty calendar
+ * anchors the start; a lone start extends to the clicked day (or
+ * re-anchors when the click lands before it); clicking the lone selected
+ * day again clears both sides, which the control saves as empty dates.
+ * A complete range re-anchors: the click becomes the new lone start and
+ * the next click sets the end. Every click changes the selection, so
+ * every pick saves — there is deliberately no silent click.
+ */
+export function moduleRangeClick(range: ModuleRangePick, day: string): ModuleRangePick {
+  const { start, end } = range;
+  if (start === null || start === "") return { start: day, end: null };
+  if (end === null || end === "") {
+    if (day === start) return { start: null, end: null };
+    if (day < start) return { start: day, end: null };
+    return { start, end: day };
+  }
+  return { start: day, end: null };
+}
+
 /**
  * The range text. A full range reads `Oct 15 - Oct 22, 2026` when it stays
  * inside one month and year, `Oct 30 - Nov 04, 2026` across months, and
