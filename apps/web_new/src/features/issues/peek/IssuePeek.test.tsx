@@ -39,6 +39,9 @@ const CHILD = "523e4567-e89b-12d3-a456-426614174005";
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const ADA = "823e4567-e89b-12d3-a456-426614174007";
 const STATE = "423e4567-e89b-12d3-a456-426614174003";
+const ESTIMATE_PROJECT_SYSTEM = "c13e4567-e89b-12d3-a456-42661417400f";
+const ESTIMATE_POINT_ONE = "c23e4567-e89b-12d3-a456-426614174010";
+const ESTIMATE_POINT_TWO = "c33e4567-e89b-12d3-a456-426614174011";
 
 function projectRow() {
   return {
@@ -253,6 +256,10 @@ interface PeekExtras {
   issueKey?: string | null;
   /** Seed the detail cache empty (defensive empty-resolution path). */
   emptyDetail?: boolean;
+  /** The estimate the peeked issue carries (EST-022). */
+  estimatePoint?: string | null;
+  /** Answer the project estimate read with one points system. */
+  estimates?: boolean;
   /** Mount with the peek closed (the refocus test opens it after focusing). */
   startClosed?: boolean;
   /** Mount embedded (Escape and outside-click close nothing). */
@@ -400,6 +407,31 @@ function renderPeek(extras: PeekExtras = {}): PeekHarness {
     if (url.includes("/states/")) {
       return answer(200, JSON.stringify([STATE_ROW]));
     }
+    if (url.includes(`/projects/${PROJECT}/estimates/`)) {
+      if (extras.estimates !== true) return answer(200, "[]");
+      return answer(
+        200,
+        JSON.stringify([
+          {
+            id: ESTIMATE_PROJECT_SYSTEM,
+            workspace: UUID,
+            project: PROJECT,
+            name: "Points",
+            description: "",
+            type: "points",
+            last_used: true,
+            points: [
+              { id: ESTIMATE_POINT_ONE, key: 1, value: "1", description: "" },
+              { id: ESTIMATE_POINT_TWO, key: 2, value: "2", description: "" },
+            ],
+            created_at: "2024-01-02T03:04:05Z",
+            updated_at: "2024-02-03T04:05:06Z",
+            created_by: null,
+            updated_by: null,
+          },
+        ])
+      );
+    }
     if (url.includes(`/projects/${PROJECT}/members/`)) {
       return answer(200, JSON.stringify(PROJECT_MEMBERS));
     }
@@ -475,6 +507,7 @@ function renderPeek(extras: PeekExtras = {}): PeekHarness {
             ...(extras.epic === true ? { is_epic: true } : {}),
             ...(extras.archivedIssue === true ? { archived_at: "2024-03-04" } : {}),
             ...(extras.syncedIssue === true ? { is_synced: true } : {}),
+            ...(extras.estimatePoint === undefined ? {} : { estimate_point: extras.estimatePoint }),
           })
         )
       );
@@ -490,7 +523,10 @@ function renderPeek(extras: PeekExtras = {}): PeekHarness {
     if (url.endsWith(`/projects/${PROJECT}/`)) {
       const code = extras.projectStatus ?? 200;
       if (code !== 200) return answer(code, "{}");
-      return answer(200, JSON.stringify(detailsRow()));
+      return answer(
+        200,
+        JSON.stringify(detailsRow({ estimate: extras.estimates === true ? ESTIMATE_PROJECT_SYSTEM : null }))
+      );
     }
     if (url.endsWith("/projects/")) {
       return answer(200, JSON.stringify([projectRow()]));
@@ -1061,6 +1097,38 @@ describe("IssuePeek standing", () => {
   it("reads only on archived issues", async () => {
     renderPeek({ details: {}, archivedIssue: true });
     expect(await screen.findByRole("heading", { name: "Fix login" })).toBeInTheDocument();
+  });
+
+  it("shows an archived item's set estimate read-only (NEWFRONT-349 intended, EST-022)", async () => {
+    renderPeek({ details: {}, archivedIssue: true, estimates: true, estimatePoint: ESTIMATE_POINT_TWO });
+    await screen.findByTestId("issue-preview");
+    const row = await screen.findByRole("group", { name: "Estimate" });
+    const trigger = within(row).getByRole("button");
+    await waitFor(() => expect(trigger).toHaveTextContent("2"));
+    expect(trigger).toBeDisabled();
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(screen.queryAllByRole("textbox", { name: "Work item title" })).toHaveLength(0);
+  });
+
+  it("shows a guest's set estimate read-only in the peek (EST-022)", async () => {
+    renderPeek({
+      details: { member_role: null },
+      estimates: true,
+      estimatePoint: ESTIMATE_POINT_ONE,
+    });
+    await screen.findByRole("heading", { name: "Fix login" });
+    const row = await screen.findByRole("group", { name: "Estimate" });
+    const trigger = within(row).getByRole("button");
+    await waitFor(() => expect(trigger).toHaveTextContent("1"));
+    expect(trigger).toBeDisabled();
+  });
+
+  it("shows the empty placeholder on an unestimated peek (EST-022)", async () => {
+    renderPeek({ details: {}, estimates: true, estimatePoint: null });
+    await screen.findByTestId("issue-preview");
+    const row = await screen.findByRole("group", { name: "Estimate" });
+    expect(within(row).getByRole("button")).toHaveTextContent("None");
   });
 
   it("reads only on archived projects", async () => {

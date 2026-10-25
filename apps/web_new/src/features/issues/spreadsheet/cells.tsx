@@ -32,8 +32,7 @@ import {
   usePickerStates,
   usePickerWorkspaceMembers,
 } from "../../../shared/pickers/reference.js";
-import { selectActiveEstimate } from "@pidash/api-client";
-import { selectEstimateOptions } from "../../../shared/pickers/estimates.js";
+import { readOnlyEstimateLabel } from "../../../shared/pickers/estimates.js";
 import {
   countLabel,
   labelNamesTooltip,
@@ -620,11 +619,11 @@ function FrozenModules({ issue, context }: { issue: IssueListItem; context: Shee
 
 function FrozenEstimate({ issue, context }: { issue: IssueListItem; context: SheetCellContext }): React.ReactElement {
   const estimates = usePickerEstimates(context.workspaceSlug, context.projectId, true);
-  const system = estimates.data === undefined ? undefined : selectActiveEstimate(estimates.data);
   const value =
     issue.estimate_point === null || issue.estimate_point === undefined ? null : String(issue.estimate_point);
-  const option = system === undefined ? undefined : selectEstimateOptions(system).find((row) => row.id === value);
-  return <ReadOnlyProperty kind="estimate" value={option?.label ?? value} />;
+  // Before the systems land the stored id stands in, as it always has; the
+  // read then replaces it with the value's own label (EST-022).
+  return <ReadOnlyProperty kind="estimate" value={readOnlyEstimateLabel(estimates.data, value)} />;
 }
 
 export function formatDayOrBlank(iso: string | null): string {

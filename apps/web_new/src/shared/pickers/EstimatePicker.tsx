@@ -15,7 +15,7 @@ import { Hash } from "lucide-react";
 import * as React from "react";
 import { selectActiveEstimate } from "@pidash/api-client";
 
-import { NO_ESTIMATE_ID, selectEstimateOptions, type EstimateOption } from "./estimates.js";
+import { NO_ESTIMATE_ID, selectEstimateOptions, selectEstimateValueLabel, type EstimateOption } from "./estimates.js";
 import { usePickerEstimates } from "./reference.js";
 
 export interface EstimatePickerProps {
@@ -90,7 +90,12 @@ export function EstimatePicker({
 
   function defaultTrigger(): React.ReactElement<Record<string, unknown>> {
     const current = value === null ? undefined : options.find((option) => option.id === value);
-    const text = current?.label ?? placeholder;
+    // A point from a superseded system still names itself read-only
+    // (EST-022); an id no system lists keeps the placeholder, and so does
+    // the window before the list has answered.
+    const listed =
+      value === null || estimates.data === undefined ? undefined : selectEstimateValueLabel(estimates.data, value);
+    const text = value === null ? placeholder : (current?.label ?? listed ?? placeholder);
     if (iconOnly) {
       return (
         <IconButton label={text} variant={variant}>

@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
+import { workspaceScope } from "../../../core/query/index.js";
 import { WORKFLOW_FLAG } from "../edition/flags.js";
 import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import type { SheetCellContext } from "./cells.js";
@@ -592,6 +593,45 @@ describe("SheetPropertyCell", () => {
     clear.unmount();
     const blank = renderCell("estimate", frozen, issue({ estimate_point: undefined }));
     expect(within(blank.container).getByText("None")).toBeInTheDocument();
+  });
+
+  it("names a value that belongs to a superseded system read-only (EST-022)", async () => {
+    stubClient();
+    const superseded = [
+      {
+        id: ESTIMATE,
+        workspace: PROJECT,
+        project: PROJECT,
+        name: "Sizes",
+        description: "",
+        type: "categories",
+        last_used: false,
+        points: [{ id: "no-such-option", key: 1, value: "Large", description: "" }],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(workspaceScope(SLUG).concat("pickers", "estimates", PROJECT), superseded);
+    const { container } = render(
+      <QueryClientProvider client={queryClient}>
+        <table>
+          <tbody>
+            <tr>
+              <SheetPropertyCell
+                issue={issue({ estimate_point: "no-such-option" })}
+                column={column("estimate")}
+                context={context({ isRowReadOnly: () => true })}
+                rowIndex={0}
+                columnIndex={1}
+                onKeyDown={() => {}}
+              />
+            </tr>
+          </tbody>
+        </table>
+      </QueryClientProvider>
+    );
+    expect(within(container).getByText("Large")).toBeInTheDocument();
   });
 
   it("renders frozen dates and an unknown column as None", () => {

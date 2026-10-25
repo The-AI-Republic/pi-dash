@@ -9,7 +9,7 @@
 // choices persist in the browser. The component layer only renders what
 // these return.
 
-import type { IssueActivity, IssueComment } from "@pidash/api-client";
+import { isEstimateActivityField, type IssueActivity, type IssueComment } from "@pidash/api-client";
 
 import { formatMinutes } from "../../../shared/lib/formatDuration.js";
 
@@ -178,6 +178,11 @@ export function activitySentence(
   const created = activity.verb === "created";
   const value = activity.new_value ?? "";
   const previous = activity.old_value ?? "";
+  // Every estimate family writes its own field name (`estimate_points`,
+  // `estimate_categories`, `estimate_time`, ...) plus the legacy
+  // `estimate_point` rows, so the family is recognised by prefix: a
+  // categories install (and any future family) reads as history too.
+  if (isEstimateActivityField(activity.field)) return estimateSentence(previous, value);
   switch (activity.field) {
     case null:
       return activity.verb === "deleted" ? "deleted the work item." : "created the work item.";
@@ -194,10 +199,6 @@ export function activitySentence(
       return previous === "" ? `assigned the work item to ${value}.` : `removed ${previous} from the assignees.`;
     case "priority":
       return `set the priority to ${value}.`;
-    case "estimate_point":
-    case "estimate_points":
-    case "estimate_categories":
-      return value === "" ? "cleared the estimate." : `set the estimate to ${value}.`;
     case "parent":
       return value === "" ? `removed the parent ${previous}.` : `set the parent to ${value}.`;
     case "blocking":
@@ -240,6 +241,18 @@ export function activitySentence(
     default:
       return null;
   }
+}
+
+/**
+ * An estimate change as a sentence (EST-023). The pinned wording names the
+ * estimate point: a set or replacement reads "set the estimate point to <new
+ * value>", and the removal shape the server will send once NEWFRONT-345/348
+ * are fixed reads "removed the estimate point <old value>". Clearing records
+ * no entry today, so this removal branch only renders rows the server sends.
+ */
+function estimateSentence(previous: string, value: string): string {
+  if (value !== "") return `set the estimate point to ${value}.`;
+  return previous === "" ? "cleared the estimate." : `removed the estimate point ${previous}.`;
 }
 
 /** One of the four relation fields, each with its add and drop verbs. */

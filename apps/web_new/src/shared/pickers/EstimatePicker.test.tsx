@@ -220,6 +220,40 @@ describe("EstimatePicker", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
+  it("names a point from a superseded system read-only (EST-022)", async () => {
+    const orphanSystem = system({
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      type: "time",
+      last_used: false,
+      points: [point("99999999-9999-4999-8999-999999999999", 1, "90")],
+    });
+    const { queryClient } = harness([...POINTS_SYSTEM, orphanSystem]);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EstimatePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value="99999999-9999-4999-8999-999999999999"
+          preload
+          disabled
+          onChange={() => {}}
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("button", { name: "1h 30m" })).toBeDisabled();
+  });
+
+  it("shows the placeholder, not an id, until the list answers", () => {
+    const { queryClient } = harness(POINTS_SYSTEM, 200, true);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EstimatePicker workspaceSlug="acme" projectId={PROJECT} value={POINT_3} preload onChange={() => {}} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "None" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: POINT_3 })).not.toBeInTheDocument();
+  });
+
   it("supports icon-only and custom triggers", () => {
     const { queryClient } = harness(POINTS_SYSTEM);
     const { rerender } = render(

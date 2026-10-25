@@ -75,7 +75,7 @@ export { isCompletedModule, selectModuleOptions } from "./modules.js";
 export type { ModuleOption, ModuleOptionsInput } from "./modules.js";
 export { EstimatePicker } from "./EstimatePicker.js";
 export type { EstimatePickerProps } from "./EstimatePicker.js";
-export { NO_ESTIMATE_ID, selectEstimateOptions } from "./estimates.js";
+export { NO_ESTIMATE_ID, readOnlyEstimateLabel, selectEstimateOptions, selectEstimateValueLabel } from "./estimates.js";
 export type { EstimateOption } from "./estimates.js";
 export { IntakeStatePicker } from "./IntakeStatePicker.js";
 export type { IntakeStatePickerProps } from "./IntakeStatePicker.js";
