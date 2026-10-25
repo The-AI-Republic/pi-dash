@@ -144,6 +144,19 @@ store). `src/core/` holds `api` (the singleton HTTP client), `query`,
   Two consecutive green full runs are the bar for a shared change; a run that
   fails only with `Test timed out` under load is presumed a budget/queueing
   failure and must be re-run, not patched by skipping tests.
+- Scheduled full suite (`checks/full-suite.mjs`): the scheduler has 45 minutes
+  for web_new. That suite is ~19 000 tests and needs roughly 72 CPU-minutes,
+  so the result depends on how many cores the shared host actually grants it.
+  Measured on 2026-10-24, the shared 4-vCPU host was running other worktrees
+  at load 15-18 and granted it ~1.2 cores. The runner therefore oversubscribes
+  vitest's fork pool when the host has memory for it: 16 workers on a 4-vCPU
+  host with 30 GiB completed 1 672 files and 19 072 tests in 38 min at load
+  ~29, while the same pool on an 8-core / 8 GiB host spent 2.5 GiB and turned
+  green files into `Test timed out`. The pool is sized at 1.5 GiB per worker
+  and is never raised above vitest's CPU-count default when memory cannot
+  support it. If the scheduler starts timing out again, check the host's load
+  and free memory before blaming a test file; the default reporter's tail
+  names the file that was still in flight when the run was stopped.
 - Contract (`PIDASH_CONTRACT_BASE_URL=…`): api-client suites against a
   scratch Django seeded with `packages/api-client/contract/seed-contracts.py`.
 - E2E smoke (`pnpm --filter web_new test:e2e`, env-gated): Playwright,
