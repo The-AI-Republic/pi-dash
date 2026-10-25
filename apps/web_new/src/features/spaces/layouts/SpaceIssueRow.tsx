@@ -289,6 +289,14 @@ export function SpaceIssueRow({
     event.preventDefault();
     onOpenIssue(issue);
   };
+  // A focused link already activates on Enter; Space is the other key people
+  // press on a focused control, so honour it too and stop the page scroll.
+  const openFromKeyboard = (event: React.KeyboardEvent<HTMLAnchorElement>): void => {
+    if (event.key !== " ") return;
+    if (onOpenIssue === undefined) return;
+    event.preventDefault();
+    onOpenIssue(issue);
+  };
   if (card) {
     return (
       <div
@@ -305,6 +313,7 @@ export function SpaceIssueRow({
             title={issue.name}
             aria-current={selected ? "true" : undefined}
             onClick={open}
+            onKeyDown={openFromKeyboard}
             onFocus={showTitle}
             onBlur={hideTitle}
             className="flex cursor-pointer flex-col gap-(--space-1) px-(--space-3) py-(--space-2) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
@@ -346,6 +355,7 @@ export function SpaceIssueRow({
             title={issue.name}
             aria-current={selected ? "true" : undefined}
             onClick={open}
+            onKeyDown={openFromKeyboard}
             onFocus={showTitle}
             onBlur={hideTitle}
             className="text-body min-w-0 cursor-pointer truncate rounded-(--radius-control) text-(--text) hover:underline focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"

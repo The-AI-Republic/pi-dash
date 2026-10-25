@@ -208,6 +208,45 @@ describe("SpaceIssueRow read-only and open behavior (SPC-031/032)", () => {
     expect(preventedByCard).toBe(false);
   });
 
+  it("opens from the focused open region with the Space key too", () => {
+    const onOpenIssue = vi.fn();
+    const issue = richIssue();
+    const { rerender } = renderCard({ issue, onOpenIssue });
+    const listLink = screen.getByRole("link");
+    listLink.focus();
+    expect(listLink).toHaveFocus();
+    expect(fireEvent.keyDown(listLink, { key: " " })).toBe(false);
+    expect(onOpenIssue).toHaveBeenCalledTimes(1);
+    expect(onOpenIssue).toHaveBeenCalledWith(issue);
+
+    rerender(
+      <SpaceIssueRow
+        issue={issue}
+        state={TODO}
+        labels={LABELS}
+        projectIdentifier="SPC"
+        issueHref={issueHref(issue)}
+        card
+        onOpenIssue={onOpenIssue}
+      />
+    );
+    const cardLink = screen.getByRole("link");
+    cardLink.focus();
+    expect(cardLink).toHaveFocus();
+    expect(fireEvent.keyDown(cardLink, { key: " " })).toBe(false);
+    expect(onOpenIssue).toHaveBeenCalledTimes(2);
+    expect(onOpenIssue).toHaveBeenLastCalledWith(issue);
+
+    fireEvent.keyDown(cardLink, { key: "Enter" });
+    expect(onOpenIssue).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves Space to the browser when the row has no open action", () => {
+    renderCard();
+    const link = screen.getByRole("link");
+    expect(fireEvent.keyDown(link, { key: " " })).toBe(true);
+  });
+
   it("has no draggable cards, drag handles or inline edit controls", () => {
     renderCard({ card: true });
     const card = screen.getByTestId("space-board-card");
