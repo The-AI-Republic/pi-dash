@@ -66,6 +66,7 @@ interface Harness {
   pages: PageRow[];
   pagesStatus: number;
   pagesCalls: number;
+  pagesHold: Promise<void> | null;
   members: Record<string, unknown>[];
   meStatus: number;
   meCalls: number;
@@ -101,6 +102,7 @@ beforeEach(() => {
     pages: [],
     pagesStatus: 200,
     pagesCalls: 0,
+    pagesHold: null,
     members: [makeWorkspaceMember(PAGES_USER_ID, "Ada Byron")],
     meStatus: 200,
     meCalls: 0,
@@ -216,6 +218,7 @@ beforeEach(() => {
         });
       }
       harness.pagesCalls += 1;
+      if (harness.pagesHold !== null) await harness.pagesHold;
       return jsonResponse(url, harness.pagesStatus, harness.pages);
     }
     throw new Error(`unexpected request: ${url}`);
@@ -320,6 +323,39 @@ describe("PagesListScreen", () => {
     expect(screen.queryByTestId("pages-list-skeleton")).not.toBeInTheDocument();
     expect(screen.queryByTestId("pages-empty-state")).not.toBeInTheDocument();
     expect(harness.pagesCalls).toBe(1);
+  });
+
+  it("shows a lightweight refresh indication while a refetch runs over cached rows and clears it after", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    harness.pages = [makePageRow({ name: "Cached page" })];
+    client.setQueryData(pageKeys.list("acme", PAGES_PROJECT_ID), harness.pages);
+    let release = (): void => undefined;
+    harness.pagesHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    renderProject(PAGES_PROJECT_ID, client);
+    expect(await screen.findByRole("link", { name: "Cached page" })).toBeInTheDocument();
+    expect(screen.queryByTestId("pages-refresh-status")).not.toBeInTheDocument();
+
+    let refetch: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      refetch = client.refetchQueries({ queryKey: pageKeys.list("acme", PAGES_PROJECT_ID) });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByTestId("pages-refresh-status")).toBeInTheDocument();
+    expect(screen.getByTestId("pages-refresh-status")).toHaveTextContent("Refreshing pages");
+    expect(screen.getByRole("link", { name: "Cached page" })).toBeInTheDocument();
+    expect(screen.queryByTestId("pages-list-skeleton")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pages-empty-state")).not.toBeInTheDocument();
+
+    await act(async () => {
+      release();
+      await refetch;
+    });
+
+    await waitFor(() => expect(screen.queryByTestId("pages-refresh-status")).not.toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "Cached page" })).toBeInTheDocument();
   });
 
   it("renders rows in modified-descending order once loaded", async () => {

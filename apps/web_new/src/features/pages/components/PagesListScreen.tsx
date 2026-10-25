@@ -8,6 +8,7 @@
 // header carries the two creation entries, rows carry the favourite star
 // and the shared row menu, and every write re-reads the one collection.
 
+import { Spinner } from "@pidash/kit";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
@@ -126,6 +127,7 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   const canMovePages = isPageMoveEnabled(edition);
   const canStar = isProjectAuthorized(role);
   const canManageFeatures = isProjectAdmin(role);
+  const refreshing = pages.isFetching && !pages.isPending && rows.length > 0;
   const searchActive = client.query.trim() !== "";
   const filtersActive = hasPageFilters(client.filters);
   const quickCreate = useQuickCreatePage(workspaceSlug, projectId, quickCreateAccess(tab));
@@ -197,6 +199,14 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
                   currentUserId={currentUserId}
                   onFiltersChange={(filters) => update({ filters })}
                 />
+                {refreshing ? (
+                  <span
+                    data-testid="pages-refresh-status"
+                    className="text-caption inline-flex items-center gap-(--space-1) text-(--text-muted)"
+                  >
+                    <Spinner size="small" label="Refreshing pages" />
+                  </span>
+                ) : null}
               </div>
               <PagesFilterChips
                 filters={client.filters}
