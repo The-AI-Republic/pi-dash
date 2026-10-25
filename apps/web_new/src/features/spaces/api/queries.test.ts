@@ -9,6 +9,7 @@ import {
   resolveLegacySpaceAnchor,
   spaceGroupQueryOptions,
   spaceInstanceQueryOptions,
+  spaceIssueDetailQueryOptions,
   spaceIssuesQueryOptions,
   spaceLabelsQueryOptions,
   spaceMetaQueryOptions,
@@ -63,6 +64,7 @@ describe("space query options", () => {
       spaceInstanceQueryOptions(client),
       spaceSettingsQueryOptions(client, "anchor-1"),
       spaceIssuesQueryOptions(client, "anchor-1"),
+      spaceIssueDetailQueryOptions(client, "anchor-1", UUID),
       spaceGroupQueryOptions(client, "anchor-1", {}, UUID, "50:1:0"),
       spaceStatesQueryOptions(client, "anchor-1"),
       spaceLabelsQueryOptions(client, "anchor-1"),
@@ -73,6 +75,54 @@ describe("space query options", () => {
       expect(option.refetchOnWindowFocus).toBe(false);
       expect(option.refetchOnReconnect).toBe(false);
     }
+  });
+
+  it("reads one issue's detail for the overlay, gated on a uuid (SPC-040/043)", async () => {
+    const urls: string[] = [];
+    const detail = {
+      id: UUID,
+      name: "Public issue",
+      state_id: null,
+      sort_order: 1,
+      estimate_point: null,
+      priority: "high",
+      start_date: null,
+      target_date: "2020-01-15",
+      sequence_id: 7,
+      project_id: UUID,
+      parent_id: null,
+      created_by: null,
+      state__group: "unstarted",
+      cycle_id: null,
+      assignee_ids: [],
+      label_ids: [],
+      module_ids: [],
+      vote_items: [],
+      reaction_items: [],
+      description_json: null,
+      description_html: "<p>Words</p>",
+      description_stripped: "Words",
+      description_binary: null,
+    };
+    const client = clientWith(async (url) => {
+      urls.push(url);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: () => Promise.resolve(JSON.stringify(detail)),
+      };
+    });
+    const options = spaceIssueDetailQueryOptions(client, "anchor-1", UUID);
+    expect(options.queryKey).toEqual(["spaces", "anchor", "anchor-1", "detail", UUID]);
+    expect(options.enabled).toBe(true);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    await expect(options.queryFn!({} as never)).resolves.toMatchObject({ name: "Public issue" });
+    expect(new URL(urls[0] ?? "", "https://api.test").pathname).toBe(`/api/public/anchor/anchor-1/issues/${UUID}/`);
+    expect(spaceIssueDetailQueryOptions(client, "anchor-1", "SPC-42").enabled).toBe(false);
+    expect(spaceIssueDetailQueryOptions(client, "bad anchor", UUID).enabled).toBe(false);
   });
 
   it("reads labels once per visit through the public anchor endpoint (SPC-028)", async () => {

@@ -19,6 +19,24 @@ export { SPACE_SIGN_OUT_ACTION, SpaceAccountMenu } from "./components/SpaceAccou
 export type { SpaceAccountMenuProps } from "./components/SpaceAccountMenu.js";
 export { SpaceAccountSlot } from "./components/SpaceAccountSlot.js";
 export type { SpaceAccountSlotProps } from "./components/SpaceAccountSlot.js";
+export { SpaceIssuePeek } from "./peek/SpaceIssuePeek.js";
+export type { SpaceIssuePeekProps } from "./peek/SpaceIssuePeek.js";
+export {
+  SPACE_PEEK_PRESENTATIONS,
+  SpacePeekModeSwitch,
+  spacePeekPresentationLabel,
+} from "./peek/SpacePeekModeSwitch.js";
+export type { SpacePeekModeSwitchProps, SpacePeekPresentation } from "./peek/SpacePeekModeSwitch.js";
+export { SpaceOverlayProperties, spaceOverlayPriority, spaceOverlayState } from "./peek/SpaceOverlayProperties.js";
+export type { SpaceOverlayPropertiesProps } from "./peek/SpaceOverlayProperties.js";
+export { useClipboardWritePermission } from "./lib/clipboard.js";
+export {
+  formatSpacePropertyDate,
+  isSpaceDueOverdue,
+  isSpaceIssueId,
+  spacePeekCloseHref,
+  spacePeekOpenHref,
+} from "./lib/peek.js";
 export { SpaceLandingAccount } from "./components/SpaceLandingAccount.js";
 export type { SpaceLandingAccountProps } from "./components/SpaceLandingAccount.js";
 export {

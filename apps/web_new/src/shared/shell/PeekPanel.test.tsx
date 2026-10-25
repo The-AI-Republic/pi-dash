@@ -306,6 +306,22 @@ describe("peek guards", () => {
     }
   });
 
+  it("ignores the caller's own dialog role while a picker inside it still guards", async () => {
+    const { peekEscapeBlocked, peekOutsideBlocked } = await import("./PeekPanel.js");
+    const { unmount } = setup({ role: "dialog" });
+    const panel = screen.getByTestId("issue-preview");
+    expect(panel).toHaveAttribute("role", "dialog");
+    expect(peekEscapeBlocked(panel)).toBe(false);
+    expect(peekOutsideBlocked(document.body, panel)).toBe(false);
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    panel.appendChild(menu);
+    expect(peekEscapeBlocked(panel)).toBe(true);
+    menu.remove();
+    expect(peekEscapeBlocked(panel)).toBe(false);
+    unmount();
+  });
+
   it("reports non-elements and selects as they are", async () => {
     const { peekEscapeBlocked, peekOutsideBlocked } = await import("./PeekPanel.js");
     expect(peekOutsideBlocked(null)).toBe(false);

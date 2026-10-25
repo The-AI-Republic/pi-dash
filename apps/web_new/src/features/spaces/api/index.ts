@@ -9,6 +9,7 @@ export {
   readSpaceViewer,
   resolveLegacySpaceAnchor,
   spaceInstanceQueryOptions,
+  spaceIssueDetailQueryOptions,
   spaceIssuesQueryOptions,
   spaceLabelsQueryOptions,
   spaceSettingsQueryOptions,

@@ -15,6 +15,8 @@ export const spaceKeys = {
     ["spaces", "anchor", anchor, "issues", filterSignature, "group", stateId] as const,
   states: (anchor: string) => ["spaces", "anchor", anchor, "states"] as const,
   labels: (anchor: string) => ["spaces", "anchor", anchor, "labels"] as const,
+  /** One issue's detail for the open overlay; keyed by anchor and issue. */
+  detail: (anchor: string, issueId: string) => ["spaces", "anchor", anchor, "detail", issueId] as const,
   meta: (anchor: string) => ["spaces", "anchor", anchor, "meta"] as const,
   legacy: (workspaceSlug: string, projectId: string) => ["spaces", "legacy", workspaceSlug, projectId] as const,
 } as const;

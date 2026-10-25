@@ -34,21 +34,30 @@ function isTypingTarget(node: Element | null): boolean {
 }
 
 /**
- * Whether an Escape close must stand down: focus sits in an editable
- * control, or a dialog, menu, or picker is open somewhere.
+ * Whether an overlay other than `own` itself is open. Only the caller's
+ * own panel is discounted — a picker or nested peek inside it still
+ * guards the close.
  */
-export function peekEscapeBlocked(): boolean {
-  if (isTypingTarget(document.activeElement)) return true;
-  return document.querySelector(OPEN_OVERLAY) !== null;
+function otherOverlayOpen(own: Element | null | undefined): boolean {
+  return Array.from(document.querySelectorAll(OPEN_OVERLAY)).some((node) => node !== own);
 }
 
 /**
- * Whether an outside press must stand down: an overlay is open
- * somewhere, even when the press itself lands outside it.
+ * Whether an Escape close must stand down: focus sits in an editable
+ * control, or a dialog, menu, or picker is open besides this panel.
  */
-export function peekOutsideBlocked(target: EventTarget | null): boolean {
+export function peekEscapeBlocked(own?: Element | null | undefined): boolean {
+  if (isTypingTarget(document.activeElement)) return true;
+  return otherOverlayOpen(own);
+}
+
+/**
+ * Whether an outside press must stand down: an overlay is open besides
+ * this panel, even when the press itself lands outside it.
+ */
+export function peekOutsideBlocked(target: EventTarget | null, own?: Element | null | undefined): boolean {
   if (target instanceof Element && target.closest(OUTSIDE_IGNORED) !== null) return true;
-  return document.querySelector(OPEN_OVERLAY) !== null;
+  return otherOverlayOpen(own);
 }
 
 export interface PeekPanelProps {
@@ -58,6 +67,13 @@ export interface PeekPanelProps {
   testId?: string | undefined;
   /** Presentation; side-peek unless the caller switches (ISS-166). */
   layout?: PeekLayout | undefined;
+  /**
+   * Accessibility role for the panel. Work-item peeks on workspace
+   * surfaces keep the plain complementary region; a surface that must be
+   * a modal dialog (the public issue overlay) passes `"dialog"` with a
+   * name, and its own guards then ignore the panel itself.
+   */
+  role?: "dialog" | undefined;
   /** A nested panel paints above its parent. */
   stacked?: boolean | undefined;
   /** Context line above the title (e.g. the work-item key). */
@@ -97,6 +113,7 @@ export function PeekPanel({
   testId,
   layout = "side",
   stacked = false,
+  role,
   eyebrow,
   title,
   titleLabel,
@@ -123,7 +140,7 @@ export function PeekPanel({
     // Capture runs before overlay key handling, so an open dialog still
     // guards the peek while Escape dismisses the dialog itself.
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape" || suppressEscape || peekEscapeBlocked()) return;
+      if (event.key !== "Escape" || suppressEscape || peekEscapeBlocked(panelRef.current)) return;
       onClose();
     };
     document.addEventListener("keydown", onKeyDown, true);
@@ -135,7 +152,11 @@ export function PeekPanel({
     if (onOutsideClick === undefined) return;
     const onPointerDown = (event: PointerEvent): void => {
       const target = event.target;
-      if (target instanceof Node && panelRef.current?.contains(target) !== true && !peekOutsideBlocked(target)) {
+      if (
+        target instanceof Node &&
+        panelRef.current?.contains(target) !== true &&
+        !peekOutsideBlocked(target, panelRef.current)
+      ) {
         onOutsideClick();
       }
     };
@@ -169,6 +190,7 @@ export function PeekPanel({
       ) : null}
       <aside
         ref={panelRef}
+        {...(role === undefined ? {} : { role })}
         aria-label={label ?? "Work item preview"}
         data-testid={testId ?? "issue-preview"}
         data-peek-layout={layout}
