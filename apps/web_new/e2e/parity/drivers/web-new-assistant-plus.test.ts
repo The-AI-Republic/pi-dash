@@ -21,6 +21,7 @@ interface StubLocator {
   press?: (key: string) => Promise<void>;
   waitFor?: (options?: unknown) => Promise<unknown>;
   getAttribute?: (name: string) => Promise<string | null>;
+  evaluate?: (fn: (element: { tagName: string }) => string) => Promise<string>;
   innerText?: () => Promise<string>;
   textContent?: () => Promise<string | null>;
   inputValue?: () => Promise<string>;
@@ -419,11 +420,20 @@ describe("skipped-server notice actions", () => {
   it("reports each anchor and button with its text and href", async () => {
     const actions = [
       locator({
-        evaluate: async () => "a",
+        evaluate: async (fn) => fn({ tagName: "A" }),
         textContent: async () => " Manage servers ",
         getAttribute: async () => "/settings/profile/ai-assistant",
       }),
-      locator({ evaluate: async () => "button", textContent: async () => "Dismiss", getAttribute: async () => null }),
+      locator({
+        evaluate: async (fn) => fn({ tagName: "BUTTON" }),
+        textContent: async () => "Dismiss",
+        getAttribute: async () => null,
+      }),
+      locator({
+        evaluate: async (fn) => fn({ tagName: "BUTTON" }),
+        textContent: async () => null,
+        getAttribute: async () => null,
+      }),
     ];
     const interactive = locator({ count: async () => actions.length, nth: (index: number) => actions[index]! });
     const notice = locator({ locator: () => interactive });
@@ -437,6 +447,7 @@ describe("skipped-server notice actions", () => {
     await expect(new WebNewDriver(page).assistantSkippedNoticeActions()).resolves.toEqual([
       { kind: "a", text: "Manage servers", href: "/settings/profile/ai-assistant" },
       { kind: "button", text: "Dismiss", href: null },
+      { kind: "button", text: "", href: null },
     ]);
   });
 });
