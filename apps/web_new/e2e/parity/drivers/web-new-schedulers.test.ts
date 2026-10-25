@@ -390,6 +390,30 @@ describe("install dialog", () => {
     });
   });
 
+  it("leaves the edit outcome label blank when the checked radio cannot be read", async () => {
+    const checked = fake({
+      items: [fake({ innerText: async () => Promise.reject(new Error("detached")) })],
+    });
+    const group = fake({ role: (role: string) => (role === "radio" ? checked : absent()) });
+    const fields: Record<string, FakeLocator> = {
+      "Starts at": fake({ input: "" }),
+      "Time zone": fake({ input: "UTC" }),
+      "Recurrence (RRULE)": fake({ input: "" }),
+      "Project context (optional)": fake({ input: "" }),
+      Pod: fake({ input: "" }),
+    };
+    const dialog = fake({
+      byLabel: (label) => fields[label] ?? absent(),
+      role: (role, options) => {
+        if (role === "switch") return fake({ attribute: "false" });
+        if (role === "radiogroup" && options?.name === "What to do with findings") return group;
+        return absent();
+      },
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerProjectEditValues()).resolves.toMatchObject({ outcomeLabel: "" });
+  });
+
   it("reads the outcome modes and the current help line", async () => {
     const group = fake({
       role: (role) =>
