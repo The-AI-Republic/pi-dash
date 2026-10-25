@@ -122,7 +122,9 @@ export function SpaceIssuePeek({
       .catch(() => notifySpaceCopyFailure());
   }, []);
 
-  const copyOffered = clipboardAllowed && presentation !== "full";
+  // Copy needs a known address, so it waits for the detail to resolve
+  // instead of sitting over the skeleton (SPC-046).
+  const copyOffered = clipboardAllowed && presentation !== "full" && issue !== undefined;
 
   return (
     <PeekPanel
@@ -137,6 +139,7 @@ export function SpaceIssuePeek({
       hideTitle={issue === undefined}
       onClose={onClose}
       suppressEscape={embedded}
+      trapFocus={presentation !== "side"}
       {...(embedded ? {} : { onOutsideClick: onClose })}
       actions={
         <>

@@ -499,6 +499,36 @@ describe("space overlay address round trip (SPC-030/040/042)", () => {
     expect(navigation.navigate).not.toHaveBeenCalled();
   });
 
+  it("mounts the overlay and fetches detail while the board data still loads (SPC-040/046)", async () => {
+    let releaseDetail = (): void => {};
+    const detailGate = new Promise<void>((resolve) => (releaseDetail = resolve));
+    const requests = renderBoard(
+      {
+        issues: () => new Promise(() => undefined),
+        states: () => new Promise(() => undefined),
+        labels: () => new Promise(() => undefined),
+        detail: async () => {
+          await detailGate;
+          return reply(200, {
+            ...issue,
+            description_json: null,
+            description_html: "<p>Detail words</p>",
+            description_stripped: "Detail words",
+            description_binary: null,
+          });
+        },
+      },
+      ANCHOR,
+      { board: "list", priority: ["high"], peekId: ISSUE_ID }
+    );
+    expect(await screen.findByTestId("space-peek-skeleton")).toBeInTheDocument();
+    expect(await screen.findByTestId("space-board-loading")).toBeInTheDocument();
+    expect(requests.some((url) => url.includes(`/issues/${ISSUE_ID}/`))).toBe(true);
+    releaseDetail();
+    expect(await screen.findByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+    expect(screen.getByTestId("space-board-loading")).toBeInTheDocument();
+  });
+
   it("closes by dropping peekId while keeping view and filters (SPC-042)", async () => {
     const user = userEvent.setup();
     renderBoard({}, ANCHOR, { board: "list", priority: ["high"], peekId: ISSUE_ID });

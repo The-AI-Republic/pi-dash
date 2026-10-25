@@ -5,12 +5,20 @@
 import type { SpaceBoardIssueDetail, SpaceBoardState } from "@pidash/api-client";
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
+import { LANGUAGE_STORAGE_KEY, registerLocale, resetLocalesForTests } from "../../../core/i18n/locales.js";
 import { boardIssue, STATES, TODO_ID } from "../layouts/testFixtures.js";
+import { registerSpaceMessages, resetSpaceMessagesForTests } from "../lib/spaceMessages.js";
 import { SpaceOverlayProperties, spaceOverlayPriority, spaceOverlayState } from "./SpaceOverlayProperties.js";
 
 const DONE_ID = "33333333-3333-4333-8333-333333333333";
+
+afterEach(() => {
+  globalThis.localStorage?.clear();
+  resetSpaceMessagesForTests();
+  resetLocalesForTests();
+});
 
 function detail(overrides: Partial<SpaceBoardIssueDetail> = {}): SpaceBoardIssueDetail {
   return {
@@ -37,6 +45,18 @@ describe("SpaceOverlayProperties (SPC-044)", () => {
     expect(screen.getByText("Due date")).toBeInTheDocument();
     expect(screen.getByTestId("space-peek-due")).toHaveTextContent("Jun 30, 2030");
     expect(screen.getByTestId("space-peek-due")).not.toHaveAttribute("data-overdue");
+  });
+
+  it("renders priority as a marker chip carrying the translated label (SPC-044)", () => {
+    registerLocale({ tag: "fr", label: "Francais" });
+    globalThis.localStorage.setItem(LANGUAGE_STORAGE_KEY, "fr");
+    registerSpaceMessages("fr", { "filters.priority.high": "Haute" });
+    renderPanel(detail({ priority: "high" }));
+    const chip = screen.getByTestId("space-peek-priority");
+    expect(chip).toHaveAttribute("data-level", "high");
+    expect(chip).toContainElement(screen.getByTestId("space-priority-marker"));
+    expect(chip).toHaveTextContent("Haute");
+    expect(screen.queryByText("High")).not.toBeInTheDocument();
   });
 
   it("emphasises a past due date on an open issue", () => {

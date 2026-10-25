@@ -168,6 +168,47 @@ describe("SpaceIssuePeek shell (SPC-040/041)", () => {
     expect(screen.getByTestId("space-peek-key")).toHaveTextContent("SPC-7");
   });
 
+  it("moves focus into modal and full and traps Tab between their controls (SPC-041)", async () => {
+    const user = userEvent.setup();
+    setup();
+    const panel = await screen.findByTestId("space-peek");
+    await screen.findByTestId("space-peek-key");
+    expect(panel).not.toHaveAttribute("aria-modal");
+    await user.click(screen.getByRole("button", { name: "Change presentation" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Modal" }));
+    await waitFor(() => {
+      expect(panel).toHaveAttribute("aria-modal", "true");
+      expect(panel).toContainElement(document.activeElement as HTMLElement);
+    });
+    const focusables = within(panel).getAllByRole("button");
+    focusables[focusables.length - 1]?.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(focusables[0]);
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(focusables[focusables.length - 1]);
+    await user.click(screen.getByRole("button", { name: "Change presentation" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Full screen" }));
+    expect(panel).toHaveAttribute("aria-modal", "true");
+    await user.click(screen.getByRole("button", { name: "Change presentation" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Side panel" }));
+    expect(panel).not.toHaveAttribute("aria-modal");
+    expect(panel).not.toHaveAttribute("tabindex");
+  });
+
+  it("keeps Tab inside the panel when it has no focusable child", async () => {
+    const user = userEvent.setup();
+    setup();
+    const panel = await screen.findByTestId("space-peek");
+    await screen.findByTestId("space-peek-key");
+    await user.click(screen.getByRole("button", { name: "Change presentation" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Modal" }));
+    // Hide the real controls so the empty-list branch is reached.
+    for (const node of panel.querySelectorAll("button")) node.setAttribute("hidden", "");
+    panel.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(panel);
+  });
+
   it("closes through the header control, Escape and the backdrop", async () => {
     const user = userEvent.setup();
     const first = setup();
@@ -255,6 +296,14 @@ describe("SpaceIssuePeek content (SPC-043/044)", () => {
     expect(screen.getByTestId("space-peek-due")).toHaveAttribute("data-overdue", "true");
   });
 
+  it("orders the description before the property panel (SPC-043)", async () => {
+    setup();
+    await screen.findByTestId("space-peek-key");
+    const description = screen.getByRole("region", { name: "Issue description" });
+    const properties = screen.getByTestId("space-peek-properties");
+    expect(description.compareDocumentPosition(properties) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("renders no description block at all when the description is empty", async () => {
     for (const html of ["", "<p></p>", "   "]) {
       const view = setup({ body: () => reply(200, detail({ description_html: html })) });
@@ -315,6 +364,25 @@ describe("SpaceIssuePeek loading and failure (SPC-040/046)", () => {
       expect(screen.queryByTestId("space-peek-skeleton")).not.toBeInTheDocument();
     });
     expect(screen.getByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+  });
+
+  it("offers no copy action while the detail skeleton is up (SPC-046)", async () => {
+    stubClipboard("granted");
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    setup({
+      body: async () => {
+        await gate;
+        return reply(200, detail());
+      },
+    });
+    expect(await screen.findByTestId("space-peek-skeleton")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(globalThis.navigator.clipboard).toBeDefined();
+    });
+    expect(screen.queryByRole("button", { name: "Copy link" })).not.toBeInTheDocument();
+    release();
+    expect(await screen.findByRole("button", { name: "Copy link" })).toBeInTheDocument();
   });
 
   it("reports a malformed id as invalid without a request", async () => {

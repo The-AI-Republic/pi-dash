@@ -14,7 +14,8 @@ import { PriorityMarker } from "../filters/PriorityMarker.js";
 import { StateMarker } from "../layouts/StateMarker.js";
 import { formatSpacePropertyDate, isSpaceDueOverdue } from "../lib/peek.js";
 import { spaceMessage } from "../lib/spaceMessages.js";
-import { PRIORITY_LABELS, type PriorityLevel } from "../../../shared/pickers/priorities.js";
+import type { PriorityLevel } from "../../../shared/pickers/priorities.js";
+import { SPACE_PRIORITY_MESSAGE_KEYS } from "../filters/facets.js";
 
 export type SpaceOverlayPriority = NonNullable<SpaceBoardIssueDetail["priority"]>;
 
@@ -55,9 +56,13 @@ export function SpaceOverlayProperties({ issue, states }: SpaceOverlayProperties
       </div>
       <div data-property="priority" className="flex items-center gap-(--space-3)">
         <dt className="text-meta w-24 shrink-0 text-(--text-muted)">{spaceMessage("peek.property.priority")}</dt>
-        <dd className="text-body m-0 flex min-w-0 items-center gap-(--space-2) text-(--text)">
+        <dd
+          data-testid="space-peek-priority"
+          data-level={priority}
+          className="text-meta m-0 inline-flex min-w-0 items-center gap-(--space-1) rounded-(--radius-full) bg-(--subtle) px-(--space-2) py-(--space-1) text-(--text)"
+        >
           <PriorityMarker level={priority} />
-          <span className="truncate">{PRIORITY_LABELS[priority]}</span>
+          <span className="truncate">{spaceMessage(SPACE_PRIORITY_MESSAGE_KEYS[priority])}</span>
         </dd>
       </div>
       <div data-property="due-date" className="flex items-center gap-(--space-3)">

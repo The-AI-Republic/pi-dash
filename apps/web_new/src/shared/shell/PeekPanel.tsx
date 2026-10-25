@@ -33,6 +33,18 @@ function isTypingTarget(node: Element | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
+/** Tab order candidates inside a trapping panel. */
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** Tabbable descendants, in document order, minus hidden subtrees. */
+function focusableWithin(root: HTMLElement | null): HTMLElement[] {
+  if (root === null) return [];
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+    (node) => node.closest("[hidden], [aria-hidden='true']") === null
+  );
+}
+
 /**
  * Whether an overlay other than `own` itself is open. Only the caller's
  * own panel is discounted — a picker or nested peek inside it still
@@ -89,6 +101,12 @@ export interface PeekPanelProps {
   onClose: () => void;
   /** Caller-known Escape suppression (embedded hosts, open dialogs). */
   suppressEscape?: boolean | undefined;
+  /**
+   * Trap keyboard focus in the panel and move it in on mount. Modal and
+   * full presentations opt in; the docked side peek leaves the board
+   * reachable, so it stays non-modal.
+   */
+  trapFocus?: boolean | undefined;
   /** Outside presses close through this; without it they are ignored. */
   onOutsideClick?: (() => void) | undefined;
   /** Commits a renamed title; without it edits stay local to the field. */
@@ -121,6 +139,7 @@ export function PeekPanel({
   hideTitle = false,
   onClose,
   suppressEscape = false,
+  trapFocus = false,
   onOutsideClick,
   onCommitTitle,
   actions,
@@ -165,6 +184,39 @@ export function PeekPanel({
       document.removeEventListener("pointerdown", onPointerDown, true);
     };
   }, [onOutsideClick]);
+  React.useEffect(() => {
+    if (!trapFocus) return;
+    const panel = panelRef.current;
+    if (panel === null) return;
+    if (!panel.contains(document.activeElement)) panel.focus({ preventScroll: true });
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Tab") return;
+      const focusables = focusableWithin(panel);
+      if (focusables.length === 0) {
+        event.preventDefault();
+        panel.focus({ preventScroll: true });
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey) {
+        if (active === first || active === panel || !panel.contains(active)) {
+          event.preventDefault();
+          last?.focus();
+        }
+        return;
+      }
+      if (active === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [trapFocus]);
 
   const commit = (): void => {
     if (revertingRef.current) {
@@ -191,6 +243,8 @@ export function PeekPanel({
       <aside
         ref={panelRef}
         {...(role === undefined ? {} : { role })}
+        {...(role === "dialog" && trapFocus ? { "aria-modal": "true" } : {})}
+        {...(trapFocus ? { tabIndex: -1 } : {})}
         aria-label={label ?? "Work item preview"}
         data-testid={testId ?? "issue-preview"}
         data-peek-layout={layout}

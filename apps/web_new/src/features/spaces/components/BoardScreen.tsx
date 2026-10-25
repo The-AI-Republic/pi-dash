@@ -147,6 +147,16 @@ function ResolvedBoard({
         )}
         <SpaceThemeSwitch />
       </BoardNavbar>
+      {search.peekId === undefined ? null : (
+        <SpaceIssuePeek
+          anchor={anchor}
+          issueId={search.peekId}
+          projectIdentifier={identifier}
+          states={states.data ?? []}
+          onClose={peekNav.close}
+          onInvalid={peekNav.invalid}
+        />
+      )}
       {issues.isError || states.isError || labels.isError ? (
         <SpaceBoardError />
       ) : issues.data === undefined || states.data === undefined || labels.data === undefined ? (
@@ -174,16 +184,6 @@ function ResolvedBoard({
             openIssue={peekNav.open}
           />
           <SpaceProductBadge />
-          {search.peekId === undefined ? null : (
-            <SpaceIssuePeek
-              anchor={anchor}
-              issueId={search.peekId}
-              projectIdentifier={identifier}
-              states={states.data}
-              onClose={peekNav.close}
-              onInvalid={peekNav.invalid}
-            />
-          )}
         </>
       )}
     </div>

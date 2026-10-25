@@ -139,6 +139,33 @@ describe("PeekPanel", () => {
     expect(screen.getByRole("button", { name: "Close preview" })).toBeInTheDocument();
   });
 
+  it("traps focus when the caller opts in and leaves the docked peek alone", () => {
+    const plain = setup();
+    expect(screen.getByTestId("issue-preview")).not.toHaveAttribute("tabindex");
+    plain.unmount();
+    setup({ trapFocus: true, role: "dialog", label: "Public issue" });
+    const panel = screen.getByTestId("issue-preview");
+    expect(panel).toHaveAttribute("tabindex", "-1");
+    expect(panel).toHaveAttribute("aria-modal", "true");
+    expect(panel).toContainElement(document.activeElement as HTMLElement);
+  });
+
+  it("wraps Tab and keeps Shift+Tab inside a trapping panel", () => {
+    setup({ trapFocus: true, role: "dialog", children: <button type="button">Action</button> });
+    const panel = screen.getByTestId("issue-preview");
+    const buttons = screen.getAllByRole("button");
+    buttons[buttons.length - 1]?.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(buttons[0]);
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(buttons[buttons.length - 1]);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(buttons[0]);
+    (document.activeElement as HTMLElement).blur();
+    panel.focus();
+    expect(document.activeElement).toBe(panel);
+  });
+
   it("centers the modal layout behind a backdrop", () => {
     setup({ layout: "modal" });
     const panel = screen.getByTestId("issue-preview");
