@@ -79,6 +79,11 @@ describe("isMonthRangeError", () => {
   it("leaves in-range and fractional values unexplained", () => {
     expect(isMonthRangeError("1")).toBe(false);
     expect(isMonthRangeError("12")).toBe(false);
+    expect(isMonthRangeError("1e1")).toBe(false);
     expect(isMonthRangeError("2.5")).toBe(false);
+  });
+
+  it("explains out-of-range numeric spellings", () => {
+    expect(isMonthRangeError("1e2")).toBe(true);
   });
 });

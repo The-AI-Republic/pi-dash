@@ -510,6 +510,32 @@ describe("InstallForm author path", { timeout: 30_000 }, () => {
     expect(screen.getByRole("tab", { name: "Create new" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("keeps a create draft when the catalog lands after typing", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const props = {
+      workspaceSlug: SLUG,
+      projectId: PROJECT,
+      canInstall: true,
+      canAuthor: true,
+      onClose: vi.fn(),
+      onInstalled: vi.fn(),
+      refreshDefinitions: vi.fn(async () => undefined),
+    };
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <InstallForm {...props} installable={[]} />
+      </QueryClientProvider>
+    );
+    await userEvent.setup().type(screen.getByLabelText("Name"), "My draft");
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <InstallForm {...props} installable={[scheduler()]} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("tab", { name: "Create new" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByLabelText("Name")).toHaveValue("My draft");
+  });
+
   it("offers the dead end without author rights", () => {
     renderForm({ canAuthor: false, canInstall: false, installable: [] });
     expect(screen.getByText("No schedulers available")).toBeInTheDocument();

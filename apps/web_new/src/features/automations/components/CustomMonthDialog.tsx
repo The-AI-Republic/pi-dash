@@ -6,8 +6,7 @@
 // The field seeds at one month every open and submits a whole month to
 // the row, then closes. Empty and whole-number out-of-range values get
 // the inline range message; a fractional count stays silent because the
-// number field's step validation refuses it. The message clears as soon
-// as the user types.
+// handler refuses it. The message clears as soon as the user types.
 
 import { Button, Dialog, Input } from "@pidash/kit";
 import * as React from "react";
@@ -50,8 +49,8 @@ export function CustomMonthDialog({ open, onOpenChange, onSubmit }: CustomMonthD
     }
     const months = parseDelayInput(raw);
     if (months === null) {
-      // Fractional counts are refused by the number field's step check;
-      // keep the dialog open without adding a range message.
+      // Fractional counts are refused here; keep the dialog open without
+      // adding a range message.
       return;
     }
     onSubmit(months);

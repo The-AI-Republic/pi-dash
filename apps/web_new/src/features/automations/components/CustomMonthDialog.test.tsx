@@ -114,6 +114,19 @@ describe("CustomMonthDialog", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("forwards a whole month entered in exponent form", async () => {
+    const user = userEvent.setup();
+    const { onSubmit, onOpenChange } = setup();
+    const field = within(dialog()).getByPlaceholderText("Enter Months");
+    await user.clear(field);
+    await user.type(field, "1e1");
+    // The number field accepts exponent notation and reports it as a valid
+    // whole value; the handler must forward the months it denotes.
+    await user.click(within(dialog()).getByRole("button", { name: "Submit" }));
+    expect(onSubmit).toHaveBeenCalledWith(10);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
   it("cancels without submitting and reseeds on the next open", async () => {
     const user = userEvent.setup();
     const { onSubmit, onOpenChange, rerender } = setup();

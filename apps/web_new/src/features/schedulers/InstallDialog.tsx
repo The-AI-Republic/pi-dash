@@ -142,7 +142,11 @@ export function InstallForm({
   // slow first read cannot strand a reinstallable definition on "Create
   // new" (AGT-012). An explicit tab choice wins from then on.
   const [modeChoice, setModeChoice] = React.useState<"install" | "create" | undefined>();
-  const mode: InstallMode = modeChoice ?? initialInstallMode(canAuthor, installable.length);
+  // A create draft also wins: the catalog may land after the person has
+  // started writing, and switching tabs would discard that work.
+  const [draftStarted, setDraftStarted] = React.useState(false);
+  const mode: InstallMode =
+    modeChoice ?? (draftStarted ? "create" : undefined) ?? initialInstallMode(canAuthor, installable.length);
   // The picker's value is the user's choice, or the first option until they
   // make one. Keeping it derived means a catalog that lands after the dialog
   // opens still gets a valid selection without a state-sync effect.
@@ -177,6 +181,7 @@ export function InstallForm({
   };
 
   const changeDefinition = <K extends keyof DefinitionDraft>(field: K, value: DefinitionDraft[K]): void => {
+    setDraftStarted(true);
     setDefinition((current) => ({ ...current, [field]: value }));
     setDefinitionErrors((current) => ({ ...current, [field]: undefined }));
   };
@@ -360,6 +365,7 @@ export function InstallForm({
             {...(definitionErrors.name === undefined ? {} : { error: definitionErrors.name })}
             onChange={(event) => {
               const name = event.target.value;
+              setDraftStarted(true);
               setDefinition((current) => ({
                 ...current,
                 name,
@@ -415,7 +421,10 @@ export function InstallForm({
         value={schedule.value}
         errors={schedule.errors}
         disabled={pending}
-        onChange={schedule.change}
+        onChange={(field, next) => {
+          if (mode === "create") setDraftStarted(true);
+          schedule.change(field, next);
+        }}
       />
 
       <OutcomeModeField idPrefix="project-install" value={outcomeMode} disabled={pending} onChange={setOutcomeMode} />
