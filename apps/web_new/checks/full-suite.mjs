@@ -154,9 +154,10 @@ function countsOf(report) {
 
 // A failure is real when it fails again on the re-run: the same test, or, for
 // a file that failed to load in either run, any failure in that file. A file
-// that did not finish the re-run either is also real: a hang is not flakiness,
-// and calling it flaky would turn a suite that never completed green. When the
-// re-run itself crashed nothing was disproved, so every failure stays real.
+// that did not finish either run is also real: a hang is not flakiness, and a
+// first-run hang whose re-run fails a real test must not turn the suite green.
+// When the re-run itself crashed nothing was disproved, so every failure stays
+// real.
 // Pure, so the self-test covers every branch.
 function classify(first, rerun, rerunCrashed = false) {
   const again = new Set(rerun.map((failure) => `${failure.file}\u0000${failure.test}`));
@@ -171,6 +172,7 @@ function classify(first, rerun, rerunCrashed = false) {
       again.has(`${failure.file}\u0000${failure.test}`) ||
       unloadedFiles.has(failure.file) ||
       hungFiles.has(failure.file) ||
+      (failure.test === HUNG_FAILURE && failingFiles.has(failure.file)) ||
       (failure.test === LOAD_FAILURE && failingFiles.has(failure.file));
     return { ...failure, kind: real ? "real" : "flaky" };
   });
@@ -367,7 +369,6 @@ function runBatch(suite, files, { sh, tmp, root, host, timeoutMs, seq, label = "
 // unhandled rejection, a worker that died, or no test files at all. Its output
 // tail is the only evidence, so it must reach the summary.
 function crashedRun(run, root) {
-  if (!run.report) return false;
   if (run.status === 0 && run.report.success !== false) return false;
   return failuresOf(run.report, root).length === 0;
 }
@@ -431,8 +432,13 @@ function runBatchIsolated(suite, batch, ctx, depth = 0) {
   // A run that exited non-zero with no failing test to show is a crash: an
   // unhandled rejection, a worker that died, or no test files. It has to reach
   // the summary even though every file it did report passed.
-  if (run.report || missing.length === 0)
-    return { results, unfinished: [], runs: 1, crashed: crashedRun(run, ctx.root), output: run.output };
+  if (run.report || missing.length === 0) {
+    // A non-zero run with no JSON report is a crash even when every file
+    // streamed a passing progress line: the process did not finish cleanly, so
+    // treating it as green would hide a worker that died after the last module.
+    const crashed = run.timedOut || (!run.report && run.status !== 0) || crashedRun(run, ctx.root);
+    return { results, unfinished: [], runs: 1, crashed, output: run.output };
+  }
   // The batch stopped without timing out, so it died: an early crash is not a
   // hang, and retrying the unfinished files would only repeat it. The output
   // tail is the evidence; the files it never reached stay unaccounted for.

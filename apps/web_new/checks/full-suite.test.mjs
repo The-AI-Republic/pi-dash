@@ -249,6 +249,15 @@ describe("classify and uniqueFiles", () => {
       "real",
     ]);
   });
+
+  it("keeps a first-run hang real when the re-run fails a real test", () => {
+    expect(
+      classify(
+        [{ file: "f.test.ts", test: "(file did not finish)" }],
+        [{ file: "f.test.ts", test: "f breaks on the re-run" }]
+      )[0].kind
+    ).toBe("real");
+  });
 });
 
 // A fake shell for the batched runner. `files` is what `vitest list` prints;
@@ -608,6 +617,35 @@ describe("main", () => {
     // The initial batch, then one retry per file; the re-run of the two
     // failures hangs the same way and is bisected again.
     expect(vitestCalls(shell).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("reports a timed-out batch as a crash even when every file it reported passed", () => {
+    const files = ["src/a.test.ts", "src/b.test.ts"];
+    const plan = ({ files: run_, label }) =>
+      label === "rerun"
+        ? { report: report(run_.map((file) => fileResult(file))) }
+        : {
+            progress: run_.map((file) => progressEnd(file)),
+            timedOut: true,
+            output: "worker still running after all modules ended",
+          };
+    const { status, summary } = run(["--out", "s.json", "--no-install"], { files, plan });
+    expect(status).toBe(1);
+    expect(summary.suites[0].counts).toMatchObject({ files: 2, filesFailed: 0 });
+    expect(summary.suites[0].crash).toContain("worker still running");
+    expect(summary.suites[0].failures).toEqual([]);
+  });
+
+  it("reports a non-zero run with no JSON report as a crash when every file did finish", () => {
+    const files = ["src/a.test.ts", "src/b.test.ts"];
+    const plan = ({ files: run_, label }) =>
+      label === "rerun"
+        ? { report: report(run_.map((file) => fileResult(file))) }
+        : { progress: run_.map((file) => progressEnd(file)), status: 2, output: "worker exited 2" };
+    const { status, summary } = run(["--out", "s.json", "--no-install"], { files, plan });
+    expect(status).toBe(1);
+    expect(summary.suites[0].counts).toMatchObject({ files: 2, filesFailed: 0 });
+    expect(summary.suites[0].crash).toBe("worker exited 2");
   });
 
   it("classifies failures recovered from progress lines by test name", () => {
