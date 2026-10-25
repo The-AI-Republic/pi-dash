@@ -441,7 +441,26 @@ describe("instance and GPT stubs", () => {
     expect(seen.fulfill).toHaveBeenCalledWith({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ response: "canned", response_html: "<p>canned</p>" }),
+      body: JSON.stringify({
+        response: "canned",
+        response_html: "<p>canned</p>",
+        project_detail: {
+          id: "00000000-0000-4000-8000-000000000001",
+          identifier: "PAR",
+          name: "Parity project",
+          cover_image: null,
+          cover_image_url: null,
+          logo_props: {},
+          description: "",
+          is_default: false,
+        },
+        workspace_detail: {
+          name: "Parity workspace",
+          slug: "parity-workspace",
+          id: "00000000-0000-4000-8000-000000000002",
+          logo_url: null,
+        },
+      }),
     });
     await expect(driver.assistantGptRequests()).resolves.toEqual([{ prompt: "", task: "Summarize" }]);
   });
