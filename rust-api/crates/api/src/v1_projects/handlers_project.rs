@@ -1097,7 +1097,8 @@ pub async fn render_project(
             // Unknown keys, and keys cut by `?fields=`, are ignored —
             // never appended (`_filter_fields` pops them from the ordered
             // field dict, `serializers/base.py:28-30,62-68`).
-            if !(READ_FIELD_ORDER.contains(&key.as_str()) && keep(key)) {
+            let declared = READ_FIELD_ORDER.contains(&key.as_str()) && keep(key);
+            if !declared {
                 continue;
             }
             let expanded = match key.as_str() {
