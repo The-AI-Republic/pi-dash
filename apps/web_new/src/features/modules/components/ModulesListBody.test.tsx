@@ -27,7 +27,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { emptyModuleFilters, toggleModuleFilterValue } from "../lib/moduleListControls.js";
-import { jsonResponse, MODULES_PROJECT_ID, makeModuleRow } from "../testing.js";
+import { jsonResponse, makeDirectoryEntry, MODULES_LEAD_ID, MODULES_PROJECT_ID, makeModuleRow } from "../testing.js";
 import { ModuleListProvider, type ModuleListContextValue } from "./moduleListContext.js";
 import { ModulesListBody } from "./ModulesListBody.js";
 
@@ -203,6 +203,23 @@ describe("ModulesListBody", () => {
     expect(screen.getAllByTestId("modules-row")[0]).toHaveAttribute("data-module-archived", "true");
     fireEvent.click(screen.getAllByTestId("modules-row-progress")[0]!);
     expect(onOpenPeek).toHaveBeenCalledWith("323e4567-e89b-12d3-a456-426614174003");
+  });
+
+  it("resolves a board card's lead against the workspace directory", () => {
+    renderWithContext(context(), [makeModuleRow({ lead_id: MODULES_LEAD_ID, name: "Led" })], {
+      layout: "board",
+      members: [makeDirectoryEntry()],
+    });
+    const lead = screen.getByTestId("modules-card-lead");
+    expect(lead).toHaveAttribute("data-lead-kind", "avatar");
+    expect(within(lead).getByRole("img", { name: "Ada Lovelace" })).toBeInTheDocument();
+  });
+
+  it("shows the no-lead mark when the directory has no entry for the module's lead", () => {
+    renderWithContext(context(), [makeModuleRow({ lead_id: MODULES_LEAD_ID, name: "Orphan lead" })], {
+      layout: "board",
+    });
+    expect(screen.getByTestId("modules-card-lead")).toHaveAttribute("data-lead-kind", "none");
   });
 
   it("keeps an empty project out of the no-match container", () => {

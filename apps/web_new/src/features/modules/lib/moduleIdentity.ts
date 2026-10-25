@@ -7,7 +7,7 @@
 // mix splits into bar segments, and whether the lead slot shows an avatar
 // or the no-lead marker. Nothing here touches the network.
 
-import type { ModuleRow } from "@pidash/api-client";
+import type { ModuleRow, WorkspaceMember } from "@pidash/api-client";
 
 /** The three shapes a row's progress marker can take (§3.5). */
 export type ModuleProgressMarker = { kind: "check" } | { kind: "alert" } | { kind: "percent"; percent: number };
@@ -120,6 +120,32 @@ export type ModuleLeadSlot = { kind: "avatar"; memberId: string } | { kind: "non
 
 export function moduleLeadSlot(row: Pick<ModuleRow, "lead_id">): ModuleLeadSlot {
   return row.lead_id === null ? { kind: "none" } : { kind: "avatar", memberId: row.lead_id };
+}
+
+/** The lead as a card can show it: the person's name and picture. */
+export interface ModuleLeadPerson {
+  name: string;
+  avatarUrl: string | null;
+}
+
+/** A resolved lead slot: the person, or the reason the mark is the no-lead one. */
+export type ResolvedModuleLead = { kind: "avatar"; person: ModuleLeadPerson } | { kind: "none" };
+
+/**
+ * Resolve a module's lead against the workspace directory (§4.3). A module
+ * without a lead, or one whose lead is no longer in the directory the viewer
+ * can read, shows the no-lead mark — the card never renders an empty avatar
+ * or an id as a name.
+ */
+export function resolveModuleLead(
+  row: Pick<ModuleRow, "lead_id">,
+  members: readonly WorkspaceMember[] | undefined
+): ResolvedModuleLead {
+  const slot = moduleLeadSlot(row);
+  if (slot.kind === "none") return { kind: "none" };
+  const entry = members?.find((membership) => membership.member.id === slot.memberId);
+  if (entry === undefined) return { kind: "none" };
+  return { kind: "avatar", person: { name: entry.member.display_name, avatarUrl: entry.member.avatar_url } };
 }
 
 /** The card's done-over-total count text, e.g. `1/2 work items`. */

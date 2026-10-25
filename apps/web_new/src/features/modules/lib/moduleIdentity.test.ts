@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { MODULES_LEAD_ID, makeModuleRow } from "../testing.js";
+import { makeDirectoryEntry, MODULES_LEAD_ID, makeModuleRow } from "../testing.js";
 import {
   MODULE_SEGMENT_COLORS,
   MODULE_SEGMENT_GROUPS,
@@ -18,6 +18,7 @@ import {
   moduleProgressMarker,
   moduleProgressSegments,
   moduleWorkItemCountText,
+  resolveModuleLead,
 } from "./moduleIdentity.js";
 
 describe("moduleProgressMarker", () => {
@@ -154,6 +155,28 @@ describe("moduleLeadSlot", () => {
 
   it("falls back to the no-lead mark", () => {
     expect(moduleLeadSlot(makeModuleRow())).toEqual({ kind: "none" });
+  });
+});
+
+describe("resolveModuleLead", () => {
+  it("resolves the lead's name and picture from the directory", () => {
+    const entry = makeDirectoryEntry({ member: { avatar_url: "https://cdn.test/ada.png" } });
+    expect(resolveModuleLead(makeModuleRow({ lead_id: MODULES_LEAD_ID }), [entry])).toEqual({
+      kind: "avatar",
+      person: { name: "Ada Lovelace", avatarUrl: "https://cdn.test/ada.png" },
+    });
+  });
+
+  it("shows the no-lead mark for a module without a lead", () => {
+    expect(resolveModuleLead(makeModuleRow(), [makeDirectoryEntry()])).toEqual({ kind: "none" });
+  });
+
+  it("shows the no-lead mark when the lead left the readable directory", () => {
+    expect(resolveModuleLead(makeModuleRow({ lead_id: MODULES_LEAD_ID }), [])).toEqual({ kind: "none" });
+  });
+
+  it("shows the no-lead mark before the directory arrives", () => {
+    expect(resolveModuleLead(makeModuleRow({ lead_id: MODULES_LEAD_ID }), undefined)).toEqual({ kind: "none" });
   });
 });
 

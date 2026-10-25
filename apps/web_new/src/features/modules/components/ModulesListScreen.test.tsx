@@ -262,6 +262,18 @@ describe("ModulesListScreen", () => {
     expect(within(slot).getByRole("button", { name: "Menu Delivery" })).toBeInTheDocument();
   });
 
+  it("gives the board cards their lead from the workspace directory", async () => {
+    harness.modules = [
+      makeModuleRow({ name: "Led", lead_id: TEAMMATE_ID }),
+      makeModuleRow({ id: "323e4567-e89b-12d3-a456-426614174011", name: "Unled" }),
+    ];
+    writeProjectLayout(MODULES_PROJECT_ID, "board");
+    renderScreen();
+    const cards = await screen.findAllByTestId("modules-board-card");
+    expect(within(cards[0]!).getByTestId("modules-card-lead")).toHaveAttribute("data-lead-kind", "avatar");
+    expect(within(cards[1]!).getByTestId("modules-card-lead")).toHaveAttribute("data-lead-kind", "none");
+  });
+
   it("gates the screen with an admin shortcut and never reads the list", async () => {
     harness.project = makeProjectRow({ module_view: false });
     renderScreen();

@@ -124,7 +124,11 @@ describe("ModuleListRow", () => {
         onOpenPeek={vi.fn()}
       />
     );
-    expect(screen.getByTestId("modules-row-peek").className).toContain("group-hover:opacity-100");
+    const hoverOnly = screen.getByTestId("modules-row-peek").className;
+    expect(hoverOnly).toContain("group-hover:opacity-100");
+    // Narrow fine-pointer viewports (a squeezed desktop window, the
+    // desktop shell) never hover, so the trigger stays visible there too.
+    expect(hoverOnly).toContain("max-md:opacity-100");
     rerender(
       <ModuleListRow
         workspaceSlug="acme"

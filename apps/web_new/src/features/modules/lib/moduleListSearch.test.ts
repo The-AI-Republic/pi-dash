@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // The modules list's validated search (parity/specs/modules.md §5,
-// MOD-019): only `peekModule` lives in the address, and a malformed value
-// is dropped at the route boundary.
+// MOD-019): `peekModule` is validated and normalised, a malformed value is
+// dropped at the route boundary, and every other key survives so a shared
+// link keeps its parameters through an open or a close.
 
 import { describe, expect, it } from "vitest";
 
@@ -24,9 +25,19 @@ describe("parseModulesListSearch", () => {
     expect(parseModulesListSearch({})).toEqual({});
   });
 
-  it("drops keys the screen does not own", () => {
-    expect(parseModulesListSearch({ peekModule: MODULES_MODULE_ID, layout: "board" })).toEqual({
+  it("keeps a valid peek next to the keys it does not interpret", () => {
+    expect(parseModulesListSearch({ peekModule: MODULES_MODULE_ID, layout: "board", q: "del" })).toEqual({
       peekModule: MODULES_MODULE_ID,
+      layout: "board",
+      q: "del",
     });
+  });
+
+  it("keeps the other keys and drops only a malformed peek", () => {
+    expect(parseModulesListSearch({ peekModule: "Delivery", layout: "board" })).toEqual({ layout: "board" });
+  });
+
+  it("keeps the other keys when the address carries no peek at all", () => {
+    expect(parseModulesListSearch({ layout: "board" })).toEqual({ layout: "board" });
   });
 });

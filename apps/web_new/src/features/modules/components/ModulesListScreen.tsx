@@ -177,6 +177,7 @@ function ModulesListSettled({
         peekModuleId={peekModuleId}
         onOpenPeek={openPeek}
         archived={archived}
+        members={members}
         {...(rowMenu === undefined ? {} : { rowMenu })}
       />
     );

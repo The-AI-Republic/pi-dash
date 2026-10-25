@@ -72,11 +72,16 @@ afterEach(() => {
 });
 
 describe("modules tab route search", () => {
-  it("validates the address down to its peek key", () => {
+  it("validates peekModule and keeps the other address keys", () => {
     const validateSearch = Route.options.validateSearch as unknown as (raw: Record<string, unknown>) => unknown;
     expect(validateSearch({})).toEqual({});
     expect(validateSearch({ peekModule: MODULE_ID })).toEqual({ peekModule: MODULE_ID });
     expect(validateSearch({ peekModule: "not-an-id" })).toEqual({});
+    expect(validateSearch({ peekModule: MODULE_ID, layout: "board" })).toEqual({
+      peekModule: MODULE_ID,
+      layout: "board",
+    });
+    expect(validateSearch({ peekModule: "not-an-id", layout: "board" })).toEqual({ layout: "board" });
   });
 
   it("plumbs the params into the screen", async () => {

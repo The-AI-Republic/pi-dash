@@ -18,10 +18,11 @@
 // behind it stays readable (§5). Slices E–H fill the accessory slots the
 // row and card hand them; the timeline chart belongs to slice I (MOD-021).
 
-import type { ModuleRow } from "@pidash/api-client";
+import type { ModuleRow, WorkspaceMember } from "@pidash/api-client";
 import * as React from "react";
 
 import type { ModulesLayout } from "../lib/moduleLayouts.js";
+import { resolveModuleLead } from "../lib/moduleIdentity.js";
 import { moduleBoardGridClass } from "../lib/modulePeek.js";
 import {
   DEFAULT_MODULE_SORT,
@@ -63,6 +64,11 @@ export interface ModulesListBodyProps extends Partial<ModulesListNarrowing> {
   alwaysShowActions?: boolean | undefined;
   /** Per-row quick menu slot (slice H); archived hosts reuse the same slot. */
   rowMenu?: ((module: ModuleRow) => React.ReactNode) | undefined;
+  /**
+   * The workspace directory the board card resolves a lead against (§4.3);
+   * absent, every card shows the no-lead mark.
+   */
+  members?: readonly WorkspaceMember[] | undefined;
 }
 
 export interface ModuleBodyRowOptions {
@@ -70,6 +76,7 @@ export interface ModuleBodyRowOptions {
   alwaysShowActions: boolean | undefined;
   onOpenPeek: ((moduleId: string) => void) | undefined;
   rowMenu: ((module: ModuleRow) => React.ReactNode) | undefined;
+  members: readonly WorkspaceMember[] | undefined;
 }
 
 /** One rendered module in the list or board layout; later slices extend both. */
@@ -81,7 +88,17 @@ export function renderModule(
   options?: ModuleBodyRowOptions
 ): React.ReactElement {
   const shared = { workspaceSlug, projectId, module };
-  if (layout === "board") return <ModuleBoardCard key={module.id} {...shared} onOpenPeek={options?.onOpenPeek} />;
+  if (layout === "board") {
+    const lead = resolveModuleLead(module, options?.members);
+    return (
+      <ModuleBoardCard
+        key={module.id}
+        {...shared}
+        lead={lead.kind === "avatar" ? lead.person : null}
+        onOpenPeek={options?.onOpenPeek}
+      />
+    );
+  }
   const menu = options?.rowMenu?.(module);
   return (
     <ModuleListRow
@@ -109,6 +126,7 @@ export function ModulesListBody({
   archived,
   alwaysShowActions,
   rowMenu,
+  members,
 }: ModulesListBodyProps): React.ReactElement {
   // The screen provides the list context; props stay available so a host
   // (the archived body, tests) can drive the body on its own.
@@ -133,7 +151,7 @@ export function ModulesListBody({
     );
   }
 
-  const rowOptions: ModuleBodyRowOptions = { archived, alwaysShowActions, onOpenPeek, rowMenu };
+  const rowOptions: ModuleBodyRowOptions = { archived, alwaysShowActions, onOpenPeek, rowMenu, members };
   const listClass = layout === "board" ? moduleBoardGridClass({ peekOpen: peekModuleId !== null }) : "flex flex-col";
   return (
     <div
