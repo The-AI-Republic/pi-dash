@@ -164,6 +164,60 @@ describe("PeekPanel", () => {
     (document.activeElement as HTMLElement).blur();
     panel.focus();
     expect(document.activeElement).toBe(panel);
+    fireEvent.keyDown(document, { key: "Enter" });
+    expect(document.activeElement).toBe(panel);
+  });
+
+  it("does nothing for a trapping panel with no portal root", () => {
+    document.body.innerHTML = "";
+    render(<PeekPanel title="Hidden" titleLabel="Work item title" onClose={vi.fn()} trapFocus />);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+  });
+
+  it("leaves Tab alone while focus cycles inside the panel", () => {
+    setup({ trapFocus: true, role: "dialog", children: <button type="button">Action</button> });
+    const buttons = screen.getAllByRole("button");
+    const first = buttons[0];
+    if (first === undefined) throw new Error("missing first control");
+    first.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+  });
+
+  it("keeps Shift+Tab alone in the middle of a trapping panel", () => {
+    setup({ trapFocus: true, role: "dialog", children: <button type="button">Action</button> });
+    const buttons = screen.getAllByRole("button");
+    const middle = buttons[1];
+    if (middle === undefined) throw new Error("missing middle control");
+    middle.focus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(middle);
+  });
+
+  it("holds focus on the panel when every control is hidden", () => {
+    setup({ trapFocus: true, role: "dialog", children: <button type="button">Action</button> });
+    const panel = screen.getByTestId("issue-preview");
+    for (const node of panel.querySelectorAll("button, input")) node.setAttribute("hidden", "");
+    panel.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(panel);
+  });
+
+  it("does not steal focus when it is already inside the panel at mount", () => {
+    const { rerender } = setup({ titleAsHeading: true });
+    screen.getByRole("button", { name: "Close preview" }).focus();
+    rerender(
+      <PeekPanel
+        title="Parity first issue"
+        titleLabel="Work item title"
+        titleAsHeading
+        onClose={vi.fn()}
+        trapFocus
+        role="dialog"
+      />
+    );
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close preview" }));
   });
 
   it("centers the modal layout behind a backdrop", () => {
@@ -322,6 +376,7 @@ describe("focus trap helpers", () => {
     expect(trapTabTarget(root, null, true)).toBe(last);
     expect(trapTabTarget(root, document.body, false)).toBeNull();
     expect(trapTabTarget(root, first, false)).toBeNull();
+    expect(trapTabTarget(root, root, false)).toBe(first);
     root.innerHTML = "";
     expect(trapTabTarget(root, null, false)).toBe("self");
     root.remove();

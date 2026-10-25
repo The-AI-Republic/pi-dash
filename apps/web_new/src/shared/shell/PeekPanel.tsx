@@ -38,11 +38,13 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /** Tabbable descendants, in document order, minus hidden subtrees. */
-export function focusableWithin(root: HTMLElement | null): HTMLElement[] {
+export function focusableWithin(root: HTMLElement | null): [HTMLElement, ...HTMLElement[]] | [] {
   if (root === null) return [];
-  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+  const nodes = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
     (node) => node.closest("[hidden], [aria-hidden='true']") === null
   );
+  const [first, ...rest] = nodes;
+  return first === undefined ? [] : [first, ...rest];
 }
 
 /**
@@ -60,10 +62,10 @@ export function trapTabTarget(
   const first = focusables[0];
   const last = focusables[focusables.length - 1];
   if (shiftKey) {
-    if (active === first || active === panel || active === null) return last ?? null;
+    if (active === first || active === panel || active === null) return last;
     return null;
   }
-  return active === last ? (first ?? null) : null;
+  return active === last || active === panel || active === null ? first : null;
 }
 
 /**
