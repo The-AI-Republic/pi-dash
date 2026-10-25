@@ -29,7 +29,6 @@ import { useCreateWorkItem } from "../api/create.js";
 import { useTouchInput } from "../calendar/useMedia.js";
 import type { DisplayFeatureFlags } from "../display/matrix.js";
 import type { RichExpression } from "../filters/rich/expression.js";
-import { isTempRowId } from "../freshness/fresh.js";
 import { useAttachExisting } from "../list/attach.js";
 import { isCollapsed, readCollapsedGroups, useToggleCollapsedGroup } from "../list/collapse.js";
 import { creationDisabledForGroup } from "../list/grouping.js";
@@ -58,13 +57,15 @@ import {
 } from "./model.js";
 import { boardCellOf, useBoard } from "./pages.js";
 import { KanbanLaneHeader } from "./KanbanLaneHeader.js";
-import { copyCardLink, KanbanPeek } from "./KanbanPeek.js";
 import { KanbanQuickAdd } from "./KanbanQuickAdd.js";
 import { useBoardCardMove } from "./mutations.js";
 import { useBoardDrag, type DraggedCard } from "./useBoardDrag.js";
 import type { BoardDropPoint, CardDropEdge } from "./dropTarget.js";
 import { boardDropRefusal, insertionIndexForDrop, MOVE_REFUSED_TITLE, planBoardMove } from "./drag.js";
 import { creationBlockedInColumn, dropBlockedInColumn } from "../edition/workflow.js";
+import { copyCardLink } from "../peek/peekLink.js";
+import type { LayoutPeekProps } from "../peek/usePeekAddress.js";
+import { usePeekAddress } from "../peek/usePeekAddress.js";
 
 const LazyCreateDialog = React.lazy(() =>
   import("../components/WorkItemCreateDialog.js").then((module) => ({ default: module.WorkItemCreateDialog }))
@@ -76,10 +77,16 @@ const LazyDeleteDialog = React.lazy(() =>
   import("../lifecycle/DeleteWorkItemDialog.js").then((module) => ({ default: module.DeleteWorkItemDialog }))
 );
 
+// The full peek carries the whole detail composition; it loads on first
+// open and stays out of the board chunk (Quality gates).
+const LazyIssuePeek = React.lazy(() =>
+  import("../peek/ResolvingIssuePeek.js").then((module) => ({ default: module.ResolvingIssuePeek }))
+);
+
 /** How long the dropped card keeps its highlight. */
 export const DROPPED_HIGHLIGHT_MS = 2000;
 
-export interface KanbanBoardProps {
+export interface KanbanBoardProps extends LayoutPeekProps {
   workspaceSlug: string;
   entity: IssuesEntity;
   projectId: string;
@@ -91,9 +98,7 @@ export interface KanbanBoardProps {
   completedCycle?: boolean | undefined;
   /** Stored rich filters scope every column read. */
   richFilters?: RichExpression | undefined;
-  /** Controlled peek key (the route owns the URL param). */
-  peekKey?: string | null | undefined;
-  onPeekChange?: ((key: string | null) => void) | undefined;
+  /** Controlled peeked work-item id (the route owns the URL param). */
   /** Cycle/module creation target for quick-add. */
   cycleId?: string | undefined;
   moduleId?: string | undefined;
@@ -156,7 +161,8 @@ export function KanbanBoard({
   canEdit,
   completedCycle = false,
   richFilters = {},
-  peekKey: controlledPeekKey,
+  peekKey,
+  peekProjectId,
   onPeekChange,
   cycleId,
   moduleId,
@@ -195,8 +201,7 @@ export function KanbanBoard({
   const create = useCreateWorkItem(workspaceSlug);
   const move = useBoardCardMove(workspaceSlug, projectId, entity);
   const attach = useAttachExisting({ workspaceSlug, projectId, entity, cycleId, moduleId });
-  const [localPeekKey, setLocalPeekKey] = React.useState<string | null>(null);
-  const peekKey = controlledPeekKey === undefined ? localPeekKey : controlledPeekKey;
+  const peek = usePeekAddress({ projectId, peekKey, peekProjectId, onPeekChange });
   const [createTarget, setCreateTarget] = React.useState<{ columnKey: string; laneKey: string | null } | null>(null);
   const [attachOpen, setAttachOpen] = React.useState(false);
   const [deleteIssue, setDeleteIssue] = React.useState<IssueListItem | null>(null);
@@ -213,14 +218,6 @@ export function KanbanBoard({
     hideEstimate: projectDetails === null || projectDetails.estimate === null,
   };
 
-  const setPeek = React.useCallback(
-    (key: string | null) => {
-      if (onPeekChange !== undefined) onPeekChange(key);
-      else setLocalPeekKey(key);
-    },
-    [onPeekChange]
-  );
-
   React.useEffect(() => {
     if (droppedId === null) return;
     const timer = globalThis.setTimeout(() => setDroppedId(null), DROPPED_HIGHLIGHT_MS);
@@ -236,7 +233,6 @@ export function KanbanBoard({
     ...(creationBlockedReason === undefined ? {} : { workflowBlockedReason: creationBlockedReason }),
   });
   const showQuickAdd = quickAddReason === undefined;
-  const peekIssue = peekKey === null ? null : (boardRows(lanes).find((row) => keyOf(row) === peekKey) ?? null);
   const hoverColumn = drag.target?.columnKey ?? null;
   const hoverLane = drag.target?.laneKey ?? null;
 
@@ -354,7 +350,12 @@ export function KanbanBoard({
       void navigate({ to: "/$ws/browse/$issueKey", params: { ws: workspaceSlug, issueKey: keyOf(issue) } });
       return;
     }
-    setPeek(keyOf(issue));
+    peek.open({ issueId: issue.id, projectId: issue.project_id, nestingLevel: 0 });
+  }
+
+  /** A card lifts when the peek names it by id, or by key for deep links. */
+  function isPeeked(issue: IssueListItem): boolean {
+    return peek.peeked === issue.id || peek.peeked === keyOf(issue);
   }
 
   function quickAdd(columnKey: string, laneKey: string | null): React.ReactNode {
@@ -476,7 +477,7 @@ export function KanbanBoard({
           properties={prefs.properties}
           flags={flags}
           readOnly={readOnly}
-          peeked={peekKey === keyOf(issue)}
+          peeked={isPeeked(issue)}
           estimateEnabled={projectDetails?.estimate != null}
           states={refs.stateRows}
           stateNames={refs.stateNames}
@@ -669,15 +670,19 @@ export function KanbanBoard({
           />
         </React.Suspense>
       )}
-      {peekIssue === null ? null : (
-        <KanbanPeek
-          workspaceSlug={workspaceSlug}
-          projectId={projectId}
-          projectIdentifier={projectIdentifier}
-          issue={peekIssue}
-          canRename={editAllowed && !isTempRowId(peekIssue.id)}
-          onClose={() => setPeek(null)}
-        />
+      {peek.peeked === null ? null : (
+        <React.Suspense fallback={null}>
+          <LazyIssuePeek
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            projectIdentifier={projectIdentifier}
+            peeked={peek.peeked}
+            peekProjectId={peek.peekProjectId}
+            rows={boardRows(lanes)}
+            onPeekChange={peek.report}
+            onClose={peek.close}
+          />
+        </React.Suspense>
       )}
     </div>
   );

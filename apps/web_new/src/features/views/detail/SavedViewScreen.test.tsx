@@ -32,12 +32,26 @@ vi.mock("@tanstack/react-router", () => ({
 // The issues layout root and its five bodies are heavy; the body pin here is
 // which one the stored record selects and what it is handed. The issues
 // suites own their internal behavior.
-const bodyHarness = vi.hoisted(() => ({ layout: "", expression: null as unknown, orderBy: "" }));
+const bodyHarness = vi.hoisted(() => ({
+  layout: "",
+  expression: null as unknown,
+  orderBy: "",
+  peek: null as {
+    peekKey: string | null;
+    peekProjectId: string | null;
+    onPeekChange: (request: unknown) => void;
+  } | null,
+}));
 vi.mock("../../issues/layouts/ViewLayoutBody.js", () => ({
-  ViewLayoutBody: (props: { layout: string; richExpression: unknown }) => {
+  ViewLayoutBody: (props: {
+    layout: string;
+    richExpression: unknown;
+    peek?: { peekKey: string | null; peekProjectId: string | null; onPeekChange: (request: unknown) => void };
+  }) => {
     bodyHarness.layout = props.layout;
     bodyHarness.expression = props.richExpression;
-    return <div data-testid="view-body" data-layout={props.layout} />;
+    bodyHarness.peek = props.peek ?? null;
+    return <div data-testid="view-body" data-layout={props.layout} data-peek={props.peek?.peekKey ?? ""} />;
   },
 }));
 vi.mock("../../issues/layouts/IssuesLayoutRoot.js", () => ({
@@ -279,6 +293,8 @@ function issueResponse(): IssueListResponse {
 beforeEach(() => {
   bodyHarness.layout = "";
   bodyHarness.expression = null;
+  bodyHarness.peek = null;
+  routerHarness.navigate.mockReset();
   routerHarness.navigate.mockReset();
   filterHarness.view = null;
   filterHarness.viewDisplay = null;
@@ -366,6 +382,37 @@ describe("SavedViewScreen", () => {
     expect(screen.getByTestId("view-body")).toHaveAttribute("data-layout", "kanban");
     expect(bodyHarness.expression).toEqual({ and: [{ priority__in: "urgent" }] });
     expect(screen.getByTestId("root-total")).toHaveTextContent("1");
+  });
+
+  it("binds the peek address the view's URL carries to its layout (ISS-167)", async () => {
+    renderScreen({ peekIssueId: "issue-9", peekProjectId: "other-project" });
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    const body = await screen.findByTestId("view-body");
+    expect(body).toHaveAttribute("data-peek", "issue-9");
+    expect(bodyHarness.peek).toEqual({
+      peekKey: "issue-9",
+      peekProjectId: "other-project",
+      onPeekChange: expect.any(Function),
+    });
+  });
+
+  it("writes a peek open with replace, the foreign project and the nesting level", async () => {
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    expect(bodyHarness.peek).not.toBeNull();
+    bodyHarness.peek?.onPeekChange({ issueId: "child", projectId: "other-project", nestingLevel: 1 });
+    expect(routerHarness.navigate).toHaveBeenCalledWith({
+      to: ".",
+      replace: true,
+      search: { peekIssueId: "child", peekProjectId: "other-project", peekNestingLevel: "1" },
+    });
+  });
+
+  it("strips every peek param when the view's peek closes", async () => {
+    renderScreen({ peekIssueId: "issue-9", peekNestingLevel: "2", layout: "compact" });
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    bodyHarness.peek?.onPeekChange(null);
+    expect(routerHarness.navigate).toHaveBeenCalledWith({ to: ".", replace: true, search: { layout: "compact" } });
   });
 
   it("applies the stored expression and order to the issue read", async () => {

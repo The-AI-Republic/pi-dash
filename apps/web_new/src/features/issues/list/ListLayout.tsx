@@ -46,13 +46,17 @@ import { useAttachExisting } from "./attach.js";
 import type { RichExpression } from "../filters/rich/expression.js";
 import type { DisplayFeatureFlags } from "../display/matrix.js";
 import type { CreateFormInitialValues } from "../create/createForm.js";
+import type { LayoutPeekProps } from "../peek/usePeekAddress.js";
+import { usePeekAddress } from "../peek/usePeekAddress.js";
 
 // Overlays load on first use: the list route itself must stay inside the
 // initial-JS budget (Quality gates).
 const LazyAddExistingModal = React.lazy(() =>
   import("./AddExistingModal.js").then((module) => ({ default: module.AddExistingModal }))
 );
-const LazyListPeek = React.lazy(() => import("./ListPeek.js").then((module) => ({ default: module.ListPeek })));
+const LazyIssuePeek = React.lazy(() =>
+  import("../peek/ResolvingIssuePeek.js").then((module) => ({ default: module.ResolvingIssuePeek }))
+);
 const LazyCreateDialog = React.lazy(() =>
   import("../components/WorkItemCreateDialog.js").then((module) => ({ default: module.WorkItemCreateDialog }))
 );
@@ -82,7 +86,7 @@ export function groupLabelsFor(prefs: DisplayPrefs, refs: ReturnType<typeof useL
   return refs.labels[prefs.groupBy ?? ""] ?? new Map<string, string>();
 }
 
-export interface ListLayoutProps {
+export interface ListLayoutProps extends LayoutPeekProps {
   workspaceSlug: string;
   entity: IssuesEntity;
   projectId: string;
@@ -97,9 +101,6 @@ export interface ListLayoutProps {
   completedCycle?: boolean | undefined;
   /** Completed module pages render read-only. */
   completedModule?: boolean | undefined;
-  /** Controlled peek key (the route owns the URL param). */
-  peekKey?: string | null | undefined;
-  onPeekChange?: ((key: string | null) => void) | undefined;
   /** Compact density from the layout search param. */
   compact?: boolean | undefined;
   /**
@@ -196,7 +197,8 @@ export function ListLayout({
   moduleId,
   completedCycle = false,
   completedModule = false,
-  peekKey: controlledPeekKey,
+  peekKey,
+  peekProjectId,
   onPeekChange,
   compact = false,
   onRegisterOverlays,
@@ -229,12 +231,7 @@ export function ListLayout({
   const project = projects?.find((row) => row.id === projectId) ?? null;
   const projectDetails = details?.find((row) => row.id === projectId) ?? null;
   const estimateEnabled = projectDetails !== null && projectDetails.estimate !== null;
-  const [uncontrolledPeekKey, setUncontrolledPeekKey] = React.useState<string | null>(null);
-  const peekKey = controlledPeekKey === undefined ? uncontrolledPeekKey : controlledPeekKey;
-  // Children live inside their parent row's state, so a deep row's peek
-  // cannot resolve through the top-level page rows. The opener hands over
-  // the title, which keeps the peek usable at the three-level cap.
-  const [peekTitleHint, setPeekTitleHint] = React.useState<string | null>(null);
+  const peek = usePeekAddress({ projectId, peekKey, peekProjectId, onPeekChange });
   const [createState, setCreateState] = React.useState<CreateModalState | null>(null);
   const [addExistingOpen, setAddExistingOpen] = React.useState(false);
   const editAllowed = permissions.canEdit && (canEdit ?? true);
@@ -249,6 +246,11 @@ export function ListLayout({
   const [expandedSelectionIds, setExpandedSelectionIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const [childrenByParent, setChildrenByParent] = React.useState<ReadonlyMap<string, readonly IssueListItem[]>>(
     () => new Map()
+  );
+  /** Rows the peek can resolve without a read: pages plus expanded children. */
+  const heldRows = React.useMemo(
+    () => [...allRows, ...[...childrenByParent.values()].flat()],
+    [allRows, childrenByParent]
   );
   const onExpandedChange = React.useCallback((id: string, expanded: boolean) => {
     setExpandedSelectionIds((current) => {
@@ -312,24 +314,14 @@ export function ListLayout({
   const bulk = useBulkMutations({ workspaceSlug, projectId });
   const bulkEnabled = isBulkOperationsEnabled();
   const selectedCount = selection.selectedIds.size;
-  const peekIssue =
-    peekKey === null ? null : (allRows.find((row) => `${projectIdentifier}-${row.sequence_id}` === peekKey) ?? null);
-  const peekTitle = peekIssue?.name ?? peekTitleHint;
-
-  function setPeek(key: string | null): void {
-    if (key === null) setPeekTitleHint(null);
-    if (controlledPeekKey === undefined) setUncontrolledPeekKey(key);
-    onPeekChange?.(key);
-  }
-
-  function openPeek(key: string, title: string): void {
-    setPeekTitleHint(title);
-    setPeek(key);
-  }
-
-  function closePeek(): void {
-    setPeek(null);
-  }
+  /** A row opens its own project, which a cross-project child keeps (ISS-167). */
+  const openPeek = React.useCallback(
+    (issueId: string): void => {
+      const row = heldRows.find((entry) => entry.id === issueId);
+      peek.open({ issueId, projectId: row?.project_id ?? projectId, nestingLevel: 0 });
+    },
+    [heldRows, peek, projectId]
+  );
 
   /**
    * Creation's reason in one section. The host may name a reason for the
@@ -467,17 +459,17 @@ export function ListLayout({
       {...(pages.grouped ? { role: "region", "aria-label": "Issues" } : { "data-testid": "list-scroll" })}
       className="relative flex h-full flex-col overflow-auto pb-16"
     >
-      {peekKey === null ? null : (
+      {peek.peeked === null ? null : (
         <React.Suspense fallback={null}>
-          <LazyListPeek
-            issueKey={peekKey}
-            title={peekTitle ?? ""}
-            onClose={closePeek}
+          <LazyIssuePeek
             workspaceSlug={workspaceSlug}
             projectId={projectId}
             projectIdentifier={projectIdentifier}
-            issue={peekIssue}
-            canWrite={!readOnly}
+            peeked={peek.peeked}
+            peekProjectId={peek.peekProjectId}
+            rows={heldRows}
+            onPeekChange={peek.report}
+            onClose={peek.close}
           />
         </React.Suspense>
       )}

@@ -18,6 +18,7 @@ import { loadKanbanLayout } from "../../../../../../features/issues/kanban/lazy.
 import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
 import { preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
+import { peekSearchFor, stripPeekParams, type PeekRequest } from "../../../../../../features/issues/peek/peekUrl.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/api/queries.js";
 
 // Start the leaf and filter chunks with the route module, beside its data
@@ -74,10 +75,10 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
     const params = Route.useParams();
     const search = Route.useSearch();
     const navigate = useNavigate();
-    const setPeekKey = (key: string | null): void => {
-      const next = { ...search };
-      if (key === null) delete next.peekIssueId;
-      else next.peekIssueId = key;
+    const setPeek = (request: PeekRequest): void => {
+      // The child's project rides along when it differs from the route,
+      // so a reopened link reads the right project (ISS-167).
+      const next = request === null ? stripPeekParams({ ...search }) : peekSearchFor(search, request, params.projectId);
       void navigate({ to: ".", search: next, replace: true } as never);
     };
     return (
@@ -88,7 +89,8 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
             projectId={params.projectId}
             cycleId={params.cycleId}
             peekKey={search.peekIssueId ?? null}
-            onPeekChange={setPeekKey}
+            onPeekChange={setPeek}
+            peekProjectId={search.peekProjectId ?? null}
             compact={search.layout === "compact"}
           />
         </React.Suspense>

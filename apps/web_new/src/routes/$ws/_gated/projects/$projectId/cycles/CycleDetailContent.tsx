@@ -47,6 +47,7 @@ import type { ListLayoutOverlays } from "../../../../../../features/issues/list/
 import { selectCreatableProjects } from "../../../../../../features/issues/create/createProjects.js";
 import type { WorkItemCreateProject } from "../../../../../../features/issues/components/WorkItemCreateDialog.js";
 import { useWeekStart } from "../../../../../../features/issues/dropdowns/weekStart.js";
+import type { PeekRequest } from "../../../../../../features/issues/peek/peekUrl.js";
 
 preloadIssueFilters();
 
@@ -78,7 +79,8 @@ export interface CycleDetailContentProps {
   projectId: string;
   cycleId: string;
   peekKey: string | null;
-  onPeekChange: (key: string | null) => void;
+  peekProjectId: string | null;
+  onPeekChange: (request: PeekRequest) => void;
   compact: boolean;
 }
 
@@ -91,6 +93,7 @@ export function CycleDetailContent({
   projectId,
   cycleId,
   peekKey,
+  peekProjectId,
   onPeekChange,
   compact,
 }: CycleDetailContentProps): React.ReactElement {
@@ -256,6 +259,9 @@ export function CycleDetailContent({
                   totalCount={firstPage.total_count}
                   prefs={prefs}
                   completedCycle={finished}
+                  peekKey={peekKey}
+                  onPeekChange={onPeekChange}
+                  peekProjectId={peekProjectId}
                 />
               </React.Suspense>
             );
@@ -275,6 +281,9 @@ export function CycleDetailContent({
                   hideEstimate={project.estimate === null}
                   richExpression={preferences.rich_filters}
                   weekStart={weekStart}
+                  peekKey={peekKey}
+                  onPeekChange={onPeekChange}
+                  peekProjectId={peekProjectId}
                 />
               </React.Suspense>
             );
@@ -290,6 +299,9 @@ export function CycleDetailContent({
                   canEdit={canEdit}
                   canAddExisting={canCreate}
                   membership={{ cycleId }}
+                  peekKey={peekKey}
+                  onPeekChange={onPeekChange}
+                  peekProjectId={peekProjectId}
                 />
               </React.Suspense>
             );
@@ -309,6 +321,7 @@ export function CycleDetailContent({
                 cycleId={cycleId}
                 peekKey={peekKey}
                 onPeekChange={onPeekChange}
+                peekProjectId={peekProjectId}
               />
             );
           }
@@ -326,6 +339,7 @@ export function CycleDetailContent({
               completedCycle={finished}
               peekKey={peekKey}
               onPeekChange={onPeekChange}
+              peekProjectId={peekProjectId}
               compact={compact}
               onRegisterOverlays={setOverlays}
             />

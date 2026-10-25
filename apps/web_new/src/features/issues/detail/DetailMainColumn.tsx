@@ -25,7 +25,7 @@ import { DescriptionHistory } from "./DescriptionHistory.js";
 import { IssueDescriptionField, type RestoredDescription } from "./IssueDescriptionField.js";
 import { IssueTitleField } from "./IssueTitleField.js";
 import { SaveIndicator } from "./SaveIndicator.js";
-import { useSavePipeline } from "./savePipeline.js";
+import { useSavePipeline, type SavePipeline } from "./savePipeline.js";
 import { WaitingBanner } from "./waiting/WaitingBanner.js";
 
 /**
@@ -52,6 +52,10 @@ export interface DetailMainColumnProps {
   activity?: React.ReactNode;
   /** Title/description saves; the work-item PATCH when absent. */
   fieldWrites?: DetailFieldWrites | undefined;
+  /** Hide the title field when the host renders it (the peek panel owns its title input). */
+  showTitle?: boolean | undefined;
+  /** Shared save pipeline; the column owns one when absent (the peek shares its title pipeline). */
+  pipeline?: SavePipeline | undefined;
 }
 
 export function DetailMainColumn({
@@ -63,8 +67,11 @@ export function DetailMainColumn({
   agentActions,
   activity,
   fieldWrites,
+  showTitle = true,
+  pipeline: pipelineProp,
 }: DetailMainColumnProps): React.ReactElement {
-  const pipeline = useSavePipeline();
+  const ownedPipeline = useSavePipeline();
+  const pipeline = pipelineProp ?? ownedPipeline;
   const titleUpdate = useUpdateIssue({
     workspaceSlug,
     projectId,
@@ -115,7 +122,9 @@ export function DetailMainColumn({
       </div>
       <WaitingBanner workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} disabled={readOnly} />
       {agentActions === undefined ? null : <div className="min-w-0">{agentActions}</div>}
-      <IssueTitleField value={issue.name} disabled={readOnly} pipeline={pipeline} onSave={saveTitle} />
+      {showTitle ? (
+        <IssueTitleField value={issue.name} disabled={readOnly} pipeline={pipeline} onSave={saveTitle} />
+      ) : null}
       <IssueDescriptionField
         value={issue.description_html}
         disabled={readOnly}

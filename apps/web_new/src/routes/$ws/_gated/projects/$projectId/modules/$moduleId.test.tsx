@@ -68,10 +68,27 @@ vi.mock("../../../../../../features/modules/components/ModuleDetailScreen.js", (
       data-peek={String(props.peekKey ?? "")}
       data-compact={String(props.compact ?? false)}
     >
-      <button type="button" onClick={() => (props.onPeekChange as (key: string | null) => void)("WEB-1")}>
+      <button
+        type="button"
+        onClick={() =>
+          (props.onPeekChange as (request: unknown) => void)({ issueId: "WEB-1", projectId: PROJECT, nestingLevel: 0 })
+        }
+      >
         open
       </button>
-      <button type="button" onClick={() => (props.onPeekChange as (key: string | null) => void)(null)}>
+      <button
+        type="button"
+        onClick={() =>
+          (props.onPeekChange as (request: unknown) => void)({
+            issueId: "WEB-2",
+            projectId: "555e4567-e89b-12d3-a456-426614174099",
+            nestingLevel: 1,
+          })
+        }
+      >
+        open foreign
+      </button>
+      <button type="button" onClick={() => (props.onPeekChange as (request: unknown) => void)(null)}>
         close
       </button>
     </div>
@@ -143,7 +160,7 @@ describe("module detail route", () => {
   });
 
   it("writes and clears the peek param with replace", async () => {
-    renderRoute({ peekIssueId: "WEB-7", layout: "compact" });
+    renderRoute({ peekIssueId: "WEB-7", peekProjectId: "project-9", peekNestingLevel: "1", layout: "compact" });
     fireEvent.click(await screen.findByRole("button", { name: "open" }));
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: ".",
@@ -154,6 +171,21 @@ describe("module detail route", () => {
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: ".",
       search: { layout: "compact" },
+      replace: true,
+    });
+  });
+
+  it("keeps a foreign peeked project and the nesting level (ISS-167)", async () => {
+    renderRoute({ layout: "compact" });
+    fireEvent.click(await screen.findByRole("button", { name: "open foreign" }));
+    expect(mocks.navigate).toHaveBeenLastCalledWith({
+      to: ".",
+      search: {
+        peekIssueId: "WEB-2",
+        peekProjectId: "555e4567-e89b-12d3-a456-426614174099",
+        peekNestingLevel: "1",
+        layout: "compact",
+      },
       replace: true,
     });
   });

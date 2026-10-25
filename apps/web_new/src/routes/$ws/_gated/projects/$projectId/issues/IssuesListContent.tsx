@@ -12,7 +12,6 @@
 // the no-results card with clear-all from then on.
 
 import { useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
-import type { useNavigate } from "@tanstack/react-router";
 import type { ApiClient } from "@pidash/api-client";
 import { Button } from "@pidash/kit";
 import * as React from "react";
@@ -43,6 +42,7 @@ const LazyCalendarEntry = React.lazy(() =>
 // The empty cards ride their own chunk; the route awaits it with the list
 // leaves in `beforeLoad` so the layout mounts once (Quality gates).
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
+import type { PeekRequest } from "../../../../../../features/issues/peek/peekUrl.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
 // The list layout is a separate chunk so the route stays inside the
@@ -95,7 +95,9 @@ export interface IssuesListContentProps {
   search: IssueSearch;
   apiClient: ApiClient;
   queryClient: QueryClient;
-  navigate: ReturnType<typeof useNavigate>;
+  peekKey: string | null;
+  peekProjectId: string | null;
+  onPeekChange: (request: PeekRequest) => void;
 }
 
 export function IssuesListContent({
@@ -104,16 +106,10 @@ export function IssuesListContent({
   search,
   apiClient,
   queryClient,
-  navigate,
+  peekKey,
+  peekProjectId,
+  onPeekChange,
 }: IssuesListContentProps): React.ReactElement {
-  const peekKey = search.peekIssueId ?? null;
-  const setPeekKey = (key: string | null): void => {
-    const next = { ...search };
-    if (key === null) delete next.peekIssueId;
-    else next.peekIssueId = key;
-    void navigate({ to: ".", search: next, replace: true } as never);
-  };
-
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(apiClient, workspaceSlug));
   const project = projects.find((entry) => entry.id === projectId) ?? null;
   const [createOpen, setCreateOpen] = React.useState(false);
@@ -244,6 +240,9 @@ export function IssuesListContent({
                   issues={issues.results}
                   totalCount={issues.total_count}
                   prefs={prefs}
+                  peekKey={peekKey}
+                  onPeekChange={onPeekChange}
+                  peekProjectId={peekProjectId}
                 />
               </React.Suspense>
             );
@@ -263,6 +262,9 @@ export function IssuesListContent({
                   hideEstimate={project.estimate === null}
                   richExpression={preferences.rich_filters}
                   weekStart={weekStart}
+                  peekKey={peekKey}
+                  onPeekChange={onPeekChange}
+                  peekProjectId={peekProjectId}
                 />
               </React.Suspense>
             );
@@ -276,6 +278,9 @@ export function IssuesListContent({
                   projectIdentifier={project.identifier}
                   entity={{ scope: "project", projectId: projectId }}
                   canEdit={canEdit}
+                  peekKey={peekKey}
+                  onPeekChange={onPeekChange}
+                  peekProjectId={peekProjectId}
                 />
               </React.Suspense>
             );
@@ -292,7 +297,8 @@ export function IssuesListContent({
                 canEdit={canEdit}
                 richFilters={preferences.rich_filters}
                 peekKey={peekKey}
-                onPeekChange={setPeekKey}
+                onPeekChange={onPeekChange}
+                peekProjectId={peekProjectId}
               />
             );
           }
@@ -307,7 +313,8 @@ export function IssuesListContent({
               canEdit={canEdit}
               richFilters={preferences.rich_filters}
               peekKey={peekKey}
-              onPeekChange={setPeekKey}
+              onPeekChange={onPeekChange}
+              peekProjectId={peekProjectId}
               weekStart={weekStart}
               compact={search.layout === "compact"}
             />

@@ -68,6 +68,8 @@ vi.mock("../calendar/CalendarEntry.js", () => ({
       data-entity={JSON.stringify(props.entity)}
       data-can-edit={String(props.canEdit)}
       data-membership={JSON.stringify(props.membership ?? {})}
+      data-peek={String(props.peekKey ?? "")}
+      data-peek-project={String(props.peekProjectId ?? "")}
     />
   ),
 }));
@@ -104,6 +106,8 @@ vi.mock("../spreadsheet/SpreadsheetLayout.js", () => ({
       data-module={String(props.hideModule)}
       data-estimate={String(props.hideEstimate)}
       data-week-start={String(props.weekStart)}
+      data-peek={String(props.peekKey ?? "")}
+      data-peek-project={String(props.peekProjectId ?? "")}
     />
   ),
 }));
@@ -114,6 +118,8 @@ vi.mock("../gantt/GanttTimeline.js", () => ({
       data-testid="gantt-layout"
       data-total={String(props.totalCount)}
       data-module-completed={String(props.completedModule ?? false)}
+      data-peek={String(props.peekKey ?? "")}
+      data-peek-project={String(props.peekProjectId ?? "")}
     />
   ),
 }));
@@ -782,6 +788,18 @@ describe("EntityListScreen", () => {
     const timeline = await within(screen.getByTestId("gantt-layout-slot")).findByTestId("gantt-layout");
     expect(timeline).toHaveAttribute("data-total", "7");
     expect(timeline).toHaveAttribute("data-module-completed", "true");
+  });
+
+  it("binds the peek address into the calendar, sheet and timeline (ISS-167)", async () => {
+    setup({ peekKey: "WEB-7", peekProjectId: "project-9" });
+    expect(screen.getByTestId("calendar-entry")).toHaveAttribute("data-peek", "WEB-7");
+    expect(screen.getByTestId("calendar-entry")).toHaveAttribute("data-peek-project", "project-9");
+    const sheet = await within(screen.getByTestId("spreadsheet-layout-slot")).findByTestId("spreadsheet-layout");
+    expect(sheet).toHaveAttribute("data-peek", "WEB-7");
+    expect(sheet).toHaveAttribute("data-peek-project", "project-9");
+    const timeline = await within(screen.getByTestId("gantt-layout-slot")).findByTestId("gantt-layout");
+    expect(timeline).toHaveAttribute("data-peek", "WEB-7");
+    expect(timeline).toHaveAttribute("data-peek-project", "project-9");
   });
 
   it("mounts the module analytics entry with the module scope and total", () => {

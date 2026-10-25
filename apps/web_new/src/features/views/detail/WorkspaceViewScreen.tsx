@@ -35,6 +35,7 @@ import {
   type DisplayPrefs,
   type IssuesEntity,
   type LayoutKind,
+  type PeekRequest,
   type RichExpression,
   type WorkItemCreateProject,
 } from "../../issues/index.js";
@@ -80,8 +81,21 @@ const LazyWorkItemCreateDialog = React.lazy(() =>
 const LAYOUT_FAILURE_TITLE = "Couldn't switch the layout";
 const LAYOUT_FAILURE_BODY = "The view is unchanged — check your connection and try again.";
 
+/**
+ * Peek address the workspace routes own (parity/specs/issues.md §14,
+ * ISS-167). The body is an issues surface like any project list, so the
+ * route validates and writes the address and the screen only forwards it.
+ */
+export interface WorkspacePeekAddress {
+  peekKey: string | null;
+  peekProjectId: string | null;
+  onPeekChange: (request: PeekRequest) => void;
+}
+
 export interface WorkspaceViewScreenProps {
   params: WorkspaceViewDetailParams;
+  /** Controlled peek address from the route; every body receives it. */
+  peek: WorkspacePeekAddress;
 }
 
 function WorkspaceDetailSkeleton(): React.ReactElement {
@@ -100,7 +114,7 @@ function WorkspaceDetailError({ onRetry }: { onRetry: () => void }): React.React
   );
 }
 
-export function WorkspaceViewScreen({ params }: WorkspaceViewScreenProps): React.ReactElement {
+export function WorkspaceViewScreen({ params, peek }: WorkspaceViewScreenProps): React.ReactElement {
   const client = getAppClient();
   const navigate = useNavigate();
   const { workspace } = useWorkspace(params.ws);
@@ -137,6 +151,7 @@ export function WorkspaceViewScreen({ params }: WorkspaceViewScreenProps): React
         }}
         canEdit={permissions.canEdit}
         onOpenView={openView}
+        peek={peek}
       />
     );
   }
@@ -166,6 +181,7 @@ export function WorkspaceViewScreen({ params }: WorkspaceViewScreenProps): React
       isAdmin={permissions.isAdmin}
       onOpenView={openView}
       onOpenFallback={openFallback}
+      peek={peek}
     />
   );
 }
@@ -181,6 +197,7 @@ interface WorkspaceDefaultDetailProps {
   onRetryMe: () => void;
   canEdit: boolean;
   onOpenView: (viewId: string) => void;
+  peek: WorkspacePeekAddress;
 }
 
 function WorkspaceDefaultDetail({
@@ -194,6 +211,7 @@ function WorkspaceDefaultDetail({
   onRetryMe,
   canEdit,
   onOpenView,
+  peek,
 }: WorkspaceDefaultDetailProps): React.ReactElement {
   const client = getAppClient();
   const entity = React.useMemo<IssuesEntity>(() => ({ scope: "workspace" }), []);
@@ -300,7 +318,15 @@ function WorkspaceDefaultDetail({
               <div data-testid="workspace-view-empty-body" className="min-h-0 flex-1" />
             ) : (
               <React.Suspense fallback={<ListSkeleton />}>
-                <GlobalIssuesScreen query={bodyQuery} hideHeader emptyState={emptyState} label={defaultView.label} />
+                <GlobalIssuesScreen
+                  query={bodyQuery}
+                  hideHeader
+                  emptyState={emptyState}
+                  label={defaultView.label}
+                  peekKey={peek.peekKey}
+                  peekProjectId={peek.peekProjectId}
+                  onPeekChange={peek.onPeekChange}
+                />
               </React.Suspense>
             )}
           </div>
@@ -337,6 +363,7 @@ interface WorkspaceCustomDetailProps {
   isAdmin: boolean;
   onOpenView: (viewId: string) => void;
   onOpenFallback: () => void;
+  peek: WorkspacePeekAddress;
 }
 
 function WorkspaceCustomDetail({
@@ -348,6 +375,7 @@ function WorkspaceCustomDetail({
   isAdmin,
   onOpenView,
   onOpenFallback,
+  peek,
 }: WorkspaceCustomDetailProps): React.ReactElement {
   const client = getAppClient();
   const detail = useQuery(workspaceViewDetailQueryOptions(client, workspaceSlug, viewId));
@@ -365,6 +393,7 @@ function WorkspaceCustomDetail({
       isAdmin={isAdmin}
       onOpenView={onOpenView}
       onOpenFallback={onOpenFallback}
+      peek={peek}
     />
   );
 }
@@ -378,6 +407,7 @@ interface WorkspaceCustomBodyProps {
   isAdmin: boolean;
   onOpenView: (viewId: string) => void;
   onOpenFallback: () => void;
+  peek: WorkspacePeekAddress;
 }
 
 function WorkspaceCustomBody({
@@ -389,6 +419,7 @@ function WorkspaceCustomBody({
   isAdmin,
   onOpenView,
   onOpenFallback,
+  peek,
 }: WorkspaceCustomBodyProps): React.ReactElement {
   const client = getAppClient();
   const queryClient = useQueryClient();
@@ -521,6 +552,9 @@ function WorkspaceCustomBody({
               />
             }
             label={view.name}
+            peekKey={peek.peekKey}
+            peekProjectId={peek.peekProjectId}
+            onPeekChange={peek.onPeekChange}
           />
         </React.Suspense>
       )}

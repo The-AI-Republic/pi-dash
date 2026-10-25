@@ -105,8 +105,13 @@ export interface GanttPeekHandle {
  * Detail is hydrated through its query options so the panel paints from
  * the cache the route already owns. An unconfirmed create has no server
  * row to read yet, so activating it does nothing (ISS-006/049).
+ *
+ * A host that owns the peek address (the issues route, a saved view) is
+ * handed the activated row and mounts the panel itself, so the URL and the
+ * panel never disagree; without one the hook keeps the panel locally,
+ * which is the standalone timeline mount.
  */
-export function useGanttPeek(workspaceSlug: string): GanttPeekHandle {
+export function useGanttPeek(workspaceSlug: string, onOpen: ((row: GanttRow) => void) | null = null): GanttPeekHandle {
   const [peek, setPeek] = React.useState<GanttPeek | null>(null);
   const narrow = useNarrowViewport();
   const navigate = useNavigate();
@@ -117,9 +122,13 @@ export function useGanttPeek(workspaceSlug: string): GanttPeekHandle {
         void navigate({ to: "/$ws/browse/$issueKey", params: { ws: workspaceSlug, issueKey: row.identifier } });
         return;
       }
+      if (onOpen !== null) {
+        onOpen(row);
+        return;
+      }
       setPeek({ row });
     },
-    [narrow, navigate, workspaceSlug]
+    [narrow, navigate, onOpen, workspaceSlug]
   );
   const closePeek = React.useCallback(() => setPeek(null), []);
   return { peek, openRow, closePeek };

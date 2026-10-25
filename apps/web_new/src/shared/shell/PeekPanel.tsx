@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Shared work-item peek panel (SHELL-016; written from parity/specs/shell.md
-// §10). The shell owns this panel shell — a side panel in the fullscreen
-// portal with the title rendered as an editable field — and the issues epic
-// reuses it for full peek with its own data and commit. Body content arrives
-// as children, so this layer never reaches into feature data.
+// §10; layouts from parity/specs/issues.md §14, ISS-166/168). The shell owns
+// this panel shell — a side panel in the fullscreen portal with the title
+// rendered as an editable field — and the issues epic reuses it for full
+// peek with its own data and commit. Body content arrives as children, so
+// this layer never reaches into feature data. Escape and outside-click both
+// listen in capture so an open overlay still guards the peek while it
+// dismisses itself; typing focus and open overlays always block the close.
 
 import * as React from "react";
 import { X } from "lucide-react";
@@ -13,11 +16,50 @@ import { X } from "lucide-react";
 import { IconButton } from "@pidash/kit";
 import { FULL_SCREEN_PORTAL_ID, OverlayPortal } from "./document.js";
 
+/** Panel presentations (ISS-166): docked side (default), centered modal, full-screen. */
+export type PeekLayout = "side" | "modal" | "full";
+
+/** Overlay roles whose presence blocks a peek close (ISS-168). */
+const OPEN_OVERLAY = '[role="dialog"], [role="menu"], [role="listbox"]';
+
+/** Surfaces an outside press ignores besides the panel (ISS-168). */
+const OUTSIDE_IGNORED = `${OPEN_OVERLAY}, [data-testid="toast-stack"]`;
+
+/** Focus inside an editable control blocks the Escape close (ISS-168). */
+function isTypingTarget(node: Element | null): boolean {
+  if (!(node instanceof HTMLElement)) return false;
+  if (node.isContentEditable) return true;
+  const tag = node.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+/**
+ * Whether an Escape close must stand down: focus sits in an editable
+ * control, or a dialog, menu, or picker is open somewhere.
+ */
+export function peekEscapeBlocked(): boolean {
+  if (isTypingTarget(document.activeElement)) return true;
+  return document.querySelector(OPEN_OVERLAY) !== null;
+}
+
+/**
+ * Whether an outside press must stand down: an overlay is open
+ * somewhere, even when the press itself lands outside it.
+ */
+export function peekOutsideBlocked(target: EventTarget | null): boolean {
+  if (target instanceof Element && target.closest(OUTSIDE_IGNORED) !== null) return true;
+  return document.querySelector(OPEN_OVERLAY) !== null;
+}
+
 export interface PeekPanelProps {
   /** Accessible name for the panel; work-item panels keep the default. */
   label?: string | undefined;
   /** Test handle for the panel; work-item panels keep the default. */
   testId?: string | undefined;
+  /** Presentation; side-peek unless the caller switches (ISS-166). */
+  layout?: PeekLayout | undefined;
+  /** A nested panel paints above its parent. */
+  stacked?: boolean | undefined;
   /** Context line above the title (e.g. the work-item key). */
   eyebrow?: React.ReactNode;
   /** Current title; the field commits through onCommitTitle. */
@@ -26,7 +68,13 @@ export interface PeekPanelProps {
   titleLabel: string;
   /** Render the title as a heading instead of an editable field. */
   titleAsHeading?: boolean | undefined;
+  /** Skip the title block (loading and error states render their own body). */
+  hideTitle?: boolean | undefined;
   onClose: () => void;
+  /** Caller-known Escape suppression (embedded hosts, open dialogs). */
+  suppressEscape?: boolean | undefined;
+  /** Outside presses close through this; without it they are ignored. */
+  onOutsideClick?: (() => void) | undefined;
   /** Commits a renamed title; without it edits stay local to the field. */
   onCommitTitle?: ((next: string) => void) | undefined;
   /** Controls beside the close button (e.g. copy link). */
@@ -34,33 +82,74 @@ export interface PeekPanelProps {
   children?: React.ReactNode;
 }
 
+function panelClasses(layout: PeekLayout, stacked: boolean): string {
+  if (layout === "full") {
+    return `fixed inset-0 ${stacked ? "z-[60]" : "z-50"} flex flex-col gap-(--space-4) overflow-y-auto bg-(--surface) p-(--space-6) md:p-(--space-8)`;
+  }
+  if (layout === "modal") {
+    return `fixed top-1/2 left-1/2 ${stacked ? "z-[60]" : "z-50"} flex max-h-[92vh] w-[min(48rem,94vw)] -translate-x-1/2 -translate-y-1/2 flex-col gap-(--space-4) overflow-y-auto rounded-(--radius-dialog) border border-(--border) bg-(--surface) p-(--space-6) shadow-dialog`;
+  }
+  return `fixed top-0 right-0 bottom-0 ${stacked ? "z-50" : "z-40"} flex w-[min(30rem,92vw)] flex-col gap-(--space-4) overflow-y-auto border-l border-(--border) bg-(--surface) p-(--space-6)`;
+}
+
 export function PeekPanel({
   label,
   testId,
+  layout = "side",
+  stacked = false,
   eyebrow,
   title,
   titleLabel,
   titleAsHeading = false,
+  hideTitle = false,
   onClose,
+  suppressEscape = false,
+  onOutsideClick,
   onCommitTitle,
   actions,
   children,
 }: PeekPanelProps): React.ReactNode {
   const [draft, setDraft] = React.useState(title);
+  const panelRef = React.useRef<HTMLElement | null>(null);
+  // An Escape revert resets the draft and blurs in the same tick; the
+  // blur's commit would otherwise read the pre-revert draft and commit
+  // the abandoned text, so the revert marks this and the commit stands
+  // down once.
+  const revertingRef = React.useRef(false);
   React.useEffect(() => {
     setDraft(title);
   }, [title]);
   React.useEffect(() => {
+    // Capture runs before overlay key handling, so an open dialog still
+    // guards the peek while Escape dismisses the dialog itself.
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape" || suppressEscape || peekEscapeBlocked()) return;
+      onClose();
     };
-    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
     return () => {
-      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown, true);
     };
-  }, [onClose]);
+  }, [onClose, suppressEscape]);
+  React.useEffect(() => {
+    if (onOutsideClick === undefined) return;
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target;
+      if (target instanceof Node && panelRef.current?.contains(target) !== true && !peekOutsideBlocked(target)) {
+        onOutsideClick();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+    };
+  }, [onOutsideClick]);
 
   const commit = (): void => {
+    if (revertingRef.current) {
+      revertingRef.current = false;
+      return;
+    }
     const next = draft.trim();
     if (next === "" || next === title) {
       setDraft(title);
@@ -71,10 +160,19 @@ export function PeekPanel({
 
   return (
     <OverlayPortal rootId={FULL_SCREEN_PORTAL_ID}>
+      {layout === "modal" ? (
+        <div
+          data-testid="peek-backdrop"
+          aria-hidden="true"
+          className={`fixed inset-0 ${stacked ? "z-[55]" : "z-40"} bg-black/40`}
+        />
+      ) : null}
       <aside
+        ref={panelRef}
         aria-label={label ?? "Work item preview"}
         data-testid={testId ?? "issue-preview"}
-        className="fixed top-0 right-0 bottom-0 z-40 flex w-[min(30rem,92vw)] flex-col gap-(--space-4) overflow-y-auto border-l border-(--border) bg-(--surface) p-(--space-6)"
+        data-peek-layout={layout}
+        className={panelClasses(layout, stacked)}
       >
         <div className="flex items-start justify-between gap-(--space-4)">
           <p className="text-caption min-w-0 flex-1 truncate pt-(--space-1) text-(--text-muted)">{eyebrow}</p>
@@ -85,7 +183,7 @@ export function PeekPanel({
             </IconButton>
           </div>
         </div>
-        {titleAsHeading ? (
+        {hideTitle ? null : titleAsHeading ? (
           <h4 className="text-h3 w-full px-(--space-2) py-(--space-1) text-(--text)">{title}</h4>
         ) : (
           <input
@@ -97,6 +195,14 @@ export function PeekPanel({
             onBlur={commit}
             onKeyDown={(event) => {
               if (event.key === "Enter") commit();
+              // Escape reverts the edit instead of closing: the typing
+              // guard above already stood the close down, and the blur
+              // hands the next Escape back to the panel.
+              if (event.key === "Escape") {
+                setDraft(title);
+                revertingRef.current = true;
+                event.currentTarget.blur();
+              }
             }}
             className="text-h3 w-full rounded-(--radius-control) border border-transparent bg-transparent px-(--space-2) py-(--space-1) text-(--text) hover:border-(--border) focus:border-(--accent) focus:outline-none"
           />

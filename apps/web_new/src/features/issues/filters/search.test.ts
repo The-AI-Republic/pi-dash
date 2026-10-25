@@ -22,6 +22,16 @@ describe("issue search", () => {
     expect(parseIssueSearch(null)).toEqual({});
   });
 
+  it("keeps the peek selection, project, and nesting level (ISS-167)", () => {
+    expect(parseIssueSearch({ peekIssueId: "WEB-42" })).toEqual({ peekIssueId: "WEB-42" });
+    expect(parseIssueSearch({ peekIssueId: "a", peekProjectId: "b", peekNestingLevel: "1" })).toEqual({
+      peekIssueId: "a",
+      peekProjectId: "b",
+      peekNestingLevel: "1",
+    });
+    expect(parseIssueSearch({ peekNestingLevel: 2 })).toEqual({});
+  });
+
   it("drops display and filter keys: display state is never URL deep-linkable (ISS-106)", () => {
     expect(
       parseIssueSearch({

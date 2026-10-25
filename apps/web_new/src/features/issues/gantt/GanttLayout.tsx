@@ -25,9 +25,10 @@ import {
 import { WorkItemPreviewHover } from "../lifecycle/WorkItemPreviewCard.js";
 import { todayIsoDay } from "../dropdowns/calendar.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
+import type { LayoutPeekProps, PeekSelection } from "../peek/usePeekAddress.js";
+import { usePeekAddress } from "../peek/usePeekAddress.js";
 import { deriveReorder, type DropPlacement } from "./drag.js";
 import { GanttChart, type GanttSelectionBinding } from "./GanttChart.js";
-import { GanttPeekPanel } from "./GanttPeekPanel.js";
 import { GanttQuickAdd } from "./GanttQuickAdd.js";
 import { canEditTimeline } from "./permissions.js";
 import { buildRows, type GanttRow } from "./rows.js";
@@ -42,6 +43,11 @@ import {
 } from "./useGanttData.js";
 import { useGanttMutations } from "./useGanttMutations.js";
 
+// The peek is the whole detail composition; it loads on first open.
+const LazyIssuePeek = React.lazy(() =>
+  import("../peek/ResolvingIssuePeek.js").then((module) => ({ default: module.ResolvingIssuePeek }))
+);
+
 /** The single selection bucket behind the sidebar's header tri-state. */
 const TIMELINE_SELECTION_GROUP = "gantt";
 
@@ -55,7 +61,7 @@ export function isManualOrder(orderBy: string | null | undefined): boolean {
   return orderBy === "sort_order";
 }
 
-export interface GanttLayoutProps {
+export interface GanttLayoutProps extends LayoutPeekProps {
   workspaceSlug: string;
   projectId: string;
   projectIdentifier: string;
@@ -69,6 +75,9 @@ export interface GanttLayoutProps {
   completedCycle?: boolean;
   /** True for a completed module: the quick-add is hidden (MOD-030). */
   completedModule?: boolean;
+  /** Controlled peeked work-item id (the route owns the URL param). */
+  /** Receives the selection the route should write, or null on close (ISS-167). */
+  /** Peeked project from the URL, when it differs from the route (ISS-167). */
 }
 
 /** Map ordered rows to their state color, skipping uncolored states. */
@@ -99,6 +108,17 @@ export function orderedRows(
   return buildRows(issues, projectIdentifier);
 }
 
+/**
+ * The selection a timeline row opens (ISS-165/167): the row's own project,
+ * taken from the list column the row was built from (a cross-project child
+ * reads under its own project), or the route's when the list no longer
+ * holds that row.
+ */
+export function ganttRowPeek(row: GanttRow, issues: readonly IssueListItem[], routeProjectId: string): PeekSelection {
+  const held = issues.find((entry) => entry.id === row.id);
+  return { issueId: row.id, projectId: held?.project_id ?? routeProjectId, nestingLevel: 0 };
+}
+
 export function GanttLayout({
   workspaceSlug,
   projectId,
@@ -109,11 +129,23 @@ export function GanttLayout({
   weekStart,
   completedCycle = false,
   completedModule = false,
+  peekKey,
+  onPeekChange,
+  peekProjectId,
 }: GanttLayoutProps): React.ReactElement {
   const rows = React.useMemo(() => orderedRows(issues, prefs, projectIdentifier), [issues, prefs, projectIdentifier]);
   const states = useGanttStates(workspaceSlug, projectId);
   const barColors = React.useMemo(() => barColorsFor(rows, states), [rows, states]);
-  const { peek, openRow, closePeek } = useGanttPeek(workspaceSlug);
+  const peek = usePeekAddress({ projectId, peekKey, peekProjectId, onPeekChange });
+  const openFromAddress = React.useCallback(
+    (row: GanttRow) => {
+      peek.open(ganttRowPeek(row, issues, projectId));
+    },
+    [issues, peek, projectId]
+  );
+  // Every activation goes through the address, so a route-owned URL and a
+  // standalone timeline share one mount and one close.
+  const { openRow } = useGanttPeek(workspaceSlug, openFromAddress);
   const projectRole = useProjectMemberRole(workspaceSlug, projectId);
   // An archived project hides every edit affordance (ISS-222). The
   // layout reads that from the list the route already holds.
@@ -216,7 +248,7 @@ export function GanttLayout({
         totalCount={totalCount}
         weekStart={weekStart}
         barColors={barColors}
-        peekedId={peek?.row.id ?? null}
+        peekedId={peek.peeked}
         onOpenRow={openRow}
         hasMore={totalCount > rows.length}
         selection={selectionBinding}
@@ -266,9 +298,20 @@ export function GanttLayout({
           }}
         />
       )}
-      {peek !== null ? (
-        <GanttPeekPanel workspaceSlug={workspaceSlug} projectId={projectId} row={peek.row} onClose={closePeek} />
-      ) : null}
+      {peek.peeked === null ? null : (
+        <React.Suspense fallback={null}>
+          <LazyIssuePeek
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            projectIdentifier={projectIdentifier}
+            peeked={peek.peeked}
+            peekProjectId={peek.peekProjectId}
+            rows={issues}
+            onPeekChange={peek.report}
+            onClose={peek.close}
+          />
+        </React.Suspense>
+      )}
     </div>
   );
 }

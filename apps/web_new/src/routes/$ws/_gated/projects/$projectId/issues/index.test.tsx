@@ -39,6 +39,14 @@ import { sheetIssuesQueryOptions } from "../../../../../../features/issues/sprea
 import { pickerCyclesQueryOptions } from "../../../../../../shared/pickers/reference.js";
 import { Route } from "./index.js";
 
+// The peek is the full detail composition; this suite proves the route hands
+// each layout the address it should bind, not the panel's internals.
+vi.mock("../../../../../../features/issues/peek/ResolvingIssuePeek.js", () => ({
+  ResolvingIssuePeek: (props: { peeked: string; peekProjectId?: string | null; onClose: () => void }) => (
+    <div data-testid="issue-preview" data-peeked={props.peeked} data-peek-project={props.peekProjectId ?? ""} />
+  ),
+}));
+
 // The board's own reads and rendering belong to its slice suite; this file
 // proves the route offers the layout, awaits its chunk and wires the props.
 const kanbanProps: { current: Record<string, unknown> | null } = { current: null };
@@ -361,7 +369,7 @@ function renderScreen(
     displayFilters?: Record<string, unknown>;
     projects?: Project[];
   } = {}
-): void {
+): ReturnType<typeof render> {
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: PARAMS.ws, projectId: PARAMS.projectId });
   vi.spyOn(Route, "useSearch").mockReturnValue(search);
   const apiClient = createAppClient("https://api.test", (() => {
@@ -482,7 +490,7 @@ function renderScreen(
 
   const Component = Route.options.component;
   if (!Component) throw new Error("issues route has no component");
-  render(
+  return render(
     <QueryClientProvider client={queryClient}>
       <React.Suspense fallback={<p>loading</p>}>
         <Component />
@@ -677,6 +685,20 @@ describe("project issues screen", () => {
     expect(screen.queryByLabelText("WEB-42")).toBeNull();
   });
 
+  it("binds the peek address into the timeline and the sheet (ISS-167)", async () => {
+    const search: IssueSearch = { peekIssueId: ISSUE_UUID, peekProjectId: "other-project", peekNestingLevel: "1" };
+    for (const layout of ["gantt_chart", "spreadsheet"] as const) {
+      const { unmount } = renderScreen(search, 1, [issueRow()], {
+        displayFilters: { layout, group_by: null, order_by: "sort_order" },
+        ...(layout === "spreadsheet" ? { prefs: spreadsheetPrefsSeed() } : {}),
+      });
+      const preview = await screen.findByTestId("issue-preview", undefined, LAZY_WAIT);
+      expect(preview).toHaveAttribute("data-peeked", ISSUE_UUID);
+      expect(preview).toHaveAttribute("data-peek-project", "other-project");
+      unmount();
+    }
+  });
+
   it("renders the timeline read-only for an archived project (ISS-222)", async () => {
     renderScreen({}, 1, [issueRow({ start_date: "2026-10-01", target_date: "2026-10-05" })], {
       project: { archived_at: "2026-01-01T00:00:00Z" },
@@ -803,6 +825,7 @@ describe("project issues screen", () => {
       "entity",
       "onPeekChange",
       "peekKey",
+      "peekProjectId",
       "prefs",
       "projectId",
       "projectIdentifier",
@@ -815,13 +838,19 @@ describe("project issues screen", () => {
   it("passes the peek param to the board and writes peek changes back to the URL", async () => {
     const navigate = vi.fn();
     routeNavigate.fn = navigate;
-    renderScreen({ peekIssueId: "WEB-42", layout: "compact" }, 1, [issueRow()], {
-      displayFilters: { layout: "kanban", group_by: null, order_by: "sort_order" },
-    });
+    renderScreen(
+      { peekIssueId: "WEB-42", peekProjectId: "project-9", peekNestingLevel: "1", layout: "compact" },
+      1,
+      [issueRow()],
+      {
+        displayFilters: { layout: "kanban", group_by: null, order_by: "sort_order" },
+      }
+    );
     await screen.findByTestId("kanban-layout", undefined, LAZY_WAIT);
     expect(kanbanProps.current?.["peekKey"]).toBe("WEB-42");
-    const change = kanbanProps.current?.["onPeekChange"] as (key: string | null) => void;
-    change("WEB-43");
+    expect(kanbanProps.current?.["peekProjectId"]).toBe("project-9");
+    const change = kanbanProps.current?.["onPeekChange"] as (request: unknown) => void;
+    change({ issueId: "WEB-43", projectId: PARAMS.projectId, nestingLevel: 0 });
     expect(navigate).toHaveBeenCalledWith({
       to: ".",
       search: { peekIssueId: "WEB-43", layout: "compact" },
@@ -829,6 +858,32 @@ describe("project issues screen", () => {
     });
     change(null);
     expect(navigate).toHaveBeenLastCalledWith({ to: ".", search: { layout: "compact" }, replace: true });
+  });
+
+  it("writes a foreign peeked project and drops it for the route project (ISS-167)", async () => {
+    const navigate = vi.fn();
+    routeNavigate.fn = navigate;
+    renderScreen({}, 1, [issueRow()], {
+      displayFilters: { layout: "kanban", group_by: null, order_by: "sort_order" },
+    });
+    await screen.findByTestId("kanban-layout", undefined, LAZY_WAIT);
+    const change = kanbanProps.current?.["onPeekChange"] as (request: unknown) => void;
+    change({ issueId: "WEB-43", projectId: "555e4567-e89b-12d3-a456-426614174099", nestingLevel: 1 });
+    expect(navigate).toHaveBeenLastCalledWith({
+      to: ".",
+      search: {
+        peekIssueId: "WEB-43",
+        peekProjectId: "555e4567-e89b-12d3-a456-426614174099",
+        peekNestingLevel: "1",
+      },
+      replace: true,
+    });
+    change({ issueId: "WEB-44", projectId: PARAMS.projectId, nestingLevel: 0 });
+    expect(navigate).toHaveBeenLastCalledWith({
+      to: ".",
+      search: { peekIssueId: "WEB-44" },
+      replace: true,
+    });
   });
 
   it("offers the spreadsheet layout and renders it from the stored preference", async () => {

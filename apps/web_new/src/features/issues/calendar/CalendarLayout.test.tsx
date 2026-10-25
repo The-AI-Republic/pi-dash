@@ -61,6 +61,34 @@ vi.mock("../prefs/displayPrefs.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../peek/ResolvingIssuePeek.js", () => ({
+  ResolvingIssuePeek: (props: {
+    peeked: string;
+    peekProjectId?: string | null;
+    onPeekChange?: (selection: unknown) => void;
+    onClose: () => void;
+  }) => (
+    <div
+      aria-label="Work item preview"
+      data-testid="issue-preview"
+      data-peeked={props.peeked}
+      data-peek-project={props.peekProjectId ?? ""}
+    >
+      <button type="button" onClick={props.onClose}>
+        Close preview
+      </button>
+      {props.onPeekChange === undefined ? null : (
+        <button
+          type="button"
+          onClick={() => props.onPeekChange?.({ issueId: "child", projectId: "other", nestingLevel: 1 })}
+        >
+          Nest child
+        </button>
+      )}
+    </div>
+  ),
+}));
+
 vi.mock("./actions.js", () => ({
   useRedateIssue: () => ({ isSaving: false, reDate: state.reDate }),
   useCalendarCreate: (_slug: string, _projectId: string, context?: unknown) => {
@@ -303,6 +331,7 @@ beforeEach(() => {
 afterEach(() => {
   resetAppClient();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("CalendarLayout", () => {
@@ -461,8 +490,9 @@ describe("CalendarLayout", () => {
     renderLayout();
     const user = userEvent.setup();
     await user.click(await screen.findByRole("link", { name: "WEB-42" }));
-    expect(screen.getByTestId("issue-preview")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Work item title" })).toHaveValue("Fix login");
+    const preview = await screen.findByTestId("issue-preview");
+    expect(preview).toHaveAttribute("data-peeked", ISSUE_ID);
+    expect(preview).toHaveAttribute("data-peek-project", "");
     expect(window.location.search).toContain(`peekIssueId=${ISSUE_ID}`);
     expect(state.reDate).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Close preview" }));
@@ -470,12 +500,30 @@ describe("CalendarLayout", () => {
     expect(window.location.search).not.toContain("peekIssueId");
   });
 
-  it("opens peek from the deep link and closes on Escape", async () => {
+  it("opens peek from the deep link and closes it from the panel", async () => {
     window.history.replaceState({}, "", `/acme/projects/1/issues?peekIssueId=${ISSUE_ID}`);
     renderLayout();
-    expect(await screen.findByRole("textbox", { name: "Work item title" })).toHaveValue("Fix login");
-    fireEvent.keyDown(document, { key: "Escape" });
+    expect(await screen.findByTestId("issue-preview")).toHaveAttribute("data-peeked", ISSUE_ID);
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
     expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+    expect(window.location.search).not.toContain("peekIssueId");
+  });
+
+  it("keeps the peeked project from the deep link (ISS-167)", async () => {
+    window.history.replaceState({}, "", `/acme/projects/1/issues?peekIssueId=${ISSUE_ID}&peekProjectId=${EXTRA_ID}`);
+    renderLayout();
+    expect(await screen.findByTestId("issue-preview")).toHaveAttribute("data-peek-project", EXTRA_ID);
+  });
+
+  it("follows a nested open into the address with the child project (ISS-167)", async () => {
+    renderLayout();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("link", { name: "WEB-42" }));
+    await user.click(screen.getByRole("button", { name: "Nest child" }));
+    const search = new URLSearchParams(window.location.search);
+    expect(search.get("peekIssueId")).toBe("child");
+    expect(search.get("peekProjectId")).toBe("other");
+    expect(search.get("peekNestingLevel")).toBe("1");
   });
 
   it("deep-links blocks through the workspace browse route", async () => {
