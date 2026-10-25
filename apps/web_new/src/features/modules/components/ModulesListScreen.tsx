@@ -107,9 +107,9 @@ interface ModulesListSettledProps {
   /** Archived mode for the rows the body renders (slice G's screen). */
   archived?: boolean | undefined;
   /**
-   * Per-row quick menu slot. Absent, the live list mounts the shared row
-   * menu in the matching mode; slice G's screen passes its own to wire
-   * the archive opener.
+   * Per-row quick menu slot. Absent, the screen mounts the shared row
+   * menu in the matching mode; slice G wires its archive opener on the
+   * live list's default menu (MOD-026), never a second menu.
    */
   rowMenu?: ((module: ModuleRow) => React.ReactNode) | undefined;
   children?: React.ReactNode;
@@ -236,8 +236,8 @@ export interface ModulesListScreenProps {
   archived?: boolean;
   /**
    * Per-row quick menu slot. Absent, the screen mounts the shared row
-   * menu in the matching mode; slice G's screen passes its own to wire
-   * the archive opener.
+   * menu in the matching mode; slice G wires its archive opener on the
+   * live list's default menu (MOD-026), never a second menu.
    */
   rowMenu?: (module: ModuleRow) => React.ReactNode;
   /**

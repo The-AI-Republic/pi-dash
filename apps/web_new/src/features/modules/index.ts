@@ -71,25 +71,23 @@ export { MODULES_SEARCH_TRIGGER_LABEL, ModulesSearch, type ModulesSearchProps } 
 export { ModulesSortMenu, type ModulesSortMenuProps } from "./components/ModulesSortMenu.js";
 export { ModuleLayoutIcon } from "./components/ModuleLayoutIcon.js";
 export { ModuleListRow, moduleRowHoverClass, type ModuleListRowProps } from "./components/ModuleListRow.js";
-export { moduleDetailMenuEntries } from "./components/menus/moduleDetailMenuEntries.js";
 export {
   MODULE_ARCHIVE_GATE_HINT,
   MODULE_MENU_ARCHIVE,
   MODULE_MENU_COPY,
   MODULE_MENU_OPEN,
   MODULE_MENU_RESTORE,
+  MODULE_RESTORE_SUCCESS_BODY,
+  MODULE_RESTORE_SUCCESS_TITLE,
+  ModuleRowMenu,
   moduleCanArchive,
+  moduleDetailMenuEntries,
   moduleMenuEntries,
   type ModuleMenuAssembly,
   type ModuleMenuEntryId,
   type ModuleMenuEntryPlan,
-} from "./components/menus/moduleMenuModel.js";
-export {
-  MODULE_RESTORE_SUCCESS_BODY,
-  MODULE_RESTORE_SUCCESS_TITLE,
-  ModuleRowMenu,
   type ModuleRowMenuProps,
-} from "./components/menus/ModuleRowMenu.js";
+} from "./components/menus/index.js";
 export {
   buildModuleCreateCommand,
   buildModuleJumpCommand,
