@@ -22,6 +22,11 @@ export function sttConfigQueryOptions(client: ApiClient) {
     queryKey: sttConfigKeys.all(),
     queryFn: () => getSttConfig(client),
     staleTime: 60_000,
+    // The operator can flip the kill switch without a web rebuild. This is
+    // the one read the composer and the settings page share, so a refocus
+    // is how a tab that stayed open learns the switch moved (AGT-064).
+    // Other reads keep the app-wide no-focus-refetch policy.
+    refetchOnWindowFocus: "always",
   });
 }
 

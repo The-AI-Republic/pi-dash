@@ -152,6 +152,8 @@ import type {
   SchedulerProjectInstallOption,
   SchedulerProjectRow,
   SchedulerScheduleValues,
+  SchedulerRecurrenceAction,
+  SchedulerRecurrenceFacts,
   RunnersEditPodForm,
   RunnersPodTile,
   RunnersRail,
@@ -366,6 +368,11 @@ export class WebDriver implements ParityDriver {
   private assistantTranscribeTextStub: string | null = null;
   private assistantTranscribeFailure: { status: number; body: Record<string, string> } | null = null;
   private assistantTranscribeSeen: { contentType: string; hasFilePart: boolean; byteLength: number }[] = [];
+  private assistantDictationEnabledStub: boolean | null = null;
+  private assistantDictationWritesDisabled = false;
+  private assistantDictationRoutesInstalled = false;
+  private assistantSpeechConfigReadsSeen = 0;
+  private assistantSpeechConfigReadHandler: ((request: { url(): string; method(): string }) => void) | null = null;
   private assistantDesktopWatchHandler: ((request: { method(): string; url(): string }) => void) | null = null;
   private assistantDesktopCalls: { method: string; url: string }[] = [];
   private assistantInstanceLlmStub: boolean | null = null;
@@ -16115,6 +16122,46 @@ export class WebDriver implements ParityDriver {
     return this.schedulerHumanizer(this.schedulerDialog());
   }
 
+  async schedulerRecurrenceFacts(): Promise<SchedulerRecurrenceFacts> {
+    // The oracle has no builder: the recurrence editor is one plain
+    // textarea. The sentence under it is still the same live line, so the
+    // scenario can compare that half on both targets.
+    const dialog = this.schedulerDialog();
+    const rawField = dialog.getByLabel("Recurrence (RRULE)");
+    const rawVisible = (await rawField.count()) > 0 && (await rawField.first().isVisible());
+    return {
+      visible: false,
+      interval: null,
+      unit: null,
+      unitOptions: [],
+      weekdays: [],
+      monthlyPattern: null,
+      dayOfMonth: null,
+      ordinal: null,
+      weekdayOfMonth: null,
+      ends: null,
+      endDate: null,
+      occurrences: null,
+      rawVisible,
+      rawValue: rawVisible ? await rawField.first().inputValue() : null,
+      advancedVisible: false,
+      sentence: await this.schedulerHumanizer(dialog).catch(() => ""),
+    };
+  }
+
+  async schedulerRecurrenceAct(_action: SchedulerRecurrenceAction): Promise<void> {
+    throw new Error("[parity] the recurrence builder is a web_new target; the oracle has only a raw RRULE field.");
+  }
+
+  async schedulerRecurrenceAdvanced(): Promise<boolean> {
+    // No disclosure exists on the oracle: its raw field is always open.
+    return (await this.schedulerDialog().getByLabel("Recurrence (RRULE)").count()) > 0;
+  }
+
+  async schedulerRecurrenceRaw(rule: string): Promise<void> {
+    await this.schedulerDialog().getByLabel("Recurrence (RRULE)").fill(rule);
+  }
+
   async schedulerProjectEditErrors(): Promise<string[]> {
     return this.schedulerModalErrors(this.schedulerDialog());
   }
@@ -19294,6 +19341,92 @@ export class WebDriver implements ParityDriver {
 
   async assistantMicDisabled(): Promise<boolean> {
     return this.assistantMicButton().isDisabled();
+  }
+
+  async assistantMicVisible(): Promise<boolean> {
+    const mic = this.assistantMicButton();
+    if ((await mic.count()) === 0) return false;
+    return mic.first().isVisible();
+  }
+
+  async assistantRefocus(): Promise<void> {
+    // Same visibility dance as the new driver: the query client refetches
+    // on the visible edge, which is how a kill-switch flip reaches a tab
+    // that stayed open.
+    await this.page.evaluate(() => {
+      const setState = (state: DocumentVisibilityState): void => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+      };
+      setState("hidden");
+      window.dispatchEvent(new Event("visibilitychange"));
+      setState("visible");
+      window.dispatchEvent(new Event("visibilitychange"));
+    });
+  }
+
+  async assistantSpeechConfigReads(): Promise<number> {
+    if (this.assistantSpeechConfigReadHandler === null) {
+      this.assistantSpeechConfigReadHandler = (request) => {
+        if (request.method() !== "GET") return;
+        if (new URL(request.url()).pathname.endsWith("/api/users/me/ai-assistant/stt-config/")) {
+          this.assistantSpeechConfigReadsSeen += 1;
+        }
+      };
+      this.page.on("request", this.assistantSpeechConfigReadHandler as (request: never) => void);
+    }
+    return this.assistantSpeechConfigReadsSeen;
+  }
+
+  async assistantDictationApiProbe(): Promise<{
+    read: number;
+    readEnabled: boolean | null;
+    save: number;
+    test: number;
+    transcribe: number;
+    remove: number;
+  }> {
+    // The oracle's checkout has no kill switch, so its answers are the
+    // unflagged ones; the target-only scenario never reads this leg.
+    return this.page.evaluate(async () => {
+      const base = "/api/users/me/ai-assistant";
+      const readResponse = await fetch(`${base}/stt-config/`, { credentials: "include" });
+      const read = readResponse.status;
+      let readEnabled: boolean | null = null;
+      try {
+        const body = (await readResponse.json()) as { enabled?: unknown };
+        readEnabled = typeof body.enabled === "boolean" ? body.enabled : null;
+      } catch {
+        readEnabled = null;
+      }
+      const save = await fetch(`${base}/stt-config/`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ base_url: "https://stt.test/v1", model_name: "whisper-1", api_key: "probe-key" }),
+      });
+      const test = await fetch(`${base}/stt-config/test/`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const audio = new FormData();
+      audio.append("file", new Blob([new Uint8Array([1, 2, 3])], { type: "audio/webm" }), "clip.webm");
+      const transcribe = await fetch(`${base}/transcribe/`, {
+        method: "POST",
+        credentials: "include",
+        body: audio,
+      });
+      const remove = await fetch(`${base}/stt-config/`, { method: "DELETE", credentials: "include" });
+      return {
+        read,
+        readEnabled,
+        save: save.status,
+        test: test.status,
+        transcribe: transcribe.status,
+        remove: remove.status,
+      };
+    });
   }
 
   async assistantMicHold(ms: number): Promise<void> {
@@ -48080,6 +48213,73 @@ export class WebDriver implements ParityDriver {
     const settled = this.settingsProfileWriteWait("/api/users/me/ai-assistant/stt-config/", "DELETE");
     await this.page.getByRole("button", { name: "Remove", exact: true }).nth(index).click({ timeout: 15_000 });
     await settled;
+  }
+
+  async settingsProfileStubDictationEnabled(enabled: boolean): Promise<void> {
+    this.assistantDictationEnabledStub = enabled;
+    await this.installDictationStubRoutes();
+  }
+
+  async settingsProfileStubDictationWritesDisabled(): Promise<void> {
+    this.assistantDictationWritesDisabled = true;
+    await this.installDictationStubRoutes();
+  }
+
+  async settingsProfileClearDictationStubs(): Promise<void> {
+    this.assistantDictationEnabledStub = null;
+    this.assistantDictationWritesDisabled = false;
+    this.assistantDictationRoutesInstalled = false;
+    await this.page.unroute("**/api/users/me/ai-assistant/stt-config/");
+    await this.page.unroute("**/api/users/me/ai-assistant/stt-config/test/");
+    await this.page.unroute("**/api/users/me/ai-assistant/transcribe/");
+  }
+
+  private async installDictationStubRoutes(): Promise<void> {
+    if (this.assistantDictationRoutesInstalled) return;
+    this.assistantDictationRoutesInstalled = true;
+    await this.page.route("**/api/users/me/ai-assistant/stt-config/", async (route) => {
+      const request = route.request();
+      const method = request.method();
+      const enabled = this.assistantDictationEnabledStub;
+      if (method === "GET" && enabled !== null) {
+        const live = await this.page.request.get("/api/users/me/ai-assistant/stt-config/");
+        const payload = (await live.json()) as Record<string, unknown>;
+        payload["enabled"] = enabled;
+        await route.fulfill({ status: live.status(), contentType: "application/json", json: payload });
+        return;
+      }
+      if (this.assistantDictationWritesDisabled && (method === "PUT" || method === "POST")) {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "dictation_disabled" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
+    await this.page.route("**/api/users/me/ai-assistant/stt-config/test/", async (route) => {
+      if (this.assistantDictationWritesDisabled && route.request().method() === "POST") {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "dictation_disabled" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
+    await this.page.route("**/api/users/me/ai-assistant/transcribe/", async (route) => {
+      if (this.assistantDictationWritesDisabled && route.request().method() === "POST") {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "dictation_disabled" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
   }
 
   async settingsProfileToolServerRows(): Promise<

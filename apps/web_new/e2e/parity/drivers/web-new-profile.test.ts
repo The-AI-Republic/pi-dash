@@ -1670,6 +1670,49 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
     expect(clicks).toEqual(["Save", "Test connection", "Remove"]);
   });
 
+  it("reads a remove-only dictation section without touching absent fields", async () => {
+    // Playwright locator reads on an absent element do not reject — they poll
+    // until some timeout. A never-settling stub models that: the read only
+    // finishes because the driver checks count() first, so a regression that
+    // goes straight to inputValue() fails this test's timeout instead of
+    // hanging the whole suite.
+    const touched: string[] = [];
+    const absent = (name: string) =>
+      locator({
+        count: async () => 0,
+        inputValue: () => {
+          touched.push(`${name}.inputValue`);
+          return new Promise<string>(() => undefined);
+        },
+        getAttribute: () => {
+          touched.push(`${name}.getAttribute`);
+          return new Promise<string | null>(() => undefined);
+        },
+        isDisabled: () => {
+          touched.push(`${name}.isDisabled`);
+          return new Promise<boolean>(() => undefined);
+        },
+      });
+    const section = locator({
+      locator: (selector: string) => absent(selector),
+      getByRole: (_role: string, options?: Record<string, unknown>) => absent(String(options?.["name"] ?? "")),
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(sectionPage(section));
+    expect(await driver.settingsProfileDictationFacts()).toEqual({
+      sectionVisible: true,
+      baseUrl: "",
+      model: "",
+      keyValue: "",
+      keyPlaceholder: "",
+      saveDisabled: true,
+      testDisabled: true,
+      removeVisible: false,
+      lastVerified: null,
+    });
+    expect(touched).toEqual([]);
+  }, 5_000);
+
   it("reads tool server rows with disabled, locked and prefix states", async () => {
     const rows = [
       {

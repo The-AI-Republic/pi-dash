@@ -580,3 +580,171 @@ describe("issue modal helpers", () => {
     expect(await new WebNewDriver(pageOf({ getByRole: absent })).issueModalDescriptionText()).toBeNull();
   });
 });
+
+describe("dictation kill switch", () => {
+  it("reports the mic only when it is present and visible", async () => {
+    const shown = locator({ count: async () => 1, isVisible: async () => true });
+    expect(await new WebNewDriver(pageOf({ locator: () => shown })).assistantMicVisible()).toBe(true);
+    const hidden = locator({ count: async () => 1, isVisible: async () => false });
+    expect(await new WebNewDriver(pageOf({ locator: () => hidden })).assistantMicVisible()).toBe(false);
+    const absent = locator({ count: async () => 0 });
+    expect(await new WebNewDriver(pageOf({ locator: () => absent })).assistantMicVisible()).toBe(false);
+  });
+
+  it("flips document visibility so a refocus refetches the config", async () => {
+    const evaluate = vi.fn(async (fn: () => void) => fn());
+    const dispatchEvent = vi.fn(() => true);
+    vi.stubGlobal("window", { dispatchEvent });
+    vi.stubGlobal("document", {});
+    try {
+      await new WebNewDriver(pageOf({ evaluate })).assistantRefocus();
+      expect(evaluate).toHaveBeenCalledTimes(1);
+      expect(dispatchEvent).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("counts only speech-config GETs", async () => {
+    const listeners: ((request: { url(): string; method(): string }) => void)[] = [];
+    const page = pageOf({ on: vi.fn((_event: string, handler: never) => listeners.push(handler)) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.assistantSpeechConfigReads()).toBe(0);
+    expect(page.on).toHaveBeenCalledWith("request", expect.any(Function));
+    const emit = listeners[0]!;
+    emit({ method: () => "GET", url: () => "https://app.test/api/users/me/ai-assistant/stt-config/" });
+    emit({ method: () => "PUT", url: () => "https://app.test/api/users/me/ai-assistant/stt-config/" });
+    emit({ method: () => "GET", url: () => "https://app.test/api/users/me/ai-assistant/config/" });
+    expect(await driver.assistantSpeechConfigReads()).toBe(1);
+    // A second read attaches no second listener.
+    expect(page.on).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves the flag on the read and refuses writes while DELETE stays open", async () => {
+    const route = vi.fn(async () => undefined);
+    const request = {
+      get: vi.fn(async () => ({
+        status: () => 200,
+        json: async () => ({
+          base_url: "https://stt.test",
+          model_name: "whisper",
+          has_api_key: true,
+          last_verified_at: null,
+        }),
+      })),
+    };
+    const driver = new WebNewDriver(pageOf({ route, request }));
+    await driver.settingsProfileStubDictationEnabled(false);
+    const configHandler = handlerFor(route, "**/api/users/me/ai-assistant/stt-config/");
+    const read = stubRoute({ method: () => "GET" });
+    await configHandler(read as unknown as Route);
+    expect(read.fulfill).toHaveBeenCalledWith({
+      status: 200,
+      contentType: "application/json",
+      json: {
+        base_url: "https://stt.test",
+        model_name: "whisper",
+        has_api_key: true,
+        last_verified_at: null,
+        enabled: false,
+      },
+    });
+    await driver.settingsProfileStubDictationWritesDisabled();
+    const write = stubRoute({ method: () => "PUT" });
+    await configHandler(write as unknown as Route);
+    expect(write.fulfill).toHaveBeenCalledWith({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "dictation_disabled" }),
+    });
+    const remove = stubRoute({ method: () => "DELETE" });
+    await configHandler(remove as unknown as Route);
+    expect(remove.fallback).toHaveBeenCalledTimes(1);
+    const test = stubRoute({
+      method: () => "POST",
+      url: () => "https://app.test/api/users/me/ai-assistant/stt-config/test/",
+    });
+    const testHandler = handlerFor(route, "**/api/users/me/ai-assistant/stt-config/test/");
+    await testHandler(test as unknown as Route);
+    expect(test.fulfill).toHaveBeenCalledWith({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "dictation_disabled" }),
+    });
+    const transcribe = handlerFor(route, "**/api/users/me/ai-assistant/transcribe/");
+    const upload = stubRoute({ method: () => "POST" });
+    await transcribe(upload as unknown as Route);
+    expect(upload.fulfill).toHaveBeenCalledWith({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "dictation_disabled" }),
+    });
+  });
+
+  it("leaves traffic alone when no stub state is armed and removes the routes", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route, unroute }));
+    await driver.settingsProfileStubDictationEnabled(true);
+    const configHandler = handlerFor(route, "**/api/users/me/ai-assistant/stt-config/");
+    const write = stubRoute({ method: () => "PUT" });
+    await configHandler(write as unknown as Route);
+    expect(write.fallback).toHaveBeenCalledTimes(1);
+    await driver.settingsProfileClearDictationStubs();
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/ai-assistant/stt-config/");
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/ai-assistant/stt-config/test/");
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/ai-assistant/transcribe/");
+  });
+});
+
+describe("dictation API probe", () => {
+  it("drives every speech endpoint in the browser and reports its status", async () => {
+    const calls: { url: string; method: string }[] = [];
+    const fetchMock = vi.fn(async (input: string, init?: { method?: string }) => {
+      const method = init?.method ?? "GET";
+      calls.push({ url: input, method });
+      const status = method === "GET" ? 200 : method === "DELETE" ? 204 : 404;
+      return {
+        status,
+        json: async () => ({ enabled: false }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const driver = new WebNewDriver(pageOf({ evaluate: async (fn: () => unknown) => fn() }));
+      const probe = await driver.assistantDictationApiProbe();
+      expect(probe).toEqual({ read: 200, readEnabled: false, save: 404, test: 404, transcribe: 404, remove: 204 });
+      expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+        "GET /api/users/me/ai-assistant/stt-config/",
+        "PUT /api/users/me/ai-assistant/stt-config/",
+        "POST /api/users/me/ai-assistant/stt-config/test/",
+        "POST /api/users/me/ai-assistant/transcribe/",
+        "DELETE /api/users/me/ai-assistant/stt-config/",
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports a null flag when the read has no boolean, or no body", async () => {
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      return {
+        status: 200,
+        json: async () => {
+          if (call === 1) return { enabled: "yes" };
+          throw new Error("not json");
+        },
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const driver = new WebNewDriver(pageOf({ evaluate: async (fn: () => unknown) => fn() }));
+      expect((await driver.assistantDictationApiProbe()).readEnabled).toBeNull();
+      expect((await driver.assistantDictationApiProbe()).readEnabled).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
