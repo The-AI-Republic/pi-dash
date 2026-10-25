@@ -109,7 +109,7 @@ describe("UninstallInstallDialog", () => {
     setup({ binding: binding() });
     expect(screen.getByRole("heading", { name: "Uninstall scheduler?" })).toBeInTheDocument();
     const text = uninstallConsequence(binding());
-    expect(text).toContain("stops it firing on this project");
+    expect(text).toContain("stops firing on this project");
     expect(text).toContain("unaffected");
     expect(screen.getByText(text)).toBeInTheDocument();
     expect(text).toContain("Weekly review");

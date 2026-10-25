@@ -4,16 +4,21 @@
 // Custom month dialog behind either delay picker
 // (parity/specs/project-settings-part-f.md, PSET-053/054; AGT-036).
 // The field seeds at one month every open and submits a whole month to
-// the row, then closes. The number input carries required bounds, so a
-// zero, an over-range or a fractional count never reaches the handler:
-// native validation keeps the dialog open without any app text. Only an
-// empty field gets the range message, which clears as soon as the user
-// types.
+// the row, then closes. Empty and whole-number out-of-range values get
+// the inline range message; a fractional count stays silent because the
+// number field's step validation refuses it. The message clears as soon
+// as the user types.
 
 import { Button, Dialog, Input } from "@pidash/kit";
 import * as React from "react";
 
-import { DELAY_RANGE_MESSAGE, MAX_DELAY_MONTHS, MIN_DELAY_MONTHS, parseDelayInput } from "../api/months.js";
+import {
+  DELAY_RANGE_MESSAGE,
+  MAX_DELAY_MONTHS,
+  MIN_DELAY_MONTHS,
+  isMonthRangeError,
+  parseDelayInput,
+} from "../api/months.js";
 
 export const CUSTOM_MONTH_TITLE = "Customize time range";
 export const CUSTOM_MONTH_SEED = String(MIN_DELAY_MONTHS);
@@ -39,14 +44,14 @@ export function CustomMonthDialog({ open, onOpenChange, onSubmit }: CustomMonthD
 
   function submit(event: React.FormEvent<HTMLFormElement>): void {
     event.preventDefault();
-    // Native validation normally stops invalid values before submit; the
-    // guard covers a programmatic submit and keeps the outcome the same.
-    if (!event.currentTarget.checkValidity()) return;
+    if (isMonthRangeError(raw)) {
+      setShowRangeError(true);
+      return;
+    }
     const months = parseDelayInput(raw);
     if (months === null) {
-      // Everything but an empty field was refused above; the empty case
-      // is the one the app explains.
-      setShowRangeError(true);
+      // Fractional counts are refused by the number field's step check;
+      // keep the dialog open without adding a range message.
       return;
     }
     onSubmit(months);
@@ -59,7 +64,7 @@ export function CustomMonthDialog({ open, onOpenChange, onSubmit }: CustomMonthD
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange} title={CUSTOM_MONTH_TITLE}>
-      <form onSubmit={submit}>
+      <form noValidate onSubmit={submit}>
         <Input
           label="Months"
           type="number"

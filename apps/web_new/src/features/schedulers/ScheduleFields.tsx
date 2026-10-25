@@ -51,6 +51,7 @@ export function ScheduleFields({
   const ids = scheduleFieldIds(idPrefix);
   const zones = React.useMemo(() => timeZoneOptions(), []);
   const sentence = React.useMemo(() => describeRrule(value.rrule), [value.rrule]);
+  const liveSentence = value.rrule.trim() === "" ? `${sentence}.` : sentence;
   return (
     <div className="flex flex-col gap-(--space-5)">
       <div className="grid grid-cols-1 gap-(--space-4) md:grid-cols-2">
@@ -96,7 +97,7 @@ export function ScheduleFields({
           onChange={(next) => onChange("rrule", next)}
         />
         <p className="text-meta text-(--text-muted)">
-          <span className="text-(--text)">{sentence}.</span> Leave the rule empty to fire only once at the start.
+          <span className="text-(--text)">{liveSentence}</span> Leave the rule empty to fire only once at the start.
         </p>
       </div>
 
