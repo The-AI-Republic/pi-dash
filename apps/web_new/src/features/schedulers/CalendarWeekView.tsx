@@ -45,10 +45,17 @@ export function CalendarWeekView({ anchor, now, byDay, onSelect }: CalendarWeekV
       <div className="grid grid-cols-[3.5rem_repeat(7,minmax(0,1fr))] border-b border-(--border)">
         <div aria-hidden="true" />
         {days.map((day) => (
-          <div key={day.toISOString()} className="flex items-center gap-(--space-2) px-(--space-3) py-(--space-2)">
+          <div
+            key={day.toISOString()}
+            data-testid="calendar-week-day-head"
+            className="flex items-center gap-(--space-2) px-(--space-3) py-(--space-2)"
+          >
             <span className="text-meta font-medium text-(--text-muted)">{formatDayLabel(day)}</span>
             {isSameDay(day, now) ? (
-              <span className="text-meta rounded-(--radius-control) bg-(--accent-subtle) px-(--space-2) font-medium text-(--accent)">
+              <span
+                data-testid="calendar-week-today"
+                className="text-meta rounded-(--radius-control) bg-(--accent-subtle) px-(--space-2) font-medium text-(--accent)"
+              >
                 Today
               </span>
             ) : null}
@@ -73,6 +80,8 @@ export function CalendarWeekView({ anchor, now, byDay, onSelect }: CalendarWeekV
           return (
             <div
               key={day.toISOString()}
+              data-testid="calendar-week-day"
+              data-today={today ? "true" : undefined}
               style={{ height: `${DAY_HEIGHT}px` }}
               className="relative border-l border-(--border)"
             >
@@ -100,6 +109,7 @@ export function CalendarWeekView({ anchor, now, byDay, onSelect }: CalendarWeekV
               {today ? (
                 <div
                   aria-hidden="true"
+                  data-testid="calendar-now-line"
                   className="pointer-events-none absolute inset-x-0 border-t-2 border-(--danger)"
                   style={{ top: `${lineTop}px` }}
                 />

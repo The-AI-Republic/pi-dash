@@ -11529,111 +11529,393 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async schedulerOpenProjectCalendar(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("schedulerOpenProjectCalendar");
+  // --- Project firing calendar, visibility rail, occurrence panel and
+  // --- section tabs (NEWFRONT-889; AGT-011/015-017/020/021/062).
+  //
+  // The reads below are written against the new app's rendered surface: the
+  // grids, rail, panel and tabs expose test ids or accessible names of their
+  // own, so no read depends on the old app's class traversal. Navigation is
+  // settled on those surfaces rather than on an occurrences response: the
+  // query cache serves a revisited window without a round trip, and a
+  // response wait armed before the click would still stall there. Settling
+  // on the rendered state keeps cached and uncached windows alike fast.
+
+  /** The calendar section that owns both grids, the rail and the panel. */
+  private schedulerCalendarScope(): Locator {
+    return this.page.getByRole("region", { name: "Firing calendar" });
   }
+
+  private schedulerMonthRoot(): Locator {
+    return this.page.getByTestId("calendar-month-view");
+  }
+
+  private schedulerWeekRoot(): Locator {
+    return this.page.getByTestId("calendar-week-view");
+  }
+
+  private schedulerRail(): Locator {
+    return this.page.getByRole("complementary", { name: "Calendars" });
+  }
+
+  /** The occurrence panel's accessible name is "<scheduler> occurrence". */
+  private schedulerDrawer(): Locator {
+    return this.page.getByRole("dialog", { name: / occurrence$/ });
+  }
+
+  /** The scheduler section's tab strip. */
+  private schedulerTabs(): Locator {
+    return this.page.getByRole("navigation", { name: "Scheduler views" });
+  }
+
+  private async schedulerText(locator: Locator): Promise<string> {
+    return (await locator.innerText().catch(() => "")).trim();
+  }
+
+  /** Whichever body the calendar can show once its reads settle. */
+  private async schedulerCalendarReady(): Promise<void> {
+    await this.schedulerMonthRoot()
+      .or(this.schedulerWeekRoot())
+      .or(this.page.getByRole("heading", { name: "No schedulers installed", exact: true }))
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /**
+   * The week view's leading day caption. Stepping a week shifts the dates
+   * even when the month-year caption stays put, so this is the week
+   * view's own proof that a step landed.
+   */
+  private async schedulerWeekSignal(): Promise<string> {
+    const head = this.schedulerWeekRoot().getByTestId("calendar-week-day-head").first();
+    return this.schedulerText(head.locator("span").first());
+  }
+
+  /**
+   * One block's five fields in a single evaluate: the two child spans carry
+   * time then scheduler name, the button's title carries the tooltip, and
+   * the fill is the computed background (past grey vs scheduler tint).
+   */
+  private async schedulerReadBlock(button: Locator, day: string): Promise<SchedulerCalendarBlock> {
+    const spans = button.locator(":scope > span");
+    await spans.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const background = await button
+      .evaluate((element) => window.getComputedStyle(element as HTMLElement).backgroundColor)
+      .catch(() => "");
+    return {
+      day,
+      time: await this.schedulerText(spans.nth(0)),
+      name: await this.schedulerText(spans.nth(1)),
+      title: (await button.getAttribute("title").catch(() => null)) ?? "",
+      background: String(background),
+    };
+  }
+
+  /**
+   * Visible controls in `scope` whose wording offers an export-ish action.
+   * Occurrence blocks are excluded by their tooltip: they inspect a firing,
+   * they do not export one, even when a scheduler name reads like an action.
+   */
+  private async schedulerExportLike(scope: Locator): Promise<string[]> {
+    const labels: string[] = [];
+    const roles = ["button", "link"] as const;
+    for (const role of roles) {
+      for (const control of await scope.getByRole(role).all()) {
+        if (!(await control.isVisible().catch(() => false))) continue;
+        if ((await control.getAttribute("title").catch(() => null)) !== null) continue;
+        const label = await this.schedulerText(control);
+        if (label !== "" && /export|download|print|share/i.test(label)) labels.push(label);
+      }
+    }
+    return labels;
+  }
+
+  async schedulerOpenProjectCalendar(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/schedulers/calendar`);
+    await this.schedulerCalendarReady();
+  }
+
   async schedulerCalendarView(): Promise<"week" | "month"> {
-    return todo("schedulerCalendarView");
+    return (await this.schedulerWeekRoot().count()) > 0 ? "week" : "month";
   }
-  async schedulerCalendarSetView(_view: "week" | "month"): Promise<void> {
-    return todo("schedulerCalendarSetView");
+
+  async schedulerCalendarSetView(view: "week" | "month"): Promise<void> {
+    const label = view === "week" ? "Week" : "Month";
+    const target = view === "week" ? this.schedulerWeekRoot() : this.schedulerMonthRoot();
+    await this.page.getByRole("button", { name: label, exact: true }).click();
+    await target.waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerCalendarTitle(): Promise<string> {
-    return todo("schedulerCalendarTitle");
+    return this.schedulerText(this.page.getByTestId("calendar-period-label"));
   }
-  async schedulerCalendarStep(_direction: "prev" | "next"): Promise<void> {
-    return todo("schedulerCalendarStep");
+
+  async schedulerCalendarStep(direction: "prev" | "next"): Promise<void> {
+    const week = (await this.schedulerWeekRoot().count()) > 0;
+    const before = week ? await this.schedulerWeekSignal() : await this.schedulerCalendarTitle();
+    await this.page.getByRole("button", { name: direction === "prev" ? "Previous" : "Next", exact: true }).click();
+    const signal = () => (week ? this.schedulerWeekSignal() : this.schedulerCalendarTitle());
+    await expect.poll(signal, { timeout: WebNewDriver.WAIT_MS }).not.toBe(before);
   }
+
   async schedulerCalendarToday(): Promise<void> {
-    return todo("schedulerCalendarToday");
+    await this.page.getByRole("button", { name: "Today", exact: true }).click();
+    const home = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(new Date());
+    await expect.poll(() => this.schedulerCalendarTitle(), { timeout: WebNewDriver.WAIT_MS }).toBe(home);
+    // Whichever grid is mounted marks today once the jump has painted;
+    // the empty state has no grid and no mark.
+    await this.schedulerMonthRoot()
+      .or(this.schedulerWeekRoot())
+      .or(this.page.getByRole("heading", { name: "No schedulers installed", exact: true }))
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerCalendarEmptyVisible(): Promise<boolean> {
-    return todo("schedulerCalendarEmptyVisible");
+    return this.isShown(this.page.getByRole("heading", { name: "No schedulers installed", exact: true }));
   }
+
   async schedulerCalendarTruncatedVisible(): Promise<boolean> {
-    return todo("schedulerCalendarTruncatedVisible");
+    return this.isShown(this.page.getByText("Too many occurrences in this window", { exact: false }));
   }
+
   async schedulerCalendarMonthBlocks(): Promise<SchedulerCalendarBlock[]> {
-    return todo("schedulerCalendarMonthBlocks");
+    const blocks: SchedulerCalendarBlock[] = [];
+    for (const cell of await this.schedulerMonthRoot().getByTestId("calendar-month-day").all()) {
+      const day = await this.schedulerText(cell.getByTestId("calendar-month-day-number"));
+      for (const button of await cell.locator("button[title]").all()) {
+        blocks.push(await this.schedulerReadBlock(button, day));
+      }
+    }
+    return blocks;
   }
+
   async schedulerCalendarMonthOverflow(): Promise<string[]> {
-    return todo("schedulerCalendarMonthOverflow");
+    const labels: string[] = [];
+    for (const cell of await this.schedulerMonthRoot().getByTestId("calendar-month-day").all()) {
+      for (const control of await cell.locator("button:not([title])").all()) {
+        const label = await this.schedulerText(control);
+        if (label !== "") labels.push(label);
+      }
+    }
+    return labels;
   }
+
   async schedulerCalendarMonthTodayMarked(): Promise<boolean> {
-    return todo("schedulerCalendarMonthTodayMarked");
+    return (
+      (await this.schedulerMonthRoot().locator('[data-testid="calendar-month-day"][data-today="true"]').count()) > 0
+    );
   }
+
   async schedulerCalendarWeekBlocks(): Promise<SchedulerCalendarBlock[]> {
-    return todo("schedulerCalendarWeekBlocks");
+    const days: string[] = [];
+    for (const head of await this.schedulerWeekRoot().getByTestId("calendar-week-day-head").all()) {
+      days.push(await this.schedulerText(head.locator("span").first()));
+    }
+    const blocks: SchedulerCalendarBlock[] = [];
+    const lanes = await this.schedulerWeekRoot().getByTestId("calendar-week-day").all();
+    for (let index = 0; index < lanes.length; index++) {
+      for (const button of await (lanes[index] as Locator).locator("button[title]").all()) {
+        blocks.push(await this.schedulerReadBlock(button, days[index] ?? ""));
+      }
+    }
+    return blocks;
   }
+
   async schedulerCalendarWeekTodayMarked(): Promise<boolean> {
-    return todo("schedulerCalendarWeekTodayMarked");
+    return (await this.schedulerWeekRoot().getByTestId("calendar-week-today").count()) > 0;
   }
+
   async schedulerCalendarTimeLineTop(): Promise<number | null> {
-    return todo("schedulerCalendarTimeLineTop");
+    const line = this.schedulerWeekRoot().getByTestId("calendar-now-line");
+    if ((await line.count()) === 0) return null;
+    const top = await line.evaluate((element) => (element as HTMLElement).style.top).catch(() => "");
+    const offset = Number.parseFloat(String(top));
+    return Number.isFinite(offset) ? offset : null;
   }
-  async schedulerCalendarClickBlock(_name: string): Promise<void> {
-    return todo("schedulerCalendarClickBlock");
+
+  async schedulerCalendarClickBlock(name: string): Promise<void> {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    await this.schedulerCalendarScope()
+      .locator("button[title]")
+      .filter({ hasText: new RegExp(escaped) })
+      .first()
+      .click();
+    await this.schedulerDrawer().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerCalendarAnyDraggable(): Promise<boolean> {
-    return todo("schedulerCalendarAnyDraggable");
+    return (await this.schedulerCalendarScope().locator('button[draggable="true"]').count()) > 0;
   }
+
   async schedulerCalendarExportControls(): Promise<string[]> {
-    return todo("schedulerCalendarExportControls");
+    return this.schedulerExportLike(this.schedulerCalendarScope());
   }
+
   async schedulerRailVisible(): Promise<boolean> {
-    return todo("schedulerRailVisible");
+    return this.isShown(this.schedulerRail());
   }
+
   async schedulerRailRows(): Promise<{ name: string; checked: boolean }[]> {
-    return todo("schedulerRailRows");
+    const rows: { name: string; checked: boolean }[] = [];
+    for (const box of await this.schedulerRail().locator('input[type="checkbox"]').all()) {
+      const label = box.locator("xpath=..");
+      rows.push({
+        name: await this.schedulerText(label.locator("span").last()),
+        checked: await box.isChecked(),
+      });
+    }
+    return rows;
   }
-  async schedulerRailToggle(_name: string): Promise<void> {
-    return todo("schedulerRailToggle");
+
+  async schedulerRailToggle(name: string): Promise<void> {
+    await this.schedulerRail().locator("label", { hasText: name }).locator('input[type="checkbox"]').click();
   }
+
   async schedulerRailShowAll(): Promise<void> {
-    return todo("schedulerRailShowAll");
+    await this.schedulerRail().getByRole("button", { name: "Show all", exact: true }).click();
   }
+
   async schedulerRailHideAll(): Promise<void> {
-    return todo("schedulerRailHideAll");
+    await this.schedulerRail().getByRole("button", { name: "Hide all", exact: true }).click();
   }
-  async schedulerRailCrossTabPersists(_workspaceSlug: string, _projectId: string, _name: string): Promise<boolean> {
-    return todo("schedulerRailCrossTabPersists");
+
+  async schedulerRailCrossTabPersists(workspaceSlug: string, projectId: string, name: string): Promise<boolean> {
+    // Hide the row here, then read the same project in another tab of this
+    // browser context. The hidden set lives in the project's local storage
+    // and is read once on mount, so only a fresh document sees the change.
+    await this.schedulerRailToggle(name);
+    const origin = new URL(this.page.url()).origin;
+    const fresh = await this.page.context().newPage();
+    try {
+      await fresh.goto(`${origin}/${workspaceSlug}/projects/${projectId}/schedulers/calendar`);
+      const box = fresh
+        .getByRole("complementary", { name: "Calendars" })
+        .locator("label", { hasText: name })
+        .locator('input[type="checkbox"]');
+      await box.waitFor({ timeout: WebNewDriver.WAIT_MS });
+      return !(await box.isChecked());
+    } finally {
+      await fresh.close().catch(() => undefined);
+    }
   }
+
   async schedulerRailNarrowHidden(): Promise<boolean> {
-    return todo("schedulerRailNarrowHidden");
+    // The rail hides through a CSS breakpoint, so one paint is enough;
+    // a handful of short waits covers a slow layout without stalling.
+    await this.page.setViewportSize({ width: 500, height: 800 });
+    try {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        if (!(await this.schedulerRailVisible())) return true;
+        await this.page.waitForTimeout(250);
+      }
+      return false;
+    } finally {
+      await this.page.setViewportSize({ width: 1280, height: 720 });
+    }
   }
+
   async schedulerDrawerOpen(): Promise<boolean> {
-    return todo("schedulerDrawerOpen");
+    return (await this.schedulerDrawer().count()) > 0;
   }
+
   async schedulerDrawerRows(): Promise<{ label: string; value: string }[]> {
-    return todo("schedulerDrawerRows");
+    const rows: { label: string; value: string }[] = [];
+    for (const row of await this.schedulerDrawer().getByTestId("occurrence-detail").all()) {
+      const label = (
+        await row
+          .locator(":scope > div")
+          .nth(0)
+          .textContent()
+          .catch(() => "")
+      ).trim();
+      const value = await this.schedulerText(row.locator(":scope > div").nth(1));
+      if (label !== "") rows.push({ label, value });
+    }
+    return rows;
   }
+
   async schedulerDrawerHeading(): Promise<{ state: string; name: string }> {
-    return todo("schedulerDrawerHeading");
+    const drawer = this.schedulerDrawer();
+    return {
+      state: (
+        await drawer
+          .getByTestId("occurrence-status")
+          .textContent()
+          .catch(() => "")
+      ).trim(),
+      name: await this.schedulerText(drawer.getByRole("heading", { level: 2 })),
+    };
   }
+
   async schedulerDrawerLinks(): Promise<string[]> {
-    return todo("schedulerDrawerLinks");
+    const links: string[] = [];
+    for (const link of await this.schedulerDrawer().getByRole("link").all()) {
+      const text = await this.schedulerText(link);
+      if (text !== "") links.push(text);
+    }
+    return links;
   }
+
   async schedulerDrawerClose(): Promise<void> {
-    return todo("schedulerDrawerClose");
+    const drawer = this.schedulerDrawer();
+    await drawer.getByRole("button", { name: "Close", exact: true }).first().click();
+    await drawer.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerDrawerEditVisible(): Promise<boolean> {
-    return todo("schedulerDrawerEditVisible");
+    return this.isShown(this.schedulerDrawer().getByRole("button", { name: "Edit binding", exact: true }));
   }
+
   async schedulerDrawerEdit(): Promise<void> {
-    return todo("schedulerDrawerEdit");
+    await this.schedulerDrawer().getByRole("button", { name: "Edit binding", exact: true }).click();
+    const dialog = this.schedulerDialog();
+    await dialog.getByRole("heading", { name: "Edit scheduler install", exact: true }).waitFor({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await dialog.getByLabel("Starts at").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerDrawerViewScheduler(): Promise<void> {
-    return todo("schedulerDrawerViewScheduler");
+    await this.schedulerDrawer()
+      .getByRole("link", { name: /View scheduler/ })
+      .click();
+    await this.page
+      .getByRole("heading", { name: "Configuration", exact: true })
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async schedulerOpenProjectSection(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("schedulerOpenProjectSection");
+
+  async schedulerOpenProjectSection(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/schedulers`);
+    // The bare section address redirects to the calendar tab.
+    await this.page.waitForURL(/\/schedulers\/calendar$/, { timeout: WebNewDriver.WAIT_MS });
+    await this.schedulerCalendarReady();
   }
+
   async schedulerSectionTabs(): Promise<{ label: string; active: boolean }[]> {
-    return todo("schedulerSectionTabs");
+    const tabs: { label: string; active: boolean }[] = [];
+    for (const label of ["List", "Calendar"]) {
+      const tab = this.schedulerTabs().getByRole("link", { name: label, exact: true });
+      // The active tab marks itself; routes deeper in the section mark none.
+      tabs.push({ label, active: (await tab.getAttribute("aria-current").catch(() => null)) === "page" });
+    }
+    return tabs;
   }
-  async schedulerSectionOpenTab(_tab: "List" | "Calendar"): Promise<void> {
-    return todo("schedulerSectionOpenTab");
+
+  async schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void> {
+    await this.schedulerTabs().getByRole("link", { name: tab, exact: true }).click();
+    if (tab === "List") {
+      await this.page
+        .getByRole("columnheader", { name: "Scheduler", exact: true })
+        .waitFor({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.schedulerCalendarReady();
   }
+
+  async schedulerRunsExportControls(): Promise<string[]> {
+    return this.schedulerExportLike(this.schedulerRunsSection());
+  }
+
   async schedulerOpenSettingsSchedulers(workspaceSlug: string, projectId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/schedulers`);
     // The settings shell carries no workspace sidebar; settle on the panel

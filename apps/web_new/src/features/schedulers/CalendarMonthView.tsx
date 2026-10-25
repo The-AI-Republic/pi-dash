@@ -53,6 +53,8 @@ export function CalendarMonthView({
           return (
             <div
               key={cell.date.toISOString()}
+              data-testid="calendar-month-day"
+              data-today={today ? "true" : undefined}
               className={
                 cell.inMonth
                   ? "min-h-[6rem] border-b border-l border-(--border) px-(--space-1) py-(--space-1)"
@@ -61,11 +63,16 @@ export function CalendarMonthView({
             >
               <div className="mb-(--space-1) flex items-center px-(--space-1)">
                 {today ? (
-                  <span className="text-meta inline-flex size-5 items-center justify-center rounded-full bg-(--accent) font-medium text-(--on-accent)">
+                  <span
+                    data-testid="calendar-month-day-number"
+                    className="text-meta inline-flex size-5 items-center justify-center rounded-full bg-(--accent) font-medium text-(--on-accent)"
+                  >
                     {cell.date.getDate()}
                   </span>
                 ) : (
-                  <span className="text-meta text-(--text-muted)">{cell.date.getDate()}</span>
+                  <span data-testid="calendar-month-day-number" className="text-meta text-(--text-muted)">
+                    {cell.date.getDate()}
+                  </span>
                 )}
               </div>
               <MonthDay firings={firings} truncated={truncated} onSelect={onSelect} />
