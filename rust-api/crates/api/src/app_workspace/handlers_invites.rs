@@ -842,6 +842,16 @@ struct WorkspaceLiteRow {
     logo_asset_id: Option<uuid::Uuid>,
 }
 
+/// The `file_assets` columns the invite-path asset lookup selects.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct AssetRow {
+    id: uuid::Uuid,
+    entity_type: Option<String>,
+    workspace_slug: Option<String>,
+    project_id: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
+}
+
 // ---------------------------------------------------------------------------
 // Auth + gates (DRF `initial()` order: authN, then `permission_classes`)
 // ---------------------------------------------------------------------------
@@ -1484,15 +1494,48 @@ async fn fetch_workspace_lites(
     Ok(out)
 }
 
-/// Fetch `asset_url` values for a set of asset ids, reusing the merged
-/// fetcher rather than forking it.
+/// Fetch `asset_url` values for a set of asset ids (one statement): NO
+/// soft-delete scope — `logo_url`/`avatar_url` follow the forward FK
+/// through the unfiltered `_base_manager`, so soft-deleted assets still
+/// render (PIDASHCONV-1374). Same SELECT as the v1 fetcher minus the
+/// `deleted_at` predicate; the row render stays shared.
 async fn fetch_assets(
     pool: &PgPool,
     asset_ids: &[uuid::Uuid],
 ) -> Result<HashMap<uuid::Uuid, String>, Denial> {
-    crate::v1_projects::handlers_members::fetch_asset_urls(pool, asset_ids)
+    use crate::v1_projects::handlers_members::{render_asset_url, AssetRef};
+    let mut out = HashMap::new();
+    if asset_ids.is_empty() {
+        return Ok(out);
+    }
+    let placeholders: Vec<String> = (1..=asset_ids.len()).map(|i| format!("${i}")).collect();
+    let sql = format!(
+        "SELECT a.id, a.entity_type, w.slug AS workspace_slug, a.project_id, a.issue_id \
+         FROM file_assets a LEFT JOIN workspaces w ON w.id = a.workspace_id \
+         WHERE a.id IN ({})",
+        placeholders.join(", ")
+    );
+    let mut query = sqlx::query_as::<_, AssetRow>(&sql);
+    for id in asset_ids {
+        query = query.bind(*id);
+    }
+    for row in query
+        .fetch_all(pool)
         .await
-        .map_err(|_| Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?
+    {
+        let asset = AssetRef {
+            id: row.id,
+            entity_type: row.entity_type,
+            workspace_slug: row.workspace_slug,
+            project_id: row.project_id,
+            issue_id: row.issue_id,
+        };
+        if let Some(url) = render_asset_url(&asset) {
+            out.insert(asset.id, url);
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
