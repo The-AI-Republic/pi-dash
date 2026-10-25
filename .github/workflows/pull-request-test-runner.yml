@@ -108,3 +108,18 @@ jobs:
       - name: Test install.ps1 under irm | iex
         shell: pwsh
         run: ./runner/tests/install_ps1_test.ps1
+
+  windows-msi-lifecycle:
+    # The MSI stops this install's runner before Windows checks for files in
+    # use, restarts it after the upgrade, and removes its logon task on
+    # uninstall. The test drives the embedded helper against real processes
+    # and fake ScheduledTasks cmdlets; it never touches the runner's task.
+    name: Windows MSI lifecycle
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test MSI runner stop, restart, and uninstall behavior
+        shell: powershell
+        run: .\runner\tests\pidash_msi_lifecycle_test.ps1
