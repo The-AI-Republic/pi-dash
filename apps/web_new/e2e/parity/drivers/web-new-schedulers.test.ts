@@ -373,7 +373,10 @@ describe("install dialog", () => {
   });
 
   it("reads edit values from the findings group, not the recurrence Ends radios", async () => {
-    const checked = fake({ items: [fake({ text: "Create issues" })] });
+    const checked = fake({
+      items: [fake({ text: "Create issues" })],
+      locate: (selector) => (selector === "xpath=ancestor::label[1]" ? fake({ text: "Create issues" }) : absent()),
+    });
     const group = fake({ role: (role: string) => (role === "radio" ? checked : absent()) });
     const fields: Record<string, FakeLocator> = {
       "Starts at": fake({ input: "2026-01-02T09:30" }),
@@ -404,7 +407,11 @@ describe("install dialog", () => {
 
   it("leaves the edit outcome label blank when the checked radio cannot be read", async () => {
     const checked = fake({
-      items: [fake({ innerText: async () => Promise.reject(new Error("detached")) })],
+      innerText: async () => Promise.reject(new Error("detached")),
+      locate: (selector) =>
+        selector === "xpath=ancestor::label[1]"
+          ? fake({ innerText: async () => Promise.reject(new Error("detached")) })
+          : absent(),
     });
     const group = fake({ role: (role: string) => (role === "radio" ? checked : absent()) });
     const fields: Record<string, FakeLocator> = {
