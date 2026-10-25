@@ -14815,8 +14815,28 @@ export class WebNewDriver implements ParityDriver {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        // Installed only by the answer stub, which always sets the answer.
-        body: JSON.stringify(this.assistantGptAnswerStub as { response: string; response_html: string }),
+        // The project endpoint also echoes the row it ran for. The client
+        // validates that envelope, so the canned answer must carry the
+        // same detail objects a live response does.
+        body: JSON.stringify({
+          ...this.assistantGptAnswerStub,
+          project_detail: {
+            id: "00000000-0000-4000-8000-000000000001",
+            identifier: "PAR",
+            name: "Parity project",
+            cover_image: null,
+            cover_image_url: null,
+            logo_props: {},
+            description: "",
+            is_default: false,
+          },
+          workspace_detail: {
+            name: "Parity workspace",
+            slug: "parity-workspace",
+            id: "00000000-0000-4000-8000-000000000002",
+            logo_url: null,
+          },
+        }),
       });
     });
   }
