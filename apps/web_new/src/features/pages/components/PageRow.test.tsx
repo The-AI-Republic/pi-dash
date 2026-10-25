@@ -40,9 +40,16 @@ function rowElement(overrides: Partial<React.ComponentProps<typeof PageRow>> = {
     owner: OWNER,
     showStar: true,
     canDuplicate: true,
+    canManage: false,
+    canMove: false,
     onOpenInNewTab: vi.fn(),
     onCopyLink: vi.fn(),
     onDuplicate: vi.fn(),
+    onToggleVisibility: vi.fn(),
+    onToggleLock: vi.fn(),
+    onToggleArchive: vi.fn(),
+    onRequestDelete: vi.fn(),
+    onRequestMove: vi.fn(),
     ...overrides,
   };
   return (
@@ -57,6 +64,11 @@ function renderRow(overrides: Partial<React.ComponentProps<typeof PageRow>> = {}
     onOpenInNewTab: overrides.onOpenInNewTab ?? vi.fn(),
     onCopyLink: overrides.onCopyLink ?? vi.fn(),
     onDuplicate: overrides.onDuplicate ?? vi.fn(),
+    onToggleVisibility: overrides.onToggleVisibility ?? vi.fn(),
+    onToggleLock: overrides.onToggleLock ?? vi.fn(),
+    onToggleArchive: overrides.onToggleArchive ?? vi.fn(),
+    onRequestDelete: overrides.onRequestDelete ?? vi.fn(),
+    onRequestMove: overrides.onRequestMove ?? vi.fn(),
   };
   render(rowElement({ ...overrides, ...handlers }));
   return handlers;
@@ -167,6 +179,65 @@ describe("PageRow", () => {
     fireEvent.contextMenu(screen.getByRole("link", { name: "Launch notes" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Copy link" }));
     expect(props.onCopyLink).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives an owner the state switches in the pinned order and wires them", () => {
+    const props = renderRow({ canManage: true });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+      "Make a copy",
+      "Lock",
+      "Make private",
+      "Archive",
+    ]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Lock" }));
+    expect(props.onToggleLock).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Make private" }));
+    expect(props.onToggleVisibility).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+    expect(props.onToggleArchive).toHaveBeenCalledTimes(1);
+  });
+
+  it("flips the owner labels with the record's lock and visibility", () => {
+    renderRow({ canManage: true, page: makePageRow({ is_locked: true, access: 1 }) });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+      "Make a copy",
+      "Unlock",
+      "Make public",
+      "Archive",
+    ]);
+  });
+
+  it("hides visibility on a shelved row and offers Restore and Delete", () => {
+    const props = renderRow({ canManage: true, page: makePageRow({ archived_at: "2026-10-01" }) });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    const items = screen.getAllByRole("menuitem").map((item) => item.textContent);
+    expect(items).toEqual(["Open in new tab", "Copy link", "Make a copy", "Lock", "Restore", "Delete"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Restore" }));
+    expect(props.onToggleArchive).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(props.onRequestDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds the move entry only for an edition that serves it", () => {
+    renderRow({ canManage: true, canMove: true });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toContain("Move to project…");
+  });
+
+  it("shows a lock indicator on a locked row only", () => {
+    const { rerender } = render(rowElement({ page: makePageRow({ is_locked: true }) }));
+    expect(screen.getByLabelText("Locked")).toBeInTheDocument();
+    rerender(rowElement({ page: makePageRow({ is_locked: false }) }));
+    expect(screen.queryByLabelText("Locked")).not.toBeInTheDocument();
   });
 
   it("falls back to an unknown owner and an unreadable creation date", () => {

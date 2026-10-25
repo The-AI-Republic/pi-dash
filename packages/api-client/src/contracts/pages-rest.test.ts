@@ -32,6 +32,7 @@ import {
 const WS = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const PAGE = "123e4567-e89b-12d3-a456-426614174000";
+const PAGE_ALT = "123e4567-e89b-12d3-a456-4266141740aa";
 const USER = "323e4567-e89b-12d3-a456-426614174002";
 const VERSION = "423e4567-e89b-12d3-a456-426614174003";
 const BASE = `/api/workspaces/${WS}/projects/${PROJECT}/pages/`;
@@ -129,6 +130,25 @@ describe("pages collection contracts", () => {
     const rows = await listPages(client, WS, PROJECT);
     expect(rows[0]?.parent_id).toBe(PAGE);
     expect(rows[0]?.sub_pages_count).toBe(3);
+  });
+
+  it("parses a shelved row without rejecting the whole collection", async () => {
+    // The column is a Django DateField, so the row carries a calendar date,
+    // never a timestamp. A shelved row must not fail the array parse: the
+    // list falls to its empty variant if any single row is rejected.
+    const { client } = stubClient({
+      json: () => [row({ name: "Live" }), row({ id: PAGE_ALT, name: "Shelved", archived_at: "2026-10-20" })],
+    });
+    const rows = await listPages(client, WS, PROJECT);
+    expect(rows.map((entry) => entry.name)).toEqual(["Live", "Shelved"]);
+    expect(rows[1]?.archived_at).toBe("2026-10-20");
+  });
+
+  it("rejects a shelved row stamped with a full timestamp", async () => {
+    // Guards the reverse mistake: widening the field to a datetime accepts a
+    // shape the server never produces and hides the real one.
+    const { client } = stubClient({ json: () => [row({ archived_at: "2026-10-20T10:00:00Z" })] });
+    await expect(listPages(client, WS, PROJECT)).rejects.toThrow();
   });
 
   it("rejects a row with no id", async () => {

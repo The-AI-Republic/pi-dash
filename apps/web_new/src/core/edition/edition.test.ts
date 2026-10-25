@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 import {
   INTAKE_SOURCE_PILL_FLAG,
   ISSUE_DEDUPE_FLAG,
+  PAGE_MOVE_FLAG,
   isAppRailEnabled,
+  isPageMoveEnabled,
   isSidebarToggleEnabled,
   edition,
 } from "./index.js";
@@ -61,6 +63,11 @@ describe("edition", () => {
     expect(edition.flags[INTAKE_SOURCE_PILL_FLAG]).toBeUndefined();
     expect(edition.flags[ISSUE_DEDUPE_FLAG]).toBeUndefined();
   });
+
+  it("leaves the cross-project page move absent (PAGE-017: community pins no affordance)", () => {
+    expect(edition.flags[PAGE_MOVE_FLAG]).toBeUndefined();
+    expect(isPageMoveEnabled(edition)).toBe(false);
+  });
 });
 
 describe("shell edition gates", () => {
@@ -71,6 +78,12 @@ describe("shell edition gates", () => {
     expect(isAppRailEnabled(flags({ "app-rail": false }))).toBe(false);
     expect(isAppRailEnabled(flags({ "app-rail": true }))).toBe(true);
     expect(isAppRailEnabled(edition)).toBe(false);
+  });
+
+  it("enables the cross-project page move only where the edition opts in", () => {
+    expect(isPageMoveEnabled(flags({}))).toBe(false);
+    expect(isPageMoveEnabled(flags({ "page-move": false }))).toBe(false);
+    expect(isPageMoveEnabled(flags({ "page-move": true }))).toBe(true);
   });
 
   it("mounts the sidebar toggle unless the edition opts out", () => {

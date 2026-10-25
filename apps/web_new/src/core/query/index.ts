@@ -20,5 +20,5 @@ export {
   QUERY_CACHE_VERSION,
 } from "./persistence.js";
 export type { CachePersistor, PersistorOptions } from "./persistence.js";
-export { createRealtimeHub } from "./realtime.js";
+export { createRealtimeHub, getRealtimeHub, resetRealtimeHub } from "./realtime.js";
 export type { RealtimeEvent, RealtimeHandler, RealtimeHub } from "./realtime.js";

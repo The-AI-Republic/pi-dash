@@ -49,6 +49,16 @@ interface Harness {
   duplicateCalls: number;
   favoriteStatus: number;
   favoriteCalls: number;
+  accessStatus: number;
+  accessCalls: number;
+  lockStatus: number;
+  lockCalls: number;
+  archiveStatus: number;
+  archiveCalls: number;
+  deleteStatus: number;
+  deleteCalls: number;
+  moveStatus: number;
+  moveCalls: number;
   project: Record<string, unknown>;
   projectStatus: number;
   roles: Record<string, number>;
@@ -57,6 +67,7 @@ interface Harness {
   pagesCalls: number;
   members: Record<string, unknown>[];
   meStatus: number;
+  meCalls: number;
 }
 
 let harness: Harness;
@@ -73,6 +84,16 @@ beforeEach(() => {
     duplicateCalls: 0,
     favoriteStatus: 204,
     favoriteCalls: 0,
+    accessStatus: 204,
+    accessCalls: 0,
+    lockStatus: 204,
+    lockCalls: 0,
+    archiveStatus: 200,
+    archiveCalls: 0,
+    deleteStatus: 204,
+    deleteCalls: 0,
+    moveStatus: 204,
+    moveCalls: 0,
     project: makeProjectRow(),
     projectStatus: 200,
     roles: { [PAGES_PROJECT_ID]: 20 },
@@ -81,6 +102,7 @@ beforeEach(() => {
     pagesCalls: 0,
     members: [makeWorkspaceMember(PAGES_USER_ID, "Ada Byron")],
     meStatus: 200,
+    meCalls: 0,
   };
   routerHarness.navigate.mockReset();
   toaster.notifyPending.mockReset();
@@ -100,8 +122,28 @@ beforeEach(() => {
     if (url.endsWith("/project-roles/")) return jsonResponse(url, 200, harness.roles);
     if (url.endsWith("/projects/details/")) return jsonResponse(url, 200, [makeProjectDetails()]);
     if (url.endsWith("/api/users/me/")) {
+      harness.meCalls += 1;
       if (harness.meStatus === -1) return new Promise(() => undefined) as never;
-      return jsonResponse(url, harness.meStatus, { id: PAGES_USER_ID, email: "ada@test" });
+      return jsonResponse(url, harness.meStatus, {
+        id: PAGES_USER_ID,
+        email: "ada@test.example",
+        username: "ada",
+        first_name: "Ada",
+        last_name: "Byron",
+        display_name: "Ada Byron",
+        avatar: "",
+        avatar_url: null,
+        cover_image: null,
+        cover_image_url: null,
+        date_joined: "2026-01-01T00:00:00.000Z",
+        user_timezone: "UTC",
+        is_active: true,
+        is_bot: false,
+        is_email_verified: true,
+        is_password_autoset: false,
+        last_login_medium: "password",
+        last_login_time: null,
+      });
     }
     if (url.endsWith("/api/workspaces/acme/members/")) return jsonResponse(url, 200, harness.members);
     const memberRead = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/members/$`).exec(url);
@@ -117,6 +159,33 @@ beforeEach(() => {
           created_at: "2026-01-02T03:04:05Z",
         },
       ]);
+    }
+    const accessWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/access/$`).exec(url);
+    if (accessWrite !== null) {
+      harness.accessCalls += 1;
+      return jsonResponse(url, harness.accessStatus, null);
+    }
+    const lockWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/lock/$`).exec(url);
+    if (lockWrite !== null) {
+      harness.lockCalls += 1;
+      return jsonResponse(url, harness.lockStatus, null);
+    }
+    const archiveWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/archive/$`).exec(
+      url
+    );
+    if (archiveWrite !== null) {
+      harness.archiveCalls += 1;
+      return jsonResponse(url, harness.archiveStatus, { archived_at: "2026-10-25 10:00:00.123456" });
+    }
+    const deleteWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/$`).exec(url);
+    if (deleteWrite !== null && init.method === "DELETE") {
+      harness.deleteCalls += 1;
+      return jsonResponse(url, harness.deleteStatus, null);
+    }
+    const moveWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/move/$`).exec(url);
+    if (moveWrite !== null) {
+      harness.moveCalls += 1;
+      return jsonResponse(url, harness.moveStatus, null);
     }
     const favoriteWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/favorite-pages/([0-9a-f-]+)/$`).exec(
       url
@@ -158,8 +227,8 @@ afterEach(() => {
   document.title = "";
 });
 
-function renderScreen(tab: "public" | "private" | "archived" = "public"): void {
-  render(
+function renderScreen(tab: "public" | "private" | "archived" = "public"): ReturnType<typeof render> {
+  return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <PagesListScreen workspaceSlug="acme" projectId={PAGES_PROJECT_ID} tab={tab} />
     </QueryClientProvider>
@@ -468,10 +537,106 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
 
   it("offers no duplicate entry to a guest", async () => {
     harness.roles = { [PAGES_PROJECT_ID]: 5 };
-    harness.pages = [makePageRow({ name: "Read only" })];
+    harness.pages = [makePageRow({ name: "Read only", owned_by: "623e4567-e89b-12d3-a456-426614174005" })];
     renderScreen();
     await screen.findByTestId("pages-list");
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Read only" }));
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Open in new tab", "Copy link"]);
+  });
+
+  it("gives the page owner the state switches and hides them from a member", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 15 };
+    harness.pages = [makePageRow({ name: "Mine", owned_by: PAGES_USER_ID })];
+    const view = renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Mine" }));
+    await waitFor(() => expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toHaveLength(6));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+      "Make a copy",
+      "Lock",
+      "Make private",
+      "Archive",
+    ]);
+
+    view.unmount();
+    harness.pages = [makePageRow({ name: "Theirs", owned_by: "623e4567-e89b-12d3-a456-426614174005" })];
+    renderScreen();
+    await waitFor(() => expect(screen.getByRole("link", { name: "Theirs" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Theirs" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+      "Make a copy",
+    ]);
+  });
+
+  it("gives a project admin the switches on someone else's page", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 20 };
+    harness.pages = [makePageRow({ name: "Admin view", owned_by: "623e4567-e89b-12d3-a456-426614174005" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Admin view" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toContain("Make private");
+  });
+
+  it("makes the row private and re-reads the collection", async () => {
+    harness.pages = [makePageRow({ name: "Switch me" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Switch me" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Make private" }));
+    await waitFor(() => expect(harness.accessCalls).toBe(1));
+    expect(toaster.notifySuccess).toHaveBeenCalledWith("Page marked private.");
+  });
+
+  it("locks and shelves a row through the same menu", async () => {
+    harness.pages = [makePageRow({ name: "Stateful" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Stateful" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Lock" }));
+    await waitFor(() => expect(harness.lockCalls).toBe(1));
+    expect(toaster.notifySuccess).toHaveBeenCalledWith("Page locked successfully.");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Stateful" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+    await waitFor(() => expect(harness.archiveCalls).toBe(1));
+    expect(toaster.notifySuccess).toHaveBeenCalledWith("Page archived successfully.");
+  });
+
+  it("confirms deletion of a shelved row and cancels cleanly", async () => {
+    harness.pages = [makePageRow({ name: "Shelved row", archived_at: "2026-10-01" })];
+    renderScreen("archived");
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved row" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete page" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveTextContent("Shelved row");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(harness.deleteCalls).toBe(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved row" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(harness.deleteCalls).toBe(1));
+    expect(toaster.notifySuccess).toHaveBeenCalledWith("Page deleted successfully.");
+  });
+
+  it("offers no delete entry on a live row", async () => {
+    harness.pages = [makePageRow({ name: "Live row" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Live row" }));
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
+  });
+
+  it("carries no move entry in the community build", async () => {
+    harness.pages = [makePageRow({ name: "No move" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for No move" }));
+    expect(screen.queryByRole("menuitem", { name: "Move to project…" })).not.toBeInTheDocument();
   });
 });
