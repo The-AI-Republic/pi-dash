@@ -17,7 +17,10 @@ import {
   formattingBlockLabel,
   PageFormattingBar,
   PageToolbarHint,
+  PAGE_CONTROL_ACTIVE_CLASS,
   PAGE_FORMATTING_BAR_LABEL,
+  PAGE_TOOLBAR_CONTENT_CLASS,
+  PAGE_TOOLBAR_ID,
   PAGE_TYPOGRAPHY_LABEL,
 } from "./PageFormattingBar.js";
 
@@ -40,6 +43,36 @@ describe("PageFormattingBar controls", () => {
     expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual(
       PAGE_TOOLBAR_CONTROLS.map((control) => control.label)
     );
+  });
+
+  it("carries the bar's shell and its one square tile per icon", () => {
+    renderBar();
+    const bar = screen.getByRole("toolbar", { name: PAGE_FORMATTING_BAR_LABEL });
+    expect(bar).toHaveAttribute("id", PAGE_TOOLBAR_ID);
+    expect(bar.querySelector(`.${PAGE_TOOLBAR_CONTENT_CLASS}`)).not.toBeNull();
+    expect(bar.className).toContain("sticky");
+    for (const button of bar.querySelectorAll("button")) {
+      if (button.getAttribute("aria-pressed") === null) continue;
+      expect(button).toHaveClass("grid", "size-7");
+    }
+    expect(bar.querySelectorAll("button.grid.size-7")).toHaveLength(PAGE_TOOLBAR_CONTROLS.length);
+  });
+
+  it("paints the active tile with the selected layer", () => {
+    renderBar({ state: state({ bold: true }) });
+    const bold = screen.getByTestId("page-toolbar-bold");
+    expect(bold).toHaveClass(PAGE_CONTROL_ACTIVE_CLASS);
+    expect(screen.getByTestId("page-toolbar-italic")).not.toHaveClass(PAGE_CONTROL_ACTIVE_CLASS);
+  });
+
+  it("names the action in medium weight and draws one cap per key", () => {
+    renderBar();
+    const bold = PAGE_TOOLBAR_CONTROLS.find((control) => control.command === "bold");
+    if (bold === undefined) throw new Error("missing bold control");
+    render(<PageToolbarHint control={bold} />);
+    const name = screen.getAllByText("Bold").at(-1);
+    expect(name).toHaveClass("font-medium");
+    expect(screen.getAllByTestId("page-toolbar-hint-bold").at(-1)?.querySelectorAll("kbd")).toHaveLength(2);
   });
 
   it("fires the matching command on press", () => {

@@ -13,7 +13,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   markDraftOf,
   markTriggerLabel,
-  PAGE_MARK_AREA,
   PAGE_MARK_CHANGE_LABEL,
   PAGE_MARK_EMPTY_LABEL,
   PageMarkButton,
@@ -75,7 +74,13 @@ describe("PageMarkButton read-only", () => {
     expect(screen.getByTestId("page-mark")).toHaveAttribute("data-readonly", "true");
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByText("🚀")).toBeInTheDocument();
-    expect(screen.getByTestId("page-mark")).toHaveClass(PAGE_MARK_AREA);
+  });
+
+  it("draws nothing interactive on a page with no mark", () => {
+    render(<PageMarkButton logoProps={{}} editable={false} titleEmpty onPick={vi.fn()} />);
+    expect(screen.getByTestId("page-mark")).toHaveAttribute("aria-hidden", "true");
+    expect(screen.queryByTestId("page-mark-affordance")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });
 
@@ -93,17 +98,19 @@ describe("PageMarkButton editable", () => {
     return { onPick, ...view };
   }
 
-  it("wraps the picker in the revealed header area", () => {
-    mount();
-    expect(screen.getByTestId("page-mark")).toHaveClass(PAGE_MARK_AREA);
+  it("hides the affordance until the canvas header is hovered", () => {
+    mount({ logoProps: {} });
     const affordance = screen.getByTestId("page-mark-affordance");
-    expect(affordance.className).toContain("transition-opacity");
+    // The header owns the hover; the affordance is the faded child.
+    expect(affordance.className).toContain("transition-all");
     expect(affordance.className).toContain("opacity-0");
+    expect(affordance.className).toContain("group-hover/page-header:opacity-100");
+    expect(affordance.className).toContain("group-focus-within/page-header:opacity-100");
     expect(affordance).not.toHaveAttribute("data-revealed");
   });
 
   it("pins the affordance while the title is empty", () => {
-    mount({ titleEmpty: true });
+    mount({ logoProps: {}, titleEmpty: true });
     expect(screen.getByTestId("page-mark")).toHaveAttribute("data-pinned", "true");
     const affordance = screen.getByTestId("page-mark-affordance");
     expect(affordance.className).toContain("opacity-100");

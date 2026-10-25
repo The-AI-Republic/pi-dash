@@ -3,10 +3,12 @@
 // See the LICENSE file for details.
 // Editable page canvas (parity/specs/pages.md §5, PAGE-026–032). One
 // component owns the page's editing pieces and the seams between them:
-// the title field hands its Enter key to the body's start, the sticky bar
-// drives the editor's commands, and the editor reports its formatting
-// state back to the bar. The read-only body is the Suspense fallback, so
-// a slow editor chunk never leaves the canvas blank.
+// the canvas header holds the mark and the title, the title's Enter key
+// hands the caret to the body's start, the sticky bar drives the
+// editor's commands, and the editor reports its formatting state back so
+// the bar reflects the block under the caret. The read-only body is the
+// Suspense fallback, so a slow editor chunk never leaves the canvas
+// blank.
 
 import * as React from "react";
 
@@ -19,9 +21,10 @@ import {
 import { RichTextView } from "../../../shared/editor/RichTextView.js";
 import { getPageBodyDraft, setPageBodyDraft } from "../lib/pageBodyDraft.js";
 import { pageKeyCommand } from "../lib/pageToolbar.js";
+import { titleIsEmpty } from "../lib/pageTitle.js";
 import { PageBodyEditor, type PageEditorHandle } from "./PageBodyEditor.js";
+import { PageCanvasHeader } from "./PageCanvasHeader.js";
 import { PageBodySkeleton } from "./PageDetailLoading.js";
-import { PageDetailTitle } from "./PageDetailTitle.js";
 import { PageFormattingBar } from "./PageFormattingBar.js";
 
 export const PAGE_BODY_LABEL = "Page body";
@@ -33,13 +36,17 @@ export interface PageEditorSurfaceProps {
   name: string;
   /** Stored body HTML; a draft typed this session wins over it. */
   descriptionHtml: string;
+  /** Stored `logo_props`, drawn in the canvas header. */
+  logoProps: Record<string, unknown>;
   /** Persist the record name (title saves outside the body path). */
   onRename: (name: string) => void;
+  /** Persist the chosen mark (an empty record clears it). */
+  onMarkPick: (draft: Record<string, unknown>) => void;
   /** Whether the sticky bar renders (read-only pages never mount here). */
   showBar: boolean;
   /**
    * The cold-document skeleton holds the body area until the page's
-   * document is known (PAGE-079); the title and bar render throughout.
+   * document is known (PAGE-079); the header and bar render throughout.
    */
   bodyPending?: boolean | undefined;
 }
@@ -48,12 +55,18 @@ export function PageEditorSurface({
   pageId,
   name,
   descriptionHtml,
+  logoProps,
   onRename,
+  onMarkPick,
   showBar,
   bodyPending = false,
 }: PageEditorSurfaceProps): React.ReactElement {
   const handleRef = React.useRef<PageEditorHandle | null>(null);
   const [state, setState] = React.useState<PageFormattingState>(EMPTY_FORMATTING_STATE);
+  // The typed title, before its debounce saves it: an empty draft keeps
+  // the mark affordance pinned even though the stored name still has text.
+  const [titleDraft, setTitleDraft] = React.useState(name);
+  React.useEffect(() => setTitleDraft(name), [name]);
   const initialHtml = React.useMemo(() => getPageBodyDraft(pageId) ?? descriptionHtml, [pageId, descriptionHtml]);
 
   const onReady = React.useCallback((handle: PageEditorHandle) => {
@@ -91,12 +104,19 @@ export function PageEditorSurface({
 
   return (
     <>
-      <PageDetailTitle
-        pageId={pageId}
-        name={name}
+      <PageCanvasHeader
+        title={{
+          pageId,
+          name,
+          editable: true,
+          onRename,
+          onDraftChange: setTitleDraft,
+          onJumpToBody: () => handleRef.current?.focusStart(),
+        }}
+        logoProps={logoProps}
         editable
-        onRename={onRename}
-        onJumpToBody={() => handleRef.current?.focusStart()}
+        titleEmpty={titleIsEmpty(titleDraft)}
+        onMarkPick={onMarkPick}
       />
       {showBar ? <PageFormattingBar state={state} onCommand={run} onBlockKind={pickBlock} /> : null}
       <div className="editor-container">

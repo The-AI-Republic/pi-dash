@@ -286,7 +286,9 @@ describe("PageDetailScreen title and body", () => {
     renderScreen();
     const field = await screen.findByRole("textbox", { name: "Page title" });
     expect(field.closest(`[id="${harness.pageId}-title"]`)).not.toBeNull();
-    expect(field).toHaveAttribute("data-placeholder", "Untitled");
+    // The empty heading carries the placeholder, not the editing surface:
+    // the title text node is the h1 ProseMirror renders.
+    expect(field.querySelector("h1")).toHaveAttribute("data-placeholder", "Untitled");
     // The switcher is fed by the preloaded collection, which may still be
     // in flight on the first paint.
     await waitFor(() =>
@@ -453,7 +455,8 @@ describe("PageDetailScreen title, mark and toolbar", () => {
     ];
     renderScreen();
     await screen.findByRole("textbox", { name: "Page title" });
-    expect(screen.getByTestId("page-mark-glyph")).toHaveTextContent("🚀");
+    const header = screen.getByTestId("page-canvas-header");
+    expect(header.querySelector('[data-testid="page-mark-glyph"]')).toHaveTextContent("🚀");
     await waitFor(() => expect(screen.getByTestId("page-switcher-current-mark")).toHaveTextContent("🚀"));
     fireEvent.click(screen.getByRole("button", { name: /Switch page, current Launch notes/ }));
     const marks = await screen.findAllByTestId("page-switcher-mark");
@@ -464,9 +467,14 @@ describe("PageDetailScreen title, mark and toolbar", () => {
   it("keeps the header a hover target for the mark affordance", async () => {
     renderScreen();
     await screen.findByRole("textbox", { name: "Page title" });
-    const mark = screen.getByTestId("page-mark");
-    expect(mark).toHaveClass("page-header-container");
-    expect(mark.querySelector('[data-testid="page-mark-affordance"]')?.className).toContain("transition-opacity");
+    // The whole canvas header is the hover target, not the mark tile.
+    const header = screen.getByTestId("page-canvas-header");
+    expect(header).toHaveClass("page-header-container");
+    const affordance = screen.getByTestId("page-mark-affordance");
+    expect(header).toContainElement(affordance);
+    expect(affordance.className).toContain("transition-all");
+    expect(affordance.className).toContain("group-hover/page-header:opacity-100");
+    expect(affordance.className).toContain("opacity-0");
   });
 
   it("writes a picked mark through the record endpoint", async () => {

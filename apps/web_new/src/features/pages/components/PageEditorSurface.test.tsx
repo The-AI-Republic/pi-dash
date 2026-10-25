@@ -8,6 +8,7 @@
 // skeleton holds the body area until the document is known.
 
 import { act, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -22,7 +23,9 @@ function mount(props: Partial<React.ComponentProps<typeof PageEditorSurface>> = 
       pageId="page-1"
       name="Launch notes"
       descriptionHtml="<p>Stored words</p>"
+      logoProps={{}}
       onRename={vi.fn()}
+      onMarkPick={vi.fn()}
       showBar
       {...props}
     />
@@ -123,6 +126,37 @@ describe(
       editable.focus();
       // Bold is the editor's own binding; the surface must not also fire it.
       expect(fireEvent.keyDown(editable, { key: "b", metaKey: true })).toBe(true);
+    });
+
+    it("drops the mark's pin once the title gains text", async () => {
+      mount({ name: "" });
+      await vi.waitFor(() =>
+        expect(screen.getByTestId("page-mark-affordance")).toHaveAttribute("data-revealed", "true")
+      );
+      const user = userEvent.setup();
+      const field = await screen.findByRole("textbox", { name: "Page title" }, { timeout: 10_000 });
+      field.focus();
+      await user.keyboard("Named");
+      await vi.waitFor(() => expect(screen.getByTestId("page-mark-affordance")).not.toHaveAttribute("data-revealed"));
+    });
+
+    it("keeps the affordance pinned while a typed title is cleared", async () => {
+      mount({ name: "Named" });
+      const user = userEvent.setup();
+      const field = await screen.findByRole("textbox", { name: "Page title" }, { timeout: 10_000 });
+      field.focus();
+      await user.clear(field);
+      await vi.waitFor(() =>
+        expect(screen.getByTestId("page-mark-affordance")).toHaveAttribute("data-revealed", "true")
+      );
+    });
+
+    it("passes a picked mark to the page's save path", async () => {
+      const onMarkPick = vi.fn();
+      mount({ logoProps: { in_use: "emoji", emoji: { value: "1f680" } }, onMarkPick });
+      fireEvent.click(screen.getByTestId("page-mark-trigger"));
+      fireEvent.click(await screen.findByRole("button", { name: "Remove mark" }));
+      expect(onMarkPick).toHaveBeenCalledWith({});
     });
 
     it("restyles the caret's block from the typography selector", async () => {

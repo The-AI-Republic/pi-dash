@@ -44,7 +44,7 @@ function IconGlyph({ icon, color }: { icon: EmblemIcon; color: string }): React.
 }
 
 const tileClass = (selected: boolean): string =>
-  `flex size-9 items-center justify-center rounded-(--radius-control) border text-h3 ${
+  `grid h-9 w-9 place-items-center rounded-(--radius-control) border text-h3 ${
     selected ? "border-(--accent) bg-(--subtle)" : "border-transparent hover:bg-(--subtle)"
   }`;
 
@@ -57,6 +57,12 @@ export interface PageMarkPickerProps {
   triggerClassName?: string | undefined;
   /** Accessible name of the trigger; the create dialog keeps the default. */
   triggerLabel?: string | undefined;
+  /**
+   * What the trigger shows. The create dialog leaves it out and gets the
+   * draft's own glyph; the detail header passes the stored mark's art or
+   * the add-mark label instead.
+   */
+  children?: React.ReactNode;
 }
 
 /** The trigger's own face: the draft's glyph, else a neutral page sheet. */
@@ -82,6 +88,7 @@ export function PageMarkPicker({
   triggerTestId = "page-create-mark",
   triggerClassName = "flex size-9 shrink-0 items-center justify-center rounded-(--radius-control) border border-(--border) bg-(--subtle) hover:bg-(--bg)",
   triggerLabel,
+  children,
 }: PageMarkPickerProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const [mode, setMode] = React.useState<MarkMode>("icon");
@@ -121,15 +128,16 @@ export function PageMarkPicker({
           data-testid={triggerTestId}
           className={triggerClassName}
         >
-          {current.kind === "emoji" ? (
-            <span aria-hidden="true">{current.value}</span>
-          ) : current.kind === "icon" ? (
-            <IconGlyph icon={{ name: current.value, label: current.value }} color={color} />
-          ) : (
-            <span aria-hidden="true" className="text-(--text-muted)">
-              ¶
-            </span>
-          )}
+          {children ??
+            (current.kind === "emoji" ? (
+              <span aria-hidden="true">{current.value}</span>
+            ) : current.kind === "icon" ? (
+              <IconGlyph icon={{ name: current.value, label: current.value }} color={color} />
+            ) : (
+              <span aria-hidden="true" className="text-(--text-muted)">
+                ¶
+              </span>
+            ))}
         </button>
       }
     >

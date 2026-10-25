@@ -2,21 +2,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Page mark in the detail canvas (parity/specs/pages.md §5.2, PAGE-027).
-// The mark sits above the title: the page's glyph with the picker behind
-// it. The picker's affordance fades in when the canvas is hovered or
-// something inside it has focus, and stays pinned while the title is
-// empty so a brand-new page can find it. Editable pages persist every
-// pick, change and clear through the mark mutation; read-only pages show
-// the same glyph as static art with no picker at all.
+// The mark sits above the title inside the canvas header: the page's
+// glyph with the picker behind it. On a page without a mark the
+// affordance fades in when the header is hovered (or something in it has
+// focus) and stays pinned while the title is empty, so a new page can
+// find it. Once a mark exists its glyph is always drawn and opens the
+// picker. Editable pages persist every pick, change and clear through
+// the mark mutation; read-only pages show the glyph only.
 
+import { SmilePlus } from "lucide-react";
 import * as React from "react";
 
 import { ProjectMarkIcon, projectMark } from "../../../shared/pickers/index.js";
 import { PageMarkPicker } from "./PageMarkPicker.js";
 
+/** The canvas header block; also the hover target for the affordance. */
 export const PAGE_MARK_AREA = "page-header-container";
 export const PAGE_MARK_CHANGE_LABEL = "Change the page mark";
 export const PAGE_MARK_EMPTY_LABEL = "Add a page mark";
+/** Word the unmarked affordance shows (the mark row's own label). */
+export const PAGE_MARK_ADD_TEXT = "Icon";
 
 /**
  * The mark a detail page carries, in the picker's draft shape. A stored
@@ -33,6 +38,11 @@ export function markDraftOf(logoProps: Record<string, unknown>): Record<string, 
     };
   }
   return {};
+}
+
+/** Whether a stored mark has a face to draw (an upload does, a blank does not). */
+export function pageHasMark(logoProps: Record<string, unknown>): boolean {
+  return projectMark(logoProps).kind !== "initial";
 }
 
 /** Trigger name: a page with a mark changes it, one without adds it. */
@@ -65,6 +75,12 @@ export function PageMarkGlyph({ logoProps }: { logoProps: Record<string, unknown
   );
 }
 
+const MARK_TRIGGER_CLASS =
+  "flex size-[56px] cursor-pointer items-center justify-center rounded-(--radius-control) border border-(--border) bg-(--subtle) text-h2 hover:bg-(--bg)";
+
+const ADD_TRIGGER_CLASS =
+  "text-body flex h-8 cursor-pointer items-center gap-(--space-1) rounded-(--radius-control) px-(--space-2) font-medium text-(--text-muted) transition-colors hover:bg-(--subtle) hover:text-(--text)";
+
 export interface PageMarkButtonProps {
   /** Stored `logo_props` of the page. */
   logoProps: Record<string, unknown>;
@@ -78,41 +94,60 @@ export interface PageMarkButtonProps {
 
 export function PageMarkButton({ logoProps, editable, titleEmpty, onPick }: PageMarkButtonProps): React.ReactElement {
   const draft = markDraftOf(logoProps);
+  const marked = pageHasMark(logoProps);
   if (!editable) {
     return (
       <div
         data-testid="page-mark"
         data-readonly="true"
-        className={`${PAGE_MARK_AREA} text-h2 inline-flex size-14 items-center justify-center`}
+        aria-hidden={marked ? undefined : true}
+        className="inline-flex size-[56px] items-center justify-center"
       >
-        <PageMarkGlyph logoProps={logoProps} />
+        {marked ? <PageMarkGlyph logoProps={logoProps} /> : null}
       </div>
     );
   }
+  if (marked) {
+    return (
+      <div data-testid="page-mark" className="inline-flex">
+        <PageMarkPicker
+          draft={draft}
+          onDraftChange={onPick}
+          triggerTestId="page-mark-trigger"
+          triggerClassName={MARK_TRIGGER_CLASS}
+          triggerLabel={markTriggerLabel(draft)}
+        >
+          <PageMarkGlyph logoProps={logoProps} />
+        </PageMarkPicker>
+      </div>
+    );
+  }
+  // Without a mark the affordance is the picker's own trigger, faded in
+  // by the header's hover and pinned while the title is empty.
   return (
-    <div
-      data-testid="page-mark"
-      data-pinned={titleEmpty ? "true" : undefined}
-      // The header area is the hover target, so the affordance reveals
-      // from anywhere along the top of the page, not only over its tile.
-      className={`${PAGE_MARK_AREA} group/mark relative inline-flex`}
-    >
+    <div data-testid="page-mark" data-pinned={titleEmpty ? "true" : undefined} className="inline-flex">
       <div
         data-testid="page-mark-affordance"
         data-revealed={titleEmpty ? "true" : undefined}
         className={
+          // `transition-all` names the same fade the canvas header drives:
+          // a page without a mark shows the affordance on hover, on focus
+          // within the header, and pinned while its title is empty.
           titleEmpty
-            ? "opacity-100 transition-opacity"
-            : "opacity-0 transition-opacity group-focus-within/mark:opacity-100 group-hover/mark:opacity-100 pointer-coarse:opacity-100"
+            ? "opacity-100 transition-all duration-200"
+            : "opacity-0 transition-all duration-200 group-focus-within/page-header:opacity-100 group-hover/page-header:opacity-100 pointer-coarse:opacity-100"
         }
       >
         <PageMarkPicker
           draft={draft}
           onDraftChange={onPick}
           triggerTestId="page-mark-trigger"
-          triggerClassName="flex size-14 cursor-pointer items-center justify-center rounded-(--radius-control) border border-(--border) bg-(--subtle) text-h2 hover:bg-(--bg)"
+          triggerClassName={ADD_TRIGGER_CLASS}
           triggerLabel={markTriggerLabel(draft)}
-        />
+        >
+          <SmilePlus size={16} strokeWidth={1.75} aria-hidden="true" />
+          <span>{PAGE_MARK_ADD_TEXT}</span>
+        </PageMarkPicker>
       </div>
     </div>
   );

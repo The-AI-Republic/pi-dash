@@ -36,7 +36,36 @@ export {
 export { PageFavoriteStar, type PageFavoriteStarProps } from "./components/PageFavoriteStar.js";
 export { PageDetailScreen, type PageDetailScreenProps } from "./components/PageDetailScreen.js";
 export { PageDetailHeader, PAGE_CRUMB, type PageDetailHeaderProps } from "./components/PageDetailHeader.js";
-export { PageDetailTitle, PAGE_TITLE_PLACEHOLDER, type PageDetailTitleProps } from "./components/PageDetailTitle.js";
+export {
+  PageDetailTitle,
+  PAGE_TITLE_MAX_LENGTH,
+  PAGE_TITLE_PLACEHOLDER,
+  PAGE_TITLE_SAVE_DEBOUNCE_MS,
+  TitleHeading,
+  type PageDetailTitleProps,
+} from "./components/PageDetailTitle.js";
+export { clipTitle, pasteTitleText, titleIsEmpty, titleRoom } from "./lib/pageTitle.js";
+export { PageCanvasHeader, type PageCanvasHeaderProps } from "./components/PageCanvasHeader.js";
+export {
+  PAGE_MARK_AREA,
+  PAGE_MARK_CHANGE_LABEL,
+  PAGE_MARK_EMPTY_LABEL,
+  PageMarkButton,
+  PageMarkGlyph,
+  markDraftOf,
+  markTriggerLabel,
+  pageHasMark,
+} from "./components/PageMarkButton.js";
+export {
+  PAGE_CONTROL_ACTIVE_CLASS,
+  PAGE_FORMATTING_BAR_LABEL,
+  PAGE_TOOLBAR_CONTENT_CLASS,
+  PAGE_TOOLBAR_ID,
+  PAGE_TYPOGRAPHY_LABEL,
+  PageFormattingBar,
+  PageToolbarHint,
+  TypographySelector,
+} from "./components/PageFormattingBar.js";
 export {
   PageDetailPanel,
   PAGE_NOT_FOUND_BACK,
@@ -142,7 +171,6 @@ export { PageMoveDialog, type PageMoveDialogProps } from "./components/PageMoveD
 export { PageRowConnected, type PageRowConnectedProps } from "./components/PageRowConnected.js";
 export {
   PAGE_QUICK_CREATE_NAME,
-  PAGE_TITLE_MAX_LENGTH,
   PAGE_TITLE_TOO_LONG_MESSAGE,
   pageCreateInput,
   pageDraftSubmittable,
