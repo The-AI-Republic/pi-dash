@@ -89,6 +89,7 @@ use uuid::Uuid;
 use crate::app_assets::guards;
 use crate::app_assets::quote_filename;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_auth::scope::TenantScope;
@@ -1010,9 +1011,12 @@ async fn patch_project_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:pk>` canonically only; anything else is a
+    // resolver 404 before auth, answered locally like garbage (no proxy
+    // plumbing in this module — PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1102,9 +1106,10 @@ async fn delete_project_asset(
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as patch (PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1160,9 +1165,10 @@ async fn get_project_asset(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as patch (PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1247,9 +1253,11 @@ async fn post_bulk_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let entity_id = match entity_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:entity_id>` canonically only; anything else is
+    // a resolver 404 before auth, answered locally (PIDASHCONV-1399).
+    let entity_id = match classify_uuid_segment(&entity_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1508,9 +1516,11 @@ async fn get_check_asset(
     Path((slug, asset_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:asset_id>` canonically only; anything else is
+    // a resolver 404 before auth, answered locally (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1549,9 +1559,10 @@ async fn post_duplicate_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1778,9 +1789,10 @@ async fn get_workspace_download(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     download_asset(
         &state,
@@ -1801,9 +1813,10 @@ async fn get_project_download(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
