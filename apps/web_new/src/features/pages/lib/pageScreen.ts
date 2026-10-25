@@ -1,12 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Pages screen model (parity/specs/pages.md §3.1, PAGE-001/019/020). The
+// Pages screen model (parity/specs/pages.md §3.1, PAGE-001/018–021). The
 // project read drives the feature gate; the collection read only starts
-// once the gate is known open. After the first rows exist, a background
-// refetch keeps showing them instead of flashing a skeleton or zero state.
+// once the gate is known open. A failed initial read falls through to the
+// empty state, while a failed background refetch keeps cached rows.
 
-export type PagesBodyState = "skeleton" | "error" | "gate" | "zero" | "no-results" | "list";
+export type PagesBodyState = "skeleton" | "gate" | "zero" | "no-results" | "list";
 
 export interface PagesBodyInput {
   projectPending: boolean;
@@ -23,9 +23,10 @@ export interface PagesBodyInput {
 
 /**
  * Order: project, gate, collection, then the content variant. A failed
- * collection read falls through to the empty content state (§2.7) rather
- * than stranding an error panel or showing stale rows. An empty tab is a
- * zero state; a non-empty tab narrowed to nothing is no-results.
+ * initial collection read falls through to the empty content state (§2.7)
+ * rather than stranding an error panel. If a background refetch fails after
+ * rows have cached, those stale rows remain visible (PAGE-020). An empty tab
+ * is a zero state; a non-empty tab narrowed to nothing is no-results.
  */
 export function resolvePagesBody({
   projectPending,
@@ -40,10 +41,10 @@ export function resolvePagesBody({
   filtersActive,
 }: PagesBodyInput): PagesBodyState {
   if (projectPending) return "skeleton";
-  if (projectError) return "error";
+  if (projectError) return "zero";
   if (gateOff) return "gate";
   if (pagesPending) return "skeleton";
-  if (pagesError) return "zero";
+  if (pagesError && pageCount === 0) return "zero";
   if (pageCount === 0 || tabCount === 0) return "zero";
   if (resultCount === 0 && (searchActive || filtersActive)) return "no-results";
   if (resultCount === 0) return "zero";

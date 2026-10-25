@@ -37,6 +37,8 @@ import {
   makeWorkspaceMember,
 } from "../testing.js";
 import { DEFAULT_PAGE_SORT } from "../lib/pageList.js";
+import { authKeys } from "../../auth/index.js";
+import { pageKeys } from "../api/keys.js";
 import { clearCommands, findCommand } from "../../../shared/commands/index.js";
 import { CREATE_PAGE_COMMAND_ID } from "./PagesCreateEntry.js";
 import { PagesListScreen } from "./PagesListScreen.js";
@@ -65,6 +67,7 @@ interface Harness {
   pages: PageRow[];
   pagesStatus: number;
   pagesCalls: number;
+  pagesHold: Promise<void> | null;
   members: Record<string, unknown>[];
   meStatus: number;
   meCalls: number;
@@ -100,6 +103,7 @@ beforeEach(() => {
     pages: [],
     pagesStatus: 200,
     pagesCalls: 0,
+    pagesHold: null,
     members: [makeWorkspaceMember(PAGES_USER_ID, "Ada Byron")],
     meStatus: 200,
     meCalls: 0,
@@ -215,6 +219,7 @@ beforeEach(() => {
         });
       }
       harness.pagesCalls += 1;
+      if (harness.pagesHold !== null) await harness.pagesHold;
       return jsonResponse(url, harness.pagesStatus, harness.pages);
     }
     throw new Error(`unexpected request: ${url}`);
@@ -295,6 +300,92 @@ describe("PagesListScreen", () => {
     expect(screen.getByRole("button", { name: "Create your first Page" })).toBeDisabled();
   });
 
+  it("renders the empty fallback when the project read fails instead of a blank panel", async () => {
+    harness.projectStatus = 500;
+    renderScreen();
+    expect(await screen.findByTestId("pages-empty-state")).toBeInTheDocument();
+    expect(screen.getByText("No pages in this project yet")).toBeInTheDocument();
+    expect(screen.getByTestId("pages-list-screen")).not.toBeEmptyDOMElement();
+    expect(harness.pagesCalls).toBe(0);
+  });
+
+  it("keeps cached rows and hides the skeleton when a background refetch fails", async () => {
+    harness.pagesStatus = 500;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(pageKeys.list("acme", PAGES_PROJECT_ID), [makePageRow({ name: "Cached page" })]);
+    renderProject(PAGES_PROJECT_ID, client);
+    expect(await screen.findByRole("link", { name: "Cached page" })).toBeInTheDocument();
+
+    await act(async () => {
+      await client.refetchQueries({ queryKey: pageKeys.list("acme", PAGES_PROJECT_ID) });
+    });
+    // React Query flips the observer to error a tick after the promise
+    // settles; flush it so the assertions see the settled render, not the
+    // pre-refetch one (§2.7, PAGE-020).
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(client.getQueryState(pageKeys.list("acme", PAGES_PROJECT_ID))?.status).toBe("error");
+
+    expect(screen.getByRole("link", { name: "Cached page" })).toBeInTheDocument();
+    expect(screen.queryByTestId("pages-list-skeleton")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pages-empty-state")).not.toBeInTheDocument();
+    expect(harness.pagesCalls).toBe(1);
+  });
+
+  it("keeps the list when the project read fails while its row is cached", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(authKeys.project("acme", PAGES_PROJECT_ID), makeProjectRow());
+    client.setQueryData(pageKeys.list("acme", PAGES_PROJECT_ID), [makePageRow({ name: "Cached page" })]);
+    harness.pages = [makePageRow({ name: "Cached page" })];
+    renderProject(PAGES_PROJECT_ID, client);
+    expect(await screen.findByRole("link", { name: "Cached page" })).toBeInTheDocument();
+
+    harness.projectStatus = 500;
+    await act(async () => {
+      await client.refetchQueries({ queryKey: authKeys.project("acme", PAGES_PROJECT_ID) });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(client.getQueryState(authKeys.project("acme", PAGES_PROJECT_ID))?.status).toBe("error");
+
+    expect(screen.getByRole("link", { name: "Cached page" })).toBeInTheDocument();
+    expect(screen.queryByTestId("pages-empty-state")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pages-list-skeleton")).not.toBeInTheDocument();
+  });
+
+  it("shows a lightweight refresh indication while a refetch runs over cached rows and clears it after", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    harness.pages = [makePageRow({ name: "Cached page" })];
+    client.setQueryData(pageKeys.list("acme", PAGES_PROJECT_ID), harness.pages);
+    let release = (): void => undefined;
+    harness.pagesHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    renderProject(PAGES_PROJECT_ID, client);
+    expect(await screen.findByRole("link", { name: "Cached page" })).toBeInTheDocument();
+    expect(screen.queryByTestId("pages-refresh-status")).not.toBeInTheDocument();
+
+    let refetch: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      refetch = client.refetchQueries({ queryKey: pageKeys.list("acme", PAGES_PROJECT_ID) });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByTestId("pages-refresh-status")).toBeInTheDocument();
+    expect(screen.getByTestId("pages-refresh-status")).toHaveTextContent("Refreshing pages");
+    expect(screen.getByRole("link", { name: "Cached page" })).toBeInTheDocument();
+    expect(screen.queryByTestId("pages-list-skeleton")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pages-empty-state")).not.toBeInTheDocument();
+
+    await act(async () => {
+      release();
+      await refetch;
+    });
+
+    await waitFor(() => expect(screen.queryByTestId("pages-refresh-status")).not.toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "Cached page" })).toBeInTheDocument();
+  });
+
   it("renders rows in modified-descending order once loaded", async () => {
     harness.pages = [
       makePageRow({ id: pageId(1), name: "Older", updated_at: "2026-01-01T00:00:00Z" }),
@@ -329,6 +420,24 @@ describe("PagesListScreen", () => {
     fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "zzz" } });
     expect(await screen.findByTestId("pages-no-results")).toBeInTheDocument();
     expect(screen.queryByTestId("page-row")).not.toBeInTheDocument();
+    expect(harness.pagesCalls).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(await screen.findByRole("link", { name: "Alpha" })).toBeInTheDocument();
+    expect(harness.pagesCalls).toBe(1);
+  });
+
+  it("offers clear-filters in the no-results state and restores the rows", async () => {
+    harness.pages = [makePageRow({ name: "Alpha", created_at: "2026-09-01T12:00:00Z" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.click(screen.getByRole("button", { name: "Today" }));
+    expect(await screen.findByTestId("pages-no-results")).toBeInTheDocument();
+    expect(screen.queryByTestId("page-row")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(await screen.findByRole("link", { name: "Alpha" })).toBeInTheDocument();
     expect(harness.pagesCalls).toBe(1);
   });
 

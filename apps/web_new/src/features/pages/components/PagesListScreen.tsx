@@ -1,13 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project pages list (parity/specs/pages.md §3.1–§3.6 and §3.8,
-// PAGE-001–017). Reads the project row for the page_view gate and the one
+// Project pages list (parity/specs/pages.md §3.1–§3.6, §3.8–§3.10,
+// PAGE-001–021). Reads the project row for the page_view gate and the one
 // collection for the rows; search, sort and filters are client state and
 // reset when the project changes. Switching tabs never refetches. The
 // header carries the two creation entries, rows carry the favourite star
 // and the shared row menu, and every write re-reads the one collection.
 
+import { Spinner } from "@pidash/kit";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
@@ -126,6 +127,7 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   const canMovePages = isPageMoveEnabled(edition);
   const canStar = isProjectAuthorized(role);
   const canManageFeatures = isProjectAdmin(role);
+  const refreshing = pages.isFetching && !pages.isPending && rows.length > 0;
   const searchActive = client.query.trim() !== "";
   const filtersActive = hasPageFilters(client.filters);
   const quickCreate = useQuickCreatePage(workspaceSlug, projectId, quickCreateAccess(tab));
@@ -139,8 +141,8 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   });
 
   const body = resolvePagesBody({
-    projectPending: project.isPending,
-    projectError: project.isError,
+    projectPending: project.isPending && project.data === undefined,
+    projectError: project.isError && project.data === undefined,
     gateOff,
     pagesPending: pages.isPending,
     pagesError: pages.isError,
@@ -179,7 +181,7 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
             onOpenPage={goToPage}
           />
           {body === "skeleton" ? <PagesListSkeleton /> : null}
-          {body !== "skeleton" && body !== "error" && rows.length > 0 ? (
+          {body !== "skeleton" && rows.length > 0 ? (
             <>
               <div className="flex flex-wrap items-center gap-(--space-2)">
                 <PagesListTabs workspaceSlug={workspaceSlug} projectId={projectId} activeTab={tab} />
@@ -197,6 +199,14 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
                   currentUserId={currentUserId}
                   onFiltersChange={(filters) => update({ filters })}
                 />
+                {refreshing ? (
+                  <span
+                    data-testid="pages-refresh-status"
+                    className="text-caption inline-flex items-center gap-(--space-1) text-(--text-muted)"
+                  >
+                    <Spinner size="small" label="Refreshing pages" />
+                  </span>
+                ) : null}
               </div>
               <PagesFilterChips
                 filters={client.filters}
