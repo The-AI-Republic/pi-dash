@@ -427,7 +427,7 @@ export function InstallForm({
         }}
       />
 
-      <OutcomeModeField idPrefix="project-install" value={outcomeMode} disabled={pending} onChange={setOutcomeMode} />
+      <OutcomeModeField value={outcomeMode} disabled={pending} onChange={setOutcomeMode} />
       <PodField workspaceSlug={workspaceSlug} projectId={projectId} value={pod} disabled={pending} onChange={setPod} />
 
       <div className="flex justify-end gap-(--space-3)">

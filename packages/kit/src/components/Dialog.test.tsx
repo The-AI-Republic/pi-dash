@@ -148,7 +148,28 @@ describe("Dialog", () => {
     );
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveClass("top-1/2", "left-1/2", "max-w-md");
-    expect(screen.getByText("Body copy").parentElement).not.toHaveAttribute("role");
+    expect(screen.getByText("Body copy").parentElement).toHaveAttribute("role", "document");
+  });
+
+  it("caps a centred card to the viewport and scrolls its body", () => {
+    render(
+      <Dialog
+        title="New scheduler"
+        open
+        onOpenChange={() => undefined}
+        actions={<Button variant="primary">Install</Button>}
+      >
+        <p>Body copy</p>
+      </Dialog>
+    );
+    const dialog = screen.getByRole("dialog", { name: "New scheduler" });
+    expect(dialog).toHaveClass("max-h-[calc(100dvh-2rem)]", "flex", "flex-col");
+    const body = screen.getByText("Body copy").parentElement;
+    expect(body).toHaveClass("overflow-y-auto", "min-h-0", "flex-auto");
+    // The footer action stays outside the scroll region so it is always
+    // reachable, however long the body grows.
+    expect(body).not.toContainElement(screen.getByRole("button", { name: "Install" }));
+    expect(dialog).toContainElement(screen.getByRole("button", { name: "Install" }));
   });
 
   it("renders header actions beside the close control", async () => {

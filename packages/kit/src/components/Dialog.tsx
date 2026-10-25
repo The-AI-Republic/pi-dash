@@ -86,7 +86,14 @@ export function Dialog({
     if (!next && ignoreEscapeKey && details.reason === "escape-key") return;
     onOpenChange?.(next, details);
   };
-  const centered = "top-1/2 left-1/2 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-(--radius-dialog)";
+  // A centred card is capped to the viewport with its body scrolling, so a
+  // tall form keeps its tab strip, fields and footer actions reachable.
+  // The body's basis stays content-sized (`flex-auto`): the card's height is
+  // automatic up to the cap, unlike the docked panel's definite full height.
+  const centered = [
+    "top-1/2 left-1/2 flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col -translate-x-1/2 -translate-y-1/2",
+    "rounded-(--radius-dialog)",
+  ];
   // A right panel keeps the dialog's fieldset role and focus trap but
   // changes the frame: docked to the right edge, three quarters wide, and
   // full width when the caller opens it up. Width animates so the toggle
@@ -96,7 +103,7 @@ export function Dialog({
     wide ? "w-full" : "w-3/4",
     "transition-[width] duration-(--motion-duration)",
   ];
-  const frame = placement === "right" ? ["flex flex-col", ...docked, popupClassName] : [centered, popupClassName];
+  const frame = placement === "right" ? ["flex flex-col", ...docked, popupClassName] : [...centered, popupClassName];
   return (
     <BaseDialog.Root {...pickDefined({ open })} onOpenChange={handleOpenChange}>
       {trigger ? <BaseDialog.Trigger render={trigger} /> : null}
@@ -106,7 +113,7 @@ export function Dialog({
           {...pickDefined({ initialFocus })}
           className={cn("shadow-dialog fixed border border-(--border) bg-(--bg) p-(--space-12)", ...frame, className)}
         >
-          <div className="flex items-start justify-between gap-(--space-4)">
+          <div className="flex shrink-0 items-start justify-between gap-(--space-4)">
             <div className="flex flex-col gap-(--space-2)">
               <BaseDialog.Title className="text-h4-medium text-(--text)">{title}</BaseDialog.Title>
               {description ? (
@@ -134,9 +141,11 @@ export function Dialog({
               {children}
             </div>
           ) : (
-            <div className={bodyClassName}>{children}</div>
+            <div role="document" className={cn(bodyClassName, "min-h-0 flex-auto overflow-y-auto")}>
+              {children}
+            </div>
           )}
-          {actions ? <div className="mt-(--space-12) flex justify-end gap-(--space-4)">{actions}</div> : null}
+          {actions ? <div className="mt-(--space-12) flex shrink-0 justify-end gap-(--space-4)">{actions}</div> : null}
         </BaseDialog.Popup>
       </BaseDialog.Portal>
     </BaseDialog.Root>
