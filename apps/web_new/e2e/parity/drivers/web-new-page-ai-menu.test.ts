@@ -84,7 +84,7 @@ function pageDouble(options: PageOptions = {}) {
     unroute: vi.fn(async (_pattern: string) => undefined),
     locator: vi.fn((selector: string) => {
       if (selector === "#page-content-container") return canvas;
-      if (selector === '[data-testid="page-detail-title"] [role="textbox"]') return title;
+      if (selector === '[data-testid="page-detail-title"]') return title;
       if (selector === '[data-testid="page-detail-panel"]') return refusal;
       if (selector === "#page-content-container .rich-text-content p") {
         return new FakeLocator({ items: blocks });
@@ -122,6 +122,16 @@ describe("pageEditorOpen", () => {
     // posts while the page is open, and the scenario reads the log after.
     expect(stub.pageObject.route).toHaveBeenCalledWith("**/api/workspaces/*/ai-assistant/", expect.any(Function));
     expect(stub.pageObject.route).toHaveBeenCalledWith("**/api/workspaces/*/rephrase-grammar/", expect.any(Function));
+  });
+
+  it("settles on the static title of a page the viewer can read but not edit", async () => {
+    // A locked or shelved page keeps the shell but renders its title as
+    // static heading text, with no textbox. The open still settles: only
+    // an absent canvas and an absent refusal mean the page never arrived.
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.pageEditorOpen("acme", "p1", "locked")).resolves.toBeUndefined();
+    expect(stub.pageObject.locator).toHaveBeenCalledWith('[data-testid="page-detail-title"]');
   });
 
   it("settles on the refusal panel instead of throwing when the page is not readable", async () => {

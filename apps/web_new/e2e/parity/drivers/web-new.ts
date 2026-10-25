@@ -501,8 +501,13 @@ export class WebNewDriver implements ParityDriver {
 
   /** Detail canvas the page editor mounts inside (PAGE-022). */
   private static readonly PAGE_CANVAS = "#page-content-container";
-  /** The editable title field, present on a readable page (PAGE-026). */
-  private static readonly PAGE_TITLE = '[data-testid="page-detail-title"] [role="textbox"]';
+  /**
+   * The title surface, present on every readable page. It is an editable
+   * field on a page the viewer can edit (PAGE-026) and static heading text
+   * on a locked, shelved or otherwise read-only one, so waiting for the
+   * wrapper settles both variants rather than only the editable one.
+   */
+  private static readonly PAGE_TITLE = '[data-testid="page-detail-title"]';
   /** The shared refusal panel for a forbidden, missing or deleted page (PAGE-023). */
   private static readonly PAGE_REFUSAL = '[data-testid="page-detail-panel"]';
   /**
@@ -15625,9 +15630,11 @@ export class WebNewDriver implements ParityDriver {
       throw new Error(`[parity] the page detail settled on neither a canvas nor the refusal panel: ${pageId}.`);
     }
     if ((await canvas.count()) === 0) return;
-    // A readable page paints its title field above the body; the body itself
-    // is read-only until the editor slices land (PAGE-026), so the title is
-    // the canvas's stable marker rather than a contenteditable block.
+    // A readable page paints its title above the body; the body itself is
+    // read-only until the editor slices land (PAGE-026), so the title is the
+    // canvas's stable marker rather than a contenteditable block. The title
+    // wrapper serves both the editable field and the static heading, so a
+    // readable page the viewer cannot edit still settles instead of throwing.
     await this.page.locator(WebNewDriver.PAGE_TITLE).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
