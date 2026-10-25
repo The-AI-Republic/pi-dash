@@ -6,7 +6,7 @@
 // that must refuse loudly instead of reading the old UI (ISS-239–242). A
 // stub Page stands in for Playwright.
 import type { Locator, Page } from "@playwright/test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { WebDriver } from "./web.js";
 
@@ -90,6 +90,53 @@ describe("sub-work-items Load more on the old app (ISS-238)", () => {
   it("refuses to load more without a control", async () => {
     const page = pageOf(locator({ count: async () => 0 }));
     await expect(new WebDriver(page).widgetLoadMore("Sub-work items")).rejects.toThrow("no load-more row");
+  });
+
+  it("keeps waiting while a click loads nothing, then refuses once the deadline passes", async () => {
+    // A control that never goes away and rows that never grow: the click
+    // helper must keep waiting instead of reporting a landed page.
+    const start = Date.now();
+    let elapsed = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => start + elapsed);
+    let pauses = 0;
+    const row = locator({ count: async () => 1 });
+    const content = locator({ getByText: () => row });
+    const section = locator({ locator: () => content });
+    const page = {
+      locator: () => locator({ locator: () => section }),
+      waitForTimeout: async () => {
+        pauses += 1;
+        elapsed += 31_000;
+      },
+    } as unknown as Page;
+    try {
+      await expect(new WebDriver(page).widgetLoadMore("Sub-work items")).rejects.toThrow("never loaded more");
+    } finally {
+      clock.mockRestore();
+    }
+    expect(pauses).toBe(1);
+  });
+
+  it("reports no control when the section itself never mounted", async () => {
+    const page = { locator: () => locator({ count: async () => 0 }) } as unknown as Page;
+    await expect(new WebDriver(page).widgetLoadMorePresent("Sub-work items")).resolves.toBe(false);
+  });
+
+  it("reports no control when the section has no content block", async () => {
+    // The section mounted but its content never did: no row to click.
+    const header = locator({ count: async () => 1, locator: () => locator({ count: async () => 0 }) });
+    const page = {
+      locator: (selector: string) => (selector === "button.w-full" ? header : locator({ count: async () => 0 })),
+    } as unknown as Page;
+    await expect(new WebDriver(page).widgetLoadMorePresent("Sub-work items")).resolves.toBe(false);
+  });
+
+  it("reports no control when the content carries no Load more text", async () => {
+    // The section and its content mounted, but every row is already shown.
+    const content = locator({ count: async () => 1, getByText: () => locator({ count: async () => 0 }) });
+    const header = locator({ count: async () => 1, locator: () => content });
+    const page = { locator: () => header } as unknown as Page;
+    await expect(new WebDriver(page).widgetLoadMorePresent("Sub-work items")).resolves.toBe(false);
   });
 });
 

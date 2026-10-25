@@ -7,7 +7,7 @@
 // Page stands in for Playwright; each assertion covers the selector, the
 // settle wait and the value the driver hands back.
 import type { Locator, Page } from "@playwright/test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { WebNewDriver } from "./web-new.js";
 
@@ -142,6 +142,35 @@ describe("sub-work-items Load more (ISS-238)", () => {
     expect(label).toBe("Load more");
   });
 
+  it("settles when the control's label cannot be read", async () => {
+    // A control that detaches while the page lands: the blank read is not
+    // the fetching label, so the helper returns.
+    let reads = 0;
+    const control = locator({
+      count: async () => 1,
+      innerText: async () => {
+        reads += 1;
+        if (reads === 1) throw new Error("element detached");
+        return "Load more";
+      },
+    });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector.includes("sub-issues-load-more") ? control : locator({ locator: () => control }),
+    });
+    await new WebNewDriver(page).widgetLoadMore("Sub-work items");
+    expect(reads).toBe(1);
+  });
+
+  it("treats a control with no text as settled", async () => {
+    const control = locator({ count: async () => 1, innerText: async () => null as unknown as string });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector.includes("sub-issues-load-more") ? control : locator({ locator: () => control }),
+    });
+    await new WebNewDriver(page).widgetLoadMore("Sub-work items");
+  });
+
   it("refuses to click a control that is not rendered", async () => {
     const page = pageOf({ locator: () => locator({ count: async () => 0 }) });
     await expect(new WebNewDriver(page).widgetLoadMore("Sub-work items")).rejects.toThrow("no load-more control");
@@ -181,6 +210,22 @@ describe("waiting-for-runner banner (ISS-239/240)", () => {
 
   it("reads a blank sentence as null", async () => {
     const banner = locator({ locator: () => locator({ innerText: async () => "   " }) });
+    const page = pageWithSelectors(bannerTable(banner));
+    await expect(new WebNewDriver(page).waitingBannerText()).resolves.toBeNull();
+  });
+
+  it("reads a banner without its sentence paragraph as null", async () => {
+    // A section that mounted ahead of its copy: the paragraph is absent
+    // rather than blank, so the read must not throw on the missing node.
+    const banner = locator({
+      locator: (selector: string) => (selector === ":scope > p" ? locator({ count: async () => 0 }) : locator()),
+    });
+    const page = pageWithSelectors(bannerTable(banner));
+    await expect(new WebNewDriver(page).waitingBannerText()).resolves.toBeNull();
+  });
+
+  it("reads a sentence whose text never arrived as null", async () => {
+    const banner = locator({ locator: () => locator({ innerText: async () => null as unknown as string }) });
     const page = pageWithSelectors(bannerTable(banner));
     await expect(new WebNewDriver(page).waitingBannerText()).resolves.toBeNull();
   });
@@ -255,6 +300,13 @@ describe("sidebar property rows (ISS-241/242)", () => {
     await expect(new WebNewDriver(page).sidebarProperty("Estimate")).resolves.toBe("Two weeks");
   });
 
+  it("reads a value whose text content never arrived as null", async () => {
+    // The row unmounted between the count and the read.
+    const row = locator({ innerText: async () => null as unknown as string });
+    const page = pageOf({ getByRole: () => row });
+    await expect(new WebNewDriver(page).sidebarProperty("Runs on")).resolves.toBeNull();
+  });
+
   it("reads an empty row and a missing row as null", async () => {
     const blank = pageOf({ getByRole: () => locator({ innerText: async () => "   " }) });
     await expect(new WebNewDriver(blank).sidebarProperty("Runs on")).resolves.toBeNull();
@@ -316,6 +368,12 @@ describe("sidebar property rows (ISS-241/242)", () => {
     expect(events).toEqual(["focus", "Enter", "settled"]);
   });
 
+  it("reads a trigger with no text as an empty value", async () => {
+    const trigger = locator({ innerText: async () => null as unknown as string });
+    const page = pageOf({ getByRole: () => locator({ getByRole: () => trigger }) });
+    await expect(new WebNewDriver(page).propertyValueText("Runs on")).resolves.toBe("");
+  });
+
   it("reads picker openness from the option list", async () => {
     const open = pageOf({
       getByRole: (role: string) => locator({ count: async () => (role === "listbox" ? 1 : 0) }),
@@ -323,6 +381,47 @@ describe("sidebar property rows (ISS-241/242)", () => {
     await expect(new WebNewDriver(open).pickerOpen()).resolves.toBe(true);
     const closed = pageOf({ getByRole: () => locator({ count: async () => 0 }) });
     await expect(new WebNewDriver(closed).pickerOpen()).resolves.toBe(false);
+  });
+
+  it("picks an option from the listbox once it has mounted", async () => {
+    const clicks: string[] = [];
+    const option = locator({ click: async () => void clicks.push("option") });
+    const listbox = locator({ count: async () => 1, getByRole: () => locator({ first: () => option }) });
+    const page = pageOf({ getByRole: (role: string) => (role === "listbox" ? listbox : locator()) });
+    await new WebNewDriver(page).pickerPick("nf907-online");
+    expect(clicks).toEqual(["option"]);
+  });
+
+  it("retries after the popup mounts late, then falls back to the label list", async () => {
+    // The kit mounts the popup a moment after the trigger click: the first
+    // read misses it, the retry finds it. A picker with no listbox at all is
+    // the label picker, whose options are buttons.
+    const clicks: string[] = [];
+    const listbox = locator({
+      getByRole: () => locator({ first: () => locator({ click: async () => void clicks.push("late") }) }),
+    });
+    let reads = 0;
+    const late = pageOf({
+      getByRole: (role: string) => {
+        if (role !== "listbox") return locator();
+        reads += 1;
+        return reads === 1 ? locator({ count: async () => 0 }) : listbox;
+      },
+    });
+    await new WebNewDriver(late).pickerPick("nf907-online");
+    expect(clicks).toEqual(["late"]);
+
+    const label = pageOf({
+      getByRole: () => locator({ count: async () => 0 }),
+      locator: (selector: string) =>
+        selector === 'ul[aria-label="Project labels"]'
+          ? locator({
+              getByRole: () => locator({ first: () => locator({ click: async () => void clicks.push("label") }) }),
+            })
+          : locator(),
+    });
+    await new WebNewDriver(label).pickerPick("bug");
+    expect(clicks).toEqual(["late", "label"]);
   });
 });
 
@@ -354,6 +453,11 @@ describe("picker options (ISS-241/242)", () => {
     await expect(new WebNewDriver(absent).pickerOptionReason("nf907-online")).resolves.toBeNull();
   });
 
+  it("reads a row with no content spans as carrying no reason", async () => {
+    const page = pickerPage({ parts: [] });
+    await expect(new WebNewDriver(page).pickerOptionReason("nf907-online")).resolves.toBeNull();
+  });
+
   it("reads an option's disabled flag", async () => {
     const disabled = pickerPage({ parts: [], disabled: true });
     await expect(new WebNewDriver(disabled).pickerOptionDisabled("nf907-revoked")).resolves.toBe(true);
@@ -378,6 +482,67 @@ describe("picker options (ISS-241/242)", () => {
     await expect(new WebNewDriver(none).pickerSearchFocused()).resolves.toBe(false);
   });
 
+  it("reads a missing search field as not focused", async () => {
+    // The label picker has no search input; the focus probe must not throw.
+    const page = pageOf({ getByRole: () => locator({ count: async () => 0 }) });
+    await expect(new WebNewDriver(page).pickerSearchFocused()).resolves.toBe(false);
+  });
+
+  it("reads focus from the search field's own active-element test", async () => {
+    const page = pageOf({
+      getByRole: () => locator({ count: async () => 1, evaluate: async () => true }),
+    });
+    await expect(new WebNewDriver(page).pickerSearchFocused()).resolves.toBe(true);
+  });
+
+  it("reads an unfocused search field", async () => {
+    const page = pageOf({
+      getByRole: () => locator({ count: async () => 1, evaluate: async () => false }),
+    });
+    await expect(new WebNewDriver(page).pickerSearchFocused()).resolves.toBe(false);
+  });
+
+  it("compares the search field against the document's active element", async () => {
+    // The probe runs the browser-side comparison, so it is exercised with a
+    // stub document rather than a canned answer.
+    const field = { name: "search" };
+    const focus = { activeElement: field };
+    vi.stubGlobal("document", focus);
+    const page = pageOf({
+      getByRole: () => locator({ count: async () => 1, evaluate: async (fn: (el: unknown) => boolean) => fn(field) }),
+    });
+    try {
+      await expect(new WebNewDriver(page).pickerSearchFocused()).resolves.toBe(true);
+      focus.activeElement = { name: "other" };
+      await expect(new WebNewDriver(page).pickerSearchFocused()).resolves.toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("clicks the backdrop inside a dialog and the sidebar heading otherwise", async () => {
+    // Inside a dialog the backdrop covers the page, so the press goes to
+    // the empty corner; outside one it lands on the Properties heading.
+    const pressed: string[] = [];
+    const mouse = { click: async () => void pressed.push("corner") };
+    const heading = locator({ click: async () => void pressed.push("heading") });
+    const listbox = locator({ first: () => locator({ waitFor: async () => undefined }) });
+    const inDialog = pageOf({
+      getByRole: (role: string) => (role === "dialog" ? locator({ count: async () => 1 }) : listbox),
+      mouse,
+      getByText: () => locator({ first: () => heading }),
+    });
+    await new WebNewDriver(inDialog).pickerClickOutside();
+    expect(pressed).toEqual(["corner"]);
+    const onPage = pageOf({
+      getByRole: (role: string) => (role === "dialog" ? locator({ count: async () => 0 }) : listbox),
+      mouse,
+      getByText: () => locator({ first: () => heading }),
+    });
+    await new WebNewDriver(onPage).pickerClickOutside();
+    expect(pressed).toEqual(["corner", "heading"]);
+  });
+
   it("reads the empty-picker line only when no option is offered", async () => {
     const listbox = locator({ getByRole: () => locator({ count: async () => 0 }) });
     const page = pageOf({
@@ -387,6 +552,23 @@ describe("picker options (ISS-241/242)", () => {
     await expect(new WebNewDriver(page).pickerEmptyText()).resolves.toBe("No runners match.");
     const filled = pageOf({ getByRole: () => locator({ getByRole: () => locator({ count: async () => 2 }) }) });
     await expect(new WebNewDriver(filled).pickerEmptyText()).resolves.toBe("");
+  });
+
+  it("reads no empty line when the popup carries no status node", async () => {
+    const listbox = locator({ getByRole: () => locator({ count: async () => 0 }) });
+    const page = pageOf({
+      getByRole: (role: string) => (role === "listbox" ? listbox : locator({ count: async () => 0 })),
+    });
+    await expect(new WebNewDriver(page).pickerEmptyText()).resolves.toBe("");
+  });
+
+  it("reads a status node with no text as no empty line", async () => {
+    const listbox = locator({ getByRole: () => locator({ count: async () => 0 }) });
+    const page = pageOf({
+      getByRole: (role: string) =>
+        role === "listbox" ? listbox : locator({ innerText: async () => null as unknown as string }),
+    });
+    await expect(new WebNewDriver(page).pickerEmptyText()).resolves.toBe("");
   });
 });
 
@@ -409,6 +591,13 @@ describe("in-place save error (ISS-242)", () => {
       getByRole: () => locator({ getByRole: () => locator({ innerText: async () => "  " }) }),
     });
     await expect(new WebNewDriver(blank).propertyInlineError("Runs on")).resolves.toBeNull();
+  });
+
+  it("reads an alert whose text never arrived as null", async () => {
+    const page = pageOf({
+      getByRole: () => locator({ getByRole: () => locator({ innerText: async () => null as unknown as string }) }),
+    });
+    await expect(new WebNewDriver(page).propertyInlineError("Runs on")).resolves.toBeNull();
   });
 });
 
@@ -453,5 +642,81 @@ describe("widget progress and rows (ISS-174)", () => {
         selector === '[data-testid="sub-issues-section"]' ? locator({ locator: () => rows }) : locator(),
     });
     await expect(new WebNewDriver(page).widgetRowNames("Sub-work items")).resolves.toEqual(["NF-1", "NF-2"]);
+  });
+
+  it("gives up on a rollup header that cannot be read", async () => {
+    // A header unmounted between the count and the read: the rollup reads
+    // as absent rather than throwing out of a poll.
+    const page = pageOf({
+      locator: () =>
+        locator({
+          count: async () => 1,
+          first: () =>
+            locator({
+              innerText: async () => {
+                throw new Error("element detached");
+              },
+            }),
+        }),
+    });
+    await expect(new WebNewDriver(page).widgetProgress("Sub-work items")).resolves.toBeNull();
+  });
+
+  it("reads another section's rollup through its shared header", async () => {
+    const header = locator({ innerText: async () => "Relations 1/4 Done" });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-widget-header="Relations"]' ? locator({ first: () => header }) : locator(),
+    });
+    await expect(new WebNewDriver(page).widgetProgress("Relations")).resolves.toBe("1/4 Done");
+  });
+
+  it("reads another section's rows from its own panel", async () => {
+    const rows = locator({
+      count: async () => 1,
+      nth: () => locator({ innerText: async () => " design.md " }),
+    });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-widget-rows="Attachments"]' ? locator({ locator: () => rows }) : locator(),
+    });
+    await expect(new WebNewDriver(page).widgetRowNames("Attachments")).resolves.toEqual(["design.md"]);
+  });
+
+  it("toggles a shared-header section through that header", async () => {
+    const clicks: string[] = [];
+    const header = locator({
+      count: async () => 1,
+      getAttribute: async () => "false",
+      click: async () => void clicks.push("toggle"),
+    });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-widget-header="Relations"]' ? locator({ first: () => header }) : locator(),
+    });
+    await new WebNewDriver(page).toggleWidgetSection("Relations");
+    expect(clicks).toEqual(["toggle"]);
+  });
+
+  it("reads a header that cannot be read as having no rollup", async () => {
+    const header = locator({ innerText: async () => null as unknown as string });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="sub-issues-collapsible"]' ? locator({ first: () => header }) : locator(),
+    });
+    await expect(new WebNewDriver(page).widgetProgress("Sub-work items")).resolves.toBeNull();
+  });
+
+  it("reports no row when the sidebar never hydrates", async () => {
+    const heading = locator({
+      waitFor: async () => {
+        throw new Error("timed out");
+      },
+    });
+    const page = pageOf({
+      getByText: () => locator({ first: () => heading }),
+      getByRole: () => locator({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(page).propertyRowPresent("Runs on")).resolves.toBe(false);
   });
 });
