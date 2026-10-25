@@ -1,0 +1,40 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Page detail address (parity/specs/pages.md §2.6, §4, PAGE-022–025,
+// 079–080). The route owns only the two shareable query keys; the screen
+// reads them and writes them back through the router so a pane tab or a
+// snapshot is part of the address itself.
+
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import * as React from "react";
+
+import { PageDetailScreen } from "../../../../../../features/pages/components/PageDetailScreen.js";
+import { parsePageDetailSearch, type PageDetailSearch } from "../../../../../../features/pages/lib/pageDetail.js";
+
+export const Route = createFileRoute("/$ws/_gated/projects/$projectId/pages/$pageId")({
+  validateSearch: (search: Record<string, unknown>) => parsePageDetailSearch(search),
+  component: PageDetailComponent,
+});
+
+function PageDetailComponent(): React.ReactElement {
+  const { ws, projectId, pageId } = Route.useParams();
+  const search = Route.useSearch();
+  const navigate = useNavigate();
+  return (
+    <PageDetailScreen
+      workspaceSlug={ws}
+      projectId={projectId}
+      pageId={pageId}
+      search={search as PageDetailSearch}
+      onSearchChange={(next) => {
+        void navigate({
+          to: "/$ws/projects/$projectId/pages/$pageId",
+          params: { ws, projectId, pageId },
+          search: next,
+          replace: true,
+        });
+      }}
+    />
+  );
+}

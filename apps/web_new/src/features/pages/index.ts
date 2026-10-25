@@ -25,6 +25,8 @@ export {
   type PageFavoriteTarget,
 } from "./api/mutations.js";
 export { pagesListQueryOptions } from "./api/queries.js";
+export { pageVersionQueryOptions, pageVersionsQueryOptions, pageDetailQueryOptions } from "./api/detailQueries.js";
+export { PAGE_RENAME_FAILED_TITLE, usePageRename } from "./api/detailMutations.js";
 export {
   PageCreateDialog,
   PAGE_CREATE_DIALOG_TITLE,
@@ -32,6 +34,30 @@ export {
   type PageCreateDialogProps,
 } from "./components/PageCreateDialog.js";
 export { PageFavoriteStar, type PageFavoriteStarProps } from "./components/PageFavoriteStar.js";
+export { PageDetailScreen, type PageDetailScreenProps } from "./components/PageDetailScreen.js";
+export { PageDetailHeader, PAGE_CRUMB, type PageDetailHeaderProps } from "./components/PageDetailHeader.js";
+export { PageDetailTitle, PAGE_TITLE_PLACEHOLDER, type PageDetailTitleProps } from "./components/PageDetailTitle.js";
+export {
+  PageDetailPanel,
+  PAGE_NOT_FOUND_BACK,
+  PAGE_NOT_FOUND_BODY,
+  PAGE_NOT_FOUND_TITLE,
+  type PageDetailPanelProps,
+} from "./components/PageDetailPanel.js";
+export { PageBodySkeleton, PageDetailSpinner, PageVersionSkeleton } from "./components/PageDetailLoading.js";
+export { PageNavigationPane, PAGE_PANE_CLOSE, type PageNavigationPaneProps } from "./components/PageNavigationPane.js";
+export {
+  PageVersionOverlay,
+  PAGE_VERSION_VIEW_ONLY,
+  type PageVersionOverlayProps,
+} from "./components/PageVersionOverlay.js";
+export {
+  PageSiblingSwitcher,
+  PAGE_SWITCHER_LABEL,
+  PAGE_SWITCHER_SEARCH,
+  type PageSiblingSwitcherProps,
+} from "./components/PageSiblingSwitcher.js";
+export { PageSyncBadge, type PageSyncBadgeProps } from "./components/PageSyncBadge.js";
 export {
   PageMarkPicker,
   pageMarkColor,
@@ -173,3 +199,38 @@ export {
   type PagesBodyState,
 } from "./lib/pageScreen.js";
 export { copyPageLink, PAGE_LINK_COPIED_TITLE, PAGE_LINK_COPY_FAILED_TITLE, pageLinkUrl } from "./lib/share.js";
+export { isPageBodyReady, markPageBodyReady, resetPageBodyCache } from "./lib/pageBodyCache.js";
+export {
+  closeVersionSearch,
+  filterSiblingOptions,
+  historySearch,
+  pageCanonicalHref,
+  pageCapabilities,
+  pageDetailDeepHref,
+  pageDocumentTitle,
+  pageSiblingOptions,
+  pageStanding,
+  PAGE_PANE_TABS,
+  paneSearch,
+  paneTabLabel,
+  parsePageDetailSearch,
+  resolvePageDetailBody,
+  siblingHref,
+  versionSearch,
+  type PageAccessInput,
+  type PageCapabilities,
+  type PageDetailBody,
+  type PageDetailBodyInput,
+  type PageDetailSearch,
+  type PageDetailStanding,
+  type PagePaneTab,
+  type PageSiblingOption,
+} from "./lib/pageDetail.js";
+export {
+  PAGE_SYNC_LOST,
+  PAGE_SYNC_SETTLE_MS,
+  PAGE_SYNC_SYNCING,
+  reportPageSync,
+  usePageSyncStatus,
+  type PageSyncStatus,
+} from "./lib/pageSync.js";
