@@ -21,6 +21,7 @@ interface StubLocator {
   press?: (key: string) => Promise<void>;
   waitFor?: (options?: unknown) => Promise<unknown>;
   getAttribute?: (name: string) => Promise<string | null>;
+  evaluate?: (fn: (element: { tagName: string }) => string) => Promise<string>;
   innerText?: () => Promise<string>;
   textContent?: () => Promise<string | null>;
   inputValue?: () => Promise<string>;
@@ -379,6 +380,75 @@ describe("settings links and desktop watch", () => {
     await driver.assistantStartDesktopCallWatch();
     expect(off).toHaveBeenCalledTimes(1);
     expect(await driver.assistantDesktopCallsObserved()).toEqual([]);
+  });
+});
+
+describe("skipped-server notice actions", () => {
+  it("reads no actions when the transcript has no notice", async () => {
+    const transcript = locator({
+      locator: (selector: string) => {
+        expect(selector).toBe('[data-testid="assistant-notice"]');
+        return locator({ count: async () => 0 });
+      },
+    });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="assistant-transcript"]' ? transcript : locator({ count: async () => 0 }),
+    });
+
+    await expect(new WebNewDriver(page).assistantSkippedNoticeActions()).resolves.toEqual([]);
+  });
+
+  it("reads a linkless notice as no actions", async () => {
+    const interactive = locator({ count: async () => 0 });
+    const notice = locator({
+      locator: (selector: string) => {
+        expect(selector).toBe("a, button");
+        return interactive;
+      },
+    });
+    const notices = locator({ count: async () => 1, nth: () => notice });
+    const transcript = locator({ locator: () => notices });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="assistant-transcript"]' ? transcript : locator({ count: async () => 0 }),
+    });
+
+    await expect(new WebNewDriver(page).assistantSkippedNoticeActions()).resolves.toEqual([]);
+  });
+
+  it("reports each anchor and button with its text and href", async () => {
+    const actions = [
+      locator({
+        evaluate: async (fn) => fn({ tagName: "A" }),
+        textContent: async () => " Manage servers ",
+        getAttribute: async () => "/settings/profile/ai-assistant",
+      }),
+      locator({
+        evaluate: async (fn) => fn({ tagName: "BUTTON" }),
+        textContent: async () => "Dismiss",
+        getAttribute: async () => null,
+      }),
+      locator({
+        evaluate: async (fn) => fn({ tagName: "BUTTON" }),
+        textContent: async () => null,
+        getAttribute: async () => null,
+      }),
+    ];
+    const interactive = locator({ count: async () => actions.length, nth: (index: number) => actions[index]! });
+    const notice = locator({ locator: () => interactive });
+    const notices = locator({ count: async () => 1, nth: () => notice });
+    const transcript = locator({ locator: () => notices });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="assistant-transcript"]' ? transcript : locator({ count: async () => 0 }),
+    });
+
+    await expect(new WebNewDriver(page).assistantSkippedNoticeActions()).resolves.toEqual([
+      { kind: "a", text: "Manage servers", href: "/settings/profile/ai-assistant" },
+      { kind: "button", text: "Dismiss", href: null },
+      { kind: "button", text: "", href: null },
+    ]);
   });
 });
 
