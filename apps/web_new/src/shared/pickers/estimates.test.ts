@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 import type { Estimate } from "@pidash/api-client";
-import { NO_ESTIMATE_ID, selectEstimateOptions } from "./estimates.js";
+import { NO_ESTIMATE_ID, readOnlyEstimateLabel, selectEstimateOptions, selectEstimateValueLabel } from "./estimates.js";
 
 const POINTS_SYSTEM: Estimate = {
   id: "123e4567-e89b-12d3-a456-426614174000",
@@ -65,5 +65,58 @@ describe("selectEstimateOptions", () => {
     expect(selectEstimateOptions(undefined)).toEqual([
       { id: NO_ESTIMATE_ID, label: "No estimate", clear: true, disabled: true },
     ]);
+  });
+});
+
+describe("selectEstimateValueLabel (EST-022)", () => {
+  it("names a points value through the active system", () => {
+    expect(selectEstimateValueLabel([POINTS_SYSTEM], "323e4567-e89b-12d3-a456-426614174002")).toBe("3");
+  });
+
+  it("humanizes a time value", () => {
+    expect(selectEstimateValueLabel([TIME_SYSTEM], "623e4567-e89b-12d3-a456-426614174005")).toBe("1h 30m");
+  });
+
+  it("finds a point that belongs to a superseded system", () => {
+    const superseded: Estimate = { ...TIME_SYSTEM, last_used: false };
+    expect(selectEstimateValueLabel([POINTS_SYSTEM, superseded], "623e4567-e89b-12d3-a456-426614174005")).toBe(
+      "1h 30m"
+    );
+  });
+
+  it("prefers the active system's family when both list the same id", () => {
+    const sameId = "323e4567-e89b-12d3-a456-426614174002";
+    const timed: Estimate = {
+      ...TIME_SYSTEM,
+      points: [{ id: sameId, key: 1, value: "90", description: "" }],
+    };
+    const stale: Estimate = {
+      ...POINTS_SYSTEM,
+      last_used: false,
+      points: [{ id: sameId, key: 1, value: "3", description: "" }],
+    };
+    expect(selectEstimateValueLabel([stale, timed], sameId)).toBe("1h 30m");
+  });
+
+  it("returns undefined when no system lists the id or nothing is set", () => {
+    expect(selectEstimateValueLabel([POINTS_SYSTEM], "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")).toBeUndefined();
+    expect(selectEstimateValueLabel(undefined, "323e4567-e89b-12d3-a456-426614174002")).toBeUndefined();
+    expect(selectEstimateValueLabel([POINTS_SYSTEM], null)).toBeUndefined();
+    expect(selectEstimateValueLabel([POINTS_SYSTEM], "")).toBeUndefined();
+  });
+});
+
+describe("readOnlyEstimateLabel (EST-022)", () => {
+  it("uses the system's value, else the stored id", () => {
+    expect(readOnlyEstimateLabel([POINTS_SYSTEM], "323e4567-e89b-12d3-a456-426614174002")).toBe("3");
+    expect(readOnlyEstimateLabel([POINTS_SYSTEM], "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")).toBe(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    );
+  });
+
+  it("returns null for an unset value so the caller shows its placeholder", () => {
+    expect(readOnlyEstimateLabel([POINTS_SYSTEM], null)).toBeNull();
+    expect(readOnlyEstimateLabel([POINTS_SYSTEM], undefined)).toBeNull();
+    expect(readOnlyEstimateLabel([POINTS_SYSTEM], "")).toBeNull();
   });
 });

@@ -443,9 +443,37 @@ describe("SidebarPropertiesB rows", () => {
     const estimate = screen.getByRole("group", { name: "Estimate" });
     await waitFor(() => expect(within(estimate).getByRole("button")).toHaveTextContent("3"));
     expect(within(estimate).getByRole("button")).toBeDisabled();
+    // No second affordance: the read-only row's only control is the
+    // disabled trigger, and pressing it opens nothing (EST-022).
+    expect(within(estimate).getAllByRole("button")).toHaveLength(1);
+    fireEvent.click(within(estimate).getByRole("button"));
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     const cycleRow = screen.getByRole("group", { name: "Cycle" });
     await waitFor(() => expect(within(cycleRow).getByRole("button")).toHaveTextContent("Cycle 1"));
     expect(within(cycleRow).getByRole("button")).toBeDisabled();
+  });
+
+  it("shows the empty placeholder on a read-only row with no value (EST-022)", async () => {
+    const { client, queryClient } = harness();
+    renderRows(client, queryClient, { editable: false, issue: issueFixture({ estimate_point: null }) });
+    const estimate = screen.getByRole("group", { name: "Estimate" });
+    const trigger = within(estimate).getByRole("button");
+    expect(trigger).toHaveTextContent("None");
+    expect(trigger).toBeDisabled();
+  });
+
+  it("keeps an archived item's set value visible and read-only (NEWFRONT-349 intended, EST-022)", async () => {
+    const { client, queryClient } = harness();
+    renderRows(client, queryClient, {
+      editable: true,
+      issue: issueFixture({ estimate_point: "f33e4567-e89b-12d3-a456-42661417400e", archived_at: "2026-03-01" }),
+    });
+    const estimate = screen.getByRole("group", { name: "Estimate" });
+    await waitFor(() => expect(within(estimate).getByRole("button")).toHaveTextContent("3"));
+    const trigger = within(estimate).getByRole("button");
+    expect(trigger).toBeDisabled();
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
   it("names the assigned estimate in the row", async () => {

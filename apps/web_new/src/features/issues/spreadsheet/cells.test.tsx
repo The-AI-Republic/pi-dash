@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
+import { workspaceScope } from "../../../core/query/index.js";
 import { WORKFLOW_FLAG } from "../edition/flags.js";
 import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import type { SheetCellContext } from "./cells.js";
@@ -578,6 +579,25 @@ describe("SheetPropertyCell", () => {
     named.unmount();
   });
 
+  it("names a set point on a sheet a member cannot edit (EST-022)", async () => {
+    stubClient();
+    const known = renderCell("estimate", context({ editable: false }), issue({ estimate_point: ESTIMATE }));
+    await vi.waitFor(() => expect(within(known.container).getByText("3")).toBeInTheDocument());
+    expect(within(known.container).queryByText(ESTIMATE)).not.toBeInTheDocument();
+    known.unmount();
+    const unknown = renderCell("estimate", context({ editable: false }), issue({ estimate_point: "no-such-option" }));
+    expect(within(unknown.container).getByText("no-such-option")).toBeInTheDocument();
+    unknown.unmount();
+  });
+
+  it("names a set point on an editable sheet before its picker opens (EST-022)", async () => {
+    stubClient();
+    const editable = renderCell("estimate", context(), issue({ estimate_point: ESTIMATE }));
+    await vi.waitFor(() => expect(within(editable.container).getByRole("button")).toHaveTextContent("3"));
+    expect(within(editable.container).getByRole("button")).not.toHaveTextContent("None");
+    editable.unmount();
+  });
+
   it("falls back to the stored estimate when no option matches", async () => {
     stubClient();
     const frozen = context({ isRowReadOnly: () => true });
@@ -592,6 +612,45 @@ describe("SheetPropertyCell", () => {
     clear.unmount();
     const blank = renderCell("estimate", frozen, issue({ estimate_point: undefined }));
     expect(within(blank.container).getByText("None")).toBeInTheDocument();
+  });
+
+  it("names a value that belongs to a superseded system read-only (EST-022)", async () => {
+    stubClient();
+    const superseded = [
+      {
+        id: ESTIMATE,
+        workspace: PROJECT,
+        project: PROJECT,
+        name: "Sizes",
+        description: "",
+        type: "categories",
+        last_used: false,
+        points: [{ id: "no-such-option", key: 1, value: "Large", description: "" }],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(workspaceScope(SLUG).concat("pickers", "estimates", PROJECT), superseded);
+    const { container } = render(
+      <QueryClientProvider client={queryClient}>
+        <table>
+          <tbody>
+            <tr>
+              <SheetPropertyCell
+                issue={issue({ estimate_point: "no-such-option" })}
+                column={column("estimate")}
+                context={context({ isRowReadOnly: () => true })}
+                rowIndex={0}
+                columnIndex={1}
+                onKeyDown={() => {}}
+              />
+            </tr>
+          </tbody>
+        </table>
+      </QueryClientProvider>
+    );
+    expect(within(container).getByText("Large")).toBeInTheDocument();
   });
 
   it("renders frozen dates and an unknown column as None", () => {
@@ -655,10 +714,13 @@ describe("SheetPropertyCell", () => {
     const due = renderCell("due_date", context({ editable: false }), issue({ target_date: "2026-10-20" }));
     expect(screen.getByText("Oct 20, 2026")).toBeInTheDocument();
     due.unmount();
-    const estimate = renderCell("estimate", context({ editable: false }), issue({ estimate_point: 3 }));
-    expect(screen.getByText("3")).toBeInTheDocument();
+    const estimate = renderCell("estimate", context({ editable: false }), issue({ estimate_point: ESTIMATE }));
+    await vi.waitFor(() => expect(within(estimate.container).getByText("3")).toBeInTheDocument());
     estimate.unmount();
-    const editableEstimate = renderCell("estimate", context(), issue({ estimate_point: 3 }));
+    const empty = renderCell("estimate", context({ editable: false }), issue({ estimate_point: null }));
+    expect(empty.container.querySelector("td")?.textContent).toBe("");
+    empty.unmount();
+    const editableEstimate = renderCell("estimate", context(), issue({ estimate_point: ESTIMATE }));
     fireEvent.click(within(editableEstimate.container).getByRole("button"));
     await screen.findByRole("option", { name: "3" });
     editableEstimate.unmount();

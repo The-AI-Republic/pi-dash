@@ -96,6 +96,65 @@ describe("ActivityEntryRow", () => {
     expect(screen.getByText("deleted the work item.")).toBeInTheDocument();
   });
 
+  it("renders a points estimate change with the actor profile link (EST-023)", () => {
+    render(
+      <ActivityEntryRow
+        workspaceSlug="acme"
+        activity={activity({
+          field: "estimate_points",
+          verb: "updated",
+          old_value: null,
+          new_value: "1",
+        })}
+      />
+    );
+    expect(screen.getByText("set the estimate point to 1.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Ada L" })).toHaveAttribute("href", `/acme/profile/${ADA}`);
+  });
+
+  it("renders a categories estimate change naming the value (EST-023)", () => {
+    render(
+      <ActivityEntryRow
+        workspaceSlug="acme"
+        activity={activity({
+          field: "estimate_categories",
+          verb: "updated",
+          old_value: "Big",
+          new_value: "Small",
+        })}
+      />
+    );
+    expect(screen.getByText("set the estimate point to Small.")).toBeInTheDocument();
+  });
+
+  it("renders a legacy estimate_point row and an unknown estimate family (EST-023)", () => {
+    const { unmount } = render(
+      <ActivityEntryRow
+        workspaceSlug="acme"
+        activity={activity({ field: "estimate_point", verb: "updated", old_value: null, new_value: "3" })}
+      />
+    );
+    expect(screen.getByText("set the estimate point to 3.")).toBeInTheDocument();
+    unmount();
+    render(
+      <ActivityEntryRow
+        workspaceSlug="acme"
+        activity={activity({ field: "estimate_future", verb: "updated", old_value: null, new_value: "5" })}
+      />
+    );
+    expect(screen.getByText("set the estimate point to 5.")).toBeInTheDocument();
+  });
+
+  it("renders the removal shape a fixed server will send (EST-023)", () => {
+    render(
+      <ActivityEntryRow
+        workspaceSlug="acme"
+        activity={activity({ field: "estimate_points", verb: "removed", old_value: "3", new_value: null })}
+      />
+    );
+    expect(screen.getByText("removed the estimate point 3.")).toBeInTheDocument();
+  });
+
   it("credits the product for its own actions without a member link", () => {
     render(
       <ActivityEntryRow

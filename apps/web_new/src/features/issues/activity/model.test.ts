@@ -258,13 +258,7 @@ describe("activity sentences", () => {
       "set the priority to high."
     );
     expect(activitySentence({ field: "estimate_point", verb: "updated", old_value: null, new_value: "3" })).toBe(
-      "set the estimate to 3."
-    );
-    expect(activitySentence({ field: "estimate_points", verb: "updated", old_value: "3", new_value: "" })).toBe(
-      "cleared the estimate."
-    );
-    expect(activitySentence({ field: "estimate_categories", verb: "updated", old_value: "3", new_value: "1" })).toBe(
-      "set the estimate to 1."
+      "set the estimate point to 3."
     );
     expect(activitySentence({ field: "start_date", verb: "updated", old_value: "2026-09-01", new_value: "" })).toBe(
       "cleared the start date."
@@ -278,6 +272,56 @@ describe("activity sentences", () => {
     expect(activitySentence({ field: "target_date", verb: "updated", old_value: null, new_value: "2026-10-09" })).toBe(
       "set the due date to 2026-10-09."
     );
+  });
+
+  it("describes estimate changes for a points system (EST-023)", () => {
+    expect(activitySentence({ field: "estimate_points", verb: "updated", old_value: null, new_value: "1" })).toBe(
+      "set the estimate point to 1."
+    );
+    expect(activitySentence({ field: "estimate_points", verb: "updated", old_value: "1", new_value: "3" })).toBe(
+      "set the estimate point to 3."
+    );
+  });
+
+  it("describes estimate changes for a categories system (EST-023)", () => {
+    expect(activitySentence({ field: "estimate_categories", verb: "updated", old_value: null, new_value: "Big" })).toBe(
+      "set the estimate point to Big."
+    );
+    expect(
+      activitySentence({ field: "estimate_categories", verb: "updated", old_value: "Big", new_value: "Small" })
+    ).toBe("set the estimate point to Small.");
+  });
+
+  it("accepts the whole estimate family and the legacy name (EST-023)", () => {
+    for (const field of [
+      "estimate_point",
+      "estimate_points",
+      "estimate_categories",
+      "estimate_time",
+      "estimate_future",
+    ]) {
+      expect(activitySentence({ field, verb: "updated", old_value: null, new_value: "5" })).toBe(
+        "set the estimate point to 5."
+      );
+    }
+  });
+
+  it("renders the removal shape the server sends once clearing is fixed (EST-023)", () => {
+    expect(activitySentence({ field: "estimate_points", verb: "removed", old_value: "3", new_value: null })).toBe(
+      "removed the estimate point 3."
+    );
+    expect(activitySentence({ field: "estimate_categories", verb: "updated", old_value: "Big", new_value: "" })).toBe(
+      "removed the estimate point Big."
+    );
+    expect(activitySentence({ field: "estimate_points", verb: "updated", old_value: "", new_value: "" })).toBe(
+      "cleared the estimate."
+    );
+  });
+
+  it("keeps non-estimate unknown fields and near-miss names out of the feed", () => {
+    expect(activitySentence({ field: "estimate", verb: "updated", old_value: null, new_value: "3" })).toBeNull();
+    expect(activitySentence({ field: "Estimate_points", verb: "updated", old_value: null, new_value: "3" })).toBeNull();
+    expect(activitySentence({ field: "mystery", verb: "updated", old_value: null, new_value: "3" })).toBeNull();
   });
 
   it("describes assignees and labels by add or remove", () => {

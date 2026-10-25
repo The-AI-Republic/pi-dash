@@ -32,8 +32,7 @@ import {
   usePickerStates,
   usePickerWorkspaceMembers,
 } from "../../../shared/pickers/reference.js";
-import { selectActiveEstimate } from "@pidash/api-client";
-import { selectEstimateOptions } from "../../../shared/pickers/estimates.js";
+import { readOnlyEstimateLabel } from "../../../shared/pickers/estimates.js";
 import {
   countLabel,
   labelNamesTooltip,
@@ -212,13 +211,17 @@ function StartDateCell({ issue, context, onDone, disabled }: EditableCellProps):
 }
 
 function EstimateCell({ issue, context, onDone, disabled }: EditableCellProps): React.ReactElement {
+  const point = estimateValue(issue.estimate_point);
   return (
     <EstimatePicker
       workspaceSlug={context.workspaceSlug}
       projectId={context.projectId}
-      value={estimateValue(issue.estimate_point)}
+      value={point}
       disabled={disabled}
       variant="ghost"
+      // A set point names itself before the sheet is opened (EST-022), the
+      // same read the sidebar and the drafts block make.
+      preload={point !== null}
       onChange={(id) => {
         writeThenRefocus(() => context.onUpdate(issue.id, { estimate_point: id }), onDone);
       }}
@@ -462,10 +465,22 @@ function ReadOnlyCell({
     case "due_date":
       return <span>{formatDayOrBlank(issue.target_date ?? null)}</span>;
     case "estimate":
-      return <span>{issue.estimate_point ?? ""}</span>;
+      return <ReadOnlyEstimate issue={issue} context={context} />;
     default:
       return <span />;
   }
+}
+
+/**
+ * A sheet a member cannot edit still names the stored point (EST-022): the
+ * value when a system lists it, the stored id when none does, and the empty
+ * cell it always showed when no point is set.
+ */
+function ReadOnlyEstimate({ issue, context }: { issue: IssueListItem; context: SheetCellContext }): React.ReactElement {
+  const point = estimateValue(issue.estimate_point);
+  const estimates = usePickerEstimates(context.workspaceSlug, context.projectId, point !== null);
+  if (point === null) return <span />;
+  return <span>{readOnlyEstimateLabel(estimates.data, point)}</span>;
 }
 
 /**
@@ -620,11 +635,11 @@ function FrozenModules({ issue, context }: { issue: IssueListItem; context: Shee
 
 function FrozenEstimate({ issue, context }: { issue: IssueListItem; context: SheetCellContext }): React.ReactElement {
   const estimates = usePickerEstimates(context.workspaceSlug, context.projectId, true);
-  const system = estimates.data === undefined ? undefined : selectActiveEstimate(estimates.data);
   const value =
     issue.estimate_point === null || issue.estimate_point === undefined ? null : String(issue.estimate_point);
-  const option = system === undefined ? undefined : selectEstimateOptions(system).find((row) => row.id === value);
-  return <ReadOnlyProperty kind="estimate" value={option?.label ?? value} />;
+  // Before the systems land the stored id stands in, as it always has; the
+  // read then replaces it with the value's own label (EST-022).
+  return <ReadOnlyProperty kind="estimate" value={readOnlyEstimateLabel(estimates.data, value)} />;
 }
 
 export function formatDayOrBlank(iso: string | null): string {

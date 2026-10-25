@@ -218,6 +218,28 @@ describe("SpaceIssueRow read-only and open behavior (SPC-031/032)", () => {
   });
 });
 
+describe("SpaceIssueRow estimate absence (EST-022)", () => {
+  // The old public surfaces never showed an estimate; the board issues
+  // contract still carries estimate_point, so a card must keep ignoring it.
+  const ESTIMATED = { estimate_point: 41 } as const;
+
+  it("shows no estimate value on the list row even when the issue carries one", () => {
+    renderCard({ issue: richIssue(ESTIMATED) });
+    expect(screen.getByTestId("space-board-issue")).not.toHaveTextContent("41");
+    expect(screen.queryByText(/estimate/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /estimate/i })).not.toBeInTheDocument();
+  });
+
+  it("shows no estimate value or control on the board card", () => {
+    renderCard({ card: true, votesEnabled: true, reactionsEnabled: true, issue: richIssue(ESTIMATED) });
+    const card = screen.getByTestId("space-board-card");
+    expect(card).not.toHaveTextContent("41");
+    expect(card.querySelector("[data-testid*='estimate'], [aria-label*='stimate']")).toBeNull();
+    expect(screen.queryByRole("button", { name: /estimate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+});
+
 describe("SpaceIssueRow board footer (SPC-029)", () => {
   it("renders nothing when both engagement flags are off", () => {
     renderCard({ card: true });

@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   patch: vi.fn(),
   move: vi.fn(),
   modules: vi.fn(),
+  estimateReads: vi.fn(),
+  estimateSystems: { value: undefined as unknown },
 }));
 
 vi.mock("./mutations.js", () => ({
@@ -120,16 +122,22 @@ vi.mock("../../../shared/pickers/index.js", () => {
         </button>
       </div>
     ),
-    EstimatePicker: (props: { onChange: (id: string | null) => void; disabled?: boolean }) => (
-      <button
-        type="button"
-        data-testid="estimate-picker"
-        disabled={props.disabled}
-        onClick={() => props.onChange("point-2")}
-      >
-        Estimate
-      </button>
+    EstimatePicker: (props: {
+      onChange: (id: string | null) => void;
+      disabled?: boolean;
+      trigger: React.ReactNode;
+    }) => (
+      <div data-testid="estimate-picker">
+        {props.trigger}
+        <button type="button" disabled={props.disabled} onClick={() => props.onChange("point-2")}>
+          Pick estimate
+        </button>
+      </div>
     ),
+    usePickerEstimates: (workspaceSlug: string, projectId: string, enabled: boolean) => {
+      mocks.estimateReads({ workspaceSlug, projectId, enabled });
+      return { data: mocks.estimateSystems.value };
+    },
   };
 });
 
@@ -218,7 +226,10 @@ function props(overrides: Partial<InlinePropertyStripProps> = {}): InlinePropert
   };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.estimateSystems.value = undefined;
+});
 afterEach(() => {
   resetEditionIssuesProviders();
   delete edition.flags[WORKFLOW_FLAG];
@@ -372,7 +383,7 @@ describe("InlinePropertyStrip", () => {
     expect(mocks.modules).toHaveBeenCalledWith(["module-1", "module-2"], [MODULE]);
     fireEvent.click(screen.getByRole("button", { name: "Pick cycle" }));
     expect(mocks.move).toHaveBeenCalledWith("cycle-2", CYCLE);
-    fireEvent.click(screen.getByTestId("estimate-picker"));
+    fireEvent.click(screen.getByRole("button", { name: "Pick estimate" }));
     expect(mocks.patch).toHaveBeenCalledWith({ estimate_point: "point-2" });
     fireEvent.click(screen.getByRole("button", { name: "Labels: Bug" }));
     expect(mocks.patch).toHaveBeenCalledWith({ label_ids: ["label-1", "new-label"] });
@@ -403,8 +414,79 @@ describe("InlinePropertyStrip", () => {
     render(<InlinePropertyStrip {...props(overrides)} />);
     expect(screen.getByRole("button", { name: "Todo" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Priority: high" })).toBeDisabled();
-    expect(screen.getByTestId("estimate-picker")).toBeDisabled();
+    expect(screen.getByTestId("row-estimate-trigger")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Pick member" })).toBeDisabled();
+  });
+
+  it("keeps every editable property writable when the row is not read-only", () => {
+    render(<InlinePropertyStrip {...props({ readOnly: false })} />);
+    expect(screen.getByTestId("row-estimate-trigger")).toBeEnabled();
+  });
+});
+
+describe("InlinePropertyStrip estimate rendering (EST-022)", () => {
+  function systems(type: "points" | "categories" | "time", value: string) {
+    return [
+      {
+        id: "s1",
+        workspace: PROJECT,
+        project: PROJECT,
+        name: "Sizes",
+        description: "",
+        type,
+        last_used: true,
+        points: [{ id: "point-3", key: 1, value, description: "" }],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        created_by: null,
+        updated_by: null,
+      },
+    ];
+  }
+
+  it.each([
+    ["points", "3"],
+    ["categories", "Large"],
+    ["time", "90"],
+  ] as const)("names a %s value on a read-only row", (type, value) => {
+    mocks.estimateSystems.value = systems(type, value);
+    render(<InlinePropertyStrip {...props({ readOnly: true, issue: issue({ estimate_point: "point-3" }) })} />);
+    const chip = screen.getByTestId("row-estimate-trigger");
+    expect(chip).toHaveTextContent(type === "time" ? "1h 30m" : value);
+    expect(chip).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Pick estimate" })).toBeDisabled();
+  });
+
+  it("reads the systems when a point is set and skips the read otherwise", () => {
+    mocks.estimateSystems.value = systems("points", "3");
+    const set = render(
+      <InlinePropertyStrip {...props({ readOnly: true, issue: issue({ estimate_point: "point-3" }) })} />
+    );
+    expect(mocks.estimateReads).toHaveBeenCalledWith({ workspaceSlug: "acme", projectId: PROJECT, enabled: true });
+    set.unmount();
+
+    mocks.estimateReads.mockClear();
+    const empty = render(
+      <InlinePropertyStrip {...props({ readOnly: true, issue: issue({ estimate_point: null }) })} />
+    );
+    expect(mocks.estimateReads).toHaveBeenCalledWith({ workspaceSlug: "acme", projectId: PROJECT, enabled: false });
+    expect(screen.getByTestId("row-estimate-trigger")).toHaveTextContent("None");
+    empty.unmount();
+
+    mocks.estimateReads.mockClear();
+    render(
+      <InlinePropertyStrip
+        {...props({ readOnly: true, estimateEnabled: false, issue: issue({ estimate_point: "point-3" }) })}
+      />
+    );
+    expect(mocks.estimateReads).toHaveBeenCalledWith({ workspaceSlug: "acme", projectId: PROJECT, enabled: false });
+    expect(screen.queryByTestId("row-estimate-trigger")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the placeholder for an id no system lists", () => {
+    mocks.estimateSystems.value = systems("points", "3");
+    render(<InlinePropertyStrip {...props({ readOnly: true, issue: issue({ estimate_point: "gone" }) })} />);
+    expect(screen.getByTestId("row-estimate-trigger")).toHaveTextContent("None");
   });
 });
 

@@ -402,3 +402,49 @@ describe("ActivityFeed", () => {
     expect(within(group).getAllByRole("checkbox")).toHaveLength(4);
   });
 });
+
+describe("ActivityFeed estimate history (EST-023)", () => {
+  it("renders points and categories changes as estimate entries naming their values", async () => {
+    renderFeed({
+      activities: [
+        activity({
+          id: "a13e4567-e89b-12d3-a456-426614174011",
+          field: "estimate_points",
+          verb: "updated",
+          old_value: null,
+          new_value: "1",
+          created_at: "2026-10-16T09:00:00Z",
+        }),
+        activity({
+          id: "a13e4567-e89b-12d3-a456-426614174012",
+          field: "estimate_categories",
+          verb: "updated",
+          old_value: "Big",
+          new_value: "Small",
+          created_at: "2026-10-16T09:05:00Z",
+        }),
+      ],
+    });
+    expect(await screen.findByText("set the estimate point to 1.")).toBeInTheDocument();
+    expect(screen.getByText("set the estimate point to Small.")).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "Ada L" })[0]).toHaveAttribute("href", `/acme/profile/${ADA}`);
+  });
+
+  it("shows only the earlier set entry after a clear records nothing (NEWFRONT-345 pinned)", async () => {
+    renderFeed({
+      activities: [
+        activity({
+          id: "a13e4567-e89b-12d3-a456-426614174013",
+          field: "estimate_points",
+          verb: "updated",
+          old_value: null,
+          new_value: "3",
+          created_at: "2026-10-16T09:00:00Z",
+        }),
+      ],
+    });
+    expect(await screen.findByText("set the estimate point to 3.")).toBeInTheDocument();
+    expect(screen.queryByText(/removed the estimate/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/cleared the estimate/i)).not.toBeInTheDocument();
+  });
+});
