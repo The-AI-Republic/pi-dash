@@ -66,7 +66,9 @@ test(
         // the editor, and the card falls back to the workspace row.
         await expect.poll(async () => driver.promptsEditorState(), { timeout: 30_000 }).toBeNull();
         const rows = await serverPromptSections(workspaceSlug, "coding-task", "user", member.session);
-        expect(rows.find((row) => row.key === EDITABLE_SECTION)?.source).toBe("default");
+        // Dropping the personal override falls back to the workspace row,
+        // which is itself an override in this scenario.
+        expect(rows.find((row) => row.key === EDITABLE_SECTION)?.source).toBe("workspace");
         await driver.promptsOpen(workspaceSlug);
         const card = await expectCard(driver, EDITABLE_SECTION, (candidate) => candidate.body === WORKSPACE_BODY);
         expect(card.sourceBadge).toBe("Workspace override");

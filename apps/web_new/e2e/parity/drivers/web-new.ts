@@ -11921,13 +11921,13 @@ export class WebNewDriver implements ParityDriver {
     const checked = dialog
       .getByRole("radiogroup", { name: "What to do with findings" })
       .getByRole("radio", { checked: true });
+    // A radio element carries no text; its wrapping label is what a
+    // person sees, as in schedulerOutcomeState.
+    const checkedLabel = checked.locator("xpath=ancestor::label[1]");
     return {
       ...schedule,
       outcomeLabel: (
-        (await checked
-          .first()
-          .innerText()
-          .catch(() => "")) ?? ""
+        (await checkedLabel.innerText().catch(async () => await checked.innerText().catch(() => ""))) ?? ""
       ).trim(),
       pod: await dialog.getByLabel("Pod").inputValue(),
     };

@@ -7,10 +7,9 @@
 // line live, echoing invalid input raw; the stored rule remains the tooltip
 // fallback.
 // Row: AGT-020.
-// Note: the list/detail fallback for a blank rule reads "Once at dtstart"
-// (a literal "dtstart", unlike the dialog's "Fires once at the start
-// time."). It still means a single firing, so the row holds; the area spec
-// may prefer the dialog's sentence for the new app.
+// Note: AGT-020's target uses the dialog's sentence ("Fires once at the
+// start time") for a blank rule on every surface; the old app's literal
+// "Once at dtstart" stays the oracle leg only.
 import { test, expect } from "../../fixtures";
 import {
   ensureProject,

@@ -170,9 +170,9 @@ describe("describeRrule", () => {
 });
 
 describe("describeStoredRrule", () => {
-  it("names the API's own anchor for a blank stored rule", () => {
-    expect(describeStoredRrule("")).toBe("Once at dtstart");
-    expect(describeStoredRrule("   ")).toBe("Once at dtstart");
+  it("names a blank stored rule the same way the dialog does", () => {
+    expect(describeStoredRrule("")).toBe("Fires once at the start time");
+    expect(describeStoredRrule("   ")).toBe("Fires once at the start time");
   });
 
   it("delegates every non-blank rule to the plain-language reading", () => {
