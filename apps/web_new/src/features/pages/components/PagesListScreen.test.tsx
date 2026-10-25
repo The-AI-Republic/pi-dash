@@ -67,6 +67,7 @@ interface Harness {
   pagesCalls: number;
   members: Record<string, unknown>[];
   meStatus: number;
+  meCalls: number;
 }
 
 let harness: Harness;
@@ -101,6 +102,7 @@ beforeEach(() => {
     pagesCalls: 0,
     members: [makeWorkspaceMember(PAGES_USER_ID, "Ada Byron")],
     meStatus: 200,
+    meCalls: 0,
   };
   routerHarness.navigate.mockReset();
   toaster.notifyPending.mockReset();
@@ -120,8 +122,28 @@ beforeEach(() => {
     if (url.endsWith("/project-roles/")) return jsonResponse(url, 200, harness.roles);
     if (url.endsWith("/projects/details/")) return jsonResponse(url, 200, [makeProjectDetails()]);
     if (url.endsWith("/api/users/me/")) {
+      harness.meCalls += 1;
       if (harness.meStatus === -1) return new Promise(() => undefined) as never;
-      return jsonResponse(url, harness.meStatus, { id: PAGES_USER_ID, email: "ada@test" });
+      return jsonResponse(url, harness.meStatus, {
+        id: PAGES_USER_ID,
+        email: "ada@test.example",
+        username: "ada",
+        first_name: "Ada",
+        last_name: "Byron",
+        display_name: "Ada Byron",
+        avatar: "",
+        avatar_url: null,
+        cover_image: null,
+        cover_image_url: null,
+        date_joined: "2026-01-01T00:00:00.000Z",
+        user_timezone: "UTC",
+        is_active: true,
+        is_bot: false,
+        is_email_verified: true,
+        is_password_autoset: false,
+        last_login_medium: "password",
+        last_login_time: null,
+      });
     }
     if (url.endsWith("/api/workspaces/acme/members/")) return jsonResponse(url, 200, harness.members);
     const memberRead = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/members/$`).exec(url);
@@ -205,8 +227,8 @@ afterEach(() => {
   document.title = "";
 });
 
-function renderScreen(tab: "public" | "private" | "archived" = "public"): void {
-  render(
+function renderScreen(tab: "public" | "private" | "archived" = "public"): ReturnType<typeof render> {
+  return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <PagesListScreen workspaceSlug="acme" projectId={PAGES_PROJECT_ID} tab={tab} />
     </QueryClientProvider>
@@ -515,7 +537,7 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
 
   it("offers no duplicate entry to a guest", async () => {
     harness.roles = { [PAGES_PROJECT_ID]: 5 };
-    harness.pages = [makePageRow({ name: "Read only" })];
+    harness.pages = [makePageRow({ name: "Read only", owned_by: "623e4567-e89b-12d3-a456-426614174005" })];
     renderScreen();
     await screen.findByTestId("pages-list");
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Read only" }));
@@ -525,9 +547,10 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
   it("gives the page owner the state switches and hides them from a member", async () => {
     harness.roles = { [PAGES_PROJECT_ID]: 15 };
     harness.pages = [makePageRow({ name: "Mine", owned_by: PAGES_USER_ID })];
-    renderScreen();
+    const view = renderScreen();
     await screen.findByTestId("pages-list");
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Mine" }));
+    await waitFor(() => expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toHaveLength(6));
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
       "Open in new tab",
       "Copy link",
@@ -537,6 +560,7 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
       "Archive",
     ]);
 
+    view.unmount();
     harness.pages = [makePageRow({ name: "Theirs", owned_by: "623e4567-e89b-12d3-a456-426614174005" })];
     renderScreen();
     await waitFor(() => expect(screen.getByRole("link", { name: "Theirs" })).toBeInTheDocument());

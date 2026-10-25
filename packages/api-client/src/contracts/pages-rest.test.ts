@@ -131,6 +131,12 @@ describe("pages collection contracts", () => {
     expect(rows[0]?.sub_pages_count).toBe(3);
   });
 
+  it("parses a shelved row's archive stamp as a timestamp", async () => {
+    const { client } = stubClient({ json: () => [row({ archived_at: "2026-10-20T10:00:00Z" })] });
+    const rows = await listPages(client, WS, PROJECT);
+    expect(rows[0]?.archived_at).toBe("2026-10-20T10:00:00Z");
+  });
+
   it("rejects a row with no id", async () => {
     const { client } = stubClient({ json: () => [{ name: "No id" }] });
     await expect(listPages(client, WS, PROJECT)).rejects.toThrow();
