@@ -19295,17 +19295,88 @@ export class WebNewDriver implements ParityDriver {
   async modulesFavoritesExpanded(): Promise<boolean> {
     return todo("modulesFavoritesExpanded");
   }
-  async modulesOpenRowMenu(_name: string): Promise<void> {
-    return todo("modulesOpenRowMenu");
+  /** The live or archived row whose own name span carries exactly `name`. */
+  private modulesMenuRow(name: string): Locator {
+    // modulesRow scopes to the live list; the archived screen mounts the
+    // same rows under its own shell, so the menu search spans the page.
+    return this.page
+      .getByTestId("modules-row")
+      .filter({
+        has: this.page.locator('[data-testid="modules-row-name"]', {
+          hasText: WebNewDriver.modulesExactName(name),
+        }),
+      })
+      .first();
+  }
+
+  /** One open menu entry's title: the title line, or the whole row when plain. */
+  private async modulesMenuItemTitle(item: Locator): Promise<string> {
+    const titled = item.locator("[data-menu-title]");
+    if ((await titled.count()) > 0) return ((await titled.first().innerText()) ?? "").trim();
+    return ((await item.innerText()) ?? "").trim();
+  }
+
+  /** The open menu's entry carrying exactly `title`; throws when absent. */
+  private async modulesMenuItemByTitle(title: string): Promise<Locator> {
+    const items = this.page.locator('[role="menuitem"]:visible');
+    const count = await items.count();
+    for (let index = 0; index < count; index += 1) {
+      const item = items.nth(index);
+      if ((await this.modulesMenuItemTitle(item)) === title) return item;
+    }
+    throw new Error(`modules menu has no entry titled "${title}"`);
+  }
+
+  async modulesOpenRowMenu(name: string): Promise<void> {
+    if ((await this.page.locator('[role="menuitem"]:visible').count()) === 0) {
+      const row = this.modulesMenuRow(name);
+      // The desktop trigger reveals on row hover; hovering first reads
+      // the menu the way a viewer opens it.
+      await row.hover({ timeout: WebNewDriver.WAIT_MS });
+      await row.locator('div[data-main-menu="true"]:visible button').click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.locator('[role="menuitem"]:visible').first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesMenuItems(): Promise<ModulesMenuEntry[]> {
-    return todo("modulesMenuItems");
+    const items = this.page.locator('[role="menuitem"]:visible');
+    const count = await items.count();
+    const entries: ModulesMenuEntry[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const item = items.nth(index);
+      const title = await this.modulesMenuItemTitle(item);
+      if (title === "") continue;
+      const noted = item.locator("[data-menu-description]");
+      const description = (await noted.count()) > 0 ? ((await noted.first().innerText()) ?? "").trim() || null : null;
+      const disabled = (await item.getAttribute("data-disabled")) !== null;
+      entries.push({ title, disabled, description });
+    }
+    return entries;
   }
-  async modulesMenuChoose(_title: string): Promise<void> {
-    return todo("modulesMenuChoose");
+  async modulesMenuChoose(title: string): Promise<void> {
+    // Copy entries write through the async clipboard API, which headless
+    // Chromium denies without an explicit grant.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const item = await this.modulesMenuItemByTitle(title);
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator('[role="menuitem"]:visible')
+      .first()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
-  async modulesMenuChooseOpenTab(_titlePart: string): Promise<{ url: string; title: string }> {
-    return todo("modulesMenuChooseOpenTab");
+  async modulesMenuChooseOpenTab(titlePart: string): Promise<{ url: string; title: string }> {
+    const item = await this.modulesMenuItemByTitle("Open in new tab");
+    const [popup] = await Promise.all([
+      this.page.context().waitForEvent("page", { timeout: WebNewDriver.WAIT_MS }),
+      item.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    await popup.waitForLoadState("domcontentloaded", { timeout: WebNewDriver.WAIT_MS });
+    // The module-specific tab title lands after the detail fetch, well
+    // past the generic shell title.
+    await expect.poll(async () => popup.title(), { timeout: WebNewDriver.WAIT_MS }).toContain(titlePart);
+    const result = { url: popup.url(), title: await popup.title() };
+    await popup.close().catch(() => undefined);
+    return result;
   }
   async modulesDialogVisible(kind: "edit" | "archive" | "delete"): Promise<boolean> {
     const heading = kind === "edit" ? "Update module" : kind === "archive" ? /^Archive module/ : "Delete module";
@@ -19318,7 +19389,8 @@ export class WebNewDriver implements ParityDriver {
     return text === "" ? null : text;
   }
   async modulesReadClipboard(): Promise<string> {
-    return todo("modulesReadClipboard");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
   async modulesOpenDetail(
     workspaceSlug: string,
@@ -19716,6 +19788,23 @@ export class WebNewDriver implements ParityDriver {
       }
     }
     return false;
+  }
+
+  /**
+   * Entry labels of the opened row menu for `name` (ROW_041: the menu
+   * must offer no export, import or print action). Opens the row's
+   * overflow menu, reads its titles, and closes it again.
+   */
+  async modulesXRowMenuEntries(name: string): Promise<string[]> {
+    await this.modulesOpenRowMenu(name);
+    const entries = await this.modulesMenuItems();
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .locator('[role="menuitem"]:visible')
+      .first()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return entries.map((entry) => entry.title);
   }
 
   // --- Modules cross-cutting (NEWFRONT-807, MOD-038/039/042/043).

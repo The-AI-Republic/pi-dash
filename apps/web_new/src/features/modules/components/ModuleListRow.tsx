@@ -49,6 +49,18 @@ export interface ModuleListRowProps {
 }
 
 /**
+ * Hover reveal for the row's inline actions: hidden until the row is
+ * hovered or focused, always shown on touch and narrow screens, or
+ * always shown when the host asks (tests, narrow hosts). The list body
+ * reuses this for the desktop quick menu so both mounts reveal as one.
+ */
+export function moduleRowHoverClass(alwaysShowActions: boolean): string {
+  return alwaysShowActions
+    ? ""
+    : "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100 max-md:opacity-100";
+}
+
+/**
  * The progress marker, with the marker's kind on a small test handle so a
  * reader never has to parse the svg: a check once everything is done, an
  * alert for a finished-status module below full completion, otherwise the
@@ -100,9 +112,7 @@ export function ModuleListRow({
   menu,
   alwaysShowActions = false,
 }: ModuleListRowProps): React.ReactElement {
-  const hoverClass = alwaysShowActions
-    ? ""
-    : "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100 max-md:opacity-100";
+  const hoverClass = moduleRowHoverClass(alwaysShowActions);
 
   const openPeek = (event: React.MouseEvent): void => {
     event.preventDefault();

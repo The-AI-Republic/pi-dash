@@ -44,6 +44,7 @@ import { hasModuleFilters, type ModuleListFilters, type ModuleSort } from "../li
 import { useModuleListDisplay, type ModuleListDisplay } from "../lib/moduleListDisplayStore.js";
 import { ModuleCreateAction } from "./dialogs/ModuleCreateAction.js";
 import { ModuleDialogProvider, useModuleDialogs } from "./dialogs/ModuleDialogProvider.js";
+import { ModuleRowMenu } from "./menus/ModuleRowMenu.js";
 import { ModuleListProvider } from "./moduleListContext.js";
 import { ModulesFeatureGate } from "./ModulesFeatureGate.js";
 import { ModulesFilterChips } from "./ModulesFilterChips.js";
@@ -105,7 +106,11 @@ interface ModulesListSettledProps {
   onPeekChange: (moduleId: string | null) => void;
   /** Archived mode for the rows the body renders (slice G's screen). */
   archived?: boolean | undefined;
-  /** Per-row quick menu slot, supplied by the host slice. */
+  /**
+   * Per-row quick menu slot. Absent, the live list mounts the shared row
+   * menu in the matching mode; slice G's screen passes its own to wire
+   * the archive opener.
+   */
   rowMenu?: ((module: ModuleRow) => React.ReactNode) | undefined;
   children?: React.ReactNode;
 }
@@ -159,6 +164,20 @@ function ModulesListSettled({
         }}
       />
     );
+  // The live list mounts the shared quick menu (slice H) on every row
+  // and card; editors get the full entries, guests the link actions.
+  // Archived hosts pass their own menu to wire the archive opener.
+  const menuForRow =
+    rowMenu ??
+    ((module: ModuleRow) => (
+      <ModuleRowMenu
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        module={module}
+        canEdit={createAllowed}
+        archived={archived}
+      />
+    ));
   const body =
     children !== undefined ? (
       children
@@ -178,7 +197,7 @@ function ModulesListSettled({
         onOpenPeek={openPeek}
         archived={archived}
         members={members}
-        {...(rowMenu === undefined ? {} : { rowMenu })}
+        rowMenu={menuForRow}
       />
     );
   return listSection(
@@ -215,7 +234,11 @@ export interface ModulesListScreenProps {
   onPeekChange?: (moduleId: string | null) => void;
   /** Render rows in archived mode, where a body click opens the peek. */
   archived?: boolean;
-  /** Per-row quick menu slot, supplied by the host slice. */
+  /**
+   * Per-row quick menu slot. Absent, the screen mounts the shared row
+   * menu in the matching mode; slice G's screen passes its own to wire
+   * the archive opener.
+   */
   rowMenu?: (module: ModuleRow) => React.ReactNode;
   /**
    * The list body. Absent, the screen renders its own rows, cards or

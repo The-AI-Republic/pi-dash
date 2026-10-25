@@ -197,6 +197,52 @@ describe("ModulesListBody", () => {
     expect(screen.getAllByTestId("modules-row-peek")[0]?.className).not.toContain("opacity-0");
   });
 
+  it("mounts the desktop quick menu beside the narrow-screen one", () => {
+    renderWithContext(context(), ROWS, {
+      rowMenu: (module) => <button type="button">{`Menu ${module.name}`}</button>,
+    });
+    const desktop = screen.getAllByTestId("modules-row-menu-desktop");
+    expect(desktop).toHaveLength(3);
+    expect(desktop[0]?.className).toContain("hidden");
+    expect(desktop[0]?.className).toContain("md:flex");
+    // The desktop trigger reveals on hover like the peek control.
+    expect(desktop[0]?.className).toContain("group-hover:opacity-100");
+    expect(within(desktop[0]!).getByRole("button", { name: "Menu Alpha" })).toBeInTheDocument();
+    // The narrow-screen mount stays beside it; the breakpoint shows one.
+    expect(screen.getAllByTestId("modules-row-menu")).toHaveLength(3);
+  });
+
+  it("keeps the desktop quick menu visible when the host asks", () => {
+    renderWithContext(context(), ROWS, {
+      alwaysShowActions: true,
+      rowMenu: (module) => <button type="button">{`Menu ${module.name}`}</button>,
+    });
+    expect(screen.getAllByTestId("modules-row-menu-desktop")[0]?.className).not.toContain("opacity-0");
+  });
+
+  it("mounts no quick menu without the slot", () => {
+    renderWithContext(context(), ROWS);
+    expect(screen.queryAllByTestId("modules-row-menu-desktop")).toHaveLength(0);
+    expect(screen.queryAllByTestId("modules-row-menu")).toHaveLength(0);
+  });
+
+  it("hands every board card the quick menu slot", () => {
+    renderWithContext(context(), ROWS, {
+      layout: "board",
+      rowMenu: (module) => <button type="button">{`Menu ${module.name}`}</button>,
+    });
+    const slots = screen.getAllByTestId("modules-card-menu");
+    expect(slots).toHaveLength(3);
+    expect(within(slots[0]!).getByRole("button", { name: "Menu Alpha" })).toBeInTheDocument();
+  });
+
+  it("leaves board cards menu-free without the slot", () => {
+    renderWithContext(context(), ROWS, { layout: "board" });
+    for (const slot of screen.getAllByTestId("modules-card-menu")) {
+      expect(slot).toBeEmptyDOMElement();
+    }
+  });
+
   it("renders archived rows in archived mode and leaves cards alone", () => {
     const onOpenPeek = vi.fn();
     renderWithContext(context(), ROWS, { onOpenPeek, archived: true });

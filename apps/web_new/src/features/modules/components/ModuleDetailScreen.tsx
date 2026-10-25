@@ -8,7 +8,7 @@
 // header, the tab title, and the analytics sidebar beside the hosted
 // layouts. The gone-away gate wraps this screen at the route; guests
 // render the same frame with the host and sidebar refusing their edits,
-// and with no module actions menu at all (§4.5).
+// and the actions menu offering only the read-only link entries (§4.5).
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import * as React from "react";
@@ -31,6 +31,7 @@ import { ModuleProgressSection } from "./sidebar/ModuleProgressSection.js";
 import { moduleDetailQueryOptions } from "./sidebar/moduleSidebarQueries.js";
 import { ModuleDetailBadge } from "./ModuleDetailBadge.js";
 import { ModuleDetailActions } from "./dialogs/ModuleDetailActions.js";
+import { moduleDetailMenuEntries } from "./menus/moduleDetailMenuEntries.js";
 import { ModuleDetailCrumbs } from "./ModuleDetailCrumbs.js";
 import { ModuleSidebarToggle } from "./ModuleSidebarToggle.js";
 export interface ModuleDetailScreenProps {
@@ -98,9 +99,10 @@ export function ModuleDetailScreen({
   // the shared dialog's option; map once, here, so the dialog can offer it.
   const createProject = toModuleCreateProject(project);
   // Edit and Delete are editor entries; guests never see them (§4.5).
-  // Read-only entries (copy link, open in a new tab) belong to the row
-  // actions slice, which extends the same menu through `extraEntries`.
+  // The read-only link entries ride the same menu through `extraEntries`,
+  // so every role copies and opens from the header.
   const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at !== null });
+  const headerMenuEntries = moduleDetailMenuEntries(workspaceSlug, projectId, moduleId);
   return (
     <div data-testid="module-detail-screen" className="flex h-full min-h-0 flex-col">
       <ModuleDetailCrumbs
@@ -135,14 +137,13 @@ export function ModuleDetailScreen({
                 ) : null}
                 <ModuleDetailBadge total={firstPage.total_count} />
                 <ModuleSidebarToggle collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
-                {canEdit ? (
-                  <ModuleDetailActions
-                    workspaceSlug={workspaceSlug}
-                    projectId={projectId}
-                    moduleId={moduleId}
-                    canEdit
-                  />
-                ) : null}
+                <ModuleDetailActions
+                  workspaceSlug={workspaceSlug}
+                  projectId={projectId}
+                  moduleId={moduleId}
+                  canEdit={canEdit}
+                  extraEntries={headerMenuEntries}
+                />
               </>
             }
             emptyStateActions={{

@@ -18,6 +18,15 @@ import {
   MODULE_LINK_UPDATE_TITLE,
   MODULE_LINKS_EMPTY,
   MODULE_LINKS_TITLE,
+  MODULE_ARCHIVE_GATE_HINT,
+  MODULE_LINK_COPIED_BODY,
+  MODULE_MENU_ARCHIVE,
+  MODULE_MENU_COPY,
+  MODULE_MENU_OPEN,
+  MODULE_MENU_RESTORE,
+  MODULE_OPEN_NEW_TAB_FAILED_TITLE,
+  MODULE_RESTORE_SUCCESS_BODY,
+  MODULE_RESTORE_SUCCESS_TITLE,
   MODULES_CRUMB,
   MODULES_LAYOUTS,
   MODULE_USER_ZONE_HEADING,
@@ -48,6 +57,7 @@ import {
   ModuleSaveDialog,
   useModuleDialogs,
   ModuleListRow,
+  ModuleRowMenu,
   ModulesFeatureGate,
   ModulesLayoutSwitcher,
   ModulesListBody,
@@ -83,6 +93,12 @@ import {
   useModuleLinksWrite,
   userZoneDiffers,
   writeSidebarCollapsed,
+  copyModuleLink,
+  moduleCanArchive,
+  moduleDetailMenuEntries,
+  moduleMenuEntries,
+  moduleRowHoverClass,
+  openModuleInNewTab,
 } from "./index.js";
 
 describe("modules barrel", () => {
@@ -175,6 +191,25 @@ describe("modules barrel", () => {
     expect(readSidebarCollapsed).toBeDefined();
     expect(writeSidebarCollapsed).toBeDefined();
     expect(useDetailSidebarCollapsed).toBeDefined();
+  });
+
+  it("re-exports the shared quick menu later slices mount", () => {
+    expect(ModuleRowMenu).toBeDefined();
+    expect(moduleMenuEntries).toBeDefined();
+    expect(moduleCanArchive).toBeDefined();
+    expect(MODULE_MENU_OPEN).toBe("Open in new tab");
+    expect(MODULE_MENU_COPY).toBe("Copy link");
+    expect(MODULE_MENU_ARCHIVE).toBe("Archive");
+    expect(MODULE_MENU_RESTORE).toBe("Restore");
+    expect(MODULE_ARCHIVE_GATE_HINT).toContain("completed or cancelled");
+    expect(MODULE_RESTORE_SUCCESS_TITLE).toBe("Restore success");
+    expect(MODULE_RESTORE_SUCCESS_BODY).toContain("project modules");
+    expect(moduleDetailMenuEntries).toBeDefined();
+    expect(moduleRowHoverClass).toBeDefined();
+    expect(copyModuleLink).toBeDefined();
+    expect(openModuleInNewTab).toBeDefined();
+    expect(MODULE_LINK_COPIED_BODY).toBe("Module link copied to clipboard.");
+    expect(MODULE_OPEN_NEW_TAB_FAILED_TITLE).toBeDefined();
   });
 
   it("re-exports the sidebar links section later slices mount with", () => {

@@ -252,14 +252,37 @@ describe("ModulesListScreen", () => {
     );
   });
 
-  it("hands the rows their host menu slot, and only when a host supplies one", async () => {
-    const { unmount } = renderScreen();
+  it("mounts the shared quick menu on every row without a host menu", async () => {
+    renderScreen();
     expect(await screen.findByTestId("modules-row")).toBeInTheDocument();
-    expect(screen.queryByTestId("modules-row-menu")).not.toBeInTheDocument();
-    unmount();
+    // One row mounts two triggers: the narrow-screen and desktop mounts.
+    const triggers = screen.getAllByTestId("module-row-menu-trigger");
+    expect(triggers).toHaveLength(2);
+    expect(triggers[0]).toHaveAccessibleName("Module actions for Delivery");
+  });
+
+  it("opens the editor entries from the default row menu", async () => {
+    renderScreen();
+    const triggers = await screen.findAllByTestId("module-row-menu-trigger");
+    fireEvent.click(triggers[0]!);
+    const titles = screen
+      .getAllByRole("menuitem")
+      .map((entry) => entry.querySelector("[data-menu-title]")?.textContent?.trim() ?? entry.textContent?.trim());
+    expect(titles).toEqual(["Edit", "Open in new tab", "Copy link", "Archive", "Delete"]);
+  });
+
+  it("mounts the shared quick menu on board cards", async () => {
+    writeProjectLayout(MODULES_PROJECT_ID, "board");
+    renderScreen();
+    const card = await screen.findByTestId("modules-board-card");
+    expect(within(card).getByTestId("module-row-menu-trigger")).toBeInTheDocument();
+  });
+
+  it("hands the rows their host menu slot when a host supplies one", async () => {
     renderScreen(undefined, { rowMenu: (module) => <button type="button">{`Menu ${module.name}`}</button> });
     const slot = await screen.findByTestId("modules-row-menu");
     expect(within(slot).getByRole("button", { name: "Menu Delivery" })).toBeInTheDocument();
+    expect(screen.queryByTestId("module-row-menu-trigger")).not.toBeInTheDocument();
   });
 
   it("gives the board cards their lead from the workspace directory", async () => {
