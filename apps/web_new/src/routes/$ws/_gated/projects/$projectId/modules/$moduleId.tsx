@@ -15,8 +15,6 @@ import * as React from "react";
 // barrels would pull the list body, dialogs and picker parts into the
 // initial bundle (NEWFRONT-619, size gate).
 import { isProjectGateError } from "../../../../../../features/auth/index.js";
-import { ModuleDetailGate } from "../../../../../../features/modules/components/ModuleDetailGate.js";
-import { moduleDetailQueryOptions } from "../../../../../../features/modules/components/sidebar/moduleSidebarQueries.js";
 import { loadKanbanLayout } from "../../../../../../features/issues/kanban/lazy.js";
 import { loadIssueListLeaves, primeIssueListLeaves } from "../../../../../../features/issues/components/lazyLeaves.js";
 import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
@@ -36,11 +34,22 @@ const LazyModuleDetailScreen = React.lazy(() =>
     default: module.ModuleDetailScreen,
   }))
 );
+// The gate reads the module through the modules sidebar queries, which
+// take the issues feature through its barrel. Await both chunks in the
+// route load so neither screen code nor the issue list joins the entry.
+const loadModuleDetailGate = () =>
+  import("../../../../../../features/modules/components/ModuleDetailGate.js").then((module) => ({
+    default: module.ModuleDetailGate,
+  }));
+const LazyModuleDetailGate = React.lazy(loadModuleDetailGate);
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$moduleId")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params }) => {
-    const { prefetchEntityList } = await import("../../../../../../features/issues/list/prefetch.js");
+    const [{ prefetchEntityList }, { moduleDetailQueryOptions }] = await Promise.all([
+      import("../../../../../../features/issues/list/prefetch.js"),
+      import("../../../../../../features/modules/components/sidebar/moduleSidebarQueries.js"),
+    ]);
     const entity = { scope: "module", projectId: params.projectId, moduleId: params.moduleId } as const;
     try {
       // Preferences first: the stored flags shape the first page read.
@@ -51,7 +60,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
       );
       // The board and the list/analytics leaves ride their own chunks;
       // await them with the data so the first commit is the screen.
-      await Promise.all([loadKanbanLayout(), loadIssueListLeaves()]);
+      await Promise.all([loadKanbanLayout(), loadIssueListLeaves(), loadModuleDetailGate()]);
     } catch (error) {
       // A missing module 404s the prefetch, and a reader without project
       // access is refused with 403/409: both belong to a gate, not to the
@@ -88,18 +97,20 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
       void navigate({ to: ".", search: next, replace: true } as never);
     };
     return (
-      <ModuleDetailGate workspaceSlug={params.ws} projectId={params.projectId} moduleId={params.moduleId}>
-        <React.Suspense fallback={<ListSkeleton />}>
-          <LazyModuleDetailScreen
-            workspaceSlug={params.ws}
-            projectId={params.projectId}
-            moduleId={params.moduleId}
-            peekKey={search.peekIssueId ?? null}
-            onPeekChange={setPeekKey}
-            compact={search.layout === "compact"}
-          />
-        </React.Suspense>
-      </ModuleDetailGate>
+      <React.Suspense fallback={<ListSkeleton />}>
+        <LazyModuleDetailGate workspaceSlug={params.ws} projectId={params.projectId} moduleId={params.moduleId}>
+          <React.Suspense fallback={<ListSkeleton />}>
+            <LazyModuleDetailScreen
+              workspaceSlug={params.ws}
+              projectId={params.projectId}
+              moduleId={params.moduleId}
+              peekKey={search.peekIssueId ?? null}
+              onPeekChange={setPeekKey}
+              compact={search.layout === "compact"}
+            />
+          </React.Suspense>
+        </LazyModuleDetailGate>
+      </React.Suspense>
     );
   },
 });

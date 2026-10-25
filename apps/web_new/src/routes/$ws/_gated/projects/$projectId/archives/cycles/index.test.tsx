@@ -127,7 +127,7 @@ describe("archived cycles tab route", () => {
     renderTab(detailRow());
 
     await screen.findByTestId("archives-shell");
-    expect(screen.getByTestId("archived-cycles-screen")).toBeInTheDocument();
+    expect(await screen.findByTestId("archived-cycles-screen")).toBeInTheDocument();
     expect(screen.queryByTestId("archived-cycle-preview")).toBeNull();
   });
 

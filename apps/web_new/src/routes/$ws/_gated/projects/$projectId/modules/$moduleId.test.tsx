@@ -197,6 +197,11 @@ describe("module detail route", () => {
     // the route asserts requested, not once — the loader dedupes.
     expect(mocks.loadKanban).toHaveBeenCalled();
     expect(mocks.loadLeaves).toHaveBeenCalledTimes(1);
+    // The gate's sidebar queries reach the issues barrel, so the route
+    // awaits that chunk too; the first commit still mounts the whole
+    // screen rather than a skeleton that swaps out (size gate).
+    const gate = await import("../../../../../../features/modules/components/ModuleDetailGate.js");
+    expect(gate.ModuleDetailGate).toBeDefined();
   }, 20000);
 
   it.each([404, 403, 409])(

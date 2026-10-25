@@ -63,8 +63,12 @@ afterEach(() => {
 });
 
 describe("states settings route", () => {
-  it("carries no loader prefetch", () => {
-    expect(Route.options.beforeLoad).toBeUndefined();
+  it("primes the shell and tab chunks without a data read", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("settings route has no chunk prefetch");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    await beforeLoad({} as never);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("mounts the tab inside the shell for an admin", async () => {

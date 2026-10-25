@@ -13,9 +13,16 @@
 import { createFileRoute, Navigate, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
-// Direct module imports: the feature barrels grow with later slices,
-// which must not join this route's initial chunk.
-import { ArchivedCyclesScreen } from "../../../../../../../features/archives/components/ArchivedCyclesScreen.js";
+// The screen is deferred: this route definition is eager, and its cycle
+// barrel would pin the archived list, rows and transfer dialog into the
+// initial chunk (size gate). The route awaits the chunk, so a visit still
+// commits the screen in one pass.
+const loadArchivedCyclesScreen = () =>
+  import("../../../../../../../features/archives/components/ArchivedCyclesScreen.js").then((module) => ({
+    default: module.ArchivedCyclesScreen,
+  }));
+const ArchivedCyclesScreen = React.lazy(loadArchivedCyclesScreen);
+
 import { ArchivesShell } from "../../../../../../../features/archives/components/ArchivesShell.js";
 import { archivesRouteTitle, archivesTabHref } from "../../../../../../../features/archives/tabs.js";
 import { useProjectRow } from "../../../../../../../features/auth/queries.js";
@@ -24,6 +31,9 @@ import { useDocumentHead } from "../../../../../../../shared/shell/document.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/archives/cycles/")({
   validateSearch: (search: Record<string, unknown>) => parseCyclesListSearch(search),
+  beforeLoad: async () => {
+    await loadArchivedCyclesScreen();
+  },
   component: ArchivedCyclesTab,
 });
 
@@ -49,12 +59,14 @@ function ArchivedCyclesTab(): React.ReactElement {
   }
   return (
     <ArchivesShell workspaceSlug={ws} projectId={projectId} activeTab="cycles">
-      <ArchivedCyclesScreen
-        workspaceSlug={ws}
-        projectId={projectId}
-        peekCycleId={peekCycleId}
-        onPeekChange={setPeekCycleId}
-      />
+      <React.Suspense fallback={null}>
+        <ArchivedCyclesScreen
+          workspaceSlug={ws}
+          projectId={projectId}
+          peekCycleId={peekCycleId}
+          onPeekChange={setPeekCycleId}
+        />
+      </React.Suspense>
     </ArchivesShell>
   );
 }

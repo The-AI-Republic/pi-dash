@@ -36,11 +36,11 @@ describe("pages route", () => {
     expect(validate({ type: "bogus" })).toEqual({ type: "public" });
   });
 
-  it("passes the params and active tab to the screen", () => {
+  it("passes the params and active tab to the screen", async () => {
     const Component = Route.options.component;
     if (!Component) throw new Error("missing component");
     render(<Component />);
-    expect(screen.getByTestId("pages-screen")).toBeInTheDocument();
+    expect(await screen.findByTestId("pages-screen")).toBeInTheDocument();
     expect(screenSpy.render).toHaveBeenCalledWith({
       workspaceSlug: "acme",
       projectId: "project-1",

@@ -21,11 +21,7 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS } from "../../../core/query/index.js";
 import { useProjectRow } from "../../auth/index.js";
-// Deep imports: the archived-cycles route is eager, so the cycles barrel
-// would pull its whole export surface into the initial chunk.
-import { cycleKeys } from "../../cycles/api/keys.js";
-import { useCycleFilterStore } from "../../cycles/api/filterStore.js";
-import { hasCycleFilters, makeCycleFilter } from "../../cycles/lib/cycleFilters.js";
+import { cycleKeys, hasCycleFilters, makeCycleFilter, useCycleFilterStore } from "../../cycles/index.js";
 
 /**
  * The filter/search store slot for one project's archived tab. The

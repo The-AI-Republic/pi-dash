@@ -11,7 +11,7 @@
 import { Switch } from "@pidash/kit";
 import * as React from "react";
 
-import { useProjectSettings } from "../../project-settings/components/ProjectSettingsLayout.js";
+import { useProjectSettings } from "../../project-settings/index.js";
 import { useProjectRow } from "../../auth/index.js";
 import { notifyPending } from "../../../shared/shell/index.js";
 import {

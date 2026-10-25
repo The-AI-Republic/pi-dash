@@ -11,9 +11,7 @@
 import { X } from "lucide-react";
 import * as React from "react";
 
-// Deep import: this chip row is reached from an eager archives route, so
-// the issues barrel would pin its whole export surface (size gate).
-import { DATE_PRESETS } from "../../issues/filters/rich/legacyDimensions.js";
+import { DATE_PRESETS } from "../../issues/index.js";
 import { useCycleFilterStore } from "../api/filterStore.js";
 import { lifecycleLabel } from "../lib/cycleGroups.js";
 import {

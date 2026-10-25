@@ -9,10 +9,7 @@
 
 import type { SavedView } from "@pidash/api-client";
 
-// Deep import: the views detail route is eager, so the issues barrel would
-// pull its whole export surface into the measured initial chunk.
-import { parseLayoutKind } from "../../issues/layouts/kinds.js";
-import type { LayoutKind } from "../../issues/layouts/kinds.js";
+import { parseLayoutKind, type LayoutKind } from "../../issues/index.js";
 import { UNTITLED_VIEW_NAME } from "../lib/viewListControls.js";
 
 /** Heading pinned by the oracle for every unreadable view (VIEW-022). */

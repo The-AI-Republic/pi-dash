@@ -19,10 +19,15 @@ import { ChevronDown, SlidersHorizontal } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { LayoutIcon } from "../../issues/components/LayoutIcon.js";
-import { DISPLAY_SWITCH_LABELS, GROUP_NONE_LABEL, type DisplaySwitchKey } from "../../issues/display/matrix.js";
-import { rowDomId } from "../../issues/freshness/fresh.js";
-import { LAYOUT_LABELS, resolveActiveLayout } from "../../issues/layouts/kinds.js";
+import {
+  DISPLAY_SWITCH_LABELS,
+  GROUP_NONE_LABEL,
+  LAYOUT_LABELS,
+  LayoutIcon,
+  resolveActiveLayout,
+  rowDomId,
+  type DisplaySwitchKey,
+} from "../../issues/index.js";
 import { projectStatesQueryOptions } from "../../home/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { pickerWorkspaceMembersQueryOptions } from "../../../shared/pickers/index.js";

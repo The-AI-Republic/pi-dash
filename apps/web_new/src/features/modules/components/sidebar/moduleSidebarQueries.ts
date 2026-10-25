@@ -18,8 +18,8 @@ import {
   type ModuleDetail,
 } from "@pidash/api-client";
 
-import { FETCH_ON_MOUNT_FRESHNESS, fetchOnMountOptions } from "../../../issues/freshness/read.js";
-import { projectEstimatesQueryOptions } from "../../../estimates/api.js";
+import { FETCH_ON_MOUNT_FRESHNESS, fetchOnMountOptions } from "../../../issues/index.js";
+import { projectEstimatesQueryOptions } from "../../../estimates/index.js";
 import { moduleKeys } from "../../api/keys.js";
 
 /**
