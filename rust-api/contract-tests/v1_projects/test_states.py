@@ -6,6 +6,7 @@ routing, one denied case and one tenant-isolation case. Note create answers
 """
 
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -250,3 +251,143 @@ def test_detail_non_canonical_spelling_404s(seed, conn):
     body = http.get(seed["keys"][KEY], f"{base(seed)}/{st['id']}/").json()
     assert body["id"] == st["id"]
     assert body["name"] == st["name"]
+
+
+# --- expand asset URLs: odd cover/avatar assets (PIDASHCONV-1396) -----------
+#
+# State `?expand=project` / `?expand=created_by` render `cover_image_url` /
+# `avatar_url` through the same `FileAsset.asset_url` semantics PIDASHCONV-1148
+# fixed on the project route (`db/models/asset.py:80-100`): a NULL/unmapped
+# `entity_type` renders null; an attachment/description asset with a NULL
+# workspace raises a plain AttributeError inside the property, which DRF's
+# `Field.get_attribute` turns into `SkipField` for the read-only lite field
+# (the key is left out, 200); NULL project/issue ids render as "None" text.
+# Seeds mirror the 1148 helpers in test_projects.py.
+
+EXPAND_DESCRIPTION_TYPES = (
+    "ISSUE_DESCRIPTION",
+    "COMMENT_DESCRIPTION",
+    "PAGE_DESCRIPTION",
+    "DRAFT_ISSUE_DESCRIPTION",
+)
+
+
+def _add_expand_asset(conn, entity_type, *, workspace_id=None):
+    aid = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO file_assets (id, attributes, asset, entity_type,
+                workspace_id, is_deleted, is_archived,
+                size, is_uploaded, created_at, updated_at)
+            VALUES (%s, '{}', 'ct/expand.png', %s, %s,
+                false, false, 0, false, now(), now())
+            """,
+            (aid, entity_type, workspace_id),
+        )
+    conn.commit()
+    return aid
+
+
+def _expand_state(seed, conn, entity_type, *, workspace_id=None):
+    # One project (cover asset + text) + one creator (avatar asset + text)
+    # + one state by that creator, all sharing the same asset shape.
+    tag = db.new_tag()
+    pid = db.create_project(conn, seed["ws_a"]["id"], tag,
+                            created_by_id=seed["owner"]["id"])["id"]
+    db.add_project_member(conn, seed["ws_a"]["id"], pid, seed["owner"]["id"],
+                          db.ADMIN)
+    cover_aid = _add_expand_asset(conn, entity_type, workspace_id=workspace_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET cover_image_asset_id = %s, cover_image = %s"
+            " WHERE id = %s",
+            (cover_aid, "COVER_TEXT_XYZ", pid),
+        )
+    creator = db.create_user(conn, tag + "c", first_name="CtExp")
+    avatar_aid = _add_expand_asset(conn, entity_type, workspace_id=workspace_id)
+    db.set_user_avatar(conn, creator["id"], asset_id=avatar_aid,
+                       avatar="AVATAR_TEXT_XYZ")
+    st = db.create_state(conn, seed["ws_a"]["id"], pid, tag + "s",
+                         created_by_id=creator["id"])
+    return pid, st["id"], cover_aid, avatar_aid
+
+
+def _expanded_row(seed, pid, sid, expand):
+    pbase = (f"/api/v1/workspaces/{seed['ws_a']['slug']}"
+             f"/projects/{pid}/states")
+    body = http.get(seed["keys"][KEY], pbase + "/",
+                    params={"expand": expand, "per_page": "100"}).json()
+    return next(s for s in body["results"] if s["id"] == sid)
+
+
+def test_expand_project_cover_null_entity_renders_null(seed, conn):
+    # (a) NULL / unmapped entity_type: the expanded project renders
+    # "cover_image_url": null even with non-empty cover_image text.
+    for entity in (None, "DRAFT_ISSUE_ATTACHMENT"):
+        pid, sid, _, _ = _expand_state(seed, conn, entity)
+        row = _expanded_row(seed, pid, sid, "project")
+        assert "cover_image_url" in row["project"]
+        assert row["project"]["cover_image_url"] is None
+
+
+def test_expand_created_by_avatar_null_entity_renders_null(seed, conn):
+    # (a) NULL / unmapped entity_type: the expanded creator renders
+    # "avatar_url": null even with non-empty avatar text.
+    for entity in (None, "DRAFT_ISSUE_ATTACHMENT"):
+        pid, sid, _, _ = _expand_state(seed, conn, entity)
+        row = _expanded_row(seed, pid, sid, "created_by")
+        assert "avatar_url" in row["created_by"]
+        assert row["created_by"]["avatar_url"] is None
+
+
+def test_expand_project_cover_null_workspace_omits_key(seed, conn):
+    # (c) attachment/description asset with NULL workspace_id: DRF leaves
+    # the cover_image_url key out of the expanded project (200).
+    for entity in ("ISSUE_ATTACHMENT",) + EXPAND_DESCRIPTION_TYPES:
+        pid, sid, _, _ = _expand_state(seed, conn, entity)
+        row = _expanded_row(seed, pid, sid, "project")
+        assert "cover_image_url" not in row["project"], entity
+
+
+def test_expand_created_by_avatar_null_workspace_omits_key(seed, conn):
+    # (c) attachment/description asset with NULL workspace_id: DRF leaves
+    # the avatar_url key out of the expanded creator (200).
+    for entity in ("ISSUE_ATTACHMENT",) + EXPAND_DESCRIPTION_TYPES:
+        pid, sid, _, _ = _expand_state(seed, conn, entity)
+        row = _expanded_row(seed, pid, sid, "created_by")
+        assert "avatar_url" not in row["created_by"], entity
+
+
+def test_expand_cover_null_project_renders_none_text(seed, conn):
+    # (b) ISSUE_ATTACHMENT with a workspace but NULL project/issue: the
+    # Python f-string renders str(None) == "None" into the URL path, on
+    # both the expanded project and the expanded creator.
+    ws_id = seed["ws_a"]["id"]
+    pid, sid, cover_aid, avatar_aid = _expand_state(
+        seed, conn, "ISSUE_ATTACHMENT", workspace_id=ws_id)
+    slug = seed["ws_a"]["slug"]
+    row = _expanded_row(seed, pid, sid, "project")
+    assert row["project"]["cover_image_url"] == (
+        f"/api/assets/v2/workspaces/{slug}/projects/None"
+        f"/issues/None/attachments/{cover_aid}/"
+    )
+    row = _expanded_row(seed, pid, sid, "created_by")
+    assert row["created_by"]["avatar_url"] == (
+        f"/api/assets/v2/workspaces/{slug}/projects/None"
+        f"/issues/None/attachments/{avatar_aid}/"
+    )
+
+
+def test_expand_cover_static_asset_renders_url(seed, conn):
+    # Control: mapped static assets render their static URL verbatim on
+    # both expands.
+    pid, sid, cover_aid, _ = _expand_state(
+        seed, conn, "PROJECT_COVER")
+    row = _expanded_row(seed, pid, sid, "project")
+    assert row["project"]["cover_image_url"] == (
+        f"/api/assets/v2/static/{cover_aid}/")
+    pid2, sid2, _, avatar_aid2 = _expand_state(seed, conn, "USER_AVATAR")
+    row2 = _expanded_row(seed, pid2, sid2, "created_by")
+    assert row2["created_by"]["avatar_url"] == (
+        f"/api/assets/v2/static/{avatar_aid2}/")
