@@ -1086,12 +1086,18 @@ pub async fn render_project(
     );
 
     // `BaseSerializer.to_representation` expand (`serializers/base.py:71+`):
-    // each requested key present in the output is replaced in place (order
-    // kept): mapped FKs render their lite serializer, anything else reads
-    // the `<key>_id` attribute (null when absent).
+    // gated on `expand in self.fields` — the fields-filtered serializer
+    // field set — not on presence in the rendered output. Mapped FKs render
+    // their lite serializer in place, anything else reads the `<key>_id`
+    // attribute (null when absent); declared-but-skipped keys (`sort_order`
+    // on detail, `SkipField` keys) are appended, like the Django dict
+    // assignment (`serializers/base.py:108-116`).
     if let Some(keys) = expand {
         for key in keys {
-            if !map.contains_key(key) {
+            // Unknown keys, and keys cut by `?fields=`, are ignored —
+            // never appended (`_filter_fields` pops them from the ordered
+            // field dict, `serializers/base.py:28-30,62-68`).
+            if !(READ_FIELD_ORDER.contains(&key.as_str()) && keep(key)) {
                 continue;
             }
             let expanded = match key.as_str() {
@@ -1116,10 +1122,10 @@ pub async fn render_project(
                     let attname = format!("{key}_id");
                     match row.try_get::<Option<uuid::Uuid>, _>(attname.as_str()) {
                         Ok(v) => render_uuid_opt(v),
-                        Err(_) => match row.try_get::<Option<String>, _>(key.as_str()) {
-                            Ok(v) => v.map(Value::String).unwrap_or(Value::Null),
-                            Err(_) => Value::Null,
-                        },
+                        // `getattr(instance, f"{expand}_id", None)`:
+                        // plain columns have no `<key>_id` attribute, so
+                        // they render null — never the column text.
+                        Err(_) => Value::Null,
                     }
                 }
             };
