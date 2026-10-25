@@ -18,8 +18,8 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError } from "../../../shared/shell/toaster.js";
 import { pageChildrenQueryOptions } from "../api/treeQueries.js";
-import type { PageCreatorOption, PageSort } from "../lib/pageList.js";
-import { sortPageSiblings } from "../lib/pageList.js";
+import type { PageCreatorOption, PageListTab, PageSort } from "../lib/pageList.js";
+import { pageInTab, sortPageSiblings } from "../lib/pageList.js";
 import {
   flattenPageTree,
   pageChildCount,
@@ -68,6 +68,8 @@ export interface PageTreeProps {
   rows: readonly PageRowData[];
   /** Every page the caller has loaded, for move legality. */
   pool: readonly PageRowData[];
+  /** The active tab; children outside it never enter the tree (PAGE-085). */
+  tab: PageListTab;
   /** The active list sort; each sibling list keeps favourite-first. */
   sort: PageSort;
   /** Children of an archived parent are shelved too (PAGE-088). */
@@ -127,6 +129,7 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
     projectId,
     rows,
     pool,
+    tab,
     sort,
     includeArchivedChildren = false,
     showStar,
@@ -174,10 +177,19 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
     const active = new Map<string, readonly PageRowData[]>();
     for (const pageId of wanted) {
       const list = children.get(pageId);
-      if (list !== undefined) active.set(pageId, sortPageSiblings(list, sort));
+      // The backend's `?parent=` branch has no archived filter, so the tab
+      // partition is applied here as well as to the top-level rows.
+      if (list !== undefined)
+        active.set(
+          pageId,
+          sortPageSiblings(
+            list.filter((row) => pageInTab(row, tab)),
+            sort
+          )
+        );
     }
     return active;
-  }, [children, wanted, sort]);
+  }, [children, wanted, sort, tab]);
   const entries = React.useMemo(
     () => flattenPageTree(rows, { expanded, children: activeChildren, pending }),
     [rows, expanded, activeChildren, pending]
@@ -216,7 +228,10 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
       onDragOver={(event) => {
         if (!canMove) return;
         event.preventDefault();
-        if (dragOver === undefined) setDragOver(null);
+        // The container is always the top-level target, including after the
+        // pointer has crossed a row: leaving the row's id here would make a
+        // background drop nest under the last hovered row (PAGE-087).
+        setDragOver(null);
       }}
       onDrop={(event) => {
         if (!canMove) return;

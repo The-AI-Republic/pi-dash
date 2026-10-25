@@ -41364,9 +41364,17 @@ export class WebNewDriver implements ParityDriver {
   // --- Nested pages (D17, PAGE-084-090). Real selectors and real server
   // --- reads; the oracle driver throws a D17 notice for every one.
 
+  /**
+   * Every nested-page row: tree lines and the flat search/filter/favourite
+   * results share the title link, so discovery assertions read both
+   * (PAGE-085/090).
+   */
+  private pagesNestedRows(): Locator {
+    return this.page.getByTestId("page-tree-item").or(this.page.getByTestId("page-row"));
+  }
+
   private pagesNestedRow(title: string): Locator {
-    return this.page
-      .getByTestId("page-tree-item")
+    return this.pagesNestedRows()
       .filter({ has: this.page.getByRole("link", { name: title, exact: true }) })
       .first();
   }
@@ -41394,7 +41402,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesNestedOpenRow(title: string): Promise<void> {
-    await this.page.getByTestId("page-tree-item").getByRole("link", { name: title, exact: true }).click();
+    await this.pagesNestedRows().getByRole("link", { name: title, exact: true }).click();
     await this.page.getByTestId("page-detail-header").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
@@ -41423,11 +41431,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesNestedRowTitles(): Promise<string[]> {
-    const titles = await this.page
-      .getByTestId("page-tree-item")
-      .evaluateAll((nodes) =>
-        nodes.map((node) => node.querySelector("a[aria-label]")?.getAttribute("aria-label") ?? "")
-      );
+    const titles = await this.pagesNestedRows().evaluateAll((nodes) =>
+      nodes.map((node) => node.querySelector("a[aria-label]")?.getAttribute("aria-label") ?? "")
+    );
     return titles.filter((title) => title !== "");
   }
 

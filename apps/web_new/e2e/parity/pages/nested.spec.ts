@@ -16,6 +16,7 @@ import {
   serverCreateProjectWithFlags,
   serverEnsureProjectMember,
   serverFavoritePage,
+  serverListChildPages,
   serverListPages,
   serverPageRecord,
   serverPageRequestStatus,
@@ -121,9 +122,9 @@ test(
       // page other than the source. The record proves the parent link.
       await driver.pagesNestedWaitDetail();
       const rows = await setupRetry("list created child", () =>
-        serverListPages(seed.workspaceSlug, projectId, session)
+        serverListChildPages(seed.workspaceSlug, projectId, parentId, session)
       );
-      const child = rows.find((row) => row.id !== parentId);
+      const child = rows[0];
       expect(child).toBeDefined();
       expect(titleOf(child as PagesListServerRow)).toBe("Untitled");
       const childRecord = await serverPageRecord(seed.workspaceSlug, projectId, child?.id as string, session);
@@ -162,8 +163,10 @@ test(
       expect(await driver.pagesNestedOptionsItems()).toContain("Add sub-page");
       await driver.pagesNestedOptionsPick("Add sub-page");
       await driver.pagesNestedWaitDetail();
-      const rows = await setupRetry("list header child", () => serverListPages(seed.workspaceSlug, projectId, session));
-      const child = rows.find((row) => row.id !== parentId);
+      const rows = await setupRetry("list header child", () =>
+        serverListChildPages(seed.workspaceSlug, projectId, parentId, session)
+      );
+      const child = rows[0];
       expect(child).toBeDefined();
       expect((await serverPageRecord(seed.workspaceSlug, projectId, child?.id as string, session)).parentId).toBe(
         parentId

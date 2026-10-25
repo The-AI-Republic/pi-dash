@@ -32,6 +32,7 @@ import {
   serverBindRepositoryRaw,
   serverDeleteProjectRaw,
   serverIdentifierTaken,
+  serverListChildPages,
   serverPageRecord,
   serverPatchPageParent,
   serverProjectFetchStatus,
@@ -140,6 +141,51 @@ describe("serverPageRecord", () => {
     expect(record.parentId).toBe("parent-1");
     expect(record.subPagesCount).toBe(3);
     expect(record.archivedAt).toBe("2026-10-12T00:00:00Z");
+  });
+});
+
+describe("serverListChildPages", () => {
+  it("asks the nested child branch for one parent and maps the rows", async () => {
+    payload = [
+      {
+        id: "child-1",
+        name: "Policies",
+        access: 1,
+        owned_by: "owner-1",
+        is_favorite: true,
+        created_at: "2026-10-11T00:00:00Z",
+        updated_at: "2026-10-12T00:00:00Z",
+      },
+    ];
+    const rows = await serverListChildPages("ws", "project", "parent-1", "session=x", false, apiBase);
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("GET");
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/ws/projects/project/pages/?parent=parent-1");
+    expect(rows).toEqual([
+      {
+        id: "child-1",
+        name: "Policies",
+        access: 1,
+        ownedBy: "owner-1",
+        isFavorite: true,
+        archivedAt: null,
+        createdAt: "2026-10-11T00:00:00Z",
+        updatedAt: "2026-10-12T00:00:00Z",
+      },
+    ]);
+  });
+
+  it("adds include_archived when the caller asks for a shelved subtree", async () => {
+    payload = { results: [] };
+    await serverListChildPages("ws", "project", "parent-1", "session=x", true, apiBase);
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/ws/projects/project/pages/?parent=parent-1&include_archived=true");
+  });
+
+  it("throws naming the child-list status", async () => {
+    stubStatus = 400;
+    await expect(serverListChildPages("ws", "project", "parent-1", "session=x", false, apiBase)).rejects.toThrow(
+      "[parity] page child list failed with HTTP 400"
+    );
   });
 });
 

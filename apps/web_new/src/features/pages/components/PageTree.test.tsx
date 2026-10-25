@@ -83,6 +83,7 @@ function renderTree(overrides: Partial<React.ComponentProps<typeof PageTree>> = 
     projectId: PAGES_PROJECT_ID,
     rows: [parent],
     pool: [parent, child, grand],
+    tab: "public",
     sort: { key: "name", direction: "ascending" },
     showStar: false,
     canDuplicate: true,
@@ -278,6 +279,42 @@ describe("PageTree", () => {
     ]);
   });
 
+  it("drops a row on the container at the top level after hovering another row", () => {
+    const onMovePage = vi.fn();
+    const sibling = makePageRow({ id: GRAND, name: "Travel", owned_by: PAGES_USER_ID });
+    renderTree({ onMovePage, rows: [parent, sibling], pool: [parent, sibling] });
+    const transfer: Record<string, string> = {};
+    const dataTransfer = {
+      getData: (type: string) => transfer[type] ?? "",
+      setData: (type: string, value: string) => {
+        transfer[type] = value;
+      },
+      effectAllowed: "",
+    };
+    const items = screen.getAllByTestId("page-tree-item");
+    fireEvent.dragStart(items[0] as HTMLElement, { dataTransfer });
+    fireEvent.dragOver(items[1] as HTMLElement, { dataTransfer });
+    fireEvent.dragOver(screen.getByTestId("pages-tree"), { dataTransfer });
+    fireEvent.drop(screen.getByTestId("pages-tree"), { dataTransfer });
+    expect(onMovePage).toHaveBeenCalledWith(parent, null);
+  });
+
+  it("does not render an archived child in a live tab even when the parent read returns it", async () => {
+    const archivedChild = makePageRow({
+      id: CHILD,
+      name: "Shelved policy",
+      parent: PARENT,
+      parent_id: PARENT,
+      archived_at: "2026-10-20",
+      owned_by: PAGES_USER_ID,
+    });
+    listPagesMock.mockResolvedValue([archivedChild]);
+    renderTree({ tab: "public", pool: [parent, archivedChild] });
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Handbook" }));
+    await waitFor(() => expect(listPagesMock).toHaveBeenCalled());
+    expect(screen.queryByRole("link", { name: "Shelved policy" })).not.toBeInTheDocument();
+  });
+
   it("marks the container as a drop target while a legal drag passes over it", () => {
     const onMovePage = vi.fn();
     renderTree({ onMovePage });
@@ -308,9 +345,22 @@ describe("PageTree", () => {
     const onMovePage = vi.fn();
     renderTree({ onMovePage, canMove: false });
     const dataTransfer = { getData: () => PARENT, setData: vi.fn(), effectAllowed: "" };
+    fireEvent.dragOver(screen.getByTestId("pages-tree"), { dataTransfer });
     fireEvent.drop(screen.getByTestId("pages-tree"), { dataTransfer });
     expect(onMovePage).not.toHaveBeenCalled();
     expect(screen.queryByRole("menuitem", { name: "Move to…" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the row highlight stable on repeated dragOver events", () => {
+    const onMovePage = vi.fn();
+    const sibling = makePageRow({ id: GRAND, name: "Travel", owned_by: PAGES_USER_ID });
+    renderTree({ onMovePage, rows: [parent, sibling], pool: [parent, sibling] });
+    const items = screen.getAllByTestId("page-tree-item");
+    const dataTransfer = { getData: () => PARENT, setData: vi.fn(), effectAllowed: "" };
+    fireEvent.dragOver(items[1] as HTMLElement, { dataTransfer });
+    fireEvent.dragOver(items[1] as HTMLElement, { dataTransfer });
+    fireEvent.drop(items[1] as HTMLElement, { dataTransfer });
+    expect(onMovePage).toHaveBeenCalledWith(parent, GRAND);
   });
 
   it("refuses a drop of a row onto itself", () => {

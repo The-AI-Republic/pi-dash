@@ -1043,6 +1043,7 @@ describe("PagesListScreen nested tree and discovery (D17, PAGE-084–090)", () =
     harness.childrenByParent = { [parent.id]: [child] };
     renderScreen("archived");
     expect(await screen.findByRole("link", { name: "Shelved handbook" })).toBeInTheDocument();
+    expect(harness.pagesCalls).toBe(1);
     expect(screen.queryByRole("link", { name: "Shelved policy" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Shelved handbook" }));
     expect(await screen.findByRole("link", { name: "Shelved policy" })).toBeInTheDocument();

@@ -14876,6 +14876,48 @@ export async function serverListPages(
   });
 }
 
+/**
+ * List one parent's children (`?parent=<id>`), optionally including archived
+ * children. The top-level collection omits nested pages, so this is the only
+ * way a setup step can see the child it just created (PAGE-084/085).
+ */
+export async function serverListChildPages(
+  workspaceSlug: string,
+  projectId: string,
+  parentId: string,
+  sessionCookie: string,
+  includeArchived = false,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PagesListServerRow[]> {
+  const params = new URLSearchParams({ parent: parentId });
+  if (includeArchived) params.set("include_archived", "true");
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/?${params.toString()}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) throw new Error(`[parity] page child list failed with HTTP ${res.status}.`);
+  const rows: unknown[] = Array.isArray(res.payload)
+    ? res.payload
+    : ((res.payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string") throw new Error("[parity] page child list carried a row without a string id.");
+    return {
+      id: rec["id"] as string,
+      name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
+      access: typeof rec["access"] === "number" ? (rec["access"] as number) : 0,
+      ownedBy: typeof rec["owned_by"] === "string" ? (rec["owned_by"] as string) : "",
+      isFavorite: rec["is_favorite"] === true,
+      archivedAt: typeof rec["archived_at"] === "string" ? (rec["archived_at"] as string) : null,
+      createdAt: typeof rec["created_at"] === "string" ? (rec["created_at"] as string) : "",
+      updatedAt: typeof rec["updated_at"] === "string" ? (rec["updated_at"] as string) : "",
+    };
+  });
+}
+
 /** Set a page's access level (0 public, 1 private); owner-only on the server. */
 export async function serverSetPageAccess(
   workspaceSlug: string,

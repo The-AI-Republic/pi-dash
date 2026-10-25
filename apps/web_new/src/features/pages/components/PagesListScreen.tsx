@@ -144,9 +144,10 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   const searchActiveEarly = client.query.trim() !== "";
   const filtersActiveEarly = hasPageFilters(client.filters);
   const discoveryActive = searchActiveEarly || filtersActiveEarly;
-  // The archived tab also needs the whole shelved forest: its children are
-  // not top-level rows, and a restore notice needs the still-archived parent.
-  const forestActive = discoveryActive || tab === "archived";
+  // Discovery spans every depth and needs the whole visible forest. The
+  // archived tab stays on the one collection read and loads its subtree
+  // lazily through the tree, so PAGE-020's single-read pin still holds.
+  const forestActive = discoveryActive;
   // Discovery (search/filters/favourites) spans every depth, so it reads
   // the whole visible forest; the plain list stays on the one top-level
   // collection and the tree reads children lazily per expanded parent.
@@ -377,6 +378,7 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
                   projectId={projectId}
                   rows={treeRoots}
                   pool={discoveryPool}
+                  tab={tab}
                   sort={client.sort}
                   includeArchivedChildren={tab === "archived"}
                   showStar={canStar}
