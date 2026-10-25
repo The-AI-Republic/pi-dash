@@ -40,6 +40,8 @@ export { Popover } from "./components/Popover";
 export type { PopoverProps } from "./components/Popover";
 export { PREVIEW_CARD_DELAY_MS, PreviewCard } from "./components/PreviewCard";
 export type { PreviewCardProps } from "./components/PreviewCard";
+export { ProgressRing } from "./components/ProgressRing";
+export type { ProgressRingProps, ProgressRingSize } from "./components/ProgressRing";
 export { Skeleton } from "./components/Skeleton";
 export type { SkeletonProps } from "./components/Skeleton";
 export { Spinner } from "./components/Spinner";

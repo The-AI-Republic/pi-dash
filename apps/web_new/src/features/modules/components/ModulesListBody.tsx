@@ -9,13 +9,21 @@
 // none, the no-match container renders instead of the list — the
 // underlying set is untouched, so clearing the header restores every
 // module in its order. An empty project is slice F's zero state, never
-// this container. Slices D–H extend the row and card in place; the
-// timeline chart belongs to slice I (MOD-021).
+// this container.
+//
+// Slice D (MOD-012/019/020) supplies the row's peek trigger and archived
+// mode, the card's peek trigger, and the peek itself: a row or card press
+// reports the module id to the screen, which owns the `peekModule` key.
+// The board grid loses a wide column while the panel is open so a card
+// behind it stays readable (§5). Slices E–H fill the accessory slots the
+// row and card hand them; the timeline chart belongs to slice I (MOD-021).
 
-import type { ModuleRow } from "@pidash/api-client";
+import type { ModuleRow, WorkspaceMember } from "@pidash/api-client";
 import * as React from "react";
 
 import type { ModulesLayout } from "../lib/moduleLayouts.js";
+import { resolveModuleLead } from "../lib/moduleIdentity.js";
+import { moduleBoardGridClass } from "../lib/modulePeek.js";
 import {
   DEFAULT_MODULE_SORT,
   moduleListContentState,
@@ -46,18 +54,62 @@ export interface ModulesListBodyProps extends Partial<ModulesListNarrowing> {
   modules: readonly ModuleRow[];
   /** Clock anchor for the relative date filters; tests pin it. */
   now?: Date | undefined;
+  /** The module the peek panel shows; null when it is closed. */
+  peekModuleId?: string | null | undefined;
+  /** Open this module's peek (a row's or card's info control, an archived row). */
+  onOpenPeek?: ((moduleId: string) => void) | undefined;
+  /** Archived mode for the rows the body renders (slice G's screen). */
+  archived?: boolean | undefined;
+  /** Keep row actions visible at every width (a narrow host, tests). */
+  alwaysShowActions?: boolean | undefined;
+  /** Per-row quick menu slot (slice H); archived hosts reuse the same slot. */
+  rowMenu?: ((module: ModuleRow) => React.ReactNode) | undefined;
+  /**
+   * The workspace directory the board card resolves a lead against (§4.3);
+   * absent, every card shows the no-lead mark.
+   */
+  members?: readonly WorkspaceMember[] | undefined;
+}
+
+export interface ModuleBodyRowOptions {
+  archived: boolean | undefined;
+  alwaysShowActions: boolean | undefined;
+  onOpenPeek: ((moduleId: string) => void) | undefined;
+  rowMenu: ((module: ModuleRow) => React.ReactNode) | undefined;
+  members: readonly WorkspaceMember[] | undefined;
 }
 
 /** One rendered module in the list or board layout; later slices extend both. */
-function renderModule(
+export function renderModule(
   layout: ModulesLayout,
   workspaceSlug: string,
   projectId: string,
-  module: ModuleRow
+  module: ModuleRow,
+  options?: ModuleBodyRowOptions
 ): React.ReactElement {
   const shared = { workspaceSlug, projectId, module };
-  if (layout === "board") return <ModuleBoardCard key={module.id} {...shared} />;
-  return <ModuleListRow key={module.id} {...shared} />;
+  if (layout === "board") {
+    const lead = resolveModuleLead(module, options?.members);
+    return (
+      <ModuleBoardCard
+        key={module.id}
+        {...shared}
+        lead={lead.kind === "avatar" ? lead.person : null}
+        onOpenPeek={options?.onOpenPeek}
+      />
+    );
+  }
+  const menu = options?.rowMenu?.(module);
+  return (
+    <ModuleListRow
+      key={module.id}
+      {...shared}
+      archived={options?.archived}
+      alwaysShowActions={options?.alwaysShowActions}
+      onOpenPeek={options?.onOpenPeek}
+      {...(menu === undefined ? {} : { menu })}
+    />
+  );
 }
 
 export function ModulesListBody({
@@ -69,6 +121,12 @@ export function ModulesListBody({
   sort: sortProp,
   filters: filtersProp,
   now,
+  peekModuleId = null,
+  onOpenPeek,
+  archived,
+  alwaysShowActions,
+  rowMenu,
+  members,
 }: ModulesListBodyProps): React.ReactElement {
   // The screen provides the list context; props stay available so a host
   // (the archived body, tests) can drive the body on its own.
@@ -93,12 +151,17 @@ export function ModulesListBody({
     );
   }
 
-  const listClass =
-    layout === "board" ? "grid grid-cols-1 gap-(--space-4) md:grid-cols-2 xl:grid-cols-3" : "flex flex-col";
+  const rowOptions: ModuleBodyRowOptions = { archived, alwaysShowActions, onOpenPeek, rowMenu, members };
+  const listClass = layout === "board" ? moduleBoardGridClass({ peekOpen: peekModuleId !== null }) : "flex flex-col";
   return (
-    <div data-testid="modules-list" data-layout={layout} className={listClass}>
+    <div
+      data-testid="modules-list"
+      data-layout={layout}
+      data-peek-open={peekModuleId === null ? "false" : "true"}
+      className={listClass}
+    >
       <ul aria-label="Modules" className={layout === "board" ? "contents" : "flex flex-col"}>
-        {narrowed.ordered.map((module) => renderModule(layout, workspaceSlug, projectId, module))}
+        {narrowed.ordered.map((module) => renderModule(layout, workspaceSlug, projectId, module, rowOptions))}
       </ul>
     </div>
   );

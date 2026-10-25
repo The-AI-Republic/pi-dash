@@ -11,7 +11,7 @@
 // matches, without touching the underlying set.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -27,7 +27,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { emptyModuleFilters, toggleModuleFilterValue } from "../lib/moduleListControls.js";
-import { jsonResponse, MODULES_PROJECT_ID, makeModuleRow } from "../testing.js";
+import { jsonResponse, makeDirectoryEntry, MODULES_LEAD_ID, MODULES_PROJECT_ID, makeModuleRow } from "../testing.js";
 import { ModuleListProvider, type ModuleListContextValue } from "./moduleListContext.js";
 import { ModulesListBody } from "./ModulesListBody.js";
 
@@ -164,6 +164,62 @@ describe("ModulesListBody", () => {
       </ModuleListProvider>
     );
     expect(names()).toEqual(["Alpha", "Module 2", "Module 10"]);
+  });
+
+  it("narrows the board grid while the peek is open", () => {
+    renderWithContext(context(), ROWS, {
+      layout: "board",
+      peekModuleId: "323e4567-e89b-12d3-a456-426614174002",
+    });
+    const root = screen.getByTestId("modules-list");
+    expect(root).toHaveAttribute("data-peek-open", "true");
+    expect(root.className).toContain("xl:grid-cols-2");
+  });
+
+  it("keeps the wide board grid while the peek is closed", () => {
+    renderWithContext(context(), ROWS, { layout: "board" });
+    const root = screen.getByTestId("modules-list");
+    expect(root).toHaveAttribute("data-peek-open", "false");
+    expect(root.className).toContain("xl:grid-cols-3");
+  });
+
+  it("hands every row the peek writer and the row menu slot", () => {
+    const onOpenPeek = vi.fn();
+    renderWithContext(context(), ROWS, {
+      onOpenPeek,
+      alwaysShowActions: true,
+      rowMenu: (module) => <button type="button">{`Menu ${module.name}`}</button>,
+    });
+    // Rows are in natural name order, so the first one is Alpha.
+    fireEvent.click(screen.getAllByTestId("modules-row-peek")[0]!);
+    expect(onOpenPeek).toHaveBeenCalledWith("323e4567-e89b-12d3-a456-426614174003");
+    expect(screen.getAllByTestId("modules-row-menu")).toHaveLength(3);
+    expect(screen.getAllByTestId("modules-row-peek")[0]?.className).not.toContain("opacity-0");
+  });
+
+  it("renders archived rows in archived mode and leaves cards alone", () => {
+    const onOpenPeek = vi.fn();
+    renderWithContext(context(), ROWS, { onOpenPeek, archived: true });
+    expect(screen.getAllByTestId("modules-row")[0]).toHaveAttribute("data-module-archived", "true");
+    fireEvent.click(screen.getAllByTestId("modules-row-progress")[0]!);
+    expect(onOpenPeek).toHaveBeenCalledWith("323e4567-e89b-12d3-a456-426614174003");
+  });
+
+  it("resolves a board card's lead against the workspace directory", () => {
+    renderWithContext(context(), [makeModuleRow({ lead_id: MODULES_LEAD_ID, name: "Led" })], {
+      layout: "board",
+      members: [makeDirectoryEntry()],
+    });
+    const lead = screen.getByTestId("modules-card-lead");
+    expect(lead).toHaveAttribute("data-lead-kind", "avatar");
+    expect(within(lead).getByRole("img", { name: "Ada Lovelace" })).toBeInTheDocument();
+  });
+
+  it("shows the no-lead mark when the directory has no entry for the module's lead", () => {
+    renderWithContext(context(), [makeModuleRow({ lead_id: MODULES_LEAD_ID, name: "Orphan lead" })], {
+      layout: "board",
+    });
+    expect(screen.getByTestId("modules-card-lead")).toHaveAttribute("data-lead-kind", "none");
   });
 
   it("keeps an empty project out of the no-match container", () => {
