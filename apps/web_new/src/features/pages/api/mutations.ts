@@ -35,9 +35,10 @@ export const PAGE_CREATE_FAILED_TITLE = "Page could not be created.";
 /** Favourite progress and outcomes; the oracle matches /added/ and /removed/. */
 export const PAGE_FAVORITE_ADDING_TITLE = "Adding to favorites…";
 export const PAGE_FAVORITE_REMOVING_TITLE = "Removing from favorites…";
-export const PAGE_FAVORITE_ADDED_TITLE = "Added to favorites";
-export const PAGE_FAVORITE_REMOVED_TITLE = "Removed from favorites";
-export const PAGE_FAVORITE_FAILED_TITLE = "Couldn't update favorites";
+export const PAGE_FAVORITE_ADDED_TITLE = "Page added to favorites.";
+export const PAGE_FAVORITE_REMOVED_TITLE = "Page removed from favorites.";
+export const PAGE_FAVORITE_FAILED_TITLE = "Page could not be added to favorites.";
+export const PAGE_FAVORITE_REMOVE_FAILED_TITLE = "Page could not be removed from favorites.";
 
 /** Flip one cached row's star; undefined stays undefined. Pure for tests. */
 export function flipPageFavorite<T extends { is_favorite: boolean }>(row: T | undefined): T | undefined {
@@ -146,7 +147,7 @@ export function usePageFavorite(target: PageFavoriteTarget): {
         if (!isFavoritesSectionOpen()) setFavoritesSectionOpen(true);
       } catch (error) {
         notice.settle({
-          title: PAGE_FAVORITE_FAILED_TITLE,
+          title: row.is_favorite ? PAGE_FAVORITE_REMOVE_FAILED_TITLE : PAGE_FAVORITE_FAILED_TITLE,
           ...(error instanceof Error ? { description: error.message } : {}),
           failed: true,
         });

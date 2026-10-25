@@ -55,6 +55,7 @@ import {
   PAGE_FAVORITE_ADDED_TITLE,
   PAGE_FAVORITE_ADDING_TITLE,
   PAGE_FAVORITE_FAILED_TITLE,
+  PAGE_FAVORITE_REMOVE_FAILED_TITLE,
   PAGE_FAVORITE_REMOVED_TITLE,
   PAGE_FAVORITE_REMOVING_TITLE,
   useCreatePage,
@@ -264,6 +265,7 @@ describe("usePageFavorite", () => {
       title: PAGE_FAVORITE_ADDED_TITLE,
       description: "Launch notes is now a favorite.",
     });
+    expect(PAGE_FAVORITE_ADDED_TITLE).toBe("Page added to favorites.");
     expect(shell.setFavoritesSectionOpen).toHaveBeenCalledWith(true);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.list(SLUG, PAGES_PROJECT_ID) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.detail(SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID) });
@@ -335,6 +337,7 @@ describe("usePageFavorite", () => {
       title: PAGE_FAVORITE_REMOVED_TITLE,
       description: "Launch notes is no longer a favorite.",
     });
+    expect(PAGE_FAVORITE_REMOVED_TITLE).toBe("Page removed from favorites.");
     expect(shell.setFavoritesSectionOpen).not.toHaveBeenCalled();
   });
 
@@ -357,8 +360,32 @@ describe("usePageFavorite", () => {
       description: "Server said no",
       failed: true,
     });
+    expect(PAGE_FAVORITE_FAILED_TITLE).toBe("Page could not be added to favorites.");
     expect(cachedStar(client)).toEqual({ list: false, detail: false });
     expect(shell.setFavoritesSectionOpen).not.toHaveBeenCalled();
+  });
+
+  it("names a failed removal as a removal", async () => {
+    const client = newClient();
+    seed(client, true);
+    contracts.removePageFavorite.mockRejectedValue(new Error("Server said no"));
+    const hook = renderHook(
+      () => usePageFavorite({ workspaceSlug: SLUG, projectId: PAGES_PROJECT_ID, page: makePageRow({ is_favorite: true }) }),
+      { wrapper: wrapper(client) }
+    );
+
+    await act(async () => {
+      hook.result.current.toggle();
+      await waitFor(() => expect(pending.settle).toHaveBeenCalledWith(expect.objectContaining({ failed: true })));
+    });
+
+    expect(PAGE_FAVORITE_REMOVE_FAILED_TITLE).toBe("Page could not be removed from favorites.");
+    expect(pending.settle).toHaveBeenCalledWith({
+      title: PAGE_FAVORITE_REMOVE_FAILED_TITLE,
+      description: "Server said no",
+      failed: true,
+    });
+    expect(cachedStar(client)).toEqual({ list: true, detail: true });
   });
 
   it("reports a failure that is not an Error without a description", async () => {
