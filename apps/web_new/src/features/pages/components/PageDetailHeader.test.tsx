@@ -42,6 +42,7 @@ import {
   PAGE_COPY_LINK_LABEL,
   PAGE_CRUMB,
   PAGE_HISTORY_ITEM,
+  PAGE_OPEN_PANE_LABEL,
   PAGE_OPTIONS_LABEL,
 } from "./PageDetailHeader.js";
 
@@ -53,10 +54,12 @@ const page: PageDetail = {
 function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailHeader>> = {}): {
   onCopyLink: ReturnType<typeof vi.fn>;
   onOpenHistory: ReturnType<typeof vi.fn>;
+  onOpenPane: ReturnType<typeof vi.fn>;
   onSelectSibling: ReturnType<typeof vi.fn>;
 } {
   const onCopyLink = vi.fn();
   const onOpenHistory = vi.fn();
+  const onOpenPane = vi.fn();
   const onSelectSibling = vi.fn();
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -73,11 +76,12 @@ function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailH
         onSelectSibling={onSelectSibling}
         onCopyLink={onCopyLink}
         onOpenHistory={onOpenHistory}
+        onOpenPane={onOpenPane}
         {...overrides}
       />
     </QueryClientProvider>
   );
-  return { onCopyLink, onOpenHistory, onSelectSibling };
+  return { onCopyLink, onOpenHistory, onOpenPane, onSelectSibling };
 }
 
 beforeEach(() => {
@@ -116,6 +120,14 @@ describe("PageDetailHeader", () => {
     fireEvent.click(screen.getByRole("button", { name: /Switch page, current Launch notes/ }));
     fireEvent.click(screen.getByRole("option", { name: "Other page" }));
     expect(onSelectSibling).toHaveBeenCalledWith("other");
+  });
+
+  it("offers the navigation-pane toggle in the action strip", () => {
+    const { onOpenPane } = renderHeader();
+    const toggle = screen.getByRole("button", { name: PAGE_OPEN_PANE_LABEL });
+    expect(toggle.querySelector("svg.lucide-panel-right")).not.toBeNull();
+    fireEvent.click(toggle);
+    expect(onOpenPane).toHaveBeenCalledTimes(1);
   });
 
   it("shows the sync badge and hides the star from guests", () => {

@@ -1,16 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Detail breadcrumb and action strip (parity/specs/pages.md §4.3, §7,
-// PAGE-024/055/056). Project context, the always-present path back to the
-// collection, the searchable sibling switcher, the sync indicator and the
-// action cluster: favourite, link copy, and the options menu whose history
-// entry writes the info pane. Later header slices add the remaining menu
-// entries at the same mount.
+// Detail breadcrumb and action strip (parity/specs/pages.md §4.3, §6.5,
+// §7, PAGE-024/045/055/056). Project context, the always-present path back
+// to the collection, the searchable sibling switcher, the sync indicator
+// and the action cluster: the navigation-pane toggle, favourite, link copy,
+// and the options menu whose history entry writes the info pane. Later
+// header slices add the remaining menu entries at the same mount.
 
 import { IconButton, Menu } from "@pidash/kit";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { Ellipsis, Link2 } from "lucide-react";
+import { Ellipsis, Link2, PanelRight } from "lucide-react";
 import * as React from "react";
 
 import { ProjectMark } from "../../../shared/pickers/ProjectMark.js";
@@ -27,6 +27,7 @@ export const PAGE_COPY_LINK_LABEL = "Copy link";
 export const PAGE_COPIED_LINK_LABEL = "Copied link";
 export const PAGE_OPTIONS_LABEL = "Page options";
 export const PAGE_HISTORY_ITEM = "Version history";
+export const PAGE_OPEN_PANE_LABEL = "Open navigation pane";
 
 /** How long the copy control reports its success before reverting. */
 export const PAGE_COPY_CONFIRM_MS = 1600;
@@ -44,6 +45,8 @@ export interface PageDetailHeaderProps {
   onSelectSibling: (pageId: string) => void;
   onCopyLink: () => void;
   onOpenHistory: () => void;
+  /** Reveal the navigation pane (PAGE-045). */
+  onOpenPane: () => void;
 }
 
 export function PageDetailHeader({
@@ -59,6 +62,7 @@ export function PageDetailHeader({
   onSelectSibling,
   onCopyLink,
   onOpenHistory,
+  onOpenPane,
 }: PageDetailHeaderProps): React.ReactElement {
   const navigate = useNavigate();
   const [copied, setCopied] = React.useState(false);
@@ -111,6 +115,15 @@ export function PageDetailHeader({
       />
       <span className="flex-1" aria-hidden="true" />
       <PageSyncBadge status={syncStatus} />
+      <IconButton
+        label={PAGE_OPEN_PANE_LABEL}
+        aria-expanded={false}
+        data-testid="page-pane-toggle"
+        size="small"
+        onClick={onOpenPane}
+      >
+        <PanelRight size={16} strokeWidth={1.5} aria-hidden="true" />
+      </IconButton>
       {showStar ? <PageFavoriteStar workspaceSlug={workspaceSlug} projectId={projectId} page={page} /> : null}
       <IconButton label={copied ? PAGE_COPIED_LINK_LABEL : PAGE_COPY_LINK_LABEL} size="small" onClick={handleCopy}>
         <Link2 size={16} strokeWidth={1.5} aria-hidden="true" />

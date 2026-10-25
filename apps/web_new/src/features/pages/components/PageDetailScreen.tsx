@@ -1,13 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Pages detail shell (parity/specs/pages.md §4, PAGE-022–025, 079–080).
-// One record read by URL id with visit tracking plus the shared collection
-// read that feeds the sibling switcher; the header cluster, the not-found
-// panel, the centered record spinner, the title and body surfaces, the
-// navigation pane and the version overlay. The editor, toolbar, pane tab
-// bodies, header menu entries and collaboration client mount here in later
-// slices; this shell owns their seams and the URL protocol they share.
+// Pages detail shell (parity/specs/pages.md §4, §6.5–§6.9, PAGE-022–025,
+// 045–050, 079–080). One record read by URL id with visit tracking plus the
+// shared collection read that feeds the sibling switcher; the header
+// cluster, the not-found panel, the centered record spinner, the title and
+// body surfaces, the navigation pane with its live outline/statistics/
+// assets/attribution, and the version overlay. The editor, toolbar, header
+// menu entries and collaboration client mount here in later slices; this
+// shell owns their seams and the URL protocol they share.
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -18,6 +19,7 @@ import { meQueryOptions } from "../../../core/session/queries.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { RichTextView } from "../../../shared/editor/RichTextView.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
+import { usePaletteWorkspaceMembers } from "../../../shared/shell/contextual/index.js";
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { pageDetailQueryOptions, pageVersionQueryOptions, pageVersionsQueryOptions } from "../api/detailQueries.js";
 import { usePageRename } from "../api/detailMutations.js";
@@ -42,9 +44,12 @@ import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
 import { PageDetailPanel } from "./PageDetailPanel.js";
 import { PageDetailHeader } from "./PageDetailHeader.js";
 import { PageDetailTitle } from "./PageDetailTitle.js";
+import { PageHeadingPreview } from "./PageHeadingPreview.js";
 import { PageNavigationPane } from "./PageNavigationPane.js";
 import { PageVersionOverlay } from "./PageVersionOverlay.js";
 import { PAGE_UNTITLED } from "../lib/pageList.js";
+import { useLivePageDocument } from "../lib/pageDocumentLive.js";
+import { pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
 
 export const PAGE_BODY_LABEL = "Page body";
 
@@ -114,6 +119,21 @@ export function PageDetailScreen({
 
   const syncStatus = usePageSyncStatus(pageId);
   const rename = usePageRename(workspaceSlug, projectId, pageId);
+  const directory = usePaletteWorkspaceMembers(workspaceSlug);
+
+  // The pane reads the canvas, so headings, counts and assets follow
+  // typing; before the canvas paints, the stored body stands in (PAGE-046).
+  const canvasRef = React.useRef<HTMLDivElement | null>(null);
+  const storedHtml = page?.description_html ?? "";
+  const live = useLivePageDocument(canvasRef, storedHtml, { workspaceSlug, projectId });
+  const paneDocument = live.document;
+  const openPane = (): void => {
+    onSearchChange(paneSearch(search, "outline"));
+  };
+  const openFromPreview = (heading: PageDocument["headings"][number] | null): void => {
+    onSearchChange(paneSearch(search, "outline"));
+    if (heading !== null) live.scrollToHeading(heading);
+  };
 
   const siblings = React.useMemo(() => pageSiblingOptions(pages.data ?? []), [pages.data]);
 
@@ -166,6 +186,14 @@ export function PageDetailScreen({
   const canManage = capabilities.canManage || isProjectAdmin(role);
   const projectName = project.data?.name ?? projectId;
   const pageTitle = page.name.trim() === "" ? PAGE_UNTITLED : page.name;
+  const actors = pageActorRows({
+    workspaceSlug,
+    updatedBy: page.updated_by ?? page.created_by,
+    updatedAt: page.updated_at,
+    ownedBy: page.owned_by,
+    createdAt: page.created_at,
+    members: pageActorMembers(directory.data),
+  });
 
   return (
     <div data-testid="page-detail-screen" className="flex min-h-0 flex-1 flex-col">
@@ -184,9 +212,10 @@ export function PageDetailScreen({
           void copyPageLink(workspaceSlug, projectId, page.id);
         }}
         onOpenHistory={() => onSearchChange(historySearch(search))}
+        onOpenPane={openPane}
       />
       <div className="flex min-h-0 flex-1">
-        <div className="min-w-0 flex-1 overflow-y-auto">
+        <div className="relative min-w-0 flex-1 overflow-y-auto">
           <article aria-label={pageTitle} className="mx-auto w-full max-w-3xl px-(--space-8) py-(--space-6)">
             <PageDetailTitle
               pageId={page.id}
@@ -199,7 +228,7 @@ export function PageDetailScreen({
                 {capabilities.isShelved ? "This page is archived and read-only." : "This page is locked and read-only."}
               </p>
             ) : null}
-            <div id="page-content-container" className="relative w-full">
+            <div id="page-content-container" className="relative w-full" ref={canvasRef}>
               <div className="frame-renderer w-full">
                 <div className="editor-container">
                   {bodyReady ? (
@@ -213,19 +242,21 @@ export function PageDetailScreen({
               </div>
             </div>
           </article>
+          {paneOpen ? null : <PageHeadingPreview headings={paneDocument.headings} onOpen={openFromPreview} />}
         </div>
-        {paneOpen ? (
-          <PageNavigationPane
-            workspaceSlug={workspaceSlug}
-            projectId={projectId}
-            pageId={page.id}
-            search={search}
-            versions={search.paneTab === "info" ? versions.data : undefined}
-            onSelectTab={openPaneTab}
-            onClose={closePane}
-            onSelectVersion={selectVersion}
-          />
-        ) : null}
+        <PageNavigationPane
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          pageId={page.id}
+          search={search}
+          document={paneDocument}
+          actors={actors}
+          versions={search.paneTab === "info" ? versions.data : undefined}
+          onSelectTab={openPaneTab}
+          onClose={closePane}
+          onSelectVersion={selectVersion}
+          onSelectHeading={live.scrollToHeading}
+        />
       </div>
       {search.version !== undefined ? (
         <PageVersionOverlay

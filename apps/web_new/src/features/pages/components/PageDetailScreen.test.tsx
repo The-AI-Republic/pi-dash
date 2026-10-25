@@ -389,6 +389,39 @@ describe("PageDetailScreen deep links", () => {
     expect(changes.at(-1)).toEqual({ paneTab: "assets" });
   });
 
+  it("opens the outline from the header toggle", async () => {
+    const { changes } = renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    fireEvent.click(screen.getByRole("button", { name: "Open navigation pane" }));
+    expect(changes.at(-1)).toEqual({ paneTab: "outline" });
+  });
+
+  it("shows the heading preview at the canvas edge while the pane is shut", async () => {
+    harness.page = record({ description_html: "<h1>Launch</h1><h2>Scope</h2><p>Body</p>" });
+    const { changes } = renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    const preview = await screen.findByRole("button", { name: "Open outline" });
+    expect(preview.querySelectorAll('div[style*="width"]')).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Scope" }));
+    expect(changes.at(-1)).toEqual({ paneTab: "outline" });
+  });
+
+  it("lists the stored headings in the outline and the stored counts on the info tab", async () => {
+    harness.page = record({ description_html: "<h1>Launch</h1><h2>Scope</h2><p>Two words</p>" });
+    renderScreen({ paneTab: "outline" });
+    expect(await screen.findByRole("button", { name: "Scope" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Launch" })).toBeInTheDocument();
+  });
+
+  it("attributes the page to the directory's names with profile links", async () => {
+    renderScreen({ paneTab: "info" });
+    await screen.findByRole("textbox", { name: "Page title" });
+    const edited = screen.getByText("Edited by").nextElementSibling as HTMLElement;
+    const link = edited.querySelector("a");
+    expect(link?.textContent).toBe("Ada Byron");
+    expect(link?.getAttribute("href")).toBe(`/acme/profile/${PAGES_USER_ID}/`);
+  });
+
   it("closes the pane while keeping an open snapshot key", async () => {
     const { changes } = renderScreen({ paneTab: "info" });
     await screen.findByRole("complementary", { name: "Navigation pane" });

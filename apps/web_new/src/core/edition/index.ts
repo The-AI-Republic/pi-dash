@@ -11,6 +11,7 @@ export type {
   RouteExtension,
   SettingsSection,
   SidebarItem,
+  PageNavigationPaneSlotProps,
   SlotComponents,
   ViewAccessFieldProps,
   ViewAccessSlot,
