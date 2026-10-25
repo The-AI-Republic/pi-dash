@@ -14723,7 +14723,26 @@ export class WebNewDriver implements ParityDriver {
     return { newChat, rows };
   }
   async assistantSkippedNoticeActions(): Promise<{ kind: string; text: string; href: string | null }[]> {
-    return todo("assistantSkippedNoticeActions");
+    // A skipped-server notice is a client-synthesized, linkless report in
+    // the current UI. Read its interactive descendants from the stable
+    // notice id, not paint order, so AGT-060 also catches any future action
+    // that turns the notice into a management surface.
+    const notices = this.assistantTranscript().locator('[data-testid="assistant-notice"]');
+    const actions: { kind: string; text: string; href: string | null }[] = [];
+    const noticeTotal = await notices.count();
+    for (let i = 0; i < noticeTotal; i += 1) {
+      const interactive = notices.nth(i).locator("a, button");
+      const actionTotal = await interactive.count();
+      for (let j = 0; j < actionTotal; j += 1) {
+        const node = interactive.nth(j);
+        actions.push({
+          kind: await node.evaluate((element) => element.tagName.toLowerCase()),
+          text: ((await node.textContent()) ?? "").trim(),
+          href: await node.getAttribute("href"),
+        });
+      }
+    }
+    return actions;
   }
   async assistantChatSettingsLinks(): Promise<string[]> {
     // Registry chrome lives in settings: a fully keyed chat surface must
