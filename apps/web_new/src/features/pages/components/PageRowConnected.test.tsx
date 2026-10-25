@@ -68,7 +68,7 @@ beforeEach(() => {
     }
     if (url.endsWith("/archive/")) {
       harness.archiveCalls += 1;
-      return jsonResponse(url, 200, { archived_at: "2026-10-25T10:00:00" });
+      return jsonResponse(url, 200, { archived_at: "2026-10-25 10:00:00.123456" });
     }
     if (url.endsWith("/move/")) {
       harness.moveCalls += 1;
@@ -135,7 +135,7 @@ describe("PageRowConnected", () => {
   });
 
   it("opens the delete dialog on a shelved row and closes it after the write", async () => {
-    renderRow({ page: makePageRow({ name: "Connected row", archived_at: "2026-10-01T00:00:00Z" }) });
+    renderRow({ page: makePageRow({ name: "Connected row", archived_at: "2026-10-01" }) });
     openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(await screen.findByRole("heading", { name: "Delete page" })).toBeInTheDocument();
@@ -146,7 +146,7 @@ describe("PageRowConnected", () => {
 
   it("keeps the delete dialog open when the write is refused", async () => {
     harness.deleteStatus = 500;
-    renderRow({ page: makePageRow({ name: "Connected row", archived_at: "2026-10-01T00:00:00Z" }) });
+    renderRow({ page: makePageRow({ name: "Connected row", archived_at: "2026-10-01" }) });
     openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));

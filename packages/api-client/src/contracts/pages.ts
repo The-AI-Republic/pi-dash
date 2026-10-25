@@ -11,7 +11,7 @@
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { ApiError, isApiError } from "../errors.js";
-import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableDate, nullableUuid, uuid } from "./fields.js";
 
 /** Mark stored on `logo_props`: one emoji value or one icon name+colour. */
 export const PageMark = z.object({
@@ -41,7 +41,7 @@ export const PageRow = z.object({
   sub_pages_count: z.optional(z.number()),
   is_favorite: z.boolean(),
   is_locked: z.boolean(),
-  archived_at: nullableDateTime(),
+  archived_at: nullableDate(),
   workspace: uuid(),
   created_at: dateTime(),
   updated_at: dateTime(),
@@ -87,7 +87,7 @@ export const PageUpdate = z.object({
   sub_pages_count: z.optional(z.number()),
   is_locked: z.optional(z.boolean()),
   is_favorite: z.optional(z.boolean()),
-  archived_at: z.optional(nullableDateTime()),
+  archived_at: z.optional(nullableDate()),
   workspace: z.optional(uuid()),
   created_at: z.optional(dateTime()),
   updated_at: z.optional(dateTime()),
@@ -111,7 +111,7 @@ export const PageDuplicateResult = z.object({
   color: z.string(),
   parent: nullableUuid(),
   is_locked: z.boolean(),
-  archived_at: nullableDateTime(),
+  archived_at: nullableDate(),
   workspace: uuid(),
   created_at: dateTime(),
   updated_at: dateTime(),

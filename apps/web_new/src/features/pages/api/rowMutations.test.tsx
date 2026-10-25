@@ -44,6 +44,7 @@ import {
   PAGE_EVENT_UNARCHIVED,
   PAGE_EVENT_UNLOCKED,
   PAGES_REALTIME_TOPIC,
+  localCalendarDate,
   patchPageRow,
   publishPageEvent,
   removePageRow,
@@ -324,11 +325,19 @@ describe("usePageLockWrite", () => {
   });
 });
 
+describe("localCalendarDate", () => {
+  it("renders the local calendar date with padded month and day", () => {
+    expect(localCalendarDate(new Date(2026, 0, 5, 23, 59))).toBe("2026-01-05");
+    expect(localCalendarDate(new Date(2026, 9, 25, 0, 0))).toBe("2026-10-25");
+    expect(localCalendarDate(new Date(2026, 11, 31, 12, 0))).toBe("2026-12-31");
+  });
+});
+
 describe("usePageArchiveWrite", () => {
   it("shelves the page, drops its favourite and publishes", async () => {
     const client = newClient();
     seed(client, makePageRow({ is_favorite: true }), makePageRow({ is_favorite: true }));
-    contracts.archivePage.mockResolvedValue({ archived_at: "2026-10-25T10:00:00" });
+    contracts.archivePage.mockResolvedValue({ archived_at: "2026-10-25 10:00:00.123456" });
     const events: unknown[] = [];
     getRealtimeHub().subscribe(PAGES_REALTIME_TOPIC, (event) => events.push(event.payload));
     const hook = renderHook(() => usePageArchiveWrite(target()), { wrapper: wrapper(client) });
@@ -340,7 +349,9 @@ describe("usePageArchiveWrite", () => {
 
     expect(contracts.archivePage).toHaveBeenCalledWith(expect.anything(), SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID);
     const archived = cachedList(client)[0];
-    expect(archived?.archived_at).not.toBeNull();
+    // The optimistic stamp mirrors the row's calendar-date shape, not a
+    // timestamp: the cached collection must stay parseable.
+    expect(archived?.archived_at).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(archived?.is_favorite).toBe(false);
     expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_ARCHIVED_TITLE);
     expect(events).toEqual([expect.objectContaining({ event: PAGE_EVENT_ARCHIVED })]);

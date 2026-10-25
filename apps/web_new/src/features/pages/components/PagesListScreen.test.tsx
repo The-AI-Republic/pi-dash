@@ -175,7 +175,7 @@ beforeEach(() => {
     );
     if (archiveWrite !== null) {
       harness.archiveCalls += 1;
-      return jsonResponse(url, harness.archiveStatus, { archived_at: "2026-10-25T10:00:00" });
+      return jsonResponse(url, harness.archiveStatus, { archived_at: "2026-10-25 10:00:00.123456" });
     }
     const deleteWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/$`).exec(url);
     if (deleteWrite !== null && init.method === "DELETE") {
@@ -606,7 +606,7 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
   });
 
   it("confirms deletion of a shelved row and cancels cleanly", async () => {
-    harness.pages = [makePageRow({ name: "Shelved row", archived_at: "2026-10-01T00:00:00Z" })];
+    harness.pages = [makePageRow({ name: "Shelved row", archived_at: "2026-10-01" })];
     renderScreen("archived");
     await screen.findByTestId("pages-list");
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved row" }));

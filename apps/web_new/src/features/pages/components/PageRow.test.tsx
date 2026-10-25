@@ -216,7 +216,7 @@ describe("PageRow", () => {
   });
 
   it("hides visibility on a shelved row and offers Restore and Delete", () => {
-    const props = renderRow({ canManage: true, page: makePageRow({ archived_at: "2026-10-01T00:00:00Z" }) });
+    const props = renderRow({ canManage: true, page: makePageRow({ archived_at: "2026-10-01" }) });
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
     const items = screen.getAllByRole("menuitem").map((item) => item.textContent);
     expect(items).toEqual(["Open in new tab", "Copy link", "Make a copy", "Lock", "Restore", "Delete"]);

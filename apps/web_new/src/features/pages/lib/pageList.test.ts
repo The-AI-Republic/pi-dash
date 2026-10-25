@@ -64,9 +64,9 @@ describe("pageInTab", () => {
     expect(pageInTab(makePageRow({ access: 1 }), "public")).toBe(false);
     expect(pageInTab(makePageRow({ access: 1 }), "private")).toBe(true);
     expect(pageInTab(makePageRow({ access: 0 }), "private")).toBe(false);
-    expect(pageInTab(makePageRow({ archived_at: "2026-10-01T00:00:00Z" }), "archived")).toBe(true);
-    expect(pageInTab(makePageRow({ access: 1, archived_at: "2026-10-01T00:00:00Z" }), "archived")).toBe(true);
-    expect(pageInTab(makePageRow({ archived_at: "2026-10-01T00:00:00Z" }), "public")).toBe(false);
+    expect(pageInTab(makePageRow({ archived_at: "2026-10-01" }), "archived")).toBe(true);
+    expect(pageInTab(makePageRow({ access: 1, archived_at: "2026-10-01" }), "archived")).toBe(true);
+    expect(pageInTab(makePageRow({ archived_at: "2026-10-01" }), "public")).toBe(false);
   });
 });
 
@@ -278,7 +278,7 @@ describe("visiblePageRows", () => {
     makePageRow({ id: "open-old", name: "Alpha", access: 0, updated_at: "2026-01-01T00:00:00Z" }),
     makePageRow({ id: "open-new", name: "Beta", access: 0, updated_at: "2026-02-01T00:00:00Z" }),
     makePageRow({ id: "private", name: "Gamma", access: 1, updated_at: "2026-03-01T00:00:00Z" }),
-    makePageRow({ id: "archived", name: "Delta", access: 0, archived_at: "2026-04-01T00:00:00Z" }),
+    makePageRow({ id: "archived", name: "Delta", access: 0, archived_at: "2026-04-01" }),
   ];
 
   it("applies tab, sort, search and filters in order", () => {

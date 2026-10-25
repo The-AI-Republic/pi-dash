@@ -214,6 +214,17 @@ export function usePageLockWrite(target: PageRowTarget): {
   };
 }
 
+/**
+ * The local calendar date as `YYYY-MM-DD` — the shape `archived_at` carries on
+ * a page row (the column is a date, not a timestamp).
+ */
+export function localCalendarDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 /** One page's shelve/restore switch (PAGE-015, shared with PAGE-059). */
 export function usePageArchiveWrite(target: PageRowTarget): {
   pending: boolean;
@@ -230,7 +241,10 @@ export function usePageArchiveWrite(target: PageRowTarget): {
     },
     onMutate: (archived) =>
       cache.patch({
-        archived_at: archived ? new Date().toISOString() : null,
+        // The row's stamp is a calendar date, like the column it mirrors; the
+        // tab predicate only reads null vs not-null, but the optimistic row
+        // must still be the shape the contract accepts.
+        archived_at: archived ? localCalendarDate(new Date()) : null,
         ...(archived ? { is_favorite: false } : {}),
       }),
     onSuccess: (_data, archived) => {
