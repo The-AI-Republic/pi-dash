@@ -69,6 +69,10 @@
 //!   edge); here they answer the `ValidationError` 400, the same body the
 //!   kernels render for badly-formed UUIDs inside filters (cycle-issues
 //!   precedent).
+//! * The flat list keeps duplicate rows from legacy m2m filters
+//!   (`?assignees=A,B`, `?labels=L1,L2`): no `.distinct()` anywhere on
+//!   this endpoint, so each joined copy counts and renders
+//!   (PIDASHCONV-1372).
 //!
 //! # Deliberate pilot divergences (faithful to the Python source)
 //!
@@ -762,8 +766,9 @@ fn group_member_select(group_by: &str) -> &'static str {
 /// scope, manager scope applied twice) plus the `ComplexFilterBackend`
 /// tree plus the legacy `issue_filters(params, "GET")` predicates, over
 /// the pilot `issue` / `state` aliases so every compiled fragment splices
-/// verbatim. Downstream consumers are all `DISTINCT issue.id`-based, so
-/// the id-set wrap is equivalent to Django's single queryset.
+/// verbatim. The flat consumer counts and returns every joined row (no
+/// `.distinct()` on this endpoint, PIDASHCONV-1372); only the grouped
+/// consumers are `DISTINCT issue.id`-based.
 fn profile_filtered_set(
     user_id: &uuid::Uuid,
     slug: &str,
@@ -930,10 +935,12 @@ async fn user_profile_issues(
     let key = order_key(&order_spec.out_param, &params.order_by, cycle_bridge, false)?;
     let direction = if key.descending { "DESC" } else { "ASC" };
     // Total count over the pre-annotation set (the `deepcopy` at `:157`).
-    // The flat branch keeps the distinct-issue count; the grouped branch
-    // counts `queryset.count()` over the order-joined rows (pinned live:
-    // fan-out links count).
-    let total_sql = if group_by.is_some() && !key.joins.is_empty() {
+    // The flat branch counts every joined row: there is no `.distinct()`
+    // on this endpoint, so legacy m2m filters fan out and each copy
+    // counts (PIDASHCONV-1372). The grouped branch keeps its shape.
+    let total_sql = if group_by.is_none() {
+        format!("SELECT COUNT(*) {}", filtered.from_where)
+    } else if !key.joins.is_empty() {
         format!(
             "SELECT COUNT(*) {}",
             crate::app_issues::with_order_joins(&filtered.from_where, &key.joins)
@@ -973,10 +980,11 @@ async fn user_profile_issues(
     .await
 }
 
-/// Plain `paginate` branch (`user.py:243-250`): distinct rows, the
-/// rewritten order key `NULLS LAST` plus `-created_at`, offset window.
-/// The total over the pre-annotation set arrives from the caller (the
-/// `deepcopy` at `:157`), like the grouped branch — no second count.
+/// Plain `paginate` branch (`user.py:243-250`): every joined row (no
+/// `DISTINCT` — duplicates from legacy m2m filters render, like Django),
+/// the rewritten order key `NULLS LAST` plus `-created_at`, offset
+/// window. The total over the pre-annotation set arrives from the caller
+/// (the `deepcopy` at `:157`), like the grouped branch — no second count.
 #[allow(clippy::too_many_arguments)]
 async fn profile_flat_response(
     pool: &sqlx::PgPool,
@@ -995,12 +1003,12 @@ async fn profile_flat_response(
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
     let selects = profile_row_selects(&[]);
-    // The cycle-name traversal joins ride on the row query only: fan-out
-    // rows differ in `__order_key`, so `DISTINCT` keeps one row per link
-    // like Django, while the caller-supplied total stays distinct-issue.
+    // The cycle-name traversal joins ride on the row query only; every
+    // joined row is returned (Django slices the queryset with no
+    // `.distinct()`, so fan-out copies stay).
     let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
-        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
+        "SELECT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
         window.stop - window.offset,
         window.offset
     );

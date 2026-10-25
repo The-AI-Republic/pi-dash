@@ -42,6 +42,9 @@ def clean_db(db):
                 # Activities carry FKs into projects (and issues); the graph
                 # timezone suite (PIDASHCONV-1371) seeds them directly.
                 "issue_activities",
+                # Labels carry a project FK; the duplicate-rows suite
+                # (PIDASHCONV-1372) seeds them directly.
+                "labels",
                 "user_favorites",
                 "issues",
                 "draft_issue_assignees",
