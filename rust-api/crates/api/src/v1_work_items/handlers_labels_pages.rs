@@ -3786,18 +3786,15 @@ async fn page_archive_inner(
                 return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
             };
             if parent_archived.is_some() {
-                // `page.save(update_fields=["parent"])`: the auto_now
-                // `updated_at` and the crum `updated_by` still stamp
-                // (the D-30 merged precedent ports the same line).
-                sqlx::query(
-                    r#"UPDATE pages SET parent_id = NULL, updated_at = now(), updated_by_id = $1
-                       WHERE id = $2"#,
-                )
-                .bind(pre.actor.id)
-                .bind(page_id)
-                .execute(&pre.pool)
-                .await
-                .map_err(|error| db_error(error, "unarchive-detach"))?;
+                // `save(update_fields=["parent"])` restricts the UPDATE to the
+                // listed column, so Django persists ONLY `parent_id`: the
+                // in-memory `updated_at` (auto_now) and `updated_by` (
+                // `BaseModel.save`) are set on the instance but never written.
+                sqlx::query(r#"UPDATE pages SET parent_id = NULL WHERE id = $1"#)
+                    .bind(page_id)
+                    .execute(&pre.pool)
+                    .await
+                    .map_err(|error| db_error(error, "unarchive-detach"))?;
             }
         }
         sqlx::query(crate::app_pages::STATE_CTE_SQL)
