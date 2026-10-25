@@ -18,16 +18,14 @@ import { ExternalLink, Link2 } from "lucide-react";
 import * as React from "react";
 
 import { PeekPanel } from "../../../shared/shell/index.js";
-import {
-  copyCycleLink,
-  CycleDateSpan,
-  cycleProgressCounts,
-  cycleProgressPercent,
-  CycleProgressRing,
-  lifecycleLabel,
-  lifecycleTone,
-  openCycleInNewTab,
-} from "../../cycles/index.js";
+// Deep imports: this panel is reached from an eager route definition, so
+// the cycles barrel would pin its whole export surface into the initial
+// chunk (size gate).
+import { CycleDateSpan } from "../../cycles/components/CycleDateSpan.js";
+import { CycleProgressRing } from "../../cycles/components/CycleProgressRing.js";
+import { lifecycleLabel, lifecycleTone } from "../../cycles/lib/cycleGroups.js";
+import { cycleProgressCounts, cycleProgressPercent } from "../../cycles/lib/cycleProgress.js";
+import { copyCycleLink, openCycleInNewTab } from "../../cycles/lib/cycleShare.js";
 import { useArchivedCycleDetail } from "../api/archivedCycles.js";
 
 export interface ArchivedCyclePeekPanelProps {

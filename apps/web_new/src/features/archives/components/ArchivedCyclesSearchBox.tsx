@@ -14,7 +14,8 @@ import { IconButton } from "@pidash/kit";
 import { Search, X } from "lucide-react";
 import * as React from "react";
 
-import { useCycleSearchStore } from "../../cycles/index.js";
+// Deep import: the archived-cycles route is eager (size gate).
+import { useCycleSearchStore } from "../../cycles/api/searchStore.js";
 import { archivedCycleStoreSlot } from "../api/archivedCycles.js";
 
 export interface ArchivedCyclesSearchBoxProps {

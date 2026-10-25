@@ -19,18 +19,19 @@ import { getAppClient } from "../../../core/api/client.js";
 import { usePickerWorkspaceMembers } from "../../../shared/pickers/reference.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
 import { isProjectAuthorized } from "../../projects/index.js";
-import {
-  archivedCyclesQueryOptions,
-  CycleFilterChips,
-  CycleFilterMenu,
-  CycleRow,
-  CyclesLoadError,
-  CyclesNoMatch,
-  filterCyclesByQuery,
-  selectCycleMemberDirectory,
-  useCycleSearchStore,
-  type CycleFilterDimension,
-} from "../../cycles/index.js";
+// Deep imports: this screen is reached from an eager route definition, so
+// the cycles barrel would pin its whole export surface into the initial
+// chunk (size gate).
+import { archivedCyclesQueryOptions } from "../../cycles/api/queries.js";
+import { useCycleSearchStore } from "../../cycles/api/searchStore.js";
+import { CycleFilterChips } from "../../cycles/components/CycleFilterChips.js";
+import { CycleFilterMenu } from "../../cycles/components/CycleFilterMenu.js";
+import { CycleRow } from "../../cycles/components/CycleRow.js";
+import { CyclesLoadError } from "../../cycles/components/CyclesLoadError.js";
+import { CyclesNoMatch } from "../../cycles/components/CyclesNoMatch.js";
+import type { CycleFilterDimension } from "../../cycles/lib/cycleFilters.js";
+import { filterCyclesByQuery } from "../../cycles/lib/cycleSearch.js";
+import { selectCycleMemberDirectory } from "../../cycles/lib/cycleMembers.js";
 import { archivedCycleStoreSlot, useArchivedCycleListFilter } from "../api/archivedCycles.js";
 import { resolveArchivedCyclesBody } from "../lib/archivedCyclesBody.js";
 import { ArchivedCyclePeekPanel } from "./ArchivedCyclePeekPanel.js";

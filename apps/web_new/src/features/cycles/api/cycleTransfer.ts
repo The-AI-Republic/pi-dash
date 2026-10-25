@@ -13,7 +13,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { transferCycleIssues } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { entityListsKeyPart, issueKeys, type IssuesEntity } from "../../issues/index.js";
+import { issueKeys } from "../../issues/api/keys.js";
+import { entityListsKeyPart, type IssuesEntity } from "../../issues/prefs/entities.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 import { invalidateAfterCycleTransfer } from "./invalidate.js";
 

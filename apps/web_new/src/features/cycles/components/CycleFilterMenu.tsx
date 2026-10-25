@@ -13,21 +13,21 @@ import { Button, Popover } from "@pidash/kit";
 import { Check, ListFilter } from "lucide-react";
 import * as React from "react";
 
+// Deep imports: this menu is reached from an eager archives route, so the
+// issues barrel would pin its whole export surface into the initial chunk.
+import { DateCalendar } from "../../issues/dropdowns/DatePicker.js";
+import { DateRangeCalendar } from "../../issues/dropdowns/DateRangePicker.js";
+import type { RangeValue } from "../../issues/dropdowns/calendar.js";
+import { useWeekStart } from "../../issues/dropdowns/weekStart.js";
+import { FilterSection } from "../../issues/filters/shared/FilterSection.js";
+import type { FilterSectionOption } from "../../issues/filters/shared/FilterSection.js";
+import { customDateMode, customRange, isDatePreset } from "../../issues/filters/rich/dateValue.js";
 import {
   DATE_PRESETS,
-  DateCalendar,
-  DateRangeCalendar,
-  FilterSection,
-  customDateMode,
   customEndEntry,
-  customRange,
   customStartEntry,
   hasCustomDate,
-  isDatePreset,
-  useWeekStart,
-  type FilterSectionOption,
-  type RangeValue,
-} from "../../issues/index.js";
+} from "../../issues/filters/rich/legacyDimensions.js";
 import { useCycleFilterStore } from "../api/filterStore.js";
 import { lifecycleLabel } from "../lib/cycleGroups.js";
 import {

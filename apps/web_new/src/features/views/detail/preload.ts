@@ -15,15 +15,15 @@
 import type { ApiClient } from "@pidash/api-client";
 import type { QueryClient } from "@tanstack/react-query";
 
-import {
-  loadIssueListLeaves,
-  loadSavedViewEmptyCard,
-  issuesQueryOptions,
-  orderByFromDisplayFilters,
-  preloadViewLayout,
-  primeIssueListLeaves,
-  type IssueSearch,
-} from "../../issues/index.js";
+// Deep imports: this module is reached from an eager route definition, so
+// the issues barrel would pin its whole export surface (list screen, empty
+// cards, expression codec) into the measured initial chunk (size gate).
+import { issuesQueryOptions } from "../../issues/api/queries.js";
+import { loadIssueListLeaves, primeIssueListLeaves } from "../../issues/components/lazyLeaves.js";
+import { loadSavedViewEmptyCard } from "../../issues/emptyStates/viewEmpty.js";
+import type { IssueSearch } from "../../issues/filters/search.js";
+import { preloadViewLayout } from "../../issues/layouts/ViewLayoutBody.js";
+import { orderByFromDisplayFilters } from "../../issues/prefs/prefsQuery.js";
 import { projectViewDetailQueryOptions } from "../api/detail.js";
 import { savedViewLayout } from "./model.js";
 

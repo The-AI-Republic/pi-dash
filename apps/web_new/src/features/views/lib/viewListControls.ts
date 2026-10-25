@@ -9,7 +9,9 @@
 
 import type { SavedView, WorkspaceMember } from "@pidash/api-client";
 
-import type { RangeValue } from "../../issues/index.js";
+// Deep import: the views detail route is eager, and the issues barrel
+// would pull its whole export surface into the initial chunk.
+import type { RangeValue } from "../../issues/dropdowns/calendar.js";
 import { VIEW_ACCESS_SHARED, viewAccessLabel } from "./projectViews.js";
 
 // --- display name and search (VIEW-004) -------------------------------------

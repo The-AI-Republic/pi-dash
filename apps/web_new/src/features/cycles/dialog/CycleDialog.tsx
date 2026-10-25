@@ -19,7 +19,10 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { useProjectRoles } from "../../auth/index.js";
-import { DateRangePicker, type RangeValue } from "../../issues/index.js";
+// Deep imports: this dialog is reached from an eager archives route, so the
+// issues barrel would pin its whole export surface into the initial chunk.
+import { DateRangePicker } from "../../issues/dropdowns/DateRangePicker.js";
+import type { RangeValue } from "../../issues/dropdowns/calendar.js";
 import { isProjectAuthorized, projectDetailsQueryOptions } from "../../projects/index.js";
 import { ProjectPicker, toProjectOption } from "../../../shared/pickers/index.js";
 import { notifyError, notifySuccess, storePreference } from "../../../shared/shell/index.js";

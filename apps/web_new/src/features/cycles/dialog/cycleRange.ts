@@ -7,7 +7,8 @@
 // reuses the check gate and the refusal copy so both surfaces refuse the
 // same ranges with the same guidance.
 
-import type { RangeValue } from "../../issues/index.js";
+// Deep type import: the cycle dialog is reached from an eager route.
+import type { RangeValue } from "../../issues/dropdowns/calendar.js";
 
 import { instantToProjectDate } from "../lib/cycleDates.js";
 
