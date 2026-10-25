@@ -149,6 +149,7 @@ describe("IntakeScreen lazy detail", () => {
     installServer();
     renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
     expect(await screen.findByRole("status", { name: "Loading work item" })).toBeInTheDocument();
+    await vi.waitFor(() => expect(releaseDetailChunk).toBeTypeOf("function"));
     releaseDetail();
     const stub = await screen.findByTestId("intake-detail-stub");
     expect(stub).toHaveAttribute("data-issue-id", ISSUE_1);

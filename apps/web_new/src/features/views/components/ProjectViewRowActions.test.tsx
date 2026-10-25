@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { SavedView } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 
 const notify = vi.hoisted(() => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
@@ -138,7 +138,7 @@ interface RenderActionsOptions {
 
 function renderActions(options: RenderActionsOptions = {}): {
   queryClient: QueryClient;
-  onPublishOpenChange: ReturnType<typeof vi.fn>;
+  onPublishOpenChange: Mock<(open: boolean) => void>;
   view: SavedView;
 } {
   seedSession();
@@ -147,7 +147,7 @@ function renderActions(options: RenderActionsOptions = {}): {
   if (options.seedList ?? true) {
     queryClient.setQueryData<SavedView[]>(viewKeys.projectList("acme", PROJECT), [view]);
   }
-  const onPublishOpenChange = (options.onPublishOpenChange ?? vi.fn()) as ReturnType<typeof vi.fn>;
+  const onPublishOpenChange = (options.onPublishOpenChange ?? vi.fn()) as Mock<(open: boolean) => void>;
   render(
     <QueryClientProvider client={queryClient}>
       <ProjectViewRowActions

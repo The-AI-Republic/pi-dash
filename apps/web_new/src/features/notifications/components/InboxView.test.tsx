@@ -670,11 +670,11 @@ describe("InboxView card actions", () => {
     await user.click(screen.getByRole("button", { name: "Pick a date" }));
     const target = new Date();
     target.setDate(target.getDate() + 2);
-    await user.click(
-      await screen.findByRole("button", {
-        name: new RegExp(`^\\w+ ${target.getDate()}, ${target.getFullYear()}$`),
-      })
-    );
+    const targetDay = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-${String(
+      target.getDate()
+    ).padStart(2, "0")}`;
+    const dayGrid = await screen.findByTestId("snooze-date-calendar-grid");
+    await user.click(dayGrid.querySelector(`[data-day="${targetDay}"]`) as HTMLElement);
     await user.click(screen.getByRole("button", { name: "Pick a time" }));
     const panel = await screen.findByRole("listbox", { name: "Pick a time" });
     await user.click(within(panel).getByRole("button", { name: /^AM$/ }));

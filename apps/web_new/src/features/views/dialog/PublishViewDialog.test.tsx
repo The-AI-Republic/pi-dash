@@ -5,15 +5,15 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, type Mock, vi } from "vitest";
 
 import { PublishViewDialog } from "./PublishViewDialog.js";
 
 function handlers(): {
-  onPublish: ReturnType<typeof vi.fn>;
-  onUnpublish: ReturnType<typeof vi.fn>;
-  onCopyLink: ReturnType<typeof vi.fn>;
-  onClose: ReturnType<typeof vi.fn>;
+  onPublish: Mock<() => void>;
+  onUnpublish: Mock<() => void>;
+  onCopyLink: Mock<() => void>;
+  onClose: Mock<() => void>;
 } {
   return { onPublish: vi.fn(), onUnpublish: vi.fn(), onCopyLink: vi.fn(), onClose: vi.fn() };
 }

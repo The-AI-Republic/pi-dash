@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import type { RichTextEditorHandle } from "../../../shared/editor/index.js";
@@ -67,7 +67,7 @@ function stubMentions(handler: (query: string) => unknown[]) {
   return calls;
 }
 
-function fakeHandle(): RichTextEditorHandle & { insertMention: ReturnType<typeof vi.fn> } {
+function fakeHandle(): RichTextEditorHandle & { insertMention: Mock<(target: { id: string; name: string }) => void> } {
   return {
     insertImage: () => undefined,
     insertMention: vi.fn(),
