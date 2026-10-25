@@ -131,6 +131,10 @@ jobs:
       RUST_BASE_URL: http://127.0.0.1:8080
       EMAIL_HOST: localhost
       API_KEY_RATE_LIMIT: 100000/minute
+      # Stub live-document server the page-create tests bind (PIDASHCONV-1503):
+      # both backends convert through it only while a test holds it up; with
+      # the stub down conversion fails and the 503 tests still pass.
+      LIVE_BASE_URL: http://127.0.0.1:18096
       # Fixed key so HTTP suites can forge session rows (see
       # rust-api/contract-tests/_harness/http.py); Rust serve gets the same
       # SECRET_KEY so forged sessions validate on both backends.

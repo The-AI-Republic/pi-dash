@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
 import json
 import socket
@@ -719,6 +720,91 @@ def posthog_sink():
     sink.start(config.POSTHOG_SINK_BASE)
     yield sink
     sink.stop()
+
+
+class LiveDocStub:
+    """Stub live-document conversion server for page-write tests (PIDASHCONV-1503).
+
+    Page writes convert through ``POST {LIVE_URL}/convert-document/``
+    (``pi_dash.utils.live_document``); without a live server both backends
+    503 and nothing is written. The stub binds the fixed base in
+    ``LIVE_DOC_STUB_BASE`` — the backend under test points ``LIVE_BASE_URL``
+    at the same base — and answers every POST with one fixed usable
+    document (non-empty binary, empty body HTML, empty JSON).
+
+    Context-manager scoped (one conversion window per test), deliberately
+    NOT a session fixture: while the stub is down conversion fails and the
+    503 contract tests keep passing.
+    """
+
+    BINARY = b"contract-live-document"
+
+    def __init__(self, base_url: str | None = None) -> None:
+        outer = self
+        self.requests: list[dict] = []
+        self._lock = threading.Lock()
+        payload = json.dumps(
+            {
+                "description_binary": base64.b64encode(self.BINARY).decode("ascii"),
+                "description_html": "<p></p>",
+                "description_json": {},
+            }
+        ).encode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    parsed = json.loads(raw) if raw else None
+                except ValueError:
+                    parsed = None
+                with outer._lock:
+                    outer.requests.append(
+                        {
+                            "method": self.command,
+                            "path": urlsplit(self.path).path,
+                            "headers": dict(self.headers),
+                            "body": raw,
+                            "json": parsed,
+                        }
+                    )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = _answer
+            do_POST = _answer
+            do_PUT = _answer
+            do_PATCH = _answer
+            do_DELETE = _answer
+
+            def log_message(self, *args: object) -> None:  # keep test output clean
+                pass
+
+        parts = urlsplit(base_url or config.LIVE_DOC_STUB_BASE)
+        self._server = ThreadingHTTPServer((parts.hostname, parts.port), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def snapshot(self) -> list[dict]:
+        with self._lock:
+            return list(self.requests)
+
+    def __enter__(self) -> "LiveDocStub":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
 
 
 class HostileLengthSink:

@@ -3250,7 +3250,7 @@ async fn page_post_inner(
             "description_stripped", "owned_by_id", "access", "color", "parent_id", "archived_at",
             "is_locked", "view_props", "logo_props", "is_global", "moved_to_page", "moved_to_project",
             "sort_order", "external_id", "external_source")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, '', NULL, NULL,
+           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, '', $13, NULL,
             FALSE, '{"full_width": false}', '{}', FALSE, NULL, NULL, 65535, NULL, NULL)"#,
     )
     .bind(page_id)
