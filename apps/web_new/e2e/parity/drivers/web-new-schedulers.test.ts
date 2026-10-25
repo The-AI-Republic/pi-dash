@@ -1342,6 +1342,9 @@ describe("calendar fallbacks and branch edges", () => {
       { day: "", time: "", name: "", title: "", background: "" },
     ]);
     await expect(driver.schedulerCalendarMonthOverflow()).resolves.toEqual([]);
+  });
+});
+
 describe("scheduler catalog", () => {
   it("opens the workspace catalog and settles on the table", async () => {
     const goto = vi.fn(async () => null);
@@ -1673,8 +1676,10 @@ describe("scheduler bulk install", () => {
       text: "Bulk Gamma\nAG6C\nInstalled",
       role: (role: string) => (role === "checkbox" ? fake({ checked: true, disabled: true }) : absent()),
     });
+    const options = fake({ items: [alpha, locked], filter: () => fake({ items: [alpha, locked] }) });
     const panel = fake({
-      locate: (selector: string) => (selector === "li" ? fake({ items: [alpha, locked] }) : absent()),
+      locate: (selector: string) =>
+        selector === "li" ? options : selector === 'input[type="checkbox"]' ? fake() : absent(),
     });
     const dialog = fake({
       locate: (selector: string) =>
@@ -1684,6 +1689,25 @@ describe("scheduler bulk install", () => {
     await expect(new WebNewDriver(page).schedulerInstallPickerOptions()).resolves.toEqual([
       { name: "Bulk Alpha", identifier: "AG6A", checked: false, locked: false },
       { name: "Bulk Gamma", identifier: "AG6C", checked: true, locked: true },
+    ]);
+  });
+
+  it("ignores the loading placeholder in the picker body", async () => {
+    const loading = fake({ text: "Checking installs…" });
+    const alpha = fake({
+      text: "Bulk Alpha\nAG6A",
+      role: (role: string) => (role === "checkbox" ? fake({ checked: false, disabled: false }) : absent()),
+    });
+    const options = fake({ items: [alpha], filter: () => fake({ items: [alpha] }) });
+    const panel = fake({
+      locate: (selector: string) => (selector === "li" ? fake({ items: [loading], filter: () => options }) : absent()),
+    });
+    const dialog = fake({
+      locate: (selector: string) => (selector === "div[data-prevent-outside-click]" ? panel : absent()),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerInstallPickerOptions()).resolves.toEqual([
+      { name: "Bulk Alpha", identifier: "AG6A", checked: false, locked: false },
     ]);
   });
 

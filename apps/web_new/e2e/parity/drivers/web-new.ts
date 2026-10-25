@@ -10216,12 +10216,16 @@ export class WebNewDriver implements ParityDriver {
 
   async schedulerInstallPickerOptions(): Promise<SchedulerInstallOption[]> {
     const panel = await this.schedulerEnsureInstallPickerOpen();
-    await panel
-      .locator("li")
+    // The picker body uses <li> for the loading placeholder and the
+    // no-matches note as well as for project rows. Only rows with a
+    // checkbox are options; waiting for any <li> would hand back the
+    // placeholder as a project before the install detection settles.
+    const items = panel.locator("li").filter({ has: panel.locator('input[type="checkbox"]') });
+    await items
+      .first()
       .or(panel.getByText("No projects match your search.", { exact: false }))
       .first()
       .waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const items = panel.locator("li");
     const total = await items.count();
     const out: SchedulerInstallOption[] = [];
     for (let i = 0; i < total; i++) {
