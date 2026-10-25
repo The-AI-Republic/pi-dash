@@ -261,6 +261,71 @@ test(
         await driver.page.reload();
         await expect.poll(() => driver.propertyValueText("Runs on"), { timeout: 60_000 }).toContain(busy.name);
         expect(await driver.propertyValueText("Runs on")).toContain(auto?.name ?? "");
+        // Nothing is waiting yet, so the trigger carries no badge.
+        expect(await driver.propertyValueText("Runs on")).not.toContain(" ahead");
+      });
+
+      await test.step("a queued run puts the waiting badge on the trigger", async () => {
+        // The badge reads the active run, not the selection: a queued run
+        // behind the pinned busy runner reads "2 ahead" beside the trigger.
+        // The OSS serializer drops `dispatch_wait` (PDASHOSS01-297), so the
+        // detail read answers with it through the browser.
+        const queued = structuredClone(base) as Record<string, unknown>;
+        queued["assigned_pod_id"] = target.podId;
+        queued["assigned_runner_id"] = busy.id;
+        queued["agent_executor"] = "local_runner";
+        queued["agent_status"] = {
+          ticker: null,
+          run_count: 1,
+          active_run: {
+            id: crypto.randomUUID(),
+            status: "queued",
+            executor_kind: "local_runner",
+            queue_position: null,
+            runner: null,
+            runner_name: null,
+            pinned_runner: busy.id,
+            pinned_runner_name: busy.name,
+            pin_kind: "dedicated",
+            dispatch_wait: {
+              reason: "runner_busy",
+              pin_kind: "dedicated",
+              runner: busy.id,
+              runner_name: busy.name,
+              queued_at: "2026-10-25T10:00:00Z",
+              runner_last_seen_at: null,
+              runs_ahead: 2,
+              releasable: true,
+            },
+            created_at: "2026-10-25T10:00:00Z",
+            assigned_at: null,
+            started_at: null,
+            ended_at: null,
+            done_payload: null,
+            error: "",
+            error_code: "",
+            error_diagnostic: null,
+            llm_model: "",
+            input_tokens: null,
+            output_tokens: null,
+            total_tokens: null,
+            live_state: null,
+          },
+          latest_run: null,
+        };
+        await driver.page.route(`**${detailPath}`, async (route) => {
+          if (route.request().method() !== "GET") {
+            await route.fallback();
+            return;
+          }
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(queued) });
+        });
+        await driver.page.reload();
+        await expect.poll(() => driver.propertyRowPresent("Runs on"), { timeout: 60_000 }).toBe(true);
+        await expect.poll(() => driver.propertyValueText("Runs on"), { timeout: 30_000 }).toContain("2 ahead");
+        const trigger = await driver.propertyValueText("Runs on");
+        expect(trigger).toContain(busy.name);
+        expect(trigger).toContain(auto?.name ?? "");
       });
     } finally {
       await driver.page.unrouteAll({ behavior: "wait" }).catch(() => {});

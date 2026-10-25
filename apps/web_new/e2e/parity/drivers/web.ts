@@ -4478,6 +4478,18 @@ export class WebDriver implements ParityDriver {
     throw new Error(`[parity] widgetLoadMoreFetching(${widget}) has no oracle: PDASHOSS01-299 owns it.`);
   }
 
+  async expandWidgetRowChildren(widget: string, rowName: string): Promise<void> {
+    throw new Error(`[parity] expandWidgetRowChildren(${widget}, ${rowName}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
+  async widgetRowLoadMorePresent(widget: string, rowName: string): Promise<boolean> {
+    throw new Error(`[parity] widgetRowLoadMorePresent(${widget}, ${rowName}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
+  async widgetRowLoadMore(widget: string, rowName: string): Promise<void> {
+    throw new Error(`[parity] widgetRowLoadMore(${widget}, ${rowName}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
   async widgetGroupNames(widget: string): Promise<string[]> {
     const content = await this.widgetContent(widget);
     if (!content) return [];

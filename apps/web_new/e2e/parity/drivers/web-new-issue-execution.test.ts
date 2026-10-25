@@ -203,6 +203,139 @@ describe("sub-work-items Load more fetching state (ISS-238)", () => {
   });
 });
 
+describe("nested parent Load more (ISS-238)", () => {
+  /** A page whose sub-work-items panel resolves every selector to `row`. */
+  function nestedPage(row: StubLocator): Page {
+    const rows = locator({ filter: () => row, last: () => row, nth: () => row });
+    const panel = locator({ locator: () => rows });
+    return pageOf({ locator: () => panel });
+  }
+
+  /** The name matcher on a `getByRole` call, as a string. */
+  function nameOf(options: unknown): string {
+    const name = (options as { name?: unknown } | undefined)?.name;
+    if (typeof name === "string") return name;
+    if (name instanceof RegExp) return name.source;
+    return "";
+  }
+
+  /** A row whose buttons answer `loadMore` and `toggle`. */
+  function rowWith(loadMore: StubLocator, toggle: StubLocator, rest: Partial<StubLocator> = {}): StubLocator {
+    return locator({
+      count: async () => 1,
+      getByRole: (_role: string, options?: unknown) => (nameOf(options).startsWith("^Load more$") ? loadMore : toggle),
+      ...rest,
+    });
+  }
+
+  it("reports a nested parent's control present when it is shown", async () => {
+    const control = locator({ count: async () => 1, isVisible: async () => true, last: () => control });
+    const page = nestedPage(rowWith(control, locator()));
+    await expect(new WebNewDriver(page).widgetRowLoadMorePresent("Sub-work items", "Paged child 1000")).resolves.toBe(
+      true
+    );
+  });
+
+  it("reads a hidden nested control as absent", async () => {
+    const control = locator({ count: async () => 1, isVisible: async () => false, last: () => control });
+    const page = nestedPage(rowWith(control, locator()));
+    await expect(new WebNewDriver(page).widgetRowLoadMorePresent("Sub-work items", "Paged child 1000")).resolves.toBe(
+      false
+    );
+  });
+
+  it("reports a nested parent with no control as absent", async () => {
+    const page = nestedPage(rowWith(locator({ count: async () => 0 }), locator()));
+    await expect(new WebNewDriver(page).widgetRowLoadMorePresent("Sub-work items", "Paged child 1000")).resolves.toBe(
+      false
+    );
+  });
+
+  it("clicks a nested control and settles once its label leaves the fetching state", async () => {
+    let label = "Load more";
+    const clicks: string[] = [];
+    const control = locator({
+      count: async () => 1,
+      innerText: async () => label,
+      click: async () => {
+        clicks.push("load");
+        label = "Loading more…";
+        setTimeout(() => {
+          label = "Load more";
+        }, 0);
+      },
+      last: () => control,
+    });
+    await new WebNewDriver(nestedPage(rowWith(control, locator()))).widgetRowLoadMore(
+      "Sub-work items",
+      "Paged child 1000"
+    );
+    expect(clicks).toEqual(["load"]);
+    expect(label).toBe("Load more");
+  });
+
+  it("refuses a nested row without its own control", async () => {
+    const page = nestedPage(rowWith(locator({ count: async () => 0 }), locator()));
+    await expect(new WebNewDriver(page).widgetRowLoadMore("Sub-work items", "Paged child 1000")).rejects.toThrow(
+      "no nested load-more control"
+    );
+  });
+
+  it("expands a nested row and settles once its children land", async () => {
+    let expanded = false;
+    const clicks: string[] = [];
+    const toggle = locator({
+      count: async () => 1,
+      click: async () => {
+        clicks.push("expand");
+        expanded = true;
+      },
+    });
+    const row = rowWith(locator({ count: async () => 0 }), toggle, {
+      innerText: async () => (expanded ? "Paged child 1000\nPaged child 3000" : "Paged child 1000"),
+      locator: (selector: string) =>
+        selector === "[data-sub-issue-row]" ? locator({ count: async () => (expanded ? 1 : 0) }) : locator(),
+    });
+    await new WebNewDriver(nestedPage(row)).expandWidgetRowChildren("Sub-work items", "Paged child 1000");
+    expect(clicks).toEqual(["expand"]);
+  });
+
+  it("settles an expansion that renders an empty note", async () => {
+    const row = rowWith(locator({ count: async () => 0 }), locator({ count: async () => 1 }), {
+      innerText: async () => "Paged child 1000\nNo children yet.",
+      locator: () => locator({ count: async () => 0 }),
+    });
+    await new WebNewDriver(nestedPage(row)).expandWidgetRowChildren("Sub-work items", "Paged child 1000");
+  });
+
+  it("waits out the loading note before settling", async () => {
+    let reads = 0;
+    const row = rowWith(locator({ count: async () => 0 }), locator({ count: async () => 1 }), {
+      innerText: async () => {
+        reads += 1;
+        return reads === 1 ? "Paged child 1000\nLoading children" : "Paged child 1000\nNo children yet.";
+      },
+      locator: () => locator({ count: async () => 0 }),
+    });
+    await new WebNewDriver(nestedPage(row)).expandWidgetRowChildren("Sub-work items", "Paged child 1000");
+    expect(reads).toBeGreaterThan(1);
+  });
+
+  it("refuses a row that is not rendered", async () => {
+    const page = nestedPage(locator({ count: async () => 0 }));
+    await expect(new WebNewDriver(page).expandWidgetRowChildren("Sub-work items", "Paged child 1000")).rejects.toThrow(
+      "no row"
+    );
+  });
+
+  it("refuses a row with no expander", async () => {
+    const page = nestedPage(rowWith(locator({ count: async () => 0 }), locator({ count: async () => 0 })));
+    await expect(new WebNewDriver(page).expandWidgetRowChildren("Sub-work items", "Paged child 1000")).rejects.toThrow(
+      "has no expander"
+    );
+  });
+});
+
 describe("waiting-for-runner banner (ISS-239/240)", () => {
   const bannerTable = (banner: StubLocator) => ({
     "role:region:Waiting for runner": () => banner,
@@ -634,9 +767,7 @@ describe("property note (ISS-241)", () => {
         locator({ count: async () => 1, innerText: async () => "  nf907-busy runs one issue   at a time. " }),
     });
     const page = pageOf({ getByRole: () => row });
-    await expect(new WebNewDriver(page).propertyNote("Runs on")).resolves.toBe(
-      "nf907-busy runs one issue at a time."
-    );
+    await expect(new WebNewDriver(page).propertyNote("Runs on")).resolves.toBe("nf907-busy runs one issue at a time.");
   });
 
   it("reads a missing row, a missing note and a blank note as null", async () => {

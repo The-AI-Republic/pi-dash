@@ -3461,6 +3461,65 @@ export class WebNewDriver implements ParityDriver {
     if (await first.isDisabled()) return true;
     return (await first.getByRole("status").count()) > 0;
   }
+  /** One nested parent's row block, matched by the name it shows. */
+  private widgetNestedRow(widget: string, rowName: string): Locator {
+    // A nested parent's name also reads inside every ancestor block, so
+    // the innermost match is the row itself.
+    return this.widgetPanel(widget)
+      .locator("[data-sub-issue-row]")
+      .filter({ has: this.page.getByText(rowName, { exact: true }) })
+      .last();
+  }
+  /**
+   * The Load more control a nested parent draws under its own children.
+   * Nested rows carry no test id of their own, so the control is the last
+   * plain "Load more" button inside the row: its own follows every deeper
+   * row's control.
+   */
+  private widgetRowLoadMoreControl(widget: string, rowName: string): Locator {
+    return this.widgetNestedRow(widget, rowName)
+      .getByRole("button", { name: /^Load more$/ })
+      .last();
+  }
+  /**
+   * Expand a nested parent's children. Its first page fetches on the
+   * expansion, so this ends once a child row, the parent's own Load more
+   * control or an empty/error note has rendered.
+   */
+  async expandWidgetRowChildren(widget: string, rowName: string): Promise<void> {
+    const row = this.widgetNestedRow(widget, rowName);
+    if ((await row.count()) === 0)
+      throw new Error(`[parity] no row ${JSON.stringify(rowName)} in ${JSON.stringify(widget)}.`);
+    const toggle = row.getByRole("button", { name: /^Expand children of / }).first();
+    if ((await toggle.count()) === 0) throw new Error(`[parity] ${JSON.stringify(rowName)} has no expander.`);
+    await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(
+        async () => {
+          const children = await row.locator("[data-sub-issue-row]").count();
+          if (children > 0) return false;
+          if ((await this.widgetRowLoadMoreControl(widget, rowName).count()) > 0) return false;
+          const text = (await row.innerText().catch(() => "")) ?? "";
+          return text.includes("Loading children");
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(false);
+  }
+  /** Whether a nested parent shows its own Load more control. */
+  async widgetRowLoadMorePresent(widget: string, rowName: string): Promise<boolean> {
+    return this.isShown(this.widgetRowLoadMoreControl(widget, rowName));
+  }
+  /** Click a nested parent's Load more control; ends after the next page lands. */
+  async widgetRowLoadMore(widget: string, rowName: string): Promise<void> {
+    const control = this.widgetRowLoadMoreControl(widget, rowName);
+    if ((await control.count()) === 0)
+      throw new Error(`[parity] no nested load-more control under ${JSON.stringify(rowName)}.`);
+    await control.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(async () => ((await control.innerText().catch(() => "")) ?? "").trim(), { timeout: WebNewDriver.WAIT_MS })
+      .not.toBe("Loading more…");
+  }
   async widgetHeaderControlCount(_widget: string): Promise<number> {
     return todo("widgetHeaderControlCount");
   }

@@ -863,6 +863,12 @@ export interface ParityDriver {
   widgetLoadMore(widget: string): Promise<void>;
   /** Whether the named widget's Load more control is mid-fetch (ISS-238). */
   widgetLoadMoreFetching(widget: string): Promise<boolean>;
+  /** Expand a nested parent row in the named widget; ends with its children fetched (ISS-238). */
+  expandWidgetRowChildren(widget: string, rowName: string): Promise<void>;
+  /** True when a nested parent row in the named widget shows its own Load more control (ISS-238). */
+  widgetRowLoadMorePresent(widget: string, rowName: string): Promise<boolean>;
+  /** Click a nested parent row's own Load more control; ends after the page settles (ISS-238). */
+  widgetRowLoadMore(widget: string, rowName: string): Promise<void>;
   /** Group titles inside the named widget (e.g. relation types), or []. */
   widgetGroupNames(widget: string): Promise<string[]>;
   /** Ensure the named widget section is expanded. */
