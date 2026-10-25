@@ -38,7 +38,7 @@ export interface PageDetailHeaderProps {
   projectName: string;
   projectLogo: Record<string, unknown>;
   projectIdentifier: string;
-  page: Pick<PageRowData, "id" | "name" | "is_favorite">;
+  page: Pick<PageRowData, "id" | "name" | "is_favorite" | "logo_props">;
   siblings: readonly PageSiblingOption[];
   syncStatus: PageSyncStatus;
   showStar: boolean;
@@ -113,6 +113,7 @@ export function PageDetailHeader({
       </span>
       <PageSiblingSwitcher
         currentName={page.name.trim() === "" ? "Untitled" : page.name}
+        currentLogoProps={page.logo_props as Record<string, unknown>}
         options={siblings}
         onSelect={onSelectSibling}
       />

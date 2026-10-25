@@ -107,10 +107,15 @@ export function pageDocumentTitle(name: string): string {
   return pageDisplayTitle(name);
 }
 
-/** One switcher row; archived pages never appear (PAGE-024). */
+/**
+ * One switcher row; archived pages never appear (PAGE-024). The mark
+ * rides along so the switcher can draw the page's glyph beside its name
+ * (PAGE-027).
+ */
 export interface PageSiblingOption {
   id: string;
   name: string;
+  logoProps: Record<string, unknown>;
 }
 
 /**
@@ -121,7 +126,11 @@ export interface PageSiblingOption {
 export function pageSiblingOptions(rows: readonly PageRow[]): PageSiblingOption[] {
   return rows
     .filter((row) => row.archived_at === null)
-    .map((row) => ({ id: row.id, name: pageDisplayTitle(row.name) }))
+    .map((row) => ({
+      id: row.id,
+      name: pageDisplayTitle(row.name),
+      logoProps: row.logo_props as Record<string, unknown>,
+    }))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
