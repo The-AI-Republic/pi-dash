@@ -6,6 +6,23 @@
 
 export { loadCommentExtensions, loadDescriptionExtensions, loadIssueDescriptionExtensions } from "./extensions.js";
 export { CommentRichTextEditor, IssueDescriptionEditor, RichTextEditor } from "./RichTextEditor.js";
+export {
+  alignmentOf,
+  blockKindForHeading,
+  EMPTY_FORMATTING_STATE,
+  formattingStatesEqual,
+  headingLevelOf,
+  readFormattingState,
+} from "./pageFormatting.js";
+export type {
+  PageAlignment,
+  PageBlockKind,
+  PageEditorProbe,
+  PageFormatCommand,
+  PageFormattingState,
+  PageListKind,
+} from "./pageFormatting.js";
+export { loadPageExtensions } from "./pageExtensions.js";
 export { MENTION_CONTENT_TAGS, MENTION_ENTITY, MENTION_TAG, mentionAttributes, mentionQueryAt } from "./mention.js";
 export type { MentionQuery, MentionTarget } from "./mention.js";
 export type { RichTextEditorHandle, RichTextEditorProps, StoredImageInsert } from "./RichTextEditor.js";

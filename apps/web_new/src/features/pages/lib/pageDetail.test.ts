@@ -130,7 +130,8 @@ describe("sibling options", () => {
       makePageRow({ id: "c", name: "Alpha" }),
       makePageRow({ id: "d", name: "Gone", archived_at: "2026-10-01T00:00:00Z" }),
     ];
-    expect(pageSiblingOptions(rows)).toEqual([
+    const options = pageSiblingOptions(rows);
+    expect(options.map((option) => ({ id: option.id, name: option.name }))).toEqual([
       { id: "c", name: "Alpha" },
       { id: "b", name: "Beta" },
       { id: "a", name: "Untitled" },
@@ -139,12 +140,12 @@ describe("sibling options", () => {
 
   it("filters case-insensitively and returns everything for a blank query", () => {
     const options = [
-      { id: "a", name: "Alpha" },
-      { id: "b", name: "Beta" },
+      { id: "a", name: "Alpha", logoProps: {} },
+      { id: "b", name: "Beta", logoProps: {} },
     ];
     expect(filterSiblingOptions(options, "")).toEqual(options);
     expect(filterSiblingOptions(options, "  ")).toEqual(options);
-    expect(filterSiblingOptions(options, "BET")).toEqual([{ id: "b", name: "Beta" }]);
+    expect(filterSiblingOptions(options, "BET")).toEqual([{ id: "b", name: "Beta", logoProps: {} }]);
     expect(filterSiblingOptions(options, "zzz")).toEqual([]);
   });
 });

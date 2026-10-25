@@ -22,7 +22,7 @@ import { useProjectRoles, useProjectRow } from "../../auth/index.js";
 import { usePaletteWorkspaceMembers } from "../../../shared/shell/contextual/index.js";
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { pageDetailQueryOptions, pageVersionQueryOptions, pageVersionsQueryOptions } from "../api/detailQueries.js";
-import { usePageRename } from "../api/detailMutations.js";
+import { usePageMark, usePageRename } from "../api/detailMutations.js";
 import { pagesListQueryOptions } from "../api/queries.js";
 import { isPageBodyReady, markPageBodyReady } from "../lib/pageBodyCache.js";
 import {
@@ -43,15 +43,14 @@ import { usePageSyncStatus } from "../lib/pageSync.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
 import { PageDetailPanel } from "./PageDetailPanel.js";
 import { PageDetailHeader } from "./PageDetailHeader.js";
-import { PageDetailTitle } from "./PageDetailTitle.js";
+import { PageCanvasHeader } from "./PageCanvasHeader.js";
+import { PageEditorSurface, PAGE_BODY_LABEL } from "./PageEditorSurface.js";
 import { PageHeadingPreview } from "./PageHeadingPreview.js";
 import { PageNavigationPane } from "./PageNavigationPane.js";
 import { PageVersionOverlay } from "./PageVersionOverlay.js";
 import { PAGE_UNTITLED } from "../lib/pageList.js";
 import { useLivePageDocument } from "../lib/pageDocumentLive.js";
 import { PAGE_CANVAS_MEASURE_PX, pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
-
-export const PAGE_BODY_LABEL = "Page body";
 
 export interface PageDetailScreenProps {
   workspaceSlug: string;
@@ -124,6 +123,7 @@ export function PageDetailScreen({
 
   const syncStatus = usePageSyncStatus(pageId);
   const rename = usePageRename(workspaceSlug, projectId, pageId);
+  const mark = usePageMark(workspaceSlug, projectId, pageId);
 
   // The pane reads the canvas, so headings, counts and assets follow
   // typing; before the canvas paints, the stored body stands in (PAGE-046).
@@ -243,12 +243,6 @@ export function PageDetailScreen({
                 className="frame-renderer mx-auto w-full px-(--space-8) transition-[max-width] duration-(--motion-duration) ease-(--motion-easing)"
                 style={{ maxWidth: paneOpen ? PAGE_CANVAS_MEASURE_PX.wide : PAGE_CANVAS_MEASURE_PX.readable }}
               >
-                <PageDetailTitle
-                  pageId={page.id}
-                  name={page.name}
-                  editable={capabilities.canEdit}
-                  onRename={(next) => rename.mutate(next)}
-                />
                 {capabilities.isShelved || capabilities.isLocked ? (
                   <p className="text-caption mb-(--space-4) text-(--text-muted)">
                     {capabilities.isShelved
@@ -256,15 +250,37 @@ export function PageDetailScreen({
                       : "This page is locked and read-only."}
                   </p>
                 ) : null}
-                <div className="editor-container">
-                  {bodyReady ? (
-                    <RichTextView html={page.description_html} label={PAGE_BODY_LABEL} />
-                  ) : (
-                    <PageBodySkeleton />
-                  )}
-                  {canManage ? <span data-testid="page-detail-manage-mount" hidden aria-hidden="true" /> : null}
-                  <span data-testid="page-detail-action-mount" hidden aria-hidden="true" />
-                </div>
+                {capabilities.canEdit ? (
+                  <PageEditorSurface
+                    pageId={page.id}
+                    name={page.name}
+                    descriptionHtml={page.description_html}
+                    logoProps={page.logo_props as Record<string, unknown>}
+                    onRename={saveName}
+                    onMarkPick={saveMark}
+                    showBar
+                    bodyPending={!bodyReady}
+                  />
+                ) : (
+                  <>
+                    <PageCanvasHeader
+                      title={{ pageId: page.id, name: page.name, editable: false }}
+                      logoProps={page.logo_props as Record<string, unknown>}
+                      editable={false}
+                      titleEmpty={page.name.trim() === ""}
+                      onMarkPick={saveMark}
+                    />
+                    {bodyReady ? (
+                      <div className="editor-container">
+                        <RichTextView html={page.description_html} label={PAGE_BODY_LABEL} />
+                      </div>
+                    ) : (
+                      <PageBodySkeleton />
+                    )}
+                  </>
+                )}
+                {canManage ? <span data-testid="page-detail-manage-mount" hidden aria-hidden="true" /> : null}
+                {bodyReady ? <span data-testid="page-detail-action-mount" hidden aria-hidden="true" /> : null}
               </div>
             </article>
           </div>

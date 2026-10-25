@@ -10,7 +10,12 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { PageDetailTitle, PAGE_TITLE_MAX_LENGTH, PAGE_TITLE_PLACEHOLDER } from "./PageDetailTitle.js";
+import {
+  PageDetailTitle,
+  PAGE_TITLE_MAX_LENGTH,
+  PAGE_TITLE_PLACEHOLDER,
+  PAGE_TITLE_SAVE_DEBOUNCE_MS,
+} from "./PageDetailTitle.js";
 
 function editable(name: string, onRename = vi.fn()): { onRename: ReturnType<typeof vi.fn>; field: HTMLElement } {
   const { container } = render(<PageDetailTitle pageId="page-1" name={name} editable onRename={onRename} />);
@@ -117,8 +122,20 @@ describe("PageDetailTitle editable", () => {
     fireEvent.focus(field);
     const exec = vi.fn();
     Object.defineProperty(document, "execCommand", { value: exec, configurable: true });
+    // Only the room left after "Old" (3 chars) is filled, up to the cap.
     fireEvent.paste(field, { clipboardData: { getData: () => "y".repeat(PAGE_TITLE_MAX_LENGTH + 3) } });
-    expect(exec).toHaveBeenCalledWith("insertText", false, "y".repeat(PAGE_TITLE_MAX_LENGTH));
+    expect(exec).toHaveBeenCalledWith("insertText", false, "y".repeat(PAGE_TITLE_MAX_LENGTH - 3));
+  });
+
+  it("treats a node without text content as an empty paste target", () => {
+    const { field } = editable("Old");
+    field.focus();
+    fireEvent.focus(field);
+    Object.defineProperty(field, "textContent", { configurable: true, get: () => null });
+    const exec = vi.fn();
+    Object.defineProperty(document, "execCommand", { value: exec, configurable: true });
+    fireEvent.paste(field, { clipboardData: { getData: () => "pasted" } });
+    expect(exec).toHaveBeenCalledWith("insertText", false, "pasted");
   });
 
   it("adopts a server-side rename when not focused", () => {
@@ -127,6 +144,74 @@ describe("PageDetailTitle editable", () => {
     expect(field()?.textContent).toBe("Before");
     rerender(<PageDetailTitle pageId="page-1" name="After" editable onRename={vi.fn()} />);
     expect(field()?.textContent).toBe("After");
+  });
+
+  it("saves a keystroke burst once the debounce elapses", async () => {
+    vi.useFakeTimers();
+    try {
+      const { onRename, field } = editable("Old");
+      fireEvent.focus(field);
+      field.textContent = "Debounced";
+      fireEvent.input(field);
+      expect(onRename).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(PAGE_TITLE_SAVE_DEBOUNCE_MS);
+      expect(onRename).toHaveBeenCalledWith("Debounced");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not repeat a debounced save of the same text", () => {
+    vi.useFakeTimers();
+    try {
+      const { onRename, field } = editable("Old");
+      fireEvent.focus(field);
+      field.textContent = "Once";
+      fireEvent.input(field);
+      vi.advanceTimersByTime(PAGE_TITLE_SAVE_DEBOUNCE_MS);
+      fireEvent.input(field);
+      vi.advanceTimersByTime(PAGE_TITLE_SAVE_DEBOUNCE_MS);
+      expect(onRename).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves a focused draft alone when the server name changes", () => {
+    const { rerender } = render(<PageDetailTitle pageId="page-1" name="Before" editable onRename={vi.fn()} />);
+    const field = () => document.querySelector<HTMLElement>('[contenteditable="true"]');
+    const node = field();
+    if (node === null) throw new Error("missing field");
+    node.focus();
+    fireEvent.focus(node);
+    rerender(<PageDetailTitle pageId="page-1" name="Remote rename" editable onRename={vi.fn()} />);
+    expect(field()?.textContent).toBe("Before");
+  });
+
+  it("still refuses overflow when the document offers no selection", () => {
+    const { field } = editable("Old");
+    fireEvent.focus(field);
+    field.textContent = "q".repeat(PAGE_TITLE_MAX_LENGTH + 1);
+    const original = window.getSelection;
+    Object.defineProperty(window, "getSelection", { configurable: true, value: () => null });
+    try {
+      expect(() => fireEvent.input(field)).not.toThrow();
+    } finally {
+      Object.defineProperty(window, "getSelection", { configurable: true, value: original });
+    }
+    expect(field.textContent).toHaveLength(PAGE_TITLE_MAX_LENGTH);
+  });
+
+  it("keeps the caret inside the field after refusing overflow", () => {
+    const { field } = editable("Old");
+    fireEvent.focus(field);
+    field.textContent = "z".repeat(PAGE_TITLE_MAX_LENGTH + 2);
+    fireEvent.input(field);
+    expect(field.textContent).toHaveLength(PAGE_TITLE_MAX_LENGTH);
+    const selection = window.getSelection();
+    expect(selection).not.toBeNull();
+    expect(selection?.rangeCount).toBe(1);
+    expect(selection?.isCollapsed).toBe(true);
   });
 
   it("works without a rename handler", () => {

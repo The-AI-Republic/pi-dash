@@ -145,3 +145,35 @@ describe("PageMarkPicker", () => {
     expect(onDraftChange).toHaveBeenCalledWith({});
   });
 });
+
+describe("PageMarkPicker emoji typed outside the catalogue", () => {
+  it("offers the typed glyph once and does not offer it twice", () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose a page mark" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Emoji" }));
+    // A catalogue hit: the tile is enough and no extra entry is offered.
+    fireEvent.change(screen.getByPlaceholderText("Search or type an emoji"), { target: { value: "🚀" } });
+    expect(screen.queryByRole("button", { name: "Use 🚀" })).not.toBeInTheDocument();
+    // A glyph outside the catalogue is offered as its own entry.
+    fireEvent.change(screen.getByPlaceholderText("Search or type an emoji"), { target: { value: "🫠" } });
+    fireEvent.click(screen.getByRole("button", { name: "Use 🫠" }));
+    expect(draftOf()).toEqual({ in_use: "emoji", emoji: { value: "129760" } });
+  });
+});
+
+describe("PageMarkPicker trigger overrides", () => {
+  it("carries a caller's trigger test id, class and name", () => {
+    render(
+      <PageMarkPicker
+        draft={{}}
+        onDraftChange={vi.fn()}
+        triggerTestId="page-mark-trigger"
+        triggerClassName="size-14"
+        triggerLabel="Add a page mark"
+      />
+    );
+    const trigger = screen.getByTestId("page-mark-trigger");
+    expect(trigger).toHaveAccessibleName("Add a page mark");
+    expect(trigger).toHaveClass("size-14");
+  });
+});

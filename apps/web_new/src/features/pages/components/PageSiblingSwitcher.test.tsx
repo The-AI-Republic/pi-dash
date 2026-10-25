@@ -18,9 +18,16 @@ import {
 } from "./PageSiblingSwitcher.js";
 
 const OPTIONS = [
-  { id: "a", name: "Alpha" },
-  { id: "b", name: "Beta" },
+  { id: "a", name: "Alpha", logoProps: {} },
+  { id: "b", name: "Beta", logoProps: {} },
 ];
+
+/** The visible name of each open option, without its mark glyph. */
+function optionNames(): (string | null)[] {
+  return screen
+    .getAllByRole("option")
+    .map((option) => option.querySelector('[data-testid="page-switcher-option-name"]')?.textContent ?? null);
+}
 
 function trigger(): HTMLElement {
   return screen.getByRole("button", { name: `${PAGE_SWITCHER_LABEL}, current Alpha` });
@@ -33,14 +40,14 @@ describe("PageSiblingSwitcher", () => {
     fireEvent.click(trigger());
     expect(trigger()).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByPlaceholderText(PAGE_SWITCHER_SEARCH)).toBeInTheDocument();
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Alpha", "Beta"]);
+    expect(optionNames()).toEqual(["Alpha", "Beta"]);
   });
 
   it("narrows the options as the search is typed", () => {
     render(<PageSiblingSwitcher currentName="Alpha" options={OPTIONS} onSelect={vi.fn()} />);
     fireEvent.click(trigger());
     fireEvent.change(screen.getByPlaceholderText(PAGE_SWITCHER_SEARCH), { target: { value: "bet" } });
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Beta"]);
+    expect(optionNames()).toEqual(["Beta"]);
     fireEvent.change(screen.getByPlaceholderText(PAGE_SWITCHER_SEARCH), { target: { value: "zzz" } });
     expect(screen.queryAllByRole("option")).toEqual([]);
     expect(screen.getByText(PAGE_SWITCHER_EMPTY)).toBeInTheDocument();

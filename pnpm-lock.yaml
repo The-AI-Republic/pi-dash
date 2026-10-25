@@ -811,6 +811,18 @@ importers:
       '@tiptap/extension-link':
         specifier: ^2.22.3
         version: 2.27.3(@tiptap/core@2.26.3(@tiptap/pm@2.26.1))(@tiptap/pm@2.26.1)
+      '@tiptap/extension-task-item':
+        specifier: ^2.22.3
+        version: 2.26.1(@tiptap/core@2.26.3(@tiptap/pm@2.26.1))(@tiptap/pm@2.26.1)
+      '@tiptap/extension-task-list':
+        specifier: ^2.22.3
+        version: 2.26.1(@tiptap/core@2.26.3(@tiptap/pm@2.26.1))
+      '@tiptap/extension-text-align':
+        specifier: ^2.22.3
+        version: 2.26.1(@tiptap/core@2.26.3(@tiptap/pm@2.26.1))
+      '@tiptap/extension-underline':
+        specifier: ^2.22.3
+        version: 2.26.1(@tiptap/core@2.26.3(@tiptap/pm@2.26.1))
       '@tiptap/pm':
         specifier: ^2.26.1
         version: 2.26.1

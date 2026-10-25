@@ -10,6 +10,7 @@ import { ChevronDown } from "lucide-react";
 import * as React from "react";
 
 import { filterSiblingOptions, type PageSiblingOption } from "../lib/pageDetail.js";
+import { PageMarkGlyph } from "./PageMarkButton.js";
 
 export const PAGE_SWITCHER_LABEL = "Switch page";
 export const PAGE_SWITCHER_SEARCH = "Search";
@@ -17,12 +18,19 @@ export const PAGE_SWITCHER_EMPTY = "No matching pages";
 
 export interface PageSiblingSwitcherProps {
   currentName: string;
+  /** The open page's stored mark, drawn on the trigger (PAGE-027). */
+  currentLogoProps?: Record<string, unknown> | undefined;
   options: readonly PageSiblingOption[];
   /** Navigate to the picked page's canonical address. */
   onSelect: (pageId: string) => void;
 }
 
-export function PageSiblingSwitcher({ currentName, options, onSelect }: PageSiblingSwitcherProps): React.ReactElement {
+export function PageSiblingSwitcher({
+  currentName,
+  currentLogoProps = {},
+  options,
+  onSelect,
+}: PageSiblingSwitcherProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const rootRef = React.useRef<HTMLDivElement>(null);
@@ -66,7 +74,15 @@ export function PageSiblingSwitcher({ currentName, options, onSelect }: PageSibl
         }}
         className="text-body flex max-w-56 min-w-0 cursor-pointer items-center gap-(--space-1) rounded-(--radius-control) px-(--space-1) py-(--space-1) text-(--text) hover:bg-(--subtle)"
       >
-        <span className="truncate">{currentName}</span>
+        <span
+          data-testid="page-switcher-current-mark"
+          className="inline-flex size-4 shrink-0 items-center justify-center"
+        >
+          <PageMarkGlyph logoProps={currentLogoProps} />
+        </span>
+        <span data-testid="page-switcher-current-name" className="truncate">
+          {currentName}
+        </span>
         <ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-(--text-muted)" />
       </button>
       {open ? (
@@ -100,9 +116,17 @@ export function PageSiblingSwitcher({ currentName, options, onSelect }: PageSibl
                       close();
                       onSelect(option.id);
                     }}
-                    className="text-body flex w-full cursor-pointer items-center rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left text-(--text) hover:bg-(--subtle)"
+                    className="text-body flex w-full cursor-pointer items-center gap-(--space-1) rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left text-(--text) hover:bg-(--subtle)"
                   >
-                    <span className="truncate">{option.name}</span>
+                    <span
+                      data-testid="page-switcher-mark"
+                      className="inline-flex size-4 shrink-0 items-center justify-center"
+                    >
+                      <PageMarkGlyph logoProps={option.logoProps} />
+                    </span>
+                    <span data-testid="page-switcher-option-name" className="truncate">
+                      {option.name}
+                    </span>
                   </button>
                 </li>
               ))}

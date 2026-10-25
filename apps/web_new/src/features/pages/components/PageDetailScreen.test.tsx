@@ -47,6 +47,7 @@ interface Harness {
   page: PageDetail;
   pageStatus: number;
   pageCalls: string[];
+  pageWrites: { method: string; body: unknown }[];
   pages: PageRow[];
   pagesStatus: number;
   pagesCalls: number;
@@ -82,6 +83,7 @@ beforeEach(() => {
     },
     pageStatus: 200,
     pageCalls: [],
+    pageWrites: [],
     pages: [],
     pagesStatus: 200,
     pagesCalls: 0,
@@ -168,6 +170,8 @@ beforeEach(() => {
       return jsonResponse(url, harness.pageStatus, { ...harness.page, id: recordRead[1] });
     }
     if (recordRead !== null && init.method === "PATCH") {
+      const body = (init as { body?: string }).body;
+      harness.pageWrites.push({ method: init.method, body: body === undefined ? null : JSON.parse(body) });
       return jsonResponse(url, 200, { id: recordRead[1], name: "Renamed" });
     }
     const collection = new RegExp(`/api/workspaces/acme/projects/[0-9a-f-]+/pages/$`).exec(url);
@@ -289,10 +293,11 @@ describe("PageDetailScreen title and body", () => {
       expect(screen.getByRole("button", { name: /Switch page, current Untitled/ })).toBeInTheDocument()
     );
     fireEvent.click(screen.getByRole("button", { name: /Switch page, current Untitled/ }));
-    expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual([
-      "Second page",
-      "Untitled",
-    ]);
+    const switcherOptions = (await screen.findAllByRole("option")).map(
+      (option) => option.querySelector('[data-testid="page-switcher-option-name"]')?.textContent
+    );
+    expect(switcherOptions).toContain("Second page");
+    expect(switcherOptions).toContain("Untitled");
   });
 
   it("renders the stored body and skeletons a cold document once", async () => {
@@ -365,6 +370,7 @@ describe("PageDetailScreen title and body", () => {
     await screen.findByText("This page is locked and read-only.");
     expect(container.querySelector('[contenteditable="true"]')).toBeNull();
     expect(screen.getByRole("heading", { name: "Launch notes" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Loading page body" })).not.toBeInTheDocument());
   });
 
   it("renders a shelved page read-only", async () => {
@@ -382,6 +388,98 @@ describe("PageDetailScreen title and body", () => {
     );
     await screen.findByText("This page is archived and read-only.");
     expect(container.querySelector('[contenteditable="true"]')).toBeNull();
+  });
+});
+
+describe("PageDetailScreen title, mark and toolbar", () => {
+  it("mounts the sticky bar for an editable page", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(screen.getByRole("toolbar", { name: "Formatting" })).toBeInTheDocument();
+    expect(screen.getByTestId("page-toolbar-bold")).toBeInTheDocument();
+  });
+
+  it("withholds the bar and the mark control from a read-only viewer", async () => {
+    harness.page = record({ is_locked: true });
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <PageDetailScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          pageId={harness.pageId}
+          search={{}}
+          onSearchChange={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    await screen.findByText("This page is locked and read-only.");
+    expect(screen.queryByRole("toolbar", { name: "Formatting" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("page-mark")).toHaveAttribute("data-readonly", "true");
+    expect(screen.queryByRole("button", { name: "Change the page mark" })).not.toBeInTheDocument();
+  });
+
+  it("skeletons a read-only page's body until its document is known", async () => {
+    harness.page = record({ is_locked: true });
+    const frame = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
+    try {
+      render(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <PageDetailScreen
+            workspaceSlug="acme"
+            projectId={PROJECT}
+            pageId={harness.pageId}
+            search={{}}
+            onSearchChange={vi.fn()}
+          />
+        </QueryClientProvider>
+      );
+      await screen.findByText("This page is locked and read-only.");
+      expect(screen.getByRole("status", { name: "Loading page body" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Launch notes" })).toBeInTheDocument();
+    } finally {
+      frame.mockRestore();
+    }
+  });
+
+  it("draws the page mark in the header and the sibling switcher", async () => {
+    harness.page = record({ logo_props: { in_use: "emoji", emoji: { value: "1f680" } } });
+    harness.pages = [
+      makePageRow({
+        id: harness.pageId,
+        name: "Launch notes",
+        logo_props: { in_use: "emoji", emoji: { value: "1f680" } },
+      }),
+      makePageRow({ id: OTHER, name: "Second page", logo_props: { in_use: "emoji", emoji: { value: "1f600" } } }),
+    ];
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(screen.getByTestId("page-mark-glyph")).toHaveTextContent("🚀");
+    await waitFor(() => expect(screen.getByTestId("page-switcher-current-mark")).toHaveTextContent("🚀"));
+    fireEvent.click(screen.getByRole("button", { name: /Switch page, current Launch notes/ }));
+    const marks = await screen.findAllByTestId("page-switcher-mark");
+    // Rows are sorted by name: Launch notes, then Second page.
+    expect(marks.map((mark) => mark.textContent)).toEqual(["🚀", "😀"]);
+  });
+
+  it("keeps the header a hover target for the mark affordance", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    const mark = screen.getByTestId("page-mark");
+    expect(mark).toHaveClass("page-header-container");
+    expect(mark.querySelector('[data-testid="page-mark-affordance"]')?.className).toContain("transition-opacity");
+  });
+
+  it("writes a picked mark through the record endpoint", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    fireEvent.click(screen.getByTestId("page-mark-trigger"));
+    const search = await screen.findByPlaceholderText("Search icons");
+    fireEvent.change(search, { target: { value: "rocket" } });
+    fireEvent.click(screen.getByRole("button", { name: "Rocket launch" }));
+    await waitFor(() => expect(harness.pageWrites).toHaveLength(1));
+    expect(harness.pageWrites[0]?.body).toEqual({
+      logo_props: { in_use: "icon", icon: { name: "rocket_launch", color: "#6366f1" } },
+    });
   });
 });
 

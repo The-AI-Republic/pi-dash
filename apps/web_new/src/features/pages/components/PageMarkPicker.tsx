@@ -52,6 +52,11 @@ export interface PageMarkPickerProps {
   /** Current draft mark; an empty record means none chosen yet. */
   draft: Record<string, unknown>;
   onDraftChange: (draft: Record<string, unknown>) => void;
+  /** Test hook / sizing of the trigger; the create dialog keeps the default. */
+  triggerTestId?: string | undefined;
+  triggerClassName?: string | undefined;
+  /** Accessible name of the trigger; the create dialog keeps the default. */
+  triggerLabel?: string | undefined;
 }
 
 /** The trigger's own face: the draft's glyph, else a neutral page sheet. */
@@ -71,7 +76,13 @@ export function pageMarkColor(draft: Record<string, unknown>): string {
   return mark.kind === "icon" && mark.color !== null ? mark.color : DEFAULT_EMBLEM_ICON_COLOR;
 }
 
-export function PageMarkPicker({ draft, onDraftChange }: PageMarkPickerProps): React.ReactElement {
+export function PageMarkPicker({
+  draft,
+  onDraftChange,
+  triggerTestId = "page-create-mark",
+  triggerClassName = "flex size-9 shrink-0 items-center justify-center rounded-(--radius-control) border border-(--border) bg-(--subtle) hover:bg-(--bg)",
+  triggerLabel,
+}: PageMarkPickerProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const [mode, setMode] = React.useState<MarkMode>("icon");
   const [query, setQuery] = React.useState("");
@@ -105,10 +116,10 @@ export function PageMarkPicker({ draft, onDraftChange }: PageMarkPickerProps): R
       trigger={
         <button
           type="button"
-          aria-label={current.kind === "none" ? "Choose a page mark" : "Change the page mark"}
+          aria-label={triggerLabel ?? (current.kind === "none" ? "Choose a page mark" : "Change the page mark")}
           aria-expanded={open}
-          data-testid="page-create-mark"
-          className="flex size-9 shrink-0 items-center justify-center rounded-(--radius-control) border border-(--border) bg-(--subtle) hover:bg-(--bg)"
+          data-testid={triggerTestId}
+          className={triggerClassName}
         >
           {current.kind === "emoji" ? (
             <span aria-hidden="true">{current.value}</span>

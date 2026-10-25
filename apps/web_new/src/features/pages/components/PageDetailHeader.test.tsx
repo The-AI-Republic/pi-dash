@@ -70,7 +70,7 @@ function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailH
         projectLogo={{}}
         projectIdentifier="WEB"
         page={page}
-        siblings={[{ id: "other", name: "Other page" }]}
+        siblings={[{ id: "other", name: "Other page", logoProps: {} }]}
         syncStatus="lost"
         showStar
         onSelectSibling={onSelectSibling}

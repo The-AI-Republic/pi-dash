@@ -8,8 +8,8 @@ import { pickDefined } from "../lib/props";
 export interface TooltipProps {
   /** Element the hint anchors to. */
   children: React.ReactElement<Record<string, unknown>>;
-  /** Short hint text. */
-  content: string;
+  /** Hint text, or markup when the hint carries a name and a key. */
+  content: React.ReactNode;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
