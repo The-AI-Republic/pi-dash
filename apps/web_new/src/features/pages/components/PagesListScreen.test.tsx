@@ -37,6 +37,7 @@ import {
   makeWorkspaceMember,
 } from "../testing.js";
 import { DEFAULT_PAGE_SORT } from "../lib/pageList.js";
+import { authKeys } from "../../auth/index.js";
 import { pageKeys } from "../api/keys.js";
 import { clearCommands, findCommand } from "../../../shared/commands/index.js";
 import { CREATE_PAGE_COMMAND_ID } from "./PagesCreateEntry.js";
@@ -318,11 +319,38 @@ describe("PagesListScreen", () => {
     await act(async () => {
       await client.refetchQueries({ queryKey: pageKeys.list("acme", PAGES_PROJECT_ID) });
     });
+    // React Query flips the observer to error a tick after the promise
+    // settles; flush it so the assertions see the settled render, not the
+    // pre-refetch one (§2.7, PAGE-020).
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(client.getQueryState(pageKeys.list("acme", PAGES_PROJECT_ID))?.status).toBe("error");
 
     expect(screen.getByRole("link", { name: "Cached page" })).toBeInTheDocument();
     expect(screen.queryByTestId("pages-list-skeleton")).not.toBeInTheDocument();
     expect(screen.queryByTestId("pages-empty-state")).not.toBeInTheDocument();
     expect(harness.pagesCalls).toBe(1);
+  });
+
+  it("keeps the list when the project read fails while its row is cached", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(authKeys.project("acme", PAGES_PROJECT_ID), makeProjectRow());
+    client.setQueryData(pageKeys.list("acme", PAGES_PROJECT_ID), [makePageRow({ name: "Cached page" })]);
+    harness.pages = [makePageRow({ name: "Cached page" })];
+    renderProject(PAGES_PROJECT_ID, client);
+    expect(await screen.findByRole("link", { name: "Cached page" })).toBeInTheDocument();
+
+    harness.projectStatus = 500;
+    await act(async () => {
+      await client.refetchQueries({ queryKey: authKeys.project("acme", PAGES_PROJECT_ID) });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(client.getQueryState(authKeys.project("acme", PAGES_PROJECT_ID))?.status).toBe("error");
+
+    expect(screen.getByRole("link", { name: "Cached page" })).toBeInTheDocument();
+    expect(screen.queryByTestId("pages-empty-state")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pages-list-skeleton")).not.toBeInTheDocument();
   });
 
   it("shows a lightweight refresh indication while a refetch runs over cached rows and clears it after", async () => {
