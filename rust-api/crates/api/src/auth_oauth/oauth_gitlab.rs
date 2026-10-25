@@ -712,9 +712,12 @@ async fn app_callback(
     let allowed: Vec<&str> = allowed_owned.iter().map(String::as_str).collect();
     let callback = read_callback_session(&session);
     let code = query_last(&query, "code");
-    let query_state = query_last(&query, "state").unwrap_or_default();
+    // `request.GET.get("state")` is `None` when the param is absent, and
+    // `None != ""` always mismatches (`views/app/gitlab.py:63-66`): keep
+    // the `Option` so a missing param never equals the `""` default.
+    let query_state = query_last(&query, "state");
 
-    if query_state != callback.state {
+    if query_state.as_deref() != Some(callback.state.as_str()) {
         return Ok(redirect_response(plain_error_location(
             &base,
             callback.next_path.as_deref(),
@@ -817,9 +820,13 @@ async fn space_callback(
 ) -> Result<Response, Denial> {
     let callback = read_callback_session(&session);
     let code = query_last(&query, "code");
-    let query_state = query_last(&query, "state").unwrap_or_default();
+    // Same `None != ""` rule as the app twin (`views/space/gitlab.py:61-65`):
+    // a missing param must not match the `""` session default.
+    let query_state = query_last(&query, "state");
 
-    if query_state == callback.state && !code.as_deref().unwrap_or("").is_empty() {
+    if query_state.as_deref() == Some(callback.state.as_str())
+        && !code.as_deref().unwrap_or("").is_empty()
+    {
         let handle = session
             .as_ref()
             .map(|axum::Extension(handle)| handle.clone());
