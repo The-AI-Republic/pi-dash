@@ -857,6 +857,10 @@ export interface ParityDriver {
   widgetRowNames(widget: string): Promise<string[]>;
   /** Progress text (`<done>/<total> Done`) of the named widget, or null. */
   widgetProgress(widget: string): Promise<string | null>;
+  /** Whether the named widget shows its own Load more control (ISS-238). */
+  widgetLoadMorePresent(widget: string): Promise<boolean>;
+  /** Click the named widget's Load more control; ends after the page settles. */
+  widgetLoadMore(widget: string): Promise<void>;
   /** Group titles inside the named widget (e.g. relation types), or []. */
   widgetGroupNames(widget: string): Promise<string[]>;
   /** Ensure the named widget section is expanded. */
@@ -1223,6 +1227,11 @@ export interface ParityDriver {
   pickerSearchFocused(): Promise<boolean>;
   /** Click the open-picker option whose text contains `text`. */
   pickerPick(text: string): Promise<void>;
+  /**
+   * The reason text a picker option carries beside its label (a server
+   * reason, a default badge), or null when the option is absent or bare.
+   */
+  pickerOptionReason(text: string): Promise<string | null>;
   /** Whether the open-picker option containing `text` is disabled. */
   pickerOptionDisabled(text: string): Promise<boolean>;
   /** Empty-state message in the open picker, or "" when options render. */
@@ -1253,6 +1262,20 @@ export interface ParityDriver {
   datePickerClear(label: string): Promise<void>;
   /** Whether the sidebar property row `label` renders at all. */
   propertyRowPresent(label: string): Promise<boolean>;
+  // --- Waiting-run banner (ISS-239/240). New-app-first: the old UI gains
+  // --- it with PDASHOSS01-299, so these probes are web_new-only.
+  /** Whether the waiting-for-runner banner renders on the detail page. */
+  waitingBannerPresent(): Promise<boolean>;
+  /** Banner sentence naming the runner and the reason, or null when absent. */
+  waitingBannerText(): Promise<string | null>;
+  /** Names of the banner's action controls, in render order. */
+  waitingBannerActions(): Promise<string[]>;
+  /** Whether the banner action named `name` is disabled (or absent). */
+  waitingBannerActionDisabled(name: string): Promise<boolean>;
+  /** Click the banner action named `name`; ends after the request settles. */
+  waitingBannerAction(name: string): Promise<void>;
+  /** In-place API validation message under the property row `label`, or null. */
+  propertyInlineError(label: string): Promise<string | null>;
   // --- Create-issue modal project picker (NEWFRONT-122, ISS-211).
   // --- Observed on the running old app: the modal header carries the
   // --- project picker (a combobox popup with a search box and a listbox
