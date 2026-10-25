@@ -18,6 +18,12 @@
 // dialog provider whose openers every later menu calls. An empty project
 // renders the onboarding state instead of an empty list. The create action
 // is mounted only for admin and member standing, so guests never see it.
+//
+// Slice D adds the peek: the screen takes the `peekModule` key the route
+// validated, hands every row and card a writer that opens it, and mounts
+// the shared peek panel below the header while the key names a module
+// (§5, MOD-019). Closing writes the key away; the screen never decides a
+// panel's own address.
 
 import type { ModuleRow, WorkspaceMember } from "@pidash/api-client";
 import { useQuery } from "@tanstack/react-query";
@@ -45,12 +51,16 @@ import { ModulesFilterMenu } from "./ModulesFilterMenu.js";
 import { ModulesListBody } from "./ModulesListBody.js";
 import { ModulesListHeader } from "./ModulesListHeader.js";
 import { ModulesListSkeleton } from "./ModulesListSkeleton.js";
+import { ModulePeekPanel } from "./ModulePeekPanel.js";
 import { ModulesSearch } from "./ModulesSearch.js";
 import { ModulesSortMenu } from "./ModulesSortMenu.js";
 import { ModulesZeroState } from "./ModulesZeroState.js";
 
-/** The screen's one page slot: header (or nothing) over the body state. */
-function listSection(header: React.ReactNode, body: React.ReactNode): React.ReactElement {
+/**
+ * The screen's one page slot: header (or nothing) over the body state, with
+ * the peek panel mounted beside them once a module is peeked.
+ */
+function listSection(header: React.ReactNode, body: React.ReactNode, peek: React.ReactNode = null): React.ReactElement {
   return (
     <section
       aria-label={MODULES_CRUMB}
@@ -59,6 +69,7 @@ function listSection(header: React.ReactNode, body: React.ReactNode): React.Reac
     >
       {header}
       {body}
+      {peek}
     </section>
   );
 }
@@ -88,6 +99,14 @@ interface ModulesListSettledProps {
   modules: readonly ModuleRow[];
   /** The list read settled empty — onboarding replaces the empty body. */
   empty: boolean;
+  /** The peeked module id from the address; null when no panel is open. */
+  peekModuleId: string | null;
+  /** Write the peek key: an id opens, null closes. */
+  onPeekChange: (moduleId: string | null) => void;
+  /** Archived mode for the rows the body renders (slice G's screen). */
+  archived?: boolean | undefined;
+  /** Per-row quick menu slot, supplied by the host slice. */
+  rowMenu?: ((module: ModuleRow) => React.ReactNode) | undefined;
   children?: React.ReactNode;
 }
 
@@ -109,12 +128,58 @@ function ModulesListSettled({
   loading,
   modules,
   empty,
+  peekModuleId,
+  onPeekChange,
+  archived,
+  rowMenu,
   children,
 }: ModulesListSettledProps): React.ReactElement {
   const dialogs = useModuleDialogs();
   const openCreate = (): void => {
     dialogs?.openCreate();
   };
+  // The trigger toggles: pressing the info control of the module already
+  // open closes the panel, which keeps the control honest when it stays in
+  // view on a narrow screen.
+  const openPeek = (moduleId: string): void => {
+    onPeekChange(moduleId === peekModuleId ? null : moduleId);
+  };
+  // The list already knows the peeked module's name, so the panel's title
+  // is readable while the detail read lands.
+  const peekedName = peekModuleId === null ? undefined : modules.find((module) => module.id === peekModuleId)?.name;
+  const peek =
+    peekModuleId === null || archived === true ? null : (
+      <ModulePeekPanel
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        moduleId={peekModuleId}
+        fallbackName={peekedName}
+        onClose={() => {
+          onPeekChange(null);
+        }}
+      />
+    );
+  const body =
+    children !== undefined ? (
+      children
+    ) : loading ? (
+      <ModulesListSkeleton layout={shownLayout} />
+    ) : empty ? (
+      // Onboarding is for a project that truly has no modules; a failed
+      // read is not proof of that, so it keeps the plain list shell.
+      <ModulesZeroState canCreate={createAllowed} onCreate={openCreate} />
+    ) : (
+      <ModulesListBody
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        layout={shownLayout}
+        modules={modules}
+        peekModuleId={peekModuleId}
+        onOpenPeek={openPeek}
+        archived={archived}
+        {...(rowMenu === undefined ? {} : { rowMenu })}
+      />
+    );
   return listSection(
     <ModulesListHeader
       projectName={projectName}
@@ -130,23 +195,27 @@ function ModulesListSettled({
         <ModulesFilterChips filters={display.filters} members={members} meId={meId} onFiltersChange={onFiltersChange} />
       }
     />,
-    children !== undefined ? (
-      children
-    ) : loading ? (
-      <ModulesListSkeleton layout={shownLayout} />
-    ) : empty ? (
-      // Onboarding is for a project that truly has no modules; a failed
-      // read is not proof of that, so it keeps the plain list shell.
-      <ModulesZeroState canCreate={createAllowed} onCreate={openCreate} />
-    ) : (
-      <ModulesListBody workspaceSlug={workspaceSlug} projectId={projectId} layout={shownLayout} modules={modules} />
-    )
+    body,
+    peek
   );
 }
 
 export interface ModulesListScreenProps {
   workspaceSlug: string;
   projectId: string;
+  /**
+   * The module named by the address's peek key, already validated by the
+   * route; null when nothing is peeked. The screen never reads the address
+   * itself, so an embedding host (slice G's archives screen) can open a
+   * peek without a route of its own.
+   */
+  peekModuleId?: string | null;
+  /** Write the peek key: an id opens, null closes. */
+  onPeekChange?: (moduleId: string | null) => void;
+  /** Render rows in archived mode, where a body click opens the peek. */
+  archived?: boolean;
+  /** Per-row quick menu slot, supplied by the host slice. */
+  rowMenu?: (module: ModuleRow) => React.ReactNode;
   /**
    * The list body. Absent, the screen renders its own rows, cards or
    * timeline rows; slices B and F wrap this set with narrowing and the
@@ -155,7 +224,20 @@ export interface ModulesListScreenProps {
   children?: React.ReactNode;
 }
 
-export function ModulesListScreen({ workspaceSlug, projectId, children }: ModulesListScreenProps): React.ReactElement {
+function ignorePeekChange(): void {
+  // A host that renders rows without a peek address still gets working
+  // info controls; they simply have nowhere to write.
+}
+
+export function ModulesListScreen({
+  workspaceSlug,
+  projectId,
+  peekModuleId = null,
+  onPeekChange = ignorePeekChange,
+  archived,
+  rowMenu,
+  children,
+}: ModulesListScreenProps): React.ReactElement {
   const navigate = useNavigate();
   const narrow = useNarrowViewport();
   const project = useQuery(moduleProjectFactsQueryOptions(getAppClient(), workspaceSlug, projectId));
@@ -254,6 +336,10 @@ export function ModulesListScreen({ workspaceSlug, projectId, children }: Module
           loading={state === "skeleton"}
           modules={modules.data ?? []}
           empty={modules.isSuccess && modules.data.length === 0}
+          peekModuleId={peekModuleId}
+          onPeekChange={onPeekChange}
+          archived={archived}
+          {...(rowMenu === undefined ? {} : { rowMenu })}
         >
           {children}
         </ModulesListSettled>

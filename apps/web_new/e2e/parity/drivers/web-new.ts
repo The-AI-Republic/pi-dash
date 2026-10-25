@@ -19334,23 +19334,30 @@ export class WebNewDriver implements ParityDriver {
     await trigger.click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async modulesTogglePeek(_name: string): Promise<void> {
-    return todo("modulesTogglePeek");
+  async modulesTogglePeek(name: string): Promise<void> {
+    await this.modulesRowPeekTrigger(name).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.modulesPeekVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
   async modulesPeekVisible(): Promise<boolean> {
-    return todo("modulesPeekVisible");
+    return this.isShown(this.modulesPeekPanel());
   }
   async modulesPeekName(): Promise<string | null> {
-    return todo("modulesPeekName");
+    const name = await this.modulesListPeekName();
+    return name;
   }
   async modulesClosePeek(): Promise<void> {
-    return todo("modulesClosePeek");
+    await this.modulesListPeekClose();
   }
   async modulesBoardColumnCount(): Promise<number> {
-    return todo("modulesBoardColumnCount");
+    const grid = this.modulesContent();
+    await grid.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const columns = await grid.evaluate((element) => getComputedStyle(element).gridTemplateColumns);
+    return columns.split(" ").filter((part) => part.trim().length > 0).length;
   }
-  async modulesClickRow(_name: string): Promise<void> {
-    return todo("modulesClickRow");
+  async modulesClickRow(name: string): Promise<void> {
+    // A live row's name is the detail link; an archived row's name opens
+    // its peek instead, so this hook only presses the row's link itself.
+    await this.modulesRowLink(name).click({ timeout: WebNewDriver.WAIT_MS });
   }
   private modulesTimelineSidebarLinks(): Locator {
     return this.page.locator('#gantt-sidebar a[href*="/modules/"]');
@@ -23893,80 +23900,251 @@ export class WebNewDriver implements ParityDriver {
     await this.modulesListWaitSettled();
   }
 
-  async modulesListRowProgress(_name: string): Promise<ModulesListRowProgress> {
-    return todo("modulesListRowProgress");
+  // --- Slice D (NEWFRONT-796, MOD-012/019/020): the row identity, the
+  // --- card identity and the address-driven peek. Every reader is scoped
+  // --- to the wrapper carrying the module name, so a module called
+  // --- "Alpha 2" never answers for "Alpha".
+
+  /** The list row wrapper whose own name span carries exactly `name`. */
+  private modulesRow(name: string): Locator {
+    return this.page
+      .getByTestId("modules-list")
+      .getByTestId("modules-row")
+      .filter({
+        has: this.page.locator('[data-testid="modules-row-name"]', { hasText: WebNewDriver.modulesExactName(name) }),
+      })
+      .first();
   }
 
-  async modulesListRowDetailHref(_name: string): Promise<string> {
-    return todo("modulesListRowDetailHref");
+  /** The board card wrapper whose own name span carries exactly `name`. */
+  private modulesBoardCard(name: string): Locator {
+    return this.page
+      .getByTestId("modules-list")
+      .getByTestId("modules-board-card")
+      .filter({
+        has: this.page.locator('[data-testid="modules-board-card-name"]', {
+          hasText: WebNewDriver.modulesExactName(name),
+        }),
+      })
+      .first();
   }
 
-  async modulesListRowOpenPeek(_name: string): Promise<void> {
-    return todo("modulesListRowOpenPeek");
+  /** A row's or card's name, as an exact-match pattern. */
+  private static modulesExactName(name: string): RegExp {
+    return new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+  }
+
+  private modulesRowLink(name: string): Locator {
+    return this.modulesRow(name).getByTestId("modules-row-link").first();
+  }
+
+  /** The info control of a row or card, whichever layout renders. */
+  private modulesRowPeekTrigger(name: string): Locator {
+    return this.modulesRow(name)
+      .getByTestId("modules-row-peek")
+      .or(this.modulesBoardCard(name).getByTestId("modules-board-card-peek"))
+      .first();
+  }
+
+  /** The peek panel, mounted by the shared peek chrome. */
+  private modulesPeekPanel(): Locator {
+    return this.page.getByTestId("modules-peek").last();
+  }
+
+  /** One card slot by its stable handle. */
+  private modulesCardSlot(name: string, slot: "status" | "dates" | "favorite" | "menu"): Locator {
+    return this.modulesBoardCard(name).getByTestId(`modules-card-${slot}`).first();
+  }
+
+  async modulesListRowProgress(name: string): Promise<ModulesListRowProgress> {
+    const marker = this.modulesRow(name).getByTestId("modules-row-progress").first();
+    await marker.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const kind = await marker.getAttribute("data-progress-kind");
+    if (kind === "check") return { kind: "check" };
+    if (kind === "alert") return { kind: "alert" };
+    if (kind === "percent") {
+      const percent = Number((await marker.getAttribute("data-progress-percent")) ?? "");
+      if (Number.isFinite(percent)) return { kind: "percent", percent };
+    }
+    throw new Error(`[parity] row ${JSON.stringify(name)} has no readable progress marker (${String(kind)}).`);
+  }
+
+  async modulesListRowDetailHref(name: string): Promise<string> {
+    const link = this.modulesRowLink(name);
+    await link.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const href = await link.getAttribute("href");
+    if (href === null || href === "") {
+      throw new Error(`[parity] list row never rendered ${JSON.stringify(name)}.`);
+    }
+    return href;
+  }
+
+  async modulesListRowOpenPeek(name: string): Promise<void> {
+    // The control reveals on hover; hovering the row first is harmless
+    // where it is already visible.
+    await this.modulesRow(name)
+      .hover({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    await this.modulesRowPeekTrigger(name).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.modulesAwaitPeekName(name);
   }
 
   async modulesListPeekName(): Promise<string | null> {
-    return todo("modulesListPeekName");
+    const panel = this.modulesPeekPanel();
+    if (!(await this.isShown(panel))) return null;
+    const heading = panel.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText()) ?? "").trim();
   }
 
   async modulesListPeekClose(): Promise<void> {
-    return todo("modulesListPeekClose");
+    await this.modulesPeekPanel().getByRole("button", { name: "Close preview", exact: true }).first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await expect.poll(() => this.modulesPeekVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
   }
 
-  async modulesListRowMenuVisible(_name: string): Promise<boolean> {
-    return todo("modulesListRowMenuVisible");
+  async modulesListRowMenuVisible(name: string): Promise<boolean> {
+    const slot = this.modulesRow(name).getByTestId("modules-row-menu").first();
+    if ((await slot.count()) === 0) return false;
+    // The slot stays mounted and hides below the medium band, so the
+    // question is what the viewer can see, not what the DOM holds.
+    return slot.isVisible();
   }
 
-  async modulesListArchivedRowClickOpensPeek(_name: string): Promise<void> {
-    return todo("modulesListArchivedRowClickOpensPeek");
+  async modulesListArchivedRowClickOpensPeek(name: string): Promise<void> {
+    const row = this.modulesRow(name);
+    await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const before = new URL(this.page.url()).pathname;
+    // The progress marker is part of the row body, never a control, so a
+    // press there is the body press an archived row turns into a peek.
+    await row.getByTestId("modules-row-progress").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.modulesAwaitPeekName(name);
+    const after = new URL(this.page.url()).pathname;
+    if (after !== before) throw new Error(`[parity] archived row navigated to ${after} instead of peeking.`);
   }
 
-  async modulesListCardNameTruncated(_name: string): Promise<boolean> {
-    return todo("modulesListCardNameTruncated");
+  async modulesListCardNameTruncated(name: string): Promise<boolean> {
+    const title = this.modulesBoardCard(name).getByTestId("modules-board-card-name").first();
+    return title.evaluate((element) => element.scrollWidth > element.clientWidth);
   }
 
-  async modulesListCardNameTooltip(_name: string): Promise<string | null> {
-    return todo("modulesListCardNameTooltip");
+  async modulesListCardNameTooltip(name: string): Promise<string | null> {
+    const title = this.modulesBoardCard(name).getByTestId("modules-board-card-name").first();
+    await title.hover({ timeout: WebNewDriver.WAIT_MS });
+    // The hint renders in a portal once it opens; the tooltip role is the
+    // popup's own, so no text pattern can mistake the card for its hint.
+    const hint = this.page
+      .getByRole("tooltip")
+      .filter({ hasText: WebNewDriver.modulesExactName(name) })
+      .first();
+    const seen = await hint.waitFor({ timeout: 5_000 }).then(
+      () => true,
+      () => false
+    );
+    if (seen) {
+      const text = ((await hint.innerText()) ?? "").trim();
+      if (text === name) return text;
+    }
+    // Every card also carries the full name as the span's native title; a
+    // popup that never paints still leaves the full name readable.
+    return title.getAttribute("title");
   }
 
-  async modulesListCardStatusText(_name: string): Promise<string> {
-    return todo("modulesListCardStatusText");
+  async modulesListCardStatusText(name: string): Promise<string> {
+    const slot = this.modulesCardSlot(name, "status");
+    const control = slot.getByRole("button").first();
+    const target = (await control.count()) > 0 ? control : slot;
+    return ((await target.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
 
-  async modulesListCardOpenPeek(_name: string): Promise<void> {
-    return todo("modulesListCardOpenPeek");
+  async modulesListCardOpenPeek(name: string): Promise<void> {
+    await this.modulesBoardCard(name).getByTestId("modules-board-card-peek").first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.modulesAwaitPeekName(name);
   }
 
-  async modulesListCardIssueCount(_name: string): Promise<string> {
-    return todo("modulesListCardIssueCount");
+  async modulesListCardIssueCount(name: string): Promise<string> {
+    return (
+      (await this.modulesBoardCard(name).getByTestId("modules-board-card-count").first().innerText({
+        timeout: WebNewDriver.WAIT_MS,
+      })) ?? ""
+    ).trim();
   }
 
-  async modulesListCardLeadKind(_name: string): Promise<ModulesListCardLead> {
-    return todo("modulesListCardLeadKind");
+  async modulesListCardLeadKind(name: string): Promise<ModulesListCardLead> {
+    const lead = this.modulesBoardCard(name).getByTestId("modules-card-lead").first();
+    await lead.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const kind = await lead.getAttribute("data-lead-kind");
+    if (kind === "avatar" || kind === "none") return kind;
+    throw new Error(`[parity] card lead slot never rendered for ${JSON.stringify(name)}.`);
   }
 
-  async modulesListCardProgressSegments(_name: string): Promise<ModulesListCardSegments> {
-    return todo("modulesListCardProgressSegments");
+  async modulesListCardProgressSegments(name: string): Promise<ModulesListCardSegments> {
+    const bar = this.modulesBoardCard(name).getByTestId("modules-card-progress").first();
+    return bar.evaluate((element) => {
+      const widths: number[] = [];
+      const colors: string[] = [];
+      for (const slice of [...element.querySelectorAll('[data-testid="modules-card-progress-segment"]')]) {
+        const style = (slice as HTMLElement).style;
+        widths.push(Number.parseFloat(style.width) || 0);
+        colors.push(style.backgroundColor);
+      }
+      return { widths, colors };
+    });
   }
 
-  async modulesListCardDatesVisible(_name: string): Promise<boolean> {
-    return todo("modulesListCardDatesVisible");
+  async modulesListCardDatesVisible(name: string): Promise<boolean> {
+    return this.isShown(this.modulesCardSlot(name, "dates"));
   }
 
-  async modulesListCardFavoriteVisible(_name: string): Promise<boolean> {
-    return todo("modulesListCardFavoriteVisible");
+  async modulesListCardFavoriteVisible(name: string): Promise<boolean> {
+    return this.isShown(this.modulesCardSlot(name, "favorite"));
   }
 
-  async modulesListCardQuickMenuVisible(_name: string): Promise<boolean> {
-    return todo("modulesListCardQuickMenuVisible");
+  async modulesListCardQuickMenuVisible(name: string): Promise<boolean> {
+    return this.isShown(this.modulesCardSlot(name, "menu"));
   }
 
-  async modulesListCardClickBody(_name: string): Promise<void> {
-    return todo("modulesListCardClickBody");
+  async modulesListCardClickBody(name: string): Promise<void> {
+    // The count line is plain card body: it carries no handler of its own,
+    // so a press on it is the body press MOD-020 navigates from.
+    await this.modulesBoardCard(name).getByTestId("modules-board-card-count").first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page.waitForFunction(
+      () =>
+        /\/modules\/[0-9a-fA-F-]{36}\/?$/.test(new URL(window.location.href).pathname) &&
+        !new URL(window.location.href).searchParams.has("peekModule"),
+      null,
+      // 60s: the detail route compiles cold on its first visit.
+      { timeout: 60_000 }
+    );
   }
 
-  async modulesListCardClickControl(_name: string, _control: ModulesListCardControl): Promise<void> {
-    return todo("modulesListCardClickControl");
+  async modulesListCardClickControl(name: string, control: ModulesListCardControl): Promise<void> {
+    const slot = this.modulesCardSlot(name, control);
+    const target = slot.getByRole("button").first();
+    await ((await target.count()) > 0 ? target : slot).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.moduleCardControlStaysPut(control);
+  }
+
+  /** A card control press must never move the address; settle, then check. */
+  private async moduleCardControlStaysPut(control: ModulesListCardControl): Promise<void> {
+    const before = this.page.url();
+    // Let the control's own popover paint, then dismiss whatever opened.
+    await this.page.waitForTimeout(500);
+    const after = this.page.url();
+    if (after !== before) throw new Error(`[parity] card control ${control} navigated to ${after}.`);
+    await this.page.keyboard.press("Escape");
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(300);
+  }
+
+  /** Wait until the peek panel shows `name` for the module it names. */
+  private async modulesAwaitPeekName(name: string): Promise<void> {
+    await expect.poll(() => this.modulesListPeekName(), { timeout: WebNewDriver.WAIT_MS }).toBe(name);
   }
 
   // --- Estimates creation dialog (NEWFRONT-323, EST-008..013). Appended;

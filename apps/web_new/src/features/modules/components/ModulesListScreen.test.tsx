@@ -30,6 +30,23 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   useNavigate: () => routerHarness.navigate,
 }));
 
+// The panel's own suite covers its body; the screen's contract is which
+// module it mounts, with which fallback name, and where the close writes.
+vi.mock("./ModulePeekPanel.js", () => ({
+  ModulePeekPanel: (props: { moduleId: string; fallbackName?: string; archived?: boolean; onClose: () => void }) => (
+    <div
+      data-testid="peek-stub"
+      data-module-id={props.moduleId}
+      data-fallback-name={props.fallbackName ?? ""}
+      data-archived={String(props.archived === true)}
+    >
+      <button type="button" onClick={props.onClose}>
+        Close stub
+      </button>
+    </div>
+  ),
+}));
+
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useNarrowViewport: () => viewportHarness.narrow,
@@ -203,10 +220,13 @@ afterEach(() => {
   document.title = "";
 });
 
-function renderScreen(children?: React.ReactNode): ReturnType<typeof render> {
+function renderScreen(
+  children?: React.ReactNode,
+  props: Partial<React.ComponentProps<typeof ModulesListScreen>> = {}
+): ReturnType<typeof render> {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <ModulesListScreen workspaceSlug="acme" projectId={MODULES_PROJECT_ID}>
+      <ModulesListScreen workspaceSlug="acme" projectId={MODULES_PROJECT_ID} {...props}>
         {children}
       </ModulesListScreen>
     </QueryClientProvider>
@@ -230,6 +250,16 @@ describe("ModulesListScreen", () => {
       "href",
       `/acme/projects/${MODULES_PROJECT_ID}/modules/${MODULES_MODULE_ID}`
     );
+  });
+
+  it("hands the rows their host menu slot, and only when a host supplies one", async () => {
+    const { unmount } = renderScreen();
+    expect(await screen.findByTestId("modules-row")).toBeInTheDocument();
+    expect(screen.queryByTestId("modules-row-menu")).not.toBeInTheDocument();
+    unmount();
+    renderScreen(undefined, { rowMenu: (module) => <button type="button">{`Menu ${module.name}`}</button> });
+    const slot = await screen.findByTestId("modules-row-menu");
+    expect(within(slot).getByRole("button", { name: "Menu Delivery" })).toBeInTheDocument();
   });
 
   it("gates the screen with an admin shortcut and never reads the list", async () => {
@@ -559,5 +589,56 @@ describe("ModulesListScreen", () => {
         [...lead.querySelectorAll('[role="checkbox"]')].map((node) => node.getAttribute("aria-label"))
       ).not.toContain("You");
     });
+  });
+
+  it("opens the peek through the address writer and mounts the panel", async () => {
+    const onPeekChange = vi.fn();
+    renderScreen(undefined, { peekModuleId: null, onPeekChange });
+    await screen.findByTestId("modules-list");
+    expect(screen.queryByTestId("modules-peek")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("modules-row-peek"));
+    expect(onPeekChange).toHaveBeenCalledWith(MODULES_MODULE_ID);
+  });
+
+  it("closes the peek already open from the same control", async () => {
+    const onPeekChange = vi.fn();
+    renderScreen(undefined, { peekModuleId: MODULES_MODULE_ID, onPeekChange });
+    await screen.findByTestId("modules-list");
+    fireEvent.click(screen.getByTestId("modules-row-peek"));
+    expect(onPeekChange).toHaveBeenCalledWith(null);
+  });
+
+  it("mounts the peek panel for the module the address names", async () => {
+    renderScreen(undefined, { peekModuleId: MODULES_MODULE_ID, onPeekChange: vi.fn() });
+    await screen.findByTestId("modules-list");
+    const panel = await screen.findByTestId("peek-stub");
+    expect(panel).toHaveAttribute("data-module-id", MODULES_MODULE_ID);
+    expect(panel).toHaveAttribute("data-fallback-name", "Delivery");
+    expect(panel).toHaveAttribute("data-archived", "false");
+  });
+
+  it("closes the panel through the address writer", async () => {
+    const onPeekChange = vi.fn();
+    renderScreen(undefined, { peekModuleId: MODULES_MODULE_ID, onPeekChange });
+    await screen.findByTestId("modules-list");
+    fireEvent.click(screen.getByRole("button", { name: "Close stub" }));
+    expect(onPeekChange).toHaveBeenCalledWith(null);
+  });
+
+  it("never mounts the panel in archived mode, which opens the archived peek itself", async () => {
+    renderScreen(undefined, { peekModuleId: MODULES_MODULE_ID, onPeekChange: vi.fn(), archived: true });
+    await screen.findByTestId("modules-list");
+    expect(screen.queryByTestId("modules-peek")).not.toBeInTheDocument();
+    expect(screen.getByTestId("modules-row")).toHaveAttribute("data-module-archived", "true");
+  });
+
+  it("gives the rows a working info control even when no address writer is supplied", async () => {
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    // The control swallows its press but has nowhere to write, so the
+    // panel stays shut and the row is still on the list.
+    expect(fireEvent.click(screen.getByTestId("modules-row-peek"))).toBe(false);
+    expect(screen.queryByTestId("peek-stub")).not.toBeInTheDocument();
+    expect(screen.getByTestId("modules-row")).toBeInTheDocument();
   });
 });

@@ -23,7 +23,13 @@ export {
   moduleViewEnabled,
 } from "./api/projectFacts.js";
 export { modulesListQueryOptions } from "./api/queries.js";
-export { ModuleBoardCard, type ModuleBoardCardProps } from "./components/ModuleBoardCard.js";
+export { ModuleBoardCard, type ModuleCardLead, type ModuleBoardCardProps } from "./components/ModuleBoardCard.js";
+export { ModulePeekPanel, modulePeekSummary, type ModulePeekPanelProps } from "./components/ModulePeekPanel.js";
+export {
+  ModuleSegmentedBar,
+  moduleSegmentSummary,
+  type ModuleSegmentedBarProps,
+} from "./components/ModuleSegmentedBar.js";
 export { ModuleFeatureSettings, type ModuleFeatureSettingsProps } from "./components/ModuleFeatureSettings.js";
 export {
   ModuleCreateAction,
@@ -289,6 +295,23 @@ export {
   type ModuleListDisplayHandle,
   type ModuleListDisplayRecord,
 } from "./lib/moduleListDisplayStore.js";
+export {
+  MODULE_SEGMENT_COLORS,
+  MODULE_SEGMENT_GROUPS,
+  MODULE_SEGMENT_LABELS,
+  moduleLeadSlot,
+  modulePercentFloor,
+  moduleProgressMarker,
+  moduleProgressSegments,
+  moduleWorkItemCountText,
+  type ModuleLeadSlot,
+  type ModuleProgressMarker,
+  type ModuleProgressSegment,
+  type ModuleStateSegmentGroup,
+} from "./lib/moduleIdentity.js";
+export { parseModulesListSearch, type ModulesListSearch } from "./lib/moduleListSearch.js";
+export { moduleBoardGridClass, modulePeekFromSearch, withModulePeek } from "./lib/modulePeek.js";
+export { modulePressHitControl } from "./lib/modulePress.js";
 export {
   compareModuleNames,
   MODULES_CRUMB,

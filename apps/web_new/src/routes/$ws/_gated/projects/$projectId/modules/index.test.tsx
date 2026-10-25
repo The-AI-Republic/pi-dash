@@ -50,6 +50,8 @@ describe("modules tab route", () => {
       throw new Error(`unexpected request: ${url}`);
     }) as never);
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme", projectId: MODULES_PROJECT_ID } as never);
+    // The peek key is absent here; index.search.test.tsx owns its plumbing.
+    vi.spyOn(Route, "useSearch").mockReturnValue({} as never);
     const Component = Route.options.component;
     if (!Component) throw new Error("missing component");
     render(
