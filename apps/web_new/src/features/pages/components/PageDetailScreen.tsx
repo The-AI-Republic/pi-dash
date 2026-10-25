@@ -132,6 +132,9 @@ export function PageDetailScreen({
     },
     [mark]
   );
+  // The rename path hands the title's committed value straight to the
+  // mutation; `mutate` is stable, so the header does not re-render for it.
+  const saveName = rename.mutate;
 
   // The pane reads the canvas, so headings, counts and assets follow
   // typing; before the canvas paints, the stored body stands in (PAGE-046).

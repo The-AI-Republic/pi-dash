@@ -317,8 +317,10 @@ describe("PageDetailScreen title and body", () => {
     field.textContent = "Renamed";
     fireEvent.input(field);
     fireEvent.blur(field);
-    await waitFor(() => expect(document.title).toBe("Launch notes"));
+    await waitFor(() => expect(harness.pageWrites).toEqual([{ method: "PATCH", body: { name: "Renamed" } }]));
+    await waitFor(() => expect(document.title).toBe("Renamed"));
     expect(field.textContent).toBe("Renamed");
+    expect(screen.queryByTestId("page-title-count")).not.toBeInTheDocument();
   });
 
   it("renders an owned open page as editable", async () => {
