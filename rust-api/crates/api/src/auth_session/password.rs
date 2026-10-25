@@ -982,17 +982,20 @@ fn user_agent_of(headers: &HeaderMap) -> String {
 async fn password_row(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
-) -> Result<Option<(String, bool)>, sqlx::Error> {
+) -> Result<Option<(String, bool, bool)>, sqlx::Error> {
     use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT password, is_password_autoset FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
+        "SELECT password, is_password_autoset, token_updated_at FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
     row.map(|row| {
         Ok::<_, sqlx::Error>((
             row.try_get("password")?,
             row.try_get("is_password_autoset")?,
+            row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("token_updated_at")?
+                .is_some(),
         ))
     })
     .transpose()
@@ -1063,7 +1066,7 @@ async fn change_password(
         Ok(Some(row)) => row,
         _ => return server_error(),
     };
-    let (stored, is_autoset) = row;
+    let (stored, is_autoset, _) = row;
     let old_matches = match &old {
         Field::Text(candidate) => {
             match pidash_auth::password::verify_password(candidate, &stored) {
@@ -1097,14 +1100,9 @@ async fn change_password(
     );
     // `set_password` + `is_password_autoset = False` + `save()`; the
     // `user_logged_in` signal bumps `last_login` (`update_last_login`).
-    if sqlx::query(
-        "UPDATE users SET password = $1, is_password_autoset = false, last_login = now() WHERE id = $2",
-    )
-    .bind(&encoded)
-    .bind(actor.id)
-    .execute(&pool)
-    .await
-    .is_err()
+    if crate::auth_session::email::write_password_with_save_effects(&pool, actor.id, &encoded, true)
+        .await
+        .is_err()
     {
         return server_error();
     }
@@ -1193,7 +1191,7 @@ async fn set_password(
         Ok(Some(row)) => row,
         _ => return server_error(),
     };
-    let (_, is_autoset) = row;
+    let (_, is_autoset, token_set) = row;
     let password_weak = password_text
         .as_deref()
         .map(pidash_services::auth_session::password::password_is_weak)
@@ -1222,24 +1220,32 @@ async fn set_password(
         &salt,
         pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
-    if sqlx::query(
-        "UPDATE users SET password = $1, is_password_autoset = false, last_login = now() WHERE id = $2",
-    )
-    .bind(&encoded)
-    .bind(actor.id)
-    .execute(&pool)
-    .await
-    .is_err()
+    // `set_password` + `is_password_autoset = False` + `save()`; the
+    // `user_logged_in` signal bumps `last_login` (`update_last_login`).
+    if crate::auth_session::email::write_password_with_save_effects(&pool, actor.id, &encoded, true)
+        .await
+        .is_err()
     {
         return server_error();
     }
     // `invalidate_cache("/api/users/me/")` deletes a key no reader ever
     // sets (`cache_response` never wraps a users/me view), so there is no
     // cache I/O to port — the observable behavior is identical.
-    let snapshot = match user_snapshot(&pool, actor.id).await {
+    let mut snapshot = match user_snapshot(&pool, actor.id).await {
         Ok(Some(snapshot)) => snapshot,
         _ => return server_error(),
     };
+    // `user_login` fires `update_last_login`, whose
+    // `save(update_fields=["last_login"])` runs the overridden `save()`
+    // body in memory: a second token rotation that is never persisted,
+    // but `UserSerializer(user)` reads the in-memory user — so the body
+    // shows a phantom token/timestamp (`body.token != row.token` on
+    // Django; phantom only when a token was already in use).
+    if token_set {
+        let now = chrono::Utc::now();
+        snapshot.token = crate::auth_session::email::fresh_user_token();
+        snapshot.token_updated_at = Some((now.timestamp(), now.timestamp_subsec_micros()));
+    }
     let pairs = pw::user_serializer_pairs(&snapshot);
     let body = crate::auth_session::json_error_string(&pairs);
     let now = now_unix();
@@ -1680,10 +1686,7 @@ async fn reset_password(
         &salt,
         pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
-    if sqlx::query("UPDATE users SET password = $1, is_password_autoset = false WHERE id = $2")
-        .bind(&encoded)
-        .bind(user_id)
-        .execute(&pool)
+    if crate::auth_session::email::write_password_with_save_effects(&pool, user_id, &encoded, false)
         .await
         .is_err()
     {
