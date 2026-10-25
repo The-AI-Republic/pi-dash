@@ -10,7 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Transport } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import type { MergedPromptSection } from "../lib/sections.js";
@@ -59,9 +59,10 @@ describe("SectionEditor with the real API client", () => {
     createAppClient("https://api.test", transport);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
 
+    const onClose = vi.fn();
     render(
       <QueryClientProvider client={queryClient}>
-        <SectionEditor workspaceSlug={SLUG} section={SECTION} scope="user" onClose={() => undefined} />
+        <SectionEditor workspaceSlug={SLUG} section={SECTION} scope="user" onClose={onClose} />
       </QueryClientProvider>
     );
     fireEvent.change(screen.getByLabelText("Prompt section text"), { target: { value: "never persisted" } });
@@ -72,5 +73,6 @@ describe("SectionEditor with the real API client", () => {
     );
     expect(screen.getByLabelText("Prompt section text")).toHaveValue("never persisted");
     expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
