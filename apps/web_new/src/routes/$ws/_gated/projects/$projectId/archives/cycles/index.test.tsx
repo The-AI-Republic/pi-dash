@@ -138,6 +138,12 @@ describe("archived cycles tab route", () => {
     expect(await screen.findByTestId("archived-cycle-preview")).toBeInTheDocument();
   });
 
+  it("awaits the screen chunk before the route commits", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (typeof beforeLoad !== "function") throw new Error("archived cycles tab has no chunk prefetch");
+    await expect(beforeLoad({} as never)).resolves.toBeUndefined();
+  });
+
   it("validates the peek key and drops anything invalid", () => {
     const validate = Route.options.validateSearch;
     if (typeof validate !== "function") throw new Error("archived cycles tab has no search validation");
