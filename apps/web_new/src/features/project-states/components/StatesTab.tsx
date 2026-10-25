@@ -16,7 +16,7 @@ import * as React from "react";
 
 import type { State } from "@pidash/api-client";
 import { useProjectRow } from "../../auth/index.js";
-import { useProjectSettings } from "../../project-settings/index.js";
+import { useProjectSettings } from "../../project-settings/components/ProjectSettingsLayout.js";
 import {
   useCreateState,
   useDeleteState,

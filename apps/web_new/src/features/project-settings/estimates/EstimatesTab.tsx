@@ -9,7 +9,7 @@
 import * as React from "react";
 
 import { useDocumentHead } from "../../../shared/shell/document.js";
-import { EstimatesScreen } from "../../estimates/index.js";
+import { EstimatesScreen } from "../../estimates/EstimatesScreen.js";
 import { useProjectSettings } from "../components/ProjectSettingsLayout.js";
 import { isAdminStanding } from "../tabs.js";
 

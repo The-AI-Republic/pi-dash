@@ -16,7 +16,9 @@ import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { loadRichFilterBuilder, prefsQueryOptions, writeEntityPrefs, type IssuesEntity } from "../../issues/index.js";
+import { loadRichFilterBuilder } from "../../issues/filters/rich/loader.js";
+import { writeEntityPrefs, type IssuesEntity } from "../../issues/prefs/entities.js";
+import { prefsQueryOptions } from "../../issues/prefs/prefsQuery.js";
 import { notifyError } from "../../../shared/shell/toaster.js";
 import { toggleBreakdownFilter, type BreakdownDimension } from "../lib/cycleBreakdownFilter.js";
 import { cycleDetailPath } from "../lib/cycleScreen.js";
