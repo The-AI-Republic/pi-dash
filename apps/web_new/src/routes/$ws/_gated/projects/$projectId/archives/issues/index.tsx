@@ -14,7 +14,7 @@ import { ArchivesShell } from "../../../../../../../features/archives/components
 import { archivesRouteTitle } from "../../../../../../../features/archives/tabs.js";
 import { useProjectRow } from "../../../../../../../features/auth/queries.js";
 import { ArchivedIssuesScreen } from "../../../../../../../features/issues/contexts/ArchivedIssuesScreen.js";
-import { useProjectScopeReset } from "../../../../../../../features/issues/contexts/useProjectScopeReset.js";
+import { usePeekResetOnProjectChange } from "../../../../../../../features/issues/contexts/useProjectScopeReset.js";
 import { parseIssueSearch } from "../../../../../../../features/issues/filters/search.js";
 import { useDocumentHead } from "../../../../../../../shared/shell/document.js";
 
@@ -23,7 +23,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/archives/i
   component: ArchivedIssuesTab,
 });
 
-function ArchivedIssuesTab(): React.ReactElement {
+export function ArchivedIssuesTab(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   const search = Route.useSearch();
   const navigate = useNavigate();
@@ -49,18 +49,7 @@ function ArchivedIssuesTab(): React.ReactElement {
   // project switch re-mounts the body and drops any selection carried
   // over from the previous project's address (spec §2.2/§2.5).
   const scope = `${ws}/${projectId}`;
-  useProjectScopeReset(scope, () => {
-    if (
-      search.peekIssueId === undefined &&
-      search.peekProjectId === undefined &&
-      search.peekNestingLevel === undefined
-    ) {
-      return;
-    }
-    const next = { ...search };
-    delete next.peekIssueId;
-    delete next.peekProjectId;
-    delete next.peekNestingLevel;
+  usePeekResetOnProjectChange(scope, search, (next) => {
     void navigate({ to: ".", search: next, replace: true } as never);
   });
   return (

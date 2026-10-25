@@ -136,6 +136,7 @@ function renderScreen(
     display?: Record<string, unknown>;
     page?: unknown;
     failList?: boolean;
+    estimate?: Record<string, unknown> | null;
   } = {}
 ) {
   const projects = options.projects ?? [project()];
@@ -152,7 +153,10 @@ function renderScreen(
   }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   queryClient.setQueryData(projectsQueryOptions(apiClient, SLUG).queryKey, projects);
-  queryClient.setQueryData(projectDetailsQueryOptions(apiClient, SLUG).queryKey, []);
+  queryClient.setQueryData(
+    projectDetailsQueryOptions(apiClient, SLUG).queryKey,
+    options.estimate === undefined ? [] : [{ ...project(), estimate: options.estimate } as never]
+  );
   queryClient.setQueryData(
     archivedPageQueryOptions(apiClient, SLUG, PROJECT, {
       expression: (options.stored ?? {}) as never,
@@ -334,6 +338,16 @@ describe("ArchivedIssuesScreen", () => {
     );
     await user.click(screen.getByRole("button", { name: "close archived peek" }));
     expect(changed).toEqual([null]);
+  });
+
+  it("mounts the peek with no row when the selection is not on the first page", async () => {
+    renderScreen({ rows: 0, peekIssueId: "423e4567-e89b-12d3-a456-426614174003", onPeekChange: () => undefined });
+    expect(await screen.findByTestId("archived-peek")).toHaveAttribute("data-cycle", "");
+  });
+
+  it("reads the estimate system for a project that has one", async () => {
+    renderScreen({ rows: 1, estimate: { id: "623e4567-e89b-12d3-a456-426614174005" } });
+    expect(await screen.findByText("Old login form")).toBeInTheDocument();
   });
 
   it("mounts no peek when the address carries no selection", async () => {

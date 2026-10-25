@@ -13,7 +13,7 @@ import {
 } from "@tanstack/react-router";
 import type { ProjectDetail } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../../../../core/api/client.js";
 import { authKeys } from "../../../../../../../features/auth/index.js";
@@ -100,6 +100,10 @@ function renderTab(seedRow: boolean) {
   return router;
 }
 
+beforeEach(() => {
+  archiveNavigate.fn.mockClear();
+});
+
 afterEach(() => {
   resetAppClient();
   vi.restoreAllMocks();
@@ -159,5 +163,17 @@ describe("archived work-items tab peek address", () => {
       search: { peekIssueId: "423e4567-e89b-12d3-a456-426614174003", layout: "compact" },
       replace: true,
     });
+  });
+
+  it("parses the address search into the issue-search shape", () => {
+    const validate = Route.options.validateSearch as (search: Record<string, unknown>) => Record<string, unknown>;
+    expect(validate({ peekIssueId: UUID, layout: "compact" })).toMatchObject({ peekIssueId: UUID });
+  });
+
+  it("does not touch the address for a plain first mount", async () => {
+    vi.spyOn(Route, "useSearch").mockReturnValue({ layout: "compact" } as never);
+    renderTab(true);
+    await screen.findByTestId("archived-screen");
+    expect(archiveNavigate.fn).not.toHaveBeenCalled();
   });
 });

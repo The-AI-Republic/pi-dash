@@ -42,6 +42,9 @@ import {
 /** The archived list always offers the list layout. */
 const ARCHIVED_LAYOUTS = ["list"] as const;
 
+/** Read-only sections carry no add or collapse behavior. */
+const NOOP = (): void => undefined;
+
 export interface ArchivedIssuesScreenProps {
   workspaceSlug: string;
   projectId: string;
@@ -241,11 +244,11 @@ export function ArchivedIssuesScreen({
                     section={section}
                     dimension={display.groupBy}
                     collapsed={false}
-                    onToggle={() => undefined}
+                    onToggle={NOOP}
                     canAdd={false}
                     menu={false}
-                    onCreate={() => undefined}
-                    onAddExisting={() => undefined}
+                    onCreate={NOOP}
+                    onAddExisting={NOOP}
                   />
                   {section.rows.map((issue) => renderRow(issue))}
                   {pages.sectionMore(section) ? (
