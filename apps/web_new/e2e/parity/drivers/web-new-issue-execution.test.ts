@@ -177,6 +177,32 @@ describe("sub-work-items Load more (ISS-238)", () => {
   });
 });
 
+describe("sub-work-items Load more fetching state (ISS-238)", () => {
+  it("reads a disabled control as mid-fetch", async () => {
+    const control = locator({ count: async () => 1, isDisabled: async () => true });
+    const page = pageOf({ locator: () => locator({ locator: () => control }) });
+    await expect(new WebNewDriver(page).widgetLoadMoreFetching("Sub-work items")).resolves.toBe(true);
+  });
+
+  it("reads a live spinner inside the control as mid-fetch", async () => {
+    const control = locator({
+      count: async () => 1,
+      isDisabled: async () => false,
+      getByRole: (role: string) => locator({ count: async () => (role === "status" ? 1 : 0) }),
+    });
+    const page = pageOf({ locator: () => locator({ locator: () => control }) });
+    await expect(new WebNewDriver(page).widgetLoadMoreFetching("Sub-work items")).resolves.toBe(true);
+  });
+
+  it("reads a settled control and a missing control as idle", async () => {
+    const settled = locator({ count: async () => 1, getByRole: () => locator({ count: async () => 0 }) });
+    const page = pageOf({ locator: () => locator({ locator: () => settled }) });
+    await expect(new WebNewDriver(page).widgetLoadMoreFetching("Sub-work items")).resolves.toBe(false);
+    const absent = pageOf({ locator: () => locator({ count: async () => 0 }) });
+    await expect(new WebNewDriver(absent).widgetLoadMoreFetching("Sub-work items")).resolves.toBe(false);
+  });
+});
+
 describe("waiting-for-runner banner (ISS-239/240)", () => {
   const bannerTable = (banner: StubLocator) => ({
     "role:region:Waiting for runner": () => banner,
@@ -598,6 +624,33 @@ describe("in-place save error (ISS-242)", () => {
       getByRole: () => locator({ getByRole: () => locator({ innerText: async () => null as unknown as string }) }),
     });
     await expect(new WebNewDriver(page).propertyInlineError("Runs on")).resolves.toBeNull();
+  });
+});
+
+describe("property note (ISS-241)", () => {
+  it("reads the advisory paragraph under the row and collapses its whitespace", async () => {
+    const row = locator({
+      locator: () =>
+        locator({ count: async () => 1, innerText: async () => "  nf907-busy runs one issue   at a time. " }),
+    });
+    const page = pageOf({ getByRole: () => row });
+    await expect(new WebNewDriver(page).propertyNote("Runs on")).resolves.toBe(
+      "nf907-busy runs one issue at a time."
+    );
+  });
+
+  it("reads a missing row, a missing note and a blank note as null", async () => {
+    await expect(
+      new WebNewDriver(pageOf({ getByRole: () => locator({ count: async () => 0 }) })).propertyNote("Runs on")
+    ).resolves.toBeNull();
+    const noNote = pageOf({ getByRole: () => locator({ locator: () => locator({ count: async () => 0 }) }) });
+    await expect(new WebNewDriver(noNote).propertyNote("Runs on")).resolves.toBeNull();
+    const blank = pageOf({ getByRole: () => locator({ locator: () => locator({ innerText: async () => "  " }) }) });
+    await expect(new WebNewDriver(blank).propertyNote("Runs on")).resolves.toBeNull();
+    const unread = pageOf({
+      getByRole: () => locator({ locator: () => locator({ innerText: async () => null as unknown as string }) }),
+    });
+    await expect(new WebNewDriver(unread).propertyNote("Runs on")).resolves.toBeNull();
   });
 });
 

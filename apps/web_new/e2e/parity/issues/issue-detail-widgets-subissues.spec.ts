@@ -306,8 +306,17 @@ test(
         expect(viewed[0]).toContain("per_page=50");
         expect(viewed[0]).not.toContain("cursor=");
       });
-      await test.step("Load more appends the next cursor page", async () => {
-        await driver.widgetLoadMore("Sub-work items");
+      await test.step("Load more shows its fetching state, then appends the next cursor page", async () => {
+        // The control disables and swaps in its spinner while the next
+        // page is in flight, so the read has to land during the request.
+        const loading = driver.widgetLoadMore("Sub-work items");
+        try {
+          await expect
+            .poll(() => driver.widgetLoadMoreFetching("Sub-work items"), { timeout: 5_000 })
+            .toBe(true);
+        } finally {
+          await loading;
+        }
         await expect
           .poll(async () => (await driver.widgetRowNames("Sub-work items")).length, { timeout: 30_000 })
           .toBe(54);

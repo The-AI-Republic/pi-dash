@@ -250,11 +250,9 @@ test(
         await driver.pickerPick(busy.name);
         await expect.poll(() => driver.propertyValueText("Runs on"), { timeout: 30_000 }).toContain(busy.name);
         expect(await driver.propertyInlineError("Runs on")).toBeNull();
-        const note = driver.page.getByText(new RegExp(`${busy.name} runs one issue at a time`)).first();
-        await expect(note).toBeVisible({ timeout: 15_000 });
-        expect(await note.innerText()).toBe(
-          `${busy.name} runs one issue at a time. This issue will wait behind 2 others.`
-        );
+        await expect
+          .poll(() => driver.propertyNote("Runs on"), { timeout: 15_000 })
+          .toBe(`${busy.name} runs one issue at a time. This issue will wait behind 2 others.`);
       });
 
       await test.step("the trigger names the runner and its pod after a reload", async () => {

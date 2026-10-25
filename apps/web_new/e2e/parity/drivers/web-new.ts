@@ -3449,6 +3449,18 @@ export class WebNewDriver implements ParityDriver {
       .poll(async () => ((await control.innerText().catch(() => "")) ?? "").trim(), { timeout: WebNewDriver.WAIT_MS })
       .not.toBe("Loading more…");
   }
+  /**
+   * Whether the section's Load more control is mid-fetch: the control
+   * disables itself and swaps its label for a spinner labelled
+   * "Loading more sub-work items" while the next cursor page lands.
+   */
+  async widgetLoadMoreFetching(widget: string): Promise<boolean> {
+    const control = this.widgetLoadMoreControl(widget);
+    if ((await control.count()) === 0) return false;
+    const first = control.first();
+    if (await first.isDisabled()) return true;
+    return (await first.getByRole("status").count()) > 0;
+  }
   async widgetHeaderControlCount(_widget: string): Promise<number> {
     return todo("widgetHeaderControlCount");
   }
@@ -4469,6 +4481,21 @@ export class WebNewDriver implements ParityDriver {
     const alert = this.propertyRow(label).getByRole("alert").first();
     if ((await alert.count()) === 0) return null;
     const text = ((await alert.innerText()) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  /**
+   * The advisory note under a property row's control. The pod picker
+   * prints its wait note as a paragraph between the combobox and the
+   * error alert; the row's value container owns it.
+   */
+  async propertyNote(label: string): Promise<string | null> {
+    const row = this.propertyRow(label);
+    if ((await row.count()) === 0) return null;
+    // The error alert is a paragraph too; the note is the one that is not.
+    const note = row.first().locator('p:not([role="alert"])').first();
+    if ((await note.count()) === 0) return null;
+    const text = ((await note.innerText()) ?? "").trim().replace(/\s+/g, " ");
     return text === "" ? null : text;
   }
 

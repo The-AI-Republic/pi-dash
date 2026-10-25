@@ -152,6 +152,8 @@ describe("new-app-first probes refuse on the old app", () => {
     ["waitingBannerAction", () => driver.waitingBannerAction("Cancel run")],
     ["propertyInlineError", () => driver.propertyInlineError("Runs on")],
     ["pickerOptionReason", () => driver.pickerOptionReason("nf907-online")],
+    ["propertyNote", () => driver.propertyNote("Runs on")],
+    ["widgetLoadMoreFetching", () => driver.widgetLoadMoreFetching("Sub-work items")],
   ])("%s names PDASHOSS01-299", async (_name, read) => {
     await expect(read()).rejects.toThrow("PDASHOSS01-299");
   });

@@ -861,6 +861,8 @@ export interface ParityDriver {
   widgetLoadMorePresent(widget: string): Promise<boolean>;
   /** Click the named widget's Load more control; ends after the page settles. */
   widgetLoadMore(widget: string): Promise<void>;
+  /** Whether the named widget's Load more control is mid-fetch (ISS-238). */
+  widgetLoadMoreFetching(widget: string): Promise<boolean>;
   /** Group titles inside the named widget (e.g. relation types), or []. */
   widgetGroupNames(widget: string): Promise<string[]>;
   /** Ensure the named widget section is expanded. */
@@ -1276,6 +1278,8 @@ export interface ParityDriver {
   waitingBannerAction(name: string): Promise<void>;
   /** In-place API validation message under the property row `label`, or null. */
   propertyInlineError(label: string): Promise<string | null>;
+  /** Advisory note a property row carries (a busy-runner wait note), or null. */
+  propertyNote(label: string): Promise<string | null>;
   // --- Create-issue modal project picker (NEWFRONT-122, ISS-211).
   // --- Observed on the running old app: the modal header carries the
   // --- project picker (a combobox popup with a search box and a listbox

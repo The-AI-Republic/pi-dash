@@ -4474,6 +4474,10 @@ export class WebDriver implements ParityDriver {
     }
   }
 
+  async widgetLoadMoreFetching(widget: string): Promise<boolean> {
+    throw new Error(`[parity] widgetLoadMoreFetching(${widget}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
   async widgetGroupNames(widget: string): Promise<string[]> {
     const content = await this.widgetContent(widget);
     if (!content) return [];
@@ -7639,6 +7643,10 @@ export class WebDriver implements ParityDriver {
 
   async propertyInlineError(label: string): Promise<string | null> {
     throw new Error(`[parity] propertyInlineError(${label}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
+  async propertyNote(label: string): Promise<string | null> {
+    throw new Error(`[parity] propertyNote(${label}) has no oracle: PDASHOSS01-299 owns it.`);
   }
 
   async propertyRowPresent(label: string): Promise<boolean> {
