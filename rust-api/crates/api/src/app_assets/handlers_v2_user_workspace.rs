@@ -672,12 +672,18 @@ async fn user_entity_delete(
 }
 
 /// `WorkspaceFileAssetEndpoint.entity_asset_save` (`v2.py:247-284`).
+///
+/// The Django writes are FULL `workspace.save()` / `project.save()` calls,
+/// so they also stamp `updated_at` (`auto_now`) and `updated_by` (the CRUM
+/// request user) — hence the `now` / `actor_id` parameters.
 #[allow(clippy::result_large_err)]
 async fn workspace_entity_save(
     pool: &sqlx::PgPool,
     asset_id: &Uuid,
     entity_type: &str,
     asset: &AssetRow,
+    now: DateTime<Utc>,
+    actor_id: &Uuid,
 ) -> Result<(), Response> {
     match q::workspace_save_action(entity_type) {
         q::WorkspaceSaveAction::SetLogo => {
@@ -700,10 +706,12 @@ async fn workspace_entity_save(
                     .map_err(|_| server_error())?;
             }
             sqlx::query(
-                r#"UPDATE "workspaces" SET "logo" = $1, "logo_asset_id" = $2 WHERE "id" = $3"#,
+                r#"UPDATE "workspaces" SET "logo" = $1, "logo_asset_id" = $2, "updated_at" = $3, "updated_by_id" = $4 WHERE "id" = $5"#,
             )
             .bind("")
             .bind(asset_id)
+            .bind(now)
+            .bind(actor_id)
             .bind(workspace_id)
             .execute(pool)
             .await
@@ -728,10 +736,12 @@ async fn workspace_entity_save(
                     .map_err(|_| server_error())?;
             }
             sqlx::query(
-                r#"UPDATE "projects" SET "cover_image" = $1, "cover_image_asset_id" = $2 WHERE "id" = $3"#,
+                r#"UPDATE "projects" SET "cover_image" = $1, "cover_image_asset_id" = $2, "updated_at" = $3, "updated_by_id" = $4 WHERE "id" = $5"#,
             )
             .bind("")
             .bind(asset_id)
+            .bind(now)
+            .bind(actor_id)
             .bind(project_id)
             .execute(pool)
             .await
@@ -743,11 +753,16 @@ async fn workspace_entity_save(
 }
 
 /// `WorkspaceFileAssetEndpoint.entity_asset_delete` (`v2.py:286-312`).
+///
+/// Full `workspace.save()` / `project.save()` like the link path, so the
+/// `updated_at` / `updated_by` stamps ride along (`now` / `actor_id`).
 #[allow(clippy::result_large_err)]
 async fn workspace_entity_delete(
     pool: &sqlx::PgPool,
     entity_type: &str,
     asset: &AssetRow,
+    now: DateTime<Utc>,
+    actor_id: &Uuid,
 ) -> Result<(), Response> {
     match q::workspace_delete_action(entity_type) {
         q::WorkspaceDeleteAction::ClearLogo => {
@@ -767,8 +782,12 @@ async fn workspace_entity_delete(
             .await
             .map_err(|_| server_error())?;
             row.ok_or_else(does_not_exist)?;
-            sqlx::query(r#"UPDATE "workspaces" SET "logo_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(workspace_id)
+            sqlx::query(
+                r#"UPDATE "workspaces" SET "logo_asset_id" = NULL, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3"#,
+            )
+            .bind(now)
+            .bind(actor_id)
+            .bind(workspace_id)
                 .execute(pool)
                 .await
                 .map_err(|_| server_error())?;
@@ -786,8 +805,12 @@ async fn workspace_entity_delete(
             .await
             .map_err(|_| server_error())?;
             let Some(_) = row else { return Ok(()) };
-            sqlx::query(r#"UPDATE "projects" SET "cover_image_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(project_id)
+            sqlx::query(
+                r#"UPDATE "projects" SET "cover_image_asset_id" = NULL, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3"#,
+            )
+            .bind(now)
+            .bind(actor_id)
+            .bind(project_id)
                 .execute(pool)
                 .await
                 .map_err(|_| server_error())?;
@@ -1236,7 +1259,7 @@ async fn workspace_patch(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let _actor = match require_user(&state, extension).await {
+    let actor = match require_user(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
@@ -1263,7 +1286,10 @@ async fn workspace_patch(
         publish_metadata(pool, &asset_id).await;
     }
     let entity_type = asset.entity_type.clone().unwrap_or_default();
-    if let Err(response) = workspace_entity_save(pool, &asset_id, &entity_type, &asset).await {
+    let now = Utc::now();
+    if let Err(response) =
+        workspace_entity_save(pool, &asset_id, &entity_type, &asset, now, &actor.id).await
+    {
         return response;
     }
     let data = match parse_data(content_type(&headers).as_deref(), &body) {
@@ -1300,7 +1326,7 @@ async fn workspace_delete(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let _actor = match require_user(&state, extension).await {
+    let actor = match require_user(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
@@ -1324,7 +1350,9 @@ async fn workspace_delete(
         Err(_) => return server_error(),
     };
     let entity_type = asset.entity_type.clone().unwrap_or_default();
-    if let Err(response) = workspace_entity_delete(pool, &entity_type, &asset).await {
+    let now = Utc::now();
+    if let Err(response) = workspace_entity_delete(pool, &entity_type, &asset, now, &actor.id).await
+    {
         return response;
     }
     if sqlx::query(&q::delete_update_sql())
