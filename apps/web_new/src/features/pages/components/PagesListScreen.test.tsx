@@ -49,6 +49,16 @@ interface Harness {
   duplicateCalls: number;
   favoriteStatus: number;
   favoriteCalls: number;
+  accessStatus: number;
+  accessCalls: number;
+  lockStatus: number;
+  lockCalls: number;
+  archiveStatus: number;
+  archiveCalls: number;
+  deleteStatus: number;
+  deleteCalls: number;
+  moveStatus: number;
+  moveCalls: number;
   project: Record<string, unknown>;
   projectStatus: number;
   roles: Record<string, number>;
@@ -73,6 +83,16 @@ beforeEach(() => {
     duplicateCalls: 0,
     favoriteStatus: 204,
     favoriteCalls: 0,
+    accessStatus: 204,
+    accessCalls: 0,
+    lockStatus: 204,
+    lockCalls: 0,
+    archiveStatus: 200,
+    archiveCalls: 0,
+    deleteStatus: 204,
+    deleteCalls: 0,
+    moveStatus: 204,
+    moveCalls: 0,
     project: makeProjectRow(),
     projectStatus: 200,
     roles: { [PAGES_PROJECT_ID]: 20 },
@@ -117,6 +137,33 @@ beforeEach(() => {
           created_at: "2026-01-02T03:04:05Z",
         },
       ]);
+    }
+    const accessWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/access/$`).exec(url);
+    if (accessWrite !== null) {
+      harness.accessCalls += 1;
+      return jsonResponse(url, harness.accessStatus, null);
+    }
+    const lockWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/lock/$`).exec(url);
+    if (lockWrite !== null) {
+      harness.lockCalls += 1;
+      return jsonResponse(url, harness.lockStatus, null);
+    }
+    const archiveWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/archive/$`).exec(
+      url
+    );
+    if (archiveWrite !== null) {
+      harness.archiveCalls += 1;
+      return jsonResponse(url, harness.archiveStatus, { archived_at: "2026-10-25T10:00:00" });
+    }
+    const deleteWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/$`).exec(url);
+    if (deleteWrite !== null && init.method === "DELETE") {
+      harness.deleteCalls += 1;
+      return jsonResponse(url, harness.deleteStatus, null);
+    }
+    const moveWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/move/$`).exec(url);
+    if (moveWrite !== null) {
+      harness.moveCalls += 1;
+      return jsonResponse(url, harness.moveStatus, null);
     }
     const favoriteWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/favorite-pages/([0-9a-f-]+)/$`).exec(
       url
@@ -473,5 +520,99 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
     await screen.findByTestId("pages-list");
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Read only" }));
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Open in new tab", "Copy link"]);
+  });
+
+  it("gives the page owner the state switches and hides them from a member", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 15 };
+    harness.pages = [makePageRow({ name: "Mine", owned_by: PAGES_USER_ID })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Mine" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+      "Make a copy",
+      "Lock",
+      "Make private",
+      "Archive",
+    ]);
+
+    harness.pages = [makePageRow({ name: "Theirs", owned_by: "623e4567-e89b-12d3-a456-426614174005" })];
+    renderScreen();
+    await waitFor(() => expect(screen.getByRole("link", { name: "Theirs" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Theirs" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+      "Make a copy",
+    ]);
+  });
+
+  it("gives a project admin the switches on someone else's page", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 20 };
+    harness.pages = [makePageRow({ name: "Admin view", owned_by: "623e4567-e89b-12d3-a456-426614174005" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Admin view" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toContain("Make private");
+  });
+
+  it("makes the row private and re-reads the collection", async () => {
+    harness.pages = [makePageRow({ name: "Switch me" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Switch me" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Make private" }));
+    await waitFor(() => expect(harness.accessCalls).toBe(1));
+    expect(toaster.notifySuccess).toHaveBeenCalledWith("Page marked private.");
+  });
+
+  it("locks and shelves a row through the same menu", async () => {
+    harness.pages = [makePageRow({ name: "Stateful" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Stateful" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Lock" }));
+    await waitFor(() => expect(harness.lockCalls).toBe(1));
+    expect(toaster.notifySuccess).toHaveBeenCalledWith("Page locked successfully.");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Stateful" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+    await waitFor(() => expect(harness.archiveCalls).toBe(1));
+    expect(toaster.notifySuccess).toHaveBeenCalledWith("Page archived successfully.");
+  });
+
+  it("confirms deletion of a shelved row and cancels cleanly", async () => {
+    harness.pages = [makePageRow({ name: "Shelved row", archived_at: "2026-10-01T00:00:00Z" })];
+    renderScreen("archived");
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved row" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete page" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveTextContent("Shelved row");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(harness.deleteCalls).toBe(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved row" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(harness.deleteCalls).toBe(1));
+    expect(toaster.notifySuccess).toHaveBeenCalledWith("Page deleted successfully.");
+  });
+
+  it("offers no delete entry on a live row", async () => {
+    harness.pages = [makePageRow({ name: "Live row" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Live row" }));
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
+  });
+
+  it("carries no move entry in the community build", async () => {
+    harness.pages = [makePageRow({ name: "No move" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for No move" }));
+    expect(screen.queryByRole("menuitem", { name: "Move to project…" })).not.toBeInTheDocument();
   });
 });

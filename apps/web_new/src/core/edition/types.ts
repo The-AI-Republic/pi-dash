@@ -50,6 +50,14 @@ export const ISSUE_DEDUPE_FLAG = "issue-dedupe";
  * requests are the bare default and never show a pill in any edition.
  */
 export const INTAKE_SOURCE_PILL_FLAG = "intake-source-pill";
+/**
+ * Cross-project page move (PAGE-017, parity/specs/pages.md §3.8 and
+ * §11.1). Editions whose server serves `pages/{id}/move/` set this; the
+ * community edition leaves it absent, so the pages row menu carries no
+ * move entry and no dialog ever mounts.
+ */
+export const PAGE_MOVE_FLAG = "page-move";
+
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {
   id: string;

@@ -24,19 +24,38 @@ describe("pages barrel", () => {
     expect(typeof pages.useCreatePage).toBe("function");
     expect(typeof pages.useQuickCreatePage).toBe("function");
     expect(typeof pages.useDuplicatePage).toBe("function");
+    expect(typeof pages.usePageVisibilityWrite).toBe("function");
+    expect(typeof pages.usePageLockWrite).toBe("function");
+    expect(typeof pages.usePageArchiveWrite).toBe("function");
+    expect(typeof pages.usePageDeleteWrite).toBe("function");
+    expect(typeof pages.usePageMoveWrite).toBe("function");
+    expect(typeof pages.PageDeleteDialog).toBe("function");
+    expect(typeof pages.PageMoveDialog).toBe("function");
+    expect(typeof pages.PageRowConnected).toBe("function");
+    expect(pages.PAGES_REALTIME_TOPIC).toBe("pages");
     expect(pages.CREATE_PAGE_COMMAND_ID).toBe("pages.create-page");
     expect(pages.PAGE_TITLE_MAX_LENGTH).toBe(255);
     expect(pages.pageKeys).toBe(pageKeys);
   });
 
   it("builds the row menu in the pinned order and gates the duplicate entry", () => {
-    const handlers = { openInNewTab: () => undefined, copyLink: () => undefined, duplicate: () => undefined };
-    expect(pages.pageRowActions({ duplicate: true }, handlers).map((entry) => entry.label)).toEqual([
+    const handlers = {
+      openInNewTab: () => undefined,
+      copyLink: () => undefined,
+      duplicate: () => undefined,
+      toggleVisibility: () => undefined,
+      toggleLock: () => undefined,
+      toggleArchive: () => undefined,
+      requestDelete: () => undefined,
+      requestMove: () => undefined,
+    };
+    const base = { manage: false, archived: false, locked: false, restricted: false, move: false };
+    expect(pages.pageRowActions({ ...base, duplicate: true }, handlers).map((entry) => entry.label)).toEqual([
       "Open in new tab",
       "Copy link",
       "Make a copy",
     ]);
-    expect(pages.pageRowActions({ duplicate: false }, handlers).map((entry) => entry.label)).toEqual([
+    expect(pages.pageRowActions({ ...base, duplicate: false }, handlers).map((entry) => entry.label)).toEqual([
       "Open in new tab",
       "Copy link",
     ]);

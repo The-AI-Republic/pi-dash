@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Project pages list (parity/specs/pages.md §3.1–§3.6 and §3.8,
-// PAGE-001–012). Reads the project row for the page_view gate and the one
+// PAGE-001–017). Reads the project row for the page_view gate and the one
 // collection for the rows; search, sort and filters are client state and
 // reset when the project changes. Switching tabs never refetches. The
 // header carries the two creation entries, rows carry the favourite star
@@ -49,7 +49,8 @@ import { PagesNoResults } from "./PagesNoResults.js";
 import { PagesSearch } from "./PagesSearch.js";
 import { PagesSortMenu } from "./PagesSortMenu.js";
 import { PageCreateDialogEntry, PagesQuickCreate } from "./PagesCreateEntry.js";
-import { PageRow } from "./PageRow.js";
+import { PageRowConnected } from "./PageRowConnected.js";
+import { edition, isPageMoveEnabled } from "../../../core/edition/index.js";
 
 export interface PagesListScreenProps {
   workspaceSlug: string;
@@ -120,7 +121,9 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   );
   const creatorName = pageCreatorName(creators, client.filters.creator);
   const role = roles.data?.[projectId] ?? null;
+  const viewerIsAdmin = isProjectAdmin(role);
   const canCreate = isProjectAuthorized(role);
+  const canMovePages = isPageMoveEnabled(edition);
   const canStar = isProjectAuthorized(role);
   const canManageFeatures = isProjectAdmin(role);
   const searchActive = client.query.trim() !== "";
@@ -223,7 +226,7 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
               {visible.map((page) => {
                 const owner = creators.find((creator) => creator.id === page.owned_by) ?? null;
                 return (
-                  <PageRow
+                  <PageRowConnected
                     key={page.id}
                     workspaceSlug={workspaceSlug}
                     projectId={projectId}
@@ -231,6 +234,8 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
                     owner={owner}
                     showStar={canStar}
                     canDuplicate={canCreate}
+                    canManage={viewerIsAdmin || (currentUserId !== null && page.owned_by === currentUserId)}
+                    canMove={canMovePages}
                     onOpenInNewTab={() => {
                       globalThis.window.open(pageLinkUrl(workspaceSlug, projectId, page.id), "_blank", "noopener");
                     }}

@@ -21,6 +21,21 @@ export interface RealtimeHub {
   subscribe(topic: string, handler: RealtimeHandler): Unsubscribe;
 }
 
+/** The app's single hub. Features publish through this so the transport
+ * (SSE, socket, desktop bridge) can be swapped underneath without touching
+ * call sites. */
+let appHub: RealtimeHub | null = null;
+
+export function getRealtimeHub(): RealtimeHub {
+  if (appHub === null) appHub = createRealtimeHub();
+  return appHub;
+}
+
+/** Tests only: forget the hub so a suite starts from a clean fan-out. */
+export function resetRealtimeHub(): void {
+  appHub = null;
+}
+
 /** Local fan-out with no transport. Server wiring replaces the inside,
  * never the call sites. */
 export function createRealtimeHub(): RealtimeHub {

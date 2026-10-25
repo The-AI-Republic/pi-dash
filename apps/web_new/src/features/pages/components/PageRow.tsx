@@ -1,16 +1,17 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// One page row (parity/specs/pages.md §3.5 and §3.8, PAGE-006/009–012). The
+// One page row (parity/specs/pages.md §3.5 and §3.8, PAGE-006/009–017). The
 // row exposes the document mark, title (untitled fallback), owner,
 // visibility and creation date, plus a working favourite star and the
 // overflow trigger. Hovering the metadata reveals each detail; the row
 // itself opens the detail view and its context menu mirrors the overflow
-// menu, which comes from the one action builder so both stay in step.
+// menu, which comes from the one action builder so both stay in step. A
+// locked page also shows its lock beside the visibility glyph.
 
 import { Avatar, ContextMenu, IconButton, Menu, Tooltip } from "@pidash/kit";
 import type { PageRow as PageRowData } from "@pidash/api-client";
-import { CalendarDays, Ellipsis, FileText, Globe2, Lock } from "lucide-react";
+import { CalendarDays, Ellipsis, FileText, Globe2, Lock, LockKeyhole } from "lucide-react";
 import * as React from "react";
 import { Link } from "@tanstack/react-router";
 
@@ -30,9 +31,18 @@ export interface PageRowProps {
   showStar: boolean;
   /** Duplication is a member-and-admin entry; other viewers never see it. */
   canDuplicate: boolean;
+  /** The page's owner or a project admin may switch its state. */
+  canManage: boolean;
+  /** Cross-project move is an edition flag; community builds carry none. */
+  canMove: boolean;
   onOpenInNewTab: () => void;
   onCopyLink: () => void;
   onDuplicate: () => void;
+  onToggleVisibility: () => void;
+  onToggleLock: () => void;
+  onToggleArchive: () => void;
+  onRequestDelete: () => void;
+  onRequestMove: () => void;
 }
 
 function formatCreatedOn(value: string): string {
@@ -94,15 +104,38 @@ export function PageRow({
   owner,
   showStar,
   canDuplicate,
+  canManage,
+  canMove,
   onOpenInNewTab,
   onCopyLink,
   onDuplicate,
+  onToggleVisibility,
+  onToggleLock,
+  onToggleArchive,
+  onRequestDelete,
+  onRequestMove,
 }: PageRowProps): React.ReactElement {
   const title = pageDisplayTitle(page.name);
   const ownerName = owner?.name ?? "Unknown member";
   const entries = pageRowActions(
-    { duplicate: canDuplicate },
-    { openInNewTab: onOpenInNewTab, copyLink: onCopyLink, duplicate: onDuplicate }
+    {
+      duplicate: canDuplicate,
+      manage: canManage,
+      archived: page.archived_at !== null,
+      locked: page.is_locked,
+      restricted: page.access === 1,
+      move: canMove,
+    },
+    {
+      openInNewTab: onOpenInNewTab,
+      copyLink: onCopyLink,
+      duplicate: onDuplicate,
+      toggleVisibility: onToggleVisibility,
+      toggleLock: onToggleLock,
+      toggleArchive: onToggleArchive,
+      requestDelete: onRequestDelete,
+      requestMove: onRequestMove,
+    }
   );
   const row = (
     <div
@@ -127,6 +160,7 @@ export function PageRow({
           </span>
         </Tooltip>
         <VisibilityGlyph access={page.access} />
+        {page.is_locked ? <LockKeyhole size={14} strokeWidth={1.5} aria-label="Locked" /> : null}
         <Tooltip content={formatCreatedOn(page.created_at)}>
           <span
             className="inline-flex cursor-default items-center text-(--text-muted)"
