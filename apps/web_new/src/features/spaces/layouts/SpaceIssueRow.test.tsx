@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import type { SpaceBoardIssue, SpaceBoardState } from "@pidash/api-client";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -16,6 +16,7 @@ import {
   formatSpaceCardDate,
   spaceCardLabels,
   spaceCardPriority,
+  spaceCardReactionEmoji,
   spaceCardReactionCounts,
   spaceCardVoteCounts,
   SpaceIssueRow,
@@ -50,9 +51,9 @@ function richIssue(overrides: Partial<SpaceBoardIssue> = {}): SpaceBoardIssue {
       { vote: 0, actor_details: { ...ACTOR, id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" } },
     ],
     reaction_items: [
-      { reaction: "👍", actor_details: ACTOR },
-      { reaction: "👍", actor_details: { ...ACTOR, id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } },
-      { reaction: "🎉", actor_details: { ...ACTOR, id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" } },
+      { reaction: "128077", actor_details: ACTOR },
+      { reaction: "128077", actor_details: { ...ACTOR, id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } },
+      { reaction: "127881", actor_details: { ...ACTOR, id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" } },
     ],
     ...overrides,
   };
@@ -83,6 +84,15 @@ describe("SpaceIssueRow identity and markers (SPC-027/028)", () => {
     expect(link).not.toContainElement(screen.getByTestId("space-issue-key"));
   });
 
+  it("shows the list row's full title in a tooltip on keyboard focus", () => {
+    renderCard();
+    const link = screen.getByRole("link", { name: "A very long public work item title" });
+    fireEvent.focus(link);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("A very long public work item title");
+    fireEvent.blur(link);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
   it("renders the board card body as one link with the key, title and tooltip", () => {
     renderCard({ card: true });
     const card = screen.getByTestId("space-board-card");
@@ -90,6 +100,13 @@ describe("SpaceIssueRow identity and markers (SPC-027/028)", () => {
     expect(link).toContainElement(card.querySelector("a > div:nth-child(1)") as HTMLElement);
     expect(link.querySelector("div[title='A very long public work item title']")).not.toBeNull();
     expect(screen.getByText("SPC-7")).toBeInTheDocument();
+  });
+
+  it("shows the board title in a tooltip on keyboard focus", () => {
+    renderCard({ card: true });
+    const link = screen.getByRole("link", { name: /SPC-7 A very long public work item title/ });
+    fireEvent.focus(link);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("A very long public work item title");
   });
 
   it("shows state, priority, label and due-date markers", () => {
@@ -219,7 +236,9 @@ describe("SpaceIssueRow board footer (SPC-029)", () => {
     renderCard({ card: true, reactionsEnabled: true });
     expect(screen.queryByTestId("space-card-votes")).not.toBeInTheDocument();
     const reactions = screen.getAllByTestId("space-card-reaction");
-    expect(reactions.map((node) => node.getAttribute("data-reaction"))).toEqual(["👍", "🎉"]);
+    expect(reactions.map((node) => node.getAttribute("data-reaction"))).toEqual(["128077", "127881"]);
+    expect(reactions.map((node) => node.textContent)).toEqual(["👍2", "🎉1"]);
+    expect(reactions[0]).toHaveAccessibleName("React with 👍 to A very long public work item title");
     expect(reactions[0]).toHaveTextContent("2");
     expect(screen.getByTestId("space-card-reaction-add")).toHaveAttribute("aria-haspopup", "dialog");
   });
@@ -235,7 +254,7 @@ describe("SpaceIssueRow board footer (SPC-029)", () => {
     await userEvent.click(screen.getByTestId("space-card-reaction-add"));
     expect(onVote).toHaveBeenNthCalledWith(1, issue, 1);
     expect(onVote).toHaveBeenNthCalledWith(2, issue, -1);
-    expect(onReact).toHaveBeenCalledWith(issue, "👍");
+    expect(onReact).toHaveBeenCalledWith(issue, "128077");
     rerender(
       <SpaceIssueRow
         issue={issue}
@@ -262,9 +281,12 @@ describe("SpaceIssueRow board footer (SPC-029)", () => {
   it("groups votes and reactions and keeps first-seen reaction order", () => {
     expect(spaceCardVoteCounts(richIssue())).toEqual({ up: 2, down: 1 });
     expect(spaceCardReactionCounts(richIssue().reaction_items)).toEqual([
-      { reaction: "👍", count: 2 },
-      { reaction: "🎉", count: 1 },
+      { reaction: "128077", emoji: "👍", count: 2 },
+      { reaction: "127881", emoji: "🎉", count: 1 },
     ]);
+    expect(spaceCardReactionEmoji("128077-127995")).toBe("👍🏻");
+    expect(spaceCardReactionEmoji("not-a-code")).toBe("not-a-code");
+    expect(spaceCardReactionEmoji("1114112")).toBe("1114112");
   });
 });
 
@@ -275,6 +297,27 @@ describe("SpaceIssueRow embed behavior (SPC-015)", () => {
       renderCard({ card: true, reactionsEnabled: true });
       expect(screen.queryByTestId("space-card-reaction-add")).not.toBeInTheDocument();
       expect(screen.getAllByTestId("space-card-reaction")).toHaveLength(2);
+    } finally {
+      embed.framed = false;
+    }
+  });
+
+  it("keeps vote counts visible but makes both vote controls inert inside a frame", async () => {
+    embed.framed = true;
+    const onVote = vi.fn();
+    try {
+      renderCard({ card: true, votesEnabled: true, onVote });
+      const up = screen.getByTestId("space-card-vote-up");
+      const down = screen.getByTestId("space-card-vote-down");
+      expect(up).toHaveTextContent("2");
+      expect(down).toHaveTextContent("1");
+      expect(up).toBeDisabled();
+      expect(down).toBeDisabled();
+      expect(up).toHaveAttribute("aria-disabled", "true");
+      expect(down).toHaveAttribute("aria-disabled", "true");
+      await userEvent.click(up);
+      await userEvent.click(down);
+      expect(onVote).not.toHaveBeenCalled();
     } finally {
       embed.framed = false;
     }

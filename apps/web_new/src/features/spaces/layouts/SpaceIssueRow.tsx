@@ -9,6 +9,7 @@
 // as the link's ordinary fallback.
 
 import type { SpaceBoardIssue, SpaceBoardLabel, SpaceBoardState } from "@pidash/api-client";
+import { Tooltip } from "@pidash/kit";
 import { AlertCircle, Ban, SignalHigh, SignalLow, SignalMedium, SmilePlus, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import * as React from "react";
@@ -85,13 +86,22 @@ export function spaceCardVoteCounts(issue: Pick<SpaceBoardIssue, "vote_items">):
   return { up, down };
 }
 
-/** Emoji reactions grouped by their code, preserving first-seen order. */
+/** The character for one API reaction key; an unknown key shows the key itself. */
+export function spaceCardReactionEmoji(code: string): string {
+  const parts = code.split("-");
+  if (parts.some((part) => !/^\d+$/.test(part))) return code;
+  const points = parts.map((part) => Number(part));
+  if (points.some((point) => point > 0x10ffff)) return code;
+  return String.fromCodePoint(...points);
+}
+
+/** Emoji reactions grouped by their API code, preserving first-seen order. */
 export function spaceCardReactionCounts(
   reactionItems: SpaceBoardIssue["reaction_items"]
-): Array<{ reaction: string; count: number }> {
+): Array<{ reaction: string; emoji: string; count: number }> {
   const counts = new Map<string, number>();
   for (const item of reactionItems) counts.set(item.reaction, (counts.get(item.reaction) ?? 0) + 1);
-  return [...counts].map(([reaction, count]) => ({ reaction, count }));
+  return [...counts].map(([reaction, count]) => ({ reaction, emoji: spaceCardReactionEmoji(reaction), count }));
 }
 
 export interface SpaceIssueRowProps {
@@ -198,9 +208,11 @@ function CardFooter({
           <button
             type="button"
             aria-label={`Upvote ${issue.name}`}
+            aria-disabled={embedded ? "true" : undefined}
+            disabled={embedded}
             data-testid="space-card-vote-up"
-            onClick={() => onVote?.(issue, 1)}
-            className="text-meta inline-flex cursor-pointer items-center gap-(--space-1) rounded-(--radius-control) px-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
+            onClick={embedded ? undefined : () => onVote?.(issue, 1)}
+            className={`text-meta inline-flex items-center gap-(--space-1) rounded-(--radius-control) px-(--space-1) text-(--text-muted) ${embedded ? "cursor-default opacity-60" : "cursor-pointer hover:bg-(--subtle) hover:text-(--text)"}`}
           >
             <ThumbsUp size={12} strokeWidth={1.75} aria-hidden="true" />
             <span className="tabular-nums">{votes.up}</span>
@@ -208,9 +220,11 @@ function CardFooter({
           <button
             type="button"
             aria-label={`Downvote ${issue.name}`}
+            aria-disabled={embedded ? "true" : undefined}
+            disabled={embedded}
             data-testid="space-card-vote-down"
-            onClick={() => onVote?.(issue, -1)}
-            className="text-meta inline-flex cursor-pointer items-center gap-(--space-1) rounded-(--radius-control) px-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
+            onClick={embedded ? undefined : () => onVote?.(issue, -1)}
+            className={`text-meta inline-flex items-center gap-(--space-1) rounded-(--radius-control) px-(--space-1) text-(--text-muted) ${embedded ? "cursor-default opacity-60" : "cursor-pointer hover:bg-(--subtle) hover:text-(--text)"}`}
           >
             <ThumbsDown size={12} strokeWidth={1.75} aria-hidden="true" />
             <span className="tabular-nums">{votes.down}</span>
@@ -219,17 +233,17 @@ function CardFooter({
       ) : null}
       {reactionsEnabled ? (
         <div data-testid="space-card-reactions" className="flex min-w-0 items-center gap-(--space-1)">
-          {reactions.map(({ reaction, count }) => (
+          {reactions.map(({ reaction, emoji, count }) => (
             <button
               key={reaction}
               type="button"
-              aria-label={`React with ${reaction} to ${issue.name}`}
+              aria-label={`React with ${emoji} to ${issue.name}`}
               data-testid="space-card-reaction"
               data-reaction={reaction}
               onClick={() => onReact?.(issue, reaction)}
               className="text-meta inline-flex cursor-pointer items-center gap-(--space-1) rounded-(--radius-control) bg-(--subtle) px-(--space-1)"
             >
-              <span aria-hidden="true">{reaction}</span>
+              <span aria-hidden="true">{emoji}</span>
               <span className="text-(--text-muted) tabular-nums">{count}</span>
             </button>
           ))}
@@ -265,8 +279,11 @@ export function SpaceIssueRow({
   onReact,
 }: SpaceIssueRowProps): React.ReactElement {
   const embedded = useSpaceEmbedded();
+  const [titleTooltipOpen, setTitleTooltipOpen] = React.useState(false);
   const key = issueKey(projectIdentifier, issue);
   const emphasis = selected ? "border-(--accent-strong) ring-1 ring-(--accent-strong)" : "border-(--border)";
+  const showTitle = (): void => setTitleTooltipOpen(true);
+  const hideTitle = (): void => setTitleTooltipOpen(false);
   const open = (event: React.MouseEvent<HTMLAnchorElement>): void => {
     if (onOpenIssue === undefined) return;
     event.preventDefault();
@@ -281,20 +298,24 @@ export function SpaceIssueRow({
         data-selected={selected ? "true" : undefined}
         className={`group/kanban-block flex flex-col rounded-(--radius-control) border bg-(--bg) ${emphasis}`}
       >
-        <a
-          id={`issue-${issue.id}`}
-          href={issueHref}
-          title={issue.name}
-          aria-current={selected ? "true" : undefined}
-          onClick={open}
-          className="flex cursor-pointer flex-col gap-(--space-1) px-(--space-3) py-(--space-2) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
-        >
-          <div className="text-meta text-(--text-muted)">{key}</div>
-          <div title={issue.name} className="text-body truncate text-(--text)">
-            {issue.name}
-          </div>
-          <MarkerStrip issue={issue} state={state} labels={labels} />
-        </a>
+        <Tooltip content={issue.name} open={titleTooltipOpen} onOpenChange={setTitleTooltipOpen}>
+          <a
+            id={`issue-${issue.id}`}
+            href={issueHref}
+            title={issue.name}
+            aria-current={selected ? "true" : undefined}
+            onClick={open}
+            onFocus={showTitle}
+            onBlur={hideTitle}
+            className="flex cursor-pointer flex-col gap-(--space-1) px-(--space-3) py-(--space-2) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
+          >
+            <div className="text-meta text-(--text-muted)">{key}</div>
+            <div title={issue.name} className="text-body truncate text-(--text)">
+              {issue.name}
+            </div>
+            <MarkerStrip issue={issue} state={state} labels={labels} />
+          </a>
+        </Tooltip>
         <CardFooter
           issue={issue}
           votesEnabled={votesEnabled}
@@ -318,16 +339,20 @@ export function SpaceIssueRow({
         <div data-testid="space-issue-key" className="text-meta shrink-0 text-(--text-muted)">
           {key}
         </div>
-        <a
-          id={`issue-${issue.id}`}
-          href={issueHref}
-          title={issue.name}
-          aria-current={selected ? "true" : undefined}
-          onClick={open}
-          className="text-body min-w-0 cursor-pointer truncate rounded-(--radius-control) text-(--text) hover:underline focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
-        >
-          {issue.name}
-        </a>
+        <Tooltip content={issue.name} open={titleTooltipOpen} onOpenChange={setTitleTooltipOpen}>
+          <a
+            id={`issue-${issue.id}`}
+            href={issueHref}
+            title={issue.name}
+            aria-current={selected ? "true" : undefined}
+            onClick={open}
+            onFocus={showTitle}
+            onBlur={hideTitle}
+            className="text-body min-w-0 cursor-pointer truncate rounded-(--radius-control) text-(--text) hover:underline focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
+          >
+            {issue.name}
+          </a>
+        </Tooltip>
       </div>
       <MarkerStrip issue={issue} state={state} labels={labels} />
     </div>
