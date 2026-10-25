@@ -70,6 +70,20 @@ describe("PageDeleteDialog", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
+  it("dismisses on Escape when no write is running", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange } = renderDialog();
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("refuses to dismiss while the request is in flight", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange } = renderDialog({ pending: true });
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
   it("keeps the dialog mounted when closed", () => {
     renderDialog({ open: false });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

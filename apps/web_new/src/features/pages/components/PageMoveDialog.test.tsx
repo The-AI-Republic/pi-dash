@@ -142,6 +142,20 @@ describe("PageMoveDialog", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
+  it("dismisses on Escape when no write is running", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange } = renderDialog();
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("refuses to dismiss while the request is in flight", async () => {
+    const user = userEvent.setup();
+    const { onOpenChange } = renderDialog({ pending: true });
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
   it("names an untitled page with the fallback label", () => {
     renderDialog({ pageName: "" });
     expect(screen.getByRole("dialog")).toHaveTextContent("Untitled");
