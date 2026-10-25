@@ -70,8 +70,12 @@ export interface PageEditorHandle {
   focusStart: () => void;
   /** The formatting state right now, for a bar that mounted after it. */
   readState: () => PageFormattingState;
-  /** Replace the whole body with stored markup, in place (PAGE-053). */
-  replaceBody: (html: string) => void;
+  /**
+   * Replace the whole body with stored markup, in place (PAGE-053).
+   * Answers false when the editor refused the command, so the caller
+   * reports the refusal instead of a change that never happened.
+   */
+  replaceBody: (html: string) => boolean;
 }
 
 /**
@@ -134,9 +138,11 @@ export function runBlockKind(editor: PageEditorRef, kind: PageBlockKind): void {
  * The update is emitted, so every listener the editor already has — the
  * draft seam the save slice persists from, the live document the pane
  * reads — sees the restored body exactly as it would see a typed one.
+ * Answers the command's own result: a refused write must not be
+ * reported as a restore.
  */
-export function replacePageBody(editor: PageEditorRef, html: string): void {
-  editor.chain().setContent(html, true).run();
+export function replacePageBody(editor: PageEditorRef, html: string): boolean {
+  return editor.chain().setContent(html, true).run();
 }
 
 /** The text block holding the caret, in the shape the reader expects. */

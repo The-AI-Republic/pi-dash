@@ -24,16 +24,20 @@ const RENDERABLE_TYPES = new Set([
   "horizontalRule",
 ]);
 
-/** Inline marks it can paint; an unknown mark is dropped, not its text. */
-type RenderableMark = { type: "bold" | "italic" | "strike" | "code" | "link"; attrs?: unknown };
+/** Inline marks it can paint; an unknown mark sends the document to the fallback. */
+type RenderableMark = { type: "bold" | "italic" | "underline" | "strike" | "code" | "link"; attrs?: unknown };
 
 const RENDERABLE_MARKS: ReadonlySet<string> = new Set<RenderableMark["type"]>([
   "bold",
   "italic",
+  "underline",
   "strike",
   "code",
   "link",
 ]);
+
+/** The alignments the page editor writes on paragraphs and headings. */
+const ALIGNMENTS: ReadonlySet<string> = new Set(["left", "center", "right"]);
 
 interface StructuredNode {
   type?: unknown;
@@ -60,11 +64,63 @@ function escapeText(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** True when every node in the tree is one the renderer understands. */
-function allRenderable(nodes: readonly StructuredNode[]): boolean {
-  return nodes.every(
-    (node) => typeof node.type === "string" && RENDERABLE_TYPES.has(node.type) && allRenderable(nodeList(node.content))
+function marksOf(value: unknown): StructuredMark[] {
+  return Array.isArray(value) ? (value as StructuredMark[]) : [];
+}
+
+/** A mark is paintable when both its kind and the address it carries are. */
+function markRenderable(mark: StructuredMark): boolean {
+  if (typeof mark.type !== "string" || !RENDERABLE_MARKS.has(mark.type)) return false;
+  const href = attrsOf(mark.attrs)["href"];
+  return href === undefined || typeof href === "string";
+}
+
+/**
+ * Alignment is paintable only in the three values the editor writes;
+ * any other value is a formatting decision this renderer would drop.
+ */
+function alignmentRenderable(value: unknown): boolean {
+  return value === undefined || (typeof value === "string" && ALIGNMENTS.has(value));
+}
+
+/** How each attribute the renderer paints is read, by owning node kind. */
+const NODE_ATTRIBUTES: Readonly<Record<string, Readonly<Record<string, (value: unknown) => boolean>>>> = {
+  paragraph: { textAlign: alignmentRenderable },
+  heading: { textAlign: alignmentRenderable, level: (value) => typeof value === "number" },
+  orderedList: { start: (value) => typeof value === "number" },
+};
+
+/**
+ * A node keeps only the attributes the editor stores on it — alignment
+ * on text blocks, a heading's level, a list's start — and only in the
+ * shape the renderer reads. Anything else would be lost by painting the
+ * structured form, so it sends the document to the fallback. The editor
+ * writes every default attribute as null; those carry nothing.
+ */
+function attrsRenderable(type: string, attrs: unknown): boolean {
+  const known = NODE_ATTRIBUTES[type] ?? {};
+  return Object.entries(attrsOf(attrs)).every(
+    ([name, value]) =>
+      value === null || value === undefined || (Object.hasOwn(known, name) && known[name]?.(value) === true)
   );
+}
+
+/**
+ * True when the renderer can paint the node whole: a known kind, no
+ * attribute or mark it would have to drop, and the same for everything
+ * inside it.
+ */
+function nodeRenderable(node: StructuredNode): boolean {
+  if (typeof node.type !== "string" || !RENDERABLE_TYPES.has(node.type)) return false;
+  if (node.type === "text") {
+    // A text node with no text paints nothing, and nothing is what it
+    // holds, so it costs no fidelity to skip it (the inline renderer
+    // does exactly that).
+    if (typeof node.text !== "string") return true;
+    return node.marks === undefined || (Array.isArray(node.marks) && marksOf(node.marks).every(markRenderable));
+  }
+  if (node.marks !== undefined || !attrsRenderable(node.type, node.attrs)) return false;
+  return nodeList(node.content).every(nodeRenderable);
 }
 
 function wrapMark(mark: RenderableMark, inner: string): string {
@@ -73,6 +129,8 @@ function wrapMark(mark: RenderableMark, inner: string): string {
       return `<strong>${inner}</strong>`;
     case "italic":
       return `<em>${inner}</em>`;
+    case "underline":
+      return `<u>${inner}</u>`;
     case "strike":
       return `<s>${inner}</s>`;
     case "code":
@@ -94,15 +152,18 @@ function renderInline(nodes: readonly StructuredNode[]): string {
     .map((node) => {
       if (node.type === "hardBreak") return "<br>";
       if (node.type !== "text" || typeof node.text !== "string") return "";
-      const marks = nodeList(node.marks as unknown) as StructuredMark[];
-      return marks
-        .filter((mark) => RENDERABLE_MARKS.has(mark.type as string))
-        .reduceRight<string>(
-          (inner, mark) => wrapMark({ type: mark.type as RenderableMark["type"], attrs: mark.attrs }, inner),
-          escapeText(node.text)
-        );
+      return marksOf(node.marks).reduceRight<string>(
+        (inner, mark) => wrapMark({ type: mark.type as RenderableMark["type"], attrs: mark.attrs }, inner),
+        escapeText(node.text)
+      );
     })
     .join("");
+}
+
+/** The alignment style a text block carries, or nothing. */
+function alignAttribute(attrs: Record<string, unknown>): string {
+  const alignment = attrs["textAlign"];
+  return typeof alignment === "string" ? ` style="text-align: ${alignment}"` : "";
 }
 
 /** Block content: one markup fragment per block, in document order. */
@@ -137,11 +198,11 @@ function renderBlock(node: RenderableBlock): string {
     case "doc":
       return renderBlocks(nodeList(node.content));
     case "paragraph":
-      return `<p>${renderInline(nodeList(node.content))}</p>`;
+      return `<p${alignAttribute(attrs)}>${renderInline(nodeList(node.content))}</p>`;
     case "heading": {
       const raw = attrs["level"];
       const level = typeof raw === "number" ? Math.min(6, Math.max(1, raw)) : 1;
-      return `<h${level}>${renderInline(nodeList(node.content))}</h${level}>`;
+      return `<h${level}${alignAttribute(attrs)}>${renderInline(nodeList(node.content))}</h${level}>`;
     }
     case "bulletList":
       return `<ul>${nodeList(node.content).map(renderListItem).join("")}</ul>`;
@@ -168,7 +229,7 @@ export function snapshotBodyHtml(snapshot: {
   description_html: string;
 }): string {
   const document = snapshot.description_json as StructuredNode;
-  if (document.type !== "doc" || !allRenderable([document])) return snapshot.description_html;
+  if (document.type !== "doc" || !nodeRenderable(document)) return snapshot.description_html;
   const rendered = renderBlock(document as RenderableBlock);
   return rendered.trim() === "" ? snapshot.description_html : rendered;
 }

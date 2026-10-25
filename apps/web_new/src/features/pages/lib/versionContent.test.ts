@@ -60,7 +60,7 @@ describe("snapshotBodyHtml", () => {
   it("paints heading levels, clamped to the six the reader has", () => {
     const html = snapshotBodyHtml({
       description_json: doc(
-        { type: "heading", attrs: { level: 2 }, content: [text("Middle")] },
+        { type: "heading", attrs: { level: 2, textAlign: null }, content: [text("Middle")] },
         { type: "heading", attrs: { level: 9 }, content: [text("Deep")] },
         { type: "heading", attrs: {}, content: [text("Plain")] }
       ),
@@ -69,7 +69,61 @@ describe("snapshotBodyHtml", () => {
     expect(html).toBe("<h2>Middle</h2><h6>Deep</h6><h1>Plain</h1>");
   });
 
-  it("paints the marks it knows and keeps the text of one it does not", () => {
+  it("reads the document the live editor actually stores, null defaults and all", () => {
+    // Captured from the page editor (StarterKit + underline + alignment)
+    // parsing a body with alignment, a list start and nested blocks.
+    const html = snapshotBodyHtml({
+      description_json: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            attrs: { textAlign: "center" },
+            content: [{ type: "text", marks: [{ type: "underline" }], text: "a" }],
+          },
+          { type: "heading", attrs: { textAlign: null, level: 2 }, content: [{ type: "text", text: "b" }] },
+          {
+            type: "orderedList",
+            attrs: { start: 3 },
+            content: [
+              {
+                type: "listItem",
+                content: [{ type: "paragraph", attrs: { textAlign: null }, content: [{ type: "text", text: "c" }] }],
+              },
+            ],
+          },
+          {
+            type: "paragraph",
+            attrs: { textAlign: null },
+            content: [{ type: "text", text: "d" }, { type: "hardBreak" }, { type: "text", text: "e" }],
+          },
+        ],
+      },
+      description_html: "<p>Markup fallback words</p>",
+    });
+    expect(html).toBe(
+      '<p style="text-align: center"><u>a</u></p><h2>b</h2><ol start="3"><li><p>c</p></li></ol><p>d<br>e</p>'
+    );
+  });
+
+  it("falls back for a node kind the page editor has but this renderer does not paint", () => {
+    const html = snapshotBodyHtml({
+      description_json: doc({
+        type: "taskList",
+        content: [
+          {
+            type: "taskItem",
+            attrs: { checked: false },
+            content: [{ type: "paragraph", attrs: { textAlign: null }, content: [text("todo")] }],
+          },
+        ],
+      }),
+      description_html: '<ul data-type="taskList"><li>todo</li></ul>',
+    });
+    expect(html).toBe('<ul data-type="taskList"><li>todo</li></ul>');
+  });
+
+  it("paints every mark the page editor writes", () => {
     const html = snapshotBodyHtml({
       description_json: doc(
         paragraph(
@@ -84,7 +138,63 @@ describe("snapshotBodyHtml", () => {
       ),
       description_html: "",
     });
-    expect(html).toBe("<p><strong>bold</strong> <em><s>italic strike</s></em> <code>code</code> under</p>");
+    expect(html).toBe("<p><strong>bold</strong> <em><s>italic strike</s></em> <code>code</code> <u>under</u></p>");
+  });
+
+  it("falls back to the stored markup for a mark the renderer would drop", () => {
+    const html = snapshotBodyHtml({
+      description_json: doc(paragraph(text("highlighted", [{ type: "highlight" }]))),
+      description_html: "<p><mark>highlighted</mark></p>",
+    });
+    expect(html).toBe("<p><mark>highlighted</mark></p>");
+  });
+
+  it("keeps a text block's alignment as the editor stored it", () => {
+    const html = snapshotBodyHtml({
+      description_json: doc(
+        { type: "paragraph", attrs: { textAlign: "center" }, content: [text("aligned")] },
+        { type: "heading", attrs: { level: 2, textAlign: "right" }, content: [text("title")] },
+        { type: "paragraph", attrs: { textAlign: "left" }, content: [text("normal")] }
+      ),
+      description_html: "",
+    });
+    expect(html).toBe(
+      '<p style="text-align: center">aligned</p><h2 style="text-align: right">title</h2><p style="text-align: left">normal</p>'
+    );
+  });
+
+  it("falls back rather than dropping an alignment it cannot paint", () => {
+    const html = snapshotBodyHtml({
+      description_json: doc({ type: "paragraph", attrs: { textAlign: "justify" }, content: [text("justified")] }),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    expect(html).toBe("<p>Markup fallback words</p>");
+  });
+
+  it("falls back rather than dropping an attribute or a heading level it cannot read", () => {
+    const unknownBlockAttribute = snapshotBodyHtml({
+      description_json: doc({ type: "paragraph", attrs: { colour: "red" }, content: [text("coloured")] }),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    const unreadableHeadingLevel = snapshotBodyHtml({
+      description_json: doc({ type: "heading", attrs: { level: "2" }, content: [text("title")] }),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    expect(unknownBlockAttribute).toBe("<p>Markup fallback words</p>");
+    expect(unreadableHeadingLevel).toBe("<p>Markup fallback words</p>");
+  });
+
+  it("falls back for a link whose address is not text, and for malformed mark data", () => {
+    const numericHref = snapshotBodyHtml({
+      description_json: doc(paragraph(text("site", [{ type: "link", attrs: { href: 42 } }]))),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    const notAList = snapshotBodyHtml({
+      description_json: doc({ type: "paragraph", content: [{ type: "text", text: "odd", marks: { type: "bold" } }] }),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    expect(numericHref).toBe("<p>Markup fallback words</p>");
+    expect(notAList).toBe("<p>Markup fallback words</p>");
   });
 
   it("links only when the mark carries an address", () => {

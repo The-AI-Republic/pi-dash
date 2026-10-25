@@ -171,7 +171,7 @@ Rows marked `new (D17)` are **not parity rows**: the old web app cannot show nes
 | `PATCH /api/workspaces/{slug}/projects/{pid}/pages/{pageId}/description/` (binary plus markup plus structured)                                  | PAGE-064                     |
 | `POST /api/workspaces/{slug}/projects/{pid}/pages/{pageId}/duplicate/`                                                                          | PAGE-012                     |
 | `POST /api/workspaces/{slug}/projects/{pid}/pages/{pageId}/move/` with new-project identifier                                                   | PAGE-017                     |
-| `GET /api/workspaces/{slug}/projects/{pid}/pages/{pageId}/versions/`; `GET .../versions/{versionId}/`; `POST .../versions/{versionId}/restore/` | PAGE-051, PAGE-052, PAGE-053 |
+| `GET /api/workspaces/{slug}/projects/{pid}/pages/{pageId}/versions/`; `GET .../versions/{versionId}/` (no restore route: PAGE-053 writes the snapshot into the live editor through the page's own save) | PAGE-051, PAGE-052, PAGE-053 |
 | `GET /api/workspaces/{slug}/entity-search/` (scoped by project id)                                                                              | PAGE-041, PAGE-043           |
 | `GET /api/users/me/` as the live identity check                                                                                                 | PAGE-068                     |
 | File-service upload with asset confirmation on the page description entity                                                                      | PAGE-034, PAGE-039           |

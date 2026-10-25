@@ -17,7 +17,7 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     applyBlockKind: vi.fn(),
     focusStart: vi.fn(),
     readState: vi.fn(),
-    replaceBody: vi.fn(),
+    replaceBody: vi.fn(() => true),
     ...overrides,
   };
 }
@@ -39,6 +39,11 @@ describe("applyPageRestore", () => {
         throw new Error("destroyed");
       },
     });
+    expect(applyPageRestore(editor, "<p>Snapshot body</p>")).toBe(false);
+  });
+
+  it("answers the editor's own refusal, which is not an exception", () => {
+    const editor = handle({ replaceBody: () => false });
     expect(applyPageRestore(editor, "<p>Snapshot body</p>")).toBe(false);
   });
 

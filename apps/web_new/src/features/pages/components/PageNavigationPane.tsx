@@ -16,7 +16,13 @@ import * as React from "react";
 
 import type { PageVersion } from "@pidash/api-client";
 import { edition } from "../../../core/edition/index.js";
-import { PAGE_PANE_TABS, pageDetailDeepHref, type PageDetailSearch, type PagePaneTab } from "../lib/pageDetail.js";
+import {
+  closeVersionSearch,
+  PAGE_PANE_TABS,
+  pageDetailDeepHref,
+  type PageDetailSearch,
+  type PagePaneTab,
+} from "../lib/pageDetail.js";
 import {
   PAGE_PANE_WIDTH_PX,
   type PageActorMember,
@@ -184,7 +190,7 @@ function VersionTimeline({
               <VersionEntryRow
                 key="current"
                 entry={entry}
-                href={pageDetailDeepHref(workspaceSlug, projectId, pageId, search)}
+                href={pageDetailDeepHref(workspaceSlug, projectId, pageId, closeVersionSearch(search))}
                 onSelect={onSelectCurrent}
               />
             ) : (

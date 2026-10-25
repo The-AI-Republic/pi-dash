@@ -24,8 +24,7 @@ export const PAGE_VERSION_RESTORE_FAILED = "Page version could not be restored."
 export function applyPageRestore(handle: PageEditorHandle | null, html: string): boolean {
   if (handle === null) return false;
   try {
-    handle.replaceBody(html);
-    return true;
+    return handle.replaceBody(html);
   } catch {
     return false;
   }

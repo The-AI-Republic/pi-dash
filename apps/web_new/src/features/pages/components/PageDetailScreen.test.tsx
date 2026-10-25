@@ -836,6 +836,30 @@ describe("PageDetailScreen deep links", () => {
     await waitFor(() => expect(editor).toHaveTextContent("Stored snapshot body"));
   });
 
+  it("restores the editor's own formatting: underline and alignment survive the write", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    harness.versionJson = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { textAlign: "center" },
+          content: [{ type: "text", marks: [{ type: "underline" }], text: "Aligned underline" }],
+        },
+      ],
+    };
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    const body = await screen.findByLabelText("Version body");
+    await waitFor(() => expect(body.querySelector("u")).toHaveTextContent("Aligned underline"));
+    expect(body.querySelector("p")).toHaveStyle({ textAlign: "center" });
+    const editor = await screen.findByLabelText("Page body");
+    await waitFor(() => expect(editor).toHaveAttribute("contenteditable", "true"));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(editor.querySelector("u")).toHaveTextContent("Aligned underline"));
+    expect(editor.querySelector("p")).toHaveStyle({ textAlign: "center" });
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Page version restored."));
+  });
+
   it("reports a refused restore and leaves the overlay and address alone", async () => {
     harness.versions = [SNAPSHOT_ROW];
     vi.mocked(applyPageRestore).mockReturnValueOnce(false);

@@ -238,6 +238,15 @@ describe("PageNavigationPane", () => {
     expect(screen.getByRole("link", { name: /Oct 20, 2026/ })).toHaveAttribute("aria-current", "true");
   });
 
+  it("points the current row at the live document, never at the open snapshot", () => {
+    const versionId = VERSIONS[0]?.id ?? "";
+    const { onSelectCurrentVersion } = renderPane({ search: { paneTab: "info", version: versionId } });
+    const current = screen.getByRole("link", { name: PAGE_CURRENT_VERSION_LABEL });
+    expect(current.getAttribute("href")).toBe(`/acme/projects/project-1/pages/page-1?paneTab=info`);
+    fireEvent.click(current);
+    expect(onSelectCurrentVersion).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the live row current while no snapshot is open", () => {
     renderPane({ search: { paneTab: "info" } });
     const current = screen.getByRole("link", { name: PAGE_CURRENT_VERSION_LABEL });
