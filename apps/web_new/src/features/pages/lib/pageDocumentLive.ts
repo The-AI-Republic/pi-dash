@@ -27,6 +27,16 @@ export interface LivePageDocument {
 /** Heading tags the canvas walk considers, in document order. */
 const HEADING_SELECTOR = "h1, h2, h3";
 
+/**
+ * The region the pane describes: the body inside the canvas, never the
+ * title, the formatting bar or the page's action mounts that share the
+ * same container (PAGE-046–049, §6.5). The read-only body and the live
+ * editor both paint it as `.editor-container`.
+ */
+export function pageBodyElement(canvas: HTMLElement): HTMLElement | null {
+  return canvas.querySelector<HTMLElement>(".editor-container");
+}
+
 function headingElements(container: HTMLElement, level: PageHeadingLevel, levelIndex: number): HTMLElement | null {
   const matches = Array.from(container.querySelectorAll<HTMLElement>(HEADING_SELECTOR)).filter(
     (element) => element.tagName.toLowerCase() === `h${level}`
@@ -50,11 +60,18 @@ export function useLivePageDocument(
   );
 
   // Reading the canvas rather than the stored body is what makes the pane
-  // live. A canvas with nothing painted in it yet (no editor, no stored
-  // body) leaves the stored document in place instead of reporting empty.
+  // live. The read is scoped to the body: the title shares the canvas and
+  // is not part of the document the outline, preview and counts describe.
+  // A canvas whose body has not painted yet (cold load, no editor) leaves
+  // the stored document in place instead of reporting empty.
   const read = React.useCallback((): void => {
     const canvas = canvasRef.current;
-    const painted = canvas === null || canvas.firstChild === null ? storedHtml : canvas.innerHTML;
+    if (canvas === null) {
+      setDocument(parsePageDocument(storedHtml, { workspaceSlug, projectId }));
+      return;
+    }
+    const body = pageBodyElement(canvas) ?? canvas;
+    const painted = body.innerHTML.trim() === "" ? storedHtml : body.innerHTML;
     setDocument(parsePageDocument(painted, { workspaceSlug, projectId }));
   }, [canvasRef, storedHtml, workspaceSlug, projectId]);
 
@@ -81,7 +98,8 @@ export function useLivePageDocument(
     (heading: PageHeading): void => {
       const canvas = canvasRef.current;
       if (canvas === null) return;
-      const element = headingElements(canvas, heading.level, heading.levelIndex);
+      const body = pageBodyElement(canvas) ?? canvas;
+      const element = headingElements(body, heading.level, heading.levelIndex);
       if (element !== null && typeof element.scrollIntoView === "function") {
         element.scrollIntoView({ behavior: "smooth", block: "start" });
       }

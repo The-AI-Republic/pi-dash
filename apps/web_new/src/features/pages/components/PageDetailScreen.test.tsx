@@ -52,6 +52,7 @@ interface Harness {
   pagesCalls: number;
   pagesHold: Promise<void> | null;
   pageHold: Promise<void> | null;
+  membersHold: Promise<void> | null;
   role: number | null;
   viewer: string;
   versions: Record<string, unknown>[];
@@ -86,6 +87,7 @@ beforeEach(() => {
     pagesCalls: 0,
     pagesHold: null,
     pageHold: null,
+    membersHold: null,
     role: 20,
     viewer: PAGES_USER_ID,
     versions: [],
@@ -174,7 +176,10 @@ beforeEach(() => {
       if (harness.pagesHold !== null) await harness.pagesHold;
       return jsonResponse(url, harness.pagesStatus, harness.pages);
     }
-    if (url.endsWith("/api/workspaces/acme/members/")) return jsonResponse(url, 200, [makeWorkspaceMember()]);
+    if (url.endsWith("/api/workspaces/acme/members/")) {
+      if (harness.membersHold !== null) await harness.membersHold;
+      return jsonResponse(url, 200, [makeWorkspaceMember()]);
+    }
     throw new Error(`unexpected request: ${url}`);
   }) as never);
 });
@@ -419,6 +424,65 @@ describe("PageDetailScreen deep links", () => {
     renderScreen({ paneTab: "outline" });
     expect(await screen.findByRole("button", { name: "Scope" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Launch" })).toBeInTheDocument();
+  });
+
+  it("holds the canvas until the directory answers, so rows never flash the fallback", async () => {
+    let release: () => void = () => undefined;
+    harness.membersHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    renderScreen({ paneTab: "info" });
+    await screen.findByLabelText("Loading page");
+    expect(screen.queryByText("Edited by")).not.toBeInTheDocument();
+    release();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await waitFor(() => expect(screen.queryByLabelText("Loading page")).not.toBeInTheDocument());
+    const edited = screen.getByText("Edited by").nextElementSibling as HTMLElement;
+    expect(edited.querySelector("a")?.textContent).toBe("Ada Byron");
+  });
+
+  it("keeps the title out of the pane's document while it sits on the canvas", async () => {
+    harness.page = record({ name: "Launch notes", description_html: "<h1>Scope</h1><p>Body</p>" });
+    renderScreen({ paneTab: "outline" });
+    const canvas = await screen.findByLabelText("Launch notes");
+    // The title lives inside the measured canvas but outside the body, so
+    // the outline lists the document's headings only (PAGE-046/047).
+    expect(canvas.querySelector('[data-testid="page-detail-title"]')).not.toBeNull();
+    expect(await screen.findByRole("button", { name: "Scope" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Launch notes" })).not.toBeInTheDocument();
+  });
+
+  it("widens the readable canvas measure when the pane opens", async () => {
+    const { rerender } = render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <PageDetailScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          pageId={harness.pageId}
+          search={{}}
+          onSearchChange={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    const canvas = await screen.findByLabelText("Launch notes");
+    const measure = canvas.querySelector<HTMLElement>(".frame-renderer");
+    expect(canvas.tagName).toBe("ARTICLE");
+    expect(canvas.style.width).toBe("");
+    expect(measure?.style.maxWidth).toBe("720px");
+    expect(measure).toHaveClass("w-full");
+    rerender(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <PageDetailScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          pageId={harness.pageId}
+          search={{ paneTab: "outline" }}
+          onSearchChange={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    const openCanvas = await screen.findByLabelText("Launch notes");
+    expect(openCanvas.querySelector<HTMLElement>(".frame-renderer")?.style.maxWidth).toBe("1152px");
   });
 
   it("attributes the page to the directory's names with profile links", async () => {

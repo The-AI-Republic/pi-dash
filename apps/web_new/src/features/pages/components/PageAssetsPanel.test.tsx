@@ -6,9 +6,14 @@
 // thumbnail, name and hover download, the extension renderer for other
 // kinds, and the themed prompt with no attachments.
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
+
+const scheme = vi.hoisted(() => ({ current: "light" as string, customDark: false }));
+vi.mock("../../../core/theme/index.js", () => ({
+  useResolvedScheme: () => ({ scheme: scheme.current, customDark: scheme.customDark }),
+}));
 
 import { PAGE_ASSETS_EMPTY_ART_ALT, PAGE_ASSETS_EMPTY_TITLE, PageAssetsPanel } from "./PageAssetsPanel.js";
 import type { PageAssetRow } from "../lib/pagePane.js";
@@ -29,6 +34,16 @@ describe("PageAssetsPanel", () => {
     expect(screen.getByAltText(PAGE_ASSETS_EMPTY_ART_ALT)).toBeInTheDocument();
   });
 
+  it("paints the dark illustration for a dark scheme", () => {
+    scheme.current = "dark";
+    try {
+      render(<PageAssetsPanel assets={[]} />);
+      expect(screen.getByAltText(PAGE_ASSETS_EMPTY_ART_ALT).getAttribute("src")).toContain("empty-dark.svg");
+    } finally {
+      scheme.current = "light";
+    }
+  });
+
   it("renders an image row with its thumbnail, view and hover download", () => {
     render(<PageAssetsPanel assets={[IMAGE]} />);
     const row = screen.getByTestId("page-asset-row");
@@ -41,6 +56,18 @@ describe("PageAssetsPanel", () => {
     // Hidden until the row is hovered (or the action is focused).
     expect(download?.className).toContain("opacity-0");
     expect(download?.className).toContain("group-hover/asset:opacity-100");
+  });
+
+  it("keeps the download action from activating the row's view link", () => {
+    render(<PageAssetsPanel assets={[IMAGE]} />);
+    const row = screen.getByTestId("page-asset-row");
+    const download = row.querySelector<HTMLAnchorElement>('a[target="_blank"][data-asset-download]');
+    if (download === null) throw new Error("no download action");
+    const rowClick = vi.fn();
+    row.addEventListener("click", rowClick);
+    const downloadClick = fireEvent.click(download);
+    expect(rowClick).toHaveBeenCalledTimes(1);
+    expect(downloadClick).toBe(true);
   });
 
   it("leaves the thumbnail out of a row with no picture", () => {

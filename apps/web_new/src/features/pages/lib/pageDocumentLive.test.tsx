@@ -62,10 +62,44 @@ describe("useLivePageDocument", () => {
     expect(state().document.assets).toHaveLength(1);
   });
 
+  it("reads only the body, so the page title never joins the outline or the counts", async () => {
+    render(<Harness html="" />);
+    paint('<h1 id="title">Launch notes</h1><div class="editor-container"><h1>Top</h1><p>two words</p></div>');
+    await waitFor(() =>
+      expect(state().document).toMatchObject({
+        headings: [{ level: 1, text: "Top", levelIndex: 1 }],
+        stats: { words: 3, paragraphs: 1 },
+      })
+    );
+  });
+
+  it("falls back to the stored body while the body region is empty", () => {
+    render(<Harness html="<h1>Stored</h1><p>one two three</p>" />);
+    paint('<h1>Launch notes</h1><div class="editor-container">  </div>');
+    expect(state().document.headings).toEqual([{ level: 1, text: "Stored", levelIndex: 1 }]);
+    expect(state().document.stats.words).toBe(4);
+  });
+
   it("scopes asset rows to the page's workspace", async () => {
     render(<Harness html="" />);
     paint('<img src="asset-3">');
     await waitFor(() => expect(state().document.assets[0]?.viewHref).toBe("/api/assets/v2/workspaces/acme/asset-3/"));
+  });
+
+  it("scrolls within the body when the canvas also carries a title heading", () => {
+    render(<Harness html="" />);
+    paint('<h1>Launch notes</h1><div class="editor-container"><h1>Top</h1><h2>Other</h2><h2>Mid</h2></div>');
+    const canvas = screen.getByTestId("canvas");
+    const title = canvas.querySelector("h1") as HTMLElement;
+    const body = canvas.querySelector(".editor-container") as HTMLElement;
+    const mid = body.querySelectorAll("h2")[1] as HTMLElement;
+    const scroll = vi.fn();
+    title.scrollIntoView = vi.fn();
+    mid.scrollIntoView = scroll;
+    act(() => {
+      screen.getByRole("button", { name: "scroll" }).click();
+    });
+    expect(scroll).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
   });
 
   it("scrolls the canvas to the heading the outline picked", () => {

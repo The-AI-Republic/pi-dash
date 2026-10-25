@@ -7,11 +7,12 @@
 // links are never rows. With no attachments the tab explains the empty
 // state instead of showing a bare list.
 
-import { EmptyState } from "@pidash/kit";
+import { EmptyState, emptyStateImagePath } from "@pidash/kit";
 import { Download } from "lucide-react";
 import * as React from "react";
 
-import type { PageAssetRow } from "../lib/pagePane.js";
+import { useResolvedScheme } from "../../../core/theme/index.js";
+import { pageArtScheme, type PageAssetRow } from "../lib/pagePane.js";
 
 export const PAGE_ASSETS_EMPTY_TITLE = "Missing images";
 export const PAGE_ASSETS_EMPTY_BODY = "Pictures added to this page will be listed here.";
@@ -28,6 +29,7 @@ export interface PageAssetsPanelProps {
 }
 
 function PageAssetsEmpty(): React.ReactElement {
+  const { scheme, customDark } = useResolvedScheme();
   return (
     <div data-testid="page-assets-empty">
       <EmptyState
@@ -35,7 +37,7 @@ function PageAssetsEmpty(): React.ReactElement {
         size="small"
         art={
           <img
-            src="/empty-state/general/empty-light.svg"
+            src={emptyStateImagePath({ category: "general", type: "empty" }, pageArtScheme(scheme, customDark))}
             alt={PAGE_ASSETS_EMPTY_ART_ALT}
             className="h-32 w-32"
             draggable={false}
@@ -49,12 +51,22 @@ function PageAssetsEmpty(): React.ReactElement {
 }
 
 function PageAssetRowView({ asset }: { asset: PageAssetRow }): React.ReactElement {
+  // The assets oracle reads a row as an anchor holding the name paragraph,
+  // with the download anchor nested inside it (§6.7 driver contract). The
+  // two destinations stay independent in behaviour: a click on the
+  // download action never also activates the row's view link.
+  const guardRow = (event: React.MouseEvent<HTMLAnchorElement>): void => {
+    if (event.target instanceof Element && event.target.closest("[data-asset-download]") !== null) {
+      event.preventDefault();
+    }
+  };
   return (
     <a
       href={asset.viewHref}
       target="_blank"
       rel="noreferrer"
       data-testid="page-asset-row"
+      onClick={guardRow}
       className="group/asset flex items-center gap-(--space-2) rounded-(--radius-control) p-(--space-1) hover:bg-(--subtle)"
     >
       {asset.thumbnailHref === null ? null : (
@@ -69,7 +81,11 @@ function PageAssetRowView({ asset }: { asset: PageAssetRow }): React.ReactElemen
         href={asset.downloadHref}
         target="_blank"
         rel="noreferrer"
+        data-asset-download=""
         aria-label={`${PAGE_ASSETS_DOWNLOAD_LABEL} ${asset.name}`}
+        onClick={(event) => {
+          event.stopPropagation();
+        }}
         className="pointer-events-none inline-flex size-6 shrink-0 items-center justify-center rounded-(--radius-control) text-(--text-muted) opacity-0 group-hover/asset:pointer-events-auto group-hover/asset:opacity-100 hover:bg-(--subtle) hover:text-(--text) focus-visible:pointer-events-auto focus-visible:opacity-100"
       >
         <Download size={14} strokeWidth={1.5} aria-hidden="true" />

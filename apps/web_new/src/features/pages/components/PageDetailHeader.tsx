@@ -47,6 +47,8 @@ export interface PageDetailHeaderProps {
   onOpenHistory: () => void;
   /** Reveal the navigation pane (PAGE-045). */
   onOpenPane: () => void;
+  /** Whether the navigation pane is currently open (PAGE-045). */
+  paneOpen: boolean;
 }
 
 export function PageDetailHeader({
@@ -63,6 +65,7 @@ export function PageDetailHeader({
   onCopyLink,
   onOpenHistory,
   onOpenPane,
+  paneOpen,
 }: PageDetailHeaderProps): React.ReactElement {
   const navigate = useNavigate();
   const [copied, setCopied] = React.useState(false);
@@ -117,7 +120,7 @@ export function PageDetailHeader({
       <PageSyncBadge status={syncStatus} />
       <IconButton
         label={PAGE_OPEN_PANE_LABEL}
-        aria-expanded={false}
+        aria-expanded={paneOpen}
         data-testid="page-pane-toggle"
         size="small"
         onClick={onOpenPane}

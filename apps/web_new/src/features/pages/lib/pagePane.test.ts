@@ -11,12 +11,14 @@ import { describe, expect, it } from "vitest";
 import {
   assetFileName,
   EMPTY_PAGE_DOCUMENT,
+  PAGE_CANVAS_MEASURE_PX,
   PAGE_DEACTIVATED_USER,
   PAGE_PANE_TAB_ORDER,
   PAGE_PANE_WIDTH_PX,
   PAGE_PREVIEW_BAR_WIDTH_PX,
   PAGE_OUTLINE_INDENT_PX,
   pageActorRows,
+  pageArtScheme,
   pageAssetDownloadHref,
   pageAssetViewHref,
   pageActorMembers,
@@ -35,6 +37,11 @@ const SCOPE = { workspaceSlug: "acme", projectId: "project-1" };
 describe("tabs and geometry", () => {
   it("orders the tabs Outline, Info, Assets", () => {
     expect(PAGE_PANE_TAB_ORDER).toEqual(["outline", "info", "assets"]);
+  });
+
+  it("pins the canvas measures at the readable and wide ends (PAGE-045, §6.5)", () => {
+    expect(PAGE_CANVAS_MEASURE_PX.readable).toBe("720px");
+    expect(PAGE_CANVAS_MEASURE_PX.wide).toBe("1152px");
   });
 
   it("pins a fixed pane width inside the oracle's range", () => {
@@ -325,6 +332,18 @@ describe("attribution", () => {
   it("keeps an unreadable creation date verbatim and formats a readable one", () => {
     expect(pageCalendarDate("nope")).toBe("nope");
     expect(pageCalendarDate("2026-03-04T12:00:00Z")).toMatch(/2026/);
+  });
+});
+
+describe("empty-state art scheme", () => {
+  it("follows the applied theme and the custom palette's darkness", () => {
+    expect(pageArtScheme("light")).toBe("light");
+    expect(pageArtScheme("light-contrast")).toBe("light");
+    expect(pageArtScheme("dark")).toBe("dark");
+    expect(pageArtScheme("dark-contrast")).toBe("dark");
+    expect(pageArtScheme("custom", true)).toBe("dark");
+    expect(pageArtScheme("custom", false)).toBe("light");
+    expect(pageArtScheme("custom")).toBe("light");
   });
 });
 

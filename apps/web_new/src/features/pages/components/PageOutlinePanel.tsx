@@ -6,10 +6,11 @@
 // reads at a glance; selecting one scrolls the canvas to it. A document
 // without headings gets a themed prompt instead of an empty list.
 
-import { EmptyState } from "@pidash/kit";
+import { EmptyState, emptyStateImagePath } from "@pidash/kit";
 import * as React from "react";
 
-import { PAGE_OUTLINE_INDENT_PX, type PageHeading, type PageHeadingLevel } from "../lib/pagePane.js";
+import { useResolvedScheme } from "../../../core/theme/index.js";
+import { PAGE_OUTLINE_INDENT_PX, pageArtScheme, type PageHeading, type PageHeadingLevel } from "../lib/pagePane.js";
 
 export const PAGE_OUTLINE_EMPTY_TITLE = "Missing headings";
 export const PAGE_OUTLINE_EMPTY_BODY = "Add headings to this page and they will appear here.";
@@ -26,6 +27,7 @@ export interface PageOutlinePanelProps {
  * (the kit's themed art is decorative by default).
  */
 function PageOutlineEmpty(): React.ReactElement {
+  const { scheme, customDark } = useResolvedScheme();
   return (
     <div data-testid="page-outline-empty">
       <EmptyState
@@ -33,7 +35,7 @@ function PageOutlineEmpty(): React.ReactElement {
         size="small"
         art={
           <img
-            src="/empty-state/general/empty-light.svg"
+            src={emptyStateImagePath({ category: "general", type: "empty" }, pageArtScheme(scheme, customDark))}
             alt={PAGE_OUTLINE_EMPTY_ART_ALT}
             className="h-32 w-32"
             draggable={false}

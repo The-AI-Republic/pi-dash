@@ -76,6 +76,13 @@ export const PAGE_PANE_TAB_ORDER: readonly PagePaneTab[] = PAGE_PANE_TABS.map((t
 /** The pane's fixed width in CSS pixels (PAGE-045, oracle: 290–298). */
 export const PAGE_PANE_WIDTH_PX = 296;
 
+/**
+ * The canvas's readable measure (spec §6.5; the oracle pins both ends):
+ * the narrow measure while the pane is shut, the wide one while it is
+ * open, so the pane's slide reflows the canvas rather than overlaying it.
+ */
+export const PAGE_CANVAS_MEASURE_PX = { readable: "720px", wide: "1152px" } as const;
+
 /** Indentation per outline level; the ratio 1:2:4 is oracle-pinned. */
 export const PAGE_OUTLINE_INDENT_PX: Record<PageHeadingLevel, number> = { 1: 16, 2: 32, 3: 64 };
 
@@ -349,6 +356,16 @@ export function pageActorRows(input: PageActorInput): PageActorRow[] {
     { ...editor, role: "edited", timeText: `${shortRelativeAge(input.updatedAt, input.nowMs)} ago` },
     { ...creator, role: "created", timeText: pageCalendarDate(input.createdAt) },
   ];
+}
+
+/**
+ * Which shipped empty-state illustration to use. The pane's prompts follow
+ * the applied theme: dark and dark-contrast paint the dark art, and a
+ * custom theme follows its palette's darkness.
+ */
+export function pageArtScheme(scheme: string, customDark = false): "light" | "dark" {
+  if (scheme === "custom") return customDark ? "dark" : "light";
+  return scheme === "dark" || scheme === "dark-contrast" ? "dark" : "light";
 }
 
 /** Bars the collapsed preview draws, one per heading (PAGE-046). */

@@ -77,6 +77,7 @@ function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailH
         onCopyLink={onCopyLink}
         onOpenHistory={onOpenHistory}
         onOpenPane={onOpenPane}
+        paneOpen={false}
         {...overrides}
       />
     </QueryClientProvider>
@@ -126,8 +127,14 @@ describe("PageDetailHeader", () => {
     const { onOpenPane } = renderHeader();
     const toggle = screen.getByRole("button", { name: PAGE_OPEN_PANE_LABEL });
     expect(toggle.querySelector("svg.lucide-panel-right")).not.toBeNull();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(toggle);
     expect(onOpenPane).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the pane as expanded while it is open", () => {
+    renderHeader({ paneOpen: true });
+    expect(screen.getByRole("button", { name: PAGE_OPEN_PANE_LABEL })).toHaveAttribute("aria-expanded", "true");
   });
 
   it("shows the sync badge and hides the star from guests", () => {

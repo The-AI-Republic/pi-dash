@@ -49,7 +49,7 @@ import { PageNavigationPane } from "./PageNavigationPane.js";
 import { PageVersionOverlay } from "./PageVersionOverlay.js";
 import { PAGE_UNTITLED } from "../lib/pageList.js";
 import { useLivePageDocument } from "../lib/pageDocumentLive.js";
-import { pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
+import { PAGE_CANVAS_MEASURE_PX, pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
 
 export const PAGE_BODY_LABEL = "Page body";
 
@@ -105,8 +105,13 @@ export function PageDetailScreen({
     });
   }, [page, viewerId, role]);
 
+  // The attribution rows cannot say who edited or created the page until
+  // the member directory answers; waiting for it here keeps the fallback
+  // label for departed members from flashing on every load (PAGE-050).
+  const directory = usePaletteWorkspaceMembers(workspaceSlug);
+
   const body = resolvePageDetailBody({
-    pending: record.isPending || me.isPending || roles.isPending,
+    pending: record.isPending || me.isPending || roles.isPending || directory.isPending,
     recordError: record.isError,
     canRead: capabilities?.canRead ?? true,
   });
@@ -119,7 +124,6 @@ export function PageDetailScreen({
 
   const syncStatus = usePageSyncStatus(pageId);
   const rename = usePageRename(workspaceSlug, projectId, pageId);
-  const directory = usePaletteWorkspaceMembers(workspaceSlug);
 
   // The pane reads the canvas, so headings, counts and assets follow
   // typing; before the canvas paints, the stored body stands in (PAGE-046).
@@ -213,32 +217,47 @@ export function PageDetailScreen({
         }}
         onOpenHistory={() => onSearchChange(historySearch(search))}
         onOpenPane={openPane}
+        paneOpen={paneOpen}
       />
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1 overflow-y-auto">
-          <article aria-label={pageTitle} className="mx-auto w-full max-w-3xl px-(--space-8) py-(--space-6)">
-            <PageDetailTitle
-              pageId={page.id}
-              name={page.name}
-              editable={capabilities.canEdit}
-              onRename={(next) => rename.mutate(next)}
-            />
-            {capabilities.isShelved || capabilities.isLocked ? (
-              <p className="text-caption mb-(--space-4) text-(--text-muted)">
-                {capabilities.isShelved ? "This page is archived and read-only." : "This page is locked and read-only."}
-              </p>
-            ) : null}
-            <div id="page-content-container" className="relative w-full" ref={canvasRef}>
-              <div className="frame-renderer w-full">
-                <div className="editor-container">
-                  {bodyReady ? (
-                    <RichTextView html={page.description_html} label={PAGE_BODY_LABEL} />
-                  ) : (
-                    <PageBodySkeleton />
-                  )}
-                  {canManage ? <span data-testid="page-detail-manage-mount" hidden aria-hidden="true" /> : null}
-                  <span data-testid="page-detail-action-mount" hidden aria-hidden="true" />
-                </div>
+          {/* The measured canvas fills the column, so the pane's slide
+              reflows it by the pane's own width (PAGE-045). The readable
+              measure lives inside it and follows the pane state: narrow
+              while it is shut, wide while it is open (§6.5). The title is
+              part of the canvas, which is why the pane's live read scopes
+              itself to the body below it. */}
+          <article
+            id="page-content-container"
+            aria-label={pageTitle}
+            ref={canvasRef}
+            className="relative w-full py-(--space-6)"
+          >
+            <div
+              className="frame-renderer mx-auto w-full px-(--space-8) transition-[max-width] duration-(--motion-duration) ease-(--motion-easing)"
+              style={{ maxWidth: paneOpen ? PAGE_CANVAS_MEASURE_PX.wide : PAGE_CANVAS_MEASURE_PX.readable }}
+            >
+              <PageDetailTitle
+                pageId={page.id}
+                name={page.name}
+                editable={capabilities.canEdit}
+                onRename={(next) => rename.mutate(next)}
+              />
+              {capabilities.isShelved || capabilities.isLocked ? (
+                <p className="text-caption mb-(--space-4) text-(--text-muted)">
+                  {capabilities.isShelved
+                    ? "This page is archived and read-only."
+                    : "This page is locked and read-only."}
+                </p>
+              ) : null}
+              <div className="editor-container">
+                {bodyReady ? (
+                  <RichTextView html={page.description_html} label={PAGE_BODY_LABEL} />
+                ) : (
+                  <PageBodySkeleton />
+                )}
+                {canManage ? <span data-testid="page-detail-manage-mount" hidden aria-hidden="true" /> : null}
+                <span data-testid="page-detail-action-mount" hidden aria-hidden="true" />
               </div>
             </div>
           </article>
