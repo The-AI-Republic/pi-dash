@@ -330,6 +330,13 @@ describe("PageDetailScreen title and body", () => {
     expect(screen.getByTestId("page-detail-manage-mount")).toBeInTheDocument();
   });
 
+  it("keeps the favorite control off an open page a guest-role viewer owns", async () => {
+    harness.role = 5;
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(screen.queryByRole("button", { name: /favorite/i })).not.toBeInTheDocument();
+  });
+
   it("falls back to the project id and no mark when the project row is unavailable", async () => {
     harness.projectStatus = 404;
     renderScreen();

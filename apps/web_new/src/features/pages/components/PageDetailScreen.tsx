@@ -18,7 +18,7 @@ import { meQueryOptions } from "../../../core/session/queries.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { RichTextView } from "../../../shared/editor/RichTextView.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
-import { isProjectAdmin } from "../../projects/index.js";
+import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { pageDetailQueryOptions, pageVersionQueryOptions, pageVersionsQueryOptions } from "../api/detailQueries.js";
 import { usePageRename } from "../api/detailMutations.js";
 import { pagesListQueryOptions } from "../api/queries.js";
@@ -178,7 +178,7 @@ export function PageDetailScreen({
         page={page}
         siblings={siblings}
         syncStatus={syncStatus}
-        showStar={capabilities.standing !== "guest"}
+        showStar={isProjectAuthorized(role)}
         onSelectSibling={(id) => goTo(siblingHref(workspaceSlug, projectId, id))}
         onCopyLink={() => {
           void copyPageLink(workspaceSlug, projectId, page.id);
