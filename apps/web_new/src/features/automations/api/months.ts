@@ -34,8 +34,22 @@ export function isDelayEnabled(months: number): boolean {
 export function parseDelayInput(raw: string): number | null {
   const trimmed = raw.trim();
   if (trimmed === "") return null;
-  if (!/^\d+$/.test(trimmed)) return null;
   const months = Number(trimmed);
+  if (!Number.isFinite(months) || !Number.isInteger(months)) return null;
   if (months < MIN_DELAY_MONTHS || months > MAX_DELAY_MONTHS) return null;
   return months;
+}
+
+/**
+ * Whether an invalid custom-month value should be explained inline.
+ * Empty fields and whole numbers outside the accepted range get the
+ * message; fractional input stays silent because the dialog refuses it
+ * without writing or explaining.
+ */
+export function isMonthRangeError(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (trimmed === "") return true;
+  const months = Number(trimmed);
+  if (!Number.isFinite(months) || !Number.isInteger(months)) return false;
+  return months < MIN_DELAY_MONTHS || months > MAX_DELAY_MONTHS;
 }

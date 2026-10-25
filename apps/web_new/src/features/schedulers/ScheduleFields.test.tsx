@@ -40,7 +40,7 @@ describe("ScheduleFields", () => {
     expect(screen.getByLabelText("Recurrence (RRULE)")).toHaveValue("FREQ=DAILY");
     expect(screen.getByLabelText("Project context (optional)")).toHaveValue("");
     expect(screen.getByLabelText("Starts at")).toHaveAttribute("id", ids.startsAt);
-    expect(screen.getByText("every day.")).toBeInTheDocument();
+    expect(screen.getByText("every day")).toBeInTheDocument();
     expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("switch")).toHaveAccessibleName("Disable this install");
   });
@@ -48,11 +48,11 @@ describe("ScheduleFields", () => {
   it("changes the rule through the builder and keeps the sentence live", async () => {
     const user = userEvent.setup();
     render(<Harness />);
-    expect(screen.getByText("every day.")).toBeInTheDocument();
+    expect(screen.getByText("every day")).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText("Repeat unit"), "week");
-    expect(screen.getByText("every week on Monday.")).toBeInTheDocument();
+    expect(screen.getByText("every week on Monday")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Repeat interval"), { target: { value: "3" } });
-    expect(screen.getByText("every 3 weeks on Monday.")).toBeInTheDocument();
+    expect(screen.getByText("every 3 weeks on Monday")).toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText("Repeat unit"), "none");
     expect(screen.getByText("Fires once at the start time.")).toBeInTheDocument();
   });
@@ -64,7 +64,7 @@ describe("ScheduleFields", () => {
     await user.click(screen.getByRole("button", { name: "Advanced: rule text" }));
     await user.clear(screen.getByLabelText("Recurrence (RRULE)"));
     await user.type(screen.getByLabelText("Recurrence (RRULE)"), "FREQ=NOPE");
-    expect(screen.getByText("FREQ=NOPE.")).toBeInTheDocument();
+    expect(screen.getByText("FREQ=NOPE", { selector: "span" })).toBeInTheDocument();
   });
 
   it("reports edits for every field and mirrors errors", async () => {

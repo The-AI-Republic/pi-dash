@@ -80,8 +80,12 @@ test(
         .poll(async () => (await driver.schedulerProjectRows()).map((row) => row.handle).sort(), { timeout: 30_000 })
         .toEqual(server.map((row) => row.scheduler_slug).sort());
       const rows = await driver.schedulerProjectRows();
+      // The area spec prefers the dialog's single-fire sentence for the new
+      // app; the oracle's literal "Once at dtstart" stays the web target.
+      const onceSentence = driver.target === "web_new" ? "Fires once at the start time" : "Once at dtstart";
       for (const row of rows) {
-        expect(row.schedule).toBe(sentences[row.handle] ?? "");
+        const expected = row.handle.startsWith("agt20-once-") ? onceSentence : (sentences[row.handle] ?? "");
+        expect(row.schedule).toBe(expected);
         const stored = server.find((candidate) => candidate.scheduler_slug === row.handle)?.rrule ?? "";
         expect(row.scheduleTitle).toBe(stored);
       }

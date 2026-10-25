@@ -137,7 +137,16 @@ export function InstallForm({
   refreshDefinitions,
 }: InstallFormProps): React.ReactElement {
   const install = useInstallSchedulerBinding(workspaceSlug);
-  const [mode, setMode] = React.useState<InstallMode>(() => initialInstallMode(canAuthor, installable.length));
+  // The catalog arrives after the dialog opens. Until the person picks a
+  // tab, derive the landing tab from what is actually installable so a
+  // slow first read cannot strand a reinstallable definition on "Create
+  // new" (AGT-012). An explicit tab choice wins from then on.
+  const [modeChoice, setModeChoice] = React.useState<"install" | "create" | undefined>();
+  // A create draft also wins: the catalog may land after the person has
+  // started writing, and switching tabs would discard that work.
+  const [draftStarted, setDraftStarted] = React.useState(false);
+  const mode: InstallMode =
+    modeChoice ?? (draftStarted ? "create" : undefined) ?? initialInstallMode(canAuthor, installable.length);
   // The picker's value is the user's choice, or the first option until they
   // make one. Keeping it derived means a catalog that lands after the dialog
   // opens still gets a valid selection without a state-sync effect.
@@ -167,11 +176,12 @@ export function InstallForm({
   const definitionId = chosenId ?? options[0]?.id ?? "";
 
   const switchMode = (next: "install" | "create"): void => {
-    setMode(next);
+    setModeChoice(next);
     setSchedulerError(undefined);
   };
 
   const changeDefinition = <K extends keyof DefinitionDraft>(field: K, value: DefinitionDraft[K]): void => {
+    setDraftStarted(true);
     setDefinition((current) => ({ ...current, [field]: value }));
     setDefinitionErrors((current) => ({ ...current, [field]: undefined }));
   };
@@ -228,7 +238,7 @@ export function InstallForm({
       );
       setFlipped(created);
       setChosenId(created.id);
-      setMode("install");
+      setModeChoice("install");
     } finally {
       setAuthoring(false);
     }
@@ -355,6 +365,7 @@ export function InstallForm({
             {...(definitionErrors.name === undefined ? {} : { error: definitionErrors.name })}
             onChange={(event) => {
               const name = event.target.value;
+              setDraftStarted(true);
               setDefinition((current) => ({
                 ...current,
                 name,
@@ -410,7 +421,10 @@ export function InstallForm({
         value={schedule.value}
         errors={schedule.errors}
         disabled={pending}
-        onChange={schedule.change}
+        onChange={(field, next) => {
+          if (mode === "create") setDraftStarted(true);
+          schedule.change(field, next);
+        }}
       />
 
       <OutcomeModeField idPrefix="project-install" value={outcomeMode} disabled={pending} onChange={setOutcomeMode} />

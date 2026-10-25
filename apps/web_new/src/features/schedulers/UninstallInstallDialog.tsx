@@ -24,7 +24,7 @@ export interface UninstallInstallDialogProps {
 
 /** The consequence sentence naming the definition; shared with tests. */
 export function uninstallConsequence(binding: Pick<SchedulerBinding, "scheduler_name">): string {
-  return `Uninstalling ${binding.scheduler_name} stops it firing on this project. The scheduler definition itself is unaffected: it stays in the workspace catalog and can be installed again later.`;
+  return `Uninstalling ${binding.scheduler_name} stops firing on this project. The scheduler definition itself is unaffected: it stays in the workspace catalog and can be installed again later.`;
 }
 
 interface UninstallActionsProps {

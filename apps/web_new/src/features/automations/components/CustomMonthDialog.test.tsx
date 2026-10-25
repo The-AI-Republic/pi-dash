@@ -4,9 +4,9 @@
 // See the LICENSE file for details.
 // Custom-month dialog (parity/specs/project-settings-part-f.md,
 // PSET-053/054; AGT-036): seeded and error-free on open, the number
-// field's native bounds silently stop zero, over-range and fractional
-// counts, an empty field is the only value the app explains, cancel
-// resets, and a valid month forwards and closes.
+// field explains empty and whole-number out-of-range values, refuses
+// fractional counts silently, cancels reset, and a valid month forwards
+// and closes.
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -54,7 +54,7 @@ describe("CustomMonthDialog", () => {
     expect(within(dialog()).queryByText(DELAY_RANGE_MESSAGE)).toBeNull();
   });
 
-  it("refuses zero and thirteen natively without forwarding, closing or explaining", async () => {
+  it("refuses zero and thirteen with the range message without forwarding or closing", async () => {
     const user = userEvent.setup();
     const { onSubmit, onOpenChange } = setup();
     const field = within(dialog()).getByPlaceholderText("Enter Months");
@@ -63,13 +63,13 @@ describe("CustomMonthDialog", () => {
       await user.type(field, value);
       await user.click(within(dialog()).getByRole("button", { name: "Submit" }));
       expect(within(dialog()).getByPlaceholderText("Enter Months")).toHaveValue(Number(value));
-      expect(within(dialog()).queryByText(DELAY_RANGE_MESSAGE)).toBeNull();
+      expect(within(dialog()).getByText(DELAY_RANGE_MESSAGE)).toBeInTheDocument();
     }
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
-  it("leaves native constraint validation on for programmatic submits", async () => {
+  it("keeps the numeric bounds while explaining an out-of-range keyboard submit", async () => {
     const user = userEvent.setup();
     const { onSubmit, onOpenChange } = setup();
     const field = within(dialog()).getByPlaceholderText("Enter Months");
@@ -84,9 +84,10 @@ describe("CustomMonthDialog", () => {
     await user.type(field, "{Enter}");
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
+    expect(within(dialog()).getByText(DELAY_RANGE_MESSAGE)).toBeInTheDocument();
   });
 
-  it("refuses a submit dispatched past native validation while the value is out of range", async () => {
+  it("explains an out-of-range value submitted past native validation", async () => {
     const user = userEvent.setup();
     const { onSubmit, onOpenChange } = setup();
     const field = within(dialog()).getByPlaceholderText("Enter Months");
@@ -94,12 +95,12 @@ describe("CustomMonthDialog", () => {
     await user.type(field, "13");
     const form = field.closest("form");
     if (form === null) throw new Error("month field is outside its form");
-    // A direct submit skips the browser's own check; the handler's guard
-    // still keeps the dialog open without writing or explaining.
+    // A direct submit skips the browser's own check; the handler still
+    // keeps the dialog open and explains the accepted range.
     fireEvent.submit(form);
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
-    expect(within(dialog()).queryByText(DELAY_RANGE_MESSAGE)).toBeNull();
+    expect(within(dialog()).getByText(DELAY_RANGE_MESSAGE)).toBeInTheDocument();
   });
 
   it("forwards a whole month and asks to close", async () => {
@@ -110,6 +111,19 @@ describe("CustomMonthDialog", () => {
     await user.type(field, "5");
     await user.click(within(dialog()).getByRole("button", { name: "Submit" }));
     expect(onSubmit).toHaveBeenCalledWith(5);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("forwards a whole month entered in exponent form", async () => {
+    const user = userEvent.setup();
+    const { onSubmit, onOpenChange } = setup();
+    const field = within(dialog()).getByPlaceholderText("Enter Months");
+    await user.clear(field);
+    await user.type(field, "1e1");
+    // The number field accepts exponent notation and reports it as a valid
+    // whole value; the handler must forward the months it denotes.
+    await user.click(within(dialog()).getByRole("button", { name: "Submit" }));
+    expect(onSubmit).toHaveBeenCalledWith(10);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
