@@ -59,31 +59,32 @@ class FakeLocator {
     this.waitFor.mockImplementation(options.waitFor ?? (async () => undefined));
   }
 
+  private fail<T>(value: T): Promise<T> {
+    return this.options.throws === true ? Promise.reject(new Error("read failed")) : Promise.resolve(value);
+  }
   count(): Promise<number> {
-    return Promise.resolve(this.options.items?.length ?? this.options.count ?? 0);
+    return this.fail(this.options.items?.length ?? this.options.count ?? 0);
   }
   all(): Promise<FakeLocator[]> {
     return this.fail(this.options.all !== undefined ? this.options.all() : (this.options.items ?? []));
   }
   isVisible(): Promise<boolean> {
-    return Promise.resolve(this.options.visible ?? true);
+    return this.fail(this.options.visible ?? true);
   }
   isChecked(): Promise<boolean> {
-    return Promise.resolve(this.options.checked ?? false);
+    return this.fail(this.options.checked ?? false);
   }
   isDisabled(): Promise<boolean> {
-    return Promise.resolve(this.options.disabled ?? false);
+    return this.fail(this.options.disabled ?? false);
   }
   innerText(): Promise<string> {
-    return this.options.innerText !== undefined
-      ? this.options.innerText()
-      : this.fail(this.options.text ?? "");
+    return this.options.innerText !== undefined ? this.options.innerText() : this.fail(this.options.text ?? "");
   }
   textContent(): Promise<string | null> {
-    return Promise.resolve(this.options.content ?? this.options.text ?? "");
+    return this.fail(this.options.content ?? this.options.text ?? "");
   }
   inputValue(): Promise<string> {
-    return Promise.resolve(this.options.input ?? "");
+    return this.fail(this.options.input ?? "");
   }
   getAttribute(name: string): Promise<string | null> {
     if (this.options.getAttribute !== undefined) return this.options.getAttribute(name);
@@ -684,7 +685,6 @@ describe("recurrence builder", () => {
     );
   });
 });
-
 
 describe("calendar surface", () => {
   function calendarPage(overrides: {
