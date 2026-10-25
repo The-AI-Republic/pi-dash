@@ -174,9 +174,9 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
 
     println!();
     if let Some(email) = token.user_email.as_deref() {
-        println!("✓ Logged in as {email}.");
+        println!("✓ Browser approved sign-in as {email}.");
     } else {
-        println!("✓ Logged in.");
+        println!("✓ Browser approved sign-in.");
     }
 
     // v1: a CLI install is bound to one workspace. Resolve which one
@@ -199,6 +199,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         &workspace_slug,
         &dev_machine_id,
         &host_label,
+        paths,
     )
     .await?;
     runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token, args.force)
@@ -465,6 +466,7 @@ async fn exchange_for_machine_token(
     workspace_slug: &str,
     dev_machine_id: &uuid::Uuid,
     host_label: &str,
+    paths: &Paths,
 ) -> Result<MachineTokenResponse> {
     let url = format!("{cloud_url}/api/v1/auth/machine-token/");
     let resp = client
@@ -481,11 +483,41 @@ async fn exchange_for_machine_token(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("machine-token exchange failed: HTTP {status}: {body}");
+        return Err(machine_token_exchange_error(
+            status,
+            &body,
+            &paths.config_path(),
+        ));
     }
     resp.json::<MachineTokenResponse>()
         .await
         .context("parsing machine-token exchange response")
+}
+
+fn machine_token_exchange_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    config_path: &std::path::Path,
+) -> anyhow::Error {
+    // Only this structured server error indicates a possible ownership conflict.
+    // Other 404s and malformed responses should keep their diagnostic details.
+    if status == reqwest::StatusCode::NOT_FOUND
+        && serde_json::from_str::<TokenError>(body)
+            .is_ok_and(|error| error.error == "dev_machine_not_found")
+    {
+        return anyhow::anyhow!(
+            "Browser approval succeeded, but Pi Dash could not finish setting up this computer.\n\n\
+             The saved computer ID may already belong to a different Pi Dash account.\n\
+             Try signing in with the account previously used on this computer.\n\n\
+             To use a different account, stop Pi Dash and back up this settings file:\n  {}\n\
+             Then remove only `dev_machine_id` from its [daemon] section and run `pidash auth login` again.\n\
+             Existing runners may need to be registered again.\n\n\
+             Details: HTTP {status}; server error: dev_machine_not_found",
+            config_path.display()
+        );
+    }
+
+    anyhow::anyhow!("machine-token exchange failed: HTTP {status}: {body}")
 }
 
 fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {

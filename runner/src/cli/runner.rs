@@ -13,7 +13,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::cli::runner_ops::{self, ApplyEnrollOptions};
-use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner};
+use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, TransportError, create_runner};
 use crate::cloud::runners::{delete_runner, probe_cloud_reachable};
 use crate::config::file;
 use crate::config::schema::{AgentKind, MAX_RUNNERS_PER_DAEMON, RunnerConfig};
@@ -73,7 +73,7 @@ pub struct AddArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Pi Dash project this runner serves.
+    /// Project identifier (e.g. ENG), not its display name. Find it with `pidash project list`.
     #[arg(long)]
     pub project: String,
 
@@ -221,7 +221,31 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
         },
     )
     .await
-    .with_context(|| format!("cloud rejected runner creation against {cloud_url}"))?;
+    .map_err(|error| {
+        let context = match &error {
+            TransportError::Server { status: 404, body }
+                if serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| {
+                    value.get("error").and_then(|error| error.as_str())
+                        == Some("project_not_found")
+                }) =>
+            {
+                let workspace = workspace_arg
+                    .as_deref()
+                    .map(|slug| format!(" in workspace {slug:?}"))
+                    .unwrap_or_default();
+                format!(
+                    "Project identifier {:?} was not found{workspace}.\n\n\
+                     --project expects the project's identifier (short code), not its display name.\n\
+                     Run `pidash project list` to see project names and identifiers in your saved workspace, \
+                     then use the `identifier` value with `pidash runner add --project <IDENTIFIER>`.\n\
+                     If the project belongs to another workspace, check the workspace and pass `--workspace <WORKSPACE_SLUG>`.",
+                    args.project
+                )
+            }
+            _ => format!("cloud rejected runner creation against {cloud_url}"),
+        };
+        anyhow::Error::new(error).context(context)
+    })?;
 
     // Local persistence under the branch's rollback umbrella: if anything
     // between the cloud mint above and the on-disk write fails, we delete
