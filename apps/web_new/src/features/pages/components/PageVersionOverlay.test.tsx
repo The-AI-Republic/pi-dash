@@ -5,7 +5,8 @@
 // Version overlay (parity/specs/pages.md §4.5, §6.9, PAGE-052/054/079):
 // the read-only marker, the loading title, the snapshot skeleton while its
 // read is in flight, the frozen structured-then-markup body, the failure
-// panel with its retry, and the close control.
+// panel with its retry, the close control, and the restore action that
+// exists only when the shell hands one down (PAGE-053).
 
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { PageVersionDetail } from "@pidash/api-client";
@@ -18,6 +19,7 @@ import {
   PAGE_VERSION_ERROR,
   PAGE_VERSION_ERROR_HINT,
   PAGE_VERSION_LOADING,
+  PAGE_VERSION_RESTORE,
   PAGE_VERSION_RETRY,
   PAGE_VERSION_VIEW_ONLY,
 } from "./PageVersionOverlay.js";
@@ -43,10 +45,16 @@ const SNAPSHOT: PageVersionDetail = {
 
 function overlay(
   snapshot: PageVersionDetail | undefined,
-  options: { failed?: boolean } = {}
-): { onClose: ReturnType<typeof vi.fn>; onRetry: ReturnType<typeof vi.fn>; container: HTMLElement } {
+  options: { failed?: boolean; onRestore?: (() => void) | null } = {}
+): {
+  onClose: ReturnType<typeof vi.fn>;
+  onRetry: ReturnType<typeof vi.fn>;
+  container: HTMLElement;
+} {
   const onClose = vi.fn();
   const onRetry = vi.fn();
+  const restore =
+    options.onRestore === null ? null : options.onRestore === undefined ? undefined : { onRestore: options.onRestore };
   const { container } = render(
     <PageVersionOverlay
       versionId="version-1"
@@ -54,6 +62,7 @@ function overlay(
       failed={options.failed ?? false}
       onClose={onClose}
       onRetry={onRetry}
+      restore={restore}
     />
   );
   return { onClose, onRetry, container };
@@ -97,6 +106,30 @@ describe("PageVersionOverlay", () => {
     const { onClose } = overlay(SNAPSHOT);
     fireEvent.click(screen.getByRole("button", { name: PAGE_VERSION_CLOSE }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no restore action when the shell hands none down", () => {
+    overlay(SNAPSHOT);
+    expect(screen.queryByRole("button", { name: PAGE_VERSION_RESTORE })).not.toBeInTheDocument();
+  });
+
+  it("runs the handed-down restore from the header", () => {
+    const onRestore = vi.fn();
+    overlay(SNAPSHOT, { onRestore });
+    fireEvent.click(screen.getByRole("button", { name: PAGE_VERSION_RESTORE }));
+    expect(onRestore).toHaveBeenCalledTimes(1);
+  });
+
+  it("withholds the restore until the snapshot it would write is known", () => {
+    const onRestore = vi.fn();
+    overlay(undefined, { onRestore });
+    expect(screen.queryByRole("button", { name: PAGE_VERSION_RESTORE })).not.toBeInTheDocument();
+  });
+
+  it("withholds the restore from the failed-read panel", () => {
+    const onRestore = vi.fn();
+    overlay(undefined, { failed: true, onRestore });
+    expect(screen.queryByRole("button", { name: PAGE_VERSION_RESTORE })).not.toBeInTheDocument();
   });
 
   it("shows an unreadable timestamp verbatim", () => {

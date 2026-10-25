@@ -3,7 +3,8 @@
 // See the LICENSE file for details.
 // Editor command adapter (parity/specs/pages.md §5.3, PAGE-026–032): each
 // toolbar command's chain call, the typography restyle, the caret jump to
-// the body start and the formatting state the bar reads back.
+// the body start, the formatting state the bar reads back, and the whole
+// body replacement the version restore writes (PAGE-053).
 
 import { describe, expect, it } from "vitest";
 
@@ -13,6 +14,7 @@ import {
   pageDocumentEmpty,
   pageEditorHandle,
   PAGE_BODY_START,
+  replacePageBody,
   runBlockKind,
   runPageCommand,
   type PageEditorChain,
@@ -37,7 +39,10 @@ function chainSpy(): { chain: PageEditorChain; calls: string[] } {
           typeof arg === "object" && arg !== null && "level" in arg
             ? String((arg as { level: unknown }).level)
             : String(arg);
-        calls.push(args.length === 0 ? property : `${property}(${shown})`);
+        // A second argument is the emit-update switch of setContent; it
+        // is part of what the command promises, so it is recorded too.
+        const extra = args.length > 1 ? `, ${String(args[1])}` : "";
+        calls.push(args.length === 0 ? property : `${property}(${shown}${extra})`);
         return chain;
       };
     },
@@ -170,6 +175,18 @@ describe("pageEditorHandle", () => {
     // falsy position as "none given" and would keep the old caret.
     expect(PAGE_BODY_START).toBe("start");
     expect(focused).toEqual(["start"]);
+  });
+
+  it("writes a whole body through the chain, emitting the update", () => {
+    const { ref, calls } = editor();
+    replacePageBody(ref, "<p>Restored</p>");
+    expect(calls).toEqual(["setContent(<p>Restored</p>, true)", "run"]);
+  });
+
+  it("exposes the body replacement on the handle the surface holds", () => {
+    const { ref, calls } = editor();
+    pageEditorHandle(ref).replaceBody("<p>From the snapshot</p>");
+    expect(calls).toEqual(["setContent(<p>From the snapshot</p>, true)", "run"]);
   });
 
   it("reads the live formatting state", () => {

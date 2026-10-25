@@ -39,12 +39,16 @@ import {
   type PageDetailSearch,
   type PagePaneTab,
 } from "../lib/pageDetail.js";
+import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
+import { applyPageRestore, PAGE_VERSION_RESTORE_FAILED, PAGE_VERSION_RESTORE_SUCCESS } from "../lib/pageRestore.js";
+import { snapshotBodyHtml } from "../lib/versionContent.js";
 import { copyPageLink } from "../lib/share.js";
 import { usePageSyncStatus } from "../lib/pageSync.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
 import { PageDetailPanel } from "./PageDetailPanel.js";
 import { PageDetailHeader } from "./PageDetailHeader.js";
 import { PageCanvasHeader } from "./PageCanvasHeader.js";
+import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 import { PageEditorSurface, PAGE_BODY_LABEL } from "./PageEditorSurface.js";
 import { PageHeadingPreview } from "./PageHeadingPreview.js";
 import { PageNavigationPane } from "./PageNavigationPane.js";
@@ -205,6 +209,29 @@ export function PageDetailScreen({
     });
   };
 
+  // Restore is the live document taking the snapshot's body: the editor
+  // reports the write through its own update, so the draft seam and the
+  // pane see it as a typed edit and the reader never leaves the page
+  // (PAGE-053). Without a live editor there is nothing to write into and
+  // the reader is told so instead.
+  const editorHandle = React.useRef<PageEditorHandle | null>(null);
+  const onEditorHandle = React.useCallback((handle: PageEditorHandle | null) => {
+    editorHandle.current = handle;
+  }, []);
+  const restoreVersion = React.useCallback(() => {
+    const opened = snapshot.data;
+    if (opened === undefined) return;
+    if (!applyPageRestore(editorHandle.current, snapshotBodyHtml(opened))) {
+      notifyError(PAGE_VERSION_RESTORE_FAILED);
+      return;
+    }
+    notifySuccess(PAGE_VERSION_RESTORE_SUCCESS);
+    // The restore is a new save, so the history and its timeline are
+    // stale from here on.
+    void queryClient.invalidateQueries({ queryKey: pageKeys.versions(workspaceSlug, projectId, pageId) });
+    closeVersion();
+  }, [snapshot.data, queryClient, workspaceSlug, projectId, pageId, closeVersion]);
+
   if (body === "spinner") {
     return <PageDetailSpinner />;
   }
@@ -286,6 +313,7 @@ export function PageDetailScreen({
                     onMarkPick={saveMark}
                     showBar
                     bodyPending={!bodyReady}
+                    onHandle={onEditorHandle}
                   />
                 ) : (
                   <>
@@ -337,6 +365,7 @@ export function PageDetailScreen({
           failed={snapshot.isError}
           onClose={closeVersion}
           onRetry={retryVersion}
+          restore={capabilities.canEdit ? { onRestore: restoreVersion } : null}
         />
       ) : null}
     </div>

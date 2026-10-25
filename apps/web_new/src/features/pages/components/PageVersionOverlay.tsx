@@ -9,6 +9,9 @@
 // so instead of guessing a date. The body shows the snapshot's structured
 // document when the renderer knows it and the stored markup otherwise. A
 // failed read is a panel with a retry that asks for the snapshot again.
+// The restore control only exists when the page's editor can take the
+// write: the overlay never decides permission itself, it simply renders
+// the action it was handed (PAGE-053).
 
 import { Button, IconButton } from "@pidash/kit";
 import type { PageVersionDetail } from "@pidash/api-client";
@@ -25,6 +28,7 @@ export const PAGE_VERSION_LOADING = "Loading version details";
 export const PAGE_VERSION_ERROR = "Something went wrong!";
 export const PAGE_VERSION_ERROR_HINT = "The version could not be loaded, please try again.";
 export const PAGE_VERSION_RETRY = "Try again";
+export const PAGE_VERSION_RESTORE = "Restore";
 
 /** The header's saved-at text, in the reader's locale (year pinned). */
 export function snapshotTime(value: string): string {
@@ -47,9 +51,26 @@ export interface PageVersionOverlayProps {
   onClose: () => void;
   /** Ask for the snapshot again after a failed read (PAGE-054). */
   onRetry: () => void;
+  /**
+   * The write the header offers, or null when the reader may not restore
+   * (no edit permission) or there is nothing loaded to restore yet.
+   */
+  restore?: PageVersionRestore | null | undefined;
 }
 
-function OverlayHeader({ title, onClose }: { title: string; onClose: () => void }): React.ReactElement {
+/** The restore action as the shell hands it down; absent without edit rights. */
+export interface PageVersionRestore {
+  onRestore: () => void;
+}
+
+interface OverlayHeaderProps {
+  title: string;
+  onClose: () => void;
+  /** Null when the snapshot is not known yet or the reader may not write. */
+  restore: PageVersionRestore | null;
+}
+
+function OverlayHeader({ title, onClose, restore }: OverlayHeaderProps): React.ReactElement {
   return (
     <div className="flex shrink-0 items-center justify-between gap-(--space-4) border-b border-(--border) px-(--space-6) py-(--space-3)">
       <div className="flex min-w-0 items-center gap-(--space-3)">
@@ -58,9 +79,16 @@ function OverlayHeader({ title, onClose }: { title: string; onClose: () => void 
           {PAGE_VERSION_VIEW_ONLY}
         </span>
       </div>
-      <IconButton label={PAGE_VERSION_CLOSE} size="small" onClick={onClose}>
-        <X size={16} strokeWidth={1.5} aria-hidden="true" />
-      </IconButton>
+      <div className="flex shrink-0 items-center gap-(--space-2)">
+        {restore === null ? null : (
+          <Button variant="secondary" size="small" onClick={restore.onRestore}>
+            {PAGE_VERSION_RESTORE}
+          </Button>
+        )}
+        <IconButton label={PAGE_VERSION_CLOSE} size="small" onClick={onClose}>
+          <X size={16} strokeWidth={1.5} aria-hidden="true" />
+        </IconButton>
+      </div>
     </div>
   );
 }
@@ -87,7 +115,11 @@ export function PageVersionOverlay({
   failed,
   onClose,
   onRetry,
+  restore = null,
 }: PageVersionOverlayProps): React.ReactElement {
+  // A failed read has no snapshot to write back, and the error panel is
+  // the only action on screen (PAGE-054).
+  const shownRestore = failed || snapshot === undefined ? null : restore;
   return (
     <div
       data-testid="page-version-overlay"
@@ -99,6 +131,7 @@ export function PageVersionOverlay({
       <OverlayHeader
         title={snapshot === undefined ? PAGE_VERSION_LOADING : snapshotTime(snapshot.last_saved_at)}
         onClose={onClose}
+        restore={shownRestore}
       />
       <div
         data-version-id={versionId}

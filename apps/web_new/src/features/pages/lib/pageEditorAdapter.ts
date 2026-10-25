@@ -32,6 +32,7 @@ export interface PageEditorChain {
   toggleCode: () => PageEditorChain;
   setParagraph: () => PageEditorChain;
   toggleHeading: (attributes: { level: number }) => PageEditorChain;
+  setContent: (content: string, emitUpdate?: boolean) => PageEditorChain;
   run: () => boolean;
 }
 
@@ -69,6 +70,8 @@ export interface PageEditorHandle {
   focusStart: () => void;
   /** The formatting state right now, for a bar that mounted after it. */
   readState: () => PageFormattingState;
+  /** Replace the whole body with stored markup, in place (PAGE-053). */
+  replaceBody: (html: string) => void;
 }
 
 /**
@@ -126,6 +129,16 @@ export function runBlockKind(editor: PageEditorRef, kind: PageBlockKind): void {
   editor.chain().focus().toggleHeading({ level }).run();
 }
 
+/**
+ * Swap the body for another document without leaving the page (PAGE-053).
+ * The update is emitted, so every listener the editor already has — the
+ * draft seam the save slice persists from, the live document the pane
+ * reads — sees the restored body exactly as it would see a typed one.
+ */
+export function replacePageBody(editor: PageEditorRef, html: string): void {
+  editor.chain().setContent(html, true).run();
+}
+
 /** The text block holding the caret, in the shape the reader expects. */
 export function caretBlockOf(editor: PageEditorRef): { type: string; attrs: Record<string, unknown> } {
   const parent = editor.state.selection.$from.parent;
@@ -165,5 +178,6 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
     applyBlockKind: (kind) => runBlockKind(editor, kind),
     focusStart: () => editor.commands.focus(PAGE_BODY_START),
     readState: () => editorFormattingState(editor),
+    replaceBody: (html) => replacePageBody(editor, html),
   };
 }

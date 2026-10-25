@@ -701,6 +701,19 @@ success notice confirms; failures report by notice. Read-only
 viewers can view snapshots and never see restore. Closing the overlay
 removes `version` from the URL and returns to the live document.
 
+The restore control sits in the overlay header beside the close control,
+appears only once the snapshot is loaded (a failed read shows the error
+panel and nothing else), and writes the same body the overlay is
+showing — the structured render when the document is known, the stored
+markup otherwise. The write is the editor's own whole-document
+replacement, reported as an ordinary edit, so the draft the save path
+persists, the live outline and statistics all follow it, and the address
+does not change. The overlay then closes (the `version` key is dropped)
+and the history read is refreshed, because the restore itself is a new
+save. A refused or impossible write (no live editor to take it) shows the
+failure notice and leaves the overlay open. Pinned copy: `Restore`,
+`Page version restored.`, `Page version could not be restored.`
+
 ## 7. Header actions and options menu (PAGE-055, PAGE-056, PAGE-057, PAGE-058, PAGE-059, PAGE-060)
 
 ### 7.1 Link copy (PAGE-055)
