@@ -490,45 +490,11 @@ export type { CreateParentPreset } from "./components/WorkItemCreateDialog.js";
 // views.js makes the bundler hoist the shared expression codec into the
 // initial bundle (size gate). The loader lives here, not in an eager
 // module, so its dynamic imports stay lazy with its callers.
-export type RichFilterBuilderModule = {
-  useRichFilterBuilder: (typeof import("./filters/rich/RichFilterBuilder.js"))["useRichFilterBuilder"];
-  serializeRichExpression: (typeof import("./filters/rich/RichFilterBuilder.js"))["serializeRichExpression"];
-  parseRichExpression: (typeof import("./filters/rich/expression.js"))["parseRichExpression"];
-  FieldConfigRegistry: (typeof import("./filters/rich/temporary.js"))["FieldConfigRegistry"];
-  buildViewCreate: (typeof import("./filters/rich/views.js"))["buildViewCreate"];
-  buildViewPatch: (typeof import("./filters/rich/views.js"))["buildViewPatch"];
-  viewDisplaySnapshot: (typeof import("./filters/rich/views.js"))["viewDisplaySnapshot"];
-  savedViewKeys: (typeof import("./filters/rich/views.js"))["savedViewKeys"];
-};
-
-let richFilterBuilderRequest: Promise<RichFilterBuilderModule> | null = null;
-
-/** Start (or reuse) the builder-module request for lazy dialog hosts. */
-export function loadRichFilterBuilder(): Promise<RichFilterBuilderModule> {
-  richFilterBuilderRequest ??= Promise.all([
-    import("./filters/rich/RichFilterBuilder.js"),
-    import("./filters/rich/expression.js"),
-    import("./filters/rich/views.js"),
-    import("./filters/rich/temporary.js"),
-  ]).then(([builder, expression, views, temporary]) => ({
-    useRichFilterBuilder: builder.useRichFilterBuilder,
-    serializeRichExpression: builder.serializeRichExpression,
-    parseRichExpression: expression.parseRichExpression,
-    FieldConfigRegistry: temporary.FieldConfigRegistry,
-    buildViewCreate: views.buildViewCreate,
-    buildViewPatch: views.buildViewPatch,
-    viewDisplaySnapshot: views.viewDisplaySnapshot,
-    savedViewKeys: views.savedViewKeys,
-  }));
-  return richFilterBuilderRequest;
-}
-
-/** Kick the request while the host list's data is still loading. */
-export function preloadRichFilterBuilder(): void {
-  void loadRichFilterBuilder().catch(() => {
-    // The host's filter section surfaces the failure when it renders.
-  });
-}
+export {
+  loadRichFilterBuilder,
+  preloadRichFilterBuilder,
+  type RichFilterBuilderModule,
+} from "./filters/rich/loader.js";
 
 export type { FieldConfigRegistry } from "./filters/rich/temporary.js";
 export type { RichCondition, RichExpression } from "./filters/rich/expression.js";

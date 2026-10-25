@@ -8,7 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { DefaultTabRedirect } from "../../../../../features/projects/index.js";
+import { DefaultTabRedirect } from "../../../../../features/projects/components/DefaultTabRedirect.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/")({
   component: BareProjectComponent,

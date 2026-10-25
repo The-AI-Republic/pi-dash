@@ -8,7 +8,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { SchedulerCatalog } from "../../../../features/schedulers/index.js";
+import type { SchedulerCatalog as SchedulerCatalogComponent } from "../../../../features/schedulers/SchedulerCatalog.js";
+
+// Deferred (size gate): the catalog and its calendar helpers stay out of
+// the initial chunk; this route only supplies the workspace slug.
+const SchedulerCatalog = React.lazy(() =>
+  import("../../../../features/schedulers/SchedulerCatalog.js").then((module) => ({
+    default: module.SchedulerCatalog,
+  }))
+) as typeof SchedulerCatalogComponent;
 
 export const Route = createFileRoute("/$ws/_gated/schedulers/")({
   // NOTE (NEWFRONT-852, size gate): the definition-list read stays behind
@@ -24,5 +32,9 @@ export const Route = createFileRoute("/$ws/_gated/schedulers/")({
 
 function SchedulersComponent(): React.ReactElement {
   const { ws } = Route.useParams();
-  return <SchedulerCatalog key={ws} workspaceSlug={ws} />;
+  return (
+    <React.Suspense fallback={null}>
+      <SchedulerCatalog key={ws} workspaceSlug={ws} />
+    </React.Suspense>
+  );
 }

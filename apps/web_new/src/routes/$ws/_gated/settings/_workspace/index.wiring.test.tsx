@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const navigate = vi.hoisted(() => vi.fn(async () => undefined));
 
-vi.mock("../../../../../features/workspace-settings/index.js", () => ({
+vi.mock("../../../../../features/workspace-settings/general/index.js", () => ({
   WorkspaceGeneralPage: ({
     workspaceSlug,
     onNavigate,

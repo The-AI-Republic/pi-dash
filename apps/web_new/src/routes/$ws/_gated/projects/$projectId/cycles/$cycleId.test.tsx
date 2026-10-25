@@ -7,7 +7,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+beforeAll(async () => {
+  await import("./CycleDetailContent.js");
+}, 60_000);
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
@@ -106,8 +110,8 @@ vi.mock("../../../../../../features/auth/queries.js", () => ({
   useProjectRoles: () => mocks.roles.current,
   useProjectRow: () => mocks.projectRow.current,
 }));
-vi.mock("../../../../../../features/projects/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../../../features/projects/index.js")>()),
+vi.mock("../../../../../../features/projects/api/queries.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../../../features/projects/api/queries.js")>()),
   projectsQueryOptions: mocks.projects,
 }));
 vi.mock("../../../../../../features/issues/display/DisplayControl.js", () => ({
@@ -295,6 +299,14 @@ import { ApiError } from "@pidash/api-client";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
 import { Route } from "./$cycleId.js";
 
+// The route module starts these chunks while its data reads run, so the
+// first layout render does not suspend and mount twice (NEWFRONT-619). The
+// calls happen at import time, before `beforeEach` clears the mocks.
+const primedAtImport = {
+  leaves: mocks.primeLeaves.mock.calls.length,
+  filters: mocks.preloadFilters.mock.calls.length,
+};
+
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
 
@@ -367,6 +379,11 @@ beforeEach(() => {
 });
 
 describe("cycle detail route", () => {
+  it("starts the leaf and filter chunks with the eager route module", () => {
+    expect(primedAtImport.leaves).toBeGreaterThan(0);
+    expect(primedAtImport.filters).toBeGreaterThan(0);
+  });
+
   it("mounts the trail, the dates and the layout root for the cycle", async () => {
     renderRoute();
     const gate = await screen.findByTestId("detail-gate");

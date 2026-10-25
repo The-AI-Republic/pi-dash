@@ -16,15 +16,13 @@ import * as React from "react";
 
 import { getAppClient } from "../../../../../core/api/client.js";
 import { usePermissions, useWorkspace } from "../../../../../core/session/index.js";
-import { resolveSettingsAddress } from "../../../../../features/project-settings/index.js";
+import { resolveSettingsAddress } from "../../../../../features/project-settings/tabs.js";
 import { NotFoundPage, resolveFileUrl } from "../../../../../shared/shell/index.js";
-import {
-  decideWorkspaceSettingsGate,
-  resolveWorkspaceSettingsIdentity,
-  isWorkspaceWebhookDetailPath,
-  SettingsNotAuthorized,
-  SettingsShell,
-} from "../../../../../features/workspace-settings/index.js";
+import { decideWorkspaceSettingsGate } from "../../../../../features/workspace-settings/lib/gate.js";
+import { resolveWorkspaceSettingsIdentity } from "../../../../../features/workspace-settings/lib/identity.js";
+import { isWorkspaceWebhookDetailPath } from "../../../../../features/workspace-settings/lib/title.js";
+import { SettingsNotAuthorized } from "../../../../../features/workspace-settings/components/SettingsNotAuthorized.js";
+import { SettingsShell } from "../../../../../features/workspace-settings/components/SettingsShell.js";
 import { workspaceQueryOptions } from "./workspaceQuery.js";
 
 /** Whether the address belongs to the project-settings area. */

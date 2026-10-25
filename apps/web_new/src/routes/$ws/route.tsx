@@ -20,13 +20,10 @@ import {
   useWorkspaces,
   workspacesQueryOptions,
 } from "../../core/session/index.js";
-import {
-  decideWorkspaceDenial,
-  membershipQueryOptions,
-  projectRolesQueryOptions,
-  WorkspaceNotFoundScreen,
-  WorkspaceNotMemberScreen,
-} from "../../features/auth/index.js";
+import { decideWorkspaceDenial } from "../../features/auth/denials.js";
+import { membershipQueryOptions, projectRolesQueryOptions } from "../../features/auth/queries.js";
+import { WorkspaceNotFoundScreen } from "../../features/auth/components/WorkspaceNotFoundScreen.js";
+import { WorkspaceNotMemberScreen } from "../../features/auth/components/WorkspaceNotMemberScreen.js";
 
 export const Route = createFileRoute("/$ws")({
   beforeLoad: async ({ context, params }) => {

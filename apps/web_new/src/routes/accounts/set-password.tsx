@@ -15,7 +15,7 @@ import * as React from "react";
 
 import { isOnboardedProfile } from "../../core/session/guards.js";
 import { meQueryOptions, profileQueryOptions } from "../../core/session/queries.js";
-import { SetPasswordCard } from "../../features/auth/index.js";
+import { SetPasswordCard } from "../../features/auth/components/SetPasswordCard.js";
 import { getToastManager, useSessionExpiredRedirect } from "../../shared/shell/index.js";
 
 export type SetPasswordGateDecision = "render" | "away";

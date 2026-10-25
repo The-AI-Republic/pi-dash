@@ -20,7 +20,7 @@ vi.mock("../../../../../../shared/shell/index.js", async (importOriginal) => ({
   useNarrowViewport: () => false,
 }));
 
-vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
+vi.mock("../../../../../../features/auth/queries.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useProjectRow: () => ({
     status: "success",
@@ -40,7 +40,7 @@ vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
 
 import { renderInRouter } from "../../../../../../features/project-settings/testing.js";
 
-vi.mock("../../../../../../features/project-states/index.js", () => ({
+vi.mock("../../../../../../features/project-states/components/StatesTab.js", () => ({
   StatesTab: () => <div data-testid="states-tab-stub" />,
 }));
 import { Route } from "./states.js";
@@ -63,8 +63,12 @@ afterEach(() => {
 });
 
 describe("states settings route", () => {
-  it("carries no loader prefetch", () => {
-    expect(Route.options.beforeLoad).toBeUndefined();
+  it("primes the shell and tab chunks without a data read", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("settings route has no chunk prefetch");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    await beforeLoad({} as never);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("mounts the tab inside the shell for an admin", async () => {

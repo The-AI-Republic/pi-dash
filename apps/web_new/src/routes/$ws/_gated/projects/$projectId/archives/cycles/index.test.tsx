@@ -127,7 +127,7 @@ describe("archived cycles tab route", () => {
     renderTab(detailRow());
 
     await screen.findByTestId("archives-shell");
-    expect(screen.getByTestId("archived-cycles-screen")).toBeInTheDocument();
+    expect(await screen.findByTestId("archived-cycles-screen")).toBeInTheDocument();
     expect(screen.queryByTestId("archived-cycle-preview")).toBeNull();
   });
 
@@ -136,6 +136,12 @@ describe("archived cycles tab route", () => {
 
     await screen.findByTestId("archives-shell");
     expect(await screen.findByTestId("archived-cycle-preview")).toBeInTheDocument();
+  });
+
+  it("awaits the screen chunk before the route commits", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (typeof beforeLoad !== "function") throw new Error("archived cycles tab has no chunk prefetch");
+    await expect(beforeLoad({} as never)).resolves.toBeUndefined();
   });
 
   it("validates the peek key and drops anything invalid", () => {

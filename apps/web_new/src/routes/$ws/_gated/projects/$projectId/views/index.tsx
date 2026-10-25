@@ -8,10 +8,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-// Deep import: this route module is eager, so the views barrel would pin
-// every dialog and screen it re-exports onto the initial chain
-// (NEWFRONT-871, size gate).
-import { ProjectViewsListScreen } from "../../../../../../features/views/components/ProjectViewsListScreen.js";
+import type { ProjectViewsListScreen as ProjectViewsListScreenComponent } from "../../../../../../features/views/components/ProjectViewsListScreen.js";
+
+// Deferred (size gate): the eager route definition only carries the
+// address; the list screen and its dialog chain ride their own chunk.
+const ProjectViewsListScreen = React.lazy(() =>
+  import("../../../../../../features/views/components/ProjectViewsListScreen.js").then((module) => ({
+    default: module.ProjectViewsListScreen,
+  }))
+) as typeof ProjectViewsListScreenComponent;
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/")({
   component: ViewsComponent,
@@ -19,5 +24,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/")({
 
 function ViewsComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
-  return <ProjectViewsListScreen workspaceSlug={ws} projectId={projectId} />;
+  return (
+    <React.Suspense fallback={null}>
+      <ProjectViewsListScreen workspaceSlug={ws} projectId={projectId} />
+    </React.Suspense>
+  );
 }

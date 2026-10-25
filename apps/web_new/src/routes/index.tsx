@@ -21,7 +21,8 @@ import {
 } from "../core/session/index.js";
 import { edition, isEditionRootEnabled, signedOutRootTarget } from "../core/edition/index.js";
 import { platform } from "../core/platform/index.js";
-import { DesktopSignInScreen, EntryScreen } from "../features/auth/index.js";
+import { DesktopSignInScreen } from "../features/auth/components/DesktopSignInScreen.js";
+import { EntryScreen } from "../features/auth/components/EntryScreen.js";
 
 export interface EntrySearch {
   next?: string | undefined;

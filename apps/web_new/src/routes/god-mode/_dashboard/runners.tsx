@@ -7,7 +7,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { AdminRunnersPage } from "../../../features/admin/index.js";
+import { AdminRunnersPage } from "../../../features/admin/components/AdminRunnersPage.js";
 
 export const Route = createFileRoute("/god-mode/_dashboard/runners")({
   component: RunnersRouteComponent,

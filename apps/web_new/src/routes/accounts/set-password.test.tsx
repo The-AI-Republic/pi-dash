@@ -19,7 +19,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 
 // Stand-in for the auth card: its internals belong to the auth area.
 // What this suite owns is the guard rule plus the screen wiring.
-vi.mock("../../features/auth/index.js", () => ({
+vi.mock("../../features/auth/components/SetPasswordCard.js", () => ({
   SetPasswordCard: () => <div data-testid="set-card" />,
 }));
 

@@ -12,15 +12,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // Stand-ins: the desktop screen and the entry card belong to the auth area.
 // What this suite owns is the web/desktop fork, the edition seam and the
 // guard rule.
-vi.mock("../features/auth/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../features/auth/index.js")>()),
-  DesktopSignInScreen: (props: { error?: string; errorDescription?: string }) => (
-    <div
-      data-testid="desktop-sign-in"
-      data-error={props.error ?? ""}
-      data-error-description={props.errorDescription ?? ""}
-    />
-  ),
+vi.mock("../features/auth/components/EntryScreen.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../features/auth/components/EntryScreen.js")>()),
   EntryScreen: (props: { next?: string; unsafeNext?: string; email?: string; errorCode?: string }) => (
     <div
       data-testid="entry-screen"
@@ -28,6 +21,17 @@ vi.mock("../features/auth/index.js", async (importOriginal) => ({
       data-unsafe-next={props.unsafeNext ?? ""}
       data-email={props.email ?? ""}
       data-error-code={props.errorCode ?? ""}
+    />
+  ),
+}));
+
+vi.mock("../features/auth/components/DesktopSignInScreen.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../features/auth/components/DesktopSignInScreen.js")>()),
+  DesktopSignInScreen: (props: { error?: string; errorDescription?: string }) => (
+    <div
+      data-testid="desktop-sign-in"
+      data-error={props.error ?? ""}
+      data-error-description={props.errorDescription ?? ""}
     />
   ),
 }));

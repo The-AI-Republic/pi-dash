@@ -8,9 +8,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ArchivesShell, archivesRouteTitle } from "../../../../../../../features/archives/index.js";
-import { useProjectRow } from "../../../../../../../features/auth/index.js";
-import { useDocumentHead } from "../../../../../../../shared/shell/index.js";
+import { ArchivesShell } from "../../../../../../../features/archives/components/ArchivesShell.js";
+import { archivesRouteTitle } from "../../../../../../../features/archives/tabs.js";
+import { useProjectRow } from "../../../../../../../features/auth/queries.js";
+import { useDocumentHead } from "../../../../../../../shared/shell/document.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/archives/issues/")({
   component: ArchivedIssuesTab,

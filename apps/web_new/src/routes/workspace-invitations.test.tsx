@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Stand-in for the single-invitation screen: its internals belong to the
 // auth area. What this suite owns is the search schema plus prop passing.
-vi.mock("../features/auth/index.js", () => ({
+vi.mock("../features/auth/components/SingleInvitation.js", () => ({
   SingleInvitation: (props: { invitationId?: string; slug?: string; token?: string }) => (
     <div
       data-testid="single-invitation"

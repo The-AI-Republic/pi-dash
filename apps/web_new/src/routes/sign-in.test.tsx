@@ -11,8 +11,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Stand-in for the desktop screen: its internals belong to the auth area.
 // What this suite owns is the web/desktop fork plus the guard rule.
-vi.mock("../features/auth/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../features/auth/index.js")>()),
+vi.mock("../features/auth/components/DesktopSignInScreen.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../features/auth/components/DesktopSignInScreen.js")>()),
   DesktopSignInScreen: (props: { error?: string; errorDescription?: string }) => (
     <div
       data-testid="desktop-sign-in"

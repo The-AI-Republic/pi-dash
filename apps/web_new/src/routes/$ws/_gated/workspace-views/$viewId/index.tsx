@@ -12,8 +12,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ListSkeleton } from "../../../../../features/issues/index.js";
-import { projectsQueryOptions } from "../../../../../features/projects/index.js";
+import { ListSkeleton } from "../../../../../features/issues/loaders/ListSkeleton.js";
+import { projectsQueryOptions } from "../../../../../features/projects/api/queries.js";
 // Deep import, not the views barrel: this route file is eager (the router
 // imports every route), and the barrel re-exports modules with module-level
 // state that Rollup then keeps in the initial chunk (NEWFRONT-879; the same

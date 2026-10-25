@@ -26,8 +26,8 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 
 // Stand-in for the auth card: its internals belong to the auth area. What
 // this suite owns is the guard rule plus the search wiring.
-vi.mock("../../features/auth/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../features/auth/index.js")>()),
+vi.mock("../../features/auth/components/DeviceApprovalCard.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../features/auth/components/DeviceApprovalCard.js")>()),
   DeviceApprovalCard: ({ initialCode }: { initialCode?: string | undefined }) => (
     <div data-testid="device-card" data-initial-code={initialCode ?? ""} />
   ),

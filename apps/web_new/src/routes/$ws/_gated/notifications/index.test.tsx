@@ -7,12 +7,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
 import { ROLE_ADMIN } from "../../../../core/session/index.js";
 import { sessionKeys } from "../../../../core/session/queries.js";
 import { Route } from "./index.js";
+
+beforeAll(async () => {
+  await import("../../../../features/notifications/components/InboxView.js");
+}, 60_000);
 
 afterEach(() => {
   resetAppClient();
@@ -24,7 +28,7 @@ describe("notifications route", () => {
     expect(Route.options).not.toHaveProperty("validateSearch");
   });
 
-  it("mounts the inbox view for the workspace", () => {
+  it("mounts the inbox view for the workspace", async () => {
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme" });
     createAppClient("https://api.test", () => new Promise<never>(() => {}));
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -45,7 +49,7 @@ describe("notifications route", () => {
         <Component />
       </QueryClientProvider>
     );
-    expect(screen.getByRole("region", { name: "Notifications" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Notifications" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Details" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "All" })).toBeInTheDocument();
   });

@@ -23,7 +23,7 @@ vi.mock("../../../../../../core/session/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../../../../core/session/index.js")>();
   return { ...original, useWorkspace: () => ({ workspace: hooks.workspace }) };
 });
-vi.mock("../../../../../../features/auth/index.js", () => ({
+vi.mock("../../../../../../features/auth/queries.js", () => ({
   useProjectRoles: () => hooks.roles,
 }));
 vi.mock("../../../../../../features/schedulers/FiringCalendar.js", () => ({

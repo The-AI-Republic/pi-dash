@@ -53,12 +53,15 @@ vi.mock("../../../../features/issues/components/WorkItemCreateDialog.js", () => 
   ),
 }));
 
-vi.mock("../../../../features/projects/index.js", () => ({
-  workspaceMembersQueryOptions: () => ({ queryKey: ["members", "acme"], queryFn: () => Promise.resolve([]) }),
+vi.mock("../../../../features/projects/components/CreateProjectDialog.js", () => ({
   CreateProjectDialog: ({ open }: { open: boolean }) => {
     harness.createOpen = open;
     return open ? <div data-testid="create-project-dialog" /> : null;
   },
+}));
+
+vi.mock("../../../../features/projects/api/members.js", () => ({
+  workspaceMembersQueryOptions: () => ({ queryKey: ["members", "acme"], queryFn: () => Promise.resolve([]) }),
 }));
 
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";

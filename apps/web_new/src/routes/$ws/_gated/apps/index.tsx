@@ -20,7 +20,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
 import { APPS_CATALOG_ROUTE_PATH, edition, isEditionRouteEnabled } from "../../../../core/edition/index.js";
-import { AppsView } from "../../../../features/openhub/index.js";
+import { AppsView } from "../../../../features/openhub/components/AppsView.js";
 import { NotFoundPage } from "../../../../shared/shell/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/apps/")({

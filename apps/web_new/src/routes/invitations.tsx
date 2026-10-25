@@ -9,7 +9,7 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
 import { decidePageGate, loadGateInputs, ONBOARDING_PATH } from "../core/session/index.js";
-import { InvitationInbox } from "../features/auth/index.js";
+import { InvitationInbox } from "../features/auth/components/InvitationInbox.js";
 
 export const Route = createFileRoute("/invitations")({
   beforeLoad: async ({ context, location }) => {

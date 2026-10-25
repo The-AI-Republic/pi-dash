@@ -8,7 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { IntegrationsPage } from "../../../../../../features/workspace-settings/index.js";
+import { IntegrationsPage } from "../../../../../../features/workspace-settings/integrations/IntegrationsPage.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace/integrations/")({
   component: WorkspaceSettingsIntegrationsPage,

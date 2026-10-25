@@ -10,7 +10,8 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
 import { meQueryOptions } from "../../core/session/queries.js";
-import { asString, ResetPasswordCard } from "../../features/auth/index.js";
+import { asString } from "../../features/auth/entrySearch.js";
+import { ResetPasswordCard } from "../../features/auth/components/ResetPasswordCard.js";
 
 export interface ResetPasswordSearch {
   uidb64?: string | undefined;

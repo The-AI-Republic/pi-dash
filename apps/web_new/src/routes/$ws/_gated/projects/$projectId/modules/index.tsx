@@ -9,7 +9,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ModulesListScreen } from "../../../../../../features/modules/index.js";
+import type { ModulesListScreen as ModulesListScreenComponent } from "../../../../../../features/modules/components/ModulesListScreen.js";
+
+// Deferred (size gate): the eager route definition only needs the loader;
+// the modules list screen rides its own chunk.
+const ModulesListScreen = React.lazy(() =>
+  import("../../../../../../features/modules/components/ModulesListScreen.js").then((module) => ({
+    default: module.ModulesListScreen,
+  }))
+) as typeof ModulesListScreenComponent;
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/")({
   component: ModulesComponent,
@@ -17,5 +25,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/")
 
 function ModulesComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
-  return <ModulesListScreen workspaceSlug={ws} projectId={projectId} />;
+  return (
+    <React.Suspense fallback={null}>
+      <ModulesListScreen workspaceSlug={ws} projectId={projectId} />
+    </React.Suspense>
+  );
 }

@@ -13,13 +13,11 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Navigate } from "@tanstack/react-router";
 import * as React from "react";
 
-import {
-  CreateProjectDialog,
-  projectsQueryOptions,
-  selectSidebarProjects,
-  workspaceMembersQueryOptions,
-} from "../../../../../features/projects/index.js";
-import { ProjectSettingsGuidance } from "../../../../../features/project-settings/index.js";
+import { CreateProjectDialog } from "../../../../../features/projects/components/CreateProjectDialog.js";
+import { projectsQueryOptions } from "../../../../../features/projects/api/queries.js";
+import { selectSidebarProjects } from "../../../../../features/projects/sidebar.js";
+import { workspaceMembersQueryOptions } from "../../../../../features/projects/api/members.js";
+import { ProjectSettingsGuidance } from "../../../../../features/project-settings/components/ProjectSettingsGuidance.js";
 import { Route as GatedLayoutRoute } from "../../route.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/")({

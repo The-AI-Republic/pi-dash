@@ -129,8 +129,8 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 // The sign-out mutation resolves to a controllable landing (or throws);
 // the action and command descriptors under test stay real. The profile
 // stamp resolves too (or throws), recording its input.
-vi.mock("../../../features/auth/index.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../../features/auth/index.js")>();
+vi.mock("../../../features/auth/signOut.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../features/auth/signOut.js")>();
   return {
     ...original,
     useSignOut: () => ({
@@ -143,6 +143,12 @@ vi.mock("../../../features/auth/index.js", async (importOriginal) => {
         }
       },
     }),
+  };
+});
+vi.mock("../../../features/auth/profile.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../features/auth/profile.js")>();
+  return {
+    ...original,
     useUpdateProfile: () => ({
       mutateAsync: async (input: unknown) => {
         harness.stamped.push(input);

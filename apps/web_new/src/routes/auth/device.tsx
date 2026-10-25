@@ -10,7 +10,8 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
 import { decidePageGate, loadGateInputs, ONBOARDING_PATH } from "../../core/session/index.js";
-import { asString, DeviceApprovalCard } from "../../features/auth/index.js";
+import { asString } from "../../features/auth/entrySearch.js";
+import { DeviceApprovalCard } from "../../features/auth/components/DeviceApprovalCard.js";
 import { getToastManager, useSessionExpiredRedirect } from "../../shared/shell/index.js";
 
 /** Lenient CLI-carried code; anything else falls back to absent. */

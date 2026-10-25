@@ -11,7 +11,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { SettingsSectionOutlet } from "../../../../../../features/workspace-settings/index.js";
+import { SettingsSectionOutlet } from "../../../../../../features/workspace-settings/components/SettingsSectionOutlet.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace/members/")({
   component: WorkspaceSettingsSectionPage,

@@ -11,13 +11,17 @@ import { describe, expect, it, vi } from "vitest";
 
 const seen = vi.hoisted(() => ({ props: null as null | Record<string, unknown> }));
 
-vi.mock("../../../../features/admin/index.js", () => ({
+vi.mock("../../../../features/admin/components/AdminAuthProviderPage.js", () => ({
   AdminAuthProviderPage: (props: Record<string, unknown>) => {
     seen.props = props;
     const provider = props.provider as { slug: string };
     return <div data-testid={`admin-auth-provider-page-${provider.slug}`} />;
   },
+}));
+vi.mock("../../../../features/admin/providerAuth.js", () => ({
   AUTH_PROVIDER_BY_SLUG: { gitlab: { slug: "gitlab" } },
+}));
+vi.mock("../../../../features/admin/providerCredentials.js", () => ({
   PROVIDER_CREDENTIALS: {
     gitlab: {
       fields: "gitlab-fields",

@@ -8,33 +8,10 @@
 // the route, the components and the tests share exactly one reading.
 
 import type { PageRow } from "@pidash/api-client";
+import { PAGE_LIST_TABS, parsePageListSearch, type PageListSearch, type PageListTab } from "./pageListSearch.js";
 
-export type PageListTab = "public" | "private" | "archived";
-
-/** Tab labels are pinned by the oracle and the spec. */
-export const PAGE_LIST_TABS: ReadonlyArray<{ key: PageListTab; label: string }> = [
-  { key: "public", label: "Public" },
-  { key: "private", label: "Private" },
-  { key: "archived", label: "Archived" },
-];
-
-/** The only query key the list owns; search, sort and filters stay local. */
-export interface PageListSearch {
-  type: PageListTab;
-}
-
-/**
- * Read the tab from an arbitrary search record. Missing, repeated and
- * unknown values all land on public; the route then writes only the
- * canonical value back when the user selects a different tab.
- */
-export function parsePageListSearch(input: Record<string, unknown>): PageListSearch {
-  const raw = input["type"];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (value === "private") return { type: "private" };
-  if (value === "archived") return { type: "archived" };
-  return { type: "public" };
-}
+export { PAGE_LIST_TABS, parsePageListSearch };
+export type { PageListSearch, PageListTab };
 
 /** Whether the row belongs in one tab. Archive wins over access. */
 export function pageInTab(row: Pick<PageRow, "access" | "archived_at">, tab: PageListTab): boolean {

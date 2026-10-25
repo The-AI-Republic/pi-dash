@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 
 // Stand-in for the inbox screen: its internals belong to the auth area.
 // What this suite owns is the signed-in-only gate plus mounting.
-vi.mock("../features/auth/index.js", () => ({
+vi.mock("../features/auth/components/InvitationInbox.js", () => ({
   InvitationInbox: () => <div data-testid="invitation-inbox" />,
 }));
 

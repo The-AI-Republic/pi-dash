@@ -11,7 +11,8 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
 import { meQueryOptions } from "../../core/session/queries.js";
-import { asString, ForgotPasswordCard } from "../../features/auth/index.js";
+import { asString } from "../../features/auth/entrySearch.js";
+import { ForgotPasswordCard } from "../../features/auth/components/ForgotPasswordCard.js";
 import { getToastManager } from "../../shared/shell/index.js";
 
 export interface ForgotPasswordSearch {

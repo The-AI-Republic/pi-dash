@@ -10,7 +10,7 @@ import { createFileRoute, Outlet } from "@tanstack/react-router";
 import * as React from "react";
 
 import { selectWorkspace, useWorkspaces } from "../../../../core/session/index.js";
-import { RunnersWorkspaceShell } from "../../../../features/runners/index.js";
+import { RunnersWorkspaceShell } from "../../../../features/runners/RunnersWorkspaceShell.js";
 
 export const Route = createFileRoute("/$ws/_gated/runners")({
   component: RunnersLayoutComponent,

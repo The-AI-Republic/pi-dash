@@ -8,10 +8,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import {
-  ProjectSettingsAiWorkersTab,
-  ProjectSettingsScreen,
-} from "../../../../../../features/project-settings/index.js";
+import { ProjectSettingsAiWorkersTab } from "../../../../../../features/project-settings/ai-workers/AiWorkersTabScreen.js";
+import { ProjectSettingsScreen } from "../../../../../../features/project-settings/components/ProjectSettingsScreen.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/ai-workers")({
   component: SettingsRouteComponent,

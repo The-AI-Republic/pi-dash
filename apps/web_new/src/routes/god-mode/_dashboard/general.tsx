@@ -7,7 +7,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { AdminGeneralSettingsPage } from "../../../features/admin/index.js";
+import { AdminGeneralSettingsPage } from "../../../features/admin/components/AdminGeneralSettingsPage.js";
 
 export const Route = createFileRoute("/god-mode/_dashboard/general")({
   component: GeneralSettingsRoute,

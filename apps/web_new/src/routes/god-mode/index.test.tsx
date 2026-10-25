@@ -9,8 +9,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // Stand-ins for the gate and guard: branch selection and session
 // bouncing belong to the admin area. What this suite owns is the search
 // schema plus prop passing and the guard wrap.
-vi.mock("../../features/admin/index.js", () => ({
+vi.mock("../../features/admin/components/AdminGuards.js", () => ({
   AdminHomeGuard: ({ children }: { children: React.ReactNode }) => <div data-testid="admin-home-guard">{children}</div>,
+}));
+vi.mock("../../features/admin/components/AdminEntryGate.js", () => ({
   AdminEntryGate: ({ search }: { search: Record<string, string | undefined> }) => (
     <div
       data-testid="admin-gate"

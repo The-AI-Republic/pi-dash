@@ -7,17 +7,39 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { EstimatesTab, ProjectSettingsScreen } from "../../../../../../features/project-settings/index.js";
+// The settings shell barrel reaches every project tab, including this
+// one's estimates screen. Await both chunks in the route so the shell and
+// the tab still commit together, away from the measured entry.
+const loadEstimatesTab = () =>
+  Promise.all([
+    import("../../../../../../features/project-settings/components/ProjectSettingsScreen.js"),
+    import("../../../../../../features/project-settings/estimates/EstimatesTab.js"),
+  ]).then(([screen, tab]) => ({ ProjectSettingsScreen: screen.ProjectSettingsScreen, EstimatesTab: tab.EstimatesTab }));
+const LazyEstimatesTab = React.lazy(async () => {
+  const { ProjectSettingsScreen, EstimatesTab } = await loadEstimatesTab();
+  return {
+    default: function EstimatesSettingsRoute() {
+      const { ws, projectId } = Route.useParams();
+      return (
+        <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="estimates">
+          <EstimatesTab />
+        </ProjectSettingsScreen>
+      );
+    },
+  };
+});
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/estimates")({
+  beforeLoad: async () => {
+    await loadEstimatesTab();
+  },
   component: SettingsRouteComponent,
 });
 
 function SettingsRouteComponent(): React.ReactElement {
-  const { ws, projectId } = Route.useParams();
   return (
-    <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="estimates">
-      <EstimatesTab />
-    </ProjectSettingsScreen>
+    <React.Suspense fallback={null}>
+      <LazyEstimatesTab />
+    </React.Suspense>
   );
 }

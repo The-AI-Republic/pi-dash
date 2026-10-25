@@ -9,7 +9,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { WorkspaceGeneralPage } from "../../../../../features/workspace-settings/index.js";
+import { WorkspaceGeneralPage } from "../../../../../features/workspace-settings/general/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace/")({
   component: WorkspaceGeneralRoute,

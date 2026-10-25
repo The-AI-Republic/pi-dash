@@ -13,8 +13,8 @@ import { ApiError } from "@pidash/api-client";
 // Stand-in for the auth card: its internals belong to the auth area.
 // What this suite owns is the search schema, the signed-out-only gate,
 // plus prop passing. The real search primitives stay intact.
-vi.mock("../features/auth/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../features/auth/index.js")>();
+vi.mock("../features/auth/components/SignUpCard.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../features/auth/components/SignUpCard.js")>();
   return {
     ...actual,
     SignUpCard: (props: {

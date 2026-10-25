@@ -17,7 +17,7 @@ import { getAppClient } from "../../../../../core/api/client.js";
 import { useMe, usePermissions } from "../../../../../core/session/index.js";
 import { profileSegregationQueryOptions } from "../../../../../features/profile/api/queries.js";
 import { ProfileFrame } from "../../../../../features/profile/components/ProfileFrame.js";
-import { projectsQueryOptions } from "../../../../../features/projects/index.js";
+import { projectsQueryOptions } from "../../../../../features/projects/api/queries.js";
 
 export const Route = createFileRoute("/$ws/_gated/profile/$userId")({
   loader: async ({ context, params }) => {

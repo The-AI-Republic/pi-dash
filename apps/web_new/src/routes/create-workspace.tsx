@@ -22,7 +22,9 @@ import {
   useInstanceConfig,
   useMe,
 } from "../core/session/index.js";
-import { CreationDisabledScreen, TeamSizeDropdown, WorkspaceCreateForm } from "../features/auth/index.js";
+import { CreationDisabledScreen } from "../features/auth/components/CreationDisabledScreen.js";
+import { TeamSizeDropdown } from "../features/auth/components/TeamSizeDropdown.js";
+import { WorkspaceCreateForm } from "../features/auth/components/WorkspaceCreateForm.js";
 import { getToastManager, useSessionExpiredRedirect } from "../shared/shell/index.js";
 
 export const Route = createFileRoute("/create-workspace")({

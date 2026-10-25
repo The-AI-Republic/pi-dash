@@ -8,7 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { WebhooksListPage } from "../../../../../../features/workspace-settings/index.js";
+import { WebhooksListPage } from "../../../../../../features/workspace-settings/webhooks/WebhooksListPage.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace/webhooks/")({
   component: WorkspaceWebhooksPage,

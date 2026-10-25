@@ -10,7 +10,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { InboxView } from "../../../../features/notifications/index.js";
+import type { InboxView as InboxViewComponent } from "../../../../features/notifications/components/InboxView.js";
+
+// Deferred (size gate): route files are eager, so importing the inbox at
+// module scope would pull its feature closure into the initial chunk.
+const InboxView = React.lazy(() =>
+  import("../../../../features/notifications/components/InboxView.js").then((module) => ({
+    default: module.InboxView,
+  }))
+) as typeof InboxViewComponent;
 
 export const Route = createFileRoute("/$ws/_gated/notifications/")({
   component: NotificationsInboxRoute,
@@ -18,5 +26,9 @@ export const Route = createFileRoute("/$ws/_gated/notifications/")({
 
 function NotificationsInboxRoute(): React.ReactElement {
   const { ws } = Route.useParams();
-  return <InboxView key={ws} workspaceSlug={ws} />;
+  return (
+    <React.Suspense fallback={null}>
+      <InboxView key={ws} workspaceSlug={ws} />
+    </React.Suspense>
+  );
 }

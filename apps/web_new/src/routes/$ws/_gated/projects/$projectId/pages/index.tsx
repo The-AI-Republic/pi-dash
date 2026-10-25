@@ -8,10 +8,16 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-// Direct module imports keep the list's initial chunk free of later
-// slice barrels (creation, row actions, editor).
-import { PagesListScreen } from "../../../../../../features/pages/components/PagesListScreen.js";
-import { parsePageListSearch } from "../../../../../../features/pages/lib/pageList.js";
+import type { PagesListScreen as PagesListScreenComponent } from "../../../../../../features/pages/components/PagesListScreen.js";
+import { parsePageListSearch } from "../../../../../../features/pages/lib/pageListSearch.js";
+
+// Deferred (size gate): the eager route definition owns the search
+// validation; the list screen and its row actions ride their own chunk.
+const PagesListScreen = React.lazy(() =>
+  import("../../../../../../features/pages/components/PagesListScreen.js").then((module) => ({
+    default: module.PagesListScreen,
+  }))
+) as typeof PagesListScreenComponent;
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/pages/")({
   validateSearch: (search: Record<string, unknown>) => parsePageListSearch(search),
@@ -21,5 +27,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/pages/")({
 function PagesComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   const { type } = Route.useSearch();
-  return <PagesListScreen workspaceSlug={ws} projectId={projectId} tab={type} />;
+  return (
+    <React.Suspense fallback={null}>
+      <PagesListScreen workspaceSlug={ws} projectId={projectId} tab={type} />
+    </React.Suspense>
+  );
 }

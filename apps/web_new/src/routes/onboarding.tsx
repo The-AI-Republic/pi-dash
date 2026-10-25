@@ -17,7 +17,9 @@ import {
   loadLandingTarget,
   workspacesQueryOptions,
 } from "../core/session/index.js";
-import { InviteMembersStep, OnboardingFlow, WorkspaceStep } from "../features/auth/index.js";
+import { InviteMembersStep } from "../features/auth/components/InviteMembersStep.js";
+import { OnboardingFlow } from "../features/auth/components/OnboardingFlow.js";
+import { WorkspaceStep } from "../features/auth/components/WorkspaceStep.js";
 import { getToastManager, useSessionExpiredRedirect } from "../shared/shell/index.js";
 
 export const Route = createFileRoute("/onboarding")({

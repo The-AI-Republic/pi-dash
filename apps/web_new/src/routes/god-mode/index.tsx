@@ -12,7 +12,9 @@ import * as React from "react";
 
 import { edition } from "../../core/edition/index.js";
 import { asString } from "../../core/session/index.js";
-import { AdminEntryGate, AdminHomeGuard, type AdminEntrySearch } from "../../features/admin/index.js";
+import { AdminEntryGate } from "../../features/admin/components/AdminEntryGate.js";
+import { AdminHomeGuard } from "../../features/admin/components/AdminGuards.js";
+import type { AdminEntrySearch } from "../../features/admin/components/AdminEntryGate.js";
 
 /**
  * The router's default search parser JSON-parses each value, so the

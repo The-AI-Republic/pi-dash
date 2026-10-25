@@ -25,13 +25,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import type { RouterContext } from "../../__root.js";
 
-vi.mock("../../../features/auth/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../features/auth/index.js")>();
+vi.mock("../../../features/auth/components/WorkspaceHomeTour.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../features/auth/components/WorkspaceHomeTour.js")>();
   return { ...actual, WorkspaceHomeTour: () => <div data-testid="tour-seam" /> };
 });
 
-vi.mock("../../../features/home/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../features/home/index.js")>();
+vi.mock("../../../features/home/components/HomeDashboard.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../features/home/components/HomeDashboard.js")>();
   return {
     ...actual,
     HomeDashboard: (props: {
@@ -53,6 +53,12 @@ vi.mock("../../../features/home/index.js", async (importOriginal) => {
         )}
       </div>
     ),
+  };
+});
+vi.mock("../../../features/home/components/HomeWidgetStack.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../features/home/components/HomeWidgetStack.js")>();
+  return {
+    ...actual,
     HomeWidgetStack: (props: {
       workspaceSlug: string;
       projects: unknown;
@@ -73,19 +79,25 @@ vi.mock("../../../features/home/index.js", async (importOriginal) => {
         {props.emptyState}
       </div>
     ),
-    QuicklinksWidget: (props: { workspaceSlug: string }) => (
-      <div data-testid="quicklinks-slot" data-slug={props.workspaceSlug} />
-    ),
-    ManageWidgetsDialog: (props: { workspaceSlug: string; open: boolean }) => (
-      <div data-testid="manage-slot" data-slug={props.workspaceSlug} data-open={String(props.open)} />
-    ),
-    HomeAllOffState: () => <div data-testid="all-off-slot" />,
   };
 });
+vi.mock("../../../features/home/components/QuicklinksWidget.js", () => ({
+  QuicklinksWidget: (props: { workspaceSlug: string }) => (
+    <div data-testid="quicklinks-slot" data-slug={props.workspaceSlug} />
+  ),
+}));
+vi.mock("../../../features/home/components/ManageWidgetsDialog.js", () => ({
+  ManageWidgetsDialog: (props: { workspaceSlug: string; open: boolean }) => (
+    <div data-testid="manage-slot" data-slug={props.workspaceSlug} data-open={String(props.open)} />
+  ),
+}));
+vi.mock("../../../features/home/components/HomeAllOffState.js", () => ({
+  HomeAllOffState: () => <div data-testid="all-off-slot" />,
+}));
 
 import { assistantKeys } from "../../../features/assistant/index.js";
-import { widgetPrefsKeys } from "../../../features/home/index.js";
-import { projectKeys } from "../../../features/projects/index.js";
+import { widgetPrefsKeys } from "../../../features/home/api/widgetPrefs.js";
+import { projectKeys } from "../../../features/projects/api/keys.js";
 import { Route } from "./index.js";
 
 const THREAD = {

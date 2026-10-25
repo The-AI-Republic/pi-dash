@@ -7,7 +7,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { AdminLoopJobsPage } from "../../../../features/admin/index.js";
+import { AdminLoopJobsPage } from "../../../../features/admin/components/AdminLoopJobsPage.js";
 
 export const Route = createFileRoute("/god-mode/_dashboard/loop/")({
   component: LoopJobsRouteComponent,
