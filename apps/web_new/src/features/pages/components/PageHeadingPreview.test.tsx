@@ -25,6 +25,13 @@ describe("PageHeadingPreview", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("anchors at the canvas edge without scrolling with the body", () => {
+    render(<PageHeadingPreview headings={HEADINGS} onOpen={vi.fn()} />);
+    const root = screen.getByTestId("page-heading-preview");
+    expect(root).toHaveClass("absolute", "top-28", "right-0");
+    expect(root).not.toHaveClass("sticky", "fixed");
+  });
+
   it("draws one sized bar per heading", () => {
     render(<PageHeadingPreview headings={HEADINGS} onOpen={vi.fn()} />);
     const button = screen.getByRole("button", { name: PAGE_PREVIEW_OPEN_LABEL });

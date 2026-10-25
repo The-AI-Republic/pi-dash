@@ -75,22 +75,16 @@ describe("PageAssetsPanel", () => {
     expect(screen.getByTestId("page-asset-row").querySelector('div[style*="background-image"]')).toBeNull();
   });
 
-  it("hands other kinds to the extension renderer", () => {
-    const renderAttachment = vi.fn((asset: PageAssetRow) => <span>licensed {asset.name}</span>);
-    render(
-      <PageAssetsPanel
-        assets={[{ ...IMAGE, kind: "attachment", thumbnailHref: null, name: "brief.pdf" }]}
-        renderAttachment={renderAttachment}
-      />
-    );
-    expect(renderAttachment).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("licensed brief.pdf")).toBeInTheDocument();
+  it("shows the name of a kind beyond pictures without a row link", () => {
+    render(<PageAssetsPanel assets={[{ ...IMAGE, kind: "attachment", thumbnailHref: null, name: "brief.pdf" }]} />);
     expect(screen.getByText("brief.pdf")).toBeInTheDocument();
     expect(screen.queryByTestId("page-asset-row")).not.toBeInTheDocument();
   });
 
-  it("shows only the name when no extension claims the kind", () => {
-    render(<PageAssetsPanel assets={[{ ...IMAGE, kind: "attachment", thumbnailHref: null, name: "brief.pdf" }]} />);
-    expect(screen.getByText("brief.pdf")).toBeInTheDocument();
+  it("keys rows by position, so the same picture embedded twice gets two rows", () => {
+    const two = { ...IMAGE, thumbnailHref: IMAGE.thumbnailHref };
+    const { container } = render(<PageAssetsPanel assets={[two, two]} />);
+    expect(screen.getAllByTestId("page-asset-row")).toHaveLength(2);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
   });
 });

@@ -175,16 +175,16 @@ describe("PageNavigationPane", () => {
     expect(screen.getByText("sun.png")).toBeInTheDocument();
   });
 
-  it("passes the attachment renderer through to the assets tab", () => {
+  it("shows only the name of a kind beyond pictures in the built-in body", () => {
     renderPane({
       search: { paneTab: "assets" },
       document: {
         ...DOCUMENT,
         assets: [{ ...DOCUMENT.assets[0]!, kind: "attachment", thumbnailHref: null }],
       },
-      renderAttachment: (asset) => <span>licensed {asset.name}</span>,
     });
-    expect(screen.getByText("licensed sun.png")).toBeInTheDocument();
+    expect(screen.getByText("sun.png")).toBeInTheDocument();
+    expect(screen.queryByTestId("page-asset-row")).not.toBeInTheDocument();
   });
 
   it("lets an edition replace the tab body while keeping the shell", () => {

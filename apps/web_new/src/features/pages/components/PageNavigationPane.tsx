@@ -17,13 +17,7 @@ import * as React from "react";
 import type { PageVersion } from "@pidash/api-client";
 import { edition } from "../../../core/edition/index.js";
 import { PAGE_PANE_TABS, pageDetailDeepHref, type PageDetailSearch, type PagePaneTab } from "../lib/pageDetail.js";
-import {
-  PAGE_PANE_WIDTH_PX,
-  type PageActorRow,
-  type PageAssetRow,
-  type PageDocument,
-  type PageHeading,
-} from "../lib/pagePane.js";
+import { PAGE_PANE_WIDTH_PX, type PageActorRow, type PageDocument, type PageHeading } from "../lib/pagePane.js";
 import { PageActorsInfo } from "./PageActorsInfo.js";
 import { PageAssetsPanel } from "./PageAssetsPanel.js";
 import { PageDocumentStats } from "./PageDocumentStats.js";
@@ -49,8 +43,6 @@ export interface PageNavigationPaneProps {
   onSelectVersion: (versionId: string) => void;
   /** Bring one outline heading into view (PAGE-047). */
   onSelectHeading: (heading: PageHeading) => void;
-  /** Edition renderer for attachment kinds beyond images (§6.7). */
-  renderAttachment?: ((asset: PageAssetRow) => React.ReactNode) | undefined;
 }
 
 function versionTime(value: string): string {
@@ -170,14 +162,14 @@ interface PaneBodyProps {
   document: PageDocument;
   actors: readonly PageActorRow[];
   onSelectHeading: (heading: PageHeading) => void;
-  renderAttachment?: ((asset: PageAssetRow) => React.ReactNode) | undefined;
 }
 
-function PaneBody({ tab, document, actors, onSelectHeading, renderAttachment }: PaneBodyProps): React.ReactElement {
+// Non-image attachments show only their name here: the built-in body is the
+// community rendering (§6.7), and an edition that renders attachment kinds
+// itself replaces this body through the `pageNavigationPane` slot.
+function PaneBody({ tab, document, actors, onSelectHeading }: PaneBodyProps): React.ReactElement {
   if (tab === "outline") return <PageOutlinePanel headings={document.headings} onSelectHeading={onSelectHeading} />;
-  if (tab === "assets") {
-    return <PageAssetsPanel assets={document.assets} renderAttachment={renderAttachment} />;
-  }
+  if (tab === "assets") return <PageAssetsPanel assets={document.assets} />;
   return (
     <div className="flex flex-col gap-(--space-6)">
       <PageDocumentStats stats={document.stats} />
@@ -231,7 +223,6 @@ export function PageNavigationPane(props: PageNavigationPaneProps): React.ReactE
               document={document}
               actors={actors}
               onSelectHeading={props.onSelectHeading}
-              renderAttachment={props.renderAttachment}
             />
           ) : (
             <EditionBody tab={search.paneTab} workspaceSlug={workspaceSlug} projectId={projectId} pageId={pageId} />

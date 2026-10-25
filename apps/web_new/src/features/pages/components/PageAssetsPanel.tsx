@@ -21,11 +21,6 @@ export const PAGE_ASSETS_DOWNLOAD_LABEL = "Download";
 
 export interface PageAssetsPanelProps {
   assets: readonly PageAssetRow[];
-  /**
-   * Edition seam for attachment kinds the community build does not render
-   * itself (§6.7, §9.4); absent means only the name shows.
-   */
-  renderAttachment?: ((asset: PageAssetRow) => React.ReactNode) | undefined;
 }
 
 function PageAssetsEmpty(): React.ReactElement {
@@ -51,10 +46,12 @@ function PageAssetsEmpty(): React.ReactElement {
 }
 
 function PageAssetRowView({ asset }: { asset: PageAssetRow }): React.ReactElement {
-  // The assets oracle reads a row as an anchor holding the name paragraph,
-  // with the download anchor nested inside it (§6.7 driver contract). The
-  // download action stops its click from bubbling to the row, so choosing
-  // the download never also activates the row's view link.
+  // Deliberately an anchor nested inside an anchor: the assets oracle reads
+  // a row as an anchor holding the name paragraph with the download anchor
+  // inside it (§6.7 driver contract). Do not "fix" the nesting by moving
+  // the action out of the row. The download action stops its click from
+  // bubbling to the row, so choosing the download never also activates the
+  // row's view link.
   return (
     <a
       href={asset.viewHref}
@@ -88,18 +85,22 @@ function PageAssetRowView({ asset }: { asset: PageAssetRow }): React.ReactElemen
   );
 }
 
-export function PageAssetsPanel({ assets, renderAttachment }: PageAssetsPanelProps): React.ReactElement {
+export function PageAssetsPanel({ assets }: PageAssetsPanelProps): React.ReactElement {
   if (assets.length === 0) return <PageAssetsEmpty />;
   return (
     <ul data-testid="page-assets" className="flex flex-col gap-(--space-1)">
-      {assets.map((asset) => (
-        <li key={`${asset.source}-${asset.name}`} className="min-w-0">
+      {/* Rows key on their position: the same picture can be embedded twice
+          (same source, same name) and each embed is its own row. */}
+      {assets.map((asset, index) => (
+        <li key={index} className="min-w-0">
           {asset.kind === "image" ? (
             <PageAssetRowView asset={asset} />
           ) : (
+            // Kinds beyond pictures show their name and nothing else in the
+            // community build; an edition renders them with its own pane body
+            // through the `pageNavigationPane` slot (§6.7, §9.4).
             <div className="flex items-center justify-between gap-(--space-2) p-(--space-1)">
               <p className="text-body min-w-0 flex-1 truncate text-(--text)">{asset.name}</p>
-              {renderAttachment?.(asset) ?? null}
             </div>
           )}
         </li>

@@ -441,6 +441,31 @@ describe("PageDetailScreen deep links", () => {
     expect(edited.querySelector("a")?.textContent).toBe("Ada Byron");
   });
 
+  it("gives the screen a definite height and keeps the shut pane out of the scrollport", async () => {
+    renderScreen();
+    const canvas = await screen.findByLabelText("Launch notes");
+    const screenRoot = screen.getByTestId("page-detail-screen");
+    // The pane's shut state is a negative margin; clipping the screen keeps
+    // it from becoming reachable by scrolling the surrounding content.
+    expect(screenRoot).toHaveClass("h-full", "min-h-0", "flex-col", "overflow-x-clip");
+    // The canvas column is the page's own vertical scroller, so the
+    // surrounding content area never becomes the scroller instead.
+    const scroll = screen.getByTestId("page-canvas-scroll");
+    expect(scroll).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+    expect(scroll.contains(canvas)).toBe(true);
+    expect(screen.getByTestId("page-canvas-stage")).toContainElement(scroll);
+  });
+
+  it("pins the heading preview beside the scroller instead of inside the document", async () => {
+    harness.page = record({ description_html: "<h1>Launch</h1><h2>Scope</h2>" });
+    renderScreen();
+    const preview = await screen.findByRole("button", { name: "Open outline" });
+    // Inside the scroller the preview would scroll away with the body; it
+    // belongs to the stage, which does not scroll (PAGE-046).
+    expect(screen.getByTestId("page-canvas-scroll")).not.toContainElement(preview);
+    expect(screen.getByTestId("page-canvas-stage")).toContainElement(preview);
+  });
+
   it("keeps the title out of the pane's document while it sits on the canvas", async () => {
     harness.page = record({ name: "Launch notes", description_html: "<h1>Scope</h1><p>Body</p>" });
     renderScreen({ paneTab: "outline" });

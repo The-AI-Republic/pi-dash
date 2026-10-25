@@ -200,7 +200,12 @@ export function PageDetailScreen({
   });
 
   return (
-    <div data-testid="page-detail-screen" className="flex min-h-0 flex-1 flex-col">
+    // The screen owns its own height and clips horizontally: the pane's
+    // shut state is a negative right margin, which must stay out of the
+    // layout's scrollport instead of becoming reachable by scrolling the
+    // content area (PAGE-045). The canvas column below is the page's
+    // vertical scroller.
+    <div data-testid="page-detail-screen" className="flex h-full min-h-0 flex-col overflow-x-clip">
       <PageDetailHeader
         workspaceSlug={workspaceSlug}
         projectId={projectId}
@@ -220,47 +225,51 @@ export function PageDetailScreen({
         paneOpen={paneOpen}
       />
       <div className="flex min-h-0 flex-1">
-        <div className="relative min-w-0 flex-1 overflow-y-auto">
-          {/* The measured canvas fills the column, so the pane's slide
+        <div data-testid="page-canvas-stage" className="relative flex min-h-0 min-w-0 flex-1">
+          <div data-testid="page-canvas-scroll" className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+            {/* The measured canvas fills the column, so the pane's slide
               reflows it by the pane's own width (PAGE-045). The readable
               measure lives inside it and follows the pane state: narrow
               while it is shut, wide while it is open (§6.5). The title is
               part of the canvas, which is why the pane's live read scopes
               itself to the body below it. */}
-          <article
-            id="page-content-container"
-            aria-label={pageTitle}
-            ref={canvasRef}
-            className="relative w-full py-(--space-6)"
-          >
-            <div
-              className="frame-renderer mx-auto w-full px-(--space-8) transition-[max-width] duration-(--motion-duration) ease-(--motion-easing)"
-              style={{ maxWidth: paneOpen ? PAGE_CANVAS_MEASURE_PX.wide : PAGE_CANVAS_MEASURE_PX.readable }}
+            <article
+              id="page-content-container"
+              aria-label={pageTitle}
+              ref={canvasRef}
+              className="relative w-full py-(--space-6)"
             >
-              <PageDetailTitle
-                pageId={page.id}
-                name={page.name}
-                editable={capabilities.canEdit}
-                onRename={(next) => rename.mutate(next)}
-              />
-              {capabilities.isShelved || capabilities.isLocked ? (
-                <p className="text-caption mb-(--space-4) text-(--text-muted)">
-                  {capabilities.isShelved
-                    ? "This page is archived and read-only."
-                    : "This page is locked and read-only."}
-                </p>
-              ) : null}
-              <div className="editor-container">
-                {bodyReady ? (
-                  <RichTextView html={page.description_html} label={PAGE_BODY_LABEL} />
-                ) : (
-                  <PageBodySkeleton />
-                )}
-                {canManage ? <span data-testid="page-detail-manage-mount" hidden aria-hidden="true" /> : null}
-                <span data-testid="page-detail-action-mount" hidden aria-hidden="true" />
+              <div
+                className="frame-renderer mx-auto w-full px-(--space-8) transition-[max-width] duration-(--motion-duration) ease-(--motion-easing)"
+                style={{ maxWidth: paneOpen ? PAGE_CANVAS_MEASURE_PX.wide : PAGE_CANVAS_MEASURE_PX.readable }}
+              >
+                <PageDetailTitle
+                  pageId={page.id}
+                  name={page.name}
+                  editable={capabilities.canEdit}
+                  onRename={(next) => rename.mutate(next)}
+                />
+                {capabilities.isShelved || capabilities.isLocked ? (
+                  <p className="text-caption mb-(--space-4) text-(--text-muted)">
+                    {capabilities.isShelved
+                      ? "This page is archived and read-only."
+                      : "This page is locked and read-only."}
+                  </p>
+                ) : null}
+                <div className="editor-container">
+                  {bodyReady ? (
+                    <RichTextView html={page.description_html} label={PAGE_BODY_LABEL} />
+                  ) : (
+                    <PageBodySkeleton />
+                  )}
+                  {canManage ? <span data-testid="page-detail-manage-mount" hidden aria-hidden="true" /> : null}
+                  <span data-testid="page-detail-action-mount" hidden aria-hidden="true" />
+                </div>
               </div>
-            </div>
-          </article>
+            </article>
+          </div>
+          {/* Sits beside the scroller rather than inside it, so it stays at
+              the canvas edge however far the body has scrolled (PAGE-046). */}
           {paneOpen ? null : <PageHeadingPreview headings={paneDocument.headings} onOpen={openFromPreview} />}
         </div>
         <PageNavigationPane
