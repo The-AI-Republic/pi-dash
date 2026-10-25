@@ -18,6 +18,7 @@ interface Options {
   content?: string;
   input?: string;
   checked?: boolean;
+  selected?: boolean;
   disabled?: boolean;
   attribute?: string | null;
   items?: FakeLocator[];
@@ -73,6 +74,9 @@ class FakeLocator {
   }
   isChecked(): Promise<boolean> {
     return this.fail(this.options.checked ?? false);
+  }
+  isSelected(): Promise<boolean> {
+    return this.fail(this.options.selected ?? false);
   }
   isDisabled(): Promise<boolean> {
     return this.fail(this.options.disabled ?? false);
@@ -1568,6 +1572,27 @@ describe("scheduler definition dialog", () => {
 });
 
 describe("scheduler edit and delete", () => {
+  it("opens delete from the row and waits for the confirmation heading", async () => {
+    const remove = fake({ click: vi.fn(async () => undefined) });
+    const row = fake({
+      role: (role: string, options?: Record<string, unknown>) =>
+        role === "button" && options?.["name"] === "Delete" ? remove : absent(),
+    });
+    const heading = fake({ count: 1, waitFor: vi.fn(async () => undefined) });
+    const dialog = fake({
+      role: (role: string, options?: Record<string, unknown>) =>
+        role === "heading" && options?.["name"] === "Delete scheduler" ? heading : absent(),
+    });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="scheduler-row"]' ? fake({ filter: () => row }) : absent(),
+      getByRole: () => fake({ last: () => dialog }),
+    });
+    await new WebNewDriver(page).schedulerOpenDelete("weekly-report");
+    expect(remove.click).toHaveBeenCalled();
+    expect(heading.waitFor).toHaveBeenCalledWith(expect.objectContaining({ timeout: expect.any(Number) }));
+  });
+
   it("opens edit from the row and waits for the handle value", async () => {
     const handle = fake({ count: 1, input: "weekly-report" });
     const edit = fake({ click: vi.fn(async () => undefined) });
@@ -1603,6 +1628,52 @@ describe("scheduler edit and delete", () => {
     expect(confirm.click).toHaveBeenCalled();
     await driver.schedulerCancelDelete();
     expect(cancel.click).toHaveBeenCalled();
+  });
+
+  it("returns when the confirmation unmounts the dialog", async () => {
+    const confirm = fake({ click: vi.fn(async () => undefined) });
+    const heading = fake({ count: 0 });
+    const dialog = fake({
+      role: (role: string) => (role === "button" ? confirm : role === "heading" ? heading : absent()),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerConfirmDelete();
+    expect(confirm.click).toHaveBeenCalled();
+  });
+
+  it("returns when a refusal leaves the dialog open with a toast", async () => {
+    const confirm = fake({ click: vi.fn(async () => undefined) });
+    const heading = fake({ count: 1 });
+    const dialog = fake({
+      role: (role: string) => (role === "button" ? confirm : role === "heading" ? heading : absent()),
+    });
+    const card = fake({ text: "Could not delete scheduler\nServer detail", visible: true });
+    const page = pageOf({
+      getByRole: () => fake({ last: () => dialog }),
+      locator: (selector: string) =>
+        selector === '[data-testid="toast-notification"]' ? fake({ items: [card] }) : absent(),
+    });
+    await new WebNewDriver(page).schedulerConfirmDelete();
+    expect(confirm.click).toHaveBeenCalled();
+  });
+
+  it("throws when the confirmation settles on neither outcome", async () => {
+    vi.useFakeTimers();
+    try {
+      const confirm = fake({ click: vi.fn(async () => undefined) });
+      const heading = fake({ count: 1 });
+      const dialog = fake({
+        role: (role: string) => (role === "button" ? confirm : role === "heading" ? heading : absent()),
+      });
+      const waitForTimeout = vi.fn(async () => {
+        vi.setSystemTime(Date.now() + 30_001);
+      });
+      const page = pageOf({ getByRole: () => fake({ last: () => dialog }), waitForTimeout });
+      await expect(new WebNewDriver(page).schedulerConfirmDelete()).rejects.toThrow("settled on neither outcome");
+      expect(waitForTimeout).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports delete openness from the dialog heading", async () => {
@@ -1667,6 +1738,24 @@ describe("scheduler notices", () => {
 });
 
 describe("scheduler bulk install", () => {
+  it("opens install from the row and waits for the picker toggle", async () => {
+    const install = fake({ click: vi.fn(async () => undefined) });
+    const row = fake({
+      role: (role: string, options?: Record<string, unknown>) =>
+        role === "button" && options?.["name"] === "Install" ? install : absent(),
+    });
+    const toggle = fake({ count: 1, waitFor: vi.fn(async () => undefined) });
+    const dialog = fake({ locate: () => toggle });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="scheduler-row"]' ? fake({ filter: () => row }) : absent(),
+      getByRole: () => fake({ last: () => dialog }),
+    });
+    await new WebNewDriver(page).schedulerOpenInstall("weekly-report");
+    expect(install.click).toHaveBeenCalled();
+    expect(toggle.waitFor).toHaveBeenCalled();
+  });
+
   it("reads picker options and handles locked installed rows", async () => {
     const alpha = fake({
       text: "Bulk Alpha\nAG6A",
@@ -1753,6 +1842,86 @@ describe("scheduler bulk install", () => {
     await driver.schedulerCloseInstall();
     expect(cancel.click).toHaveBeenCalled();
     await expect(driver.schedulerInstallOpen()).resolves.toBe(true);
+  });
+
+  it("reports install openness from the text fallback and reports a closed dialog", async () => {
+    const open = fake({
+      locator: () => fake({ count: 0 }),
+      byText: () => fake({ count: 1 }),
+    });
+    const closed = fake({
+      locator: () => fake({ count: 0 }),
+      byText: () => fake({ count: 0 }),
+    });
+    await expect(
+      new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => open }) })).schedulerInstallOpen()
+    ).resolves.toBe(true);
+    await expect(
+      new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => closed }) })).schedulerInstallOpen()
+    ).resolves.toBe(false);
+  });
+});
+
+describe("project scheduler create", () => {
+  it("opens the project schedulers address and waits for the create control", async () => {
+    const goto = vi.fn(async () => null);
+    const waitFor = vi.fn(async () => undefined);
+    const create = fake({ count: 1, waitFor });
+    const page = pageOf({
+      goto,
+      locator: (selector: string) => (selector === "#main-sidebar" ? fake({ waitFor }) : absent()),
+      getByRole: (role: string, options?: Record<string, unknown>) =>
+        role === "button" && options?.["name"] === "New Scheduler" ? create : absent(),
+    });
+    await new WebNewDriver(page).schedulerOpenProjectSchedulers("acme", "p1");
+    expect(goto).toHaveBeenCalledWith("/acme/projects/p1/schedulers/list");
+    expect(create.waitFor).toHaveBeenCalled();
+  });
+
+  it("opens create and switches to the create tab when install is preselected", async () => {
+    const create = fake({ click: vi.fn(async () => undefined) });
+    const tabClick = vi.fn(async () => undefined);
+    const tab = fake({ count: 1, selected: false, click: tabClick });
+    const handle = fake({ count: 1, waitFor: vi.fn(async () => undefined) });
+    const dialog = fake({
+      role: (role: string, options?: Record<string, unknown>) =>
+        role === "heading" && options?.["name"] === "New Scheduler"
+          ? fake({ waitFor: vi.fn(async () => undefined) })
+          : role === "tab"
+            ? tab
+            : absent(),
+      byLabel: (label: string) => (label === "Handle" ? handle : absent()),
+    });
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) =>
+        role === "button" && options?.["name"] === "New Scheduler" ? create : fake({ last: () => dialog }),
+    });
+    await new WebNewDriver(page).schedulerOpenProjectCreate();
+    expect(create.click).toHaveBeenCalled();
+    expect(tabClick).toHaveBeenCalled();
+  });
+
+  it("leaves an already selected create tab and a create-first dialog alone", async () => {
+    const tab = fake({ count: 1, selected: true, click: vi.fn(async () => undefined) });
+    const dialog = fake({
+      role: (role: string) => (role === "tab" ? tab : fake({ waitFor: vi.fn(async () => undefined) })),
+      byLabel: () => fake({ count: 1, waitFor: vi.fn(async () => undefined) }),
+    });
+    await new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => dialog }) })).schedulerOpenProjectCreate();
+    expect(tab.click).not.toHaveBeenCalled();
+
+    const noTab = fake({
+      role: () => absent(),
+      byLabel: () => fake({ count: 1, waitFor: vi.fn(async () => undefined) }),
+    });
+    await new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => noTab }) })).schedulerOpenProjectCreate();
+  });
+
+  it("submits the project create dialog", async () => {
+    const submit = fake({ click: vi.fn(async () => undefined) });
+    const dialog = fake({ locate: () => submit });
+    await new WebNewDriver(pageOf({ getByRole: () => fake({ last: () => dialog }) })).schedulerProjectCreateSubmit();
+    expect(submit.click).toHaveBeenCalled();
   });
 });
 
