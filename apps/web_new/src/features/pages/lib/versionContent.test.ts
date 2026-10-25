@@ -141,6 +141,19 @@ describe("snapshotBodyHtml", () => {
     expect(html).toBe("<p><strong>bold</strong> <em><s>italic strike</s></em> <code>code</code> <u>under</u></p>");
   });
 
+  it("paints a non-link mark without an address, and refuses one whose address is not text", () => {
+    const withoutAddress = snapshotBodyHtml({
+      description_json: doc(paragraph(text("strong", [{ type: "bold", attrs: {} }]))),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    const unreadableAddress = snapshotBodyHtml({
+      description_json: doc(paragraph(text("odd", [{ type: "bold", attrs: { href: 42 } }]))),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    expect(withoutAddress).toBe("<p><strong>strong</strong></p>");
+    expect(unreadableAddress).toBe("<p>Markup fallback words</p>");
+  });
+
   it("falls back to the stored markup for a mark the renderer would drop", () => {
     const html = snapshotBodyHtml({
       description_json: doc(paragraph(text("highlighted", [{ type: "highlight" }]))),
