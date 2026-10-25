@@ -34,6 +34,12 @@ interface Options {
   getAttribute?: (name: string) => Promise<string | null>;
   selectOption?: (value: string) => Promise<void>;
   evaluateAll?: (fn: (nodes: unknown[]) => unknown) => Promise<unknown>;
+  testId?: (id: string) => FakeLocator;
+  all?: () => FakeLocator[];
+  waitFor?: () => Promise<void>;
+  innerText?: () => Promise<string>;
+  evaluate?: unknown;
+  throws?: boolean;
 }
 
 class FakeLocator {
@@ -50,28 +56,35 @@ class FakeLocator {
     this.fill = vi.fn(options.fill ?? (async () => undefined));
     this.selectOption = vi.fn(options.selectOption ?? (async () => undefined));
     this.evaluateAll = vi.fn(options.evaluateAll ?? (async () => []));
+    this.waitFor.mockImplementation(options.waitFor ?? (async () => undefined));
   }
 
+  private fail<T>(value: T): Promise<T> {
+    return this.options.throws === true ? Promise.reject(new Error("read failed")) : Promise.resolve(value);
+  }
   count(): Promise<number> {
-    return Promise.resolve(this.options.items?.length ?? this.options.count ?? 0);
+    return this.fail(this.options.items?.length ?? this.options.count ?? 0);
+  }
+  all(): Promise<FakeLocator[]> {
+    return this.fail(this.options.all !== undefined ? this.options.all() : (this.options.items ?? []));
   }
   isVisible(): Promise<boolean> {
-    return Promise.resolve(this.options.visible ?? true);
+    return this.fail(this.options.visible ?? true);
   }
   isChecked(): Promise<boolean> {
-    return Promise.resolve(this.options.checked ?? false);
+    return this.fail(this.options.checked ?? false);
   }
   isDisabled(): Promise<boolean> {
-    return Promise.resolve(this.options.disabled ?? false);
+    return this.fail(this.options.disabled ?? false);
   }
   innerText(): Promise<string> {
-    return Promise.resolve(this.options.text ?? "");
+    return this.options.innerText !== undefined ? this.options.innerText() : this.fail(this.options.text ?? "");
   }
   textContent(): Promise<string | null> {
-    return Promise.resolve(this.options.content ?? this.options.text ?? "");
+    return this.fail(this.options.content ?? this.options.text ?? "");
   }
   inputValue(): Promise<string> {
-    return Promise.resolve(this.options.input ?? "");
+    return this.fail(this.options.input ?? "");
   }
   getAttribute(name: string): Promise<string | null> {
     if (this.options.getAttribute !== undefined) return this.options.getAttribute(name);
@@ -104,6 +117,13 @@ class FakeLocator {
   getByLabel(label: string): FakeLocator {
     return this.options.byLabel?.(label) ?? absent();
   }
+  getByTestId(id: string): FakeLocator {
+    return this.options.testId?.(id) ?? absent();
+  }
+  evaluate(): Promise<unknown> {
+    if (this.options.throws === true) return Promise.reject(new Error("evaluate failed"));
+    return Promise.resolve(this.options.evaluate ?? "");
+  }
   locator(selector: string): FakeLocator {
     return this.options.locate?.(selector) ?? absent();
   }
@@ -122,10 +142,16 @@ function pageOf(overrides: Partial<Record<string, unknown>> = {}): Page {
     goto: vi.fn(async () => null),
     waitForTimeout: vi.fn(async () => undefined),
     waitForResponse: vi.fn(async () => ({})),
+    waitForURL: vi.fn(async () => undefined),
+    setViewportSize: vi.fn(async () => undefined),
+    url: vi.fn(() => "http://localhost/acme/projects/p1/schedulers/calendar"),
+    context: vi.fn(() => ({ newPage: vi.fn(async () => pageOf()) })),
+    close: vi.fn(async () => undefined),
     route: vi.fn(async () => undefined),
     unroute: vi.fn(async () => undefined),
     getByRole: vi.fn(() => absent()),
     getByText: vi.fn(() => absent()),
+    getByTestId: vi.fn(() => absent()),
     locator: vi.fn(() => absent()),
     ...overrides,
   } as unknown as Page;
@@ -657,5 +683,664 @@ describe("recurrence builder", () => {
     await expect(driver.schedulerRecurrenceAct({ kind: "unit", value: "week" })).rejects.toThrow(
       "recurrence builder is a web_new target"
     );
+  });
+});
+
+describe("calendar surface", () => {
+  function calendarPage(overrides: {
+    week?: FakeLocator;
+    month?: FakeLocator;
+    ready?: FakeLocator;
+    role?: (role: string, options?: Record<string, unknown>) => FakeLocator;
+    title?: string;
+    goto?: ReturnType<typeof vi.fn>;
+  }): Page {
+    return pageOf({
+      goto: overrides.goto ?? vi.fn(async () => null),
+      getByTestId: (id: string) => {
+        if (id === "calendar-week-view") return overrides.week ?? absent();
+        if (id === "calendar-month-view") return overrides.month ?? absent();
+        if (id === "calendar-period-label") return fake({ text: overrides.title ?? "October 2026" });
+        return absent();
+      },
+      getByRole:
+        overrides.role ??
+        ((role: string) =>
+          role === "region"
+            ? fake({ count: 1, locate: () => absent() })
+            : role === "heading"
+              ? fake({ count: 0 })
+              : absent()),
+    });
+  }
+
+  it("opens the calendar address and settles on a rendered body", async () => {
+    const goto = vi.fn(async () => null);
+    const waitFor = vi.fn(async () => undefined);
+    const page = calendarPage({ month: fake({ count: 1 }), ready: fake({ count: 1, waitFor }), goto });
+    const driver = new WebNewDriver(page);
+    await driver.schedulerOpenProjectCalendar("acme", "p1");
+    expect(goto).toHaveBeenCalledWith("/acme/projects/p1/schedulers/calendar");
+  });
+
+  it("reads the mounted grid as the active view", async () => {
+    const week = fake({ count: 1 });
+    await expect(new WebNewDriver(calendarPage({ week })).schedulerCalendarView()).resolves.toBe("week");
+    await expect(new WebNewDriver(calendarPage({})).schedulerCalendarView()).resolves.toBe("month");
+  });
+
+  it("switches the view and waits for the target grid", async () => {
+    const click = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const month = fake({ count: 1, waitFor });
+    const page = calendarPage({
+      month,
+      role: (role, options) =>
+        role === "button" && String(options?.["name"] ?? "") === "Month" ? fake({ click }) : absent(),
+    });
+    await new WebNewDriver(page).schedulerCalendarSetView("month");
+    expect(click).toHaveBeenCalled();
+    expect(waitFor).toHaveBeenCalled();
+
+    // The week side picks its own button and settles on the week grid.
+    const weekWaitFor = vi.fn(async () => undefined);
+    const week = fake({ count: 1, waitFor: weekWaitFor });
+    const weekPage = calendarPage({
+      week,
+      role: (role, options) =>
+        role === "button" && String(options?.["name"] ?? "") === "Week" ? fake({ click }) : absent(),
+    });
+    await new WebNewDriver(weekPage).schedulerCalendarSetView("week");
+    expect(weekWaitFor).toHaveBeenCalled();
+  });
+
+  it("steps the month view until its caption changes", async () => {
+    let label = "October 2026";
+    const click = vi.fn(async () => {
+      label = "November 2026";
+    });
+    const page = pageOf({
+      getByTestId: (id: string) => (id === "calendar-period-label" ? fake({ innerText: async () => label }) : absent()),
+      getByRole: (role, options) =>
+        role === "button" && String(options?.["name"] ?? "") === "Next" ? fake({ click }) : absent(),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.schedulerCalendarTitle()).resolves.toBe("October 2026");
+    await driver.schedulerCalendarStep("next");
+    expect(click).toHaveBeenCalled();
+
+    // The month view's other direction clicks its own control.
+    label = "December 2026";
+    const previous = vi.fn(async () => {
+      label = "November 2026";
+    });
+    const backward = pageOf({
+      getByTestId: (id: string) => (id === "calendar-period-label" ? fake({ innerText: async () => label }) : absent()),
+      getByRole: (role, options) =>
+        role === "button" && String(options?.["name"] ?? "") === "Previous" ? fake({ click: previous }) : absent(),
+    });
+    await new WebNewDriver(backward).schedulerCalendarStep("prev");
+    expect(previous).toHaveBeenCalled();
+  });
+
+  it("steps the week view by its day caption, even within one month", async () => {
+    let day = "Sun 25";
+    const click = vi.fn(async () => {
+      day = "Sun 1";
+    });
+    const week = fake({
+      count: 1,
+      testId: (id: string) =>
+        id === "calendar-week-day-head" ? fake({ locate: () => fake({ text: day }) }) : absent(),
+    });
+    const page = pageOf({
+      getByTestId: (id: string) => (id === "calendar-week-view" ? week : absent()),
+      getByRole: (role, options) =>
+        role === "button" && String(options?.["name"] ?? "") === "Next" ? fake({ click }) : absent(),
+    });
+    await new WebNewDriver(page).schedulerCalendarStep("next");
+    expect(click).toHaveBeenCalled();
+  });
+
+  it("jumps home to the current month-year caption", async () => {
+    const current = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(new Date());
+    const click = vi.fn(async () => undefined);
+    const page = pageOf({
+      getByTestId: (id: string) =>
+        id === "calendar-period-label"
+          ? fake({ text: current })
+          : id === "calendar-month-view"
+            ? fake({ count: 1 })
+            : absent(),
+      getByRole: (role, options) =>
+        role === "button" && String(options?.["name"] ?? "") === "Today" ? fake({ click }) : absent(),
+    });
+    await new WebNewDriver(page).schedulerCalendarToday();
+    expect(click).toHaveBeenCalled();
+  });
+
+  it("reports the empty and truncation states", async () => {
+    const page = pageOf({
+      getByRole: (role: string) => (role === "heading" ? fake({ count: 1, visible: true }) : absent()),
+      getByText: () => fake({ count: 1, visible: true }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.schedulerCalendarEmptyVisible()).resolves.toBe(true);
+    await expect(driver.schedulerCalendarTruncatedVisible()).resolves.toBe(true);
+    const blank = new WebNewDriver(pageOf());
+    await expect(blank.schedulerCalendarEmptyVisible()).resolves.toBe(false);
+    await expect(blank.schedulerCalendarTruncatedVisible()).resolves.toBe(false);
+  });
+
+  it("reads month cells by test id, one block per titled button", async () => {
+    const block = fake({
+      locate: (selector: string) =>
+        selector === ":scope > span" ? fake({ items: [fake({ text: "9:00 AM" }), fake({ text: "Alpha" })] }) : absent(),
+      attribute: "Alpha · 9:00 AM",
+      evaluate: "rgb(10, 20, 30)",
+    });
+    const cell = fake({
+      testId: (id: string) => (id === "calendar-month-day-number" ? fake({ text: "18" }) : absent()),
+      locate: (selector: string) => (selector === "button[title]" ? fake({ items: [block] }) : absent()),
+    });
+    const month = fake({ testId: (id: string) => (id === "calendar-month-day" ? fake({ items: [cell] }) : absent()) });
+    const page = pageOf({
+      getByTestId: (id: string) => (id === "calendar-month-view" ? month : absent()),
+    });
+    await expect(new WebNewDriver(page).schedulerCalendarMonthBlocks()).resolves.toEqual([
+      { day: "18", time: "9:00 AM", name: "Alpha", title: "Alpha · 9:00 AM", background: "rgb(10, 20, 30)" },
+    ]);
+  });
+
+  it("reads month overflow from untitled controls and today from its marker", async () => {
+    const cell = fake({
+      locate: (selector: string) =>
+        selector === "button:not([title])"
+          ? fake({ items: [fake({ text: "+ 20 more" }), fake({ text: " " })] })
+          : absent(),
+    });
+    const month = fake({
+      testId: (id: string) => (id === "calendar-month-day" ? fake({ items: [cell] }) : absent()),
+      locate: (selector: string) =>
+        selector === '[data-testid="calendar-month-day"][data-today="true"]' ? fake({ count: 1 }) : absent(),
+    });
+    const page = pageOf({ getByTestId: (id: string) => (id === "calendar-month-view" ? month : absent()) });
+    const driver = new WebNewDriver(page);
+    await expect(driver.schedulerCalendarMonthOverflow()).resolves.toEqual(["+ 20 more"]);
+    await expect(driver.schedulerCalendarMonthTodayMarked()).resolves.toBe(true);
+    const quiet = pageOf({ getByTestId: () => fake({ testId: () => absent(), locate: () => absent() }) });
+    await expect(new WebNewDriver(quiet).schedulerCalendarMonthTodayMarked()).resolves.toBe(false);
+  });
+
+  it("pairs week day headers with their lanes and marks today", async () => {
+    const alpha = fake({
+      locate: (selector: string) =>
+        selector === ":scope > span" ? fake({ items: [fake({ text: "9:00 AM" }), fake({ text: "Alpha" })] }) : absent(),
+      attribute: "Alpha · 9:00 AM",
+      evaluate: "rgb(1, 2, 3)",
+    });
+    const beta = fake({
+      locate: (selector: string) =>
+        selector === ":scope > span" ? fake({ items: [fake({ text: "10:00 AM" }), fake({ text: "Beta" })] }) : absent(),
+      attribute: "Beta · 10:00 AM",
+      evaluate: "rgb(4, 5, 6)",
+    });
+    const laneOne = fake({
+      locate: (selector: string) => (selector === "button[title]" ? fake({ items: [alpha] }) : absent()),
+    });
+    const laneTwo = fake({
+      locate: (selector: string) => (selector === "button[title]" ? fake({ items: [beta] }) : absent()),
+    });
+    const week = fake({
+      testId: (id: string) => {
+        if (id === "calendar-week-day-head")
+          return fake({
+            items: [
+              fake({
+                locate: (selector: string) =>
+                  selector === "span" ? fake({ items: [fake({ text: "Sun 18" })] }) : absent(),
+              }),
+              fake({
+                locate: (selector: string) =>
+                  selector === "span" ? fake({ items: [fake({ text: "Mon 19" })] }) : absent(),
+              }),
+            ],
+          });
+        if (id === "calendar-week-day") return fake({ items: [laneOne, laneTwo] });
+        if (id === "calendar-week-today") return fake({ count: 1 });
+        return absent();
+      },
+    });
+    const page = pageOf({ getByTestId: (id: string) => (id === "calendar-week-view" ? week : absent()) });
+    const driver = new WebNewDriver(page);
+    await expect(driver.schedulerCalendarWeekBlocks()).resolves.toEqual([
+      { day: "Sun 18", time: "9:00 AM", name: "Alpha", title: "Alpha · 9:00 AM", background: "rgb(1, 2, 3)" },
+      { day: "Mon 19", time: "10:00 AM", name: "Beta", title: "Beta · 10:00 AM", background: "rgb(4, 5, 6)" },
+    ]);
+    await expect(driver.schedulerCalendarWeekTodayMarked()).resolves.toBe(true);
+    const noToday = pageOf({ getByTestId: () => fake({ testId: () => absent() }) });
+    await expect(new WebNewDriver(noToday).schedulerCalendarWeekTodayMarked()).resolves.toBe(false);
+  });
+
+  it("reads a lane whose day has no header as unlabelled", async () => {
+    const block = fake({
+      locate: (selector: string) =>
+        selector === ":scope > span" ? fake({ items: [fake({ text: "9:00 AM" }), fake({ text: "Alpha" })] }) : absent(),
+      attribute: "Alpha · 9:00 AM",
+      evaluate: "rgb(1, 2, 3)",
+    });
+    const lane = fake({
+      locate: (selector: string) => (selector === "button[title]" ? fake({ items: [block] }) : absent()),
+    });
+    const week = fake({
+      testId: (id: string) => {
+        if (id === "calendar-week-day-head") return fake({ items: [] });
+        if (id === "calendar-week-day") return fake({ items: [lane] });
+        return absent();
+      },
+    });
+    const page = pageOf({ getByTestId: (id: string) => (id === "calendar-week-view" ? week : absent()) });
+    await expect(new WebNewDriver(page).schedulerCalendarWeekBlocks()).resolves.toEqual([
+      { day: "", time: "9:00 AM", name: "Alpha", title: "Alpha · 9:00 AM", background: "rgb(1, 2, 3)" },
+    ]);
+  });
+
+  it("reads the now-line offset or reports its absence", async () => {
+    const line = fake({ count: 1, evaluate: "123.5px" });
+    const week = fake({ testId: (id: string) => (id === "calendar-now-line" ? line : absent()) });
+    const page = pageOf({ getByTestId: (id: string) => (id === "calendar-week-view" ? week : absent()) });
+    await expect(new WebNewDriver(page).schedulerCalendarTimeLineTop()).resolves.toBe(123.5);
+    const missing = pageOf({ getByTestId: () => fake({ testId: () => fake({ count: 0 }) }) });
+    await expect(new WebNewDriver(missing).schedulerCalendarTimeLineTop()).resolves.toBeNull();
+    const unparsable = fake({ count: 1, evaluate: "auto" });
+    const broken = pageOf({
+      getByTestId: (id: string) => (id === "calendar-week-view" ? fake({ testId: () => unparsable }) : absent()),
+    });
+    await expect(new WebNewDriver(broken).schedulerCalendarTimeLineTop()).resolves.toBeNull();
+  });
+
+  it("clicks a block by scheduler name inside the calendar region", async () => {
+    const click = vi.fn(async () => undefined);
+    const matched = fake({ first: () => fake({ click }) });
+    const scope = fake({
+      locate: (selector: string) => (selector === "button[title]" ? fake({ filter: () => matched }) : absent()),
+    });
+    const drawer = fake({ waitFor: vi.fn(async () => undefined) });
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) =>
+        role === "region" ? scope : role === "dialog" && options?.["name"] !== undefined ? drawer : absent(),
+    });
+    await new WebNewDriver(page).schedulerCalendarClickBlock("Alpha");
+    expect(click).toHaveBeenCalled();
+  });
+
+  it("reads block fields through the two spans and the fill", async () => {
+    const block = fake({
+      locate: (selector: string) =>
+        selector === ":scope > span" ? fake({ items: [fake({ text: "9:00 AM" }), fake({ text: "Alpha" })] }) : absent(),
+      attribute: "Alpha · 9:00 AM",
+      evaluate: "rgb(9, 9, 9)",
+    });
+    const lane = fake({ locate: () => fake({ items: [block] }) });
+    const week = fake({
+      testId: (id: string) =>
+        id === "calendar-week-day-head"
+          ? fake({ items: [fake({ locate: () => fake({ text: "Sun 18" }) })] })
+          : id === "calendar-week-day"
+            ? fake({ items: [lane] })
+            : absent(),
+    });
+    const page = pageOf({ getByTestId: (id: string) => (id === "calendar-week-view" ? week : absent()) });
+    await expect(new WebNewDriver(page).schedulerCalendarWeekBlocks()).resolves.toEqual([
+      { day: "Sun 18", time: "9:00 AM", name: "Alpha", title: "Alpha · 9:00 AM", background: "rgb(9, 9, 9)" },
+    ]);
+  });
+
+  it("reports no draggable blocks and no export controls", async () => {
+    const titled = fake({ attribute: "Alpha · 9:00 AM", text: "Export Alpha", visible: true });
+    const exportButton = fake({ text: "Export", visible: true, attribute: null });
+    const hidden = fake({ text: "Download", visible: false, attribute: null });
+    const scope = fake({
+      locate: (selector: string) => (selector === 'button[draggable="true"]' ? fake({ count: 0 }) : absent()),
+      role: (role: string) =>
+        role === "button" ? fake({ all: async () => [titled, exportButton, hidden] }) : fake({ all: async () => [] }),
+    });
+    const page = pageOf({ getByRole: (role: string) => (role === "region" ? scope : absent()) });
+    const driver = new WebNewDriver(page);
+    await expect(driver.schedulerCalendarAnyDraggable()).resolves.toBe(false);
+    await expect(driver.schedulerCalendarExportControls()).resolves.toEqual(["Export"]);
+  });
+});
+
+describe("calendar visibility rail", () => {
+  function railWith(rows: { name: string; checked: boolean }[], overrides: Partial<Record<string, unknown>> = {}) {
+    const boxes = rows.map((row) =>
+      fake({
+        checked: row.checked,
+        locate: (selector: string) =>
+          selector === "xpath=.."
+            ? fake({
+                locate: (inner: string) =>
+                  inner === "span" ? fake({ items: [fake({ text: "dot" }), fake({ text: row.name })] }) : absent(),
+              })
+            : absent(),
+      })
+    );
+    return fake({
+      count: 1,
+      visible: true,
+      role: (role: string) => (role === "button" ? fake({ click: overrides["buttonClick"] ?? vi.fn() }) : absent()),
+      locate: (selector: string) =>
+        selector === 'input[type="checkbox"]'
+          ? fake({ items: boxes })
+          : selector === "label"
+            ? fake({ locate: () => boxes[0] ?? absent() })
+            : absent(),
+      ...overrides,
+    });
+  }
+
+  it("reads visibility and one row per checkbox, in order", async () => {
+    const page = pageOf({
+      getByRole: (role: string) =>
+        role === "complementary"
+          ? railWith([
+              { name: "Alpha", checked: true },
+              { name: "Beta", checked: false },
+            ])
+          : absent(),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.schedulerRailVisible()).resolves.toBe(true);
+    await expect(driver.schedulerRailRows()).resolves.toEqual([
+      { name: "Alpha", checked: true },
+      { name: "Beta", checked: false },
+    ]);
+    const hidden = new WebNewDriver(pageOf());
+    await expect(hidden.schedulerRailVisible()).resolves.toBe(false);
+    await expect(hidden.schedulerRailRows()).resolves.toEqual([]);
+  });
+
+  it("toggles one row and drives show-all / hide-all", async () => {
+    const boxClick = vi.fn(async () => undefined);
+    const buttonClick = vi.fn(async () => undefined);
+    const box = fake({ checked: true, click: boxClick });
+    const rail = fake({
+      locate: (selector: string) => (selector === "label" ? fake({ locate: () => box }) : absent()),
+      role: (role: string) => (role === "button" ? fake({ click: buttonClick }) : absent()),
+    });
+    const page = pageOf({ getByRole: (role: string) => (role === "complementary" ? rail : absent()) });
+    const driver = new WebNewDriver(page);
+    await driver.schedulerRailToggle("Alpha");
+    await driver.schedulerRailShowAll();
+    await driver.schedulerRailHideAll();
+    expect(boxClick).toHaveBeenCalled();
+    expect(buttonClick).toHaveBeenCalledTimes(2);
+  });
+
+  it("loads a fresh tab with the hidden choice applied, then closes it", async () => {
+    const close = vi.fn(async () => undefined);
+    const box = fake({ checked: false, waitFor: vi.fn(async () => undefined) });
+    const freshRail = fake({ locate: () => fake({ locate: () => box }) });
+    const fresh = pageOf({
+      goto: vi.fn(async () => null),
+      getByRole: (role: string) => (role === "complementary" ? freshRail : absent()),
+      close,
+    });
+    const current = pageOf({
+      locate: () => fake({ locate: () => fake({ click: vi.fn() }) }),
+      getByRole: (role: string) =>
+        role === "complementary" ? fake({ locate: () => fake({ locate: () => fake({ click: vi.fn() }) }) }) : absent(),
+      url: () => "http://localhost/acme/projects/p1/schedulers/calendar",
+      context: () => ({ newPage: vi.fn(async () => fresh) }),
+    });
+    await expect(new WebNewDriver(current).schedulerRailCrossTabPersists("acme", "p1", "Alpha")).resolves.toBe(true);
+    expect(close).toHaveBeenCalled();
+  });
+
+  it("reports a rail that stays visible on a narrow viewport as not hidden", async () => {
+    const waitForTimeout = vi.fn(async () => undefined);
+    const page = pageOf({
+      waitForTimeout,
+      getByRole: (role: string) => (role === "complementary" ? fake({ count: 1, visible: true }) : absent()),
+    });
+    await expect(new WebNewDriver(page).schedulerRailNarrowHidden()).resolves.toBe(false);
+    expect(waitForTimeout).toHaveBeenCalled();
+  });
+
+  it("hides the rail below the desktop breakpoint and restores the viewport", async () => {
+    let narrow = false;
+    const setViewportSize = vi.fn(async (size: { width: number }) => {
+      narrow = size.width < 768;
+    });
+    const page = pageOf({
+      setViewportSize,
+      getByRole: (role: string) =>
+        role === "complementary" ? fake({ count: narrow ? 0 : 1, visible: !narrow }) : absent(),
+    });
+    await expect(new WebNewDriver(page).schedulerRailNarrowHidden()).resolves.toBe(true);
+    expect(setViewportSize).toHaveBeenCalledWith({ width: 500, height: 800 });
+    expect(setViewportSize).toHaveBeenCalledWith({ width: 1280, height: 720 });
+  });
+});
+
+describe("occurrence panel", () => {
+  function drawer(linkClick = vi.fn(async () => undefined)) {
+    const detail = fake({
+      locate: (selector: string) =>
+        selector === ":scope > div"
+          ? fake({ items: [fake({ content: "When" }), fake({ text: "Oct 25, 2026, 9:00 AM" })] })
+          : absent(),
+    });
+    const closeClick = vi.fn(async () => undefined);
+    return {
+      closeClick,
+      node: fake({
+        count: 1,
+        testId: (id: string) =>
+          id === "occurrence-detail"
+            ? fake({ items: [detail] })
+            : id === "occurrence-status"
+              ? fake({ content: "Scheduled" })
+              : absent(),
+        role: (role: string, options?: Record<string, unknown>) => {
+          if (role === "heading") return fake({ text: "Alpha" });
+          if (role === "link")
+            return options?.["name"] === undefined
+              ? fake({ items: [fake({ text: "View scheduler →" })] })
+              : fake({ click: linkClick });
+          if (role === "button") {
+            const name = String(options?.["name"] ?? "");
+            if (name === "Close") return fake({ click: closeClick, first: () => fake({ click: closeClick }) });
+            if (name === "Edit binding") return fake({ count: 1, visible: true, click: vi.fn(async () => undefined) });
+            return absent();
+          }
+          return absent();
+        },
+        waitFor: vi.fn(async () => undefined),
+      }),
+    };
+  }
+
+  it("reads open state, heading, detail rows and links", async () => {
+    const panel = drawer();
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) =>
+        role === "dialog" && options?.["name"] !== undefined ? panel.node : absent(),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.schedulerDrawerOpen()).resolves.toBe(true);
+    await expect(driver.schedulerDrawerHeading()).resolves.toEqual({ state: "Scheduled", name: "Alpha" });
+    await expect(driver.schedulerDrawerRows()).resolves.toEqual([{ label: "When", value: "Oct 25, 2026, 9:00 AM" }]);
+    await expect(driver.schedulerDrawerLinks()).resolves.toEqual(["View scheduler →"]);
+    await expect(driver.schedulerDrawerEditVisible()).resolves.toBe(true);
+  });
+
+  it("closes through the dismiss control and reports a closed panel", async () => {
+    const panel = drawer();
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) =>
+        role === "dialog" && options?.["name"] !== undefined ? panel.node : absent(),
+    });
+    await new WebNewDriver(page).schedulerDrawerClose();
+    expect(panel.closeClick).toHaveBeenCalled();
+    await expect(new WebNewDriver(pageOf()).schedulerDrawerOpen()).resolves.toBe(false);
+  });
+
+  it("opens the edit dialog from the panel and follows the install link", async () => {
+    const linkClick = vi.fn(async () => undefined);
+    const panel = drawer(linkClick);
+    const dialogWaitFor = vi.fn(async () => undefined);
+    const dialog = fake({
+      role: () => fake({ waitFor: dialogWaitFor }),
+      byLabel: () => fake({ waitFor: dialogWaitFor }),
+    });
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        if (role === "dialog" && options?.["name"] !== undefined) return panel.node;
+        if (role === "dialog") return dialog;
+        if (role === "heading") return fake({ waitFor: vi.fn(async () => undefined) });
+        return absent();
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await driver.schedulerDrawerEdit();
+    expect(dialogWaitFor).toHaveBeenCalled();
+    await driver.schedulerDrawerViewScheduler();
+    expect(linkClick).toHaveBeenCalled();
+  });
+});
+
+describe("scheduler section tabs", () => {
+  function tabsPage(active: string) {
+    return pageOf({
+      getByRole: (role: string) => {
+        if (role === "navigation")
+          return fake({
+            role: (inner: string, options?: Record<string, unknown>) => {
+              if (inner !== "link") return absent();
+              const name = String(options?.["name"] ?? "");
+              return fake({ attribute: name === active ? "page" : null, click: vi.fn(async () => undefined) });
+            },
+          });
+        if (role === "columnheader") return fake({ count: 1, waitFor: vi.fn(async () => undefined) });
+        if (role === "region") return fake({ count: 1, visible: true });
+        return absent();
+      },
+      getByTestId: (id: string) =>
+        id === "calendar-week-view" ? fake({ count: 1, waitFor: vi.fn(async () => undefined) }) : absent(),
+      goto: vi.fn(async () => null),
+      waitForURL: vi.fn(async () => undefined),
+    });
+  }
+
+  it("reads which tab is current", async () => {
+    await expect(new WebNewDriver(tabsPage("Calendar")).schedulerSectionTabs()).resolves.toEqual([
+      { label: "List", active: false },
+      { label: "Calendar", active: true },
+    ]);
+    await expect(new WebNewDriver(tabsPage("List")).schedulerSectionTabs()).resolves.toEqual([
+      { label: "List", active: true },
+      { label: "Calendar", active: false },
+    ]);
+  });
+
+  it("lands the bare path on the calendar and follows both tabs", async () => {
+    const page = tabsPage("Calendar");
+    const driver = new WebNewDriver(page);
+    await driver.schedulerOpenProjectSection("acme", "p1");
+    expect(page.goto).toHaveBeenCalledWith("/acme/projects/p1/schedulers");
+    expect(page.waitForURL).toHaveBeenCalled();
+    await driver.schedulerSectionOpenTab("List");
+    await driver.schedulerSectionOpenTab("Calendar");
+  });
+});
+
+describe("run history export scan", () => {
+  it("scans the run-history section for export-ish controls", async () => {
+    const exportButton = fake({ text: "Download CSV", visible: true, attribute: null });
+    const titled = fake({ text: "Download run", visible: true, attribute: "Run details" });
+    const section = fake({
+      role: (role: string) =>
+        role === "button" ? fake({ all: async () => [exportButton, titled] }) : fake({ all: async () => [] }),
+    });
+    const page = pageOf({
+      getByRole: (role: string) =>
+        role === "heading"
+          ? fake({ locate: (selector) => (selector === "xpath=ancestor::section[1]" ? section : absent()) })
+          : absent(),
+    });
+    await expect(new WebNewDriver(page).schedulerRunsExportControls()).resolves.toEqual(["Download CSV"]);
+  });
+});
+
+describe("calendar fallbacks and branch edges", () => {
+  it("substitutes empty fields when a block cannot be inspected", async () => {
+    const block = fake({ throws: true });
+    const drawer = fake({ count: 0 });
+    const page = pageOf({
+      getByTestId: (id: string) =>
+        id === "calendar-week-view"
+          ? fake({
+              testId: (inner: string) =>
+                inner === "calendar-week-day-head"
+                  ? fake({ items: [fake({ locate: () => fake({ items: [fake({ text: "Sun 18" })] }) })] })
+                  : inner === "calendar-week-day"
+                    ? fake({ items: [fake({ locate: () => fake({ items: [block] }) })] })
+                    : absent(),
+            })
+          : absent(),
+      getByRole: (role: string) => (role === "dialog" ? drawer : absent()),
+    });
+    await expect(new WebNewDriver(page).schedulerCalendarWeekBlocks()).resolves.toEqual([
+      { day: "Sun 18", time: "", name: "", title: "", background: "" },
+    ]);
+  });
+
+  it("skips invisible, titled and blank controls in the export scan", async () => {
+    const hidden = fake({ visible: false, text: "Export", attribute: null });
+    const titled = fake({ visible: true, text: "Export run", attribute: "Run" });
+    const blank = fake({ visible: true, text: "   ", attribute: null });
+    const link = fake({ visible: true, text: "Download", attribute: null });
+    const scope = fake({
+      role: (role: string) =>
+        role === "button" ? fake({ all: async () => [hidden, titled, blank] }) : fake({ all: async () => [link] }),
+    });
+    const page = pageOf({ getByRole: () => scope });
+    await expect(new WebNewDriver(page).schedulerCalendarExportControls()).resolves.toEqual(["Download"]);
+  });
+
+  it("reports an unreadable caption, overflow and row values as empty", async () => {
+    const page = pageOf({
+      getByTestId: (id: string) =>
+        id === "calendar-period-label"
+          ? fake({ throws: true })
+          : id === "calendar-month-view"
+            ? fake({
+                testId: (inner: string) =>
+                  inner === "calendar-month-day"
+                    ? fake({
+                        items: [
+                          fake({
+                            testId: () => fake({ throws: true }),
+                            locate: (selector: string) =>
+                              selector === "button[title]"
+                                ? fake({ items: [fake({ throws: true })] })
+                                : selector === "button:not([title])"
+                                  ? fake({ items: [fake({ throws: true })] })
+                                  : absent(),
+                          }),
+                        ],
+                      })
+                    : absent(),
+              })
+            : absent(),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.schedulerCalendarTitle()).resolves.toBe("");
+    await expect(driver.schedulerCalendarMonthBlocks()).resolves.toEqual([
+      { day: "", time: "", name: "", title: "", background: "" },
+    ]);
+    await expect(driver.schedulerCalendarMonthOverflow()).resolves.toEqual([]);
   });
 });

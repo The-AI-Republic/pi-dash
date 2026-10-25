@@ -169,7 +169,9 @@ export function FiringCalendar({
               Next
               <ChevronRight size={16} strokeWidth={1.5} aria-hidden="true" />
             </Button>
-            <div className="text-body font-medium text-(--text)">{formatMonthYear(anchor)}</div>
+            <div data-testid="calendar-period-label" className="text-body font-medium text-(--text)">
+              {formatMonthYear(anchor)}
+            </div>
           </div>
           <div className="flex items-center gap-(--space-2)">
             {truncated ? <span className="text-meta text-(--text-muted)">{TRUNCATION_NOTICE}</span> : null}

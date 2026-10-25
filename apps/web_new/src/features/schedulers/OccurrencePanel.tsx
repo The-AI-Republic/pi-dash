@@ -37,7 +37,7 @@ export interface OccurrencePanelProps {
 
 function DetailRow({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
   return (
-    <div className="mb-3 grid grid-cols-[7rem_minmax(0,1fr)] gap-(--space-3)">
+    <div data-testid="occurrence-detail" className="mb-3 grid grid-cols-[7rem_minmax(0,1fr)] gap-(--space-3)">
       <div className="text-meta font-medium tracking-wide text-(--text-muted) uppercase">{label}</div>
       <div className="text-body text-(--text)">{children}</div>
     </div>
@@ -66,7 +66,12 @@ export function OccurrencePanel({
     >
       <header className="flex items-start justify-between gap-(--space-3) border-b border-(--border) p-(--space-5)">
         <div className="flex flex-col gap-(--space-1)">
-          <div className="text-meta font-medium tracking-wide text-(--text-muted) uppercase">{status}</div>
+          <div
+            data-testid="occurrence-status"
+            className="text-meta font-medium tracking-wide text-(--text-muted) uppercase"
+          >
+            {status}
+          </div>
           <h2 className="text-h4-medium text-(--text)">{occurrence.scheduler_name}</h2>
         </div>
         <IconButton label="Close" variant="ghost" onClick={onClose}>
