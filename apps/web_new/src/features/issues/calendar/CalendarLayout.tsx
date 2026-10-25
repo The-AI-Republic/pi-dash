@@ -10,11 +10,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
 
-import { getAppClient } from "../../../core/api/client.js";
 import { DeleteWorkItemDialog } from "../../../shared/shell/contextual/index.js";
-import { PeekPanel } from "../../../shared/shell/index.js";
-import { issueDetailQueryOptions } from "../api/queries.js";
-import { useUpdateIssue } from "../api/mutations.js";
+import { getAppClient } from "../../../core/api/client.js";
 import { issueKeys } from "../api/keys.js";
 import type { RichExpression } from "../filters/rich/expression.js";
 import { entityListsKeyPart } from "../prefs/entities.js";
@@ -60,10 +57,17 @@ import {
 import { useNarrowViewport, useTouchInput } from "./useMedia.js";
 import { addPendingRow, removePendingRow, type PendingRowsByDay } from "./pending.js";
 import { calendarDayAtPoint } from "./dropTarget.js";
+import { PEEK_ISSUE_PARAM, type LayoutPeekProps, type PeekSelection } from "../peek/usePeekAddress.js";
+import { usePeekAddress } from "../peek/usePeekAddress.js";
 
-export const PEEK_QUERY_KEY = "peekIssueId";
+// The peek is the whole detail composition; it loads on first open.
+const LazyIssuePeek = React.lazy(() =>
+  import("../peek/ResolvingIssuePeek.js").then((module) => ({ default: module.ResolvingIssuePeek }))
+);
 
-export interface CalendarLayoutProps {
+export const PEEK_QUERY_KEY = PEEK_ISSUE_PARAM;
+
+export interface CalendarLayoutProps extends LayoutPeekProps {
   workspaceSlug: string;
   projectId: string;
   projectIdentifier: string;
@@ -80,20 +84,14 @@ export interface CalendarLayoutProps {
    * none and reads every dated row.
    */
   richExpression?: RichExpression | undefined;
-}
-
-interface CalendarPeekState {
-  issue: IssueListItem;
+  /** Controlled peeked work-item id (the route owns the URL param). */
+  /** Receives the selection the route should write, or null on close (ISS-167). */
+  /** Peeked project from the URL, when it differs from the route (ISS-167). */
 }
 
 function isoToday(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-}
-
-function parsePeekId(): string | null {
-  if (typeof globalThis.window === "undefined") return null;
-  return new URLSearchParams(globalThis.window.location.search).get(PEEK_QUERY_KEY);
 }
 
 function selectMode(value: unknown): CalendarOptions["mode"] {
@@ -113,6 +111,9 @@ export function CalendarLayout({
   canAddExisting = true,
   membership,
   richExpression = {},
+  peekKey,
+  onPeekChange,
+  peekProjectId,
 }: CalendarLayoutProps): React.ReactElement {
   const narrow = useNarrowViewport();
   const touch = useTouchInput();
@@ -130,7 +131,7 @@ export function CalendarLayout({
   const [extraByDay, setExtraByDay] = React.useState<Record<string, IssueListItem[]>>({});
   const [dayTotals, setDayTotals] = React.useState<Record<string, number>>({});
   const [dayCursors, setDayCursors] = React.useState<Record<string, string>>({});
-  const [peek, setPeek] = React.useState<CalendarPeekState | null>(null);
+  const peek = usePeekAddress({ projectId, peekKey, peekProjectId, onPeekChange });
   const [deleteTarget, setDeleteTarget] = React.useState<IssueListItem | null>(null);
   const [loadingDay, setLoadingDay] = React.useState<string | null>(null);
   const [reloadBar, setReloadBar] = React.useState(false);
@@ -188,22 +189,11 @@ export function CalendarLayout({
       doc.removeEventListener("pointercancel", onCancel);
     };
   });
-  const rename = useUpdateIssue({
-    workspaceSlug,
-    projectId,
-    issueId: peek?.issue.id ?? "",
-    failureTitle: "Couldn't save the title",
-  });
-
   const rows = React.useMemo(
     () => (calendarQuery.data === undefined ? [] : rowsFromResponse(calendarQuery.data)),
     [calendarQuery.data]
   );
   const grouped = React.useMemo(() => groupRowsByDate(rows), [rows]);
-  const peekDetail = useQuery({
-    ...issueDetailQueryOptions(getAppClient(), workspaceSlug, projectId, peek?.issue.id ?? ""),
-    enabled: peek !== null,
-  });
   const totalsByDay = React.useMemo(() => {
     const totals = new Map<string, number>();
     if (calendarQuery.data !== undefined) {
@@ -239,22 +229,6 @@ export function CalendarLayout({
     }
     setReloadBar(true);
   }, [calendarQuery.isFetching]);
-
-  React.useEffect(() => {
-    const peekId = parsePeekId();
-    if (peekId === null) return;
-    const row = rows.find((entry) => entry.id === peekId);
-    if (row !== undefined) setPeek({ issue: row });
-  }, [rows]);
-
-  React.useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") setPeek(null);
-    };
-    if (typeof globalThis.document === "undefined") return;
-    globalThis.document.addEventListener("keydown", onKeyDown);
-    return () => globalThis.document.removeEventListener("keydown", onKeyDown);
-  }, []);
 
   const title = mode === "month" ? monthTitle(year, month0) : weekTitle(weeks[0] ?? []);
 
@@ -350,13 +324,10 @@ export function CalendarLayout({
     create.mutate({ name, day }, { onSettled: () => setPendingByDay((current) => removePendingRow(current, tempId)) });
   }
 
-  function closePeek(): void {
-    setPeek(null);
-    if (typeof globalThis.window === "undefined") return;
-    const url = new URL(globalThis.window.location.href);
-    if (!url.searchParams.has(PEEK_QUERY_KEY)) return;
-    url.searchParams.delete(PEEK_QUERY_KEY);
-    globalThis.window.history.replaceState({}, "", url.toString());
+  /** Open the peek on a block, naming it in the address (ISS-167). */
+  function openPeek(issue: IssueListItem): void {
+    const selection: PeekSelection = { issueId: issue.id, projectId: issue.project_id, nestingLevel: 0 };
+    peek.open(selection);
   }
 
   return (
@@ -401,12 +372,7 @@ export function CalendarLayout({
           }
         }}
         onOpen={(issue) => {
-          setPeek({ issue });
-          if (typeof globalThis.window !== "undefined") {
-            const url = new URL(globalThis.window.location.href);
-            url.searchParams.set(PEEK_QUERY_KEY, issue.id);
-            globalThis.window.history.replaceState({}, "", url.toString());
-          }
+          openPeek(issue);
         }}
         onEdit={(issue) => {
           if (typeof globalThis.window !== "undefined") {
@@ -461,19 +427,20 @@ export function CalendarLayout({
           );
         }}
       />
-      {peek !== null ? (
-        <PeekPanel
-          eyebrow={`${projectIdentifier}-${peek.issue.sequence_id}`}
-          title={peekDetail.data?.name ?? peek.issue.name}
-          titleLabel="Work item title"
-          onClose={closePeek}
-          onCommitTitle={canEdit ? (next) => rename.mutate({ name: next }) : undefined}
-        >
-          <p className="text-body text-(--text-muted)">
-            {peekDetail.isLoading ? "Loading work item…" : "Dates, properties and activity open in the full view."}
-          </p>
-        </PeekPanel>
-      ) : null}
+      {peek.peeked === null ? null : (
+        <React.Suspense fallback={null}>
+          <LazyIssuePeek
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            projectIdentifier={projectIdentifier}
+            peeked={peek.peeked}
+            peekProjectId={peek.peekProjectId}
+            rows={rows}
+            onPeekChange={peek.report}
+            onClose={peek.close}
+          />
+        </React.Suspense>
+      )}
       <DeleteWorkItemDialog
         open={deleteTarget !== null}
         onOpenChange={(open) => {

@@ -22,6 +22,7 @@ import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { loadKanbanLayout } from "../../../../../../features/issues/kanban/lazy.js";
 import { preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
+import { peekSearchFor, stripPeekParams, type PeekRequest } from "../../../../../../features/issues/peek/peekUrl.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/api/queries.js";
 
 // Start the leaf and filter chunks with the route module, beside its data
@@ -97,15 +98,24 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     const search = Route.useSearch();
     const context = Route.useRouteContext();
     const navigate = useNavigate();
+    const setPeek = (request: PeekRequest): void => {
+      // Closing strips every peek param; opening writes the selection — the
+      // child's own project when it differs — without pushing history, so
+      // Back leaves the list rather than stepping through the stack (ISS-167).
+      const next = request === null ? stripPeekParams({ ...search }) : peekSearchFor(search, request, params.projectId);
+      void navigate({ to: ".", search: next, replace: true } as never);
+    };
     return (
       <React.Suspense fallback={<ListSkeleton />}>
         <LazyIssuesListContent
           workspaceSlug={params.ws}
           projectId={params.projectId}
+          peekKey={search.peekIssueId ?? null}
+          peekProjectId={search.peekProjectId ?? null}
+          onPeekChange={setPeek}
           search={search}
           apiClient={context.apiClient}
           queryClient={context.queryClient}
-          navigate={navigate}
         />
       </React.Suspense>
     );

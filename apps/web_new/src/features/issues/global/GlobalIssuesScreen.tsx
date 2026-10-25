@@ -10,6 +10,13 @@
 // Every row carries the project-style quick-action menu (ISS-065); the
 // row's own state annotation answers the archive gate without a read,
 // and the per-project role decides which write entries appear.
+//
+// The screen is an issues body, so it opens the same peek as the project
+// layouts (parity/specs/issues.md §14, ISS-165/167): it takes the one
+// shared address contract, and a row's title opens the panel on a plain
+// click while the row keeps its full-page href for modified clicks. The
+// workspace surface has no route project, so the peeked row's own
+// project always rides the address.
 
 import { useSuspenseInfiniteQuery, useSuspenseQuery } from "@tanstack/react-query";
 import type { GlobalIssueRow, IssueListQuery } from "@pidash/api-client";
@@ -24,7 +31,13 @@ import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { ListPageQuickActions } from "../menus/ListPageQuickActions.js";
 import { RowContextMenu, RowMenuButton } from "../menus/RowQuickActions.js";
 import { quickActionTarget, useQuickActions } from "../menus/useQuickActions.js";
+import { usePeekAddress, type LayoutPeekProps, type PeekSelection } from "../peek/usePeekAddress.js";
 import { flattenGlobalPages, globalIssuesQueryOptions, globalTotalCount } from "./queries.js";
+
+// The peek is the whole detail composition; it loads on first open.
+const LazyIssuePeek = React.lazy(() =>
+  import("../peek/ResolvingIssuePeek.js").then((module) => ({ default: module.ResolvingIssuePeek }))
+);
 
 /** Stable row height for the virtual list. */
 export const GLOBAL_ROW_HEIGHT = 40;
@@ -52,16 +65,27 @@ export function globalIssueKey(identifier: string | undefined, row: Pick<GlobalI
   return `${identifier ?? "?"}-${row.sequence_id}`;
 }
 
+/**
+ * The selection a row opens (ISS-165): its own id at the top of the
+ * stack, read from the project that owns it rather than a route's.
+ */
+export function rowPeekSelection(row: Pick<GlobalIssueRow, "id" | "project_id">): PeekSelection {
+  return { issueId: row.id, projectId: row.project_id, nestingLevel: 0 };
+}
+
 function GlobalRow({
   row,
   identifier,
   workspaceSlug,
   canWrite,
+  onOpen,
 }: {
   row: GlobalIssueRow;
   identifier: string | undefined;
   workspaceSlug: string;
   canWrite: boolean;
+  /** Opens the peek on a plain click; the href stays for modified clicks. */
+  onOpen: (row: GlobalIssueRow) => void;
 }): React.ReactElement {
   const key = globalIssueKey(identifier, row);
   const menu = useQuickActions({
@@ -81,6 +105,14 @@ function GlobalRow({
         to="/$ws/browse/$issueKey"
         params={{ ws: workspaceSlug, issueKey: key }}
         className="text-body flex h-full min-w-0 flex-1 items-center gap-(--space-2) px-(--space-3) text-(--text)"
+        onClick={(event) => {
+          // A modified click keeps the row's full-page address; a plain
+          // one opens the peek, and the href stays for middle-click and
+          // the keyboard's own activation path.
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+          event.preventDefault();
+          onOpen(row);
+        }}
       >
         <span className="text-meta w-20 shrink-0 text-(--text-muted)">{key}</span>
         <span className="min-w-0 flex-1 truncate">{row.name}</span>
@@ -91,7 +123,7 @@ function GlobalRow({
   return <RowContextMenu state={menu} trigger={body} />;
 }
 
-export interface GlobalIssuesScreenProps {
+export interface GlobalIssuesScreenProps extends LayoutPeekProps {
   /** Scope the read: a saved view's expression, a default's static condition, an order. */
   query?: IssueListQuery | undefined;
   /** Hide the list's own header; an embedding screen carries its own chrome. */
@@ -112,6 +144,9 @@ export function GlobalIssuesScreen({
   hideHeader = false,
   emptyState,
   label = "All issues",
+  peekKey,
+  peekProjectId,
+  onPeekChange,
 }: GlobalIssuesScreenProps = {}): React.ReactElement {
   const params = useParams({ strict: false }) as { ws?: string };
   const workspaceSlug = params.ws ?? "";
@@ -149,15 +184,62 @@ export function GlobalIssuesScreen({
     });
   }, [issues.hasNextPage, issues.isFetchingNextPage, issues.fetchNextPage]);
   const sentinel = useLoadMoreSentinel(loadMore, issues.hasNextPage);
+  // The workspace surface has no route project: every peeked row carries
+  // its own, so the address always spells it (ISS-167).
+  const peek = usePeekAddress({ projectId: "", peekKey, peekProjectId, onPeekChange });
+  const openRow = React.useCallback(
+    (row: GlobalIssueRow): void => {
+      peek.open(rowPeekSelection(row));
+    },
+    [peek]
+  );
+  const peekedRow = peek.peeked === null ? undefined : rows.find((row) => row.id === peek.peeked);
+  // A peeked item reads under its own project. The workspace route has no
+  // path project to fall back to, so an address that names neither the
+  // project nor a visible row has nothing to read and stays closed.
+  const peekedProject = peek.peekProjectId ?? peekedRow?.project_id ?? null;
+  const peekedIdentifier = peekedProject === null ? "" : (identifiers.get(peekedProject) ?? "");
+  // The panel stands beside every body: a shared link with no rows yet
+  // still has to open, and a nested sub-issue's parent keeps rendering
+  // while the child holds the address.
+  const panel =
+    peek.peeked === null || peekedProject === null ? null : (
+      <React.Suspense fallback={null}>
+        <LazyIssuePeek
+          workspaceSlug={workspaceSlug}
+          projectId={peekedProject}
+          projectIdentifier={peekedIdentifier}
+          peeked={peek.peeked}
+          peekProjectId={peek.peekProjectId}
+          addressProjectId=""
+          rows={rows}
+          onPeekChange={peek.report}
+          onClose={peek.close}
+        />
+      </React.Suspense>
+    );
   if (rows.length === 0) {
-    if (emptyState !== undefined) return <>{emptyState}</>;
-    // The empty surface is the workspace card (ISS-073): the old list
-    // shows the same two-tier card with or without query params, because
-    // the read ignores them (ISS-223).
-    return <GlobalIssuesEmptyState workspaceSlug={workspaceSlug} projects={projects} />;
+    const surface =
+      emptyState !== undefined ? (
+        <>{emptyState}</>
+      ) : (
+        // The empty surface is the workspace card (ISS-073): the old list
+        // shows the same two-tier card with or without query params,
+        // because the read ignores them (ISS-223).
+        <GlobalIssuesEmptyState workspaceSlug={workspaceSlug} projects={projects} />
+      );
+    return panel === null ? (
+      surface
+    ) : (
+      <>
+        {surface}
+        {panel}
+      </>
+    );
   }
   return (
     <section aria-label={label} className="flex h-full min-h-0 flex-col">
+      {panel}
       {hideHeader ? null : (
         <header className="flex items-center justify-between border-b border-(--border) px-(--space-3) py-(--space-2)">
           <h1 className="text-h3 text-(--text)">{label}</h1>
@@ -180,6 +262,7 @@ export function GlobalIssuesScreen({
             identifier={identifiers.get(row.project_id)}
             workspaceSlug={workspaceSlug}
             canWrite={writableProjects.has(row.project_id)}
+            onOpen={openRow}
           />
         )}
         footer={

@@ -10,7 +10,7 @@
 // load error.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createClient, type GlobalIssueListResponse } from "@pidash/api-client";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -19,6 +19,25 @@ import { createAppClient, resetAppClient } from "../../../../../core/api/client.
 import { makeView } from "../../../../../features/views/testing.js";
 import { Route } from "./index.js";
 import { loadWorkspaceViewDetail } from "../../../../../features/views/index.js";
+
+const navigateHarness = vi.hoisted(() => ({ navigate: vi.fn() }));
+const screenHarness = vi.hoisted(() => ({
+  stub: null as null | ((props: { peek: never }) => React.ReactElement),
+}));
+vi.mock("../../../../../features/views/detail/lazy.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../../features/views/detail/lazy.js")>();
+  return {
+    ...actual,
+    resolvedWorkspaceViewDetail: () =>
+      screenHarness.stub === null
+        ? actual.resolvedWorkspaceViewDetail()
+        : ({ WorkspaceViewScreen: screenHarness.stub } as never),
+  };
+});
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useNavigate: () => navigateHarness.navigate,
+}));
 
 vi.mock("../../../../../core/session/hooks.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../../core/session/hooks.js")>()),
@@ -33,6 +52,8 @@ vi.mock("../../../../../core/session/hooks.js", async (importOriginal) => ({
 }));
 
 const PARAMS = { ws: "acme", viewId: "223e4567-e89b-12d3-a456-426614174001" };
+const ISSUE = "023e4567-e89b-12d3-a456-426614174010";
+const OTHER_PROJECT = "523e4567-e89b-12d3-a456-426614174011";
 
 function viewRecord(overrides: Record<string, unknown> = {}) {
   return makeView({
@@ -135,6 +156,7 @@ describe("workspace view detail route preload", () => {
   it("renders the resolved screen from the route params", async () => {
     await loadWorkspaceViewDetail();
     const paramsSpy = vi.spyOn(Route, "useParams").mockReturnValue(PARAMS as never);
+    const searchSpy = vi.spyOn(Route, "useSearch").mockReturnValue({} as never);
     const { context } = contextFor(happyPath);
     const Component = Route.options.component;
     if (!Component) throw new Error("missing component");
@@ -150,7 +172,63 @@ describe("workspace view detail route preload", () => {
     expect(await screen.findByRole("region", { name: "Workspace view" })).toBeInTheDocument();
     expect(paramsSpy).toHaveBeenCalled();
     paramsSpy.mockRestore();
+    searchSpy.mockRestore();
     resetAppClient();
+  });
+
+  it("validates the peek params out of the address (ISS-167)", () => {
+    const validate = Route.options.validateSearch as unknown as (
+      search: Record<string, unknown>
+    ) => Record<string, unknown>;
+    expect(validate({ peekIssueId: ISSUE, peekProjectId: OTHER_PROJECT })).toEqual({
+      peekIssueId: ISSUE,
+      peekProjectId: OTHER_PROJECT,
+    });
+    expect(validate({ peekIssueId: "" })).toEqual({ peekIssueId: "" });
+    expect(validate({ peekNestingLevel: ["1"] })).toEqual({});
+  });
+
+  it("hands the route's address to the screen and writes reports with replace (ISS-167)", async () => {
+    screenHarness.stub = function StubScreen({
+      peek,
+    }: {
+      peek: { peekKey: string | null; peekProjectId: string | null; onPeekChange: (request: unknown) => void };
+    }) {
+      return (
+        <div data-testid="stub-screen" data-peek={String(peek.peekKey)} data-peek-project={String(peek.peekProjectId)}>
+          <button
+            type="button"
+            onClick={() => peek.onPeekChange({ issueId: ISSUE, projectId: OTHER_PROJECT, nestingLevel: 2 })}
+          >
+            open
+          </button>
+          <button type="button" onClick={() => peek.onPeekChange(null)}>
+            close
+          </button>
+        </div>
+      );
+    };
+    const paramsSpy = vi.spyOn(Route, "useParams").mockReturnValue(PARAMS as never);
+    const searchSpy = vi
+      .spyOn(Route, "useSearch")
+      .mockReturnValue({ peekIssueId: ISSUE, peekProjectId: OTHER_PROJECT } as never);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("missing component");
+    render(<Component />);
+    const stub = await screen.findByTestId("stub-screen");
+    expect(stub).toHaveAttribute("data-peek", ISSUE);
+    expect(stub).toHaveAttribute("data-peek-project", OTHER_PROJECT);
+    fireEvent.click(screen.getByRole("button", { name: "open" }));
+    expect(navigateHarness.navigate).toHaveBeenLastCalledWith({
+      to: ".",
+      search: { peekIssueId: ISSUE, peekProjectId: OTHER_PROJECT, peekNestingLevel: "2" },
+      replace: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "close" }));
+    expect(navigateHarness.navigate).toHaveBeenLastCalledWith({ to: ".", search: {}, replace: true });
+    paramsSpy.mockRestore();
+    searchSpy.mockRestore();
+    screenHarness.stub = null;
   });
 
   it("reads the customs, then the record and the scoped first page", async () => {

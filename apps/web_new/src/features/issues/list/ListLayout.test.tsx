@@ -178,7 +178,7 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
           onChange={() => props.onSelectionToggle?.(props.issue.id, false)}
         />
       )}
-      <button type="button" onClick={() => props.onOpenPeek(`WEB-${props.issue.sequence_id}`, props.issue.name)}>
+      <button type="button" onClick={() => props.onOpenPeek(props.issue.id, props.issue.name)}>
         {props.issue.name}
       </button>
       <button type="button" onClick={() => props.onOpenPeek("WEB-99", "Nested child")}>
@@ -229,6 +229,44 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
           onChange={() => props.onSelectionToggle?.(child.id, false)}
         />
       ))}
+    </div>
+  ),
+}));
+vi.mock("../peek/ResolvingIssuePeek.js", () => ({
+  ResolvingIssuePeek: (props: {
+    peeked: string;
+    peekProjectId?: string | null;
+    onPeekChange?: (selection: { issueId: string; projectId: string; nestingLevel: number } | null) => void;
+    onClose: () => void;
+  }) => (
+    <div aria-label="Work item preview" data-peeked={props.peeked} data-peek-project={props.peekProjectId ?? ""}>
+      <button
+        type="button"
+        onClick={() =>
+          props.onPeekChange?.({
+            issueId: "123e4567-e89b-12d3-a456-426614174099",
+            projectId: "223e4567-e89b-12d3-a456-426614174001",
+            nestingLevel: 1,
+          })
+        }
+      >
+        Open child
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          props.onPeekChange?.({
+            issueId: "123e4567-e89b-12d3-a456-426614174000",
+            projectId: "223e4567-e89b-12d3-a456-426614174001",
+            nestingLevel: 0,
+          })
+        }
+      >
+        Back to parent
+      </button>
+      <button type="button" onClick={props.onClose}>
+        Close preview
+      </button>
     </div>
   ),
 }));
@@ -739,23 +777,35 @@ describe("ListLayout", () => {
     expect(screen.getByTestId("add-existing-modal")).toBeInTheDocument();
   });
 
-  it("opens peek and clears it via Escape or the close control", async () => {
+  it("opens the full peek and clears it via the close control", async () => {
     const onPeekChange = vi.fn();
     const user = userEvent.setup();
     const { view } = renderLayout({ peekKey: null, onPeekChange });
     await user.click(screen.getByRole("button", { name: "Fix login" }));
-    expect(onPeekChange).toHaveBeenCalledWith("WEB-42");
+    expect(onPeekChange).toHaveBeenCalledWith({ issueId: ISSUE, projectId: PROJECT, nestingLevel: 0 });
     expect(screen.queryByLabelText("Work item preview")).not.toBeInTheDocument();
     view.unmount();
-    renderLayout({ peekKey: "WEB-42", onPeekChange });
-    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
-    // The peek is a lazy chunk: its Escape listener attaches on mount, so
-    // retry the key until the mounted peek has answered (a single fire can
-    // land between the lazy render and the effect under load).
-    await waitFor(() => {
-      fireEvent.keyDown(document, { key: "Escape" });
-      expect(onPeekChange).toHaveBeenCalledWith(null);
-    });
+    renderLayout({ peekKey: ISSUE, onPeekChange, peekProjectId: null });
+    const panel = await screen.findByLabelText("Work item preview");
+    expect(panel).toHaveAttribute("data-peeked", ISSUE);
+    // Escape belongs to the peek itself (tested there); the layout only
+    // forwards the panel's close callback to the controlled key.
+    await user.click(screen.getByRole("button", { name: "Close preview" }));
+    expect(onPeekChange).toHaveBeenCalledWith(null);
+  });
+
+  it("reports a cross-project row under its own project (ISS-167)", async () => {
+    const foreign = "823e4567-e89b-12d3-a456-426614174099";
+    mocks.pages.mockReturnValue(
+      pageState({
+        sections: [{ key: "all", title: "All", rows: [row({ project_id: foreign })], total: 1, value: null }],
+      })
+    );
+    const onPeekChange = vi.fn();
+    const user = userEvent.setup();
+    renderLayout({ peekKey: null, onPeekChange });
+    await user.click(screen.getByRole("button", { name: "Fix login" }));
+    expect(onPeekChange).toHaveBeenCalledWith({ issueId: ISSUE, projectId: foreign, nestingLevel: 0 });
   });
 
   it("supports uncontrolled peek state", async () => {
@@ -767,17 +817,73 @@ describe("ListLayout", () => {
     expect(screen.queryByLabelText("Work item preview")).not.toBeInTheDocument();
   });
 
-  it("opens peek for a nested row key that is not in the top-level pages", async () => {
+  it("opens the peek from a shared link on its own (ISS-167)", async () => {
+    window.history.replaceState({}, "", `/?peekIssueId=${ISSUE}`);
     renderLayout();
-    fireEvent.click(screen.getByRole("button", { name: "Nested child" }));
-    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
-    expect(screen.getByLabelText("Work item title")).toHaveValue("Nested child");
+    expect(await screen.findByLabelText("Work item preview")).toHaveAttribute("data-peeked", ISSUE);
+    expect(new URLSearchParams(window.location.search).get("peekIssueId")).toBe(ISSUE);
   });
 
-  it("opens peek with a blank title when the key matches no loaded row", async () => {
+  it("writes a row's raw id, then strips it on close, without a host (ISS-167)", async () => {
+    const user = userEvent.setup();
+    renderLayout();
+    await user.click(screen.getByRole("button", { name: "Fix login" }));
+    const opened = new URLSearchParams(window.location.search);
+    expect(opened.get("peekIssueId")).toBe(ISSUE);
+    expect(opened.get("peekProjectId")).toBeNull();
+    expect(opened.get("peekNestingLevel")).toBeNull();
+    window.history.replaceState({}, "", `/?peekIssueId=${ISSUE}&layout=compact`);
+    await user.click(await screen.findByRole("button", { name: "Close preview" }));
+    const closed = new URLSearchParams(window.location.search);
+    expect(closed.get("peekIssueId")).toBeNull();
+    expect(closed.get("layout")).toBe("compact");
+  });
+
+  it("writes the nested level from the panel's report without a host (ISS-167)", async () => {
+    const user = userEvent.setup();
+    renderLayout();
+    await user.click(screen.getByRole("button", { name: "Fix login" }));
+    await user.click(await screen.findByRole("button", { name: "Open child" }));
+    const nested = new URLSearchParams(window.location.search);
+    expect(nested.get("peekIssueId")).toBe("123e4567-e89b-12d3-a456-426614174099");
+    expect(nested.get("peekNestingLevel")).toBe("1");
+    await user.click(screen.getByRole("button", { name: "Back to parent" }));
+    const back = new URLSearchParams(window.location.search);
+    expect(back.get("peekIssueId")).toBe(ISSUE);
+    expect(back.get("peekNestingLevel")).toBeNull();
+    // The root panel stays mounted while the child holds the address.
+    expect(screen.getByLabelText("Work item preview")).toHaveAttribute("data-peeked", ISSUE);
+  });
+
+  it("writes a foreign row's project into the address (ISS-167)", async () => {
+    const foreign = "823e4567-e89b-12d3-a456-426614174097";
+    mocks.pages.mockReturnValue(
+      pageState({
+        sections: [{ key: "all", title: "All", rows: [row({ project_id: foreign })], total: 1, value: null }],
+      })
+    );
+    const user = userEvent.setup();
+    renderLayout();
+    await user.click(screen.getByRole("button", { name: "Fix login" }));
+    expect(new URLSearchParams(window.location.search).get("peekProjectId")).toBe(foreign);
+  });
+
+  it("mounts the resolving peek for a nested row key outside the top-level pages", async () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole("button", { name: "Nested child" }));
+    expect(await screen.findByLabelText("Work item preview")).toHaveAttribute("data-peeked", "WEB-99");
+  });
+
+  it("mounts the resolving peek for a key that matches no loaded row", async () => {
     renderLayout({ peekKey: "WEB-404" });
-    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
-    expect(screen.getByLabelText("Work item title")).toHaveValue("");
+    expect(await screen.findByLabelText("Work item preview")).toHaveAttribute("data-peeked", "WEB-404");
+  });
+
+  it("hands the peeked project through to the resolving peek", async () => {
+    renderLayout({ peekKey: "issue-9", peekProjectId: "project-9" });
+    const panel = await screen.findByLabelText("Work item preview");
+    expect(panel).toHaveAttribute("data-peeked", "issue-9");
+    expect(panel).toHaveAttribute("data-peek-project", "project-9");
   });
 
   it("passes compact density through and keeps the flat sentinel inside the scroll region", () => {

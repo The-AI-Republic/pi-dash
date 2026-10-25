@@ -14,12 +14,13 @@ import * as React from "react";
 import { ListSkeleton } from "../loaders/ListSkeleton.js";
 import { useWeekStart } from "../dropdowns/weekStart.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
+import type { LayoutPeekProps } from "../peek/usePeekAddress.js";
 
 const LazyGanttLayout = React.lazy(() =>
   import("./GanttLayout.js").then((module) => ({ default: module.GanttLayout }))
 );
 
-export interface GanttTimelineProps {
+export interface GanttTimelineProps extends LayoutPeekProps {
   workspaceSlug: string;
   projectId: string;
   projectIdentifier: string;
@@ -37,6 +38,9 @@ export interface GanttTimelineProps {
    * stays hidden like a completed cycle's (MOD-030, NEWFRONT-802).
    */
   completedModule?: boolean;
+  /** Controlled peeked work-item id (the route owns the URL param). */
+  /** Receives the selection the route should write, or null on close. */
+  /** Peeked project from the URL, when it differs from the route. */
 }
 
 /** The timeline reads the profile's week start; the layout root owns prefs. */
@@ -49,6 +53,9 @@ export function GanttTimeline({
   prefs,
   completedCycle = false,
   completedModule = false,
+  peekKey,
+  onPeekChange,
+  peekProjectId,
 }: GanttTimelineProps): React.ReactElement {
   const weekStart = useWeekStart();
   return (
@@ -63,6 +70,9 @@ export function GanttTimeline({
         weekStart={weekStart}
         completedCycle={completedCycle}
         completedModule={completedModule}
+        peekKey={peekKey}
+        onPeekChange={onPeekChange}
+        peekProjectId={peekProjectId}
       />
     </React.Suspense>
   );

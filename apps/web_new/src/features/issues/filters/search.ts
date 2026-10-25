@@ -18,6 +18,10 @@ export const IssueSearch = z.object({
   layout: z.optional(IssueLayout),
   /** Open row peek; cleared on close (ISS-013). */
   peekIssueId: z.optional(z.string()),
+  /** Peeked project when it differs from the route project (ISS-167). */
+  peekProjectId: z.optional(z.string()),
+  /** Nested peek depth; session-only, 0 when absent (ISS-165/167). */
+  peekNestingLevel: z.optional(z.string()),
 });
 export type IssueSearch = z.infer<typeof IssueSearch>;
 

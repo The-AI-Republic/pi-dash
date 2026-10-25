@@ -35,12 +35,15 @@ import {
   SavedViewEmptyCard,
   ViewLayoutBody,
   issuesQueryOptions,
+  peekSearchFor,
+  stripPeekParams,
   mergeDisplayPrefs,
   parseDisplayPrefs,
   selectCreatableProjects,
   useWeekStart,
   type IssueSearch,
   type LayoutKind,
+  type PeekRequest,
   type RichFilterBuilderParts,
   type ViewSnapshot,
   type WorkItemCreateProject,
@@ -100,6 +103,15 @@ export function SavedViewScreen({ params, search }: SavedViewScreenProps): React
     void navigate({ to: projectViewsListHref(params.ws, params.projectId) });
   };
 
+  // Every saved view lists all five layouts over one address, so the peek
+  // binds the same way here as on the issues route: writes replace, never
+  // push, and closing strips every peek param (ISS-167).
+  const setPeek = (request: PeekRequest): void => {
+    const next =
+      request === null ? stripPeekParams({ ...search }) : peekSearchFor({ ...search }, request, params.projectId);
+    void navigate({ to: ".", search: next, replace: true } as never);
+  };
+
   if (view.isPending) {
     return (
       <section aria-label="Saved view" className="flex min-h-0 flex-1 flex-col p-(--space-4)">
@@ -132,6 +144,7 @@ export function SavedViewScreen({ params, search }: SavedViewScreenProps): React
       views={sortProjectViewsDefault(views.data ?? [])}
       viewsLoading={views.isPending}
       viewsFailed={views.isError}
+      onPeekChange={setPeek}
       onOpenView={(viewId) => {
         void navigate({ to: projectViewHref(params.ws, params.projectId, viewId) });
       }}
@@ -161,6 +174,7 @@ interface SavedViewBodyProps {
   views: readonly SavedView[];
   viewsLoading: boolean;
   viewsFailed: boolean;
+  onPeekChange: (request: PeekRequest) => void;
   onOpenView: (viewId: string) => void;
   onOpenProject: () => void;
 }
@@ -183,6 +197,7 @@ function SavedViewBody({
   views,
   viewsLoading,
   viewsFailed,
+  onPeekChange,
   onOpenView,
   onOpenProject,
 }: SavedViewBodyProps): React.ReactElement {
@@ -301,6 +316,11 @@ function SavedViewBody({
           issues={rows}
           totalCount={totalCount}
           compact={search.layout === "compact"}
+          peek={{
+            peekKey: search.peekIssueId ?? null,
+            peekProjectId: search.peekProjectId ?? null,
+            onPeekChange,
+          }}
         />
       )}
       emptyState={emptyCard}

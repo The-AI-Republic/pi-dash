@@ -23,7 +23,7 @@ import { issueKeys } from "../api/keys.js";
 import { BULK_OPERATIONS_FLAG } from "../bulk/edition.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import { todayIsoDay } from "../dropdowns/calendar.js";
-import { GanttLayout, barColorsFor, orderedRows } from "./GanttLayout.js";
+import { GanttLayout, barColorsFor, ganttRowPeek, orderedRows } from "./GanttLayout.js";
 import { buildRows } from "./rows.js";
 import { addDays } from "./scale.js";
 import { ganttStatesKey } from "./useGanttData.js";
@@ -44,6 +44,34 @@ const bulkPending = vi.hoisted(() => ({
   remove: false,
   archive: false,
   subscribe: false,
+}));
+
+vi.mock("../peek/ResolvingIssuePeek.js", () => ({
+  ResolvingIssuePeek: (props: {
+    peeked: string;
+    peekProjectId?: string | null;
+    onPeekChange?: (selection: unknown) => void;
+    onClose: () => void;
+  }) => (
+    <div
+      aria-label="Work item preview"
+      data-testid="issue-preview"
+      data-peeked={props.peeked}
+      data-peek-project={props.peekProjectId ?? ""}
+    >
+      <button type="button" onClick={props.onClose}>
+        Close preview
+      </button>
+      {props.onPeekChange === undefined ? null : (
+        <button
+          type="button"
+          onClick={() => props.onPeekChange?.({ issueId: "child", projectId: "other", nestingLevel: 1 })}
+        >
+          Nest child
+        </button>
+      )}
+    </div>
+  ),
 }));
 
 vi.mock("../bulk/index.js", async (importOriginal) => ({
@@ -163,6 +191,10 @@ function renderLayout(
     projectFlags?: { cycleView?: boolean; moduleView?: boolean; estimate?: string | null };
     /** Seed an empty project list (ISS-116 missing-row default). */
     missingProject?: boolean;
+    /** Controlled peek the route would pass (ISS-167). */
+    peekKey?: string | null;
+    peekProjectId?: string | null;
+    onPeekChange?: (request: unknown) => void;
     transport?: (url: string, init: { method?: string; body?: string }) => Promise<unknown>;
   } = {}
 ) {
@@ -232,6 +264,9 @@ function renderLayout(
           weekStart={0}
           {...(options.completedCycle === undefined ? {} : { completedCycle: options.completedCycle })}
           {...(options.completedModule === undefined ? {} : { completedModule: options.completedModule })}
+          {...(options.peekKey === undefined ? {} : { peekKey: options.peekKey })}
+          {...(options.peekProjectId === undefined ? {} : { peekProjectId: options.peekProjectId })}
+          {...(options.onPeekChange === undefined ? {} : { onPeekChange: options.onPeekChange })}
         />
       </React.Suspense>
     </QueryClientProvider>
@@ -240,6 +275,7 @@ function renderLayout(
 }
 
 afterEach(() => {
+  window.history.replaceState({}, "", "/");
   delete edition.flags[BULK_OPERATIONS_FLAG];
   bulkPending.update = false;
   bulkPending.remove = false;
@@ -248,6 +284,22 @@ afterEach(() => {
   resetAppClient();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+});
+
+describe("ganttRowPeek", () => {
+  it("opens the row's own project when the list column knows it", () => {
+    const [row] = buildRows([issue({ project_id: "other-project" })], "WEB");
+    expect(ganttRowPeek(row!, [issue({ project_id: "other-project" })], PROJECT)).toEqual({
+      issueId: row!.id,
+      projectId: "other-project",
+      nestingLevel: 0,
+    });
+  });
+
+  it("falls back to the route project for a row the list no longer holds", () => {
+    const [row] = buildRows([issue()], "WEB");
+    expect(ganttRowPeek(row!, [], PROJECT)).toEqual({ issueId: row!.id, projectId: PROJECT, nestingLevel: 0 });
+  });
 });
 
 describe("orderedRows", () => {
@@ -332,15 +384,67 @@ describe("GanttLayout", () => {
     expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
   });
 
-  it("opens the shared peek for a clicked row and closes it", () => {
+  it("opens the shared peek for a clicked row and closes it", async () => {
     renderLayout();
     expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("link", { name: "First" }));
-    expect(screen.getByTestId("issue-preview")).toBeInTheDocument();
+    const preview = await screen.findByTestId("issue-preview");
+    expect(preview).toHaveAttribute("data-peeked", ISSUES[0]!.id);
     expect(document.querySelector(`[data-lane="${ISSUES[0]!.id}"]`)).toHaveAttribute("data-peeked", "true");
     fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
-    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument());
     expect(document.querySelector(`[data-lane="${ISSUES[0]!.id}"]`)).not.toHaveAttribute("data-peeked");
+  });
+
+  it("names the opened row in the address and strips it on close (ISS-167)", async () => {
+    const push = vi.spyOn(window.history, "pushState");
+    renderLayout();
+    fireEvent.click(screen.getByRole("link", { name: "First" }));
+    await screen.findByTestId("issue-preview");
+    expect(push).not.toHaveBeenCalled();
+    expect(new URLSearchParams(window.location.search).get("peekIssueId")).toBe(ISSUES[0]!.id);
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    await waitFor(() => expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument());
+    expect(new URLSearchParams(window.location.search).get("peekIssueId")).toBeNull();
+  });
+
+  it("opens the peek from a deep-linked id, keeping a foreign project", async () => {
+    window.history.replaceState({}, "", `/acme/issues?peekIssueId=${ISSUES[1]!.id}&peekProjectId=other-project`);
+    renderLayout();
+    const preview = await screen.findByTestId("issue-preview");
+    expect(preview).toHaveAttribute("data-peeked", ISSUES[1]!.id);
+    expect(preview).toHaveAttribute("data-peek-project", "other-project");
+  });
+
+  it("hands a host-owned address the row it activated and never writes the URL itself", () => {
+    const onPeekChange = vi.fn();
+    renderLayout({ peekKey: null, onPeekChange });
+    fireEvent.click(screen.getByRole("link", { name: "First" }));
+    expect(onPeekChange).toHaveBeenCalledWith({
+      issueId: ISSUES[0]!.id,
+      projectId: PROJECT,
+      nestingLevel: 0,
+    });
+    // Nothing mounts until the host writes the address back down.
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get("peekIssueId")).toBeNull();
+  });
+
+  it("passes a nested child report from the mounted panel to the host", async () => {
+    const onPeekChange = vi.fn();
+    renderLayout({ peekKey: ISSUES[0]!.id, onPeekChange });
+    await screen.findByTestId("issue-preview");
+    fireEvent.click(screen.getByRole("button", { name: "Nest child" }));
+    expect(onPeekChange).toHaveBeenLastCalledWith({ issueId: "child", projectId: "other", nestingLevel: 1 });
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    expect(onPeekChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("shows the panel the controlled address names, even for a foreign project", async () => {
+    renderLayout({ peekKey: ISSUES[2]!.id, peekProjectId: "other-project", onPeekChange: vi.fn() });
+    const preview = await screen.findByTestId("issue-preview");
+    expect(preview).toHaveAttribute("data-peeked", ISSUES[2]!.id);
+    expect(preview).toHaveAttribute("data-peek-project", "other-project");
   });
 });
 

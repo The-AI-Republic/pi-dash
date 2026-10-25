@@ -184,10 +184,27 @@ vi.mock("../../../../../../features/issues/list/lazy.js", () => ({
       >
         register
       </button>
-      <button type="button" onClick={() => (props.onPeekChange as (key: string | null) => void)("WEB-1")}>
+      <button
+        type="button"
+        onClick={() =>
+          (props.onPeekChange as (request: unknown) => void)({ issueId: "WEB-1", projectId: PROJECT, nestingLevel: 0 })
+        }
+      >
         open
       </button>
-      <button type="button" onClick={() => (props.onPeekChange as (key: string | null) => void)(null)}>
+      <button
+        type="button"
+        onClick={() =>
+          (props.onPeekChange as (request: unknown) => void)({
+            issueId: "WEB-2",
+            projectId: "555e4567-e89b-12d3-a456-426614174099",
+            nestingLevel: 1,
+          })
+        }
+      >
+        open foreign
+      </button>
+      <button type="button" onClick={() => (props.onPeekChange as (request: unknown) => void)(null)}>
         close
       </button>
     </div>
@@ -257,6 +274,8 @@ vi.mock("../../../../../../features/issues/calendar/CalendarEntry.js", () => ({
       data-cycle={String((props.membership as { cycleId: string }).cycleId)}
       data-can-edit={String(props.canEdit ?? false)}
       data-add={String(props.canAddExisting ?? false)}
+      data-peek={String(props.peekKey ?? "")}
+      data-peek-project={String(props.peekProjectId ?? "")}
     />
   ),
 }));
@@ -266,6 +285,8 @@ vi.mock("../../../../../../features/issues/spreadsheet/SpreadsheetLayout.js", ()
       data-testid="spreadsheet-layout"
       data-scope={String((props.entity as { scope: string }).scope)}
       data-hide-estimate={String(props.hideEstimate ?? false)}
+      data-peek={String(props.peekKey ?? "")}
+      data-peek-project={String(props.peekProjectId ?? "")}
     />
   ),
 }));
@@ -275,6 +296,8 @@ vi.mock("../../../../../../features/issues/gantt/GanttTimeline.js", () => ({
       data-testid="gantt-layout"
       data-completed={String(props.completedCycle ?? false)}
       data-count={String((props.issues as unknown[]).length)}
+      data-peek={String(props.peekKey ?? "")}
+      data-peek-project={String(props.peekProjectId ?? "")}
     />
   ),
 }));
@@ -411,8 +434,23 @@ describe("cycle detail route", () => {
     expect(layout).toHaveAttribute("data-cycle", CYCLE);
   });
 
+  it("binds the peek address into the calendar, sheet and timeline (ISS-167)", async () => {
+    for (const [layout, testId] of [
+      ["calendar", "calendar-layout"],
+      ["spreadsheet", "spreadsheet-layout"],
+      ["gantt_chart", "gantt-layout"],
+    ] as const) {
+      mocks.layout.current = layout;
+      const { unmount } = renderRoute({ peekIssueId: "WEB-7", peekProjectId: "project-9", peekNestingLevel: "1" });
+      const node = await screen.findByTestId(testId);
+      expect(node).toHaveAttribute("data-peek", "WEB-7");
+      expect(node).toHaveAttribute("data-peek-project", "project-9");
+      unmount();
+    }
+  });
+
   it("writes and clears the peek param with replace", async () => {
-    renderRoute({ peekIssueId: "WEB-7", layout: "compact" });
+    renderRoute({ peekIssueId: "WEB-7", peekProjectId: "project-9", peekNestingLevel: "1", layout: "compact" });
     fireEvent.click(await screen.findByRole("button", { name: "open" }));
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: ".",
@@ -423,6 +461,21 @@ describe("cycle detail route", () => {
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: ".",
       search: { layout: "compact" },
+      replace: true,
+    });
+  });
+
+  it("keeps a foreign peeked project and the nesting level (ISS-167)", async () => {
+    renderRoute({ layout: "compact" });
+    fireEvent.click(await screen.findByRole("button", { name: "open foreign" }));
+    expect(mocks.navigate).toHaveBeenLastCalledWith({
+      to: ".",
+      search: {
+        peekIssueId: "WEB-2",
+        peekProjectId: "555e4567-e89b-12d3-a456-426614174099",
+        peekNestingLevel: "1",
+        layout: "compact",
+      },
       replace: true,
     });
   });

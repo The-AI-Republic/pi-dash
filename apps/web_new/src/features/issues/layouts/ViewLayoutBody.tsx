@@ -17,6 +17,7 @@ import * as React from "react";
 
 import type { RichExpression } from "../filters/rich/expression.js";
 import { ListSkeleton } from "../loaders/ListSkeleton.js";
+import type { PeekRequest } from "../peek/peekUrl.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import type { LayoutKind } from "./kinds.js";
@@ -90,10 +91,27 @@ export interface ViewLayoutBodyProps {
   totalCount: number;
   /** Compact density from the route search. */
   compact: boolean;
+  /**
+   * Peek address the view's route owns (ISS-167). Every layout receives it,
+   * so a row in any of the five opens the same URL-bound peek.
+   */
+  peek?: ViewPeekAddress | undefined;
+}
+
+/** Controlled peek params a saved view hands each layout. */
+export interface ViewPeekAddress {
+  peekKey: string | null;
+  peekProjectId: string | null;
+  onPeekChange: (request: PeekRequest) => void;
 }
 
 export function ViewLayoutBody(props: ViewLayoutBodyProps): React.ReactElement {
-  const { layout } = props;
+  const { layout, peek } = props;
+  const peekProps = {
+    peekKey: peek?.peekKey,
+    ...(peek === undefined ? {} : { onPeekChange: peek.onPeekChange }),
+    peekProjectId: peek?.peekProjectId,
+  };
   return (
     <React.Suspense fallback={<ListSkeleton />}>
       {layout === "kanban" ? (
@@ -105,6 +123,7 @@ export function ViewLayoutBody(props: ViewLayoutBodyProps): React.ReactElement {
           prefs={props.prefs}
           canEdit={props.canEdit}
           richFilters={props.richExpression}
+          {...peekProps}
         />
       ) : layout === "calendar" ? (
         <LazyCalendarEntry
@@ -114,6 +133,7 @@ export function ViewLayoutBody(props: ViewLayoutBodyProps): React.ReactElement {
           entity={props.entity}
           canEdit={props.canEdit}
           richExpression={props.richExpression}
+          {...peekProps}
         />
       ) : layout === "spreadsheet" ? (
         <LazySpreadsheetLayout
@@ -128,6 +148,7 @@ export function ViewLayoutBody(props: ViewLayoutBodyProps): React.ReactElement {
           hideEstimate={props.hideEstimate}
           richExpression={props.richExpression}
           weekStart={props.weekStart}
+          {...peekProps}
         />
       ) : layout === "gantt_chart" ? (
         <LazyGanttTimeline
@@ -137,6 +158,7 @@ export function ViewLayoutBody(props: ViewLayoutBodyProps): React.ReactElement {
           issues={[...props.issues]}
           totalCount={props.totalCount}
           prefs={props.prefs}
+          {...peekProps}
         />
       ) : (
         <LazyListLayout
@@ -148,6 +170,7 @@ export function ViewLayoutBody(props: ViewLayoutBodyProps): React.ReactElement {
           canEdit={props.canEdit}
           richFilters={props.richExpression}
           compact={props.compact}
+          {...peekProps}
         />
       )}
     </React.Suspense>

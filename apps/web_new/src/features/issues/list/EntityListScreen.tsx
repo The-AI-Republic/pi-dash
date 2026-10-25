@@ -42,6 +42,7 @@ import { isFilteredEmpty } from "../emptyStates/filteredEmpty.js";
 import { isConditionComplete, parseRichExpression } from "../filters/rich/expression.js";
 import type { RichFilterBuilderParts } from "../filters/rich/RichFilterBuilder.js";
 import { LazyIssueFilters } from "../filters/rich/lazy.js";
+import type { PeekRequest } from "../peek/peekUrl.js";
 
 // The sheet and the timeline ride their own chunks; the stored layout
 // decides when to request them (Quality gates).
@@ -69,7 +70,9 @@ export interface EntityListScreenProps {
   /** Completed modules render read-only. */
   completedModule?: boolean | undefined;
   peekKey: string | null;
-  onPeekChange: (key: string | null) => void;
+  onPeekChange: (request: PeekRequest) => void;
+  /** Peeked project from the URL, when it differs from the route (ISS-167). */
+  peekProjectId?: string | null | undefined;
   compact: boolean;
   /** Trailing desktop header controls the host appends after Display. */
   extraHeaderActions?: React.ReactNode;
@@ -101,6 +104,7 @@ export function EntityListScreen({
   completedModule,
   peekKey,
   onPeekChange,
+  peekProjectId = null,
   compact,
   extraHeaderActions,
   emptyStateActions,
@@ -257,6 +261,9 @@ export function EntityListScreen({
                   totalCount={firstPage.total_count}
                   prefs={prefs}
                   completedModule={resolvedCompletedModule}
+                  peekKey={peekKey}
+                  onPeekChange={onPeekChange}
+                  peekProjectId={peekProjectId}
                 />
               </React.Suspense>
             );
@@ -276,6 +283,9 @@ export function EntityListScreen({
                   hideEstimate={project.estimate === null}
                   richExpression={richFilters}
                   weekStart={weekStart}
+                  peekKey={peekKey}
+                  onPeekChange={onPeekChange}
+                  peekProjectId={peekProjectId}
                 />
               </React.Suspense>
             );
@@ -296,6 +306,7 @@ export function EntityListScreen({
                 moduleId={moduleId}
                 peekKey={peekKey}
                 onPeekChange={onPeekChange}
+                peekProjectId={peekProjectId}
               />
             );
           }
@@ -312,6 +323,9 @@ export function EntityListScreen({
                   ...(entity.scope === "cycle" ? { cycleId: entity.cycleId } : {}),
                   ...(entity.scope === "module" ? { moduleId: entity.moduleId } : {}),
                 }}
+                peekKey={peekKey}
+                onPeekChange={onPeekChange}
+                peekProjectId={peekProjectId}
               />
             );
           }
@@ -330,6 +344,7 @@ export function EntityListScreen({
               completedModule={resolvedCompletedModule}
               peekKey={peekKey}
               onPeekChange={onPeekChange}
+              peekProjectId={peekProjectId}
               compact={compact}
               onRegisterOverlays={setOverlays}
             />

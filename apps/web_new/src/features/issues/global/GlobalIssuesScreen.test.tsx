@@ -12,15 +12,68 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, getAppClient, resetAppClient } from "../../../core/api/client.js";
 import { projectKeys } from "../../projects/api/keys.js";
-import { GLOBAL_LOAD_MORE_LABEL, GlobalIssuesScreen, globalIssueKey } from "./GlobalIssuesScreen.js";
+import { GLOBAL_LOAD_MORE_LABEL, GlobalIssuesScreen, globalIssueKey, rowPeekSelection } from "./GlobalIssuesScreen.js";
 import { globalIssuesQueryOptions } from "./queries.js";
+
+// The peek composition is its own suite's subject; this list owns only
+// the address it hands over, so the stub echoes what it received and
+// exposes the panel's reports.
+const peekHarness = vi.hoisted(() => ({
+  props: null as null | {
+    peeked: string;
+    peekProjectId?: string | null;
+    projectId: string;
+    projectIdentifier: string;
+    onPeekChange?: (selection: unknown) => void;
+    onClose: () => void;
+  },
+  reports: [] as unknown[],
+  closes: 0,
+}));
+vi.mock("../peek/ResolvingIssuePeek.js", () => ({
+  ResolvingIssuePeek: (props: {
+    peeked: string;
+    peekProjectId?: string | null;
+    projectId: string;
+    projectIdentifier: string;
+    onPeekChange?: (selection: unknown) => void;
+    onClose: () => void;
+  }) => {
+    peekHarness.props = props;
+    return (
+      <div
+        aria-label="Work item preview"
+        data-peeked={props.peeked}
+        data-peek-project={props.peekProjectId ?? ""}
+        data-project={props.projectId}
+        data-identifier={props.projectIdentifier}
+      >
+        <button
+          type="button"
+          onClick={() =>
+            props.onPeekChange?.({
+              issueId: "923e4567-e89b-12d3-a456-426614174013",
+              projectId: OTHER_PROJECT,
+              nestingLevel: 1,
+            })
+          }
+        >
+          Open child
+        </button>
+        <button type="button" onClick={props.onClose}>
+          Close preview
+        </button>
+      </div>
+    );
+  },
+}));
 
 // The empty surface reads workspace standing for its entries; the list
 // rows do not, so the harness pins a member throughout.
@@ -136,6 +189,9 @@ function renderScreen(
     projectKeys.list(options.withoutWorkspaceParam ? "" : SLUG),
     options.projects ?? [projectRow(PROJECT, "WEB"), projectRow(OTHER_PROJECT, "API")]
   );
+  peekHarness.props = null;
+  peekHarness.reports = [];
+  peekHarness.closes = 0;
   const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()();
   const layout = createRoute({ getParentRoute: () => rootRoute, path: "/$ws", component: () => <Outlet /> });
   const browse = createRoute({
@@ -186,6 +242,9 @@ const realHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offse
 const capturedObservers: Array<{ trigger(): void; disconnect(): void }> = [];
 
 beforeEach(() => {
+  // The address is shared by every case in the file; start each from the
+  // plain view so a peek written by an earlier case cannot seed a link.
+  window.history.replaceState({}, "", `/${SLUG}/workspace-views/all-issues`);
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
     configurable: true,
     get(this: HTMLElement) {
@@ -223,6 +282,16 @@ describe("globalIssueKey", () => {
   it("prefixes the sequence with the project identifier", () => {
     expect(globalIssueKey("WEB", { sequence_id: 42 })).toBe("WEB-42");
     expect(globalIssueKey(undefined, { sequence_id: 7 })).toBe("?-7");
+  });
+});
+
+describe("rowPeekSelection", () => {
+  it("opens the row's own id at the top of the stack", () => {
+    expect(rowPeekSelection({ id: "issue-1", project_id: PROJECT })).toEqual({
+      issueId: "issue-1",
+      projectId: PROJECT,
+      nestingLevel: 0,
+    });
   });
 });
 
@@ -443,5 +512,139 @@ describe("GlobalIssuesScreen", () => {
     );
     expect(await screen.findByTestId("view-empty-override")).toBeInTheDocument();
     expect(screen.queryByText("No Views yet")).toBeNull();
+  });
+});
+
+describe("GlobalIssuesScreen peek address (ISS-165/167)", () => {
+  const FIRST = idFor("a1");
+
+  /** The window address a standalone mount writes through `replaceState`. */
+  function lastWindowSearch(): URLSearchParams {
+    const spy = window.history.replaceState as unknown as { mock?: { calls: unknown[][] } };
+    const calls = spy.mock?.calls ?? [];
+    const url = String(calls.at(-1)?.[2] ?? "");
+    return new URLSearchParams(url.includes("?") ? url.slice(url.indexOf("?") + 1) : "");
+  }
+
+  it("opens the peek on a plain row click, writing replace with the row's project", async () => {
+    const replace = vi.spyOn(window.history, "replaceState");
+    const user = userEvent.setup();
+    renderScreen({ results: [row("a1", { sequence_id: 1, project_id: OTHER_PROJECT })] });
+    await user.click(await screen.findByRole("link", { name: /API-1/ }));
+    expect(await screen.findByLabelText("Work item preview")).toHaveAttribute("data-peeked", FIRST);
+    expect(replace).toHaveBeenCalled();
+    const address = lastWindowSearch();
+    expect(address.get("peekIssueId")).toBe(FIRST);
+    // The surface has no route project, so the row's own is always named.
+    expect(address.get("peekProjectId")).toBe(OTHER_PROJECT);
+    expect(address.get("peekNestingLevel")).toBeNull();
+    replace.mockRestore();
+  });
+
+  it("keeps the full page for a modified click", async () => {
+    renderScreen({ results: [row("a1", { sequence_id: 1 })] });
+    const link = await screen.findByRole("link", { name: /WEB-1/ });
+    for (const init of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }]) {
+      fireEvent.click(link, init);
+      expect(screen.queryByLabelText("Work item preview"), JSON.stringify(init)).toBeNull();
+    }
+  });
+
+  it("opens a deep link without a row ever being clicked (ISS-167)", async () => {
+    renderScreen(
+      { results: [row("a1", { sequence_id: 1 })] },
+      {},
+      { screenProps: { peekKey: FIRST, peekProjectId: PROJECT } }
+    );
+    const panel = await screen.findByLabelText("Work item preview");
+    expect(panel).toHaveAttribute("data-peeked", FIRST);
+    expect(panel).toHaveAttribute("data-peek-project", PROJECT);
+    // A held row supplies the project and identifier the panel resolves by.
+    expect(panel).toHaveAttribute("data-project", PROJECT);
+    expect(panel).toHaveAttribute("data-identifier", "WEB");
+  });
+
+  it("stays closed for an address that names no project and no visible row", async () => {
+    // The workspace route has no path project, so an id the loaded rows do
+    // not own has nothing to read under and stays closed.
+    renderScreen({ results: [row("a1", { sequence_id: 1 })] }, {}, { screenProps: { peekKey: idFor("elsewhere") } });
+    expect(await screen.findByText("Issue a1")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Work item preview")).toBeNull();
+  });
+
+  it("resolves a deep link that names only an id from a loaded row", async () => {
+    renderScreen({ results: [row("a1", { sequence_id: 1 })] }, {}, { screenProps: { peekKey: FIRST } });
+    const panel = await screen.findByLabelText("Work item preview");
+    expect(panel).toHaveAttribute("data-peeked", FIRST);
+    // The held row supplies the project; the address names no override.
+    expect(panel).toHaveAttribute("data-project", PROJECT);
+    expect(panel).toHaveAttribute("data-identifier", "WEB");
+  });
+
+  it("falls back to no identifier when the peeked project is not in the loaded list", async () => {
+    renderScreen(
+      { results: [row("a1", { sequence_id: 1 })] },
+      {},
+      { screenProps: { peekKey: FIRST, peekProjectId: idFor("hidden") } }
+    );
+    const panel = await screen.findByLabelText("Work item preview");
+    expect(panel).toHaveAttribute("data-project", idFor("hidden"));
+    expect(panel).toHaveAttribute("data-identifier", "");
+  });
+
+  it("mounts the deep-linked peek even before any row is visible", async () => {
+    renderScreen({ results: [] }, {}, { screenProps: { peekKey: FIRST, peekProjectId: OTHER_PROJECT } });
+    // The empty card still renders; the panel stands beside it.
+    expect(await screen.findByText("No Views yet")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Work item preview")).toHaveAttribute("data-peeked", FIRST);
+  });
+
+  it("closes through the address and strips every peek param", async () => {
+    const replace = vi.spyOn(window.history, "replaceState");
+    const user = userEvent.setup();
+    // The standalone mount writes into the live address, so seed the
+    // parameters that must survive a close.
+    window.history.replaceState({}, "", `/${SLUG}/workspace-views/all-issues?layout=list&order_by=-created_at`);
+    renderScreen({ results: [row("a1", { sequence_id: 1 })] });
+    await user.click(await screen.findByRole("link", { name: /WEB-1/ }));
+    await user.click(await screen.findByRole("button", { name: "Close preview" }));
+    expect(screen.queryByLabelText("Work item preview")).toBeNull();
+    const address = lastWindowSearch();
+    expect(address.get("peekIssueId")).toBeNull();
+    expect(address.get("peekProjectId")).toBeNull();
+    expect(address.get("peekNestingLevel")).toBeNull();
+    // The rest of the address survives the strip.
+    expect(address.get("layout")).toBe("list");
+    expect(address.get("order_by")).toBe("-created_at");
+    replace.mockRestore();
+  });
+
+  it("reports a nested open through the address and keeps the parent panel", async () => {
+    const replace = vi.spyOn(window.history, "replaceState");
+    const user = userEvent.setup();
+    renderScreen({ results: [row("a1", { sequence_id: 1 })] });
+    await user.click(await screen.findByRole("link", { name: /WEB-1/ }));
+    await user.click(await screen.findByRole("button", { name: "Open child" }));
+    const nested = lastWindowSearch();
+    expect(nested.get("peekIssueId")).toBe("923e4567-e89b-12d3-a456-426614174013");
+    expect(nested.get("peekProjectId")).toBe(OTHER_PROJECT);
+    expect(nested.get("peekNestingLevel")).toBe("1");
+    // The panel the layout opened stays mounted under the child.
+    expect(screen.getByLabelText("Work item preview")).toHaveAttribute("data-peeked", FIRST);
+    replace.mockRestore();
+  });
+
+  it("forwards reports to a host's writer instead of keeping them (ISS-167)", async () => {
+    const writer = vi.fn();
+    const user = userEvent.setup();
+    renderScreen(
+      { results: [row("a1", { sequence_id: 1 })] },
+      {},
+      { screenProps: { peekKey: null, onPeekChange: writer } }
+    );
+    await user.click(await screen.findByRole("link", { name: /WEB-1/ }));
+    expect(writer).toHaveBeenLastCalledWith({ issueId: FIRST, projectId: PROJECT, nestingLevel: 0 });
+    // Controlled: the host decides what mounts, so this list keeps none.
+    expect(screen.queryByLabelText("Work item preview")).toBeNull();
   });
 });

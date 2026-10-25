@@ -81,6 +81,9 @@ const listHarness = vi.hoisted(() => ({
   hideHeader: false,
   hasEmptyState: false,
   label: "",
+  peekKey: null as string | null | undefined,
+  peekProjectId: null as string | null | undefined,
+  onPeekChange: null as ((request: unknown) => void) | null,
 }));
 vi.mock("../../issues/global/GlobalIssuesScreen.js", () => ({
   GlobalIssuesScreen: (props: {
@@ -88,11 +91,17 @@ vi.mock("../../issues/global/GlobalIssuesScreen.js", () => ({
     hideHeader?: boolean;
     emptyState?: React.ReactNode;
     label?: string;
+    peekKey?: string | null;
+    peekProjectId?: string | null;
+    onPeekChange?: (request: unknown) => void;
   }) => {
     listHarness.query = props.query ?? null;
     listHarness.hideHeader = props.hideHeader ?? false;
     listHarness.hasEmptyState = props.emptyState !== undefined && props.emptyState !== null;
     listHarness.label = props.label ?? "";
+    listHarness.peekKey = props.peekKey;
+    listHarness.peekProjectId = props.peekProjectId;
+    listHarness.onPeekChange = props.onPeekChange ?? null;
     return (
       <div data-testid="global-list" data-label={props.label ?? ""}>
         {props.emptyState}
@@ -252,7 +261,21 @@ vi.mock("../dialog/DeleteWorkspaceViewDialog.js", () => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { VIEWS_OWNER_ID, jsonResponse, makeView } from "../testing.js";
-import { WorkspaceViewScreen } from "./WorkspaceViewScreen.js";
+import { WorkspaceViewScreen, type WorkspacePeekAddress } from "./WorkspaceViewScreen.js";
+
+const PEEKED_ISSUE = "723e4567-e89b-12d3-a456-426614174011";
+const PEEKED_PROJECT = "823e4567-e89b-12d3-a456-426614174012";
+
+/** The address the route would hand the screen; tests record its writer. */
+const peekHarness: { requests: unknown[] } = { requests: [] };
+function peekAddress(overrides: Partial<WorkspacePeekAddress> = {}): WorkspacePeekAddress {
+  return {
+    peekKey: null,
+    peekProjectId: null,
+    onPeekChange: (request) => peekHarness.requests.push(request),
+    ...overrides,
+  };
+}
 
 const CUSTOM_A = "223e4567-e89b-12d3-a456-426614174001";
 const CUSTOM_B = "323e4567-e89b-12d3-a456-426614174002";
@@ -311,6 +334,10 @@ beforeEach(() => {
   listHarness.hideHeader = false;
   listHarness.hasEmptyState = false;
   listHarness.label = "";
+  listHarness.peekKey = undefined;
+  listHarness.peekProjectId = undefined;
+  listHarness.onPeekChange = null;
+  peekHarness.requests = [];
   filtersHarness.props = null;
   defaultFiltersHarness.onExpressionChange = null;
   displayHarness.props = null;
@@ -384,11 +411,11 @@ afterEach(() => {
   document.title = "";
 });
 
-function renderScreen(viewId: string): { queryClient: QueryClient } {
+function renderScreen(viewId: string, peek: WorkspacePeekAddress = peekAddress()): { queryClient: QueryClient } {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <WorkspaceViewScreen params={{ ws: "acme", viewId }} />
+      <WorkspaceViewScreen params={{ ws: "acme", viewId }} peek={peek} />
     </QueryClientProvider>
   );
   return { queryClient };
@@ -456,7 +483,7 @@ describe("WorkspaceViewScreen defaults", () => {
     sessionHarness.mePending = true;
     const { unmount } = render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-        <WorkspaceViewScreen params={{ ws: "acme", viewId: "assigned" }} />
+        <WorkspaceViewScreen params={{ ws: "acme", viewId: "assigned" }} peek={peekAddress()} />
       </QueryClientProvider>
     );
     expect(await screen.findByTestId("issues-skeleton-list")).toBeInTheDocument();
@@ -523,6 +550,17 @@ describe("WorkspaceViewScreen defaults", () => {
     fireEvent.click(await screen.findByRole("button", { name: "New work item" }));
     expect(await screen.findByTestId("create-dialog")).toHaveAttribute("data-projects", "1");
   });
+
+  it("hands the route's peek address to the default's body (ISS-167)", async () => {
+    renderScreen("all-issues", peekAddress({ peekKey: PEEKED_ISSUE, peekProjectId: PEEKED_PROJECT }));
+    await screen.findByTestId("global-list");
+    expect(listHarness.peekKey).toBe(PEEKED_ISSUE);
+    expect(listHarness.peekProjectId).toBe(PEEKED_PROJECT);
+    // A report from the body reaches the route's writer unchanged.
+    const request = { issueId: "923e4567-e89b-12d3-a456-426614174013", projectId: PEEKED_PROJECT, nestingLevel: 1 };
+    listHarness.onPeekChange?.(request);
+    expect(peekHarness.requests).toEqual([request]);
+  });
 });
 
 describe("WorkspaceViewScreen customs", () => {
@@ -544,6 +582,15 @@ describe("WorkspaceViewScreen customs", () => {
     });
     expect(listHarness.label).toBe("Triage");
     expect(displayHarness.props?.offered).toEqual(["spreadsheet"]);
+  });
+
+  it("hands the route's peek address to the custom's body (ISS-167)", async () => {
+    renderScreen(CUSTOM_A, peekAddress({ peekKey: PEEKED_ISSUE, peekProjectId: PEEKED_PROJECT }));
+    await screen.findByTestId("global-list");
+    expect(listHarness.peekKey).toBe(PEEKED_ISSUE);
+    expect(listHarness.peekProjectId).toBe(PEEKED_PROJECT);
+    listHarness.onPeekChange?.(null);
+    expect(peekHarness.requests).toEqual([null]);
   });
 
   it("never retrieves an id the visible list hides", async () => {

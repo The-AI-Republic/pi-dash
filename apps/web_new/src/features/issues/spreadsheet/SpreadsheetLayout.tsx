@@ -6,7 +6,8 @@
 // work-item column and header, display-driven property columns, inline
 // picker edits that write immediately, header sort menus, a sticky
 // quick-add, infinite pagination, sub-issue expansion (three levels,
-// deeper opens peek), and arrow-key cell navigation.
+// deeper opens peek), and arrow-key cell navigation. A row title opens the
+// peek; the sub-issue count keeps its own full-page link.
 
 import { Button, Menu, Spinner } from "@pidash/kit";
 import { useInfiniteQuery, useQueries } from "@tanstack/react-query";
@@ -16,8 +17,6 @@ import * as React from "react";
 import type { IssueListItem } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { CopyWorkItemLinkButton } from "../../../shared/shell/CopyWorkItemLinkButton.js";
-import { PeekPanel } from "../../../shared/shell/index.js";
 import { useUpdateDisplayPrefs, type DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { usePickerCycles } from "../../../shared/pickers/reference.js";
@@ -64,10 +63,17 @@ import {
 import { SpreadsheetSkeleton } from "../loaders/skeletons.js";
 import { RowContextMenu, RowMenuButton } from "../menus/RowQuickActions.js";
 import { quickActionTarget, useQuickActions } from "../menus/useQuickActions.js";
+import type { LayoutPeekProps } from "../peek/usePeekAddress.js";
+import { usePeekAddress } from "../peek/usePeekAddress.js";
+
+// The peek is the whole detail composition; it loads on first open.
+const LazyIssuePeek = React.lazy(() =>
+  import("../peek/ResolvingIssuePeek.js").then((module) => ({ default: module.ResolvingIssuePeek }))
+);
 
 const ROW_HEIGHT = 44;
 
-export interface SpreadsheetLayoutProps {
+export interface SpreadsheetLayoutProps extends LayoutPeekProps {
   workspaceSlug: string;
   projectId: string;
   projectIdentifier: string;
@@ -86,6 +92,9 @@ export interface SpreadsheetLayoutProps {
   weekStart: number;
   /** Whether this sheet offers multi-select (ISS-108); defaults on. */
   enableSelection?: boolean | undefined;
+  /** Controlled peeked work-item id (the route owns the URL param). */
+  /** Receives the selection the route should write, or null on close (ISS-167). */
+  /** Peeked project from the URL, when it differs from the route (ISS-167). */
 }
 
 export interface DisplayRow {
@@ -108,6 +117,9 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     richExpression = {},
     weekStart,
     enableSelection = true,
+    peekKey,
+    onPeekChange,
+    peekProjectId,
   } = props;
   const client = getAppClient();
   const query = useInfiniteQuery(
@@ -118,7 +130,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     })
   );
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(new Set());
-  const [peekIssue, setPeekIssue] = React.useState<IssueListItem | null>(null);
+  const peek = usePeekAddress({ projectId, peekKey, peekProjectId, onPeekChange });
   const [scrolled, setScrolled] = React.useState(false);
   const [scrollNode, setScrollNode] = React.useState<HTMLDivElement | null>(null);
   const [localSort, setLocalSort] = React.useState<SheetSortState | null>(readStoredSheetSort);
@@ -234,7 +246,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
 
   const toggleExpanded = (row: DisplayRow): void => {
     if (row.depth >= 3) {
-      setPeekIssue(row.issue);
+      peek.open({ issueId: row.issue.id, projectId: row.issue.project_id, nestingLevel: 0 });
       return;
     }
     setExpanded((current) => {
@@ -322,6 +334,9 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
                   hasChildren={(row.issue.sub_issues_count ?? 0) > 0}
                   expanded={expanded.has(row.issue.id)}
                   onToggle={() => toggleExpanded(row)}
+                  onOpenTitle={() =>
+                    peek.open({ issueId: row.issue.id, projectId: row.issue.project_id, nestingLevel: 0 })
+                  }
                   onKeyDown={onGridKeyDown}
                   canWrite={canEdit}
                 />
@@ -392,27 +407,19 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
       ) : bulkEnabled ? null : (
         <BulkUpgradeBanner count={selectedCount} />
       )}
-      {peekIssue === null ? null : (
-        <PeekPanel
-          eyebrow={`${projectIdentifier}-${peekIssue.sequence_id}`}
-          title={peekIssue.name}
-          titleLabel="Work item title"
-          onClose={() => setPeekIssue(null)}
-          actions={
-            <CopyWorkItemLinkButton
-              workspaceSlug={workspaceSlug}
-              issueKey={`${projectIdentifier}-${peekIssue.sequence_id}`}
-            />
-          }
-        >
-          <Link
-            to="/$ws/browse/$issueKey"
-            params={{ ws: workspaceSlug, issueKey: `${projectIdentifier}-${peekIssue.sequence_id}` }}
-            className="text-body font-medium text-(--accent) hover:underline"
-          >
-            Open the full work item
-          </Link>
-        </PeekPanel>
+      {peek.peeked === null ? null : (
+        <React.Suspense fallback={null}>
+          <LazyIssuePeek
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            projectIdentifier={projectIdentifier}
+            peeked={peek.peeked}
+            peekProjectId={peek.peekProjectId}
+            rows={rows.map((row) => row.issue)}
+            onPeekChange={peek.report}
+            onClose={peek.close}
+          />
+        </React.Suspense>
       )}
     </div>
   );
@@ -591,6 +598,7 @@ function SheetRow({
   selected,
   active,
   onSelectionToggle,
+  onOpenTitle,
   canWrite,
 }: {
   row: DisplayRow;
@@ -604,6 +612,8 @@ function SheetRow({
   selected: boolean;
   active: boolean;
   onSelectionToggle: (id: string, shiftKey: boolean) => void;
+  /** A plain click on the title opens the peek, like the other layouts. */
+  onOpenTitle: () => void;
   hasChildren: boolean;
   expanded: boolean;
   onToggle: () => void;
@@ -681,7 +691,15 @@ function SheetRow({
             {temp ? (
               <span>{issue.name}</span>
             ) : (
-              <Link to={href} className="text-(--text) hover:underline">
+              <Link
+                to={href}
+                className="text-(--text) hover:underline"
+                onClick={(event) => {
+                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+                  event.preventDefault();
+                  onOpenTitle();
+                }}
+              >
                 {issue.name}
               </Link>
             )}

@@ -322,6 +322,8 @@ beforeEach(() => {
   // still mount the sheet; the sort persistence cases opt into jsdom's.
   globalThis.localStorage?.clear();
   setViewport(800, 400);
+  // The sheet mirrors the peek into the address; each case starts clean.
+  window.history.replaceState({}, "", "/");
 });
 
 afterEach(() => {
@@ -612,7 +614,7 @@ describe("SpreadsheetLayout", () => {
     state.release?.();
   });
 
-  it("navigates from the sub-issue count and from the row title to the work item", async () => {
+  it("navigates from the sub-issue count and opens the peek from the row title", async () => {
     stub({ pages: [page([issue(ID1, "Fix login", 1, { sub_issues_count: 2 }), issue(ID2, "Second", 2)])] });
     const { router } = renderSheet();
     await screen.findByRole("table");
@@ -622,9 +624,36 @@ describe("SpreadsheetLayout", () => {
     expect(router.state.location.hash.replace(/^#/, "")).toBe("sub-issues");
     await router.navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: SLUG, projectId: PROJECT } });
     await screen.findByRole("table");
+    // A plain title click is the peek, like the row in every other layout;
+    // the sub-issue count keeps its full-page link (ISS-165).
     fireEvent.click(await screen.findByRole("link", { name: "Fix login" }));
-    await waitFor(() => expect(router.state.location.pathname).toBe(`/${SLUG}/browse/WEB-1`));
-    expect(router.state.location.hash).toBe("");
+    expect(await screen.findByTestId("issue-preview")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe(`/${SLUG}/projects/${PROJECT}/issues`);
+    expect(new URLSearchParams(window.location.search).get("peekIssueId")).toBe(ID1);
+  });
+
+  it("lets a modified title click leave for the full page", async () => {
+    stub();
+    const { router } = renderSheet();
+    await screen.findByRole("table");
+    const title = await screen.findByRole("link", { name: "Fix login" });
+    expect(title).toHaveAttribute("href", `/${SLUG}/browse/WEB-1`);
+    fireEvent.click(title, { metaKey: true });
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+    expect(router.state.location.pathname).toBe(`/${SLUG}/projects/${PROJECT}/issues`);
+  });
+
+  it("opens the peek from a deep-linked id and strips its params on close", async () => {
+    stub();
+    window.history.replaceState({}, "", `/${SLUG}/projects/${PROJECT}/issues?layout=compact&peekIssueId=${ID2}`);
+    renderSheet();
+    await screen.findByRole("table");
+    expect(await screen.findByTestId("issue-preview")).toBeInTheDocument();
+    fireEvent.click(within(screen.getByTestId("issue-preview")).getByRole("button", { name: "Close preview" }));
+    await waitFor(() => expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument());
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get("peekIssueId")).toBeNull();
+    expect(params.get("layout")).toBe("compact");
   });
 
   it("offers the shared project menu from the row ellipsis and from right-click", async () => {

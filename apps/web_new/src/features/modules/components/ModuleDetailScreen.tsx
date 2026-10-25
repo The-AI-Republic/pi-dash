@@ -19,6 +19,7 @@ import { useDocumentHead } from "../../../shared/shell/index.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { isCompletedModule } from "../../../shared/pickers/modules.js";
 import { EntityListScreen, listPageQueryOptions, prefsQueryOptions, selectDisplayPrefs } from "../../issues/index.js";
+import type { PeekRequest } from "../../issues/index.js";
 import { moduleDetailTitle } from "../lib/moduleDetail.js";
 import { toModuleCreateProject } from "../lib/moduleAddWorkItem.js";
 import { useModuleAddWorkItem } from "../lib/useModuleAddWorkItem.js";
@@ -32,13 +33,14 @@ import { ModuleDetailBadge } from "./ModuleDetailBadge.js";
 import { ModuleDetailActions } from "./dialogs/ModuleDetailActions.js";
 import { ModuleDetailCrumbs } from "./ModuleDetailCrumbs.js";
 import { ModuleSidebarToggle } from "./ModuleSidebarToggle.js";
-
 export interface ModuleDetailScreenProps {
   workspaceSlug: string;
   projectId: string;
   moduleId: string;
   peekKey: string | null;
-  onPeekChange: (key: string | null) => void;
+  onPeekChange: (request: PeekRequest) => void;
+  /** Peeked project from the URL, when it differs from the route (ISS-167). */
+  peekProjectId?: string | null | undefined;
   compact: boolean;
 }
 
@@ -48,6 +50,7 @@ export function ModuleDetailScreen({
   moduleId,
   peekKey,
   onPeekChange,
+  peekProjectId = null,
   compact,
 }: ModuleDetailScreenProps): React.ReactElement {
   const client = getAppClient();
@@ -118,6 +121,7 @@ export function ModuleDetailScreen({
             completedModule={isCompletedModule(module.status)}
             peekKey={peekKey}
             onPeekChange={onPeekChange}
+            peekProjectId={peekProjectId}
             compact={compact}
             extraHeaderActions={
               <>

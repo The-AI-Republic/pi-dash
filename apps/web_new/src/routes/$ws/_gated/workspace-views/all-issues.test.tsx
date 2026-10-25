@@ -9,12 +9,18 @@
 // controls, scoped body) is covered in its own tests.
 import { QueryClient } from "@tanstack/react-query";
 import { createClient } from "@pidash/api-client";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { makeView } from "../../../../features/views/testing.js";
 import { Route } from "./all-issues.js";
+
+const navigateHarness = vi.hoisted(() => ({ navigate: vi.fn() }));
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useNavigate: () => navigateHarness.navigate,
+}));
 
 // The detail chunk stands in as an echo: the render case pins what the
 // route itself owns (the static key, the params pass-through), while the
@@ -23,11 +29,37 @@ import { Route } from "./all-issues.js";
 vi.mock("../../../../features/views/detail/lazy.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../features/views/detail/lazy.js")>()),
   resolvedWorkspaceViewDetail: () => ({
-    WorkspaceViewScreen: function StubScreen({ params }: { params: { ws: string; viewId: string } }) {
-      return <div data-testid="stub-screen">{`${params.ws}/${params.viewId}`}</div>;
+    WorkspaceViewScreen: function StubScreen({
+      params,
+      peek,
+    }: {
+      params: { ws: string; viewId: string };
+      peek: { peekKey: string | null; peekProjectId: string | null; onPeekChange: (request: unknown) => void };
+    }) {
+      return (
+        <div
+          data-testid="stub-screen"
+          data-peek={String(peek.peekKey ?? "")}
+          data-peek-project={String(peek.peekProjectId ?? "")}
+        >
+          {`${params.ws}/${params.viewId}`}
+          <button
+            type="button"
+            onClick={() => peek.onPeekChange({ issueId: ISSUE, projectId: PROJECT, nestingLevel: 0 })}
+          >
+            open
+          </button>
+          <button type="button" onClick={() => peek.onPeekChange(null)}>
+            close
+          </button>
+        </div>
+      );
     },
   }),
 }));
+
+const ISSUE = "023e4567-e89b-12d3-a456-426614174010";
+const PROJECT = "423e4567-e89b-12d3-a456-426614174003";
 
 vi.mock("../../../../core/session/hooks.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../core/session/hooks.js")>()),
@@ -149,11 +181,61 @@ describe("all-issues route", () => {
 
   it("renders the detail chunk with the static key", async () => {
     const paramsSpy = vi.spyOn(Route, "useParams").mockReturnValue(PARAMS as never);
+    const searchSpy = vi.spyOn(Route, "useSearch").mockReturnValue({} as never);
     const Component = Route.options.component;
     if (!Component) throw new Error("missing component");
     render(<Component />);
     expect(await screen.findByTestId("stub-screen")).toHaveTextContent("acme/all-issues");
     expect(paramsSpy).toHaveBeenCalled();
     paramsSpy.mockRestore();
+    searchSpy.mockRestore();
+  });
+
+  it("validates the peek params out of the address (ISS-167)", () => {
+    const validate = Route.options.validateSearch as unknown as (
+      search: Record<string, unknown>
+    ) => Record<string, unknown>;
+    expect(validate({ peekIssueId: ISSUE, peekProjectId: PROJECT, other: "x" })).toEqual({
+      peekIssueId: ISSUE,
+      peekProjectId: PROJECT,
+    });
+    expect(validate({ peekIssueId: 7 })).toEqual({});
+  });
+
+  it("hands the route's peek address to the screen (ISS-167)", async () => {
+    const paramsSpy = vi.spyOn(Route, "useParams").mockReturnValue(PARAMS as never);
+    const searchSpy = vi
+      .spyOn(Route, "useSearch")
+      .mockReturnValue({ peekIssueId: ISSUE, peekProjectId: PROJECT } as never);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("missing component");
+    render(<Component />);
+    const screenNode = await screen.findByTestId("stub-screen");
+    expect(screenNode).toHaveAttribute("data-peek", ISSUE);
+    expect(screenNode).toHaveAttribute("data-peek-project", PROJECT);
+    paramsSpy.mockRestore();
+    searchSpy.mockRestore();
+  });
+
+  it("writes the peek with replace and always names the row's project (ISS-167)", async () => {
+    const paramsSpy = vi.spyOn(Route, "useParams").mockReturnValue(PARAMS as never);
+    const searchSpy = vi.spyOn(Route, "useSearch").mockReturnValue({ view: "triage" } as never);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("missing component");
+    render(<Component />);
+    fireEvent.click(await screen.findByRole("button", { name: "open" }));
+    expect(navigateHarness.navigate).toHaveBeenLastCalledWith({
+      to: ".",
+      search: { view: "triage", peekIssueId: ISSUE, peekProjectId: PROJECT },
+      replace: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "close" }));
+    expect(navigateHarness.navigate).toHaveBeenLastCalledWith({
+      to: ".",
+      search: { view: "triage" },
+      replace: true,
+    });
+    paramsSpy.mockRestore();
+    searchSpy.mockRestore();
   });
 });
