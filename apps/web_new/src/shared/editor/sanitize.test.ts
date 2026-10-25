@@ -34,6 +34,17 @@ describe("sanitizeHtml", () => {
     expect(clean).not.toContain("onerror");
   });
 
+  it("keeps a stored link's target on the anchor and nowhere else", () => {
+    const clean = sanitizeHtml(
+      '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer nofollow">out</a>' +
+        '<span target="_blank">inline</span></p><img src="x" target="_blank">'
+    );
+    expect(clean).toContain('<a href="https://example.com" target="_blank" rel="noopener noreferrer nofollow">');
+    expect(clean).toContain("<span>inline</span>");
+    expect(clean).toContain('<img src="x">');
+    expect(sanitizeHtml('<a href="javascript:alert(1)" target="_blank">x</a>')).not.toContain("javascript:");
+  });
+
   it("drops javascript: links", () => {
     expect(sanitizeHtml('<a href="javascript:alert(1)">x</a>')).not.toContain("javascript:");
   });

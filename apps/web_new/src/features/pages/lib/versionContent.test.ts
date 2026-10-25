@@ -211,6 +211,75 @@ describe("snapshotBodyHtml", () => {
     expect(html).toBe('<p><a href="https://example.test/a?b=1&amp;c=2">site</a> bare</p>');
   });
 
+  it("keeps the stored link attributes the page editor writes", () => {
+    // Captured from the page editor (StarterKit + Link): every link mark
+    // carries target, rel and class beside its address.
+    const html = snapshotBodyHtml({
+      description_json: doc(
+        paragraph(
+          text("one", [
+            {
+              type: "link",
+              attrs: {
+                href: "https://example.test/a?b=1&c=2",
+                target: "_blank",
+                rel: "noopener noreferrer nofollow",
+                class: null,
+              },
+            },
+          ]),
+          text(" "),
+          text("two", [
+            { type: "link", attrs: { href: "https://example.test/y", target: "_self", rel: "nofollow", class: "k" } },
+          ])
+        )
+      ),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    expect(html).toBe(
+      '<p><a href="https://example.test/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer nofollow">one</a> ' +
+        '<a href="https://example.test/y" target="_self" rel="nofollow" class="k">two</a></p>'
+    );
+  });
+
+  it("falls back rather than dropping a link attribute it cannot paint", () => {
+    const unknownAttribute = snapshotBodyHtml({
+      description_json: doc(
+        paragraph(
+          text("site", [{ type: "link", attrs: { href: "https://example.test", target: "_blank", download: "a.pdf" } }])
+        )
+      ),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    const numericRel = snapshotBodyHtml({
+      description_json: doc(
+        paragraph(text("site", [{ type: "link", attrs: { href: "https://example.test", rel: 42 } }]))
+      ),
+      description_html: "<p>Markup fallback words</p>",
+    });
+    expect(unknownAttribute).toBe("<p>Markup fallback words</p>");
+    expect(numericRel).toBe("<p>Markup fallback words</p>");
+  });
+
+  it("escapes an address and its link attributes so stored quotes cannot break out", () => {
+    const html = snapshotBodyHtml({
+      description_json: doc(
+        paragraph(
+          text("site", [
+            {
+              type: "link",
+              attrs: { href: 'https://example.test/"onmouseover="x', target: '""', rel: "a&b" },
+            },
+          ])
+        )
+      ),
+      description_html: "",
+    });
+    expect(html).toBe(
+      '<p><a href="https://example.test/&quot;onmouseover=&quot;x" target="&quot;&quot;" rel="a&amp;b">site</a></p>'
+    );
+  });
+
   it("escapes text so stored angle brackets never become tags", () => {
     const html = snapshotBodyHtml({
       description_json: doc(paragraph(text("a < b & c > d"))),

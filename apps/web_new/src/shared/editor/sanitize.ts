@@ -9,7 +9,7 @@
 // their names and attributes are allowed exactly as the API's content
 // validator allows them; anything else stays stripped.
 
-import DOMPurify from "dompurify";
+import DOMPurify, { type UponSanitizeAttributeHook } from "dompurify";
 
 import { MENTION_CONTENT_TAGS, MENTION_ENTITY } from "./mention.js";
 
@@ -40,13 +40,31 @@ const STORED_CONTENT_ATTRIBUTES: Record<string, readonly string[]> = {
   input: ["type", "checked", "disabled"],
 };
 
+/**
+ * Attributes the stored-body contract keeps beyond the sanitizer's
+ * defaults, each on the one element that carries it. A link stores the
+ * window it opens in (`target`), which the API's content validator keeps
+ * and the editor writes beside the address; DOMPurify would drop it.
+ */
+const ELEMENT_ATTRIBUTES: Readonly<Record<string, string>> = { a: "target" };
+
 /** Clean stored rich-text HTML for rendering. Returns safe markup. */
 export function sanitizeHtml(dirty: string): string {
   const allowedAttributes = Object.values(STORED_CONTENT_ATTRIBUTES).flat();
-  return DOMPurify.sanitize(dirty, {
-    ADD_TAGS: [...STORED_CONTENT_TAGS],
-    ADD_ATTR: [...new Set([...allowedAttributes, "data-name"])],
-  });
+  // The hook is the only way the attribute survives: the allowlist would
+  // keep it on every element. Unsafe addresses are still rejected.
+  const keepElementAttribute: UponSanitizeAttributeHook = (node, data) => {
+    if (ELEMENT_ATTRIBUTES[node.nodeName.toLowerCase()] === data.attrName) data.forceKeepAttr = true;
+  };
+  DOMPurify.addHook("uponSanitizeAttribute", keepElementAttribute);
+  try {
+    return DOMPurify.sanitize(dirty, {
+      ADD_TAGS: [...STORED_CONTENT_TAGS],
+      ADD_ATTR: [...new Set([...allowedAttributes, "data-name"])],
+    });
+  } finally {
+    DOMPurify.removeHook("uponSanitizeAttribute", keepElementAttribute);
+  }
 }
 
 /** Absolute or self-describing sources never need the asset path. */

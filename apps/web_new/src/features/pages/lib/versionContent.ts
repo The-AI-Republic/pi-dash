@@ -64,13 +64,33 @@ function escapeText(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function escapeAttribute(value: string): string {
+  return escapeText(value).replace(/"/g, "&quot;");
+}
+
 function marksOf(value: unknown): StructuredMark[] {
   return Array.isArray(value) ? (value as StructuredMark[]) : [];
 }
 
-/** A mark is paintable when both its kind and the address it carries are. */
+/**
+ * The attributes the page editor stores on a link mark. Tiptap writes
+ * `target`, `rel` and `class` beside the address, so a link painted from
+ * the address alone would lose the new-tab and safety hints the editor
+ * (and the old app's reader) keeps.
+ */
+const LINK_ATTRIBUTES: ReadonlySet<string> = new Set(["href", "target", "rel", "class"]);
+
+/** A link mark is paintable when its address and every other stored attribute are. */
+function linkRenderable(attrs: Record<string, unknown>): boolean {
+  return Object.entries(attrs).every(
+    ([name, value]) => value === null || value === undefined || (LINK_ATTRIBUTES.has(name) && typeof value === "string")
+  );
+}
+
+/** A mark is paintable when both its kind and the attributes it carries are. */
 function markRenderable(mark: StructuredMark): boolean {
   if (typeof mark.type !== "string" || !RENDERABLE_MARKS.has(mark.type)) return false;
+  if (mark.type === "link") return linkRenderable(attrsOf(mark.attrs));
   const href = attrsOf(mark.attrs)["href"];
   return href === undefined || typeof href === "string";
 }
@@ -136,8 +156,16 @@ function wrapMark(mark: RenderableMark, inner: string): string {
     case "code":
       return `<code>${inner}</code>`;
     case "link": {
-      const href = attrsOf(mark.attrs)["href"];
-      return typeof href === "string" && href !== "" ? `<a href="${escapeText(href)}">${inner}</a>` : inner;
+      const attrs = attrsOf(mark.attrs);
+      const href = attrs["href"];
+      if (typeof href !== "string" || href === "") return inner;
+      const opening = ["href", "target", "rel", "class"]
+        .map((name) => {
+          const value = attrs[name];
+          return typeof value === "string" ? ` ${name}="${escapeAttribute(value)}"` : "";
+        })
+        .join("");
+      return `<a${opening}>${inner}</a>`;
     }
   }
 }

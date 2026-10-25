@@ -860,6 +860,51 @@ describe("PageDetailScreen deep links", () => {
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Page version restored."));
   });
 
+  it("keeps a snapshot link's stored target and rel through display and restore", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    harness.versionJson = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { textAlign: null },
+          content: [
+            {
+              type: "text",
+              marks: [
+                {
+                  type: "link",
+                  attrs: {
+                    href: "https://example.test/linked",
+                    target: "_blank",
+                    rel: "noopener noreferrer nofollow",
+                    class: null,
+                  },
+                },
+              ],
+              text: "Linked words",
+            },
+          ],
+        },
+      ],
+    };
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    const body = await screen.findByLabelText("Version body");
+    await waitFor(() => expect(body.querySelector("a")).toHaveTextContent("Linked words"));
+    const shown = body.querySelector("a");
+    expect(shown?.getAttribute("href")).toBe("https://example.test/linked");
+    expect(shown?.getAttribute("target")).toBe("_blank");
+    expect(shown?.getAttribute("rel")).toBe("noopener noreferrer nofollow");
+    const editor = await screen.findByLabelText("Page body");
+    await waitFor(() => expect(editor).toHaveAttribute("contenteditable", "true"));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(editor.querySelector("a")).toHaveTextContent("Linked words"));
+    const restored = editor.querySelector("a");
+    expect(restored?.getAttribute("target")).toBe("_blank");
+    expect(restored?.getAttribute("rel")).toBe("noopener noreferrer nofollow");
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Page version restored."));
+  });
+
   it("reports a refused restore and leaves the overlay and address alone", async () => {
     harness.versions = [SNAPSHOT_ROW];
     vi.mocked(applyPageRestore).mockReturnValueOnce(false);
