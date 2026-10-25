@@ -8,11 +8,15 @@
 // the fetch; a failed or empty read shows the guidance panel with
 // no plot, legend, or axis labels.
 import { Skeleton } from "@pidash/kit";
+import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
 import { useResolvedScheme } from "../../../core/theme/index.js";
 import { AreaChart, resolveChartScheme, type AreaSeriesDef } from "../../../shared/charts/index.js";
-import { useAnalyticsWorkItemsChart } from "../api/charts.js";
+import { getAppClient } from "../../../core/api/client.js";
+import { analyticsWorkItemsChartQueryOptions } from "../api/charts.js";
+import type { AnalyticsDialogScope } from "../api/keys.js";
+import { dialogWorkItemsChartQueryOptions } from "../api/projectScope.js";
 import {
   CREATED_SERIES_KEY,
   CREATED_SERIES_NAME,
@@ -27,6 +31,8 @@ export interface CreatedResolvedSectionProps {
   workspaceSlug: string;
   /** Resolved picker scope; enters the query key and the request. */
   projectIds: readonly string[];
+  /** Scoped dialog mode (ANL-014): read the project endpoint instead. */
+  dialogScope?: AnalyticsDialogScope | undefined;
 }
 
 /** Guidance copy for a failed or empty series read (oracle-pinned). */
@@ -44,8 +50,26 @@ function CreatedResolvedShell({ children }: { children: React.ReactNode }): Reac
   );
 }
 
-export function CreatedResolvedSection({ workspaceSlug, projectIds }: CreatedResolvedSectionProps): React.ReactElement {
-  const series = useAnalyticsWorkItemsChart(workspaceSlug, projectIds);
+export function CreatedResolvedSection({
+  workspaceSlug,
+  projectIds,
+  dialogScope,
+}: CreatedResolvedSectionProps): React.ReactElement {
+  // Exactly one source reads: the scoped dialog uses the project family,
+  // the tab the workspace family. Both hooks mount so their order is fixed.
+  const dialogSeries = useQuery({
+    ...dialogWorkItemsChartQueryOptions(
+      getAppClient(),
+      workspaceSlug,
+      dialogScope ?? { projectId: "", cycleId: null, moduleId: null }
+    ),
+    enabled: dialogScope !== undefined,
+  });
+  const tabSeries = useQuery({
+    ...analyticsWorkItemsChartQueryOptions(getAppClient(), workspaceSlug, projectIds),
+    enabled: dialogScope === undefined,
+  });
+  const series = dialogScope === undefined ? tabSeries : dialogSeries;
   const { scheme, customDark } = useResolvedScheme();
 
   if (series.isPending) {

@@ -275,9 +275,15 @@ test(
         module.id,
         browserSessionCookies(world.owner)
       );
-      await expect
-        .poll(() => driver.analyticsDialogTitle(), { timeout: 60_000 })
-        .toBe(`Analytics for ${project.name}  in ${module.name}`);
+      // The oracle's title template leaves an empty cycle fragment behind,
+      // so its module title carries a double space. Spec §13 declares one
+      // space as the intended wording and the new build implements it;
+      // this scenario records the divergence rather than the typo.
+      const moduleTitle =
+        driver.target === "web_new"
+          ? `Analytics for ${project.name} in ${module.name}`
+          : `Analytics for ${project.name}  in ${module.name}`;
+      await expect.poll(() => driver.analyticsDialogTitle(), { timeout: 60_000 }).toBe(moduleTitle);
       await expect
         .poll(
           async () =>

@@ -431,7 +431,7 @@ export {
   withIssueOrder,
 } from "./gantt/useGanttMutations.js";
 export type { GanttMutations } from "./gantt/useGanttMutations.js";
-export { AnalyticsEntry, groupCounts } from "./analytics/AnalyticsEntry.js";
+export { AnalyticsEntry } from "./analytics/AnalyticsEntry.js";
 export type { AnalyticsEntryProps } from "./analytics/AnalyticsEntry.js";
 export type { SpreadsheetLayoutProps } from "./spreadsheet/SpreadsheetLayout.js";
 export {

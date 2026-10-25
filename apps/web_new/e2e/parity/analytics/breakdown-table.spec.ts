@@ -148,9 +148,7 @@ async function moveSeededIssue(
 }
 
 /** Per-project rows of a stats payload. */
-function statRowsOf(
-  payload: unknown
-): Array<{
+function statRowsOf(payload: unknown): Array<{
   project: string;
   backlog: number;
   started: number;
@@ -372,6 +370,13 @@ test(
 
     await test.step("the dialog exports carry the same filename and headers", async () => {
       await driver.analyticsDialogOpenFromIssues(world.workspaceSlug, project.id, browserSessionCookies(world.owner));
+      // The two dialog tables settle independently: the chart table waits
+      // for its own read, the assignee table for stats. Each export read
+      // below waits for that table's own control, and these polls first
+      // prove both tables hold rows so an export can never run against a
+      // skeleton.
+      await expect.poll(() => driver.analyticsExportRowCount("chart"), { timeout: 60_000 }).toBe(2);
+      await expect.poll(() => driver.analyticsDialogRowCount(), { timeout: 60_000 }).toBeGreaterThan(0);
       const chartFile = await driver.analyticsDialogExportDownload(0);
       expect(chartFile.fileName).toBe(`${world.workspaceSlug}-analytics.csv`);
       expect(csvRowsOf(chartFile.content)[0]).toEqual(["Priority", "Count"]);

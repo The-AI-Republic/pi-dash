@@ -13,7 +13,7 @@ import { ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/permissions.js";
 import { sessionKeys } from "../../../core/session/queries.js";
 import { authKeys } from "../../auth/queries.js";
 import { pickerKeys } from "../../../shared/pickers/index.js";
-import { AnalyticsEntry, groupCounts, type AnalyticsRow } from "./AnalyticsEntry.js";
+import { AnalyticsEntry } from "./AnalyticsEntry.js";
 
 const WORKSPACE = "123e4567-e89b-12d3-a456-426614174000";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -74,57 +74,32 @@ describe("AnalyticsEntry", () => {
   it("shows to a project member even without workspace edit rights", async () => {
     // A guest-role workspace row with project membership is unusual but
     // the gate is the project role; the workspace admin path is separate.
-    const { container } = render(harness(ROLE_GUEST, { totalCount: 1 }, ROLE_MEMBER));
+    const { container } = render(harness(ROLE_GUEST, {}, ROLE_MEMBER));
     await waitFor(() => expect(container).not.toBeEmptyDOMElement());
     expect(await screen.findByTestId("issues-analytics-entry")).toBeInTheDocument();
   });
 
   it("shows to a workspace admin regardless of project membership", async () => {
-    render(harness(20, { totalCount: 1 }, null));
+    render(harness(20, {}, null));
     expect(await screen.findByTestId("issues-analytics-entry")).toBeInTheDocument();
   });
 
-  it("opens a project-scoped dialog with the total and group counts", async () => {
+  it("opens the scoped panel titled for the project", async () => {
     const user = userEvent.setup();
-    render(
-      harness(ROLE_MEMBER, { rows: [{ state_id: TODO }, { state_id: TODO }, { state_id: IN_PROGRESS }], totalCount: 3 })
-    );
-    const entry = await screen.findByTestId("issues-analytics-entry");
-    await user.click(entry);
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Work items analytics")).toBeInTheDocument();
-    expect(dialog).toHaveTextContent("Work items in Website");
-    expect(within(dialog).getByTestId("analytics-total")).toHaveTextContent("3");
-    expect(within(dialog).getByText("unstarted")).toBeInTheDocument();
-    expect(within(dialog).getByText("started")).toBeInTheDocument();
-  });
-
-  it("keeps the server total and skips partial-page group counts", async () => {
-    const user = userEvent.setup();
-    render(harness(ROLE_MEMBER, { rows: [{ state_id: TODO }], totalCount: 40 }));
+    render(harness(ROLE_MEMBER));
     await user.click(await screen.findByTestId("issues-analytics-entry"));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByTestId("analytics-total")).toHaveTextContent("40");
-    expect(within(dialog).queryByText("unstarted")).not.toBeInTheDocument();
-  });
-
-  it("names the epic dialog and its empty state", async () => {
-    const user = userEvent.setup();
-    render(harness(ROLE_MEMBER, { isEpics: true, totalCount: 0 }));
-    await user.click(await screen.findByTestId("issues-analytics-entry"));
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Epic analytics")).toBeInTheDocument();
-    expect(within(dialog).getByText("No grouped counts to show yet.")).toBeInTheDocument();
-    expect(within(dialog).getByTestId("analytics-total")).toHaveTextContent("0");
+    expect(within(dialog).getByRole("heading", { name: "Analytics for Website" })).toBeInTheDocument();
+    expect(within(dialog).getByTestId("issues-analytics-body")).toBeInTheDocument();
   });
 
   it("names the cycle scope in the dialog for members", async () => {
     const user = userEvent.setup();
-    render(harness(ROLE_MEMBER, { cycle: { id: "cycle-1", name: "Sprint 3" }, totalCount: 2 }));
+    render(harness(ROLE_MEMBER, { cycle: { id: "cycle-1", name: "Sprint 3" } }));
     expect(screen.queryByTestId("issues-analytics-entry")).not.toBeInTheDocument();
     await user.click(await screen.findByTestId("cycle-analytics-entry"));
     const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("Analytics for Website in Sprint 3");
+    expect(within(dialog).getByRole("heading", { name: "Analytics for Website in Sprint 3" })).toBeInTheDocument();
   });
 
   it("keeps the desktop trigger member+ under a cycle scope", async () => {
@@ -141,9 +116,9 @@ describe("AnalyticsEntry", () => {
     expect(screen.queryByTestId("cycle-analytics-entry")).not.toBeInTheDocument();
     await user.click(screen.getByTestId("cycle-analytics-entry-narrow"));
     const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("Analytics for Website in Sprint 3");
+    expect(within(dialog).getByRole("heading", { name: "Analytics for Website in Sprint 3" })).toBeInTheDocument();
     await user.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
   it("renders both triggers for members when the narrow entry is on", async () => {
@@ -152,13 +127,13 @@ describe("AnalyticsEntry", () => {
     expect(screen.getByTestId("cycle-analytics-entry-narrow")).toBeInTheDocument();
   });
 
-  it("names the module scope in the dialog for members", async () => {
+  it("names the module scope in the dialog with one space", async () => {
     const user = userEvent.setup();
-    render(harness(ROLE_MEMBER, { module: { id: "module-1", name: "Alpha" }, totalCount: 2 }));
+    render(harness(ROLE_MEMBER, { module: { id: "module-1", name: "Alpha" } }));
     expect(screen.queryByTestId("issues-analytics-entry")).not.toBeInTheDocument();
     await user.click(await screen.findByTestId("module-analytics-entry"));
     const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("Analytics for Website in Alpha");
+    expect(within(dialog).getByRole("heading", { name: "Analytics for Website in Alpha" })).toBeInTheDocument();
   });
 
   it("keeps the desktop trigger member+ under a module scope", async () => {
@@ -166,26 +141,11 @@ describe("AnalyticsEntry", () => {
     await waitFor(() => expect(screen.queryByTestId("module-analytics-entry")).not.toBeInTheDocument());
     expect(container).toBeEmptyDOMElement();
   });
-});
 
-describe("groupCounts", () => {
-  it("groups by workflow group in first-seen order", () => {
-    const rows: AnalyticsRow[] = [{ state_id: IN_PROGRESS }, { state_id: TODO }, { state_id: IN_PROGRESS }];
-    expect(groupCounts(rows, STATES)).toEqual([
-      { label: "started", count: 2 },
-      { label: "unstarted", count: 1 },
-    ]);
-    expect(groupCounts([], STATES)).toEqual([]);
-  });
-
-  it("labels rows without a state or with an unknown state", () => {
-    expect(groupCounts([{ state_id: null }, { state_id: "missing" }], STATES)).toEqual([
-      { label: "No state", count: 1 },
-      { label: "Other", count: 1 },
-    ]);
-  });
-
-  it("falls back to Other until the state list resolves", () => {
-    expect(groupCounts([{ state_id: TODO }], undefined)).toEqual([{ label: "Other", count: 1 }]);
+  it("adds no dialog trigger for guests on any scope", async () => {
+    // ANL-018: analytics opens no guest entry point; the desktop gate on
+    // every surface is the role check above.
+    render(harness(ROLE_GUEST, {}, ROLE_GUEST));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Analytics" })).not.toBeInTheDocument());
   });
 });

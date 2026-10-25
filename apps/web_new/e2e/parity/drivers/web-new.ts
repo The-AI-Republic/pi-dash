@@ -5833,15 +5833,19 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openAnalytics(): Promise<void> {
-    return todo("openAnalytics");
+    // The header entry is the app's own trigger; the open ends with the
+    // panel's dialog mounted, which every caller relies on.
+    await this.page.getByRole("button", { name: "Analytics" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("dialog").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async closeAnalytics(): Promise<void> {
-    return todo("closeAnalytics");
+    await this.page.keyboard.press("Escape");
+    await this.page.getByRole("dialog").waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async analyticsDialogText(): Promise<string> {
-    return todo("analyticsDialogText");
+    return (await this.page.getByRole("dialog").innerText({ timeout: WebNewDriver.WAIT_MS })).trim();
   }
 
   // Command palette / search / help / browse / repo-star (NEWFRONT-127).
@@ -25780,7 +25784,26 @@ export class WebNewDriver implements ParityDriver {
     }, testid);
   }
   async analyticsDialogHeadlineCards(): Promise<AnalyticsHeadlineCard[]> {
-    return todo("analyticsDialogHeadlineCards");
+    // The panel's grid is the only one inside the dialog; it settles when
+    // every card shows a value rather than a placeholder.
+    await this.page
+      .waitForFunction(
+        () => {
+          const grid = document.querySelector("[role='dialog'] [data-testid='analytics-headline-grid']");
+          if (!grid || grid.children.length === 0) return false;
+          return grid.querySelector("[data-testid='analytics-headline-placeholder']") === null;
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics dialog headline cards never settled.");
+      });
+    return this.page.evaluate(() =>
+      [...document.querySelectorAll("[role='dialog'] [data-testid='analytics-headline-card']")].map((card) => ({
+        label: (card.querySelector("[data-testid='analytics-headline-label']")?.textContent ?? "").trim(),
+        value: (card.querySelector("[data-testid='analytics-headline-value']")?.textContent ?? "").trim(),
+      }))
+    );
   }
 
   // --- Analytics custom insights, tables, dialog (NEWFRONT-377, ANL-010..017).
@@ -25990,61 +26013,191 @@ export class WebNewDriver implements ParityDriver {
   async analyticsInsightSkeletonCells(): Promise<number> {
     return this.analyticsExportTable("insight").locator("td > span[style*='height'][style*='20px']").count();
   }
+  /** Watch for the panel's pre-content spinner mounting (armed before open). */
+  private async analyticsDialogArmSpinner(): Promise<void> {
+    await this.page.evaluate(() => {
+      const scope = window as unknown as Record<string, unknown>;
+      scope["__paritySpinSeen"] = false;
+      const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          for (const node of [...mutation.addedNodes]) {
+            if (
+              node instanceof HTMLElement &&
+              (node.getAttribute("role") === "status" || node.querySelector("[role='status']") !== null)
+            ) {
+              scope["__paritySpinSeen"] = true;
+            }
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      scope["__paritySpinObs"] = observer;
+    });
+  }
+
+  /** Open one surface as `cookies` and press its Analytics entry. */
+  private async analyticsDialogOpenFromSurface(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(path, cookies);
+    await this.analyticsDialogArmSpinner();
+    await this.page
+      .getByRole("button", { name: "Analytics" })
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("button", { name: "Analytics" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("dialog").waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async analyticsDialogOpenFromIssues(
-    _workspaceSlug: string,
-    _projectId: string,
-    _cookies: ParityBrowserCookie[]
+    workspaceSlug: string,
+    projectId: string,
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("analyticsDialogOpenFromIssues");
+    await this.analyticsDialogOpenFromSurface(`/${workspaceSlug}/projects/${projectId}/issues`, cookies);
   }
+
   async analyticsDialogOpenFromCycle(
-    _workspaceSlug: string,
-    _projectId: string,
-    _cycleId: string,
-    _cookies: ParityBrowserCookie[]
+    workspaceSlug: string,
+    projectId: string,
+    cycleId: string,
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("analyticsDialogOpenFromCycle");
+    await this.analyticsDialogOpenFromSurface(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, cookies);
   }
+
   async analyticsDialogOpenFromModule(
-    _workspaceSlug: string,
-    _projectId: string,
-    _moduleId: string,
-    _cookies: ParityBrowserCookie[]
+    workspaceSlug: string,
+    projectId: string,
+    moduleId: string,
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("analyticsDialogOpenFromModule");
+    await this.analyticsDialogOpenFromSurface(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, cookies);
   }
+
   async analyticsSurfaceTriggerCount(): Promise<number> {
-    return todo("analyticsSurfaceTriggerCount");
+    return this.page.getByRole("button", { name: "Analytics" }).count();
   }
+
   async analyticsDialogTitle(): Promise<string> {
-    return todo("analyticsDialogTitle");
+    // Resolve one node before waiting. The panel's other sections render
+    // their own `h2` once the scope settles, so an unsettled `h2` locator
+    // is ambiguous by the time `waitFor` re-checks it (strict mode), which
+    // read as a race against the spinner. The title is the panel's first
+    // heading in document order.
+    const heading = this.page.getByRole("dialog").locator("h2").first();
+    await heading.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await heading.textContent()) ?? "").trim();
   }
+
   async analyticsDialogSpinnerSeen(): Promise<boolean> {
-    return todo("analyticsDialogSpinnerSeen");
+    return this.page.evaluate(() => (window as unknown as Record<string, unknown>)["__paritySpinSeen"] === true);
   }
+
   async analyticsDialogWideToggleVisible(): Promise<boolean> {
-    return todo("analyticsDialogWideToggleVisible");
+    const toggle = this.page.getByTestId("analytics-dialog-wide-toggle");
+    return (
+      (await toggle.count()) > 0 &&
+      (await toggle
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
+
   async analyticsDialogToggleWide(): Promise<void> {
-    return todo("analyticsDialogToggleWide");
+    const before = await this.analyticsDialogWidth();
+    await this.page.getByTestId("analytics-dialog-wide-toggle").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .waitForFunction(
+        (previous) => {
+          const content = document.querySelector("[role='dialog'] [role='document']");
+          if (!content) return false;
+          return Math.abs(content.getBoundingClientRect().width - previous) > 1;
+        },
+        before,
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics dialog width never settled after the toggle.");
+      });
   }
+
   async analyticsDialogWidth(): Promise<number> {
-    return todo("analyticsDialogWidth");
+    const box = await this.page.getByRole("dialog").locator("[role='document']").boundingBox();
+    if (!box) throw new Error("[parity] analytics dialog content has no box.");
+    return box.width;
   }
+
+  /** The dialog's second table: custom insights first, the assignee table second. */
+  private analyticsDialogTable(): Locator {
+    return this.page.getByTestId("analytics-dialog-assignee-table");
+  }
+
   async analyticsDialogRowCount(): Promise<number> {
-    return todo("analyticsDialogRowCount");
+    // Atomic settle read: one expression, so a shrinking row set cannot
+    // race between the table's target and its rows.
+    return this.analyticsDialogTable().locator("tbody tr").count();
   }
+
   async analyticsDialogTableHeaders(): Promise<string[]> {
-    return todo("analyticsDialogTableHeaders");
+    const heads = this.analyticsDialogTable().locator("thead th");
+    return (await heads.allTextContents()).map((text) => text.trim());
   }
+
   async analyticsDialogTableCells(): Promise<string[][]> {
-    return todo("analyticsDialogTableCells");
+    return this.page.evaluate(() => {
+      const table = document.querySelector('[data-testid="analytics-dialog-assignee-table"]');
+      if (!table) return [];
+      return [...table.querySelectorAll("tbody tr")].map((row) =>
+        [...row.querySelectorAll("td")].map((cell) => ((cell.textContent ?? "") as string).trim())
+      );
+    });
   }
+
   async analyticsDialogAssigneeFacts(): Promise<AnalyticsDialogAssignee[]> {
-    return todo("analyticsDialogAssigneeFacts");
+    return this.page.evaluate(() => {
+      const table = document.querySelector('[data-testid="analytics-dialog-assignee-table"]');
+      if (!table) return [];
+      return [...table.querySelectorAll("tbody tr")].map((row) => {
+        const cell = row.querySelector("td");
+        const avatar = (cell?.querySelector("img")?.getAttribute("src") ?? "") !== "";
+        // The identity cell marks its label explicitly: the avatar's own
+        // glyph is nested a level deeper, so a `span:last-child` walk
+        // returns the initials, not the name.
+        const nameSpan = cell?.querySelector('[data-testid="assignee-name"]');
+        const text = ((nameSpan?.textContent ?? cell?.textContent ?? "") as string).trim();
+        const unassigned = text === "Unassigned";
+        return { text, avatar, initial: !avatar && !unassigned, unassigned };
+      });
+    });
   }
-  async analyticsDialogExportDownload(_tableIndex: 0 | 1): Promise<LocalFileDownload> {
-    return todo("analyticsDialogExportDownload");
+
+  /**
+   * The two dialog tables in render order: the custom-insights chart table
+   * first, the assignee table second. Each has its own export control, and
+   * they mount at different times (the chart table waits for its own read),
+   * so the caller's index resolves to that table rather than to a position
+   * in a list of buttons that may not all exist yet.
+   */
+  private analyticsDialogExportAction(tableIndex: 0 | 1): Locator {
+    const table = this.page
+      .getByRole("dialog")
+      .getByTestId(tableIndex === 0 ? "analytics-custom-table" : "analytics-dialog-assignee-table");
+    return table.getByRole("button", { name: "Export as csv" });
+  }
+
+  async analyticsDialogExportDownload(tableIndex: 0 | 1): Promise<LocalFileDownload> {
+    // Wait for this table's own control before clicking: the second table
+    // is not the same button as the first at a different position, and the
+    // control only appears once that table's rows have settled.
+    const action = this.analyticsDialogExportAction(tableIndex);
+    await action.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebNewDriver.WAIT_MS }),
+      action.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const path = await download.path();
+    if (!path) throw new Error("[parity] dialog export download landed without a path.");
+    return { fileName: download.suggestedFilename(), content: this.readDownload(path) };
   }
 
   // --- Pages blocks/embeds/mentions/links (NEWFRONT-316, PAGE-037-044).

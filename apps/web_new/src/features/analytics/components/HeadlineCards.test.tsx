@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 
 const { contractMocks } = vi.hoisted(() => ({
-  contractMocks: { getAnalyticsTotals: vi.fn() },
+  contractMocks: { getAnalyticsTotals: vi.fn(), getProjectAnalyticsTotals: vi.fn() },
 }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -22,11 +22,23 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 import type { AnalyticsTabId } from "../lib/tabs.js";
 import { HeadlineCards } from "./HeadlineCards.js";
 
+const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
+const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
+
 function renderGrid(tab: AnalyticsTabId = "overview"): void {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
       <HeadlineCards workspaceSlug="acme" tab={tab} projectIds={[]} />
+    </QueryClientProvider>
+  );
+}
+
+function renderScoped(dialogScope: { projectId: string; cycleId?: string | null }): void {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <HeadlineCards workspaceSlug="acme" tab="overview" projectIds={[]} dialogScope={dialogScope} />
     </QueryClientProvider>
   );
 }
@@ -80,6 +92,37 @@ describe("HeadlineCards", () => {
       tab: "work-items",
       projectIds: [],
     });
+  });
+
+  it("reads the project endpoint in the scoped dialog and never the workspace one", async () => {
+    contractMocks.getProjectAnalyticsTotals.mockResolvedValue({ total_work_items: { count: 7 } });
+    contractMocks.getAnalyticsTotals.mockResolvedValue({ total_users: { count: 99 } });
+    renderScoped({ projectId: PROJECT, cycleId: CYCLE });
+    await waitFor(() => expect(screen.getAllByTestId("analytics-headline-value")).toHaveLength(5));
+    // Dialog mode always shows the work-items card set, whatever the tab.
+    expect(cards().map((card) => within(card).getByTestId("analytics-headline-label").textContent)).toEqual([
+      "Total Work items",
+      "Started Work items",
+      "Backlog Work items",
+      "Unstarted Work items",
+      "Completed Work items",
+    ]);
+    expect(within(cards()[0]!).getByTestId("analytics-headline-value")).toHaveTextContent("7");
+    expect(contractMocks.getProjectAnalyticsTotals).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, {
+      projectIds: [PROJECT],
+      cycleId: CYCLE,
+    });
+    expect(contractMocks.getAnalyticsTotals).not.toHaveBeenCalled();
+  });
+
+  it("carries no cycle in a project-only dialog scope", async () => {
+    contractMocks.getProjectAnalyticsTotals.mockResolvedValue({});
+    renderScoped({ projectId: PROJECT, cycleId: null });
+    await waitFor(() => expect(screen.getAllByTestId("analytics-headline-value")).toHaveLength(5));
+    expect(contractMocks.getProjectAnalyticsTotals).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, {
+      projectIds: [PROJECT],
+    });
+    expect(contractMocks.getAnalyticsTotals).not.toHaveBeenCalled();
   });
 
   it("reads missing metrics as zero", async () => {

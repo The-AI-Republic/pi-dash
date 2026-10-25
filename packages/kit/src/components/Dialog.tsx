@@ -15,6 +15,21 @@ export interface DialogProps {
   description?: string | undefined;
   /** Footer actions (usually Buttons); rendered right-aligned. */
   actions?: React.ReactNode | undefined;
+  /**
+   * Header controls placed before the close button: a panel toggle, a
+   * scope summary, and the like. They sit in the title row so a page-level
+   * panel keeps one action lane.
+   */
+  headerActions?: React.ReactNode | undefined;
+  /**
+   * Where the panel sits. `center` is the usual modal card; `right` docks
+   * the panel against the right edge at three-quarter width and grows to
+   * the full viewport width when `wide` is set. The caller owns the
+   * breakpoint that exposes `wide`; the placement itself is plain CSS.
+   */
+  placement?: "center" | "right" | undefined;
+  /** Full-width right panel; ignored while `placement` is `center`. */
+  wide?: boolean | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean, details: { reason: string }) => void) | undefined;
   /**
@@ -34,6 +49,8 @@ export interface DialogProps {
   className?: string | undefined;
   /** Body wrapper classes; the default spacing sits below the title block. */
   bodyClassName?: string | undefined;
+  /** Popup classes for `right` panels outside the width rules, e.g. max height. */
+  popupClassName?: string | undefined;
   /**
    * Control to focus when the dialog opens. Without it Base UI focuses the
    * first tabbable element, which is the header close button. Pass `false`
@@ -50,6 +67,9 @@ export function Dialog({
   title,
   description,
   actions,
+  headerActions,
+  placement = "center",
+  wide = false,
   open,
   onOpenChange,
   ignoreEscapeKey = false,
@@ -57,6 +77,7 @@ export function Dialog({
   closeButton = true,
   className,
   bodyClassName = "mt-(--space-8)",
+  popupClassName,
   initialFocus,
   children,
 }: DialogProps): React.ReactElement {
@@ -65,6 +86,17 @@ export function Dialog({
     if (!next && ignoreEscapeKey && details.reason === "escape-key") return;
     onOpenChange?.(next, details);
   };
+  const centered = "top-1/2 left-1/2 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-(--radius-dialog)";
+  // A right panel keeps the dialog's fieldset role and focus trap but
+  // changes the frame: docked to the right edge, three quarters wide, and
+  // full width when the caller opens it up. Width animates so the toggle
+  // reads as a resize rather than a jump.
+  const docked = [
+    "top-0 right-0 h-full max-h-full",
+    wide ? "w-full" : "w-3/4",
+    "transition-[width] duration-(--motion-duration)",
+  ];
+  const frame = placement === "right" ? ["flex flex-col", ...docked, popupClassName] : [centered, popupClassName];
   return (
     <BaseDialog.Root {...pickDefined({ open })} onOpenChange={handleOpenChange}>
       {trigger ? <BaseDialog.Trigger render={trigger} /> : null}
@@ -72,10 +104,7 @@ export function Dialog({
         <BaseDialog.Backdrop className="fixed inset-0 bg-black/40 transition-opacity duration-(--motion-duration)" />
         <BaseDialog.Popup
           {...pickDefined({ initialFocus })}
-          className={cn(
-            "shadow-dialog fixed top-1/2 left-1/2 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-(--radius-dialog) border border-(--border) bg-(--bg) p-(--space-12)",
-            className
-          )}
+          className={cn("shadow-dialog fixed border border-(--border) bg-(--bg) p-(--space-12)", ...frame, className)}
         >
           <div className="flex items-start justify-between gap-(--space-4)">
             <div className="flex flex-col gap-(--space-2)">
@@ -84,17 +113,29 @@ export function Dialog({
                 <BaseDialog.Description className="text-body text-(--text-muted)">{description}</BaseDialog.Description>
               ) : null}
             </div>
-            {nonDismissable || !closeButton ? null : (
-              <BaseDialog.Close
-                render={
-                  <IconButton label="Close dialog">
-                    <X size={16} strokeWidth={1.5} />
-                  </IconButton>
-                }
-              />
-            )}
+            <div className="flex shrink-0 items-center gap-(--space-2)">
+              {headerActions}
+              {nonDismissable || !closeButton ? null : (
+                <BaseDialog.Close
+                  render={
+                    <IconButton label="Close dialog">
+                      <X size={16} strokeWidth={1.5} />
+                    </IconButton>
+                  }
+                />
+              )}
+            </div>
           </div>
-          <div className={bodyClassName}>{children}</div>
+          {placement === "right" ? (
+            // The document role marks the scrollable panel content inside
+            // the dialog, which is what a region keyboard users move through
+            // and what automation measures when the panel resizes.
+            <div role="document" className={cn(bodyClassName, "min-h-0 flex-1 basis-0 overflow-y-auto")}>
+              {children}
+            </div>
+          ) : (
+            <div className={bodyClassName}>{children}</div>
+          )}
           {actions ? <div className="mt-(--space-12) flex justify-end gap-(--space-4)">{actions}</div> : null}
         </BaseDialog.Popup>
       </BaseDialog.Portal>

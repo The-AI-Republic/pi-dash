@@ -4,7 +4,16 @@
 // Public API of the analytics feature. Other features import only from here.
 
 export { analyticsKeys } from "./api/keys.js";
-export type { AnalyticsChartKind } from "./api/keys.js";
+export type { AnalyticsChartKind, AnalyticsDialogScope } from "./api/keys.js";
+export {
+  dialogCustomChartQueryOptions,
+  dialogRequestScope,
+  dialogStatsQueryOptions,
+  dialogTotalsQueryOptions,
+  dialogWorkItemsChartQueryOptions,
+  useDialogStats,
+  useDialogTotals,
+} from "./api/projectScope.js";
 export {
   analyticsCustomChartQueryOptions,
   analyticsProjectsChartQueryOptions,
@@ -43,6 +52,20 @@ export { RadarSection } from "./components/RadarSection.js";
 export type { RadarScopeProject, RadarSectionProps } from "./components/RadarSection.js";
 export { AnalyticsSectionGuidance } from "./components/AnalyticsSectionGuidance.js";
 export type { AnalyticsSectionGuidanceProps } from "./components/AnalyticsSectionGuidance.js";
+export { AssigneeBreakdownSection } from "./components/AssigneeBreakdownSection.js";
+export type { AssigneeBreakdownSectionProps } from "./components/AssigneeBreakdownSection.js";
+export { dialogScopeFor, ScopedAnalyticsDialog } from "./components/ScopedAnalyticsDialog.js";
+export type { ScopedAnalyticsDialogProps } from "./components/ScopedAnalyticsDialog.js";
+export { scopedDialogTitle } from "./lib/dialogTitle.js";
+export type { DialogTitleScope } from "./lib/dialogTitle.js";
+export {
+  ASSIGNEE_COUNT_NOUN,
+  assigneeCellText,
+  assigneeRows,
+  assigneeTableColumns,
+  UNASSIGNED_LABEL,
+} from "./lib/assignee.js";
+export type { AssigneeRow } from "./lib/assignee.js";
 export {
   headlineCardsForTab,
   OVERVIEW_HEADLINE_CARDS,

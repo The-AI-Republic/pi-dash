@@ -15,6 +15,18 @@ import type { AnalyticsTabId } from "../lib/tabs.js";
 /** Charts reads, keyed by graph kind (spec §16.6). */
 export type AnalyticsChartKind = AnalyticsChartQuery["type"];
 
+/** The narrowing a scoped dialog applies on top of one project. */
+export interface AnalyticsDialogScope {
+  projectId: string;
+  cycleId?: string | null | undefined;
+  moduleId?: string | null | undefined;
+}
+
+/** One serialized dialog scope: the project first, then its narrowing. */
+function dialogScopeKey(scope: AnalyticsDialogScope): readonly string[] {
+  return [scope.projectId, scope.cycleId ?? "", scope.moduleId ?? ""];
+}
+
 export const analyticsKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "analytics"] as const,
   /** One tab's headline totals under one normalized project scope. */
@@ -41,4 +53,30 @@ export const analyticsKeys = {
   /** Per-project stats under one normalized project scope. */
   projectStats: (workspaceSlug: string, projectIds: readonly string[]) =>
     [...analyticsKeys.all(workspaceSlug), "project-stats", projectIds] as const,
+  /**
+   * Dialog reads (parity/specs/analytics.md §13, ANL-014). The project is
+   * in the path, so it keys on its own subtree rather than the picker's
+   * `project_ids` list; the cycle or module narrowing rides the key too, so
+   * two scopes never share a cache entry.
+   */
+  dialog: (workspaceSlug: string, kind: "totals" | "charts" | "stats", scope: AnalyticsDialogScope) =>
+    [...analyticsKeys.all(workspaceSlug), "dialog", kind, dialogScopeKey(scope)] as const,
+  /** One dialog custom-graph read, keyed by the axis choice as well. */
+  dialogCustomChart: (
+    workspaceSlug: string,
+    scope: AnalyticsDialogScope,
+    xAxis: AnalyticsXAxis,
+    yAxis: AnalyticsYAxis,
+    groupBy: AnalyticsXAxis | null
+  ) =>
+    [
+      ...analyticsKeys.all(workspaceSlug),
+      "dialog",
+      "charts",
+      "custom-work-items",
+      dialogScopeKey(scope),
+      xAxis,
+      yAxis,
+      groupBy,
+    ] as const,
 };
