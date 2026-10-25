@@ -18,7 +18,6 @@ interface Options {
   content?: string;
   input?: string;
   checked?: boolean;
-  selected?: boolean;
   disabled?: boolean;
   attribute?: string | null;
   items?: FakeLocator[];
@@ -74,9 +73,6 @@ class FakeLocator {
   }
   isChecked(): Promise<boolean> {
     return this.fail(this.options.checked ?? false);
-  }
-  isSelected(): Promise<boolean> {
-    return this.fail(this.options.selected ?? false);
   }
   isDisabled(): Promise<boolean> {
     return this.fail(this.options.disabled ?? false);
@@ -1948,8 +1944,8 @@ describe("scheduler bulk install", () => {
     });
     const page = pageOf({ locator: pageLocator, getByRole: () => fake({ last: () => dialog }) });
     await new WebNewDriver(page).schedulerInstallPickerOptions();
-    // `has` resolves against the page, so a panel-rooted locator would be
-    // narrowed to the panel's own subtree and match no row at all.
+    // `has` keeps the inner locator's full selector chain when it re-roots
+    // inside each row, so a panel-rooted locator would match no row at all.
     expect(pageLocator).toHaveBeenCalledWith('input[type="checkbox"]');
     expect(filter).toHaveBeenCalledWith({ has: checkboxProbe });
   });

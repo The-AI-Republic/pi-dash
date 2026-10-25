@@ -10223,9 +10223,10 @@ export class WebNewDriver implements ParityDriver {
     // no-matches note as well as for project rows. Only rows with a
     // checkbox are options; waiting for any <li> would hand back the
     // placeholder as a project before the install detection settles.
-    // The filter's `has` locator is resolved against the page, so it must
-    // be page-rooted: a panel-rooted one is already narrowed to the panel's
-    // subtree and no <li> contains it, leaving every row filtered out.
+    // `has` re-roots the inner locator inside each candidate row but keeps
+    // its full selector chain. A panel-rooted locator still carries the panel
+    // selector, and no <li> contains a panel div, so every row filtered out.
+    // Page-rooting it leaves just the checkbox to match inside each row.
     const items = panel.locator("li").filter({ has: this.page.locator('input[type="checkbox"]') });
     await items
       .first()
