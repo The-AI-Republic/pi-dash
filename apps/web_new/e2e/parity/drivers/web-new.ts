@@ -15619,13 +15619,18 @@ export class WebNewDriver implements ParityDriver {
     // not an error, so whichever surface appears settles the open.
     const canvas = this.page.locator(WebNewDriver.PAGE_CANVAS).first();
     const refusal = this.page.locator(WebNewDriver.PAGE_REFUSAL).first();
-    const shown = (locator: Locator) =>
-      locator.waitFor({ timeout: WebNewDriver.WAIT_MS }).then(
+    // A readable page mounts the canvas even when its stored body is empty:
+    // the default page body (`<p></p>`) paints inside a zero-height box, so
+    // waiting for visibility would never settle. Attachment is the shell's
+    // own signal that the record resolved into the readable branch; the
+    // refusal panel still has to be visible because it is the painted answer.
+    const shown = (locator: Locator, state: "attached" | "visible") =>
+      locator.waitFor({ state, timeout: WebNewDriver.WAIT_MS }).then(
         () => true,
         () => false
       );
-    const canvasShown = shown(canvas);
-    const refusalShown = shown(refusal);
+    const canvasShown = shown(canvas, "attached");
+    const refusalShown = shown(refusal, "visible");
     if (!(await Promise.race([canvasShown, refusalShown])) && !(await canvasShown) && !(await refusalShown)) {
       throw new Error(`[parity] the page detail settled on neither a canvas nor the refusal panel: ${pageId}.`);
     }
@@ -15641,12 +15646,16 @@ export class WebNewDriver implements ParityDriver {
   async pageEditorAiHandleCount(): Promise<number> {
     // The side menu (with the AI handle, when a build enables it) reveals on
     // block hover; sweep the body blocks, let the reveal settle, then count
-    // what appeared. The community build has no handle (NEWFRONT-206), so
-    // the honest answer today is zero.
+    // what appeared. A body block with no painted box (an empty `<p></p>`
+    // stores bytes but no height) cannot receive a hover, so it is skipped
+    // rather than waited on. The community build has no handle
+    // (NEWFRONT-206), so the honest answer today is zero.
     const blocks = this.page.locator(`${WebNewDriver.PAGE_CANVAS} .rich-text-content p`);
     const total = await blocks.count();
     for (let index = 0; index < Math.min(total, 5); index += 1) {
-      await blocks.nth(index).hover();
+      const block = blocks.nth(index);
+      if (!(await block.isVisible())) continue;
+      await block.hover();
       await this.page.waitForTimeout(500);
     }
     await this.page.waitForTimeout(2000);

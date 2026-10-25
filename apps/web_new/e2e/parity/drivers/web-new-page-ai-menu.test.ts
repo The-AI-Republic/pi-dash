@@ -23,18 +23,18 @@ interface FakeOptions {
 
 class FakeLocator {
   readonly hover = vi.fn(async () => undefined);
-  readonly waitFor = vi.fn(async (_options?: unknown) => {
+  readonly isVisible = vi.fn(async () => this.options.visible ?? true);
+  readonly waitFor = vi.fn(async (options?: { state?: "attached" | "visible" }) => {
     if (this.options.waitForRejects === true) throw new Error("timed out");
+    const count = this.options.items?.length ?? this.options.count ?? 1;
+    if (count === 0) throw new Error("timed out");
+    if ((options?.state ?? "visible") === "visible" && this.options.visible === false) throw new Error("timed out");
   });
 
   constructor(private readonly options: FakeOptions = {}) {}
 
   count(): Promise<number> {
     return Promise.resolve(this.options.items?.length ?? this.options.count ?? 1);
-  }
-
-  isVisible(): Promise<boolean> {
-    return Promise.resolve(this.options.visible ?? true);
   }
 
   getByRole(_role: string, _options?: { name?: string | RegExp }): FakeLocator {
@@ -56,19 +56,25 @@ function absent(): FakeLocator {
 
 interface PageOptions {
   blocks?: number;
+  blockVisible?: boolean;
   handleCount?: number;
   menuCount?: number;
   menuVisible?: boolean;
   canvasPresent?: boolean;
+  canvasVisible?: boolean;
   titlePresent?: boolean;
   refusalPresent?: boolean;
 }
 
 function pageDouble(options: PageOptions = {}) {
-  const blocks = Array.from({ length: options.blocks ?? 3 }, () => new FakeLocator());
+  const blocks = Array.from(
+    { length: options.blocks ?? 3 },
+    () => new FakeLocator({ visible: options.blockVisible ?? true })
+  );
   const menu = new FakeLocator({ count: options.menuCount ?? 0, visible: options.menuVisible ?? true });
   const canvas = new FakeLocator({
     count: options.canvasPresent === false ? 0 : 1,
+    visible: options.canvasVisible ?? true,
     waitForRejects: options.canvasPresent === false,
     role: () => menu,
   });
@@ -93,7 +99,7 @@ function pageDouble(options: PageOptions = {}) {
       return absent();
     }),
   };
-  return { page: page as unknown as Page, pageObject: page, blocks, handle, menu };
+  return { page: page as unknown as Page, pageObject: page, blocks, canvas, handle, menu };
 }
 
 function routeHandler(pageObject: ReturnType<typeof pageDouble>["pageObject"], pattern: string) {
@@ -132,6 +138,18 @@ describe("pageEditorOpen", () => {
     const driver = new WebNewDriver(stub.page);
     await expect(driver.pageEditorOpen("acme", "p1", "locked")).resolves.toBeUndefined();
     expect(stub.pageObject.locator).toHaveBeenCalledWith('[data-testid="page-detail-title"]');
+  });
+
+  it("settles on an attached canvas when the page body is the default empty <p></p>", async () => {
+    // A newly created page stores `<p></p>`, whose canvas has width but no
+    // height. Visibility would never resolve; attachment is the readable
+    // page signal and must settle without waiting on a visible box.
+    const stub = pageDouble({ blocks: 1, canvasVisible: false });
+    const driver = new WebNewDriver(stub.page);
+
+    await expect(driver.pageEditorOpen("acme", "p1", "empty")).resolves.toBeUndefined();
+
+    expect(stub.canvas.waitFor).toHaveBeenCalledWith(expect.objectContaining({ state: "attached" }));
   });
 
   it("settles on the refusal panel instead of throwing when the page is not readable", async () => {
@@ -181,6 +199,16 @@ describe("pageEditorAiHandleCount", () => {
     const stub = pageDouble({ blocks: 0 });
     const driver = new WebNewDriver(stub.page);
     await expect(driver.pageEditorAiHandleCount()).resolves.toBe(0);
+  });
+
+  it("skips a stored empty <p></p>, which has no box to hover", async () => {
+    const stub = pageDouble({ blocks: 1, blockVisible: false });
+    const driver = new WebNewDriver(stub.page);
+
+    await expect(driver.pageEditorAiHandleCount()).resolves.toBe(0);
+
+    expect(stub.blocks[0]?.isVisible).toHaveBeenCalled();
+    expect(stub.blocks[0]?.hover).not.toHaveBeenCalled();
   });
 });
 
