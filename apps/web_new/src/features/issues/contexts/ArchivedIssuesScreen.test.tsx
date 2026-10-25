@@ -35,7 +35,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { ArchivedIssuesScreen } from "./ArchivedIssuesScreen.js";
-import { archivedPageQueryOptions, ARCHIVED_FILTER_STORAGE_KEY } from "./archivedIssues.js";
+import { archivedPageQueryOptions, ARCHIVED_FILTER_STORAGE_KEY, DEFAULT_ARCHIVED_DISPLAY } from "./archivedIssues.js";
 
 const SLUG = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -277,6 +277,72 @@ describe("ArchivedIssuesScreen", () => {
       const raw = window.localStorage.getItem(ARCHIVED_FILTER_STORAGE_KEY);
       expect(raw).toContain("ARCHIVED");
       expect(raw).toContain("priority");
+    });
+  });
+
+  it("leaves no stored entry on a pristine visit", async () => {
+    renderScreen();
+    await screen.findByText("No archived work items yet");
+    expect(window.localStorage.getItem(ARCHIVED_FILTER_STORAGE_KEY)).toBeNull();
+  });
+
+  it("strips this project's owned members on a pristine visit and keeps the rest", async () => {
+    window.localStorage.setItem(
+      ARCHIVED_FILTER_STORAGE_KEY,
+      JSON.stringify([
+        {
+          key: "ARCHIVED",
+          workspaceSlug: SLUG,
+          viewId: PROJECT,
+          filters: {
+            display_filters: { layout: "kanban" },
+            kanban_filters: { group_by: ["done"] },
+          },
+        },
+      ])
+    );
+    renderScreen();
+    await screen.findByText("No archived work items yet");
+    await waitFor(() => {
+      const raw = window.localStorage.getItem(ARCHIVED_FILTER_STORAGE_KEY);
+      expect(raw).not.toBeNull();
+      const [entry] = JSON.parse(raw ?? "[]") as Array<{ viewId: string; filters: Record<string, unknown> }>;
+      expect(entry?.filters).toEqual({
+        display_filters: { layout: "kanban" },
+        kanban_filters: { group_by: ["done"] },
+      });
+    });
+  });
+
+  it("keeps unknown display members while persisting a changed choice", async () => {
+    window.localStorage.setItem(
+      ARCHIVED_FILTER_STORAGE_KEY,
+      JSON.stringify([
+        {
+          key: "ARCHIVED",
+          workspaceSlug: SLUG,
+          viewId: PROJECT,
+          filters: {
+            display_filters: { layout: "kanban", calendar: { layout: "week" } },
+            kanban_filters: { group_by: ["done"] },
+          },
+        },
+      ])
+    );
+    const user = userEvent.setup();
+    renderScreen();
+    await screen.findByText("No archived work items yet");
+    await user.click(screen.getByRole("button", { name: "Add filter" }));
+    await user.click(await screen.findByRole("option", { name: "Priority" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Urgent" }));
+    await waitFor(() => {
+      const raw = window.localStorage.getItem(ARCHIVED_FILTER_STORAGE_KEY) ?? "[]";
+      const [entry] = JSON.parse(raw) as Array<{ filters: Record<string, unknown> }>;
+      expect(entry?.filters).toMatchObject({
+        display_filters: { layout: "kanban", calendar: { layout: "week" }, order_by: DEFAULT_ARCHIVED_DISPLAY.orderBy },
+        kanban_filters: { group_by: ["done"] },
+      });
+      expect(entry?.filters["richFilters"]).toBeTruthy();
     });
   });
 

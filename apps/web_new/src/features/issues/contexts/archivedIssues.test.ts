@@ -23,6 +23,7 @@ import {
   writeArchivedLocalDisplay,
   writeArchivedLocalFilter,
   writeArchivedLocalState,
+  isPristineArchivedState,
 } from "./archivedIssues.js";
 
 const SLUG = "acme";
@@ -496,13 +497,132 @@ describe("archived local storage guards", () => {
 
   it("omits group_by for an ungrouped display and keeps the rest", () => {
     const storage = memoryStorage();
-    writeArchivedLocalState(SLUG, PROJECT, {}, DEFAULT_ARCHIVED_DISPLAY, storage);
+    writeArchivedLocalState(SLUG, PROJECT, EXPRESSION, DEFAULT_ARCHIVED_DISPLAY, storage);
     const stored = JSON.parse(storage.data.get(ARCHIVED_FILTER_STORAGE_KEY) ?? "[]") as Array<{
       filters: Record<string, unknown>;
     }>;
     const displayFilters = stored[0]?.filters["display_filters"] as Record<string, unknown>;
     expect(displayFilters).not.toHaveProperty("group_by");
     expect(displayFilters).toMatchObject({ order_by: "sort_order", show_empty_groups: false, sub_issue: true });
+  });
+
+  it("leaves no entry behind on a pristine visit", () => {
+    const storage = memoryStorage();
+    writeArchivedLocalState(SLUG, PROJECT, {}, DEFAULT_ARCHIVED_DISPLAY, storage);
+    expect(storage.data.has(ARCHIVED_FILTER_STORAGE_KEY)).toBe(false);
+    expect(isPristineArchivedState({}, DEFAULT_ARCHIVED_DISPLAY)).toBe(true);
+  });
+
+  it("treats each archived choice as non-pristine", () => {
+    expect(isPristineArchivedState(EXPRESSION, DEFAULT_ARCHIVED_DISPLAY)).toBe(false);
+    for (const change of [
+      { layout: "kanban" as const },
+      { groupBy: "state" },
+      { subGroupBy: "priority" },
+      { orderBy: "-created_at" },
+      { showEmptyGroups: true },
+      { showSubIssues: false },
+      { properties: { start_date: false } },
+    ]) {
+      expect(isPristineArchivedState({}, { ...DEFAULT_ARCHIVED_DISPLAY, ...change })).toBe(false);
+    }
+  });
+
+  it("removes only this project's owned members on a pristine visit", () => {
+    const storage = memoryStorage({
+      [ARCHIVED_FILTER_STORAGE_KEY]: JSON.stringify([
+        {
+          key: "ARCHIVED",
+          workspaceSlug: SLUG,
+          viewId: PROJECT,
+          filters: { richFilters: EXPRESSION, display_filters: { layout: "kanban" }, kanban_filters: { a: 1 } },
+        },
+        { key: "ARCHIVED", workspaceSlug: SLUG, viewId: OTHER, filters: { richFilters: EXPRESSION } },
+      ]),
+    });
+    writeArchivedLocalState(SLUG, PROJECT, {}, DEFAULT_ARCHIVED_DISPLAY, storage);
+    const stored = JSON.parse(storage.data.get(ARCHIVED_FILTER_STORAGE_KEY) ?? "[]") as Array<{
+      viewId: string;
+      filters: Record<string, unknown>;
+    }>;
+    expect(stored).toHaveLength(2);
+    expect(stored.find((entry) => entry.viewId === PROJECT)?.filters).toEqual({
+      display_filters: { layout: "kanban" },
+      kanban_filters: { a: 1 },
+    });
+    expect(stored.find((entry) => entry.viewId === OTHER)?.filters).toEqual({ richFilters: EXPRESSION });
+  });
+
+  it("drops the entry when only owned members existed and the state is pristine", () => {
+    const storage = memoryStorage({
+      [ARCHIVED_FILTER_STORAGE_KEY]: JSON.stringify([
+        {
+          key: "ARCHIVED",
+          workspaceSlug: SLUG,
+          viewId: PROJECT,
+          filters: { richFilters: EXPRESSION, display_filters: { group_by: "state" }, display_properties: { a: true } },
+        },
+      ]),
+    });
+    writeArchivedLocalState(SLUG, PROJECT, {}, DEFAULT_ARCHIVED_DISPLAY, storage);
+    expect(storage.data.has(ARCHIVED_FILTER_STORAGE_KEY)).toBe(false);
+  });
+
+  it("merges display filters instead of replacing other members", () => {
+    const storage = memoryStorage({
+      [ARCHIVED_FILTER_STORAGE_KEY]: JSON.stringify([
+        {
+          key: "ARCHIVED",
+          workspaceSlug: SLUG,
+          viewId: PROJECT,
+          filters: {
+            display_filters: { layout: "kanban", calendar: { layout: "week" } },
+            display_properties: { start_date: true },
+            kanban_filters: { a: 1 },
+          },
+        },
+      ]),
+    });
+    writeArchivedLocalState(
+      SLUG,
+      PROJECT,
+      {},
+      { ...DEFAULT_ARCHIVED_DISPLAY, groupBy: "priority", orderBy: "-priority", properties: { start_date: false } },
+      storage
+    );
+    const stored = JSON.parse(storage.data.get(ARCHIVED_FILTER_STORAGE_KEY) ?? "[]") as Array<{
+      filters: Record<string, unknown>;
+    }>;
+    expect(stored[0]?.filters).toMatchObject({
+      display_filters: {
+        layout: "kanban",
+        calendar: { layout: "week" },
+        group_by: "priority",
+        order_by: "-priority",
+      },
+      display_properties: { start_date: false },
+      kanban_filters: { a: 1 },
+    });
+  });
+
+  it("clears a stored group_by when the display becomes ungrouped", () => {
+    const storage = memoryStorage({
+      [ARCHIVED_FILTER_STORAGE_KEY]: JSON.stringify([
+        {
+          key: "ARCHIVED",
+          workspaceSlug: SLUG,
+          viewId: PROJECT,
+          filters: { display_filters: { group_by: "state", layout: "list" } },
+        },
+      ]),
+    });
+    writeArchivedLocalState(SLUG, PROJECT, {}, { ...DEFAULT_ARCHIVED_DISPLAY, orderBy: "-created_at" }, storage);
+    const stored = JSON.parse(storage.data.get(ARCHIVED_FILTER_STORAGE_KEY) ?? "[]") as Array<{
+      filters: Record<string, unknown>;
+    }>;
+    const displayFilters = stored[0]?.filters["display_filters"] as Record<string, unknown>;
+    expect(displayFilters).not.toHaveProperty("group_by");
+    expect(displayFilters).toMatchObject({ layout: "list", order_by: "-created_at" });
   });
 
   it("removes the key when the last entry is written empty", () => {

@@ -17935,42 +17935,112 @@ export class WebNewDriver implements ParityDriver {
   async archivesRowMenuClick(_entry: string): Promise<void> {
     return todo("archivesRowMenuClick");
   }
+  /** The archives tab the address belongs to. */
+  private archivesTabFromUrl(): ArchivesTab {
+    const url = this.page.url();
+    const path = url.includes("://") ? new URL(url).pathname : (url.split("?")[0] ?? url);
+    if (path.includes("/archives/cycles")) return "cycles";
+    if (path.includes("/archives/modules")) return "modules";
+    return "issues";
+  }
+
+  /** The address key of whichever peek is open, across all three tabs. */
+  private archivesPeekParamName(): "peekIssueId" | "peekCycle" | "peekModule" | null {
+    const url = this.page.url();
+    const search = url.includes("://") ? new URL(url).search : `?${url.split("?")[1] ?? ""}`;
+    const params = new URLSearchParams(search);
+    for (const key of ["peekIssueId", "peekCycle", "peekModule"] as const) {
+      if (params.get(key) !== null) return key;
+    }
+    return null;
+  }
+
+  /** The named row on the active tab: issue anchor, cycle row, module row. */
+  private archivesNamedRow(name: string): Locator {
+    const content = this.archivesContent();
+    const tab = this.archivesTabFromUrl();
+    if (tab === "cycles") return content.locator('[data-testid="cycle-row"]', { hasText: name }).first();
+    if (tab === "modules") {
+      return content
+        .locator('[data-testid="modules-row"], [data-testid="modules-board-card"]', { hasText: name })
+        .first();
+    }
+    return content.locator('a[id^="issue-"]', { hasText: name }).first();
+  }
+
+  /** The peek surface the active tab opens. */
+  private archivesPeekPanel(): Locator {
+    const tab = this.archivesTabFromUrl();
+    if (tab === "cycles") return this.page.getByTestId("archived-cycle-preview");
+    if (tab === "modules") {
+      return this.page
+        .locator('[data-testid="archived-module-preview"], [data-testid="modules-analytics-sidebar"]')
+        .first();
+    }
+    return this.page.getByTestId("issue-preview");
+  }
+
+  private async archivesPeekPanelShown(): Promise<boolean> {
+    const panel = this.archivesPeekPanel();
+    if ((await panel.count()) === 0) return false;
+    return this.isShown(panel);
+  }
+
   async archivesPeekOpenFirst(name: string): Promise<void> {
-    // Archived work-item rows open the peek from their title anchor.
-    const row = this.archivesContent().locator('a[id^="issue-"]', { hasText: name }).first();
+    const tab = this.archivesTabFromUrl();
+    const row = this.archivesNamedRow(name);
     await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await row.scrollIntoViewIfNeeded().catch(() => undefined);
-    await row.locator("p").first().click({ timeout: WebNewDriver.WAIT_MS });
-    const deadline = Date.now() + WebNewDriver.WAIT_MS;
-    for (;;) {
-      if (new URL(this.page.url()).searchParams.get("peekIssueId") !== null) return;
-      if (Date.now() > deadline) {
-        throw new Error(`[parity] selecting the archived row for ${name} opened no peek (${this.page.url()}).`);
+    if (tab === "issues") {
+      await row.locator("p").first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      // Cycle and module rows open their peek from a labelled control; a
+      // row without one falls back to its own title surface.
+      const quickLook = row.getByRole("button", { name: /quick look/i }).first();
+      if ((await quickLook.count()) > 0) {
+        await quickLook.click({ timeout: WebNewDriver.WAIT_MS });
+      } else {
+        await row.locator("a, span").first().click({ timeout: WebNewDriver.WAIT_MS });
       }
+    }
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      if (this.archivesPeekParamName() !== null) return;
+      if (Date.now() > deadline) break;
       await this.page.waitForTimeout(300);
+    }
+    // A row that opens on activation rather than on press still works.
+    await row.focus().catch(() => undefined);
+    await this.page.keyboard.press("Enter").catch(() => undefined);
+    const retry = Date.now() + 10_000;
+    for (;;) {
+      if (this.archivesPeekParamName() !== null) return;
+      if (Date.now() > retry) {
+        throw new Error(`[parity] selecting the archives row for ${name} opened no peek (${this.page.url()}).`);
+      }
+      await this.page.waitForTimeout(500);
     }
   }
   async archivesPeekVisible(): Promise<boolean> {
-    if (new URL(this.page.url()).searchParams.get("peekIssueId") === null) return false;
-    const peek = this.page.getByTestId("issue-preview");
-    try {
-      await peek.waitFor({ state: "visible", timeout: 10_000 });
-      return true;
-    } catch {
-      return false;
+    if (this.archivesPeekParamName() === null) return false;
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      if (this.archivesPeekParamName() === null) return false;
+      if (await this.archivesPeekPanelShown()) return true;
+      if (Date.now() >= deadline) return false;
+      await this.page.waitForTimeout(400);
     }
   }
   async archivesPeekClose(): Promise<void> {
-    if (new URL(this.page.url()).searchParams.get("peekIssueId") === null) return;
-    const close = this.page.getByTestId("issue-preview").getByRole("button", { name: "Close preview" }).first();
+    if (this.archivesPeekParamName() === null) return;
+    const panel = this.archivesPeekPanel();
+    const close = panel.getByRole("button", { name: /^Close/ }).first();
     if ((await close.count()) > 0) {
       await close.click({ timeout: WebNewDriver.WAIT_MS });
     } else {
       await this.page.keyboard.press("Escape");
     }
-    await expect
-      .poll(() => new URL(this.page.url()).searchParams.get("peekIssueId"), { timeout: WebNewDriver.WAIT_MS })
-      .toBeNull();
+    await expect.poll(() => this.archivesPeekParamName(), { timeout: WebNewDriver.WAIT_MS }).toBeNull();
   }
   async archivesDetailBannerText(): Promise<string | null> {
     return todo("archivesDetailBannerText");
@@ -18032,28 +18102,32 @@ export class WebNewDriver implements ParityDriver {
         .first()
     );
   }
-  private archivesSearchBox(): Locator {
-    // Scoped to the archives content: the command palette and sidebar
-    // carry their own search inputs. Archived work items has no search;
-    // the cycles and modules tabs mount theirs.
-    return this.archivesContent().getByPlaceholder("Search", { exact: true });
+  /** The active tab's search field, once its box is expanded. */
+  private archivesSearchInput(): Locator {
+    const tab = this.archivesTabFromUrl();
+    if (tab === "cycles") return this.archivesContent().getByTestId("archived-cycles-search-input").first();
+    if (tab === "modules") return this.archivesContent().getByTestId("modules-search-input").first();
+    return this.archivesContent().getByPlaceholder("Search", { exact: true }).first();
+  }
+  /** The collapsed box's magnifier; its accessible name starts with "Search". */
+  private archivesSearchToggle(): Locator {
+    return this.archivesContent()
+      .getByRole("button", { name: /^Search/ })
+      .first();
   }
   async archivesSearchType(text: string): Promise<void> {
-    const box = this.archivesSearchBox();
-    if (!(await this.isShown(box))) {
-      const toggle = box.locator("xpath=./ancestor::div[1]/preceding-sibling::button").first();
-      await toggle.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const input = this.archivesSearchInput();
+    if (!(await this.isShown(input))) {
+      const toggle = this.archivesSearchToggle();
+      await toggle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       await toggle.click({ timeout: WebNewDriver.WAIT_MS });
     }
-    await box.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    await box.fill(text);
+    await input.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await input.fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
   async archivesSearchText(): Promise<string> {
-    return (
-      (await this.archivesSearchBox()
-        .inputValue()
-        .catch(() => "")) ?? ""
-    );
+    const input = this.archivesSearchInput();
+    return (await input.inputValue().catch(() => "")) ?? "";
   }
   async archivesRowDraggable(_name: string): Promise<boolean> {
     return todo("archivesRowDraggable");

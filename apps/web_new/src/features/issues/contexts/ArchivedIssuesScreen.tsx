@@ -31,7 +31,6 @@ import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { ArchivedIssuePeek } from "../peek/ArchivedIssuePeek.js";
 import {
-  DEFAULT_ARCHIVED_DISPLAY,
   projectAutomationsPath,
   readArchivedLocalState,
   useArchivedPages,
@@ -52,18 +51,6 @@ export interface ArchivedIssuesScreenProps {
   peekIssueId?: string | null | undefined;
   /** Writes the peek selection into the address (null clears it). */
   onPeekChange?: ((issueId: string | null) => void) | undefined;
-}
-
-/** Whether display choices match the archived defaults. */
-export function isDefaultArchivedDisplay(display: DisplayPrefs): boolean {
-  return (
-    display.layout === DEFAULT_ARCHIVED_DISPLAY.layout &&
-    display.groupBy === DEFAULT_ARCHIVED_DISPLAY.groupBy &&
-    display.orderBy === DEFAULT_ARCHIVED_DISPLAY.orderBy &&
-    display.showEmptyGroups === DEFAULT_ARCHIVED_DISPLAY.showEmptyGroups &&
-    display.showSubIssues === DEFAULT_ARCHIVED_DISPLAY.showSubIssues &&
-    Object.keys(display.properties).length === 0
-  );
 }
 
 function archivedHref(workspaceSlug: string, projectId: string, issue: IssueListItem): string {
@@ -110,13 +97,9 @@ export function ArchivedIssuesScreen({
     display.showEmptyGroups
   );
 
-  // Persist both halves together, preserving unknown members. A pristine
-  // page leaves no entry behind.
+  // Persist both halves together, preserving unknown members. The writer
+  // leaves a pristine page with no entry at all.
   React.useEffect(() => {
-    if (Object.keys(expression).length === 0 && isDefaultArchivedDisplay(display)) {
-      writeArchivedLocalState(workspaceSlug, projectId, {}, DEFAULT_ARCHIVED_DISPLAY);
-      return;
-    }
     writeArchivedLocalState(workspaceSlug, projectId, expression, display);
   }, [display, expression, projectId, workspaceSlug]);
 

@@ -228,10 +228,11 @@ export function useArchivedPages(
   const flatLast = flatPages[flatPages.length - 1];
   const total = grouped ? sections.reduce((sum, section) => sum + section.total, 0) : (flatLast?.total_count ?? 0);
   const loadMore = React.useCallback(() => {
-    const cursor = flatLast?.next_cursor ?? "";
-    if (grouped || !(flatLast?.next_page_results ?? false) || cursor === "") return;
+    if (grouped || flatLast === undefined || !flatLast.next_page_results) return;
+    const cursor = flatLast.next_cursor;
+    if (cursor === "") return;
     setFlatCursors((current) => (current.includes(cursor) ? current : [...current, cursor]));
-  }, [flatLast?.next_cursor, flatLast?.next_page_results, grouped]);
+  }, [flatLast, grouped]);
   const loadMoreSection = React.useCallback((section: IssueGroupSection) => {
     if (!sectionHasMore(section)) return;
     // A section that still has rows always yields a cursor.
@@ -289,6 +290,27 @@ export const DEFAULT_ARCHIVED_DISPLAY: DisplayPrefs = {
   calendar: { mode: "month", showWeekends: false },
   properties: {},
 };
+
+/** Display keys the archived control owns inside `display_filters`. */
+const OWNED_DISPLAY_KEYS = ["group_by", "order_by", "show_empty_groups", "sub_issue"] as const;
+
+/**
+ * Whether the page is showing the untouched archived state: no condition
+ * and the default display. A pristine visit leaves no persisted entry
+ * behind, because there is nothing the user chose to remember.
+ */
+export function isPristineArchivedState(expression: RichExpression, display: DisplayPrefs): boolean {
+  return (
+    Object.keys(expression).length === 0 &&
+    display.layout === DEFAULT_ARCHIVED_DISPLAY.layout &&
+    display.groupBy === DEFAULT_ARCHIVED_DISPLAY.groupBy &&
+    display.subGroupBy === DEFAULT_ARCHIVED_DISPLAY.subGroupBy &&
+    display.orderBy === DEFAULT_ARCHIVED_DISPLAY.orderBy &&
+    display.showEmptyGroups === DEFAULT_ARCHIVED_DISPLAY.showEmptyGroups &&
+    display.showSubIssues === DEFAULT_ARCHIVED_DISPLAY.showSubIssues &&
+    Object.keys(display.properties).length === 0
+  );
+}
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -375,9 +397,11 @@ export function readArchivedLocalState(
 
 /**
  * Merge one project's archived state into the local record, keeping the
- * other projects and unknown members (`kanban_filters`, future keys)
- * untouched. Empty state removes the entry rather than leaving an empty
- * shell behind.
+ * other projects and unknown members (`kanban_filters`, `calendar`, future
+ * keys) untouched. A pristine state (no condition, default display) writes
+ * nothing: any members this module owns are dropped, and the entry goes
+ * away when nothing else remains, so a first untouched visit leaves no
+ * record behind.
  */
 export function writeArchivedLocalState(
   workspaceSlug: string,
@@ -399,25 +423,40 @@ export function writeArchivedLocalState(
       (candidate as { userId?: unknown }).userId === undefined
     );
   });
-  const previous = record(existing?.filters);
-  const filters: Record<string, unknown> = { ...previous };
-  if (Object.keys(expression).length === 0) delete filters["richFilters"];
-  else filters["richFilters"] = expression;
-  const displayFilters: Record<string, unknown> = {};
-  if (display.groupBy !== null) displayFilters["group_by"] = display.groupBy;
-  displayFilters["order_by"] = display.orderBy;
-  displayFilters["show_empty_groups"] = display.showEmptyGroups;
-  displayFilters["sub_issue"] = display.showSubIssues;
-  filters["display_filters"] = displayFilters;
-  filters["display_properties"] = display.properties;
-  // The display members are always written, so the entry is never empty.
-  kept.push({
-    key: "ARCHIVED",
-    workspaceSlug,
-    viewId: projectId,
-    filters,
-  } satisfies ArchivedFilterEntry);
-  storage.setItem(ARCHIVED_FILTER_STORAGE_KEY, JSON.stringify(kept));
+  const filters: Record<string, unknown> = { ...record(existing?.filters) };
+  if (isPristineArchivedState(expression, display)) {
+    // A pristine page remembers nothing of its own; members it never set
+    // (`layout`, `calendar`, ...) survive on the stored entry.
+    delete filters["richFilters"];
+    delete filters["display_properties"];
+    const stored = record(filters["display_filters"]);
+    for (const key of OWNED_DISPLAY_KEYS) delete stored[key];
+    if (Object.keys(stored).length > 0) filters["display_filters"] = stored;
+    else delete filters["display_filters"];
+  } else {
+    if (Object.keys(expression).length === 0) delete filters["richFilters"];
+    else filters["richFilters"] = expression;
+    // Keep the members this page does not set (layout, calendar, ...) and
+    // change only the choices the archived display owns.
+    const displayFilters: Record<string, unknown> = { ...record(filters["display_filters"]) };
+    if (display.groupBy === null) delete displayFilters["group_by"];
+    else displayFilters["group_by"] = display.groupBy;
+    displayFilters["order_by"] = display.orderBy;
+    displayFilters["show_empty_groups"] = display.showEmptyGroups;
+    displayFilters["sub_issue"] = display.showSubIssues;
+    filters["display_filters"] = displayFilters;
+    filters["display_properties"] = display.properties;
+  }
+  if (Object.keys(filters).length > 0) {
+    kept.push({
+      key: "ARCHIVED",
+      workspaceSlug,
+      viewId: projectId,
+      filters,
+    } satisfies ArchivedFilterEntry);
+  }
+  if (kept.length === 0) storage.removeItem(ARCHIVED_FILTER_STORAGE_KEY);
+  else storage.setItem(ARCHIVED_FILTER_STORAGE_KEY, JSON.stringify(kept));
 }
 
 /**

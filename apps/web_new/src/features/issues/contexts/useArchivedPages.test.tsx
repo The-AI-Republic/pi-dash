@@ -131,6 +131,14 @@ describe("useArchivedPages flat list", () => {
     expect(result.current.sections[0]?.rows).toHaveLength(1);
   });
 
+  it("does nothing when there is no page yet", async () => {
+    const wrapper = mount(() => flat([row(ID_A, "Only", 1)], "100:1:0", true, 2));
+    const { result } = renderHook(() => usePages({}, null, "sort_order"), { wrapper });
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.sections[0]?.rows).toHaveLength(1));
+    expect(result.current.sections[0]?.rows.map((entry) => entry.id)).toEqual([ID_A]);
+  });
+
   it("ignores a page whose envelope carries no cursor", async () => {
     const wrapper = mount(() => flat([row(ID_A, "Only", 1)], "", true, 2));
     const { result } = renderHook(() => usePages({}, null, "sort_order"), { wrapper });
