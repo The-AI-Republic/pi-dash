@@ -39,6 +39,9 @@ export const OUTCOME_OPTIONS: readonly OutcomeOption[] = [
 /** The default mode a new install starts on. */
 export const DEFAULT_OUTCOME_MODE: OutcomeMode = "create_issue";
 
+const FOCUS_RING =
+  "focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-(--focus-ring-color) focus-visible:outline-offset-1";
+
 const OUTCOME_HELP: Record<OutcomeMode, string> = {
   create_issue:
     "Each run files an issue for every finding it has not already tracked in an open issue, and leaves it for someone to pick up.",
@@ -70,8 +73,8 @@ export function OutcomeModeField({ value, disabled = false, onChange }: OutcomeM
     if (step === 0) return;
     event.preventDefault();
     const current = OUTCOME_OPTIONS.findIndex((option) => option.value === value);
-    const next = OUTCOME_OPTIONS[(current + step + OUTCOME_OPTIONS.length) % OUTCOME_OPTIONS.length];
-    if (next === undefined) return;
+    // The modulo keeps the index inside the three-option list.
+    const next = OUTCOME_OPTIONS[(current + step + OUTCOME_OPTIONS.length) % OUTCOME_OPTIONS.length] as OutcomeOption;
     onChange(next.value);
     const buttons = groupRef.current?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
     buttons?.[OUTCOME_OPTIONS.indexOf(next)]?.focus();
@@ -98,8 +101,8 @@ export function OutcomeModeField({ value, disabled = false, onChange }: OutcomeM
             disabled={disabled}
             className={
               value === option.value
-                ? "text-body rounded-(--radius-control) border border-(--border) bg-(--subtle) px-(--space-3) py-(--space-1) font-medium text-(--text) disabled:cursor-not-allowed disabled:opacity-50"
-                : "text-body rounded-(--radius-control) border border-transparent px-(--space-3) py-(--space-1) text-(--text-muted) hover:text-(--text) disabled:cursor-not-allowed disabled:opacity-50"
+                ? `text-body rounded-(--radius-control) border border-(--border) bg-(--subtle) px-(--space-3) py-(--space-1) font-medium text-(--text) disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS_RING}`
+                : `text-body rounded-(--radius-control) border border-transparent px-(--space-3) py-(--space-1) text-(--text-muted) hover:text-(--text) disabled:cursor-not-allowed disabled:opacity-50 ${FOCUS_RING}`
             }
             onClick={() => onChange(option.value)}
           >

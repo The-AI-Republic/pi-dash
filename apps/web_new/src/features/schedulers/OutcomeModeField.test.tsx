@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 // Finding-handling field (parity/specs/agents.md §4, AGT-018): three modes,
 // issue filing first, and a help line that follows the selection.
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -54,6 +54,13 @@ describe("OutcomeModeField", () => {
     expect(screen.getByRole("radio", { name: "Create issues" })).toHaveFocus();
   });
 
+  it("keeps a visible focus ring on selected and unselected options", () => {
+    render(<OutcomeModeField value="apply_fix" onChange={vi.fn()} />);
+    for (const radio of screen.getAllByRole("radio")) {
+      expect(radio).toHaveClass("focus-visible:outline-2", "focus-visible:outline-(--focus-ring-color)");
+    }
+  });
+
   it("wraps around at the end of the group", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -79,6 +86,21 @@ describe("OutcomeModeField", () => {
     render(<OutcomeModeField value="apply_fix" disabled onChange={vi.fn()} />);
     for (const radio of screen.getAllByRole("radio")) expect(radio).toBeDisabled();
     expect(screen.getByRole("radio", { name: "Apply fix" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("does not move a disabled group with the arrow keys", () => {
+    const onChange = vi.fn();
+    render(<OutcomeModeField value="apply_fix" disabled onChange={onChange} />);
+    fireEvent.keyDown(screen.getByRole("radiogroup", { name: "What to do with findings" }), { key: "ArrowRight" });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("leaves the choice alone for keys other than the arrows", () => {
+    const onChange = vi.fn();
+    render(<OutcomeModeField value="apply_fix" onChange={onChange} />);
+    const group = screen.getByRole("radiogroup", { name: "What to do with findings" });
+    for (const key of ["Enter", "Tab", "Escape"]) fireEvent.keyDown(group, { key });
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("names every mode and every mode has help text", () => {
