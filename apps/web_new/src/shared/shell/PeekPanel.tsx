@@ -38,11 +38,32 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /** Tabbable descendants, in document order, minus hidden subtrees. */
-function focusableWithin(root: HTMLElement | null): HTMLElement[] {
+export function focusableWithin(root: HTMLElement | null): HTMLElement[] {
   if (root === null) return [];
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
     (node) => node.closest("[hidden], [aria-hidden='true']") === null
   );
+}
+
+/**
+ * The element a Tab press should move to inside a trapping panel, or
+ * `"self"` to keep focus on the panel (no tabbables), or null when the
+ * browser's own tab order is already inside the cycle.
+ */
+export function trapTabTarget(
+  panel: HTMLElement,
+  active: Element | null,
+  shiftKey: boolean
+): HTMLElement | "self" | null {
+  const focusables = focusableWithin(panel);
+  if (focusables.length === 0) return "self";
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (shiftKey) {
+    if (active === first || active === panel || active === null) return last ?? null;
+    return null;
+  }
+  return active === last ? (first ?? null) : null;
 }
 
 /**
@@ -191,26 +212,11 @@ export function PeekPanel({
     if (!panel.contains(document.activeElement)) panel.focus({ preventScroll: true });
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Tab") return;
-      const focusables = focusableWithin(panel);
-      if (focusables.length === 0) {
-        event.preventDefault();
-        panel.focus({ preventScroll: true });
-        return;
-      }
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement;
-      if (event.shiftKey) {
-        if (active === first || active === panel || !panel.contains(active)) {
-          event.preventDefault();
-          last?.focus();
-        }
-        return;
-      }
-      if (active === last) {
-        event.preventDefault();
-        first?.focus();
-      }
+      const target = trapTabTarget(panel, document.activeElement, event.shiftKey);
+      if (target === null) return;
+      event.preventDefault();
+      if (target === "self") panel.focus({ preventScroll: true });
+      else target.focus();
     };
     document.addEventListener("keydown", onKeyDown, true);
     return () => {

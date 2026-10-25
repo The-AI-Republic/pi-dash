@@ -8,7 +8,7 @@ import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { FULL_SCREEN_PORTAL_ID } from "./document.js";
-import { PeekPanel } from "./PeekPanel.js";
+import { focusableWithin, PeekPanel, trapTabTarget } from "./PeekPanel.js";
 
 function setup(props?: Partial<React.ComponentProps<typeof PeekPanel>>) {
   const onClose = vi.fn();
@@ -297,6 +297,34 @@ describe("PeekPanel", () => {
     unmount();
     fireEvent.pointerDown(document.body);
     expect(onOutsideClick).not.toHaveBeenCalled();
+  });
+});
+
+describe("focus trap helpers", () => {
+  it("reads tabbables in document order and skips hidden subtrees", () => {
+    const root = document.createElement("div");
+    root.innerHTML =
+      '<button id="a">A</button><div hidden><button id="b">B</button></div><a id="c" href="#x">C</a><button id="d" disabled>D</button>';
+    document.body.appendChild(root);
+    expect(focusableWithin(root).map((node) => node.id)).toEqual(["a", "c"]);
+    expect(focusableWithin(null)).toEqual([]);
+    root.remove();
+  });
+
+  it("wraps forward, backward and from outside the cycle", () => {
+    const root = document.createElement("div");
+    root.innerHTML = '<button id="a">A</button><button id="b">B</button>';
+    document.body.appendChild(root);
+    const [first, last] = focusableWithin(root);
+    if (first === undefined || last === undefined) throw new Error("missing controls");
+    expect(trapTabTarget(root, last, false)).toBe(first);
+    expect(trapTabTarget(root, first, true)).toBe(last);
+    expect(trapTabTarget(root, null, true)).toBe(last);
+    expect(trapTabTarget(root, document.body, false)).toBeNull();
+    expect(trapTabTarget(root, first, false)).toBeNull();
+    root.innerHTML = "";
+    expect(trapTabTarget(root, null, false)).toBe("self");
+    root.remove();
   });
 });
 
