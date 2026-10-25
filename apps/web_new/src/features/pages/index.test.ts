@@ -15,7 +15,31 @@ describe("pages barrel", () => {
     expect(typeof pages.PagesListScreen).toBe("function");
     expect(typeof pages.PageRow).toBe("function");
     expect(typeof pages.copyPageLink).toBe("function");
+    expect(typeof pages.PagesQuickCreate).toBe("function");
+    expect(typeof pages.PageCreateDialogEntry).toBe("function");
+    expect(typeof pages.PageCreateDialog).toBe("function");
+    expect(typeof pages.PageFavoriteStar).toBe("function");
+    expect(typeof pages.PageMarkPicker).toBe("function");
+    expect(typeof pages.usePageFavorite).toBe("function");
+    expect(typeof pages.useCreatePage).toBe("function");
+    expect(typeof pages.useQuickCreatePage).toBe("function");
+    expect(typeof pages.useDuplicatePage).toBe("function");
+    expect(pages.CREATE_PAGE_COMMAND_ID).toBe("pages.create-page");
+    expect(pages.PAGE_TITLE_MAX_LENGTH).toBe(255);
     expect(pages.pageKeys).toBe(pageKeys);
+  });
+
+  it("builds the row menu in the pinned order and gates the duplicate entry", () => {
+    const handlers = { openInNewTab: () => undefined, copyLink: () => undefined, duplicate: () => undefined };
+    expect(pages.pageRowActions({ duplicate: true }, handlers).map((entry) => entry.label)).toEqual([
+      "Open in new tab",
+      "Copy link",
+      "Make a copy",
+    ]);
+    expect(pages.pageRowActions({ duplicate: false }, handlers).map((entry) => entry.label)).toEqual([
+      "Open in new tab",
+      "Copy link",
+    ]);
   });
 
   it("scopes collection and detail keys under one workspace pages root", () => {

@@ -2,8 +2,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// PAGE-006 row anatomy, detail link, hover metadata and mirrored menus.
+// PAGE-006 row anatomy, detail link, hover metadata and the shared row menu
+// (PAGE-009–012: star, open in a new tab, copy link, make a copy).
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -15,26 +17,49 @@ vi.mock("@tanstack/react-router", () => ({
     </a>
   ),
 }));
+vi.mock("../../../shared/shell/toaster.js", () => ({
+  notifyPending: vi.fn(() => ({ settle: vi.fn() })),
+  notifySuccess: vi.fn(),
+  notifyError: vi.fn(),
+}));
+vi.mock("../../../shared/shell/favorites.js", () => ({
+  isFavoritesSectionOpen: () => true,
+  setFavoritesSectionOpen: vi.fn(),
+}));
 
 import { PAGES_PROJECT_ID, PAGES_USER_ID, makePageRow } from "../testing.js";
 import { PageRow } from "./PageRow.js";
 
 const OWNER = { id: PAGES_USER_ID, name: "Ada Byron", avatarUrl: null };
 
-function renderRow(overrides: Partial<React.ComponentProps<typeof PageRow>> = {}) {
+function rowElement(overrides: Partial<React.ComponentProps<typeof PageRow>> = {}): React.ReactElement {
   const props: React.ComponentProps<typeof PageRow> = {
     workspaceSlug: "acme",
     projectId: PAGES_PROJECT_ID,
     page: makePageRow(),
     owner: OWNER,
     showStar: true,
-    menu: { openInNewTab: "Open in new tab", copyLink: "Copy link" },
+    canDuplicate: true,
     onOpenInNewTab: vi.fn(),
     onCopyLink: vi.fn(),
+    onDuplicate: vi.fn(),
     ...overrides,
   };
-  render(<PageRow {...props} />);
-  return props;
+  return (
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <PageRow {...props} />
+    </QueryClientProvider>
+  );
+}
+
+function renderRow(overrides: Partial<React.ComponentProps<typeof PageRow>> = {}) {
+  const handlers = {
+    onOpenInNewTab: overrides.onOpenInNewTab ?? vi.fn(),
+    onCopyLink: overrides.onCopyLink ?? vi.fn(),
+    onDuplicate: overrides.onDuplicate ?? vi.fn(),
+  };
+  render(rowElement({ ...overrides, ...handlers }));
+  return handlers;
 }
 
 describe("PageRow", () => {
@@ -46,41 +71,25 @@ describe("PageRow", () => {
     );
     expect(screen.getByRole("img", { name: "Ada Byron" })).toBeInTheDocument();
     expect(screen.getByLabelText("Public")).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "Marked as favorite" })).toBeInTheDocument();
+    expect(screen.getByTestId("page-row-star")).toHaveAccessibleName("Remove Untitled from favorites");
     expect(screen.getByRole("button", { name: "Page actions for Untitled" })).toBeInTheDocument();
   });
 
   it("uses a private glyph and omits the star for a guest", () => {
-    renderRow({ page: makePageRow({ access: 1 }), showStar: false });
+    renderRow({ page: makePageRow({ access: 1 }), showStar: false, canDuplicate: false });
     expect(screen.getByLabelText("Private")).toBeInTheDocument();
     expect(screen.queryByTestId("page-row-star")).not.toBeInTheDocument();
   });
 
   it("decodes a stored emoji and draws a stored icon glyph in its colour", async () => {
     const { rerender } = render(
-      <PageRow
-        workspaceSlug="acme"
-        projectId={PAGES_PROJECT_ID}
-        page={makePageRow({ logo_props: { in_use: "emoji", emoji: { value: "1f600" } } })}
-        owner={OWNER}
-        showStar
-        menu={{ openInNewTab: "Open in new tab", copyLink: "Copy link" }}
-        onOpenInNewTab={() => undefined}
-        onCopyLink={() => undefined}
-      />
+      rowElement({ page: makePageRow({ logo_props: { in_use: "emoji", emoji: { value: "1f600" } } }) })
     );
     expect(screen.getByText("😀")).toBeInTheDocument();
     rerender(
-      <PageRow
-        workspaceSlug="acme"
-        projectId={PAGES_PROJECT_ID}
-        page={makePageRow({ logo_props: { in_use: "icon", icon: { name: "rocket_launch", color: "#ff0000" } } })}
-        owner={OWNER}
-        showStar
-        menu={{ openInNewTab: "Open in new tab", copyLink: "Copy link" }}
-        onOpenInNewTab={() => undefined}
-        onCopyLink={() => undefined}
-      />
+      rowElement({
+        page: makePageRow({ logo_props: { in_use: "icon", icon: { name: "rocket_launch", color: "#ff0000" } } }),
+      })
     );
     const link = screen.getByRole("link", { name: "Launch notes" });
     await waitFor(() => expect(link.querySelector("svg.lucide-rocket")).not.toBeNull());
@@ -90,16 +99,10 @@ describe("PageRow", () => {
 
   it("renders an icon without a colour, and the document fallback for empty or unknown marks", async () => {
     const { rerender } = render(
-      <PageRow
-        workspaceSlug="acme"
-        projectId={PAGES_PROJECT_ID}
-        page={makePageRow({ logo_props: { in_use: "icon", icon: { name: "star" } } })}
-        owner={{ ...OWNER, avatarUrl: "https://x.test/ada.png" }}
-        showStar
-        menu={{ openInNewTab: "Open in new tab", copyLink: "Copy link" }}
-        onOpenInNewTab={() => undefined}
-        onCopyLink={() => undefined}
-      />
+      rowElement({
+        page: makePageRow({ logo_props: { in_use: "icon", icon: { name: "star" } } }),
+        owner: { ...OWNER, avatarUrl: "https://x.test/ada.png" },
+      })
     );
     const firstLink = screen.getByRole("link", { name: "Launch notes" });
     await waitFor(() => expect(firstLink.querySelector("svg.lucide-star")).not.toBeNull());
@@ -108,33 +111,11 @@ describe("PageRow", () => {
       "src",
       "https://x.test/ada.png"
     );
-    rerender(
-      <PageRow
-        workspaceSlug="acme"
-        projectId={PAGES_PROJECT_ID}
-        page={makePageRow({ logo_props: { in_use: "emoji", emoji: { value: "" } } })}
-        owner={OWNER}
-        showStar
-        menu={{ openInNewTab: "Open in new tab", copyLink: "Copy link" }}
-        onOpenInNewTab={() => undefined}
-        onCopyLink={() => undefined}
-      />
-    );
+    rerender(rowElement({ page: makePageRow({ logo_props: { in_use: "emoji", emoji: { value: "" } } }) }));
     expect(
       screen.getByRole("link", { name: "Launch notes" }).querySelector("svg.lucide-file-text")
     ).toBeInTheDocument();
-    rerender(
-      <PageRow
-        workspaceSlug="acme"
-        projectId={PAGES_PROJECT_ID}
-        page={makePageRow({ logo_props: { in_use: "icon", icon: { name: "no_such_symbol" } } })}
-        owner={OWNER}
-        showStar
-        menu={{ openInNewTab: "Open in new tab", copyLink: "Copy link" }}
-        onOpenInNewTab={() => undefined}
-        onCopyLink={() => undefined}
-      />
-    );
+    rerender(rowElement({ page: makePageRow({ logo_props: { in_use: "icon", icon: { name: "no_such_symbol" } } }) }));
     await waitFor(() =>
       expect(
         screen.getByRole("link", { name: "Launch notes" }).querySelector("svg.lucide-file-text")
@@ -156,14 +137,29 @@ describe("PageRow", () => {
     expect(link).toBeInTheDocument();
   });
 
-  it("runs the overflow entries", () => {
+  it("runs the overflow entries for a member", () => {
     const props = renderRow();
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+      "Make a copy",
+    ]);
     fireEvent.click(screen.getByRole("menuitem", { name: "Open in new tab" }));
     expect(props.onOpenInNewTab).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Copy link" }));
     expect(props.onCopyLink).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Make a copy" }));
+    expect(props.onDuplicate).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a guest's menu to the two viewer-safe entries", () => {
+    renderRow({ canDuplicate: false });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Open in new tab", "Copy link"]);
+    expect(screen.queryByRole("menuitem", { name: "Make a copy" })).not.toBeInTheDocument();
   });
 
   it("opens the same entries from the context menu", () => {
