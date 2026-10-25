@@ -567,7 +567,7 @@ test(
 
       await test.step("a skeleton precedes the list on a cold load", async () => {
         await driver.settingsLabelsDelayLoad(8000);
-        await driver.settingsLabelsOpen(seed.workspaceSlug, projectId);
+        await driver.settingsLabelsOpen(seed.workspaceSlug, projectId, { awaitRows: false });
         await expect.poll(() => driver.settingsLabelsSkeletonVisible(), { timeout: 20_000 }).toBe(true);
       });
 

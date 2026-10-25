@@ -4685,7 +4685,11 @@ export class WebNewDriver implements ParityDriver {
     return this.page.getByTestId("label-form");
   }
 
-  async settingsLabelsOpen(workspaceSlug: string, projectId: string): Promise<void> {
+  async settingsLabelsOpen(
+    workspaceSlug: string,
+    projectId: string,
+    options: { awaitRows?: boolean } = {}
+  ): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/labels`);
     await this.page.waitForLoadState("domcontentloaded");
     // Settles on the list heading (members), the labels denial view
@@ -4703,7 +4707,7 @@ export class WebNewDriver implements ParityDriver {
       settle(this.page.getByRole("heading", { name: /don.t have access/i }).first()),
     ]);
     if (!settled) throw new Error("[parity] labels settings settled on neither the list nor the denial view.");
-    if (await listSettled) {
+    if ((await listSettled) && options.awaitRows !== false) {
       // The heading paints before the labels query resolves; the skeleton
       // occupies the list slot until rows or the empty state replace it.
       await Promise.race([
