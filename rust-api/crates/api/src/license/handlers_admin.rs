@@ -93,6 +93,7 @@ use super::form_body::{
 };
 use super::handlers_auth_forms as forms;
 use super::{file_asset_url, AssetUrl};
+use crate::auth_session::multipart::parse_fields;
 use crate::auth_session::render::render_csrf_failure;
 use crate::edge;
 use crate::middleware::body_limit::read_request_bytes;
@@ -1421,19 +1422,23 @@ fn content_type_of(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.to_str().ok())
 }
 
-/// `request.POST` as last-wins pairs, only for form content types (any
-/// other content type leaves `POST` empty in Django).
+/// `request.POST` as ordered pairs: multipart fields when the body is
+/// framed multipart, else the urlencoded parse for form posts
+/// (PIDASHCONV-1367; same shape as `auth_session::email::form_pairs`
+/// from PIDASHCONV-1349). Any other content type leaves `POST` empty in
+/// Django, so the pairs are empty there.
 fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> {
-    let is_form = content_type.is_some_and(|ct| {
-        ct.split(';').next().is_some_and(|mime| {
-            mime.trim()
-                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
-        })
-    });
+    let content_type = content_type.unwrap_or("");
+    if let Some(pairs) = parse_fields(content_type, body) {
+        return pairs;
+    }
+    let mime = content_type.split(';').next().map(str::trim).unwrap_or("");
+    let is_form = mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || mime.eq_ignore_ascii_case("multipart/form-data");
     if !is_form {
         return Vec::new();
     }
-    serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).unwrap_or_default()
+    serde_urlencoded::from_bytes(body).unwrap_or_default()
 }
 
 /// `QueryDict.get`: the last value for `key`, or `None`.
@@ -2517,6 +2522,10 @@ mod tests {
             b"a=1",
         );
         assert_eq!(form_last(&pairs, "a").as_deref(), Some("1"));
+        // Framed multipart reads fields in order (last wins downstream).
+        let framed = b"--abc\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--abc\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n2\r\n--abc--\r\n";
+        let pairs = form_pairs(Some("multipart/form-data; boundary=abc"), framed);
+        assert_eq!(form_last(&pairs, "a").as_deref(), Some("2"));
     }
 
     #[test]
