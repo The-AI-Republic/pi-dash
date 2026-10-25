@@ -281,7 +281,7 @@ export function SpaceIssueRow({
   const embedded = useSpaceEmbedded();
   const [titleTooltipOpen, setTitleTooltipOpen] = React.useState(false);
   const key = issueKey(projectIdentifier, issue);
-  const emphasis = selected ? "border-(--accent-strong) ring-1 ring-(--accent-strong)" : "border-(--border)";
+  const emphasis = selected ? "border-(--accent) ring-1 ring-(--accent)" : "border-(--border)";
   const showTitle = (): void => setTitleTooltipOpen(true);
   const hideTitle = (): void => setTitleTooltipOpen(false);
   const open = (event: React.MouseEvent<HTMLAnchorElement>): void => {
