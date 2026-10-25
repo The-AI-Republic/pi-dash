@@ -527,6 +527,7 @@ describe("InstallForm author path", { timeout: 30_000 }, () => {
       </QueryClientProvider>
     );
     await userEvent.setup().type(screen.getByLabelText("Name"), "My draft");
+    await userEvent.setup().type(screen.getByLabelText("Project context (optional)"), "Keep this too");
     rerender(
       <QueryClientProvider client={queryClient}>
         <InstallForm {...props} installable={[scheduler()]} />
@@ -534,6 +535,7 @@ describe("InstallForm author path", { timeout: 30_000 }, () => {
     );
     expect(screen.getByRole("tab", { name: "Create new" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByLabelText("Name")).toHaveValue("My draft");
+    expect(screen.getByLabelText("Project context (optional)")).toHaveValue("Keep this too");
   });
 
   it("offers the dead end without author rights", () => {
