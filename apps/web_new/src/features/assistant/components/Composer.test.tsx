@@ -183,15 +183,14 @@ describe("Composer dictation", () => {
     expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
   });
 
-  it("hides the microphone while the switch reads off, missing or unread", () => {
+  it("hides the microphone while the switch reads off or the config is unread", () => {
     const handle = fakeHandle();
-    const speeches: ComposerDictation["speech"][] = [
+    const hidden: ComposerDictation["speech"][] = [
       undefined,
       { enabled: false, has_api_key: true },
-      { has_api_key: true },
-      { enabled: true, has_api_key: true },
+      { enabled: false, has_api_key: false },
     ];
-    for (const speech of speeches.slice(0, 3)) {
+    for (const speech of hidden) {
       const { unmount } = render(
         <Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} dictation={{ speech, handle }} />
       );
@@ -199,15 +198,32 @@ describe("Composer dictation", () => {
       expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
       unmount();
     }
-    const unsupported = fakeHandle({ supported: false });
-    render(
+  });
+
+  it("keeps the microphone on a pre-switch config that carries no explicit switch", () => {
+    // A backend older than the kill switch sends no `enabled` at all; the
+    // keyed read must still offer dictation, and the keyless one must still
+    // route to setup instead of vanishing (AGT-050/AGT-051/AGT-057).
+    const { unmount } = render(
       <Composer
         draft=""
         onDraftChange={() => {}}
         onSubmit={() => {}}
-        dictation={{ speech: speeches[3], handle: unsupported }}
+        dictation={{ speech: { has_api_key: true }, handle: fakeHandle() }}
       />
     );
+    expect(screen.getByTestId("assistant-mic")).toHaveAttribute("aria-label", "Hold to dictate");
+    expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
+    unmount();
+    renderComposer({ dictation: { speech: { has_api_key: false }, handle: fakeHandle() } });
+    expect(screen.getByTestId("assistant-mic")).toHaveAttribute("aria-label", "Set up voice dictation");
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Voice dictation isn't set up.");
+  });
+
+  it("hides the microphone when the browser cannot capture", () => {
+    renderComposer({
+      dictation: { speech: { enabled: true, has_api_key: true }, handle: fakeHandle({ supported: false }) },
+    });
     expect(screen.queryByTestId("assistant-mic")).not.toBeInTheDocument();
   });
 

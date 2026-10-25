@@ -17,12 +17,21 @@ import {
 } from "./dictation.js";
 
 describe("isDictationCellShown", () => {
-  it("shows the mic only while the switch reads on and capture exists", () => {
+  it("treats an absent switch as a pre-switch backend and shows the mic", () => {
+    // The parity backend predates the kill switch: its speech read carries a
+    // key and no `enabled` field, and the composer must still offer dictation.
+    expect(isDictationCellShown({ has_api_key: true }, true)).toBe(true);
     expect(isDictationCellShown({ enabled: true, has_api_key: true }, true)).toBe(true);
+    // A keyless read keeps the mic so the press can route to setup.
     expect(isDictationCellShown({ enabled: true, has_api_key: false }, true)).toBe(true);
+    expect(isDictationCellShown({ has_api_key: false }, true)).toBe(true);
+  });
+
+  it("hides the mic on an explicit off, an unread config or no capture", () => {
     expect(isDictationCellShown({ enabled: false, has_api_key: true }, true)).toBe(false);
-    expect(isDictationCellShown({ has_api_key: true }, true)).toBe(false);
+    expect(isDictationCellShown({ enabled: false, has_api_key: false }, true)).toBe(false);
     expect(isDictationCellShown(undefined, true)).toBe(false);
+    expect(isDictationCellShown({ has_api_key: true }, false)).toBe(false);
     expect(isDictationCellShown({ enabled: true, has_api_key: true }, false)).toBe(false);
   });
 });

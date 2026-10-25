@@ -21,6 +21,7 @@ import {
   analyticsScopedStatsRaw,
   analyticsScopedTotalsRaw,
   analyticsWorkspaceName,
+  browserSessionCookies,
   exportsFindRecord,
   exportsListHistory,
   exportsSubmitStatus,
@@ -1078,5 +1079,56 @@ describe("serverWorkspacePods", () => {
       if (prior === undefined) delete process.env.PARITY_API_URL;
       else process.env.PARITY_API_URL = prior;
     }
+  });
+});
+
+describe("browserSessionCookies", () => {
+  const prior = process.env.PARITY_ORACLE_URL;
+
+  beforeEach(() => {
+    process.env.PARITY_ORACLE_URL = "http://oracle.test:13000";
+  });
+
+  afterEach(() => {
+    if (prior === undefined) delete process.env.PARITY_ORACLE_URL;
+    else process.env.PARITY_ORACLE_URL = prior;
+  });
+
+  it("reads the session and CSRF cookies out of a signed-in session", () => {
+    const cookies = browserSessionCookies({
+      email: "a@example.com",
+      password: "pw",
+      userId: "user-1",
+      cookie: "session-id=abc123; csrftoken=csrf456",
+      csrfToken: "csrf456",
+      apiBase: "http://oracle.test:13000",
+    });
+    expect(cookies).toEqual([
+      { name: "session-id", value: "abc123", domain: "oracle.test", path: "/", httpOnly: true, sameSite: "Lax" },
+      { name: "csrftoken", value: "csrf456", domain: "oracle.test", path: "/", httpOnly: true, sameSite: "Lax" },
+    ]);
+  });
+
+  it("accepts the bare cookie header a harness hands back", () => {
+    // schedulerHarness() exposes `ownerSession` as the cookie string, and
+    // passing it here used to throw on `.split` of an undefined field.
+    expect(browserSessionCookies("session-id=harness; csrftoken=csrf-h").map((c) => c.name)).toEqual([
+      "session-id",
+      "csrftoken",
+    ]);
+  });
+
+  it("returns no cookies instead of throwing when the header is missing or blank", () => {
+    expect(
+      browserSessionCookies({
+        email: "a@example.com",
+        password: "pw",
+        userId: "u",
+        cookie: undefined as never,
+        csrfToken: "",
+        apiBase: "",
+      })
+    ).toEqual([]);
+    expect(browserSessionCookies("   ")).toEqual([]);
   });
 });

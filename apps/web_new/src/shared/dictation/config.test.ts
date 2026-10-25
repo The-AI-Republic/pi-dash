@@ -41,11 +41,12 @@ beforeEach(() => {
 afterEach(() => resetAppClient());
 
 describe("dictationOffered", () => {
-  it("needs both the operator switch and a saved key", () => {
+  it("keeps the control on a pre-switch backend but off when the switch says so", () => {
     expect(dictationOffered(config())).toBe(true);
+    expect(dictationOffered(config({ enabled: undefined }))).toBe(true);
     expect(dictationOffered(config({ enabled: false }))).toBe(false);
-    expect(dictationOffered(config({ enabled: undefined }))).toBe(false);
     expect(dictationOffered(config({ has_api_key: false }))).toBe(false);
+    expect(dictationOffered(config({ enabled: false, has_api_key: false }))).toBe(false);
     expect(dictationOffered(undefined)).toBe(false);
   });
 });

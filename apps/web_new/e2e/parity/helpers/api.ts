@@ -6980,10 +6980,17 @@ function oracleHost(): string {
   }
 }
 
-/** Cookies for `context.addCookies` so a browser acts as this user with no UI login. */
-export function browserSessionCookies(session: AuthedSession): BrowserSessionCookie[] {
+/**
+ * Cookies for `context.addCookies` so a browser acts as this user with no UI
+ * login. Callers pass either a signed-in session or the bare cookie string a
+ * harness hands back (`schedulerHarness().ownerSession`); a session with no
+ * cookie header yields no cookies rather than throwing.
+ */
+export function browserSessionCookies(session: AuthedSession | string): BrowserSessionCookie[] {
   const domain = oracleHost();
-  const jar = jarFromSetCookies(session.cookie.split(";").map((p) => p.trim()));
+  const header = typeof session === "string" ? session : session.cookie;
+  if (typeof header !== "string" || header.trim() === "") return [];
+  const jar = jarFromSetCookies(header.split(";").map((p) => p.trim()));
   const out: BrowserSessionCookie[] = [];
   for (const name of ["session-id", "csrftoken"]) {
     const value = jar.get(name);

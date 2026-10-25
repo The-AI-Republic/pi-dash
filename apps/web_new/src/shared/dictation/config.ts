@@ -31,14 +31,15 @@ export function sttConfigQueryOptions(client: ApiClient) {
 }
 
 /**
- * Whether a dictation control should exist. `enabled` is absent on a
- * server older than the kill switch and reads as off, exactly as the
- * switch's default. A saved key is required, so an empty setup never
- * offers a control that could only fail.
+ * Whether a dictation control should exist. The switch is carried by the
+ * speech read, so an absent `enabled` means a server older than it, not a
+ * server that turned it off: only an explicit off removes the control
+ * (AGT-064). A saved key is required, so an empty setup never offers a
+ * control that could only fail.
  */
 export function dictationOffered(config: { enabled?: boolean | undefined; has_api_key: boolean } | undefined): boolean {
   if (config === undefined) return false;
-  return config.enabled === true && config.has_api_key;
+  return config.enabled !== false && config.has_api_key;
 }
 
 /** The speech configuration, or undefined while it loads or after a failure. */

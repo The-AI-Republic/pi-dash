@@ -33,12 +33,15 @@ export interface ComposerDictation {
 }
 
 /**
- * True when the microphone renders: the switch reads on and the browser
- * can capture. A loading, failed or pre-switch read hides it, as does an
- * explicit off (AGT-064); a missing key never hides it (AGT-051).
+ * True when the microphone renders: the browser can capture and the switch
+ * was not turned off. The switch travels on the speech read, so an absent
+ * flag is a backend that predates it, not a disabled one, and the cell stays
+ * on (AGT-050/AGT-057); only an explicit off hides it (AGT-064). A read
+ * still loading or failed has nothing to decide on and hides it, and a
+ * missing key never hides it — the keyless press routes to setup (AGT-051).
  */
 export function isDictationCellShown(speech: DictationSpeechState | undefined, supported: boolean): boolean {
-  return speech?.enabled === true && supported;
+  return supported && speech !== undefined && speech.enabled !== false;
 }
 
 /** The microphone's accessible label from the key and recording state. */
