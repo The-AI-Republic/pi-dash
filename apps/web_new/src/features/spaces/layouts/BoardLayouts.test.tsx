@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import type { SpaceLayout } from "../lib/address.js";
 import { BoardLayouts, EmptyBoardNotice, SPACE_BOARD_EMPTY_TEXT } from "./BoardLayouts.js";
-import { boardIssue, DONE_ID, firstPage, STATES, TODO_ID } from "./testFixtures.js";
+import { boardIssue, DONE_ID, firstPage, issueHref, LABELS, STATES, TODO_ID } from "./testFixtures.js";
 
 const client = createClient({
   baseUrl: "https://api.test",
@@ -31,6 +31,8 @@ function renderLayouts(
         states={STATES}
         page={page}
         projectIdentifier="SPC"
+        labels={LABELS}
+        issueHref={issueHref}
       />
     </QueryClientProvider>
   );

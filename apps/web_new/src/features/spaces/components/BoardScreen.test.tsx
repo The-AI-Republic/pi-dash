@@ -86,6 +86,7 @@ const issue = {
 };
 
 const states = [{ id: STATE_ID, name: "Todo", color: "#000", group: "unstarted" as const, sequence: 1 }];
+const labels = [{ id: "55555555-5555-4555-8555-555555555555", name: "Bug", color: "#e11d48", parent: null }];
 
 function reply(status: number, body: unknown): Awaited<ReturnType<Transport>> {
   return {
@@ -100,6 +101,7 @@ interface Routes {
   settings?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
   issues?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
   states?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
+  labels?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
 }
 
 function renderBoard(routes: Routes = {}, anchor = ANCHOR, search: SpaceBoardSearch = {}): string[] {
@@ -118,6 +120,7 @@ function renderBoard(routes: Routes = {}, anchor = ANCHOR, search: SpaceBoardSea
         }));
     }
     if (url.includes("/states/")) return await (routes.states?.() ?? reply(200, states));
+    if (url.includes("/labels/")) return await (routes.labels?.() ?? reply(200, labels));
     throw new Error(`unexpected request ${url}`);
   };
   runtime.client = createClient({ baseUrl: "https://api.test", transport });

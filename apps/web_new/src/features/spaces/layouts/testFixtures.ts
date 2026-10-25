@@ -2,12 +2,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Shared shapes for the public-board layout tests (test-only module).
-import type { SpaceBoardIssue, SpaceBoardIssuePage, SpaceBoardState } from "@pidash/api-client";
+import type { SpaceBoardIssue, SpaceBoardIssuePage, SpaceBoardLabel, SpaceBoardState } from "@pidash/api-client";
 
 export const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 export const TODO_ID = "22222222-2222-4222-8222-222222222222";
 export const DONE_ID = "33333333-3333-4333-8333-333333333333";
 export const EMPTY_ID = "44444444-4444-4444-8444-444444444444";
+export const LABEL_ID = "55555555-5555-4555-8555-555555555555";
+
+export const LABELS: SpaceBoardLabel[] = [{ id: LABEL_ID, name: "Bug", color: "#e11d48", parent: null }];
+
+/** A card address that keeps the layout and identifies one row. */
+export function issueHref(issue: SpaceBoardIssue): string {
+  return `/spaces/issues/anchor-1/?peekId=${issue.id}`;
+}
 
 export const STATES: SpaceBoardState[] = [
   { id: DONE_ID, name: "Done", color: "#0a0", group: "completed", sequence: 3 },

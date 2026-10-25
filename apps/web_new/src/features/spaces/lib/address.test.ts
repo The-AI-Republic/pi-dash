@@ -11,6 +11,7 @@ import {
   SPACE_LAYOUTS,
   SPACE_PRIORITIES,
   spaceBoardPath,
+  spaceIssueHref,
   spaceLegacyPath,
   spaceReturnPath,
   type SpaceBoardSearch,
@@ -126,6 +127,14 @@ describe("board filters in the address", () => {
   it("keeps filters in the sign-in return address", () => {
     expect(spaceReturnPath("anchor", { board: "kanban", state: [ID_A] })).toBe(
       `/issues/anchor/?board=kanban&state=${ID_A}`
+    );
+  });
+});
+
+describe("space issue address", () => {
+  it("adds peekId while keeping the layout and every filter", () => {
+    expect(spaceIssueHref("anchor", { board: "kanban", state: [ID_A], priority: ["high"] }, ID_B)).toBe(
+      `/spaces/issues/anchor/?board=kanban&peekId=${ID_B}&priority=high&state=${ID_A}`
     );
   });
 });
