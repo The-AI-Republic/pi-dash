@@ -8,6 +8,8 @@
 // (entity pickers, preference lists) register beside their commands and
 // render through the palette's generic page view (shell spec, SHELL-082).
 
+import type * as React from "react";
+
 /**
  * Contextual marker (shell spec, SHELL-090/091). Commands registered by
  * an entity screen carry the entity family plus the chip label and
@@ -156,6 +158,12 @@ export interface PalettePageOption {
   hint?: string | undefined;
   /** Marks the current selection (check shown; pickers re-read on refresh). */
   selected?: boolean | undefined;
+  /**
+   * Decorative mark ahead of the title (a status dot, an entity glyph).
+   * Navigation lists use it to show an entity's state without repeating
+   * it in words; selection pickers leave it out.
+   */
+  icon?: React.ReactNode | undefined;
   /**
    * Runs on activation. The page stays open afterwards unless the option
    * closes it through the palette store itself, so multi-change pickers

@@ -5,8 +5,8 @@
 // through the project access gate: members see the page, everyone else
 // gets the join, no-access, or not-found screen keyed off the
 // details-fetch status plus admin standing. Members also get the
-// project tab strip above the page in tabbed mode, and the views
-// palette entries (VIEW-042) on every project page.
+// project tab strip above the page in tabbed mode, and the views and
+// modules palette entries (VIEW-042, MOD-037) on every project page.
 
 import { createFileRoute, Outlet } from "@tanstack/react-router";
 import * as React from "react";
@@ -23,6 +23,13 @@ const ViewsPaletteEntries = React.lazy(() =>
     default: module.ViewsPaletteEntries,
   }))
 );
+// Same shape for the modules entries: they register two commands and a
+// jump page, and the create dialog they can open stays in its own chunk.
+const ModulePaletteEntries = React.lazy(() =>
+  import("../../../../../features/modules/palette/ModulePaletteEntries.js").then((module) => ({
+    default: module.ModulePaletteEntries,
+  }))
+);
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId")({
   component: ProjectLayoutComponent,
@@ -37,6 +44,9 @@ function ProjectLayoutComponent(): React.ReactElement {
           the chunk's first load (NEWFRONT-871, size gate). */}
       <React.Suspense fallback={null}>
         <ViewsPaletteEntries workspaceSlug={ws} projectId={projectId} />
+      </React.Suspense>
+      <React.Suspense fallback={null}>
+        <ModulePaletteEntries workspaceSlug={ws} projectId={projectId} />
       </React.Suspense>
       <ProjectTabStrip workspaceSlug={ws} projectId={projectId} />
       <Outlet />

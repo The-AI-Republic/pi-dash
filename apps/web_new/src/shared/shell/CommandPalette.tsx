@@ -337,6 +337,7 @@ function PageView({ page }: { page: PalettePage }): React.ReactElement {
                 title={option.title}
                 hint={option.hint}
                 selected={option.selected}
+                icon={option.icon}
                 onHover={() => setActiveIndex(index)}
                 onSelect={() => activate(index)}
               />

@@ -44,6 +44,16 @@ vi.mock("../../../../../features/views/palette/ViewsPaletteEntries.js", async ()
   };
 });
 
+// The modules palette entries load on their own chunk too. They register
+// commands rather than paint a page, so the stand-in is a marker this
+// suite can find beside the views one.
+vi.mock("../../../../../features/modules/palette/ModulePaletteEntries.js", async () => {
+  const ReactModule = await import("react");
+  return {
+    ModulePaletteEntries: () => ReactModule.createElement("div", { "data-testid": "modules-palette-entries" }),
+  };
+});
+
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -224,6 +234,12 @@ describe("project layout", () => {
   it("renders not-found for unknown projects", async () => {
     renderLayout(404);
     await screen.findByRole("heading", { name: "Project not found" });
+  });
+
+  it("mounts the modules palette entries beside the views ones (MOD-037)", async () => {
+    renderLayout(200);
+    await screen.findByTestId("modules-palette-entries");
+    expect(screen.getByText("Issues page")).toBeInTheDocument();
   });
 
   // Runs last: once the chunk settles, React.lazy caches it for the rest

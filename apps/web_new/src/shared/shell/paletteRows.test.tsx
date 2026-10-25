@@ -75,6 +75,37 @@ describe("PaletteOption", () => {
     expect(option.className).not.toContain("bg-(--subtle)");
   });
 
+  it("draws a decorative mark ahead of the title when the owner supplies one", () => {
+    render(
+      <ul>
+        <PaletteOption
+          active={false}
+          title="Delivery"
+          hint="In Progress"
+          icon={<svg data-testid="row-mark" />}
+          onHover={() => undefined}
+          onSelect={() => undefined}
+        />
+      </ul>
+    );
+    const option = screen.getByRole("option", { name: /Delivery/ });
+    const mark = screen.getByTestId("palette-option-icon");
+    expect(mark).toContainElement(screen.getByTestId("row-mark"));
+    expect(mark).toHaveAttribute("aria-hidden", "true");
+    // The mark leads the title in reading order.
+    expect(option.firstElementChild).toBe(mark);
+    expect(screen.getByText("In Progress")).toBeInTheDocument();
+  });
+
+  it("draws no mark for a row that carries none", () => {
+    render(
+      <ul>
+        <PaletteOption active={false} title="Go home" onHover={() => undefined} onSelect={() => undefined} />
+      </ul>
+    );
+    expect(screen.queryByTestId("palette-option-icon")).toBeNull();
+  });
+
   it("shows the two-key sequence chips beside the title", () => {
     render(
       <ul>

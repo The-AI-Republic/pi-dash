@@ -24,6 +24,7 @@ export {
 } from "./api/projectFacts.js";
 export { modulesListQueryOptions } from "./api/queries.js";
 export { ModuleBoardCard, type ModuleBoardCardProps } from "./components/ModuleBoardCard.js";
+export { ModuleFeatureSettings, type ModuleFeatureSettingsProps } from "./components/ModuleFeatureSettings.js";
 export {
   ModuleCreateAction,
   ModuleDeleteDialog,
@@ -64,6 +65,26 @@ export { MODULES_SEARCH_TRIGGER_LABEL, ModulesSearch, type ModulesSearchProps } 
 export { ModulesSortMenu, type ModulesSortMenuProps } from "./components/ModulesSortMenu.js";
 export { ModuleLayoutIcon } from "./components/ModuleLayoutIcon.js";
 export { ModuleListRow, type ModuleListRowProps } from "./components/ModuleListRow.js";
+export {
+  buildModuleCreateCommand,
+  buildModuleJumpCommand,
+  MODULE_CREATE_COMMAND_ID,
+  MODULE_CREATE_SEQUENCE,
+  MODULE_CREATE_TITLE,
+  MODULE_JUMP_COMMAND_ID,
+  MODULE_JUMP_PAGE_ID,
+  MODULE_JUMP_TITLE,
+  type ModuleCreateCommandContext,
+  type ModuleJumpCommandContext,
+} from "./palette/moduleCommands.js";
+export {
+  MODULE_JUMP_EMPTY_TEXT,
+  MODULE_JUMP_PLACEHOLDER,
+  projectModulesJumpPage,
+  type ModuleJumpPageArgs,
+} from "./palette/moduleJumpPage.js";
+export { ModulePaletteEntries, type ModulePaletteEntriesProps } from "./palette/ModulePaletteEntries.js";
+export { ModuleStatusDot, type ModuleStatusDotProps } from "./palette/ModuleStatusDot.js";
 export { ModulesFeatureGate, type ModulesFeatureGateProps } from "./components/ModulesFeatureGate.js";
 export {
   MODULE_TIMELINE_REORDER_FAILED_BODY,

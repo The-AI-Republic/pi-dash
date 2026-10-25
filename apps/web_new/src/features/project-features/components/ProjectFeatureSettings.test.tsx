@@ -143,6 +143,35 @@ describe("ProjectFeatureSettings", () => {
     );
   });
 
+  it("tells its owner after a successful write so the area can refresh its reads", async () => {
+    const user = userEvent.setup();
+    const onUpdated = vi.fn();
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectFeatureSettings feature={PROJECT_FEATURES.modules} onUpdated={onUpdated} />
+      </QueryClientProvider>
+    );
+    await user.click(screen.getByRole("switch", { name: "Enable modules" }));
+    expect(onUpdated).not.toHaveBeenCalled();
+    const [, options] = harness.mutate.mock.calls[0] as [unknown, { onSuccess: () => void }];
+    options.onSuccess();
+    expect(onUpdated).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays silent for its owner when the write is refused", async () => {
+    const user = userEvent.setup();
+    const onUpdated = vi.fn();
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectFeatureSettings feature={PROJECT_FEATURES.views} onUpdated={onUpdated} />
+      </QueryClientProvider>
+    );
+    await user.click(screen.getByRole("switch", { name: "Enable views" }));
+    const [, options] = harness.mutate.mock.calls[0] as [unknown, { onError: () => void }];
+    options.onError();
+    expect(onUpdated).not.toHaveBeenCalled();
+  });
+
   it("locks the switch while its own write is in flight", () => {
     harness.pending = true;
     renderFeature("modules");

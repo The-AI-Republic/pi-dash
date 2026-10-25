@@ -6,7 +6,7 @@
 // page, the row carries the module identity later slices read, and the
 // leading and trailing slots mount without nesting inside the link.
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -42,6 +42,26 @@ describe("ModuleListRow", () => {
     expect(row).toHaveAttribute("data-module-id", MODULES_MODULE_ID);
     expect(row).toHaveAttribute("data-module-name", "Delivery");
     expect(row).toHaveAttribute("data-module-status", "in-progress");
+  });
+
+  it("is not draggable and carries no drag handler (MOD-041)", () => {
+    render(<ModuleListRow workspaceSlug="acme" projectId={MODULES_PROJECT_ID} module={makeModuleRow()} />);
+    const row = screen.getByTestId("modules-row");
+    expect(row).not.toHaveAttribute("draggable");
+    for (const handler of ["ondragstart", "ondragend", "ondragover", "ondrop", "ondragenter", "ondragleave"]) {
+      expect(row).not.toHaveAttribute(handler);
+    }
+    // The only interactive element is the name anchor; nothing in the row
+    // offers a reorder handle.
+    expect(within(row).queryAllByRole("button")).toEqual([]);
+    expect(row.querySelector("[tabindex]")).toBeNull();
+  });
+
+  it("offers no export, import or print action (MOD-041)", () => {
+    render(<ModuleListRow workspaceSlug="acme" projectId={MODULES_PROJECT_ID} module={makeModuleRow()} />);
+    const row = screen.getByTestId("modules-row");
+    expect(row.textContent ?? "").not.toMatch(/export|import|print|download|csv/i);
+    expect(within(row).queryAllByRole("button", { name: /export|import|print|download|csv/i })).toEqual([]);
   });
 
   it("mounts the leading and trailing slots beside the link", () => {

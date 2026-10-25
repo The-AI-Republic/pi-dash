@@ -60,6 +60,7 @@ export function PaletteOption({
   shortcut,
   sequence,
   selected,
+  icon,
   onHover,
   onSelect,
 }: {
@@ -69,6 +70,7 @@ export function PaletteOption({
   shortcut?: string | undefined;
   sequence?: string | undefined;
   selected?: boolean | undefined;
+  icon?: React.ReactNode | undefined;
   onHover: () => void;
   onSelect: () => void;
 }): React.ReactElement {
@@ -86,7 +88,14 @@ export function PaletteOption({
             : "text-body flex w-full cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left text-(--text)"
         }
       >
-        <span className="min-w-0 flex-1 truncate">{title}</span>
+        {icon === undefined ? null : (
+          <span aria-hidden="true" data-testid="palette-option-icon" className="flex shrink-0 items-center">
+            {icon}
+          </span>
+        )}
+        <span data-testid="palette-option-title" className="min-w-0 flex-1 truncate">
+          {title}
+        </span>
         {hint ? <span className="text-caption max-w-40 truncate text-(--text-muted)">{hint}</span> : null}
         {sequence ? <SequenceBadge sequence={sequence} /> : null}
         {shortcut ? <Kbd keys={shortcut.split("+")} /> : null}
