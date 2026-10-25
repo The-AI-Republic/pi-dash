@@ -335,14 +335,21 @@ describe("WebNewDriver prompt section navigation and shell states", () => {
 describe("WebNewDriver prompt request controls", () => {
   it("holds only the selected section-list scope and can clear the route", async () => {
     let handler!: (route: Route) => Promise<void>;
-    const route = vi.fn(async (_pattern: string, next: (route: Route) => Promise<void>) => {
+    const route = vi.fn(async (_pattern: string | RegExp, next: (route: Route) => Promise<void>) => {
       handler = next;
     });
-    const unroute = vi.fn(async (_pattern: string) => undefined);
+    const unroute = vi.fn(async (_pattern: string | RegExp) => undefined);
     const driver = new WebNewDriver({ route, unroute } as unknown as Page);
 
     await driver.promptsFailSectionsStart("workspace");
-    expect(route).toHaveBeenCalledWith("**/api/workspaces/*/prompt-sections*", expect.any(Function));
+    const pattern = route.mock.calls[0]?.[0];
+    expect(pattern).toBeInstanceOf(RegExp);
+    const urls = [
+      "https://test/api/workspaces/acme/prompt-sections?scope=user",
+      "https://test/api/workspaces/acme/prompt-sections/autonomy?scope=workspace",
+    ];
+    for (const url of urls) expect((pattern as RegExp).test(url)).toBe(true);
+    expect((pattern as RegExp).test("https://test/api/workspaces/acme/prompt-sections/autonomy/preview")).toBe(false);
 
     const failed = routeDouble("GET", "https://test/api/workspaces/acme/prompt-sections?scope=workspace");
     await handler(failed as unknown as Route);
@@ -361,7 +368,7 @@ describe("WebNewDriver prompt request controls", () => {
     expect(write.continue).toHaveBeenCalledTimes(1);
 
     await driver.promptsFailSectionsStop();
-    expect(unroute).toHaveBeenCalledWith("**/api/workspaces/*/prompt-sections*");
+    expect(unroute).toHaveBeenCalledWith(expect.any(RegExp));
   });
 
   it("tolerates an already-cleared failure route", async () => {
