@@ -19,6 +19,7 @@ import { formatDay, formatMergedRange } from "../dropdowns/calendar.js";
 import { DateRangePicker } from "../dropdowns/DateRangePicker.js";
 import { LabelPicker } from "../labels/LabelPicker.js";
 import { isPropertyShown, type DisplayFeatureFlags } from "../display/matrix.js";
+import { selectEstimateValueLabel } from "../../../shared/pickers/estimates.js";
 import {
   CyclePicker,
   EstimatePicker,
@@ -29,6 +30,7 @@ import {
   PriorityPicker,
   STATE_GROUP_ICONS,
   StatePicker,
+  usePickerEstimates,
   type PriorityLevel,
 } from "../../../shared/pickers/index.js";
 import { stateOptionGate } from "../edition/workflow.js";
@@ -182,6 +184,19 @@ function InlinePropertyStripImpl({
       (key !== "modules" || !flags.hideModule) &&
       (key !== "estimate" || estimateEnabled)
   );
+  // A set point names itself on the chip in every state (EST-022), so the
+  // systems load beside the row rather than only when the popup opens. The
+  // read is shared by every row of the project and skipped otherwise.
+  const estimatePoint =
+    typeof issue.estimate_point === "string" && issue.estimate_point !== "" ? issue.estimate_point : null;
+  const estimates = usePickerEstimates(
+    workspaceSlug,
+    projectId,
+    estimateEnabled && keys.includes("estimate") && estimatePoint !== null
+  );
+  // The chip follows the peek rule rather than the sheet's raw-id fallback:
+  // an id no system lists reads as the empty placeholder, as the picker does.
+  const estimateText = selectEstimateValueLabel(estimates.data, estimatePoint) ?? "None";
   const state = states.find((row) => row.id === issue.state_id);
   const stateGroup = state?.group ?? null;
   const StateIcon = state === undefined ? null : STATE_GROUP_ICONS[state.group];
@@ -485,24 +500,25 @@ function InlinePropertyStripImpl({
           const estimateTrigger = (
             <button
               type="button"
-              aria-label="Estimate"
+              aria-label={`Estimate: ${estimateText}`}
+              data-testid="row-estimate-trigger"
               disabled={disabled}
-              className={chipClasses(issue.estimate_point !== null && issue.estimate_point !== undefined)}
+              className={chipClasses(estimatePoint !== null)}
             >
               <Hash size={14} strokeWidth={1.5} aria-hidden="true" />
+              <span className="truncate">{estimateText}</span>
             </button>
           );
           return (
-            <span key={key} className="inline-flex shrink-0">
+            <span key={key} className="inline-flex min-w-0 shrink-0" title={`Estimate: ${estimateText}`}>
               <DeferredPicker defer={deferPickers} disabled={disabled} trigger={estimateTrigger}>
                 {(open, onOpenChange) => (
                   <EstimatePicker
                     workspaceSlug={workspaceSlug}
                     projectId={projectId}
-                    value={typeof issue.estimate_point === "string" ? issue.estimate_point : null}
+                    value={estimatePoint}
                     onChange={(id) => patch.patchIssue({ estimate_point: id })}
                     disabled={disabled}
-                    iconOnly
                     trigger={estimateTrigger}
                     open={open}
                     onOpenChange={onOpenChange}
