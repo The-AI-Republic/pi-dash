@@ -61,18 +61,17 @@ test(
     await test.step("owner signs in and opens the thread", async () => {
       await driver.rulesEnsureSignedIn(owner.email, owner.password, workspaceSlug);
       await driver.assistantStubTranscribeText("dictation should not land");
-      // This checkout's backend predates the switch, so a target leg has to
-      // serve the flag on first: the new app reads an absent flag as off.
-      if (driver.target === "web_new") await driver.settingsProfileStubDictationEnabled(true);
+      // No flag stub here: this checkout's backend predates the switch, so
+      // the read carries no `enabled` at all — an absent flag is a
+      // pre-switch backend, not a disabled one, and the mic must render.
       await driver.assistantOpenThread(workspaceSlug, thread.id);
       await expect.poll(() => driver.assistantMicLabel(), { timeout: 60_000 }).toBe("Hold to dictate");
       expect(await driver.assistantMicVisible()).toBe(true);
     });
 
-    await test.step("flag absent: this checkout renders the ordinary dictation UI", async () => {
-      // The pre-switch backend sends no `enabled` at all; the oracle leg can
-      // only prove that an absent flag does not hide anything on its build.
-      if (driver.target === "web_new") return;
+    await test.step("flag absent: both builds render the ordinary dictation UI", async () => {
+      // The pre-switch backend sends no `enabled` at all, so this proves an
+      // absent flag hides nothing — on the oracle and on the new app alike.
       expect(await driver.assistantMicVisible()).toBe(true);
     });
 

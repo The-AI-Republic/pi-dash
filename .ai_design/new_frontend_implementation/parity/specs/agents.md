@@ -735,7 +735,9 @@ stays open so a stored key can always be deleted; the speech config read
 still answers and reports the flag; saved speech configs are untouched. The
 web app reads the flag from the speech config get it already makes, so
 flipping it needs no rebuild: with the flag off, the flag loading, or the
-read failed, the composer microphone and all its hints hide; the voice
+read failed, the composer microphone and all its hints hide. An absent
+`enabled` field is a backend older than the switch, not a disabled one, so
+it reads as on (NEWFRONT-897); only a literal false hides the controls; the voice
 section is removed from the assistant settings page, or reduced to a
 remove-only panel when a key is saved; a recording in progress is abandoned
 if the flag turns off mid-recording; and a dictation-disabled response
