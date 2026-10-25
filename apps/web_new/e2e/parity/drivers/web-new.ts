@@ -10883,7 +10883,13 @@ export class WebNewDriver implements ParityDriver {
   ): Promise<void> {
     if (input.dtstart !== undefined) await dialog.getByLabel("Starts at").fill(input.dtstart);
     if (input.tzid !== undefined) await dialog.getByLabel("Time zone").selectOption(input.tzid);
-    if (input.rrule !== undefined) await dialog.getByLabel("Recurrence (RRULE)").fill(input.rrule);
+    if (input.rrule !== undefined) {
+      // The widget keeps the rule text under its advanced disclosure
+      // (AGT-065); reveal it before typing, exactly as a person would.
+      const rawField = dialog.getByLabel("Recurrence (RRULE)");
+      if (!(await rawField.first().isVisible())) await this.schedulerRecurrenceAdvanced();
+      await rawField.first().fill(input.rrule);
+    }
     if (input.extraContext !== undefined)
       await dialog.getByLabel("Project context (optional)").fill(input.extraContext);
   }

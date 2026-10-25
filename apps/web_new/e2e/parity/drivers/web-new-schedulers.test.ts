@@ -672,6 +672,52 @@ describe("recurrence builder", () => {
     expect(raw.fill).toHaveBeenCalledWith("FREQ=DAILY");
   });
 
+  it("reveals the rule disclosure before filling the schedule", async () => {
+    let expanded = false;
+    const fill = vi.fn(async () => undefined);
+    const toggle = fake({
+      count: 1,
+      click: async () => {
+        expanded = true;
+      },
+      getAttribute: async (name: string) => (name === "aria-expanded" && expanded ? "true" : "false"),
+    });
+    const scheduleField = (label: string) =>
+      label === "Recurrence (RRULE)"
+        ? fake({
+            count: 1,
+            get visible() {
+              return expanded;
+            },
+            fill,
+          })
+        : fake({ count: 1, fill: vi.fn(async () => undefined), selectOption: vi.fn(async () => undefined) });
+    const dialog = fake({
+      role: (role: string) => (role === "button" ? toggle : absent()),
+      byLabel: scheduleField,
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=DAILY;COUNT=2" });
+    expect(toggle.click).toHaveBeenCalledTimes(1);
+    expect(fill).toHaveBeenCalledWith("FREQ=DAILY;COUNT=2");
+  });
+
+  it("fills the rule directly when the disclosure is already open", async () => {
+    const fill = vi.fn(async () => undefined);
+    const toggle = fake({ count: 1, click: vi.fn(async () => undefined) });
+    const dialog = fake({
+      role: (role: string) => (role === "button" ? toggle : absent()),
+      byLabel: (label: string) =>
+        label === "Recurrence (RRULE)"
+          ? fake({ count: 1, visible: true, fill })
+          : fake({ count: 1, fill: vi.fn(async () => undefined), selectOption: vi.fn(async () => undefined) }),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=DAILY" });
+    expect(toggle.click).not.toHaveBeenCalled();
+    expect(fill).toHaveBeenCalledWith("FREQ=DAILY");
+  });
+
   it("treats a forced raw rule as already advanced", async () => {
     const dialog = fake({
       role: () => absent(),

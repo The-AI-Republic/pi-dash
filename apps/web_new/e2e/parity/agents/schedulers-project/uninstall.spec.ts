@@ -163,9 +163,12 @@ test(
       await driver.schedulerBindingOpenUninstall();
       await driver.schedulerConfirmUninstall();
       await toastMessage(driver, "Scheduler uninstalled");
-      // The detail navigates back to the install list on success.
+      // The detail navigates back to the install list on success. The list
+      // paints its loading skeleton before the empty row, and an empty read
+      // there looks the same as a settled one, so poll the visible empty
+      // state rather than checking it once.
       await expect.poll(() => driver.schedulerProjectRows(), { timeout: 30_000 }).toEqual([]);
-      expect(await driver.schedulerProjectEmptyVisible()).toBe(true);
+      await expect.poll(() => driver.schedulerProjectEmptyVisible(), { timeout: 30_000 }).toBe(true);
       expect(await serverBindings(workspaceSlug, project.id, ownerSession)).toEqual([]);
     });
   }
