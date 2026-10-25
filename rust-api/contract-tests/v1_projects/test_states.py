@@ -2,7 +2,7 @@
 
 Covers state list/create and detail get/patch/delete, plus identifier-slug
 routing, one denied case and one tenant-isolation case. Note create answers
-200 (not 201).
+200 (not 201). Non-canonical UUID detail spellings 404 (PIDASHCONV-1393).
 """
 
 import sys
@@ -197,3 +197,56 @@ def test_isolation_other_workspace(seed, conn):
                 "DELETE FROM project_members WHERE project_id = %s AND member_id = %s",
                 (seed["project_b"]["id"], seed["owner"]["id"]),
             )
+
+
+def _spellings(canonical):
+    # Every spelling `uuid.UUID()` (and Rust's `Uuid::parse_str`) accepts
+    # but Django's `<uuid:...>` converter (`[0-9a-f]{8}-...`, matched
+    # case-sensitively) does not route (PIDASHCONV-1393).
+    return {
+        "uppercase": canonical.upper(),
+        "simple": canonical.replace("-", ""),
+        "braced": "{" + canonical + "}",
+    }
+
+
+def _assert_resolver_404(resp):
+    # Routing precedes auth and the view entirely: the answer is the
+    # resolver's 404, never the view's body or a 401. The harness serves
+    # Django with `pi_dash.settings.test` (`DEBUG = True`), so the
+    # resolver miss is Django's technical HTML page on both backends
+    # (PIDASHCONV-1193 note); the production JSON handler404 only
+    # appears with `DEBUG = False` and is unreachable here.
+    assert resp.status_code == 404, resp.text[:400]
+    assert resp.headers.get("content-type", "").startswith("text/html"), \
+        resp.headers.get("content-type")
+
+
+def test_detail_non_canonical_spelling_404s(seed, conn):
+    # `states/<uuid:state_id>/` (`state.py:19`): uppercase, plain-hex and
+    # braced spellings of a real state id resolver-404 on GET, PATCH and
+    # DELETE — for anonymous callers too — and change nothing.
+    tag = db.new_tag()
+    st = db.create_state(conn, seed["ws_a"]["id"], seed["project"]["id"], tag)
+    before = db.fetch_one(
+        conn,
+        "SELECT name, color, deleted_at FROM states WHERE id = %s",
+        (st["id"],),
+    )
+    for segment in _spellings(st["id"]).values():
+        url = f"{base(seed)}/{segment}/"
+        _assert_resolver_404(http.get(None, url, expect=404))
+        _assert_resolver_404(http.get(seed["keys"][KEY], url, expect=404))
+        _assert_resolver_404(http.patch(
+            seed["keys"][KEY], url, json={"color": "#0000ff"}, expect=404))
+        _assert_resolver_404(http.delete(seed["keys"][KEY], url, expect=404))
+    after = db.fetch_one(
+        conn,
+        "SELECT name, color, deleted_at FROM states WHERE id = %s",
+        (st["id"],),
+    )
+    assert after == before
+    # Canonical control: the gate must not reject the spelling Django routes.
+    body = http.get(seed["keys"][KEY], f"{base(seed)}/{st['id']}/").json()
+    assert body["id"] == st["id"]
+    assert body["name"] == st["name"]

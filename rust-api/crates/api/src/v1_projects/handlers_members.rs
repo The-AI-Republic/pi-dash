@@ -89,6 +89,7 @@ use serde_json::Value;
 use sqlx::Row;
 
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::permissions::{project, workspace};
 use pidash_auth::scope::TenantScope as AuthScope;
 use pidash_auth::token as auth_token;
@@ -1801,8 +1802,9 @@ fn integrity_denial(err: &sqlx::Error) -> Denial {
 }
 
 /// `GET .../members/<pk>/` (`member.py:175-192`): the *user* profile, not
-/// the membership row. A non-UUID `pk` never reaches the view in Django
-/// (the `<uuid:pk>` converter rejects it), so proxy for the exact 404.
+/// the membership row. Only the canonical spelling reaches the view in
+/// Django (the `<uuid:pk>` converter rejects the rest), so proxy every
+/// other spelling for the exact resolver 404.
 async fn pm_detail_get(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
@@ -1811,8 +1813,18 @@ async fn pm_detail_get(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Ok(pk) = pk_raw.parse::<uuid::Uuid>() else {
-        return proxy_through(state, method, uri, headers, body).await;
+    // Django routes this segment through the `<uuid:pk>` converter
+    // (`api/urls/member.py:21,31`), whose regex is lowercase-hyphenated
+    // canonical form only, matched case-sensitively — every other spelling
+    // resolver-404s before auth. `Uuid::parse_str` also accepts uppercase,
+    // simple, braced and `urn:uuid:` spellings, so gate on the raw segment
+    // and proxy the rest for Django's own resolver 404 (PIDASHCONV-1095 /
+    // -1132 / -1162 / -1193 / -1205 precedent, PIDASHCONV-1393).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
     };
     into_result_response(pm_detail_get_inner(&state, &slug, &project_raw, pk, &headers).await)
 }
@@ -1872,8 +1884,14 @@ async fn pm_detail_patch(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Ok(pk) = pk_raw.parse::<uuid::Uuid>() else {
-        return proxy_through(state, method, uri, headers, body).await;
+    // Same canonical-spelling gate as the GET handler: only a
+    // lowercase-hyphenated segment matches Django's `<uuid:pk>` route;
+    // everything else proxies for the resolver 404 (PIDASHCONV-1393).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
     };
     into_result_response(
         pm_detail_patch_inner(
@@ -1996,8 +2014,14 @@ async fn pm_detail_delete(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Ok(pk) = pk_raw.parse::<uuid::Uuid>() else {
-        return proxy_through(state, method, uri, headers, body).await;
+    // Same canonical-spelling gate as the GET handler: only a
+    // lowercase-hyphenated segment matches Django's `<uuid:pk>` route;
+    // everything else proxies for the resolver 404 (PIDASHCONV-1393).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
     };
     into_result_response(pm_detail_delete_inner(&state, &slug, &project_raw, pk, &headers).await)
 }
