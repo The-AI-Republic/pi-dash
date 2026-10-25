@@ -17,6 +17,7 @@ import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { routeTree } from "../../routeTree.gen.js";
 
 const UUID = "11111111-1111-4111-8111-111111111111";
+const ISSUE_UUID = "22222222-2222-4222-8222-222222222222";
 
 function reply(status: number, body: unknown): Awaited<ReturnType<Transport>> {
   return {
@@ -107,6 +108,33 @@ function renderSpace(
   const transport: Transport = async (url) => {
     if (url.includes("/api/instances/")) return reply(200, instance);
     if (url.includes("/settings/")) return overrides.settings?.() ?? reply(200, settings);
+    if (new RegExp(`/issues/${ISSUE_UUID}/`).test(url)) {
+      return reply(200, {
+        id: ISSUE_UUID,
+        name: "Open issue",
+        state_id: null,
+        sort_order: 1,
+        estimate_point: null,
+        priority: null,
+        start_date: null,
+        target_date: null,
+        sequence_id: 1,
+        project_id: UUID,
+        parent_id: null,
+        created_by: null,
+        state__group: null,
+        cycle_id: null,
+        assignee_ids: [],
+        label_ids: [],
+        module_ids: [],
+        vote_items: [],
+        reaction_items: [],
+        description_json: null,
+        description_html: "",
+        description_stripped: "",
+        description_binary: null,
+      });
+    }
     if (url.includes("/issues/")) {
       return reply(200, {
         grouped_by: "state_id",
@@ -147,16 +175,16 @@ afterEach(() => {
 
 describe("spaces route tree", () => {
   it("renders a board from the anchor address and settles its search", async () => {
-    const router = renderSpace("/spaces/issues/anchor-1/?board=kanban&peekId=issue-1&labels=x");
+    const router = renderSpace(`/spaces/issues/anchor-1/?board=kanban&peekId=${ISSUE_UUID}&labels=x`);
     await waitFor(() => expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board"));
-    expect(router.state.location.search).toMatchObject({ board: "kanban", peekId: "issue-1" });
+    expect(router.state.location.search).toMatchObject({ board: "kanban", peekId: ISSUE_UUID });
   });
 
   it("rewrites a pasted slash-less board address to the trailing-slash form", async () => {
-    const router = renderSpace("/spaces/issues/anchor-1?board=kanban&peekId=issue-1&labels=x");
+    const router = renderSpace(`/spaces/issues/anchor-1?board=kanban&peekId=${ISSUE_UUID}&labels=x`);
     await waitFor(() => expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board"));
     expect(router.state.location.pathname).toBe("/spaces/issues/anchor-1/");
-    expect(router.state.location.search).toMatchObject({ board: "kanban", peekId: "issue-1" });
+    expect(router.state.location.search).toMatchObject({ board: "kanban", peekId: ISSUE_UUID });
   });
 
   it("keeps the fragment when rewriting a slash-less board address", async () => {
@@ -246,8 +274,8 @@ describe("space board layout address (SPC-021/022)", () => {
 
 describe("space legacy forwarding", () => {
   it("does not forward filter parameters from a legacy link", async () => {
-    const router = renderSpace(`/spaces/acme/${UUID}/?board=kanban&peekId=issue-1&labels=l1&priority=high`);
+    const router = renderSpace(`/spaces/acme/${UUID}/?board=kanban&peekId=${ISSUE_UUID}&labels=l1&priority=high`);
     await waitFor(() => expect(router.state.location.pathname).toBe("/spaces/issues/anchor-1/"));
-    expect(router.state.location.search).toEqual({ board: "kanban", peekId: "issue-1" });
+    expect(router.state.location.search).toEqual({ board: "kanban", peekId: ISSUE_UUID });
   });
 });
