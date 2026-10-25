@@ -6,13 +6,14 @@
 // search, sort, filters, empty/error/no-results and row links.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { PageRow } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const routerHarness = vi.hoisted(() => ({ navigate: vi.fn() }));
-const toaster = vi.hoisted(() => ({ notifySuccess: vi.fn(), notifyError: vi.fn() }));
+const toaster = vi.hoisted(() => ({ notifyPending: vi.fn(), notifySuccess: vi.fn(), notifyError: vi.fn() }));
+const favoritesShell = vi.hoisted(() => ({ isFavoritesSectionOpen: vi.fn(), setFavoritesSectionOpen: vi.fn() }));
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => routerHarness.navigate,
@@ -23,6 +24,7 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 vi.mock("../../../shared/shell/toaster.js", () => toaster);
+vi.mock("../../../shared/shell/favorites.js", () => favoritesShell);
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import {
@@ -35,9 +37,18 @@ import {
   makeWorkspaceMember,
 } from "../testing.js";
 import { DEFAULT_PAGE_SORT } from "../lib/pageList.js";
+import { clearCommands, findCommand } from "../../../shared/commands/index.js";
+import { CREATE_PAGE_COMMAND_ID } from "./PagesCreateEntry.js";
 import { PagesListScreen } from "./PagesListScreen.js";
 
 interface Harness {
+  createdId: string;
+  createStatus: number;
+  createCalls: number;
+  duplicateStatus: number;
+  duplicateCalls: number;
+  favoriteStatus: number;
+  favoriteCalls: number;
   project: Record<string, unknown>;
   projectStatus: number;
   roles: Record<string, number>;
@@ -55,6 +66,13 @@ const pageId = (suffix: number): string => `323e4567-e89b-12d3-a456-4266141741${
 
 beforeEach(() => {
   harness = {
+    createdId: pageId(9),
+    createStatus: 201,
+    createCalls: 0,
+    duplicateStatus: 200,
+    duplicateCalls: 0,
+    favoriteStatus: 204,
+    favoriteCalls: 0,
     project: makeProjectRow(),
     projectStatus: 200,
     roles: { [PAGES_PROJECT_ID]: 20 },
@@ -65,9 +83,14 @@ beforeEach(() => {
     meStatus: 200,
   };
   routerHarness.navigate.mockReset();
+  toaster.notifyPending.mockReset();
+  toaster.notifyPending.mockReturnValue({ settle: vi.fn() });
   toaster.notifySuccess.mockReset();
   toaster.notifyError.mockReset();
-  createAppClient("https://api.test", (async (url: string) => {
+  favoritesShell.isFavoritesSectionOpen.mockReset();
+  favoritesShell.isFavoritesSectionOpen.mockReturnValue(false);
+  favoritesShell.setFavoritesSectionOpen.mockReset();
+  createAppClient("https://api.test", (async (url: string, init: { method: string }) => {
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
     const projectRead = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/$`).exec(url);
     if (projectRead !== null) {
@@ -95,8 +118,33 @@ beforeEach(() => {
         },
       ]);
     }
-    const pagesRead = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/$`).exec(url);
-    if (pagesRead !== null) {
+    const favoriteWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/favorite-pages/([0-9a-f-]+)/$`).exec(
+      url
+    );
+    if (favoriteWrite !== null) {
+      expect(init.method).toMatch(/^(POST|DELETE)$/);
+      harness.favoriteCalls += 1;
+      return jsonResponse(url, harness.favoriteStatus, null);
+    }
+    const duplicateWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/duplicate/$`).exec(
+      url
+    );
+    if (duplicateWrite !== null) {
+      harness.duplicateCalls += 1;
+      return jsonResponse(url, harness.duplicateStatus, {
+        ...makePageRow({ name: "Launch notes (Copy)", parent: null }),
+        description_html: "",
+      });
+    }
+    const pagesUrl = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/$`).exec(url);
+    if (pagesUrl !== null) {
+      if (init.method !== "GET") {
+        harness.createCalls += 1;
+        return jsonResponse(url, harness.createStatus, {
+          ...makePageRow({ id: harness.createdId, name: "Untitled" }),
+          description_html: "",
+        });
+      }
       harness.pagesCalls += 1;
       return jsonResponse(url, harness.pagesStatus, harness.pages);
     }
@@ -106,6 +154,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetAppClient();
+  clearCommands();
   document.title = "";
 });
 
@@ -331,5 +380,98 @@ describe("PagesListScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Date modified" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Name" }));
     expect(screen.getByRole("button", { name: "Name" })).toBeInTheDocument();
+  });
+});
+
+describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
+  it("quick-creates an untitled page from the header and lands on its detail", async () => {
+    renderScreen();
+    const quick = await screen.findByTestId("pages-quick-create");
+    expect(quick).toHaveTextContent("Add page");
+    fireEvent.click(quick);
+    await waitFor(() =>
+      expect(routerHarness.navigate).toHaveBeenCalledWith({
+        href: `/acme/projects/${PAGES_PROJECT_ID}/pages/${pageId(9)}`,
+      })
+    );
+    expect(harness.createCalls).toBe(1);
+  });
+
+  it("creates from the dialog through the palette command and lands on the new page", async () => {
+    renderScreen();
+    await screen.findByTestId("pages-quick-create");
+    await act(async () => {
+      findCommand(CREATE_PAGE_COMMAND_ID)?.run();
+    });
+    expect(await screen.findByRole("dialog", { name: "Create page" })).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("Title"), { target: { value: "From dialog" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Page" }));
+    await waitFor(() =>
+      expect(routerHarness.navigate).toHaveBeenCalledWith({
+        href: `/acme/projects/${PAGES_PROJECT_ID}/pages/${pageId(9)}`,
+      })
+    );
+    expect(toaster.notifyError).not.toHaveBeenCalled();
+  });
+
+  it("hides every create control from a guest", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 5 };
+    harness.pages = [makePageRow({ name: "Guest row" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    expect(screen.queryByTestId("pages-quick-create")).not.toBeInTheDocument();
+    expect(findCommand(CREATE_PAGE_COMMAND_ID)).toBeUndefined();
+    expect(screen.queryByTestId("page-row-star")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Guest row" }));
+    expect(screen.queryByRole("menuitem", { name: "Make a copy" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the list and reports when quick create fails", async () => {
+    harness.createStatus = 500;
+    harness.pages = [makePageRow({ name: "Existing" })];
+    renderScreen();
+    fireEvent.click(await screen.findByTestId("pages-quick-create"));
+    await waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Page could not be created."));
+    expect(routerHarness.navigate).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "Existing" })).toBeInTheDocument();
+  });
+
+  it("creates a page from the empty state's action", async () => {
+    renderScreen();
+    fireEvent.click(await screen.findByRole("button", { name: "Create your first Page" }));
+    await waitFor(() => expect(harness.createCalls).toBe(1));
+    await waitFor(() =>
+      expect(routerHarness.navigate).toHaveBeenCalledWith({
+        href: `/acme/projects/${PAGES_PROJECT_ID}/pages/${pageId(9)}`,
+      })
+    );
+  });
+
+  it("stars a row through its own favourite route and opens the favourites section", async () => {
+    harness.pages = [makePageRow({ name: "Star me" })];
+    renderScreen();
+    const star = await screen.findByRole("button", { name: "Add Star me to favorites" });
+    fireEvent.click(star);
+    await waitFor(() => expect(harness.favoriteCalls).toBe(1));
+    await waitFor(() => expect(favoritesShell.setFavoritesSectionOpen).toHaveBeenCalledWith(true));
+  });
+
+  it("duplicates a row and re-reads the collection so the copy appears", async () => {
+    harness.pages = [makePageRow({ name: "Launch notes" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Make a copy" }));
+    await waitFor(() => expect(harness.duplicateCalls).toBe(1));
+    expect(toaster.notifySuccess).toHaveBeenCalledWith("Page duplicated successfully.");
+  });
+
+  it("offers no duplicate entry to a guest", async () => {
+    harness.roles = { [PAGES_PROJECT_ID]: 5 };
+    harness.pages = [makePageRow({ name: "Read only" })];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Read only" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Open in new tab", "Copy link"]);
   });
 });

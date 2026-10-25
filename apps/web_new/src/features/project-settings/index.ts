@@ -97,6 +97,18 @@ export {
   useToggleRepositorySync,
   useUnbindRepository,
 } from "./repository/api.js";
+export {
+  DEFAULT_EMBLEM_ICON_COLOR,
+  EMBLEM_EMOJI_GROUPS,
+  EMBLEM_ICON_COLORS,
+  EMBLEM_ICONS,
+  emojiFromQuery,
+  iconNameLabel,
+  searchEmblemEmoji,
+  searchEmblemIcons,
+} from "./general/emblemCatalog.js";
+export type { EmblemEmoji, EmblemEmojiGroup, EmblemIcon } from "./general/emblemCatalog.js";
+export { markEmblem } from "./general/rules.js";
 export { GeneralSkeleton, ProjectSettingsGeneralTab, SAVE_LABEL, SAVING_LABEL } from "./general/GeneralTabScreen.js";
 export type { GeneralTabProps } from "./general/GeneralTabScreen.js";
 export {

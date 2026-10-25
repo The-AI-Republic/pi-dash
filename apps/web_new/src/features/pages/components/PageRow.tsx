@@ -1,27 +1,25 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// One page row (parity/specs/pages.md §3.5 and §3.8, PAGE-006). The row
-// exposes the document mark, title (untitled fallback), owner, visibility
-// and creation date, plus the star marker and overflow trigger. Hovering
-// the metadata reveals each detail; the row itself opens the detail view
-// and its context menu mirrors the overflow menu.
+// One page row (parity/specs/pages.md §3.5 and §3.8, PAGE-006/009–012). The
+// row exposes the document mark, title (untitled fallback), owner,
+// visibility and creation date, plus a working favourite star and the
+// overflow trigger. Hovering the metadata reveals each detail; the row
+// itself opens the detail view and its context menu mirrors the overflow
+// menu, which comes from the one action builder so both stay in step.
 
 import { Avatar, ContextMenu, IconButton, Menu, Tooltip } from "@pidash/kit";
 import type { PageRow as PageRowData } from "@pidash/api-client";
-import { CalendarDays, Ellipsis, FileText, Globe2, Lock, Star } from "lucide-react";
+import { CalendarDays, Ellipsis, FileText, Globe2, Lock } from "lucide-react";
 import * as React from "react";
 import { Link } from "@tanstack/react-router";
 
 import type { PageCreatorOption } from "../lib/pageList.js";
 import { pageDetailHref, pageDisplayTitle } from "../lib/pageList.js";
+import { pageRowActions } from "../lib/pageActions.js";
+import { PageFavoriteStar } from "./PageFavoriteStar.js";
 import { projectMark } from "../../../shared/pickers/projectIcon.js";
 import { ProjectMarkIcon } from "../../../shared/pickers/ProjectMarkIcon.js";
-
-export interface PageRowMenuStrings {
-  openInNewTab: string;
-  copyLink: string;
-}
 
 export interface PageRowProps {
   workspaceSlug: string;
@@ -30,10 +28,11 @@ export interface PageRowProps {
   owner: PageCreatorOption | null;
   /** Members and admins only; guests never see a star. */
   showStar: boolean;
-  /** Viewer-safe actions until the row-action slices own the full menu. */
-  menu: PageRowMenuStrings;
+  /** Duplication is a member-and-admin entry; other viewers never see it. */
+  canDuplicate: boolean;
   onOpenInNewTab: () => void;
   onCopyLink: () => void;
+  onDuplicate: () => void;
 }
 
 function formatCreatedOn(value: string): string {
@@ -94,16 +93,17 @@ export function PageRow({
   page,
   owner,
   showStar,
-  menu,
+  canDuplicate,
   onOpenInNewTab,
   onCopyLink,
+  onDuplicate,
 }: PageRowProps): React.ReactElement {
   const title = pageDisplayTitle(page.name);
   const ownerName = owner?.name ?? "Unknown member";
-  const entries = [
-    { label: menu.openInNewTab, onSelect: onOpenInNewTab },
-    { label: menu.copyLink, onSelect: onCopyLink },
-  ];
+  const entries = pageRowActions(
+    { duplicate: canDuplicate },
+    { openInNewTab: onOpenInNewTab, copyLink: onCopyLink, duplicate: onDuplicate }
+  );
   const row = (
     <div
       data-testid="page-row"
@@ -136,21 +136,7 @@ export function PageRow({
           </span>
         </Tooltip>
       </Link>
-      {showStar ? (
-        <span
-          data-testid="page-row-star"
-          role="img"
-          aria-label={page.is_favorite ? "Marked as favorite" : "Not marked as favorite"}
-          className="inline-flex shrink-0"
-        >
-          <Star
-            size={16}
-            strokeWidth={1.5}
-            aria-hidden="true"
-            className={page.is_favorite ? "fill-(--accent) text-(--accent)" : "text-(--text-muted)"}
-          />
-        </span>
-      ) : null}
+      {showStar ? <PageFavoriteStar workspaceSlug={workspaceSlug} projectId={projectId} page={page} /> : null}
       <Menu
         trigger={
           <IconButton label={`Page actions for ${title}`} size="small" className="shrink-0">

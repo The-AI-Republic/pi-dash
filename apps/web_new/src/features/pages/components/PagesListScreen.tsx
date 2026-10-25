@@ -1,12 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project pages list (parity/specs/pages.md §3.1–§3.5, PAGE-001–006).
-// Reads the project row for the page_view gate and the one collection for
-// the rows; search, sort and filters are client state and reset when the
-// project changes. The signal is deliberately one project read plus one
-// collection read: switching tabs never refetches, and no mutation control
-// belongs to this discovery slice.
+// Project pages list (parity/specs/pages.md §3.1–§3.6 and §3.8,
+// PAGE-001–012). Reads the project row for the page_view gate and the one
+// collection for the rows; search, sort and filters are client state and
+// reset when the project changes. Switching tabs never refetches. The
+// header carries the two creation entries, rows carry the favourite star
+// and the shared row menu, and every write re-reads the one collection.
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -20,6 +20,7 @@ import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { usePickerProjectMembers, usePickerWorkspaceMembers } from "../../../shared/pickers/reference.js";
 import { selectMemberOptions } from "../../../shared/pickers/members.js";
 import { pagesListQueryOptions } from "../api/queries.js";
+import { useDuplicatePage, useQuickCreatePage } from "../api/mutations.js";
 import {
   EMPTY_PAGE_FILTERS,
   DEFAULT_PAGE_SORT,
@@ -34,8 +35,10 @@ import {
   type PageListTab,
   type PageSort,
 } from "../lib/pageList.js";
+import { pageDetailHref } from "../lib/pageList.js";
+import { quickCreateAccess } from "../lib/pageCreate.js";
 import { PAGES_CRUMB, pagesTitle, resolvePagesBody } from "../lib/pageScreen.js";
-import { copyPageLink } from "../lib/share.js";
+import { copyPageLink, pageLinkUrl } from "../lib/share.js";
 import { PagesEmptyState } from "./PagesEmptyState.js";
 import { PagesFeatureGate } from "./PagesFeatureGate.js";
 import { PagesFilterChips } from "./PagesFilterChips.js";
@@ -45,6 +48,7 @@ import { PagesListTabs } from "./PagesListTabs.js";
 import { PagesNoResults } from "./PagesNoResults.js";
 import { PagesSearch } from "./PagesSearch.js";
 import { PagesSortMenu } from "./PagesSortMenu.js";
+import { PageCreateDialogEntry, PagesQuickCreate } from "./PagesCreateEntry.js";
 import { PageRow } from "./PageRow.js";
 
 export interface PagesListScreenProps {
@@ -89,6 +93,11 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
     }));
   };
 
+  const duplicate = useDuplicatePage(workspaceSlug, projectId);
+  const goToPage = (pageId: string): void => {
+    void navigate({ href: pageDetailHref(workspaceSlug, projectId, pageId) });
+  };
+
   const [now] = React.useState(() => new Date());
   const rows = React.useMemo(() => pages.data ?? [], [pages.data]);
   const tabRows = React.useMemo(() => rows.filter((row) => pageInTab(row, tab)), [rows, tab]);
@@ -116,6 +125,10 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   const canManageFeatures = isProjectAdmin(role);
   const searchActive = client.query.trim() !== "";
   const filtersActive = hasPageFilters(client.filters);
+  const quickCreate = useQuickCreatePage(workspaceSlug, projectId, quickCreateAccess(tab));
+  const createQuickPage = (): void => {
+    quickCreate.create((page) => goToPage(page.id));
+  };
 
   useDocumentHead({
     title: project.data === undefined ? PAGES_CRUMB : pagesTitle(project.data.name),
@@ -150,6 +163,18 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
         />
       ) : (
         <>
+          {body !== "skeleton" && canCreate ? (
+            <div className="flex items-center justify-end">
+              <PagesQuickCreate pending={quickCreate.pending} onPress={createQuickPage} />
+            </div>
+          ) : null}
+          <PageCreateDialogEntry
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            tab={tab}
+            allowed={canCreate}
+            onOpenPage={goToPage}
+          />
           {body === "skeleton" ? <PagesListSkeleton /> : null}
           {body !== "skeleton" && body !== "error" && rows.length > 0 ? (
             <>
@@ -182,7 +207,7 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
               archived={tab === "archived"}
               canCreate={canCreate}
               readFailed={pages.isError}
-              onCreate={() => undefined}
+              onCreate={createQuickPage}
             />
           ) : null}
           {body === "no-results" ? (
@@ -205,12 +230,15 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
                     page={page}
                     owner={owner}
                     showStar={canStar}
-                    menu={{ openInNewTab: "Open in new tab", copyLink: "Copy link" }}
+                    canDuplicate={canCreate}
                     onOpenInNewTab={() => {
-                      window.open(`/${workspaceSlug}/projects/${projectId}/pages/${page.id}`, "_blank", "noopener");
+                      globalThis.window.open(pageLinkUrl(workspaceSlug, projectId, page.id), "_blank", "noopener");
                     }}
                     onCopyLink={() => {
                       void copyPageLink(workspaceSlug, projectId, page.id);
+                    }}
+                    onDuplicate={() => {
+                      duplicate.mutate({ pageId: page.id });
                     }}
                   />
                 );
