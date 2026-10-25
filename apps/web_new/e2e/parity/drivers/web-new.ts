@@ -16853,7 +16853,15 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesClearModuleSearch");
   }
   async archivesCollapseSearchOutside(): Promise<void> {
-    return todo("archivesCollapseSearchOutside");
+    // Re-selecting the current tab trips the search box's outside-click
+    // detector without moving the address.
+    const path = new URL(this.page.url()).pathname;
+    const tab = path.includes("/archives/modules")
+      ? "modules"
+      : path.includes("/archives/cycles")
+        ? "cycles"
+        : "issues";
+    await this.archivesTabLink(tab).click({ timeout: WebNewDriver.WAIT_MS });
   }
   async archivesOpenModuleFilters(): Promise<void> {
     return todo("archivesOpenModuleFilters");
@@ -17006,10 +17014,39 @@ export class WebNewDriver implements ParityDriver {
     return this.page.title();
   }
   async archivesVisibleIssueNames(): Promise<string[]> {
-    return todo("archivesVisibleIssueNames");
+    // Archived rows are the shared list anchors; a virtualized row can
+    // detach between count and read, so a stuck read is skipped and the
+    // caller's poll re-reads.
+    const rows = this.archivesContent().locator('a[id^="issue-"]');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text = await rows
+        .nth(index)
+        .locator("p")
+        .first()
+        .innerText({ timeout: 10_000 })
+        .catch(() => "");
+      if (text.trim() !== "") names.push(text.trim());
+    }
+    return names;
   }
   async archivesGroupHeadings(): Promise<string[]> {
-    return todo("archivesGroupHeadings");
+    const headers = this.archivesContent().locator('div[class*="group/list-header"]');
+    const count = await headers.count();
+    const titles: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const raw = await headers
+        .nth(index)
+        .innerText({ timeout: 10_000 })
+        .catch(() => "");
+      const title = raw
+        .trim()
+        .replace(/\s+\d+\s*$/, "")
+        .trim();
+      if (title !== "") titles.push(title);
+    }
+    return titles;
   }
   async archivesOpenRowMenu(_name: string): Promise<void> {
     return todo("archivesOpenRowMenu");
@@ -17020,39 +17057,120 @@ export class WebNewDriver implements ParityDriver {
   async archivesCloseMenus(): Promise<void> {
     return todo("archivesCloseMenus");
   }
-  async archivesInlineEditorOpens(_name: string): Promise<boolean> {
-    return todo("archivesInlineEditorOpens");
+  async archivesInlineEditorOpens(name: string): Promise<boolean> {
+    // Probe the row's first control: an editor opens a listbox or dialog.
+    // The archived row's controls are disabled, and a disabled trigger
+    // opens nothing.
+    const row = this.archivesContent().locator('a[id^="issue-"]', { hasText: name }).first();
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const before = this.page.url();
+    const cell = row.getByRole("button").first();
+    if ((await cell.count()) === 0) return false;
+    await cell.click({ timeout: WebNewDriver.WAIT_MS, force: true }).catch(() => undefined);
+    await this.page.waitForTimeout(1_000);
+    if (this.page.url() !== before) return false;
+    const picker = this.page.locator('[role="listbox"]:visible, [role="dialog"]:visible');
+    return (await picker.count()) > 0;
   }
   async archivesWaitForListQuery(): Promise<ArchivesListQuery> {
-    return todo("archivesWaitForListQuery");
+    const response = await this.page.waitForResponse(
+      (candidate) => candidate.url().includes("/archived-issues/") && candidate.request().method() === "GET",
+      { timeout: 60_000 }
+    );
+    const url = response.url();
+    const params: Record<string, string> = {};
+    for (const [key, value] of new URL(url).searchParams) {
+      params[key] = params[key] === undefined ? value : `${params[key]},${value}`;
+    }
+    return { url, params };
   }
-  async archivesRowText(_name: string): Promise<string> {
-    return todo("archivesRowText");
+  async archivesRowText(name: string): Promise<string> {
+    const row = this.archivesContent().locator('a[id^="issue-"]', { hasText: name }).first();
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const rowBody = row.locator("xpath=..");
+    return ((await rowBody.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
   }
   async archivesPeekTitle(): Promise<string | null> {
-    return todo("archivesPeekTitle");
+    const peek = this.page.getByTestId("issue-preview");
+    if ((await peek.count()) === 0) return null;
+    const heading = peek.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
   async archivesPeekTitleLocked(): Promise<boolean> {
-    return todo("archivesPeekTitleLocked");
+    const peek = this.page.getByTestId("issue-preview");
+    if (!(await this.isShown(peek))) return false;
+    return (await peek.getByLabel("Work item title").count()) === 0;
   }
   async archivesPeekDescriptionText(): Promise<string> {
-    return todo("archivesPeekDescriptionText");
+    return (
+      (await this.page
+        .getByTestId("issue-preview")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
   }
   async archivesPeekDescriptionEditable(): Promise<boolean> {
-    return todo("archivesPeekDescriptionEditable");
+    return (await this.page.getByTestId("issue-preview").locator('[contenteditable="true"]').count()) > 0;
   }
   async archivesPeekActivityEditable(): Promise<boolean> {
-    return todo("archivesPeekActivityEditable");
+    const composer = this.page.getByTestId("issue-preview").getByRole("button", { name: "Comment", exact: true });
+    if ((await composer.count()) === 0) return false;
+    return composer.first().isEnabled();
   }
   async archivesPeekQueryParams(): Promise<{ issue: string | null; project: string | null; nesting: string | null }> {
-    return todo("archivesPeekQueryParams");
+    const params = new URL(this.page.url()).searchParams;
+    return {
+      issue: params.get("peekIssueId"),
+      project: params.get("peekProjectId"),
+      nesting: params.get("peekNestingLevel"),
+    };
   }
   async archivesSeedStoredExpression(
-    _workspaceSlug: string,
-    _projectId: string,
-    _expression: ArchivesFilterExpression
+    workspaceSlug: string,
+    projectId: string,
+    expression: ArchivesFilterExpression
   ): Promise<void> {
-    return todo("archivesSeedStoredExpression");
+    // The archived tab restores its expression from the browser-local
+    // `issue_local_filters` record; seed the same entry the oracle writes
+    // and reload so the first read carries it.
+    await this.page.evaluate(
+      ({ workspaceSlug, projectId, expression }) => {
+        const KEY = "issue_local_filters";
+        let entries: Array<Record<string, unknown>> = [];
+        try {
+          const raw = window.localStorage.getItem(KEY);
+          entries = raw ? (JSON.parse(raw) as Array<Record<string, unknown>>) : [];
+        } catch {
+          entries = [];
+        }
+        const index = entries.findIndex(
+          (entry) =>
+            entry["key"] === "ARCHIVED" &&
+            entry["workspaceSlug"] === workspaceSlug &&
+            entry["viewId"] === projectId &&
+            entry["userId"] === undefined
+        );
+        if (index < 0) {
+          entries.push({
+            key: "ARCHIVED",
+            workspaceSlug,
+            viewId: projectId,
+            filters: { richFilters: expression },
+          });
+        } else {
+          const current = (entries[index]["filters"] as Record<string, unknown> | undefined) ?? {};
+          entries[index] = { ...entries[index], filters: { ...current, richFilters: expression } };
+        }
+        window.localStorage.setItem(KEY, JSON.stringify(entries));
+      },
+      { workspaceSlug, projectId, expression }
+    );
+    await this.page.reload();
+    await this.archivesTabLink("issues").waitFor({ state: "visible", timeout: 120_000 });
   }
 
   private viewsRowByName(name: string): Locator {
@@ -17817,14 +17935,42 @@ export class WebNewDriver implements ParityDriver {
   async archivesRowMenuClick(_entry: string): Promise<void> {
     return todo("archivesRowMenuClick");
   }
-  async archivesPeekOpenFirst(_name: string): Promise<void> {
-    return todo("archivesPeekOpenFirst");
+  async archivesPeekOpenFirst(name: string): Promise<void> {
+    // Archived work-item rows open the peek from their title anchor.
+    const row = this.archivesContent().locator('a[id^="issue-"]', { hasText: name }).first();
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await row.scrollIntoViewIfNeeded().catch(() => undefined);
+    await row.locator("p").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (new URL(this.page.url()).searchParams.get("peekIssueId") !== null) return;
+      if (Date.now() > deadline) {
+        throw new Error(`[parity] selecting the archived row for ${name} opened no peek (${this.page.url()}).`);
+      }
+      await this.page.waitForTimeout(300);
+    }
   }
   async archivesPeekVisible(): Promise<boolean> {
-    return todo("archivesPeekVisible");
+    if (new URL(this.page.url()).searchParams.get("peekIssueId") === null) return false;
+    const peek = this.page.getByTestId("issue-preview");
+    try {
+      await peek.waitFor({ state: "visible", timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
   async archivesPeekClose(): Promise<void> {
-    return todo("archivesPeekClose");
+    if (new URL(this.page.url()).searchParams.get("peekIssueId") === null) return;
+    const close = this.page.getByTestId("issue-preview").getByRole("button", { name: "Close preview" }).first();
+    if ((await close.count()) > 0) {
+      await close.click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await this.page.keyboard.press("Escape");
+    }
+    await expect
+      .poll(() => new URL(this.page.url()).searchParams.get("peekIssueId"), { timeout: WebNewDriver.WAIT_MS })
+      .toBeNull();
   }
   async archivesDetailBannerText(): Promise<string | null> {
     return todo("archivesDetailBannerText");
@@ -17876,13 +18022,38 @@ export class WebNewDriver implements ParityDriver {
     return { ...this.archivesTraffic };
   }
   async archivesFilterControlVisible(): Promise<boolean> {
-    return todo("archivesFilterControlVisible");
+    const control = this.archivesContent().locator(
+      '[data-testid="rich-filter-add"], [data-testid="rich-filter-toggle"]'
+    );
+    if (await this.isShown(control.first())) return true;
+    return this.isShown(
+      this.archivesContent()
+        .getByRole("button", { name: /filters?/i })
+        .first()
+    );
   }
-  async archivesSearchType(_text: string): Promise<void> {
-    return todo("archivesSearchType");
+  private archivesSearchBox(): Locator {
+    // Scoped to the archives content: the command palette and sidebar
+    // carry their own search inputs. Archived work items has no search;
+    // the cycles and modules tabs mount theirs.
+    return this.archivesContent().getByPlaceholder("Search", { exact: true });
+  }
+  async archivesSearchType(text: string): Promise<void> {
+    const box = this.archivesSearchBox();
+    if (!(await this.isShown(box))) {
+      const toggle = box.locator("xpath=./ancestor::div[1]/preceding-sibling::button").first();
+      await toggle.waitFor({ timeout: WebNewDriver.WAIT_MS });
+      await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await box.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await box.fill(text);
   }
   async archivesSearchText(): Promise<string> {
-    return todo("archivesSearchText");
+    return (
+      (await this.archivesSearchBox()
+        .inputValue()
+        .catch(() => "")) ?? ""
+    );
   }
   async archivesRowDraggable(_name: string): Promise<boolean> {
     return todo("archivesRowDraggable");
@@ -17909,8 +18080,8 @@ export class WebNewDriver implements ParityDriver {
   async archivesPressKey(_key: string): Promise<void> {
     return todo("archivesPressKey");
   }
-  async archivesRowPresent(_name: string): Promise<boolean> {
-    return todo("archivesRowPresent");
+  async archivesRowPresent(name: string): Promise<boolean> {
+    return this.isShown(this.archivesContent().getByText(name).first());
   }
   async archivesPageTextPresent(text: string): Promise<boolean> {
     return this.isShown(this.page.getByText(text).first());

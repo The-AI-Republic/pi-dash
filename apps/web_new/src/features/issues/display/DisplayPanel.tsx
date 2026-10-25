@@ -45,6 +45,8 @@ export interface DisplayPanelProps {
   hideCycle: boolean;
   hideModule: boolean;
   isEpic: boolean;
+  /** Surface matrix override; archived passes its list-only matrix. */
+  matrix?: ReturnType<typeof layoutDisplayMatrix> | undefined;
   onGroupBy: (dimension: string | null) => void;
   onSubGroupBy: (dimension: string | null) => void;
   onOrderBy: (order: string) => void;
@@ -139,13 +141,14 @@ export function DisplayPanel({
   hideCycle,
   hideModule,
   isEpic,
+  matrix: matrixOverride,
   onGroupBy,
   onSubGroupBy,
   onOrderBy,
   onToggleSwitch,
   onToggleProperty,
 }: DisplayPanelProps): React.ReactElement {
-  const matrix = layoutDisplayMatrix(layout);
+  const matrix = matrixOverride ?? layoutDisplayMatrix(layout);
   const flags = { hideCycle, hideModule };
   const showSubGroup = matrix.subGroupBy !== null && layout === "kanban" && state.groupBy !== null;
   return (

@@ -15,6 +15,7 @@ import type { IssuesEntity } from "../prefs/entities.js";
 import { prefsQueryOptions } from "../prefs/prefsQuery.js";
 import { parseDisplayPrefs, type DisplayPrefs } from "../prefs/displayPrefs.js";
 import { DisplayControl } from "./DisplayControl.js";
+import { archivedDisplayMatrix } from "./matrix.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const PROJECT_ENTITY: IssuesEntity = { scope: "project", projectId: PROJECT_ID };
@@ -220,6 +221,35 @@ describe("DisplayControl", () => {
     await user.click(within(panel).getByRole("button", { name: "Assignee" }));
     await waitFor(() => expect(patches).toHaveLength(2));
     expect(window.location.href).toBe(before);
+  });
+
+  it("renders the supplied surface matrix instead of the layout's own (archived)", async () => {
+    const user = userEvent.setup();
+    const changes: DisplayPrefs[] = [];
+    createAppClient("https://api.test", (() => {
+      throw new Error("unexpected network fetch for a local display");
+    }) as never);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <IssuesLoaderProvider>
+          <DisplayControl
+            workspaceSlug="acme"
+            entity={PROJECT_ENTITY}
+            offered={["list"]}
+            hideCycle={false}
+            hideModule={false}
+            display={parseDisplayPrefs({ layout: "list", order_by: "sort_order" }, {})}
+            onDisplayChange={(next) => changes.push(next)}
+            matrix={archivedDisplayMatrix()}
+          />
+        </IssuesLoaderProvider>
+      </QueryClientProvider>
+    );
+    const panel = await openPanel(user);
+    // The archived matrix has no layout picker (list only) and no sub-work-item switch.
+    expect(within(panel).queryByRole("button", { name: /Kanban|Calendar|Spreadsheet|Gantt/i })).toBeNull();
+    await user.click(within(panel).getByRole("button", { name: "States" }));
+    expect(changes[0]).toMatchObject({ groupBy: "state" });
   });
 
   it("edits a supplied saved-view display locally without reading or writing personal preferences", async () => {

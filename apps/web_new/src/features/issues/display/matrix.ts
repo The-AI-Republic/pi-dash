@@ -196,6 +196,22 @@ export function layoutDisplayMatrix(layout: LayoutKind): LayoutDisplayMatrix {
   }
 }
 
+/**
+ * The archived work-items matrix (parity/specs/archives.md §2.3,
+ * ARCH-006). It is list-only: grouping, ordering and the live column
+ * set, with the empty-group switch but no sub-work-item switch and no
+ * item-type section. Reordering is not offered on this tab.
+ */
+export function archivedDisplayMatrix(): LayoutDisplayMatrix {
+  return {
+    properties: ALL_PILLS,
+    groupBy: LIST_GROUP,
+    subGroupBy: null,
+    orderBy: FULL_ORDERS,
+    switches: ["show_empty_groups"],
+  };
+}
+
 /** Project feature gates behind the cycle/module suppression. */
 export interface DisplayFeatureFlags {
   hideCycle: boolean;

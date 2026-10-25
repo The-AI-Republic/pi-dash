@@ -131,6 +131,12 @@ export interface ListRowProps {
   menuCanWrite?: boolean | undefined;
   /** Called after any menu write lands (the route refreshes its own reads). */
   onMenuChanged?: (() => void) | undefined;
+  /**
+   * Render the row's quick-action menu. Archived rows suppress it until
+   * the archives slice wires its read-only menu; the rest of the row is
+   * unchanged.
+   */
+  showMenu?: boolean | undefined;
 }
 
 export function issueKey(projectIdentifier: string, issue: Pick<IssueListItem, "sequence_id">): string {
@@ -226,6 +232,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
     onExpandedChange,
     onChildrenChange,
     selectionTree,
+    showMenu = true,
   } = props;
   const temp = isTempRowId(issue.id);
   const highlighted = isRowHighlighted(issue, highlightedId);
@@ -246,7 +253,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
   });
   const children = treeChildren ?? query.data?.sub_issues ?? [];
   const menu = useQuickActions(
-    temp
+    temp || !showMenu
       ? null
       : {
           workspaceSlug: props.workspaceSlug,

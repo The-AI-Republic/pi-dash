@@ -1,59 +1,89 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Archived work items surface (parity/specs/issues.md §8, ISS-071).
-// Thin by design: the archives slices own the tab shell, the read-only
-// list, the display control and the row menus (NEWFRONT-698–700). This
-// screen mounts the row ISS-071 names at the address the oracle opens —
-// the card when nothing is archived and the no-results card once a
-// condition was added through this page's filter row — over the archived
-// read and the page's own window-local expression (NEWFRONT-167).
-//
-// The row runs in temporary mode: the archived page never reads or writes
-// server preferences, so edits live in memory and in the local store for
-// the next visit to restore.
+// Archived work-items tab body (parity/specs/archives.md §2,
+// ARCH-005–007). A read-only list with the shared rich-filter row and
+// display control, grouped client-side by the server's buckets, and the
+// archived side peek driven by the address. The tab's expression,
+// display options and columns live in the window-local record the
+// oracle seeds; the project's server preferences are never read or
+// written here. Row menus, restore/delete and the empty-state
+// automation control belong to NEWFRONT-700.
 
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { Skeleton } from "@pidash/kit";
+import type { IssueListItem, ProjectDetail } from "@pidash/api-client";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
-import { IssueList } from "../components/IssueList.js";
+import { DisplayControl } from "../display/DisplayControl.js";
+import { archivedDisplayMatrix } from "../display/matrix.js";
 import { ArchivedIssuesEmpty, FilteredEmptyCard } from "../emptyStates/cards.js";
 import { isFilteredEmpty } from "../emptyStates/filteredEmpty.js";
 import { parseRichExpression, serializeRichExpression } from "../filters/rich/expression.js";
 import { useRichFilterBuilder } from "../filters/rich/RichFilterBuilder.js";
-import { projectsQueryOptions } from "../../projects/index.js";
+import { GroupHeader } from "../list/GroupHeader.js";
+import { ListRow } from "../list/ListRow.js";
+import { useListReferences } from "../list/reference.js";
+import type { DisplayPrefs } from "../prefs/displayPrefs.js";
+import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
+import { ArchivedIssuePeek } from "../peek/ArchivedIssuePeek.js";
 import {
-  archivedIssuesQueryOptions,
+  DEFAULT_ARCHIVED_DISPLAY,
   projectAutomationsPath,
-  readArchivedLocalFilter,
-  writeArchivedLocalFilter,
+  readArchivedLocalState,
+  useArchivedPages,
+  writeArchivedLocalState,
+  type ArchivedLocalState,
 } from "./archivedIssues.js";
 
-/**
- * The archived list's order. The page owns its own display state and the
- * archives slice (NEWFRONT-699) takes the control over; this host keeps
- * the read's server default so it never touches the server preference
- * record (NEWFRONT-167).
- */
-export const ARCHIVED_ORDER = "-created_at";
+/** The archived list always offers the list layout. */
+const ARCHIVED_LAYOUTS = ["list"] as const;
 
 export interface ArchivedIssuesScreenProps {
   workspaceSlug: string;
   projectId: string;
+  /** Peeked archived item from ?peekIssueId=; null when no peek is open. */
+  peekIssueId?: string | null | undefined;
+  /** Writes the peek selection into the address (null clears it). */
+  onPeekChange?: ((issueId: string | null) => void) | undefined;
 }
 
-/** The archived tab body: one read, one local expression, one card. */
-export function ArchivedIssuesScreen({ workspaceSlug, projectId }: ArchivedIssuesScreenProps): React.ReactElement {
+/** Whether display choices match the archived defaults. */
+export function isDefaultArchivedDisplay(display: DisplayPrefs): boolean {
+  return (
+    display.layout === DEFAULT_ARCHIVED_DISPLAY.layout &&
+    display.groupBy === DEFAULT_ARCHIVED_DISPLAY.groupBy &&
+    display.orderBy === DEFAULT_ARCHIVED_DISPLAY.orderBy &&
+    display.showEmptyGroups === DEFAULT_ARCHIVED_DISPLAY.showEmptyGroups &&
+    display.showSubIssues === DEFAULT_ARCHIVED_DISPLAY.showSubIssues &&
+    Object.keys(display.properties).length === 0
+  );
+}
+
+function archivedHref(workspaceSlug: string, projectId: string, issue: IssueListItem): string {
+  return `/${workspaceSlug}/projects/${projectId}/archives/issues/${issue.id}`;
+}
+
+/** The archived tab body. */
+export function ArchivedIssuesScreen({
+  workspaceSlug,
+  projectId,
+  peekIssueId = null,
+  onPeekChange,
+}: ArchivedIssuesScreenProps): React.ReactElement {
   const navigate = useNavigate();
   const client = getAppClient();
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(client, workspaceSlug));
+  const { data: details } = useQuery(projectDetailsQueryOptions(client, workspaceSlug));
   const project = projects.find((entry) => entry.id === projectId) ?? null;
-  // The local record seeds the row once per visit; the row owns edits after
-  // that, so a refetch never rewrites what the user is typing.
-  const [seed] = React.useState(() => parseRichExpression(readArchivedLocalFilter(workspaceSlug, projectId)));
+  const projectDetails: ProjectDetail | null = details?.find((entry) => entry.id === projectId) ?? null;
+
+  // The local record seeds the row once per visit; the row owns edits
+  // afterwards, so a refetch never rewrites what the user is typing.
+  const [seed] = React.useState<ArchivedLocalState>(() => readArchivedLocalState(workspaceSlug, projectId));
   const parts = useRichFilterBuilder({
     workspaceSlug,
     projectId,
@@ -61,15 +91,31 @@ export function ArchivedIssuesScreen({ workspaceSlug, projectId }: ArchivedIssue
     hideCycle: !(project?.cycle_view ?? false),
     hideModule: !(project?.module_view ?? false),
     temporary: true,
-    temporarySeed: seed,
+    temporarySeed: parseRichExpression(seed.expression),
   });
+  const [display, setDisplay] = React.useState<DisplayPrefs>(seed.display);
   const expression = React.useMemo(() => serializeRichExpression(parts.conditions), [parts.conditions]);
-  React.useEffect(() => {
-    writeArchivedLocalFilter(workspaceSlug, projectId, expression);
-  }, [expression, projectId, workspaceSlug]);
-  const { data: archived } = useSuspenseQuery(
-    archivedIssuesQueryOptions(client, workspaceSlug, projectId, expression, ARCHIVED_ORDER)
+  const refs = useListReferences({ workspaceSlug, projectId, dimension: display.groupBy });
+  const labels = refs.labels[display.groupBy ?? ""] ?? new Map<string, string>();
+  const pages = useArchivedPages(
+    workspaceSlug,
+    projectId,
+    expression,
+    display.groupBy,
+    display.orderBy,
+    labels,
+    display.showEmptyGroups
   );
+
+  // Persist both halves together, preserving unknown members. A pristine
+  // page leaves no entry behind.
+  React.useEffect(() => {
+    if (Object.keys(expression).length === 0 && isDefaultArchivedDisplay(display)) {
+      writeArchivedLocalState(workspaceSlug, projectId, {}, DEFAULT_ARCHIVED_DISPLAY);
+      return;
+    }
+    writeArchivedLocalState(workspaceSlug, projectId, expression, display);
+  }, [display, expression, projectId, workspaceSlug]);
 
   if (project === null) {
     return (
@@ -80,37 +126,95 @@ export function ArchivedIssuesScreen({ workspaceSlug, projectId }: ArchivedIssue
     );
   }
 
-  // The card's entries follow the project standing, like every other
-  // project-scoped list: a project guest sees them dead.
+  const projectIdentifier = project.identifier;
   const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at !== null });
-  // A stored expression on its own keeps the first-run card: the archived
-  // list changes card only once a condition was added through the row
-  // during this visit (spec §8). Clearing puts the unfiltered list back.
   const filtered = isFilteredEmpty({
     mode: "visit",
     hasCompleteCondition: parts.hasCompleteCondition,
     addedThisVisit: parts.addedThisVisit,
-    visibleCount: archived.total_count,
+    visibleCount: pages.total,
   });
+  const estimateEnabled = projectDetails !== null && projectDetails.estimate !== null;
+  const flags = { hideCycle: !project.cycle_view, hideModule: !project.module_view };
+
+  const openPeek = (issueId: string): void => {
+    onPeekChange?.(issueId === peekIssueId ? null : issueId);
+  };
+
+  function renderRow(issue: IssueListItem): React.ReactElement {
+    return (
+      <ListRow
+        key={issue.id}
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        projectIdentifier={projectIdentifier}
+        issue={issue}
+        depth={1}
+        properties={display.properties}
+        flags={flags}
+        readOnly
+        states={refs.stateRows}
+        stateNames={refs.stateNames}
+        assigneeNames={refs.assigneeNames}
+        labelNames={refs.labelNames}
+        cycleNames={refs.cycleNames}
+        moduleNames={refs.moduleNames}
+        openCycleIds={refs.openCycleIds}
+        estimateEnabled={estimateEnabled}
+        highlightedId={null}
+        onOpenPeek={openPeek}
+        hrefFor={(row) => archivedHref(workspaceSlug, projectId, row)}
+        showSubIssues={false}
+        timeZone={projectDetails?.timezone ?? null}
+        menuContext="archived"
+        showMenu={false}
+      />
+    );
+  }
+
   return (
-    <div data-testid="archived-issues" className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-3)">
+    <div data-testid="archived-issues" className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 flex-wrap items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-3)">
         <h2 className="text-h3 text-(--text)">Archived work items</h2>
         <span className="text-body text-(--text-muted)">
-          {archived.total_count} issue{archived.total_count === 1 ? "" : "s"}
+          {pages.total} issue{pages.total === 1 ? "" : "s"}
         </span>
-        <div className="ml-auto flex items-center gap-(--space-2)">{parts.control}</div>
+        <div className="ml-auto flex items-center gap-(--space-2)">
+          {parts.control}
+          <DisplayControl
+            workspaceSlug={workspaceSlug}
+            entity={{ scope: "project", projectId }}
+            offered={ARCHIVED_LAYOUTS}
+            hideCycle={flags.hideCycle}
+            hideModule={flags.hideModule}
+            display={display}
+            onDisplayChange={setDisplay}
+            matrix={archivedDisplayMatrix()}
+          />
+        </div>
       </div>
       {parts.row}
-      <div className="min-h-0 flex-1">
-        {filtered ? (
-          <FilteredEmptyCard
-            context="archived"
-            clearLabel="Clear filters"
-            canAct={canEdit}
-            onClear={parts.clearFilters}
-          />
-        ) : archived.total_count === 0 ? (
+      <div className="min-h-0 flex-1 overflow-auto pb-16">
+        {pages.isError ? (
+          <section role="alert" className="flex flex-col items-start gap-(--space-2) p-(--space-6)">
+            <p className="text-body text-(--text)">Couldn't load the archived work items.</p>
+            <button
+              type="button"
+              onClick={pages.refetch}
+              className="text-body rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--accent) hover:bg-(--subtle)"
+            >
+              Try again
+            </button>
+          </section>
+        ) : pages.isPending ? (
+          <div data-testid="archived-issues-loading" className="flex flex-col gap-(--space-2) p-(--space-3)">
+            {Array.from({ length: 6 }, (_, index) => (
+              <Skeleton key={index} height="32px" />
+            ))}
+          </div>
+        ) : filtered ? (
+          <FilteredEmptyCard context="archived" clearLabel="Clear filters" canAct onClear={parts.clearFilters} />
+        ) : pages.total === 0 ? (
           <ArchivedIssuesEmpty
             canAct={canEdit}
             onSetAutomation={() => {
@@ -118,9 +222,58 @@ export function ArchivedIssuesScreen({ workspaceSlug, projectId }: ArchivedIssue
             }}
           />
         ) : (
-          <IssueList issues={archived.results} projectIdentifier={project.identifier} layout="list" />
+          <div className="flex flex-col">
+            {pages.sections.map((section) =>
+              pages.grouped ? (
+                <section key={section.key} className="flex flex-col">
+                  <GroupHeader
+                    section={section}
+                    dimension={display.groupBy}
+                    collapsed={false}
+                    onToggle={() => undefined}
+                    canAdd={false}
+                    menu={false}
+                    onCreate={() => undefined}
+                    onAddExisting={() => undefined}
+                  />
+                  {section.rows.map((issue) => renderRow(issue))}
+                  {pages.sectionMore(section) ? (
+                    <button
+                      type="button"
+                      onClick={() => pages.loadMoreSection(section)}
+                      className="text-body border-b border-(--border) px-(--space-3) py-(--space-2) text-left text-(--accent) hover:bg-(--subtle)"
+                    >
+                      Load more
+                    </button>
+                  ) : null}
+                </section>
+              ) : (
+                <section key={section.key} className="flex flex-col">
+                  {section.rows.map((issue) => renderRow(issue))}
+                </section>
+              )
+            )}
+            {pages.hasMore ? (
+              <button
+                type="button"
+                onClick={pages.loadMore}
+                className="text-body border-b border-(--border) px-(--space-3) py-(--space-2) text-left text-(--accent) hover:bg-(--subtle)"
+              >
+                Load more
+              </button>
+            ) : null}
+          </div>
         )}
       </div>
+      {peekIssueId === null ? null : (
+        <ArchivedIssuePeek
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          projectIdentifier={projectIdentifier}
+          issueId={peekIssueId}
+          onClose={() => onPeekChange?.(null)}
+        />
+      )}
     </div>
   );
 }
