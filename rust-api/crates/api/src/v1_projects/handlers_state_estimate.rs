@@ -75,12 +75,6 @@
 //!   `handle_exception` branch).
 //! * `expand=<unmapped field>` overwrites that field with `null`
 //!   (`getattr(instance, f"{expand}_id", None)`, `serializers/base.py`).
-//! * Non-ASCII names slugify differently: Django `slugify` folds NFKD → ASCII
-//!   (`db/models/state.py`, via `State.save`), while
-//!   [`state_model::slugify_name`] keeps non-ASCII alphanumerics
-//!   (`char::is_alphanumeric`). ASCII names are byte-exact; non-ASCII names
-//!   diverge. The slug helper lives in the models layer (PIDASHCONV-352,
-//!   read-only for port agents), so this stays a documented divergence.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 

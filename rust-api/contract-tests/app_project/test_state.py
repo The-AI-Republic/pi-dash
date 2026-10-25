@@ -174,3 +174,29 @@ def test_intake_state_shape(world):
     assert resp.status_code == 200
     assert_keys(resp.json(), STATE_KEYS, "intake-state")
     assert resp.json()["group"] == "triage"
+
+
+def test_create_state_slug_ascii_folds_non_ascii(world, db):
+    """Non-ASCII names fold to ASCII slugs like Django's slugify (PIDASHCONV-1378)."""
+    client, _, ws, project = world.full_stack()
+    cases = [("Café", "cafe"), ("Über Größe", "uber-groe"), ("进行中", "")]
+    for name, want_slug in cases:
+        resp = client.post(
+            f"/api/workspaces/{ws['slug']}/projects/{project['id']}/states/",
+            json={"name": name, "color": "#ffffff", "group": "started"})
+        assert resp.status_code == 200, (name, resp.status_code, resp.text[:300])
+        with db.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT slug FROM states WHERE id=%s", (resp.json()["id"],))
+            assert cur.fetchone()["slug"] == want_slug, name
+
+
+def test_create_state_long_cjk_name_200_empty_slug(world, db):
+    """A 120-char CJK name stores slug="" with 200, not 500 (PIDASHCONV-1378)."""
+    client, _, ws, project = world.full_stack()
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/states/",
+        json={"name": "中" * 120, "color": "#ffffff", "group": "started"})
+    assert resp.status_code == 200, (resp.status_code, resp.text[:300])
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT slug FROM states WHERE id=%s", (resp.json()["id"],))
+        assert cur.fetchone()["slug"] == ""
