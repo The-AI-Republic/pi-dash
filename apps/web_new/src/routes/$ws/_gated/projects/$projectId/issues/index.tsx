@@ -22,6 +22,7 @@ import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { loadKanbanLayout } from "../../../../../../features/issues/kanban/lazy.js";
 import { preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
+import { loadIssuesListContent, resolvedIssuesListContent } from "./lazy.js";
 import { peekSearchFor, stripPeekParams, type PeekRequest } from "../../../../../../features/issues/peek/peekUrl.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/api/queries.js";
 
@@ -30,11 +31,6 @@ import { projectsQueryOptions } from "../../../../../../features/projects/api/qu
 // (NEWFRONT-619, NEWFRONT-669).
 primeIssueListLeaves();
 preloadIssueFilters();
-
-const loadIssuesListContent = () => import("./IssuesListContent.js");
-const LazyIssuesListContent = React.lazy(() =>
-  loadIssuesListContent().then((module) => ({ default: module.IssuesListContent }))
-);
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
@@ -105,19 +101,21 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
       const next = request === null ? stripPeekParams({ ...search }) : peekSearchFor(search, request, params.projectId);
       void navigate({ to: ".", search: next, replace: true } as never);
     };
+    // The chunk is already resolved by `beforeLoad`; rendering the component
+    // directly keeps the first commit the screen itself, with no Suspense
+    // fallback to discard and remount (NEWFRONT-906).
+    const IssuesListContent = resolvedIssuesListContent();
     return (
-      <React.Suspense fallback={<ListSkeleton />}>
-        <LazyIssuesListContent
-          workspaceSlug={params.ws}
-          projectId={params.projectId}
-          peekKey={search.peekIssueId ?? null}
-          peekProjectId={search.peekProjectId ?? null}
-          onPeekChange={setPeek}
-          search={search}
-          apiClient={context.apiClient}
-          queryClient={context.queryClient}
-        />
-      </React.Suspense>
+      <IssuesListContent
+        workspaceSlug={params.ws}
+        projectId={params.projectId}
+        peekKey={search.peekIssueId ?? null}
+        peekProjectId={search.peekProjectId ?? null}
+        onPeekChange={setPeek}
+        search={search}
+        apiClient={context.apiClient}
+        queryClient={context.queryClient}
+      />
     );
   },
 });
