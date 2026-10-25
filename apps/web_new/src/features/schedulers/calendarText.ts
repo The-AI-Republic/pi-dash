@@ -8,7 +8,7 @@
 
 import type { SchedulerBinding, SchedulerOccurrence } from "@pidash/api-client";
 
-import { describeRrule } from "./schedule.js";
+import { describeStoredRrule } from "./schedule.js";
 
 function instantFormatFor(tzid: string): Intl.DateTimeFormat {
   return new Intl.DateTimeFormat("en-US", {
@@ -51,7 +51,7 @@ export function occurrenceStatus(occurrence: Pick<SchedulerOccurrence, "kind" | 
 
 /** Plain-language repetition of the install's rule ("every day"). */
 export function occurrenceRecurrence(binding: Pick<SchedulerBinding, "rrule"> | null): string {
-  return binding === null ? "" : describeRrule(binding.rrule);
+  return binding === null ? "" : describeStoredRrule(binding.rrule);
 }
 
 /** Project context carried by the install, or the quiet placeholder. */

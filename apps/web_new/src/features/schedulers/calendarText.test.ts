@@ -48,6 +48,7 @@ describe("occurrenceStatus", () => {
 describe("install context", () => {
   it("renders the rule in plain language", () => {
     expect(occurrenceRecurrence({ rrule: "FREQ=DAILY" })).toBe("every day");
+    expect(occurrenceRecurrence({ rrule: "" })).toBe("Once at dtstart");
     expect(occurrenceRecurrence(null)).toBe("");
   });
 

@@ -164,7 +164,7 @@ describe("enable switch", () => {
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useToggleSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
 
-    let promise: Promise<void> = Promise.resolve();
+    let promise: Promise<SchedulerBinding> = Promise.resolve(binding());
     act(() => {
       promise = result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", enabled: false });
     });
@@ -194,6 +194,64 @@ describe("enable switch", () => {
     expect(notifyError).toHaveBeenCalledWith("Something went wrong", "Admins only");
   });
 
+  it("flips the open detail optimistically and seeds it from the server answer", async () => {
+    const saved = { ...binding({ enabled: false }), resolved_prompt: "", run_count: 0 };
+    contracts.updateSchedulerBinding.mockResolvedValue(saved);
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData(bindingKeys.detail(SLUG, PROJECT, "b1"), { ...saved, enabled: true });
+    const { result } = renderHook(() => useToggleSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
+
+    let promise: Promise<unknown> = Promise.resolve();
+    act(() => {
+      promise = result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", enabled: false });
+    });
+    await waitFor(() =>
+      expect(queryClient.getQueryData<{ enabled: boolean }>(bindingKeys.detail(SLUG, PROJECT, "b1"))?.enabled).toBe(
+        false
+      )
+    );
+    await act(async () => {
+      await promise;
+    });
+    expect(queryClient.getQueryData(bindingKeys.detail(SLUG, PROJECT, "b1"))).toEqual(saved);
+  });
+
+  it("rolls the open detail back when the write is refused", async () => {
+    contracts.updateSchedulerBinding.mockRejectedValue(new Error("Admins only"));
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const current = { ...binding({ enabled: true }), resolved_prompt: "", run_count: 0 };
+    queryClient.setQueryData(bindingKeys.detail(SLUG, PROJECT, "b1"), current);
+    const { result } = renderHook(() => useToggleSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
+    await act(async () => {
+      await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", enabled: false }).catch(() => undefined);
+    });
+    expect(queryClient.getQueryData(bindingKeys.detail(SLUG, PROJECT, "b1"))).toEqual(current);
+    expect(notifyError).toHaveBeenCalledWith("Something went wrong", "Admins only");
+  });
+
+  it("keeps a cold detail cache unset mid-flight, then seeds it on success", async () => {
+    let release: (value: unknown) => void = () => undefined;
+    contracts.updateSchedulerBinding.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const { result } = renderHook(() => useToggleSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
+    let promise: Promise<unknown> = Promise.resolve();
+    act(() => {
+      promise = result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", enabled: false });
+    });
+    await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
+    expect(queryClient.getQueryData(bindingKeys.detail(SLUG, PROJECT, "b1"))).toBeUndefined();
+    const saved = { ...binding({ enabled: false }), resolved_prompt: "", run_count: 0 };
+    release(saved);
+    await act(async () => {
+      await promise;
+    });
+    expect(queryClient.getQueryData(bindingKeys.detail(SLUG, PROJECT, "b1"))).toEqual(saved);
+  });
+
   it("leaves an unsettled list unsettled after a successful flip", async () => {
     contracts.updateSchedulerBinding.mockResolvedValue({ ...binding(), enabled: true });
     const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
@@ -220,7 +278,7 @@ describe("enable switch", () => {
     const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
     queryClient.setQueryData(bindingKeys.list(SLUG, PROJECT), [binding(), binding({ id: "b2" })]);
     const { result } = renderHook(() => useToggleSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
-    let promise: Promise<void> = Promise.resolve();
+    let promise: Promise<SchedulerBinding> = Promise.resolve(binding());
     act(() => {
       promise = result.current.mutateAsync({ projectId: PROJECT, bindingId: "b2", enabled: false });
     });

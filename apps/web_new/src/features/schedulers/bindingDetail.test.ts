@@ -240,6 +240,12 @@ describe("configuration grid", () => {
   it("names a blank zone as UTC", () => {
     expect(configRows(binding({ tzid: "" }), null).find((row) => row.label === "Time zone")?.value).toBe("UTC");
   });
+
+  it("reads a blank stored rule as Once at dtstart", () => {
+    const row = configRows(binding({ rrule: "" }), null).find((entry) => entry.label === "Schedule");
+    expect(row?.value).toBe("Once at dtstart");
+    expect(row?.title).toBe("");
+  });
 });
 
 describe("empty history and completion", () => {
