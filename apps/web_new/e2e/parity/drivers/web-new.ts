@@ -4696,12 +4696,21 @@ export class WebNewDriver implements ParityDriver {
         () => true,
         () => false
       );
+    const listSettled = settle(this.page.getByRole("heading", { name: "Labels", exact: true }).first());
     const settled = await Promise.race([
-      settle(this.page.getByRole("heading", { name: "Labels", exact: true }).first()),
+      listSettled,
       settle(this.page.getByRole("heading", { name: /not authorized/i }).first()),
       settle(this.page.getByRole("heading", { name: /don.t have access/i }).first()),
     ]);
     if (!settled) throw new Error("[parity] labels settings settled on neither the list nor the denial view.");
+    if (await listSettled) {
+      // The heading paints before the labels query resolves; the skeleton
+      // occupies the list slot until rows or the empty state replace it.
+      await Promise.race([
+        this.page.getByRole("list", { name: "Project labels" }).waitFor({ timeout: 60_000 }),
+        this.page.getByText("No labels yet", { exact: true }).waitFor({ timeout: 60_000 }),
+      ]);
+    }
   }
 
   async settingsLabelsNames(): Promise<string[]> {
