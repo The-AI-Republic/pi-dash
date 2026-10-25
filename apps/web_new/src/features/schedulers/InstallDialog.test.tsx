@@ -455,6 +455,61 @@ describe("InstallForm author path", { timeout: 30_000 }, () => {
     expect(screen.queryByLabelText("Scheduler")).not.toBeInTheDocument();
   });
 
+  it("derives the landing tab from a catalog that arrives after opening", () => {
+    // AGT-012: the freed definition is installable again. The dialog opens
+    // before the catalog read settles, so the default tab must follow the
+    // loaded list instead of freezing on "Create new" from an empty first
+    // render.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const props = {
+      workspaceSlug: SLUG,
+      projectId: PROJECT,
+      canInstall: true,
+      canAuthor: true,
+      onClose: vi.fn(),
+      onInstalled: vi.fn(),
+      refreshDefinitions: vi.fn(async () => undefined),
+    };
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <InstallForm {...props} installable={[]} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("tab", { name: "Create new" })).toHaveAttribute("aria-selected", "true");
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <InstallForm {...props} installable={[scheduler()]} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("tab", { name: "Install existing" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByLabelText("Scheduler")).toHaveValue("s1");
+  });
+
+  it("keeps an explicit tab choice when the catalog later changes", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const props = {
+      workspaceSlug: SLUG,
+      projectId: PROJECT,
+      canInstall: true,
+      canAuthor: true,
+      onClose: vi.fn(),
+      onInstalled: vi.fn(),
+      refreshDefinitions: vi.fn(async () => undefined),
+    };
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <InstallForm {...props} installable={[scheduler()]} />
+      </QueryClientProvider>
+    );
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Create new" }));
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <InstallForm {...props} installable={[scheduler(), scheduler({ id: "s2", slug: "second" })]} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("tab", { name: "Create new" })).toHaveAttribute("aria-selected", "true");
+  });
+
   it("offers the dead end without author rights", () => {
     renderForm({ canAuthor: false, canInstall: false, installable: [] });
     expect(screen.getByText("No schedulers available")).toBeInTheDocument();

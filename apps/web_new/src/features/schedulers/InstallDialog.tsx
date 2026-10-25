@@ -137,7 +137,12 @@ export function InstallForm({
   refreshDefinitions,
 }: InstallFormProps): React.ReactElement {
   const install = useInstallSchedulerBinding(workspaceSlug);
-  const [mode, setMode] = React.useState<InstallMode>(() => initialInstallMode(canAuthor, installable.length));
+  // The catalog arrives after the dialog opens. Until the person picks a
+  // tab, derive the landing tab from what is actually installable so a
+  // slow first read cannot strand a reinstallable definition on "Create
+  // new" (AGT-012). An explicit tab choice wins from then on.
+  const [modeChoice, setModeChoice] = React.useState<"install" | "create" | undefined>();
+  const mode: InstallMode = modeChoice ?? initialInstallMode(canAuthor, installable.length);
   // The picker's value is the user's choice, or the first option until they
   // make one. Keeping it derived means a catalog that lands after the dialog
   // opens still gets a valid selection without a state-sync effect.
@@ -167,7 +172,7 @@ export function InstallForm({
   const definitionId = chosenId ?? options[0]?.id ?? "";
 
   const switchMode = (next: "install" | "create"): void => {
-    setMode(next);
+    setModeChoice(next);
     setSchedulerError(undefined);
   };
 
@@ -228,7 +233,7 @@ export function InstallForm({
       );
       setFlipped(created);
       setChosenId(created.id);
-      setMode("install");
+      setModeChoice("install");
     } finally {
       setAuthoring(false);
     }
