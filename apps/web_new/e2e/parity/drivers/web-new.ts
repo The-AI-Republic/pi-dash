@@ -12736,7 +12736,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Prompts + project automations (NEWFRONT-186, AGT-023–037) ---
-  private static readonly PROMPT_SECTIONS_PATTERN = "**/api/workspaces/*/prompt-sections*";
+  // List reads carry a query string; upserts and reverts carry the section
+  // key as a path segment. Both must match: a glob ending at
+  // `prompt-sections*` never crossed `/`, so a PUT to
+  // .../prompt-sections/<key> escaped the failure route and reached the API
+  // (NEWFRONT-900). The optional segment deliberately excludes deeper paths.
+  private static readonly PROMPT_SECTIONS_PATTERN = /\/api\/workspaces\/[^/]+\/prompt-sections(?:\/[^/?]+)?(?:[?]|$)/;
 
   private promptsSectionsNav(): Locator {
     return this.page.getByRole("navigation", { name: "Prompt sections", exact: true });
