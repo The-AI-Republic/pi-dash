@@ -27,7 +27,12 @@ export const PAGE_COPY_LINK_LABEL = "Copy link";
 export const PAGE_COPIED_LINK_LABEL = "Copied link";
 export const PAGE_OPTIONS_LABEL = "Page options";
 export const PAGE_HISTORY_ITEM = "Version history";
-export const PAGE_OPEN_PANE_LABEL = "Open navigation pane";
+/**
+ * The header-toggle name. It deliberately differs from the floating
+ * toggle's "Open navigation pane": the floating control exists only when
+ * the sticky bar is gone (PAGE-035), so its name identifies that state.
+ */
+export const PAGE_PANE_TOGGLE_LABEL = "Navigation pane";
 
 /** How long the copy control reports its success before reverting. */
 export const PAGE_COPY_CONFIRM_MS = 1600;
@@ -120,7 +125,7 @@ export function PageDetailHeader({
       <span className="flex-1" aria-hidden="true" />
       <PageSyncBadge status={syncStatus} />
       <IconButton
-        label={PAGE_OPEN_PANE_LABEL}
+        label={PAGE_PANE_TOGGLE_LABEL}
         aria-expanded={paneOpen}
         data-testid="page-pane-toggle"
         size="small"

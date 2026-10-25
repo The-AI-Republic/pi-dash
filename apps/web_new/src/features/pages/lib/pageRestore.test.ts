@@ -15,6 +15,10 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
   return {
     applyCommand: vi.fn(),
     applyBlockKind: vi.fn(),
+    insertTable: vi.fn(),
+    applyColor: vi.fn(),
+    clearColor: vi.fn(),
+    insertImage: vi.fn(),
     focusStart: vi.fn(),
     readState: vi.fn(),
     replaceBody: vi.fn(() => true),

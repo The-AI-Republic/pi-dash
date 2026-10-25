@@ -73,6 +73,21 @@ describe("sanitizeHtml", () => {
     expect(clean).toContain("<input");
   });
 
+  it("keeps table spans and stored widths (PAGE-033)", () => {
+    const clean = sanitizeHtml(
+      '<table><tbody><tr><th colspan="2" data-colwidth="120,130">a</th></tr><tr><td rowspan="2">b</td><td>c</td></tr><tr><td>d</td></tr></tbody></table>'
+    );
+    expect(clean).toContain('colspan="2"');
+    expect(clean).toContain('rowspan="2"');
+    expect(clean).toContain('data-colwidth="120,130"');
+  });
+
+  it("keeps letter and wash colour keys on a span (PAGE-036)", () => {
+    const clean = sanitizeHtml('<p><span data-text-color="pink" data-background-color="green">paint</span></p>');
+    expect(clean).toContain('data-text-color="pink"');
+    expect(clean).toContain('data-background-color="green"');
+  });
+
   it("still strips scripts and handlers from stored content elements", () => {
     const clean = sanitizeHtml(
       '<mention-component id="u-1" onclick="steal()"></mention-component><image-component src="javascript:alert(1)" onerror="x()"></image-component>'

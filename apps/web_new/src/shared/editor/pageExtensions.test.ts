@@ -2,9 +2,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Page extension set (parity/specs/pages.md §10.1, PAGE-028–032): the
-// description core plus underline, paragraph/heading alignment and
-// checkable lists. Stored page markup must survive parse and serialize,
+// Page extension set (parity/specs/pages.md §10.1, PAGE-028–036): the
+// description core plus underline, paragraph/heading alignment,
+// checkable lists, the table nodes, the letter/wash colour mark and the
+// stored image node. Stored page markup must survive parse and serialize,
 // because saving and reloading is how a formatting choice persists.
 
 import type { AnyExtension } from "@tiptap/core";
@@ -49,6 +50,24 @@ const FIXTURES: Fixture[] = [
     keeps: ['data-type="taskList"', 'data-type="taskItem"', 'data-checked="true"', 'type="checkbox"'],
   },
   { name: "quote", html: "<blockquote><p>quoted</p></blockquote>", text: "quoted", keeps: ["<blockquote>"] },
+  {
+    name: "table",
+    html: '<table><tbody><tr><td data-colwidth="150"><p>a</p></td><td><p>b</p></td></tr></tbody></table>',
+    text: "ab",
+    keeps: ["<table>", "<tr>", "<td", 'data-colwidth="150"'],
+  },
+  {
+    name: "letter and wash colour",
+    html: '<p><span data-text-color="pink" data-background-color="green">colored</span></p>',
+    text: "colored",
+    keeps: ['data-text-color="pink"', 'data-background-color="green"'],
+  },
+  {
+    name: "stored image",
+    html: '<image-component src="asset-1" status="uploaded" data-stored-src="asset-1"></image-component>',
+    text: "",
+    keeps: ["<image-component", 'status="uploaded"', 'src="asset-1"'],
+  },
 ];
 
 function textOf(html: string): string {
@@ -56,15 +75,23 @@ function textOf(html: string): string {
 }
 
 describe("page extension set", () => {
-  it("adds underline, alignment and checkable lists to the description core", async () => {
+  it("adds underline, alignment, checkable lists, tables, colour and images to the description core", async () => {
     const base = (await loadDescriptionExtensions()) as unknown as AnyExtension[];
     const page = await loadPageExtensions();
-    expect(page).toHaveLength(base.length + 4);
+    // Four page marks/blocks, four table nodes, one colour mark and one
+    // stored-image node.
+    expect(page).toHaveLength(base.length + 10);
     const names = page.map((extension) => extension.name);
     expect(names).toContain("underline");
     expect(names).toContain("textAlign");
     expect(names).toContain("taskList");
     expect(names).toContain("taskItem");
+    expect(names).toContain("table");
+    expect(names).toContain("tableRow");
+    expect(names).toContain("tableCell");
+    expect(names).toContain("tableHeader");
+    expect(names).toContain("pageColor");
+    expect(names).toContain("image");
     expect(names).toContain("starterKit");
   });
 

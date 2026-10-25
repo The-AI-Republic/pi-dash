@@ -36,6 +36,13 @@ const STORED_CONTENT_ATTRIBUTES: Record<string, readonly string[]> = {
     "title",
   ],
   img: ["src", "alt", "title", "width", "height", "aspectRatio", "aspectratio", "alignment"],
+  // Table cells keep their spans and stored widths so a reloaded table
+  // matches what the editor wrote (PAGE-033).
+  td: ["colspan", "rowspan", "data-colwidth"],
+  th: ["colspan", "rowspan", "data-colwidth"],
+  // Letter and wash marks (PAGE-036): the stored palette key paints the
+  // span and is what a later edit reads back.
+  span: ["data-text-color", "data-background-color"],
   label: ["class", "for"],
   input: ["type", "checked", "disabled"],
 };

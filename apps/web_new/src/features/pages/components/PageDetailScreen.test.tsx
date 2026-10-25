@@ -212,6 +212,7 @@ afterEach(() => {
   vi.mocked(applyPageRestore).mockClear();
   vi.mocked(notifySuccess).mockClear();
   vi.mocked(notifyError).mockClear();
+  window.localStorage.clear();
 });
 
 function renderScreen(search: PageDetailSearch = {}): {
@@ -410,6 +411,29 @@ describe("PageDetailScreen title and body", () => {
     await waitFor(() => expect(screen.queryByRole("status", { name: "Loading page body" })).not.toBeInTheDocument());
   });
 
+  it("resolves a stored picture's asset id on a read-only body", async () => {
+    harness.page = record({
+      is_locked: true,
+      description_html: '<p><image-component src="asset-4" status="uploaded"></image-component></p>',
+    });
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <PageDetailScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          pageId={harness.pageId}
+          search={{}}
+          onSearchChange={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    await screen.findByText("This page is locked and read-only.");
+    await waitFor(() => {
+      const image = document.querySelector(".editor-container img");
+      expect(image?.getAttribute("src")).toBe("/api/assets/v2/workspaces/acme/projects/" + PROJECT + "/asset-4/");
+    });
+  });
+
   it("renders a shelved page read-only", async () => {
     harness.page = record({ archived_at: "2026-10-01" });
     const { container } = render(
@@ -436,6 +460,31 @@ describe("PageDetailScreen title, mark and toolbar", () => {
     expect(screen.getByTestId("page-toolbar-bold")).toBeInTheDocument();
   });
 
+  it("hides the bar when the sticky preference is off and keeps the floating pane toggle", async () => {
+    window.localStorage.setItem("pages_config", JSON.stringify({ sticky_toolbar: false }));
+    const { changes } = renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(screen.queryByRole("toolbar", { name: "Formatting" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("page-floating-pane-toggle")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open navigation pane" }));
+    expect(changes.at(-1)).toEqual({ paneTab: "outline" });
+  });
+
+  it("keeps the bar, and no floating toggle, when the sticky preference is on", async () => {
+    window.localStorage.setItem("pages_config", JSON.stringify({ sticky_toolbar: true }));
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(screen.getByRole("toolbar", { name: "Formatting" })).toBeInTheDocument();
+    expect(screen.queryByTestId("page-floating-pane-toggle")).not.toBeInTheDocument();
+  });
+
+  it("leaves the floating toggle to the header control while the pane is open", async () => {
+    window.localStorage.setItem("pages_config", JSON.stringify({ sticky_toolbar: false }));
+    renderScreen({ paneTab: "outline" });
+    await screen.findByRole("complementary", { name: "Navigation pane" });
+    expect(screen.queryByTestId("page-floating-pane-toggle")).not.toBeInTheDocument();
+  });
+
   it("withholds the bar and the mark control from a read-only viewer", async () => {
     harness.page = record({ is_locked: true });
     render(
@@ -451,6 +500,7 @@ describe("PageDetailScreen title, mark and toolbar", () => {
     );
     await screen.findByText("This page is locked and read-only.");
     expect(screen.queryByRole("toolbar", { name: "Formatting" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("page-floating-pane-toggle")).toBeInTheDocument();
     expect(screen.getByTestId("page-mark")).toHaveAttribute("data-readonly", "true");
     expect(screen.queryByRole("button", { name: "Change the page mark" })).not.toBeInTheDocument();
   });
@@ -538,7 +588,7 @@ describe("PageDetailScreen deep links", () => {
   it("opens the outline from the header toggle", async () => {
     const { changes } = renderScreen();
     await screen.findByRole("textbox", { name: "Page title" });
-    fireEvent.click(screen.getByRole("button", { name: "Open navigation pane" }));
+    fireEvent.click(screen.getByRole("button", { name: "Navigation pane" }));
     expect(changes.at(-1)).toEqual({ paneTab: "outline" });
   });
 

@@ -123,6 +123,14 @@
     max-width: 100%;
     border-radius: var(--radius-control);
   }
+  /* Stored page pictures: the editor paints them through a node wrapper
+     (PAGE-034), and a stored element is block-level like an ordinary
+     image so it never sits inline with surrounding prose. */
+  .rich-text-content image-component,
+  .rich-text-content .node-imageComponent {
+    display: block;
+    max-width: 100%;
+  }
   /* A stored person mention: one inline chip naming the person, so the
      read and editing surfaces both show who was mentioned (ISS-127). */
   .rich-text-content .mention-chip,
@@ -143,5 +151,56 @@
     border: 1px solid var(--border);
     padding: var(--space-4) var(--space-8);
     text-align: left;
+  }
+  /* Letter and wash marks applied from the toolbar (PAGE-036). The
+     stored attribute is the palette key; the token pair keeps the same
+     choice legible in every theme. */
+  .rich-text-content [data-text-color="gray"] {
+    color: var(--page-color-gray-text);
+  }
+  .rich-text-content [data-text-color="peach"] {
+    color: var(--page-color-peach-text);
+  }
+  .rich-text-content [data-text-color="pink"] {
+    color: var(--page-color-pink-text);
+  }
+  .rich-text-content [data-text-color="orange"] {
+    color: var(--page-color-orange-text);
+  }
+  .rich-text-content [data-text-color="green"] {
+    color: var(--page-color-green-text);
+  }
+  .rich-text-content [data-text-color="light-blue"] {
+    color: var(--page-color-light-blue-text);
+  }
+  .rich-text-content [data-text-color="dark-blue"] {
+    color: var(--page-color-dark-blue-text);
+  }
+  .rich-text-content [data-text-color="purple"] {
+    color: var(--page-color-purple-text);
+  }
+  .rich-text-content [data-background-color="gray"] {
+    background-color: var(--page-color-gray-wash);
+  }
+  .rich-text-content [data-background-color="peach"] {
+    background-color: var(--page-color-peach-wash);
+  }
+  .rich-text-content [data-background-color="pink"] {
+    background-color: var(--page-color-pink-wash);
+  }
+  .rich-text-content [data-background-color="orange"] {
+    background-color: var(--page-color-orange-wash);
+  }
+  .rich-text-content [data-background-color="green"] {
+    background-color: var(--page-color-green-wash);
+  }
+  .rich-text-content [data-background-color="light-blue"] {
+    background-color: var(--page-color-light-blue-wash);
+  }
+  .rich-text-content [data-background-color="dark-blue"] {
+    background-color: var(--page-color-dark-blue-wash);
+  }
+  .rich-text-content [data-background-color="purple"] {
+    background-color: var(--page-color-purple-wash);
   }
 }

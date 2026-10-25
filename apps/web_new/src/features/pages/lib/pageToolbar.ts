@@ -41,6 +41,19 @@ export interface PageToolbarControl {
   hint: string | null;
 }
 
+/**
+ * The three media controls this slice appends after the core twelve, in
+ * reading order (spec §5.3 items 6–8). They are not all plain format
+ * commands — table inserts a node, image opens a picker, colour opens a
+ * popover — so the bar renders them through its own media slot rather
+ * than the command list above.
+ */
+export const PAGE_MEDIA_CONTROL_LABELS = {
+  table: "Table",
+  image: "Image",
+  color: "Color",
+} as const;
+
 /** The bar's icon-only controls, in reading order (spec §5.3). */
 export const PAGE_TOOLBAR_CONTROLS: readonly PageToolbarControl[] = [
   { command: "bold", label: "Bold", hint: "Cmd + B" },

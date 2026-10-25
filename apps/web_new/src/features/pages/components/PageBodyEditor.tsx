@@ -29,6 +29,8 @@ export type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 export interface PageBodyEditorProps {
   /** Stored HTML the body opens with. */
   initialHtml: string;
+  /** Resolve a stored image asset id to its served source (PAGE-034). */
+  resolveAsset?: ((src: string) => string) | undefined;
   /** Fires with the body's HTML on every edit. */
   onChange: (html: string) => void;
   /** Fires whenever the formatting state at the caret/selection changes. */
@@ -52,6 +54,7 @@ async function loadPageEditor(): Promise<{ default: React.ComponentType<PageBody
 
   function EditorBody({
     initialHtml,
+    resolveAsset,
     onChange,
     onFormattingChange,
     onReady,
@@ -59,7 +62,7 @@ async function loadPageEditor(): Promise<{ default: React.ComponentType<PageBody
     placeholder,
     handleKeyDown,
   }: PageBodyEditorProps): React.ReactElement {
-    const shownHtml = React.useMemo(() => prepareEditorHtml(initialHtml, undefined), [initialHtml]);
+    const shownHtml = React.useMemo(() => prepareEditorHtml(initialHtml, resolveAsset), [initialHtml, resolveAsset]);
     const onChangeRef = React.useRef(onChange);
     onChangeRef.current = onChange;
     const formattingRef = React.useRef(onFormattingChange);

@@ -33,6 +33,14 @@ export interface PageEditorChain {
   setParagraph: () => PageEditorChain;
   toggleHeading: (attributes: { level: number }) => PageEditorChain;
   setContent: (content: string, emitUpdate?: boolean) => PageEditorChain;
+  /** Drop a 3×3 table at the caret (PAGE-033). */
+  insertPageTable: (attributes?: { rows?: number; cols?: number; withHeaderRow?: boolean }) => PageEditorChain;
+  /** Apply one mark to the range (the colour pair rides on one mark). */
+  setMark: (name: string, attributes: Record<string, unknown>) => PageEditorChain;
+  /** Remove one mark from the range (PAGE-036 clear). */
+  unsetMark: (name: string) => PageEditorChain;
+  /** Insert one node or HTML string at the caret (PAGE-034). */
+  insertContent: (content: unknown) => PageEditorChain;
   run: () => boolean;
 }
 
@@ -51,6 +59,8 @@ export interface PageEditorRef {
   getHTML: () => string;
   /** Tiptap's focus command: no argument focuses the current caret. */
   commands: { focus: (position?: PageFocusPosition) => void };
+  /** Tiptap's mark-attribute read; optional so simple probes still work. */
+  getAttributes?: (name: string) => Record<string, unknown>;
   state: {
     selection: {
       $from: {
@@ -64,6 +74,14 @@ export interface PageEditorRef {
 export interface PageEditorHandle {
   /** Run one formatting command at the caret (bold, lists, quote, code…). */
   applyCommand: (command: PageFormatCommand) => void;
+  /** Insert a 3×3 table at the caret (PAGE-033). */
+  insertTable: () => void;
+  /** Apply one letter or wash colour to the current range (PAGE-036). */
+  applyColor: (kind: "text" | "background", key: string) => void;
+  /** Clear one colour kind back to plain text/wash (PAGE-036). */
+  clearColor: (kind: "text" | "background") => void;
+  /** Insert an uploaded picture at the caret (PAGE-034). */
+  insertImage: (src: string, storedSrc: string) => void;
   /** Restyle the block under the caret as the given typography entry. */
   applyBlockKind: (kind: PageBlockKind) => void;
   /** Put the caret at the very start of the body (title Enter, PAGE-026). */
@@ -123,6 +141,73 @@ export function runPageCommand(editor: PageEditorRef, command: PageFormatCommand
   }
 }
 
+/**
+ * Insert the toolbar's table at the caret (PAGE-033). The table nodes'
+ * own command lands the caret in the first cell, so the next Tab walks
+ * the cells rather than leaving the document.
+ */
+export function insertPageTable(editor: PageEditorRef): void {
+  editor.chain().focus().insertPageTable({ rows: 3, cols: 3, withHeaderRow: false }).run();
+}
+
+/** The mark attribute one colour kind writes (PAGE-036). */
+const COLOR_ATTRIBUTE = { text: "textColor", background: "backgroundColor" } as const;
+/** The mark name the letter/wash pair lives on. */
+export const PAGE_COLOR_MARK = "pageColor";
+
+/** The pair the current range carries, read from the mark's attributes. */
+function currentPageColor(editor: PageEditorRef): { textColor: string | null; backgroundColor: string | null } {
+  const attributes = editor.getAttributes?.(PAGE_COLOR_MARK) ?? {};
+  return {
+    textColor: typeof attributes.textColor === "string" ? attributes.textColor : null,
+    backgroundColor: typeof attributes.backgroundColor === "string" ? attributes.backgroundColor : null,
+  };
+}
+
+/** Apply one palette key to the current range (PAGE-036). */
+export function applyPageColor(editor: PageEditorRef, kind: "text" | "background", key: string): void {
+  const current = currentPageColor(editor);
+  // Both attributes are written on every change so the untouched kind
+  // survives: a wash applied to coloured letters keeps the letters.
+  editor
+    .chain()
+    .focus()
+    .setMark(PAGE_COLOR_MARK, { ...current, [COLOR_ATTRIBUTE[kind]]: key })
+    .run();
+}
+
+/** Remove one colour kind from the current range (PAGE-036). */
+export function clearPageColor(editor: PageEditorRef, kind: "text" | "background"): void {
+  const current = currentPageColor(editor);
+  const next = { ...current, [COLOR_ATTRIBUTE[kind]]: null };
+  const chain = editor.chain().focus();
+  // Clearing the last remaining kind drops the mark itself, so the text
+  // returns to plain styling rather than an empty span.
+  if (next.textColor === null && next.backgroundColor === null) {
+    chain.unsetMark(PAGE_COLOR_MARK).run();
+    return;
+  }
+  chain.setMark(PAGE_COLOR_MARK, next).run();
+}
+
+/**
+ * Insert an uploaded picture at the caret (PAGE-034). The node is the
+ * shared stored-image shape: the stored asset id rides in
+ * `data-stored-src` (and `src`, as every client stores it) with the
+ * upload status the oracle reads back, while the editable surface paints
+ * the upload's served URL in `src`.
+ */
+export function runInsertImage(editor: PageEditorRef, src: string, storedSrc: string): void {
+  editor
+    .chain()
+    .focus()
+    .insertContent({
+      type: "image",
+      attrs: { src, "data-stored-src": storedSrc, status: "uploaded" },
+    })
+    .run();
+}
+
 /** Restyle the caret's block as plain text or one heading level. */
 export function runBlockKind(editor: PageEditorRef, kind: PageBlockKind): void {
   const level = headingLevelOf(kind);
@@ -157,7 +242,20 @@ export function editorFormattingState(editor: PageEditorRef): PageFormattingStat
     isActive: (name, attributes) => editor.isActive(name, attributes),
     caretBlock: () => caretBlockOf(editor),
     inTaskList: () => editor.isActive("taskList"),
+    colorAttrs: () => pageColorAttrs(editor),
   });
+}
+
+/**
+ * The colour mark's attributes over the caret, or null when the range
+ * holds no colour. Tiptap reports a mark's attributes through
+ * `getAttributes`; the reader stays optional so older probes keep working.
+ */
+function pageColorAttrs(editor: PageEditorRef): { textColor?: unknown; backgroundColor?: unknown } | null {
+  if (editor.getAttributes === undefined) return null;
+  const attrs = editor.getAttributes("pageColor") as { textColor?: unknown; backgroundColor?: unknown };
+  if (attrs.textColor === undefined && attrs.backgroundColor === undefined) return null;
+  return attrs;
 }
 
 /** True when the document holds no text at all (placeholder decision). */
@@ -182,6 +280,10 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
   return {
     applyCommand: (command) => runPageCommand(editor, command),
     applyBlockKind: (kind) => runBlockKind(editor, kind),
+    insertTable: () => insertPageTable(editor),
+    applyColor: (kind, key) => applyPageColor(editor, kind, key),
+    clearColor: (kind) => clearPageColor(editor, kind),
+    insertImage: (src, storedSrc) => runInsertImage(editor, src, storedSrc),
     focusStart: () => editor.commands.focus(PAGE_BODY_START),
     readState: () => editorFormattingState(editor),
     replaceBody: (html) => replacePageBody(editor, html),

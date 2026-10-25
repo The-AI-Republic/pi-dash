@@ -43,6 +43,27 @@
   --chart-9: #50c799;
   --chart-10: #b35f9e;
 
+  /* Page body letter and wash palette (parity/specs/pages.md §5.3,
+     PAGE-036). Eight named choices; the letter value paints text and the
+     wash value paints a highlight. Both are tuned for the light theme and
+     remapped for dark below. */
+  --page-color-gray-text: #6b6b74;
+  --page-color-gray-wash: #ececef;
+  --page-color-peach-text: #9a5b3a;
+  --page-color-peach-wash: #fbe6d8;
+  --page-color-pink-text: #a8426f;
+  --page-color-pink-wash: #fbdde9;
+  --page-color-orange-text: #9a5a13;
+  --page-color-orange-wash: #fcecd2;
+  --page-color-green-text: #2a6b45;
+  --page-color-green-wash: #ddf0e4;
+  --page-color-light-blue-text: #27678c;
+  --page-color-light-blue-wash: #dcecf5;
+  --page-color-dark-blue-text: #2f4a9a;
+  --page-color-dark-blue-wash: #dfe4f7;
+  --page-color-purple-text: #6a3f96;
+  --page-color-purple-wash: #eae0f5;
+
   /* Type */
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
@@ -146,6 +167,23 @@
   --chart-8: #f0707a;
   --chart-9: #76d8b0;
   --chart-10: #c984b8;
+  /* Palette twins for dark surfaces: lighter letters, deeper washes. */
+  --page-color-gray-text: #a9a9b2;
+  --page-color-gray-wash: #2b2b30;
+  --page-color-peach-text: #e0a985;
+  --page-color-peach-wash: #3b2a20;
+  --page-color-pink-text: #e79abc;
+  --page-color-pink-wash: #3b2230;
+  --page-color-orange-text: #e5b072;
+  --page-color-orange-wash: #3a2d1a;
+  --page-color-green-text: #7fc99c;
+  --page-color-green-wash: #1e3327;
+  --page-color-light-blue-text: #86c3e0;
+  --page-color-light-blue-wash: #1c2e3a;
+  --page-color-dark-blue-text: #9fb0ea;
+  --page-color-dark-blue-wash: #212a42;
+  --page-color-purple-text: #c1a0e2;
+  --page-color-purple-wash: #2e2339;
   --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.5);
   --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
 }

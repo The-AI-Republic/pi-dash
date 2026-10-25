@@ -128,6 +128,10 @@ function createStoredImageNode(Image: TiptapImage) {
         const attrs = node.attrs as Record<string, unknown>;
         const stored = attrs["data-stored-src"];
         const dom = document.createElement("image-component");
+        // A stable hook for the surface and its tests: the stored element
+        // name alone is not addressable as a class once ProseMirror owns
+        // the node (PAGE-034).
+        dom.className = "node-imageComponent";
         dom.setAttribute("contenteditable", "false");
         for (const [name, value] of Object.entries(attrs)) {
           if (name === "src" || name === "data-stored-src" || typeof value !== "string" || value === "") continue;
@@ -145,6 +149,18 @@ function createStoredImageNode(Image: TiptapImage) {
       };
     },
   }).configure({ inline: false, allowBase64: false });
+}
+
+/**
+ * The shared stored-image node on its own, for the page editor: a page
+ * body stores toolbar images exactly like a description does
+ * (`image-component` with the asset id and an upload status), so the
+ * page set attaches the same node without the issue-description extras
+ * (PAGE-034, ISS-127).
+ */
+export async function loadStoredImageExtension() {
+  const { default: Image } = await import("@tiptap/extension-image");
+  return createStoredImageNode(Image);
 }
 
 /** Description editing: paragraphs, headings, lists, code, links. */

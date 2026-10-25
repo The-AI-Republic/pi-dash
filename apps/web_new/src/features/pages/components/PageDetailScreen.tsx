@@ -17,6 +17,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { meQueryOptions } from "../../../core/session/queries.js";
+import { descriptionAssetSrc } from "../../../shared/editor/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { RichTextView } from "../../../shared/editor/RichTextView.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
@@ -48,6 +49,7 @@ import { usePageSyncStatus } from "../lib/pageSync.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
 import { PageDetailPanel } from "./PageDetailPanel.js";
 import { PageDetailHeader } from "./PageDetailHeader.js";
+import { PageFloatingPaneToggle } from "./PageFloatingPaneToggle.js";
 import { PageCanvasHeader } from "./PageCanvasHeader.js";
 import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 import { PageEditorSurface, PAGE_BODY_LABEL } from "./PageEditorSurface.js";
@@ -55,6 +57,7 @@ import { PageHeadingPreview } from "./PageHeadingPreview.js";
 import { PageNavigationPane } from "./PageNavigationPane.js";
 import { PageVersionOverlay } from "./PageVersionOverlay.js";
 import { PAGE_UNTITLED } from "../lib/pageList.js";
+import { formattingBarVisible, readStickyToolbarFromWindow } from "../lib/pagePreferences.js";
 import { useLivePageDocument } from "../lib/pageDocumentLive.js";
 import { PAGE_CANVAS_MEASURE_PX, pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
 
@@ -181,6 +184,19 @@ export function PageDetailScreen({
     });
     return () => cancelAnimationFrame(frame);
   }, [body, bodyReady, pageId]);
+
+  // The sticky preference is read once on mount (spec §9.1): the page
+  // shell is remounted by navigation, so a stored change is picked up on
+  // the next visit without a live subscription this slice does not own.
+  const [stickyToolbar, setStickyToolbar] = React.useState(readStickyToolbarFromWindow);
+  React.useEffect(() => {
+    setStickyToolbar(readStickyToolbarFromWindow());
+  }, [pageId]);
+  const showBar = capabilities !== null && formattingBarVisible({ editable: capabilities.canEdit, stickyToolbar });
+  const resolveAsset = React.useCallback(
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId }),
+    [workspaceSlug, projectId]
+  );
 
   /** Every navigation from the detail rewrites the address's two keys. */
   const goTo = (href: string): void => {
@@ -310,12 +326,14 @@ export function PageDetailScreen({
                 {capabilities.canEdit ? (
                   <PageEditorSurface
                     pageId={page.id}
+                    workspaceSlug={workspaceSlug}
+                    projectId={projectId}
                     name={page.name}
                     descriptionHtml={page.description_html}
                     logoProps={page.logo_props as Record<string, unknown>}
                     onRename={saveName}
                     onMarkPick={saveMark}
-                    showBar
+                    showBar={showBar}
                     bodyPending={!bodyReady}
                     onHandle={onEditorHandle}
                   />
@@ -330,7 +348,12 @@ export function PageDetailScreen({
                     />
                     {bodyReady ? (
                       <div className="editor-container">
-                        <RichTextView html={page.description_html} label={PAGE_BODY_LABEL} />
+                        <RichTextView
+                          html={page.description_html}
+                          label={PAGE_BODY_LABEL}
+                          resolveAsset={resolveAsset}
+                          workspaceSlug={workspaceSlug}
+                        />
                       </div>
                     ) : (
                       <PageBodySkeleton />
@@ -345,6 +368,9 @@ export function PageDetailScreen({
           {/* Sits beside the scroller rather than inside it, so it stays at
               the canvas edge however far the body has scrolled (PAGE-046). */}
           {paneOpen ? null : <PageHeadingPreview headings={paneDocument.headings} onOpen={openFromPreview} />}
+          {/* The bar's absence is what surfaces the floating toggle
+              (PAGE-035); when the bar is there, this never mounts. */}
+          {showBar || paneOpen ? null : <PageFloatingPaneToggle onOpen={openPane} />}
         </div>
         <PageNavigationPane
           workspaceSlug={workspaceSlug}
