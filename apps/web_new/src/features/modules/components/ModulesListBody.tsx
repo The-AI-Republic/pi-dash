@@ -34,7 +34,7 @@ import {
 } from "../lib/moduleListControls.js";
 import { useModuleListContext } from "./moduleListContext.js";
 import { ModuleBoardCard } from "./ModuleBoardCard.js";
-import { ModuleListRow } from "./ModuleListRow.js";
+import { ModuleListRow, moduleRowHoverClass } from "./ModuleListRow.js";
 import { ModulesNoMatch } from "./ModulesNoMatch.js";
 import { ModulesTimeline } from "./timeline/ModulesTimeline.js";
 
@@ -88,6 +88,11 @@ export function renderModule(
   options?: ModuleBodyRowOptions
 ): React.ReactElement {
   const shared = { workspaceSlug, projectId, module };
+  // The quick menu (slice H) rides the rowMenu slot on every layout: the
+  // card mounts it once, the list row mounts it twice — the narrow-screen
+  // trigger in `menu`, the hover-revealed desktop trigger in `trailing` —
+  // with exactly one visible per breakpoint.
+  const menu = options?.rowMenu?.(module);
   if (layout === "board") {
     const lead = resolveModuleLead(module, options?.members);
     return (
@@ -96,10 +101,19 @@ export function renderModule(
         {...shared}
         lead={lead.kind === "avatar" ? lead.person : null}
         onOpenPeek={options?.onOpenPeek}
+        {...(menu === undefined ? {} : { menu })}
       />
     );
   }
-  const menu = options?.rowMenu?.(module);
+  const desktopMenu =
+    menu === undefined ? undefined : (
+      <div
+        data-testid="modules-row-menu-desktop"
+        className={`hidden shrink-0 items-center md:flex ${moduleRowHoverClass(options?.alwaysShowActions ?? false)}`}
+      >
+        {menu}
+      </div>
+    );
   return (
     <ModuleListRow
       key={module.id}
@@ -107,6 +121,7 @@ export function renderModule(
       archived={options?.archived}
       alwaysShowActions={options?.alwaysShowActions}
       onOpenPeek={options?.onOpenPeek}
+      trailing={desktopMenu}
       {...(menu === undefined ? {} : { menu })}
     />
   );

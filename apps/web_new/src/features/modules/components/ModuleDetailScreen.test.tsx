@@ -400,21 +400,43 @@ describe("ModuleDetailScreen", () => {
     expect(routerHarness.navigate).not.toHaveBeenCalled();
   });
 
-  it("shows no actions menu to a guest", () => {
+  it("offers the link entries between Edit and Delete to an editor", async () => {
+    setup();
+    const actions = screen.getByTestId("extra-actions");
+    const trigger = within(actions).getByRole("button", { name: "Module actions" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    const titles = (await screen.findAllByRole("menuitem")).map((entry) => entry.textContent?.trim());
+    expect(titles).toEqual(["Edit", "Open in new tab", "Copy link", "Delete"]);
+  });
+
+  it("shows a guest only the read-only link entries", async () => {
     setup({ projects: [project({ member_role: 5 })] });
     const actions = screen.getByTestId("extra-actions");
-    expect(within(actions).queryByRole("button", { name: "Module actions" })).not.toBeInTheDocument();
+    const trigger = within(actions).getByRole("button", { name: "Module actions" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    const titles = (await screen.findAllByRole("menuitem")).map((entry) => entry.textContent?.trim());
+    expect(titles).toEqual(["Open in new tab", "Copy link"]);
   });
 
-  it("shows no actions menu for a visitor outside the project", () => {
+  it("shows a visitor outside the project only the read-only link entries", async () => {
     setup({ projects: [project({ member_role: null })] });
     const actions = screen.getByTestId("extra-actions");
-    expect(within(actions).queryByRole("button", { name: "Module actions" })).not.toBeInTheDocument();
+    const trigger = within(actions).getByRole("button", { name: "Module actions" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    const titles = (await screen.findAllByRole("menuitem")).map((entry) => entry.textContent?.trim());
+    expect(titles).toEqual(["Open in new tab", "Copy link"]);
   });
 
-  it("hides the actions menu on an archived project", () => {
+  it("shows only the read-only link entries on an archived project", async () => {
     setup({ projects: [project({ archived_at: "2026-01-02T03:04:05Z" })] });
     const actions = screen.getByTestId("extra-actions");
-    expect(within(actions).queryByRole("button", { name: "Module actions" })).not.toBeInTheDocument();
+    const trigger = within(actions).getByRole("button", { name: "Module actions" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    const titles = (await screen.findAllByRole("menuitem")).map((entry) => entry.textContent?.trim());
+    expect(titles).toEqual(["Open in new tab", "Copy link"]);
   });
 });

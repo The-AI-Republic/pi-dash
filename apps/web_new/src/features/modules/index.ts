@@ -70,7 +70,24 @@ export { MODULES_NO_MATCH_HEADING, MODULES_NO_MATCH_HINT, ModulesNoMatch } from 
 export { MODULES_SEARCH_TRIGGER_LABEL, ModulesSearch, type ModulesSearchProps } from "./components/ModulesSearch.js";
 export { ModulesSortMenu, type ModulesSortMenuProps } from "./components/ModulesSortMenu.js";
 export { ModuleLayoutIcon } from "./components/ModuleLayoutIcon.js";
-export { ModuleListRow, type ModuleListRowProps } from "./components/ModuleListRow.js";
+export { ModuleListRow, moduleRowHoverClass, type ModuleListRowProps } from "./components/ModuleListRow.js";
+export {
+  MODULE_ARCHIVE_GATE_HINT,
+  MODULE_MENU_ARCHIVE,
+  MODULE_MENU_COPY,
+  MODULE_MENU_OPEN,
+  MODULE_MENU_RESTORE,
+  MODULE_RESTORE_SUCCESS_BODY,
+  MODULE_RESTORE_SUCCESS_TITLE,
+  ModuleRowMenu,
+  moduleCanArchive,
+  moduleDetailMenuEntries,
+  moduleMenuEntries,
+  type ModuleMenuAssembly,
+  type ModuleMenuEntryId,
+  type ModuleMenuEntryPlan,
+  type ModuleRowMenuProps,
+} from "./components/menus/index.js";
 export {
   buildModuleCreateCommand,
   buildModuleJumpCommand,
@@ -312,6 +329,12 @@ export {
 export { parseModulesListSearch, type ModulesListSearch } from "./lib/moduleListSearch.js";
 export { moduleBoardGridClass, modulePeekFromSearch, withModulePeek } from "./lib/modulePeek.js";
 export { modulePressHitControl } from "./lib/modulePress.js";
+export {
+  copyModuleLink,
+  MODULE_LINK_COPIED_BODY,
+  MODULE_OPEN_NEW_TAB_FAILED_TITLE,
+  openModuleInNewTab,
+} from "./lib/moduleShare.js";
 export {
   compareModuleNames,
   MODULES_CRUMB,
