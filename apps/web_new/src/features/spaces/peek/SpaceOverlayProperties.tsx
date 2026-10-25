@@ -6,8 +6,15 @@
 // text label, so colour is never the only carrier. A missing due date
 // prints the explicit empty marker; a late date on an open issue reads
 // as overdue. Nothing here is editable.
+//
+// The state row has three outcomes, not two (SPC-046): the board's states
+// fetch may still be in flight while the detail has already landed. Until
+// it settles a non-null `state_id` is *unknown*, so the row holds a
+// placeholder instead of claiming the explicit empty marker; only a
+// settled fetch that still cannot resolve the id prints "Empty".
 
 import type { SpaceBoardIssueDetail, SpaceBoardState } from "@pidash/api-client";
+import { Skeleton } from "@pidash/kit";
 import * as React from "react";
 
 import { PriorityMarker } from "../filters/PriorityMarker.js";
@@ -37,11 +44,19 @@ function stateGroupOf(issue: SpaceBoardIssueDetail, state: SpaceBoardState | nul
 
 export interface SpaceOverlayPropertiesProps {
   issue: SpaceBoardIssueDetail;
-  states: readonly SpaceBoardState[];
+  /**
+   * The board's workflow states, or undefined while that fetch is still
+   * in flight (or failed). Undefined leaves a non-null state id unknown
+   * rather than resolved-and-missing.
+   */
+  states: readonly SpaceBoardState[] | undefined;
 }
 
 export function SpaceOverlayProperties({ issue, states }: SpaceOverlayPropertiesProps): React.ReactElement {
-  const state = spaceOverlayState(states, issue.state_id);
+  // A null state id is already settled by the detail itself: there is no
+  // state to look up, whether or not the states fetch has landed.
+  const statePending = states === undefined && issue.state_id !== null;
+  const state = states === undefined ? null : spaceOverlayState(states, issue.state_id);
   const priority = spaceOverlayPriority(issue.priority);
   const dueDate = formatSpacePropertyDate(issue.target_date);
   const overdue = isSpaceDueOverdue(issue.target_date, stateGroupOf(issue, state));
@@ -50,8 +65,16 @@ export function SpaceOverlayProperties({ issue, states }: SpaceOverlayProperties
       <div data-property="state" className="flex items-center gap-(--space-3)">
         <dt className="text-meta w-24 shrink-0 text-(--text-muted)">{spaceMessage("peek.property.state")}</dt>
         <dd className="text-body m-0 flex min-w-0 items-center gap-(--space-2) text-(--text)">
-          {state === null ? null : <StateMarker state={state} />}
-          <span className="truncate">{state?.name ?? spaceMessage("peek.empty")}</span>
+          {statePending ? (
+            <span data-testid="space-peek-state-pending" role="status" aria-label={spaceMessage("peek.loading")}>
+              <Skeleton width="6rem" height="14px" />
+            </span>
+          ) : (
+            <>
+              {state === null ? null : <StateMarker state={state} />}
+              <span className="truncate">{state?.name ?? spaceMessage("peek.empty")}</span>
+            </>
+          )}
         </dd>
       </div>
       <div data-property="priority" className="flex items-center gap-(--space-3)">

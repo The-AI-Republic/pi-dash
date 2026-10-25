@@ -14,7 +14,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import type { SpaceBoardIssuePage, SpaceBoardSettings } from "@pidash/api-client";
+import type { SpaceBoardIssue, SpaceBoardIssuePage, SpaceBoardSettings } from "@pidash/api-client";
 import * as React from "react";
 
 import { spaceRuntime } from "../api/client.js";
@@ -152,7 +152,8 @@ function ResolvedBoard({
           anchor={anchor}
           issueId={search.peekId}
           projectIdentifier={identifier}
-          states={states.data ?? []}
+          states={states.data}
+          seed={peekSeed(issues.data, search.peekId)}
           onClose={peekNav.close}
           onInvalid={peekNav.invalid}
         />
@@ -232,6 +233,23 @@ function BoardContent({
       reactionsEnabled={reactionsEnabled}
     />
   );
+}
+
+/**
+ * The list row already loaded for the open issue, if any (SPC-046). Its
+ * key and title seed the overlay header while the detail fetch is still
+ * resolving; nothing else is taken from it.
+ */
+export function peekSeed(
+  page: SpaceBoardIssuePage | undefined,
+  peekId: string | undefined
+): Pick<SpaceBoardIssue, "name" | "sequence_id"> | undefined {
+  if (page === undefined || peekId === undefined) return undefined;
+  for (const bucket of Object.values(page.results)) {
+    const row = bucket.results.find((issue) => issue.id === peekId);
+    if (row !== undefined) return { name: row.name, sequence_id: row.sequence_id };
+  }
+  return undefined;
 }
 
 /**

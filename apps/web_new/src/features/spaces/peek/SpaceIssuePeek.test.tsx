@@ -72,6 +72,8 @@ interface SetupOptions {
   embedded?: boolean;
   /** Keep nodes already in body (the focus-origin scenario). */
   preserveBody?: boolean;
+  /** Cached list row the board already had for this issue. */
+  seed?: { name: string; sequence_id: number };
   baseUrl?: string;
 }
 
@@ -97,6 +99,7 @@ function setup(options: SetupOptions = {}) {
         issueId={options.issueId ?? ISSUE_ID}
         projectIdentifier="SPC"
         states={options.states ?? STATES}
+        seed={options.seed}
         onClose={onClose}
         onInvalid={onInvalid}
         embedded={options.embedded}
@@ -366,6 +369,45 @@ describe("SpaceIssuePeek loading and failure (SPC-040/046)", () => {
     expect(screen.getByTestId("space-peek-key")).toHaveTextContent("SPC-7");
   });
 
+  it("shows a title skeleton when nothing seeds the header (SPC-046)", async () => {
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    setup({
+      body: async () => {
+        await gate;
+        return reply(200, detail());
+      },
+    });
+    expect(await screen.findByTestId("space-peek")).toBeInTheDocument();
+    expect(await screen.findByTestId("peek-title-skeleton")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Anonymous visitors can read this" })).not.toBeInTheDocument();
+    release();
+    await waitFor(() => {
+      expect(screen.queryByTestId("peek-title-skeleton")).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("heading", { name: "Anonymous visitors can read this" })).toBeInTheDocument();
+  });
+
+  it("seeds the header key and title from a cached row while detail resolves (SPC-046)", async () => {
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    setup({
+      seed: { name: "Cached row title", sequence_id: 7 },
+      body: async () => {
+        await gate;
+        return reply(200, detail());
+      },
+    });
+    const panel = await screen.findByTestId("space-peek");
+    expect(await screen.findByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+    expect(within(panel).getByRole("heading", { name: "Cached row title" })).toBeInTheDocument();
+    expect(screen.getByTestId("space-peek-skeleton")).toBeInTheDocument();
+    expect(screen.queryByTestId("peek-title-skeleton")).not.toBeInTheDocument();
+    release();
+    expect(await screen.findByRole("heading", { name: "Anonymous visitors can read this" })).toBeInTheDocument();
+    expect(screen.getByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+  });
+
   it("offers no copy action while the detail skeleton is up (SPC-046)", async () => {
     stubClipboard("granted");
     let release = (): void => {};
@@ -425,6 +467,30 @@ describe("SpaceIssuePeek loading and failure (SPC-040/046)", () => {
     expect(await screen.findByTestId("space-peek-error")).toHaveTextContent("This issue could not be loaded.");
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+  });
+});
+
+describe("SpaceIssuePeek scrolling (SPC-043)", () => {
+  it("scrolls the body under the header in every presentation", async () => {
+    const user = userEvent.setup();
+    setup();
+    const panel = await screen.findByTestId("space-peek");
+    await screen.findByTestId("space-peek-key");
+    const expectHeaderOutsideScroll = (): void => {
+      const body = within(panel).getByTestId("peek-body");
+      expect(body.className).toContain("overflow-y-auto");
+      expect(panel.className).toContain("overflow-hidden");
+      expect(body).not.toContainElement(screen.getByRole("button", { name: "Close preview" }));
+      expect(body).not.toContainElement(screen.getByRole("button", { name: "Change presentation" }));
+      expect(body).toContainElement(screen.getByTestId("space-peek-detail"));
+    };
+    expectHeaderOutsideScroll();
+    await user.click(screen.getByRole("button", { name: "Change presentation" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Modal" }));
+    expectHeaderOutsideScroll();
+    await user.click(screen.getByRole("button", { name: "Change presentation" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Full screen" }));
+    expectHeaderOutsideScroll();
   });
 });
 

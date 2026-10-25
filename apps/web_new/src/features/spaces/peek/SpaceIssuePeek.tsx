@@ -14,7 +14,7 @@
 // parameter instead of crashing. Closing is the host's address rewrite.
 
 import { isApiError, spaceAssetReadPath } from "@pidash/api-client";
-import type { SpaceBoardIssueDetail, SpaceBoardState } from "@pidash/api-client";
+import type { SpaceBoardIssue, SpaceBoardIssueDetail, SpaceBoardState } from "@pidash/api-client";
 import { Button, Skeleton } from "@pidash/kit";
 import { Link2 } from "lucide-react";
 import * as React from "react";
@@ -37,7 +37,13 @@ export interface SpaceIssuePeekProps {
   anchor: string;
   issueId: string;
   projectIdentifier: string;
-  states: readonly SpaceBoardState[];
+  /** Undefined until the board's states fetch settles (SPC-046). */
+  states: readonly SpaceBoardState[] | undefined;
+  /**
+   * The cached list row for this issue, when the board had one. It seeds
+   * only the header's key and title while detail resolves (SPC-046).
+   */
+  seed?: Pick<SpaceBoardIssue, "name" | "sequence_id"> | undefined;
   /** Close the overlay: the host drops peekId and keeps every other key. */
   onClose: () => void;
   /** The address names an issue this board cannot show; drop the key. */
@@ -89,6 +95,7 @@ export function SpaceIssuePeek({
   issueId,
   projectIdentifier,
   states,
+  seed,
   onClose,
   onInvalid,
   embedded = false,
@@ -109,7 +116,12 @@ export function SpaceIssuePeek({
   }, [invalid, onInvalid]);
 
   const issue: SpaceBoardIssueDetail | undefined = detail.data;
-  const key = issue === undefined ? "" : issueKey(projectIdentifier, issue);
+  // Until the detail lands the header still carries an identity: the
+  // cached row's key when the board had one, and a placeholder otherwise
+  // (SPC-046) — never an empty header with only the controls.
+  const headerIssue = issue ?? seed;
+  const key = headerIssue === undefined ? "" : issueKey(projectIdentifier, headerIssue);
+  const title = headerIssue?.name ?? "";
   const copyLink = React.useCallback((): void => {
     const writeText = globalThis.navigator?.clipboard?.writeText;
     if (typeof writeText !== "function" || typeof globalThis.window === "undefined") {
@@ -133,13 +145,15 @@ export function SpaceIssuePeek({
       label={issue === undefined ? spaceMessage("peek.loading") : key}
       testId="space-peek"
       eyebrow={key === "" ? null : <span data-testid="space-peek-key">{key}</span>}
-      title={issue?.name ?? ""}
+      title={title}
       titleLabel={spaceMessage("peek.titleLabel")}
       titleAsHeading
-      hideTitle={issue === undefined}
+      hideTitle={headerIssue === undefined && detail.isError}
+      titleSkeleton={headerIssue === undefined && !detail.isError}
       onClose={onClose}
       suppressEscape={embedded}
       trapFocus={presentation !== "side"}
+      scrollBody
       {...(embedded ? {} : { onOutsideClick: onClose })}
       actions={
         <>
@@ -190,7 +204,7 @@ function SpaceIssuePeekBody({
   resolveAsset,
 }: {
   issue: SpaceBoardIssueDetail;
-  states: readonly SpaceBoardState[];
+  states: readonly SpaceBoardState[] | undefined;
   full: boolean;
   resolveAsset: (src: string) => string;
 }): React.ReactElement {

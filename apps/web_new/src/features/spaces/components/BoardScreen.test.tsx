@@ -529,6 +529,32 @@ describe("space overlay address round trip (SPC-030/040/042)", () => {
     expect(screen.getByTestId("space-board-loading")).toBeInTheDocument();
   });
 
+  it("holds the state row pending instead of printing Empty while states load (SPC-043/046)", async () => {
+    let releaseStates = (): void => {};
+    const statesGate = new Promise<void>((resolve) => (releaseStates = resolve));
+    renderBoard(
+      {
+        states: async () => {
+          await statesGate;
+          return reply(200, states);
+        },
+      },
+      ANCHOR,
+      { board: "list", peekId: ISSUE_ID }
+    );
+    expect(await screen.findByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+    const stateRow = screen.getByTestId("space-peek-properties").querySelector('[data-property="state"]');
+    expect(screen.getByTestId("space-peek-state-pending")).toBeInTheDocument();
+    expect(stateRow).not.toHaveTextContent("Empty");
+    releaseStates();
+    await waitFor(() => {
+      expect(screen.queryByTestId("space-peek-state-pending")).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId("space-peek-properties").querySelector('[data-property="state"]')).toHaveTextContent(
+      "Todo"
+    );
+  });
+
   it("closes by dropping peekId while keeping view and filters (SPC-042)", async () => {
     const user = userEvent.setup();
     renderBoard({}, ANCHOR, { board: "list", priority: ["high"], peekId: ISSUE_ID });

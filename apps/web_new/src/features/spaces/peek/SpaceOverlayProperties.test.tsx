@@ -35,6 +35,11 @@ function renderPanel(issue: SpaceBoardIssueDetail, states: readonly SpaceBoardSt
   return render(<SpaceOverlayProperties issue={issue} states={states} />);
 }
 
+/** Render before the board's states fetch has produced anything. */
+function renderPendingStates(issue: SpaceBoardIssueDetail) {
+  return render(<SpaceOverlayProperties issue={issue} states={undefined} />);
+}
+
 describe("SpaceOverlayProperties (SPC-044)", () => {
   it("shows state, priority and due date with their labels", () => {
     renderPanel(detail({ priority: "high", target_date: "2030-06-30" }));
@@ -81,6 +86,30 @@ describe("SpaceOverlayProperties (SPC-044)", () => {
   it("falls back to the empty state marker when the states fetch has no match", () => {
     renderPanel(detail({ state_id: null }));
     expect(screen.getByTestId("space-peek-properties")).toHaveTextContent("Empty");
+  });
+
+  it("holds the state row pending while the states fetch is unknown (SPC-043/046)", () => {
+    renderPendingStates(detail({ state_id: TODO_ID }));
+    const stateRow = screen.getByTestId("space-peek-properties").querySelector('[data-property="state"]');
+    expect(stateRow).not.toBeNull();
+    expect(screen.getByTestId("space-peek-state-pending")).toBeInTheDocument();
+    expect(stateRow).not.toHaveTextContent("Empty");
+    expect(stateRow).not.toHaveTextContent("Todo");
+  });
+
+  it("prints the empty state marker only once the fetch settles without the id", () => {
+    renderPanel(detail({ state_id: "ffffffff-ffff-4fff-8fff-ffffffffffff" }), STATES);
+    const stateRow = screen.getByTestId("space-peek-properties").querySelector('[data-property="state"]');
+    expect(screen.queryByTestId("space-peek-state-pending")).not.toBeInTheDocument();
+    expect(stateRow).toHaveTextContent("Empty");
+  });
+
+  it("keeps a settled null state empty even while the states fetch is unknown", () => {
+    renderPendingStates(detail({ state_id: null }));
+    expect(screen.queryByTestId("space-peek-state-pending")).not.toBeInTheDocument();
+    expect(screen.getByTestId("space-peek-properties").querySelector('[data-property="state"]')).toHaveTextContent(
+      "Empty"
+    );
   });
 
   it("resolves a state by id and defaults an unset priority to none", () => {

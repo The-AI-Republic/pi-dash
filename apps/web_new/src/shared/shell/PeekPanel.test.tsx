@@ -220,6 +220,40 @@ describe("PeekPanel", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close preview" }));
   });
 
+  it("scrolls a body under the header when the caller opts in (SPC-043)", () => {
+    for (const layout of ["side", "modal", "full"] as const) {
+      const view = setup({ layout, scrollBody: true, children: <p>Long body</p> });
+      const panel = screen.getByTestId("issue-preview");
+      const body = screen.getByTestId("peek-body");
+      expect(panel.className).toContain("overflow-hidden");
+      expect(body.className).toContain("overflow-y-auto");
+      expect(body).toContainElement(screen.getByText("Long body"));
+      expect(body).not.toContainElement(screen.getByRole("button", { name: "Close preview" }));
+      expect(body).not.toContainElement(screen.getByRole("textbox", { name: "Work item title" }));
+      view.unmount();
+    }
+  });
+
+  it("keeps the single scroll region unless the caller opts in", () => {
+    setup({ layout: "modal", children: <p>Long body</p> });
+    expect(screen.queryByTestId("peek-body")).not.toBeInTheDocument();
+    const panel = screen.getByTestId("issue-preview");
+    expect(panel.className).toContain("overflow-y-auto");
+    expect(panel).toContainElement(screen.getByText("Long body"));
+  });
+
+  it("holds the title's place with a skeleton before a name is known (SPC-046)", () => {
+    setup({ title: "", titleSkeleton: true, titleAsHeading: true });
+    expect(screen.getByTestId("peek-title-skeleton")).toBeInTheDocument();
+    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
+  });
+
+  it("hides the title block outright for an error body", () => {
+    setup({ title: "", hideTitle: true });
+    expect(screen.queryByTestId("peek-title-skeleton")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
   it("centers the modal layout behind a backdrop", () => {
     setup({ layout: "modal" });
     const panel = screen.getByTestId("issue-preview");
@@ -379,6 +413,18 @@ describe("focus trap helpers", () => {
     expect(trapTabTarget(root, root, false)).toBe(first);
     root.innerHTML = "";
     expect(trapTabTarget(root, null, false)).toBe("self");
+    root.remove();
+  });
+
+  it("treats a single control as both ends of the cycle", () => {
+    const root = document.createElement("div");
+    root.innerHTML = '<button id="only">Only</button>';
+    document.body.appendChild(root);
+    const [only] = focusableWithin(root);
+    if (only === undefined) throw new Error("missing control");
+    expect(trapTabTarget(root, only, false)).toBe(only);
+    expect(trapTabTarget(root, only, true)).toBe(only);
+    expect(trapTabTarget(root, null, true)).toBe(only);
     root.remove();
   });
 });

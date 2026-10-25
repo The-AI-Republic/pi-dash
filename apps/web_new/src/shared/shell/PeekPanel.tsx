@@ -13,7 +13,7 @@
 import * as React from "react";
 import { X } from "lucide-react";
 
-import { IconButton } from "@pidash/kit";
+import { IconButton, Skeleton } from "@pidash/kit";
 import { FULL_SCREEN_PORTAL_ID, OverlayPortal } from "./document.js";
 
 /** Panel presentations (ISS-166): docked side (default), centered modal, full-screen. */
@@ -57,10 +57,9 @@ export function trapTabTarget(
   active: Element | null,
   shiftKey: boolean
 ): HTMLElement | "self" | null {
-  const focusables = focusableWithin(panel);
-  if (focusables.length === 0) return "self";
-  const first = focusables[0];
-  const last = focusables[focusables.length - 1];
+  const [first, ...rest] = focusableWithin(panel);
+  if (first === undefined) return "self";
+  const last = rest[rest.length - 1] ?? first;
   if (shiftKey) {
     if (active === first || active === panel || active === null) return last;
     return null;
@@ -121,6 +120,12 @@ export interface PeekPanelProps {
   titleAsHeading?: boolean | undefined;
   /** Skip the title block (loading and error states render their own body). */
   hideTitle?: boolean | undefined;
+  /**
+   * Hold the title's place with a skeleton while the caller has no name
+   * yet (public overlay cold load, SPC-046). The header keeps its
+   * height, and the resolved title replaces it without a layout jump.
+   */
+  titleSkeleton?: boolean | undefined;
   onClose: () => void;
   /** Caller-known Escape suppression (embedded hosts, open dialogs). */
   suppressEscape?: boolean | undefined;
@@ -134,19 +139,27 @@ export interface PeekPanelProps {
   onOutsideClick?: (() => void) | undefined;
   /** Commits a renamed title; without it edits stay local to the field. */
   onCommitTitle?: ((next: string) => void) | undefined;
+  /**
+   * Scroll the body under a fixed header instead of scrolling the whole
+   * panel. The public issue overlay opts in so its close, presentation
+   * and copy controls stay reachable however long the description is;
+   * callers that leave it off keep the original single scroll region.
+   */
+  scrollBody?: boolean | undefined;
   /** Controls beside the close button (e.g. copy link). */
   actions?: React.ReactNode;
   children?: React.ReactNode;
 }
 
-function panelClasses(layout: PeekLayout, stacked: boolean): string {
+function panelClasses(layout: PeekLayout, stacked: boolean, scrollBody: boolean): string {
+  const scroll = scrollBody ? "overflow-hidden" : "overflow-y-auto";
   if (layout === "full") {
-    return `fixed inset-0 ${stacked ? "z-[60]" : "z-50"} flex flex-col gap-(--space-4) overflow-y-auto bg-(--surface) p-(--space-6) md:p-(--space-8)`;
+    return `fixed inset-0 ${stacked ? "z-[60]" : "z-50"} flex flex-col gap-(--space-4) ${scroll} bg-(--surface) p-(--space-6) md:p-(--space-8)`;
   }
   if (layout === "modal") {
-    return `fixed top-1/2 left-1/2 ${stacked ? "z-[60]" : "z-50"} flex max-h-[92vh] w-[min(48rem,94vw)] -translate-x-1/2 -translate-y-1/2 flex-col gap-(--space-4) overflow-y-auto rounded-(--radius-dialog) border border-(--border) bg-(--surface) p-(--space-6) shadow-dialog`;
+    return `fixed top-1/2 left-1/2 ${stacked ? "z-[60]" : "z-50"} flex max-h-[92vh] w-[min(48rem,94vw)] -translate-x-1/2 -translate-y-1/2 flex-col gap-(--space-4) ${scroll} rounded-(--radius-dialog) border border-(--border) bg-(--surface) p-(--space-6) shadow-dialog`;
   }
-  return `fixed top-0 right-0 bottom-0 ${stacked ? "z-50" : "z-40"} flex w-[min(30rem,92vw)] flex-col gap-(--space-4) overflow-y-auto border-l border-(--border) bg-(--surface) p-(--space-6)`;
+  return `fixed top-0 right-0 bottom-0 ${stacked ? "z-50" : "z-40"} flex w-[min(30rem,92vw)] flex-col gap-(--space-4) ${scroll} border-l border-(--border) bg-(--surface) p-(--space-6)`;
 }
 
 export function PeekPanel({
@@ -160,9 +173,11 @@ export function PeekPanel({
   titleLabel,
   titleAsHeading = false,
   hideTitle = false,
+  titleSkeleton = false,
   onClose,
   suppressEscape = false,
   trapFocus = false,
+  scrollBody = false,
   onOutsideClick,
   onCommitTitle,
   actions,
@@ -256,7 +271,7 @@ export function PeekPanel({
         aria-label={label ?? "Work item preview"}
         data-testid={testId ?? "issue-preview"}
         data-peek-layout={layout}
-        className={panelClasses(layout, stacked)}
+        className={panelClasses(layout, stacked, scrollBody)}
       >
         <div className="flex items-start justify-between gap-(--space-4)">
           <p className="text-caption min-w-0 flex-1 truncate pt-(--space-1) text-(--text-muted)">{eyebrow}</p>
@@ -267,7 +282,11 @@ export function PeekPanel({
             </IconButton>
           </div>
         </div>
-        {hideTitle ? null : titleAsHeading ? (
+        {hideTitle && !titleSkeleton ? null : titleSkeleton ? (
+          <div data-testid="peek-title-skeleton" className="w-full px-(--space-2) py-(--space-2)">
+            <Skeleton width="70%" height="20px" />
+          </div>
+        ) : titleAsHeading ? (
           <h4 className="text-h3 w-full px-(--space-2) py-(--space-1) text-(--text)">{title}</h4>
         ) : (
           <input
@@ -291,7 +310,13 @@ export function PeekPanel({
             className="text-h3 w-full rounded-(--radius-control) border border-transparent bg-transparent px-(--space-2) py-(--space-1) text-(--text) hover:border-(--border) focus:border-(--accent) focus:outline-none"
           />
         )}
-        {children}
+        {scrollBody ? (
+          <div data-testid="peek-body" className="flex min-h-0 flex-1 flex-col gap-(--space-4) overflow-y-auto">
+            {children}
+          </div>
+        ) : (
+          children
+        )}
       </aside>
     </OverlayPortal>
   );
