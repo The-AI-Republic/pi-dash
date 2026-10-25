@@ -18,8 +18,9 @@
 // verbatim, raw editing persists, and the live sentence tracks it. Those
 // branches are documented per step, including the sentence wording: the
 // oracle prints rrule's `toText()` ("every month on the 15th", no trailing
-// full stop), while the builder's own sentence says "every month on day 15."
-// The step asserts each leg's own wording so both prove the line is live.
+// full stop), while the builder's own sentence says "every month on day 15"
+// (NEWFRONT-899 dropped the invented stop). The step asserts each leg's own
+// wording so both prove the line is live.
 // Row: AGT-065.
 import { test, expect } from "../../fixtures";
 import {
@@ -102,7 +103,7 @@ test(
       expect(facts.ends).toBe("never");
       expect(facts.rawVisible).toBe(false);
       expect(facts.advancedVisible).toBe(true);
-      expect(facts.sentence).toBe("every day.");
+      expect(facts.sentence).toBe("every day");
     });
 
     await test.step("repeat count and unit serialize a bare frequency", async () => {
@@ -151,7 +152,7 @@ test(
       expect((await driver.schedulerRecurrenceFacts()).weekdays.filter((day) => day.pressed)).toHaveLength(1);
       await driver.schedulerRecurrenceAct({ kind: "weekday", value: "Friday" });
       await expect.poll(async () => (await driver.schedulerRecurrenceFacts()).rawValue).toBe("FREQ=WEEKLY;BYDAY=MO,FR");
-      expect((await driver.schedulerRecurrenceFacts()).sentence).toBe("every week on Monday, Friday.");
+      expect((await driver.schedulerRecurrenceFacts()).sentence).toBe("every week on Monday, Friday");
     });
 
     await test.step("monthly defaults from the start day and switches to nth weekday", async () => {
@@ -212,7 +213,7 @@ test(
       const facts = await driver.schedulerRecurrenceFacts();
       expect(facts.unit).toBe("week");
       expect(facts.interval).toBe("2");
-      expect(facts.sentence).toBe("every 2 weeks on Monday, Friday.");
+      expect(facts.sentence).toBe("every 2 weeks on Monday, Friday");
     });
 
     await test.step("saving persists exactly what the builder serialized", async () => {
@@ -285,13 +286,13 @@ test(
       // target-conditional.
       await expect
         .poll(() => driver.schedulerProjectEditHumanizer(), { timeout: 30_000 })
-        .toBe(driver.target === "web_new" ? "every month on day 15." : "every month on the 15th");
+        .toBe(driver.target === "web_new" ? "every month on day 15" : "every month on the 15th");
       await driver.schedulerRecurrenceRaw("FREQ=WEEKLY;BYDAY=MO,FR");
-      // The target renders the sentence plus its own full stop; the oracle's
-      // translated line carries no extra punctuation.
+      // Neither leg adds punctuation to a rendered sentence; only the blank
+      // rule's translated single-fire sentence carries its own full stop.
       await expect
         .poll(() => driver.schedulerProjectEditHumanizer(), { timeout: 30_000 })
-        .toBe(driver.target === "web_new" ? "every week on Monday, Friday." : "every week on Monday, Friday");
+        .toBe("every week on Monday, Friday");
       await driver.schedulerRecurrenceRaw("");
       await expect
         .poll(() => driver.schedulerProjectEditHumanizer(), { timeout: 30_000 })

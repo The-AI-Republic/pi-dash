@@ -327,6 +327,93 @@ describe("install dialog", () => {
     await expect(driver.schedulerProjectInstallErrors()).resolves.toEqual(["Start time is required."]);
   });
 
+  it("reveals the advanced rule field before filling a rule the builder hides", async () => {
+    let expanded = false;
+    const toggle = fake({
+      count: 1,
+      click: async () => {
+        expanded = true;
+      },
+      getAttribute: async (name: string) => (name === "aria-expanded" && expanded ? "true" : "false"),
+    });
+    const raw = fake({ count: 1, visible: false, fill: vi.fn(async () => undefined) });
+    const dialog = fake({
+      role: (role: string) => (role === "button" ? toggle : absent()),
+      byLabel: (label: string) => (label === "Recurrence (RRULE)" ? raw : absent()),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=WEEKLY;BYDAY=MO" });
+    expect(toggle.click).toHaveBeenCalledTimes(1);
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=WEEKLY;BYDAY=MO");
+  });
+
+  it("fills an already visible rule without touching the disclosure", async () => {
+    const toggle = fake({ count: 1, click: vi.fn(async () => undefined) });
+    const raw = fake({ count: 1, visible: true, fill: vi.fn(async () => undefined) });
+    const dialog = fake({
+      role: (role: string) => (role === "button" ? toggle : absent()),
+      byLabel: (label: string) => (label === "Recurrence (RRULE)" ? raw : absent()),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=DAILY" });
+    expect(toggle.click).not.toHaveBeenCalled();
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=DAILY");
+  });
+
+  it("reads edit values from the findings group, not the recurrence Ends radios", async () => {
+    const checked = fake({ items: [fake({ text: "Create issues" })] });
+    const group = fake({ role: (role: string) => (role === "radio" ? checked : absent()) });
+    const fields: Record<string, FakeLocator> = {
+      "Starts at": fake({ input: "2026-01-02T09:30" }),
+      "Time zone": fake({ input: "Europe/Paris" }),
+      "Recurrence (RRULE)": fake({ input: "FREQ=DAILY" }),
+      "Project context (optional)": fake({ input: "ctx" }),
+      Pod: fake({ input: "p1" }),
+    };
+    const dialog = fake({
+      byLabel: (label) => fields[label] ?? absent(),
+      role: (role, options) => {
+        if (role === "switch") return fake({ attribute: "true" });
+        if (role === "radiogroup" && options?.name === "What to do with findings") return group;
+        return absent();
+      },
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerProjectEditValues()).resolves.toEqual({
+      dtstart: "2026-01-02T09:30",
+      tzid: "Europe/Paris",
+      rrule: "FREQ=DAILY",
+      extraContext: "ctx",
+      enabled: true,
+      outcomeLabel: "Create issues",
+      pod: "p1",
+    });
+  });
+
+  it("leaves the edit outcome label blank when the checked radio cannot be read", async () => {
+    const checked = fake({
+      items: [fake({ innerText: async () => Promise.reject(new Error("detached")) })],
+    });
+    const group = fake({ role: (role: string) => (role === "radio" ? checked : absent()) });
+    const fields: Record<string, FakeLocator> = {
+      "Starts at": fake({ input: "" }),
+      "Time zone": fake({ input: "UTC" }),
+      "Recurrence (RRULE)": fake({ input: "" }),
+      "Project context (optional)": fake({ input: "" }),
+      Pod: fake({ input: "" }),
+    };
+    const dialog = fake({
+      byLabel: (label) => fields[label] ?? absent(),
+      role: (role, options) => {
+        if (role === "switch") return fake({ attribute: "false" });
+        if (role === "radiogroup" && options?.name === "What to do with findings") return group;
+        return absent();
+      },
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerProjectEditValues()).resolves.toMatchObject({ outcomeLabel: "" });
+  });
+
   it("reads the outcome modes and the current help line", async () => {
     const group = fake({
       role: (role) =>

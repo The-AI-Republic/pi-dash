@@ -11258,7 +11258,11 @@ export class WebNewDriver implements ParityDriver {
   async schedulerProjectEditValues(): Promise<SchedulerBindingValues> {
     const dialog = this.schedulerDialog();
     const schedule = await this.schedulerScheduleValues(dialog);
-    const checked = dialog.getByRole("radio", { checked: true });
+    // Scope to the findings field: the recurrence builder's "Ends" group
+    // also holds radios, and its first checked option has no label text.
+    const checked = dialog
+      .getByRole("radiogroup", { name: "What to do with findings" })
+      .getByRole("radio", { checked: true });
     return {
       ...schedule,
       outcomeLabel: (

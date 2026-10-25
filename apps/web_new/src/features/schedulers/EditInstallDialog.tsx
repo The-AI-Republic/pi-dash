@@ -128,7 +128,7 @@ function EditForm({ workspaceSlug, projectId, binding, onClose, onSaved }: EditF
         disabled={pending}
         onChange={schedule.change}
       />
-      <OutcomeModeField idPrefix={idPrefix} value={outcomeMode} disabled={pending} onChange={setOutcomeMode} />
+      <OutcomeModeField value={outcomeMode} disabled={pending} onChange={setOutcomeMode} />
       <PodField workspaceSlug={workspaceSlug} projectId={projectId} value={pod} disabled={pending} onChange={setPod} />
       <div className="flex justify-end gap-(--space-3)">
         <Button variant="ghost" disabled={pending} onClick={onClose}>
