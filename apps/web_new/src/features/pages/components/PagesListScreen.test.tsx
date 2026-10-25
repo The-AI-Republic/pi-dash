@@ -37,6 +37,7 @@ import {
   makeWorkspaceMember,
 } from "../testing.js";
 import { DEFAULT_PAGE_SORT } from "../lib/pageList.js";
+import { pageKeys } from "../api/keys.js";
 import { clearCommands, findCommand } from "../../../shared/commands/index.js";
 import { CREATE_PAGE_COMMAND_ID } from "./PagesCreateEntry.js";
 import { PagesListScreen } from "./PagesListScreen.js";
@@ -293,6 +294,32 @@ describe("PagesListScreen", () => {
     renderScreen();
     expect(await screen.findByTestId("pages-empty-state")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create your first Page" })).toBeDisabled();
+  });
+
+  it("renders the empty fallback when the project read fails instead of a blank panel", async () => {
+    harness.projectStatus = 500;
+    renderScreen();
+    expect(await screen.findByTestId("pages-empty-state")).toBeInTheDocument();
+    expect(screen.getByText("No pages in this project yet")).toBeInTheDocument();
+    expect(screen.getByTestId("pages-list-screen")).not.toBeEmptyDOMElement();
+    expect(harness.pagesCalls).toBe(0);
+  });
+
+  it("keeps cached rows and hides the skeleton when a background refetch fails", async () => {
+    harness.pagesStatus = 500;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(pageKeys.list("acme", PAGES_PROJECT_ID), [makePageRow({ name: "Cached page" })]);
+    renderProject(PAGES_PROJECT_ID, client);
+    expect(await screen.findByRole("link", { name: "Cached page" })).toBeInTheDocument();
+
+    await act(async () => {
+      await client.refetchQueries({ queryKey: pageKeys.list("acme", PAGES_PROJECT_ID) });
+    });
+
+    expect(screen.getByRole("link", { name: "Cached page" })).toBeInTheDocument();
+    expect(screen.queryByTestId("pages-list-skeleton")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pages-empty-state")).not.toBeInTheDocument();
+    expect(harness.pagesCalls).toBe(1);
   });
 
   it("renders rows in modified-descending order once loaded", async () => {

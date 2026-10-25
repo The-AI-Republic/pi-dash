@@ -23,10 +23,12 @@ const BASE: PagesBodyInput = {
 describe("resolvePagesBody", () => {
   it("puts the project read and gate before the list read", () => {
     expect(resolvePagesBody({ ...BASE, projectPending: true, gateOff: true })).toBe("skeleton");
-    expect(resolvePagesBody({ ...BASE, projectError: true, gateOff: true })).toBe("error");
+    expect(resolvePagesBody({ ...BASE, projectError: true, gateOff: true })).toBe("zero");
     expect(resolvePagesBody({ ...BASE, gateOff: true, pagesPending: true })).toBe("gate");
     expect(resolvePagesBody({ ...BASE, pagesPending: true })).toBe("skeleton");
-    expect(resolvePagesBody({ ...BASE, pagesError: true })).toBe("zero");
+    expect(resolvePagesBody({ ...BASE, pagesError: true, pageCount: 0, tabCount: 0, resultCount: 0 })).toBe("zero");
+    expect(resolvePagesBody({ ...BASE, pagesError: true, pageCount: 2, tabCount: 2, resultCount: 2 })).toBe("list");
+    expect(resolvePagesBody({ ...BASE, pagesError: true, pageCount: 2, tabCount: 0, resultCount: 0 })).toBe("zero");
   });
 
   it("distinguishes a truly empty collection and tab from narrowed results", () => {
