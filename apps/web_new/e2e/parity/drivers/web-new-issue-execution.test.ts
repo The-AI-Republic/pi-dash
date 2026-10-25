@@ -281,6 +281,24 @@ describe("nested parent Load more (ISS-238)", () => {
     );
   });
 
+  it("settles a nested control whose label cannot be read or is blank", async () => {
+    // A control that detaches while its page lands reads blank, and a
+    // control mid-render reads null: neither is the fetching label.
+    const reads = [
+      async () => {
+        throw new Error("element detached");
+      },
+      async () => null as unknown as string,
+    ];
+    for (const read of reads) {
+      const control = locator({ count: async () => 1, innerText: read, last: () => control });
+      await new WebNewDriver(nestedPage(rowWith(control, locator()))).widgetRowLoadMore(
+        "Sub-work items",
+        "Paged child 1000"
+      );
+    }
+  });
+
   it("expands a nested row and settles once its children land", async () => {
     let expanded = false;
     const clicks: string[] = [];
@@ -308,6 +326,26 @@ describe("nested parent Load more (ISS-238)", () => {
     await new WebNewDriver(nestedPage(row)).expandWidgetRowChildren("Sub-work items", "Paged child 1000");
   });
 
+  it("settles an expansion whose row text cannot be read", async () => {
+    // A row that detaches while its children land reads nothing, which is
+    // not the loading note.
+    const row = rowWith(locator({ count: async () => 0 }), locator({ count: async () => 1 }), {
+      innerText: async () => null as unknown as string,
+      locator: () => locator({ count: async () => 0 }),
+    });
+    await new WebNewDriver(nestedPage(row)).expandWidgetRowChildren("Sub-work items", "Paged child 1000");
+  });
+
+  it("settles an expansion whose row detaches mid-read", async () => {
+    const row = rowWith(locator({ count: async () => 0 }), locator({ count: async () => 1 }), {
+      innerText: async () => {
+        throw new Error("element detached");
+      },
+      locator: () => locator({ count: async () => 0 }),
+    });
+    await new WebNewDriver(nestedPage(row)).expandWidgetRowChildren("Sub-work items", "Paged child 1000");
+  });
+
   it("waits out the loading note before settling", async () => {
     let reads = 0;
     const row = rowWith(locator({ count: async () => 0 }), locator({ count: async () => 1 }), {
@@ -319,6 +357,17 @@ describe("nested parent Load more (ISS-238)", () => {
     });
     await new WebNewDriver(nestedPage(row)).expandWidgetRowChildren("Sub-work items", "Paged child 1000");
     expect(reads).toBeGreaterThan(1);
+  });
+
+  it("settles an expansion whose nested control has already rendered", async () => {
+    // A parent with a next page is settled as soon as its own control
+    // shows, even before any child row paints.
+    const control = locator({ count: async () => 1, last: () => control });
+    const row = rowWith(control, locator({ count: async () => 1 }), {
+      innerText: async () => "Paged child 1000",
+      locator: () => locator({ count: async () => 0 }),
+    });
+    await new WebNewDriver(nestedPage(row)).expandWidgetRowChildren("Sub-work items", "Paged child 1000");
   });
 
   it("refuses a row that is not rendered", async () => {
