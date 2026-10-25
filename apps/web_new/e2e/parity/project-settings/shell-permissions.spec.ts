@@ -138,9 +138,11 @@ test(
       expect(await driver.settingsShellPath()).toBe(
         `/${seed.workspaceSlug}/settings/projects/${seed.projectId}/members`
       );
-      expect(await driver.settingsShellActiveItem()).toBe("Members");
+      // The rail re-renders on the new pathname after the navigation settles;
+      // poll so a loaded shared runner cannot read the previous marker.
+      await expect.poll(() => driver.settingsShellActiveItem()).toBe("Members");
       await driver.settingsShellFollowItem("States");
-      expect(await driver.settingsShellActiveItem()).toBe("States");
+      await expect.poll(() => driver.settingsShellActiveItem()).toBe("States");
     });
 
     await test.step("narrow screens swap the sidebar for a drawer with the same tabs", async () => {
