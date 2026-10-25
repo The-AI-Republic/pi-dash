@@ -2796,7 +2796,15 @@ async fn join_post(
             ALREADY_RESPONDED_BODY.to_owned(),
         ));
     }
-    let accepted = prep_bool(data.get("accepted").unwrap_or(&Value::Bool(false)))?;
+    // `accepted = request.data.get("accepted", False)` runs through
+    // `BooleanField.to_python` on `save()` (`invite.py:201-203`): the
+    // stored bool is the prepped value, but the accept/decline branch
+    // tests the in-memory raw value (`:205`), so `"False"`/`"f"`/`"0"`
+    // accept while storing `false` (the workspace join keeps this too).
+    let missing = Value::Bool(false);
+    let raw = data.get("accepted").unwrap_or(&missing);
+    let accepted = prep_bool(raw)?;
+    let accept = py_truthy(raw);
     let created_by = caller.as_ref().map(|actor| actor.id);
     // Record the response (`responded_at` + `accepted`, `updated_by` via
     // crum — `NULL` for anonymous joins). An explicit-null `accepted`
@@ -2812,7 +2820,7 @@ async fn join_post(
     .execute(&pool)
     .await
     .map_err(integrity_denial)?;
-    if accepted != Some(true) {
+    if !accept {
         return Ok(json_response(StatusCode::OK, JOIN_DECLINED_BODY.to_owned()));
     }
     // The account lookup: `User.objects.filter(email=...)` (no

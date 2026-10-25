@@ -551,6 +551,38 @@ def test_join_declined_message(world):
     assert resp.json() == {"message": "Project Invitation was not accepted"}
 
 
+def test_join_accepted_string_false_accepts(world, db):
+    # PIDASHCONV-1377: Django stores "False" as false (BooleanField)
+    # but branches on the raw string's truthiness, so it accepts and
+    # creates the memberships (the workspace join keeps this too).
+    from _harness import seed as _seed
+    client, _, ws, project = world.full_stack()
+    newcomer = world.user("strfalse")
+    inv = _seed.project_invite(world.conn, project["id"], ws["id"],
+                               email=newcomer["email"])
+    newcomer_client = world.client(newcomer)
+    resp = newcomer_client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/join/{inv['id']}/",
+        json={"email": newcomer["email"], "accepted": "False"})
+    assert resp.status_code == 200
+    assert resp.json() == {"message": "Project Invitation Accepted"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT accepted, responded_at FROM project_member_invites WHERE id=%s",
+            (str(inv["id"]),))
+        row = cur.fetchone()
+        assert row["accepted"] is False
+        assert row["responded_at"] is not None
+        cur.execute(
+            "SELECT is_active FROM workspace_members WHERE workspace_id=%s AND member_id=%s",
+            (str(ws["id"]), str(newcomer["id"])))
+        assert cur.fetchone()["is_active"] is True
+        cur.execute(
+            "SELECT role FROM project_members WHERE project_id=%s AND member_id=%s",
+            (str(project["id"]), str(newcomer["id"])))
+        assert cur.fetchone()["role"] == 15
+
+
 def test_join_wrong_email_403(world):
     from _harness import seed as _seed
     client, _, ws, project = world.full_stack()
