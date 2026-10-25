@@ -11,6 +11,13 @@ import { workspaceScope } from "../../../core/query/client.js";
 export const pageKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "pages"] as const,
   list: (workspaceSlug: string, projectId: string) => [...pageKeys.all(workspaceSlug), "list", projectId] as const,
+  /**
+   * One page's children (PAGE-085). Children are read per expanded parent,
+   * so each entry is its own cached list; a write that changes parenthood
+   * invalidates the whole nested subtree.
+   */
+  children: (workspaceSlug: string, projectId: string, pageId: string) =>
+    [...pageKeys.all(workspaceSlug), "children", projectId, pageId] as const,
   detail: (workspaceSlug: string, projectId: string, pageId: string) =>
     [...pageKeys.all(workspaceSlug), "detail", projectId, pageId] as const,
   versions: (workspaceSlug: string, projectId: string, pageId: string) =>

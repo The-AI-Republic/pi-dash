@@ -54,6 +54,20 @@ export const PageRow = z.object({
 });
 export type PageRow = z.infer<typeof PageRow>;
 
+/**
+ * The nested fields a page carries once D17 lands: its parent container and
+ * the number of non-archived children the caller can see. `parent` and
+ * `parent_id` always agree; both are emitted so clients that do not expand
+ * the container can still read the flat id. No child the caller cannot see
+ * is ever counted.
+ */
+export const PageNestedFields = z.object({
+  parent: nullableUuid(),
+  parent_id: z.optional(nullableUuid()),
+  sub_pages_count: z.optional(z.number()),
+});
+export type PageNestedFields = z.infer<typeof PageNestedFields>;
+
 /** One page in the collection (bare array, not paged). */
 export const PageRows = z.array(PageRow);
 export type PageRows = z.infer<typeof PageRows>;
@@ -124,7 +138,12 @@ export const PageDuplicateResult = z.object({
 });
 export type PageDuplicateResult = z.infer<typeof PageDuplicateResult>;
 
-/** Query for the collection read; no parameters means top-level rows. */
+/**
+ * Query for the collection read; no parameters means top-level rows. Nested
+ * pages (D17) add exactly one parameter: `parent` lists that page's children
+ * with the same visibility, ordering and favourite-first rule. A search
+ * spans every depth.
+ */
 export interface PageListQuery {
   /** Return the children of this page instead of the top-level rows. */
   parent?: string | undefined;

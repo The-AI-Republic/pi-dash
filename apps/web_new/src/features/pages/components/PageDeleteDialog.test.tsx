@@ -48,6 +48,29 @@ describe("PageDeleteDialog", () => {
     expect(screen.getByRole("dialog")).toHaveTextContent("Untitled");
   });
 
+  it("states how many sub-pages move to the top level", () => {
+    renderDialog({ rehomedCount: 1 });
+    expect(screen.getByTestId("page-delete-rehomed")).toHaveTextContent("1 sub-page will move to the top level.");
+  });
+
+  it("pluralises the re-homed count and omits the line for a leaf", () => {
+    const view = render(
+      <PageDeleteDialog
+        open
+        onOpenChange={vi.fn()}
+        pageName="Handbook"
+        rehomedCount={4}
+        pending={false}
+        onConfirm={vi.fn()}
+      />
+    );
+    expect(screen.getByTestId("page-delete-rehomed")).toHaveTextContent("4 sub-pages will move to the top level.");
+    view.rerender(
+      <PageDeleteDialog open onOpenChange={vi.fn()} pageName="Handbook" pending={false} onConfirm={vi.fn()} />
+    );
+    expect(screen.queryByTestId("page-delete-rehomed")).not.toBeInTheDocument();
+  });
+
   it("confirms the write and cancels to closed", async () => {
     const user = userEvent.setup();
     const { onOpenChange, onConfirm } = renderDialog();

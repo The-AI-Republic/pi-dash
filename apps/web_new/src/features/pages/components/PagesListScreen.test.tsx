@@ -37,9 +37,13 @@ import {
   makeWorkspaceMember,
 } from "../testing.js";
 import { DEFAULT_PAGE_SORT } from "../lib/pageList.js";
+import type { PalettePage } from "../../../shared/commands/index.js";
 import { authKeys } from "../../auth/index.js";
 import { pageKeys } from "../api/keys.js";
-import { clearCommands, findCommand } from "../../../shared/commands/index.js";
+import { pageForestKey } from "../api/treeQueries.js";
+import { clearCommands, clearPalettePages, findCommand, findPalettePage } from "../../../shared/commands/index.js";
+import { useCommandPalette } from "../../../shared/commands/index.js";
+import { PAGE_JUMP_PAGE_ID } from "../palette/pageJumpCommands.js";
 import { CREATE_PAGE_COMMAND_ID } from "./PagesCreateEntry.js";
 import { PagesListScreen } from "./PagesListScreen.js";
 
@@ -61,10 +65,16 @@ interface Harness {
   deleteCalls: number;
   moveStatus: number;
   moveCalls: number;
+  patchStatus: number;
+  patchBodies: Record<string, unknown>[];
+  createBodies: Record<string, unknown>[];
+  forestFail: boolean;
   project: Record<string, unknown>;
   projectStatus: number;
   roles: Record<string, number>;
   pages: PageRow[];
+  /** Children returned for one `?parent=` read (PAGE-085). */
+  childrenByParent: Record<string, PageRow[]>;
   pagesStatus: number;
   pagesCalls: number;
   pagesHold: Promise<void> | null;
@@ -97,10 +107,15 @@ beforeEach(() => {
     deleteCalls: 0,
     moveStatus: 204,
     moveCalls: 0,
+    patchStatus: 200,
+    patchBodies: [],
+    createBodies: [],
+    forestFail: false,
     project: makeProjectRow(),
     projectStatus: 200,
     roles: { [PAGES_PROJECT_ID]: 20 },
     pages: [],
+    childrenByParent: {},
     pagesStatus: 200,
     pagesCalls: 0,
     pagesHold: null,
@@ -116,7 +131,7 @@ beforeEach(() => {
   favoritesShell.isFavoritesSectionOpen.mockReset();
   favoritesShell.isFavoritesSectionOpen.mockReturnValue(false);
   favoritesShell.setFavoritesSectionOpen.mockReset();
-  createAppClient("https://api.test", (async (url: string, init: { method: string }) => {
+  createAppClient("https://api.test", (async (url: string, init: { method: string; body?: string | null }) => {
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
     const projectRead = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/$`).exec(url);
     if (projectRead !== null) {
@@ -182,6 +197,10 @@ beforeEach(() => {
       return jsonResponse(url, harness.archiveStatus, { archived_at: "2026-10-25 10:00:00.123456" });
     }
     const deleteWrite = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/([0-9a-f-]+)/$`).exec(url);
+    if (deleteWrite !== null && init.method === "PATCH") {
+      harness.patchBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+      return jsonResponse(url, harness.patchStatus, { id: deleteWrite[2], name: "Moved page" });
+    }
     if (deleteWrite !== null && init.method === "DELETE") {
       harness.deleteCalls += 1;
       return jsonResponse(url, harness.deleteStatus, null);
@@ -209,10 +228,11 @@ beforeEach(() => {
         description_html: "",
       });
     }
-    const pagesUrl = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/$`).exec(url);
+    const pagesUrl = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/pages/(?:\\?.*)?$`).exec(url);
     if (pagesUrl !== null) {
       if (init.method !== "GET") {
         harness.createCalls += 1;
+        harness.createBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
         return jsonResponse(url, harness.createStatus, {
           ...makePageRow({ id: harness.createdId, name: "Untitled" }),
           description_html: "",
@@ -220,6 +240,9 @@ beforeEach(() => {
       }
       harness.pagesCalls += 1;
       if (harness.pagesHold !== null) await harness.pagesHold;
+      const parent = new URL(url).searchParams.get("parent");
+      if (parent !== null && harness.forestFail) return jsonResponse(url, 500, { error: "forest unavailable" });
+      if (parent !== null) return jsonResponse(url, harness.pagesStatus, harness.childrenByParent[parent] ?? []);
       return jsonResponse(url, harness.pagesStatus, harness.pages);
     }
     throw new Error(`unexpected request: ${url}`);
@@ -229,8 +252,23 @@ beforeEach(() => {
 afterEach(() => {
   resetAppClient();
   clearCommands();
+  clearPalettePages();
+  useCommandPalette.getState().closePalette();
   document.title = "";
 });
+
+function JumpProbe({ page }: { page: PalettePage }): React.ReactElement {
+  const state = page.usePageState("");
+  return (
+    <div>
+      {state.options.map((option) => (
+        <button key={option.id} type="button" onClick={() => void option.run()}>
+          {option.title}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function renderScreen(tab: "public" | "private" | "archived" = "public"): ReturnType<typeof render> {
   return render(
@@ -420,11 +458,53 @@ describe("PagesListScreen", () => {
     fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "zzz" } });
     expect(await screen.findByTestId("pages-no-results")).toBeInTheDocument();
     expect(screen.queryByTestId("page-row")).not.toBeInTheDocument();
-    expect(harness.pagesCalls).toBe(1);
+    // Discovery reads the whole visible forest once (top level + one walk).
+    expect(harness.pagesCalls).toBe(2);
 
     fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
     expect(await screen.findByRole("link", { name: "Alpha" })).toBeInTheDocument();
-    expect(harness.pagesCalls).toBe(1);
+    expect(harness.pagesCalls).toBe(2);
+  });
+
+  it("renders the visible pages as a tree with a count and expands children in place", async () => {
+    const parent = makePageRow({ id: pageId(5), name: "Handbook", sub_pages_count: 1 });
+    const child = makePageRow({
+      id: pageId(6),
+      name: "Policies",
+      parent: parent.id,
+      parent_id: parent.id,
+    });
+    harness.pages = [parent];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen();
+    expect(await screen.findByTestId("pages-tree")).toBeInTheDocument();
+    expect(screen.getByTestId("page-tree-count")).toHaveTextContent("1");
+    expect(screen.queryByRole("link", { name: "Policies" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Handbook" }));
+    expect(await screen.findByRole("link", { name: "Policies" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Policies" }).closest('[data-testid="page-tree-item"]')).toHaveAttribute(
+      "data-depth",
+      "1"
+    );
+  });
+
+  it("shows the parent path on a child found through search", async () => {
+    const parent = makePageRow({ id: pageId(7), name: "Handbook", sub_pages_count: 1 });
+    const child = makePageRow({
+      id: pageId(8),
+      name: "Leave policy",
+      parent: parent.id,
+      parent_id: parent.id,
+    });
+    harness.pages = [parent];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
+    fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "leave" } });
+    expect(await screen.findByRole("link", { name: "Leave policy" })).toBeInTheDocument();
+    expect(screen.getByTestId("page-row-parent-path")).toHaveTextContent("Handbook");
   });
 
   it("offers clear-filters in the no-results state and restores the rows", async () => {
@@ -438,7 +518,7 @@ describe("PagesListScreen", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
     expect(await screen.findByRole("link", { name: "Alpha" })).toBeInTheDocument();
-    expect(harness.pagesCalls).toBe(1);
+    expect(harness.pagesCalls).toBe(2);
   });
 
   it("applies a favorites filter and restores rows by clearing it", async () => {
@@ -659,7 +739,7 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
     const view = renderScreen();
     await screen.findByTestId("pages-list");
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Mine" }));
-    await waitFor(() => expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toHaveLength(6));
+    await waitFor(() => expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toHaveLength(8));
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
       "Open in new tab",
       "Copy link",
@@ -667,6 +747,8 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
       "Lock",
       "Make private",
       "Archive",
+      "Add sub-page",
+      "Move to…",
     ]);
 
     view.unmount();
@@ -678,6 +760,7 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
       "Open in new tab",
       "Copy link",
       "Make a copy",
+      "Add sub-page",
     ]);
   });
 
@@ -747,5 +830,164 @@ describe("PagesListScreen creation and row writes (PAGE-007–012)", () => {
     await screen.findByTestId("pages-list");
     fireEvent.click(screen.getByRole("button", { name: "Page actions for No move" }));
     expect(screen.queryByRole("menuitem", { name: "Move to project…" })).not.toBeInTheDocument();
+  });
+});
+
+describe("PagesListScreen nested tree and discovery (D17, PAGE-084–090)", () => {
+  it("creates a sub-page from a tree row and lands on the new child", async () => {
+    const parent = makePageRow({ id: pageId(21), name: "Handbook", sub_pages_count: 0 });
+    harness.pages = [parent];
+    renderScreen();
+    await screen.findByTestId("pages-tree");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Add sub-page" }));
+    await waitFor(() => expect(harness.createCalls).toBe(1));
+    expect(harness.createBodies[0]).toMatchObject({ parent: parent.id, name: "Untitled" });
+    await waitFor(() =>
+      expect(routerHarness.navigate).toHaveBeenCalledWith({
+        href: `/acme/projects/${PAGES_PROJECT_ID}/pages/${pageId(9)}`,
+      })
+    );
+  });
+
+  it("opens the nested move picker from the row menu and reparents on confirm", async () => {
+    const parent = makePageRow({ id: pageId(22), name: "Handbook", sub_pages_count: 1 });
+    const child = makePageRow({ id: pageId(23), name: "Policies", parent: parent.id, parent_id: parent.id });
+    const other = makePageRow({ id: pageId(24), name: "Other" });
+    harness.pages = [parent, other];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen();
+    await screen.findByTestId("pages-tree");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Move to…" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /Other/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: /Other/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Move page" }));
+    await waitFor(() => expect(harness.patchBodies).toHaveLength(1));
+    expect(harness.patchBodies[0]).toEqual({ parent: other.id });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("closes the nested move picker without writing", async () => {
+    harness.pages = [makePageRow({ id: pageId(25), name: "Handbook" })];
+    renderScreen();
+    await screen.findByTestId("pages-tree");
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Move to…" }));
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(harness.patchBodies).toHaveLength(0);
+  });
+
+  it("reparents a page when dropped onto another tree row", async () => {
+    const first = makePageRow({ id: pageId(26), name: "Handbook", updated_at: "2026-04-01T00:00:00Z" });
+    const second = makePageRow({ id: pageId(27), name: "Other", updated_at: "2026-03-01T00:00:00Z" });
+    harness.pages = [first, second];
+    renderScreen();
+    await screen.findByTestId("pages-tree");
+    const transfer: Record<string, string> = {};
+    const dataTransfer = {
+      getData: (type: string) => transfer[type] ?? "",
+      setData: (type: string, value: string) => {
+        transfer[type] = value;
+      },
+      effectAllowed: "",
+    };
+    const handbook = document.querySelector(`[data-page-id="${first.id}"]`) as HTMLElement | null;
+    const other = document.querySelector(`[data-page-id="${second.id}"]`) as HTMLElement | null;
+    if (handbook === null || other === null) throw new Error("tree rows missing");
+    fireEvent.dragStart(handbook, { dataTransfer });
+    fireEvent.dragOver(other, { dataTransfer });
+    fireEvent.drop(other, { dataTransfer });
+    await waitFor(() => expect(harness.patchBodies).toHaveLength(1));
+    expect(harness.patchBodies[0]).toEqual({ parent: second.id });
+  });
+
+  it("keeps flat discovery rows usable when the forest walk fails", async () => {
+    const parent = makePageRow({ id: pageId(28), name: "Handbook", sub_pages_count: 1 });
+    harness.pages = [parent];
+    harness.forestFail = true;
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
+    fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "hand" } });
+    const row = await screen.findByRole("link", { name: "Handbook" });
+    expect(row).toBeInTheDocument();
+    expect(screen.queryByTestId("pages-tree")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Open in new tab" }));
+    expect(open).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Copy link" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Make a copy" }));
+    await waitFor(() => expect(harness.duplicateCalls).toBe(1));
+    open.mockRestore();
+  });
+
+  it("archives and creates from a flat discovery row", async () => {
+    const parent = makePageRow({ id: pageId(29), name: "Handbook" });
+    harness.pages = [parent];
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
+    fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "hand" } });
+    await screen.findByRole("link", { name: "Handbook" });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+    await waitFor(() => expect(harness.archiveCalls).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Add sub-page" }));
+    await waitFor(() => expect(harness.createCalls).toBe(1));
+    expect(harness.createBodies[0]).toMatchObject({ parent: parent.id });
+  });
+
+  it("includes a move target that the loaded forest does not contain", async () => {
+    const parent = makePageRow({ id: pageId(30), name: "Handbook", sub_pages_count: 1 });
+    const child = makePageRow({ id: pageId(31), name: "Policies", parent: parent.id, parent_id: parent.id });
+    harness.pages = [parent];
+    harness.childrenByParent = { [parent.id]: [child] };
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(pageForestKey("acme", PAGES_PROJECT_ID), { rows: [parent], complete: true });
+    renderProject(PAGES_PROJECT_ID, client);
+    await screen.findByTestId("pages-tree");
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Handbook" }));
+    await screen.findByRole("link", { name: "Policies" });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Policies" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Move to…" }));
+    expect(await screen.findByTestId("page-move-listbox")).toHaveAttribute("data-ready", "true");
+    expect(await screen.findByRole("option", { name: /Handbook/ })).toBeInTheDocument();
+  });
+
+  it("navigates to a child picked from the palette jump page", async () => {
+    const parent = makePageRow({ id: pageId(32), name: "Handbook", sub_pages_count: 1 });
+    const child = makePageRow({ id: pageId(33), name: "Leave policy", parent: parent.id, parent_id: parent.id });
+    harness.pages = [parent];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen();
+    await screen.findByTestId("pages-list");
+    const page = findPalettePage(PAGE_JUMP_PAGE_ID);
+    if (!page) throw new Error("jump page missing");
+    routerHarness.navigate.mockClear();
+    useCommandPalette.getState().openPalette();
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <JumpProbe page={page} />
+      </QueryClientProvider>
+    );
+    const childButton = await screen.findByRole("button", { name: "Leave policy" });
+    fireEvent.click(childButton);
+    expect(routerHarness.navigate).toHaveBeenCalledWith({
+      href: `/acme/projects/${PAGES_PROJECT_ID}/pages/${child.id}`,
+    });
   });
 });

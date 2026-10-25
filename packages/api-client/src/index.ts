@@ -1001,6 +1001,7 @@ export {
   PageDetail,
   PageDuplicateResult,
   PageMark,
+  PageNestedFields,
   PageRow,
   PageRows,
   PageUpdate,

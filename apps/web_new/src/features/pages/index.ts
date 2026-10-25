@@ -273,3 +273,92 @@ export {
   usePageSyncStatus,
   type PageSyncStatus,
 } from "./lib/pageSync.js";
+export {
+  childrenOf,
+  descendantIds,
+  filterMoveTargets,
+  flattenPageTree,
+  hasRestrictedAncestor,
+  pageAncestors,
+  pageChildCount,
+  pageDeleteRehomedCount,
+  pageDeleteRehomedMessage,
+  pageDiscoveryRows,
+  pageMoveRefusal,
+  pageMoveRefusalMessage,
+  pageMoveTargets,
+  pageParentId,
+  pageParentPath,
+  pageTreeRoots,
+  restoreDetaches,
+  subPageAccess,
+  PAGE_ACTION_ADD_SUB_PAGE,
+  PAGE_ACTION_MOVE_TO,
+  PAGE_MOVE_DIALOG_TITLE,
+  PAGE_MOVE_REFUSED_TITLE,
+  PAGE_MOVE_TOP_LEVEL,
+  PAGE_MOVE_TOP_LEVEL_HINT,
+  PAGE_NESTED_MOVED_TITLE,
+  PAGE_RESTORE_TO_TOP_TITLE,
+  PAGE_RESTRICTED_ANCESTOR,
+  type PageAncestor,
+  type PageMoveRefusal,
+  type PageNestedRow,
+  type PageTreeEntry,
+  type PageTreeExpansion,
+} from "./lib/pageNested.js";
+export {
+  expandedPageIds,
+  resetPageExpansion,
+  setPageExpanded,
+  subscribePageExpansion,
+  togglePageExpanded,
+  usePageExpansion,
+} from "./lib/pageTreeState.js";
+export {
+  PAGE_FOREST_LIMIT,
+  pageChildrenQueryOptions,
+  pageForestKey,
+  pageForestQueryOptions,
+  readPageForest,
+  rootsOf,
+  type PageForest,
+} from "./api/treeQueries.js";
+export {
+  moveFailureMessage,
+  PAGE_SUB_PAGE_NAME,
+  useAddSubPage,
+  usePageReparent,
+  usePageSubtreeArchive,
+  type PageReparentInput,
+  type PageSubtreeArchiveInput,
+} from "./api/nestedMutations.js";
+export {
+  childCountLabel,
+  draggedPageId,
+  dropTargetId,
+  expandLabel,
+  PAGE_DRAG_MIME,
+  PageTree,
+  type PageTreeProps,
+} from "./components/PageTree.js";
+export {
+  PageNestedMoveDialog,
+  PAGE_MOVE_EMPTY,
+  PAGE_MOVE_SEARCH_PLACEHOLDER,
+  type PageNestedMoveDialogProps,
+} from "./components/PageNestedMoveDialog.js";
+export {
+  buildPageJumpCommand,
+  PAGE_JUMP_COMMAND_ID,
+  PAGE_JUMP_PAGE_ID,
+  PAGE_JUMP_SEQUENCE,
+  PAGE_JUMP_TITLE,
+  type PageJumpCommandContext,
+} from "./palette/pageJumpCommands.js";
+export {
+  projectPagesJumpPage,
+  PAGE_JUMP_EMPTY_TEXT,
+  PAGE_JUMP_PLACEHOLDER,
+  type PageJumpPageArgs,
+} from "./palette/pageJumpPage.js";

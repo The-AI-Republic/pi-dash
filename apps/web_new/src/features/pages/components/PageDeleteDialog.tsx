@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Delete confirmation for an already-shelved page
-// (parity/specs/pages.md §3.8, PAGE-016). The host owns the open state and
+// (parity/specs/pages.md §3.8, PAGE-016/089). The host owns the open state and
 // the write: confirming calls back while the button holds its busy state,
 // cancelling only closes. The body names the page and states the deletion
 // is permanent and cannot be undone; the oracle reads both literally.
@@ -11,12 +11,15 @@ import { Button, Dialog } from "@pidash/kit";
 import * as React from "react";
 
 import { pageDisplayTitle } from "../lib/pageList.js";
+import { pageDeleteRehomedMessage } from "../lib/pageNested.js";
 
 export interface PageDeleteDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Name of the page about to be removed; shown in the warning. */
   pageName: string;
+  /** Direct sub-pages the server re-homes to the top level (PAGE-089). */
+  rehomedCount?: number | undefined;
   /** The delete request is in flight; the confirm control holds it. */
   pending: boolean;
   onConfirm: () => void;
@@ -26,10 +29,12 @@ export function PageDeleteDialog({
   open,
   onOpenChange,
   pageName,
+  rehomedCount = 0,
   pending,
   onConfirm,
 }: PageDeleteDialogProps): React.ReactElement {
   const title = pageDisplayTitle(pageName);
+  const rehomed = pageDeleteRehomedMessage(rehomedCount);
   return (
     <Dialog
       title="Delete page"
@@ -53,6 +58,11 @@ export function PageDeleteDialog({
         Are you sure you want to delete <strong className="font-medium break-words">{title}</strong>? The page will be
         deleted permanently. This action cannot be undone.
       </p>
+      {rehomed === null ? null : (
+        <p data-testid="page-delete-rehomed" className="text-body mt-(--space-2) text-(--text)">
+          {rehomed}
+        </p>
+      )}
     </Dialog>
   );
 }

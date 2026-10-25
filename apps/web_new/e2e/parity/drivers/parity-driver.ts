@@ -13599,4 +13599,77 @@ export interface CommentActivityTraffic {
    * shared comment/activity capabilities do not.
    */
   unexpectedWrites: number;
+  // --- Nested pages (D17, PAGE-084-090). web_new-only rows: the oracle
+  // --- driver throws "not applicable on the oracle (D17)" for each.
+
+  /** Open a project's pages list; resolves once the tree or an empty state renders. */
+  pagesNestedOpenList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open the archived tab of the pages list; settles its tree or empty state. */
+  pagesNestedOpenArchivedList(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Open a row through its link (client-side; the list state survives). */
+  pagesNestedOpenRow(title: string): Promise<void>;
+  /** Wait for the page detail header after a write that navigates. */
+  pagesNestedWaitDetail(): Promise<void>;
+  /** Wait for a success toast containing `text` (bounded). */
+  pagesNestedWaitToast(text: string): Promise<void>;
+  /** Browser back from a client-side row open; settles the list. */
+  pagesNestedBack(): Promise<void>;
+  /** Visible toast stack text after a write, or null. */
+  pagesNestedToastText(): Promise<string | null>;
+  /** Row titles in the tree, in display order, including loaded children. */
+  pagesNestedRowTitles(): Promise<string[]>;
+  /** Longest child count shown on the row titled `title`, or null. */
+  pagesNestedChildCount(title: string): Promise<number | null>;
+  /** Expand the row titled `title`; waits for its children to render. */
+  pagesNestedExpand(title: string): Promise<void>;
+  /** Collapse the row titled `title`; waits for its children to leave. */
+  pagesNestedCollapse(title: string): Promise<void>;
+  /** Indentation depth of the row titled `title`, or null. */
+  pagesNestedDepth(title: string): Promise<number | null>;
+  /** Secondary parent-path line on the row titled `title`, or null. */
+  pagesNestedParentPath(title: string): Promise<string | null>;
+  /** Navigate straight to a page by URL; waits for the detail header. */
+  pagesNestedOpenPage(workspaceSlug: string, projectId: string, pageId: string): Promise<void>;
+  /** Ancestor labels in the detail breadcrumb trail, outermost first. */
+  pagesNestedBreadcrumbs(): Promise<string[]>;
+  /** Whether one ancestor label in the trail is a link. */
+  pagesNestedBreadcrumbLinked(label: string): Promise<boolean>;
+  /** Follow one ancestor breadcrumb link; waits for the ancestor detail. */
+  pagesNestedBreadcrumbClick(label: string): Promise<void>;
+  /** Open the detail header options menu; resolves once items render. */
+  pagesNestedOptionsOpen(): Promise<void>;
+  /** Options-menu item labels, in display order. */
+  pagesNestedOptionsItems(): Promise<string[]>;
+  /** Click a detail/row menu item by label. */
+  pagesNestedOptionsPick(label: string): Promise<void>;
+  /** Open the row overflow menu for `title`; resolves once items render. */
+  pagesNestedRowMenuOpen(title: string): Promise<void>;
+  /** Type into the list search box (opening it first). */
+  pagesNestedSearch(text: string): Promise<void>;
+  /** Clear the list search and collapse it. */
+  pagesNestedSearchClear(): Promise<void>;
+  /** Turn on the Favorites filter from the filters panel. */
+  pagesNestedFavoritesFilter(): Promise<void>;
+  /** Open the within-project move picker for the row titled `title`. */
+  pagesNestedMovePickerOpen(title: string): Promise<void>;
+  /** Candidate labels the move picker offers, in display order. */
+  pagesNestedMoveTargets(): Promise<string[]>;
+  /** Type into the move picker's search field. */
+  pagesNestedMoveSearch(text: string): Promise<void>;
+  /** Pick a move target by label; null picks the top-level row. */
+  pagesNestedMovePick(label: string | null): Promise<void>;
+  /** Refusal text shown by the move picker, or null. */
+  pagesNestedMoveRefusal(): Promise<string | null>;
+  /** Confirm the move picker's current target. */
+  pagesNestedMoveConfirm(): Promise<void>;
+  /** Drag one row onto another (or onto the container for the top level). */
+  pagesNestedDragRow(fromTitle: string, ontoTitle: string | null): Promise<void>;
+  /** Open the delete confirmation from a shelved row's menu. */
+  pagesNestedDeleteDialogOpen(title: string): Promise<void>;
+  /** Body text of the open delete confirmation. */
+  pagesNestedDeleteDialogText(): Promise<string>;
+  /** Confirm the delete dialog and wait for it to close. */
+  pagesNestedDeleteConfirm(): Promise<void>;
+  /** Open the pages palette jump and search for `query`; returns option labels. */
+  pagesNestedPaletteFind(query: string): Promise<string[]>;
 }

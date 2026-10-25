@@ -64,6 +64,8 @@ interface Harness {
   pagesHold: Promise<void> | null;
   pageHold: Promise<void> | null;
   membersHold: Promise<void> | null;
+  createdId: string;
+  createBodies: Record<string, unknown>[];
   role: number | null;
   viewer: string;
   versions: Record<string, unknown>[];
@@ -103,6 +105,8 @@ beforeEach(() => {
     pagesHold: null,
     pageHold: null,
     membersHold: null,
+    createdId: "423e4567-e89b-12d3-a456-426614174077",
+    createBodies: [],
     role: 20,
     viewer: PAGES_USER_ID,
     versions: [],
@@ -117,7 +121,7 @@ beforeEach(() => {
   };
   resetPageBodyCache();
   router.navigate.mockReset();
-  createAppClient("https://api.test", (async (requested: string, init: { method: string }) => {
+  createAppClient("https://api.test", (async (requested: string, init: { method: string; body?: string | null }) => {
     const url = requested.split("?")[0] ?? requested;
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
     if (url.endsWith("/api/users/me/")) {
@@ -193,6 +197,14 @@ beforeEach(() => {
       return jsonResponse(url, 200, { id: recordRead[1], name: "Renamed" });
     }
     const collection = new RegExp(`/api/workspaces/acme/projects/[0-9a-f-]+/pages/$`).exec(url);
+    if (collection !== null && init.method === "POST") {
+      harness.createBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+      return jsonResponse(url, 201, {
+        ...makePageRow({ id: harness.createdId, name: "Untitled", parent: harness.pageId }),
+        parent_id: harness.pageId,
+        description_html: "",
+      });
+    }
     if (collection !== null) {
       harness.pagesCalls += 1;
       if (harness.pagesHold !== null) await harness.pagesHold;
@@ -269,6 +281,23 @@ describe("PageDetailScreen loading and panel", () => {
     expect(detailReads).toHaveLength(1);
     expect(new URL(detailReads[0] ?? "").searchParams.get("track_visit")).toBe("true");
     expect(harness.pagesCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it("skips the ancestor forest read for a top-level page", async () => {
+    harness.pages = [];
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(harness.pagesCalls).toBe(1);
+  });
+
+  it("skips the ancestor forest read when the pages feature is off", async () => {
+    harness.page = record({ parent: OTHER, parent_id: OTHER });
+    harness.projectPageView = false;
+    renderScreen();
+    // With the feature off the shell still paints the record, but the
+    // breadcrumb walk is gated with it.
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(harness.pagesCalls).toBe(0);
   });
 
   it("panels a failed record without mounting an editor", async () => {
@@ -457,6 +486,9 @@ describe("PageDetailScreen title and body", () => {
     );
     await screen.findByText("This page is archived and read-only.");
     expect(container.querySelector('[contenteditable="true"]')).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Page options" }));
+    expect(await screen.findByRole("menuitem", { name: "Version history" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Add sub-page" })).not.toBeInTheDocument();
   });
 });
 
@@ -788,6 +820,21 @@ describe("PageDetailScreen deep links", () => {
     fireEvent.click(screen.getByRole("button", { name: /Switch page, current Launch notes/ }));
     fireEvent.click(await screen.findByRole("option", { name: "Second page" }));
     expect(router.navigate).toHaveBeenCalledWith({ href: `/acme/projects/${PROJECT}/pages/${OTHER}` });
+  });
+
+  it("creates a sub-page from the header menu with the open page as parent and opens it", async () => {
+    const { changes } = renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    fireEvent.click(screen.getByRole("button", { name: "Page options" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Add sub-page" }));
+    await waitFor(() => expect(harness.createBodies).toHaveLength(1));
+    expect(harness.createBodies[0]).toMatchObject({ parent: harness.pageId, name: "Untitled", access: 0 });
+    await waitFor(() =>
+      expect(router.navigate).toHaveBeenCalledWith({
+        href: `/acme/projects/${PROJECT}/pages/${harness.createdId}`,
+      })
+    );
+    expect(changes).toEqual([]);
   });
 
   it("copies the canonical address from the header control", async () => {

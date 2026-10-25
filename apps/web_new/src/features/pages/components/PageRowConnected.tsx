@@ -34,6 +34,20 @@ export interface PageRowConnectedProps {
   canManage: boolean;
   /** The edition serves the cross-project move. */
   canMove: boolean;
+  /** Creates a child page from this row (PAGE-084); absent for guests. */
+  onAddSubPage?: (() => void) | undefined;
+  /** Opens the within-project move picker (PAGE-087); owner or admin only. */
+  onRequestNestedMove?: (() => void) | undefined;
+  /** Ancestor trail as a secondary line (PAGE-090). */
+  parentPath?: string | null | undefined;
+  /** Direct children that move up when this page is deleted (PAGE-089). */
+  rehomedCount?: number | undefined;
+  /**
+   * Overrides the archive write: the nested tree archives whole subtrees and
+   * needs to choose the restore notice from the caller's own collection
+   * (PAGE-088). Without it the row keeps its own write.
+   */
+  onToggleArchive?: ((archived: boolean) => void) | undefined;
   onOpenInNewTab: () => void;
   onCopyLink: () => void;
   onDuplicate: () => void;
@@ -48,6 +62,11 @@ export function PageRowConnected({
   canDuplicate,
   canManage,
   canMove,
+  onAddSubPage,
+  onRequestNestedMove,
+  parentPath = null,
+  rehomedCount = 0,
+  onToggleArchive,
   onOpenInNewTab,
   onCopyLink,
   onDuplicate,
@@ -72,12 +91,21 @@ export function PageRowConnected({
         canDuplicate={canDuplicate}
         canManage={canManage}
         canMove={canMove}
+        parentPath={parentPath}
+        {...(onAddSubPage === undefined ? {} : { onAddSubPage })}
+        {...(onRequestNestedMove === undefined ? {} : { onRequestNestedMove })}
         onOpenInNewTab={onOpenInNewTab}
         onCopyLink={onCopyLink}
         onDuplicate={onDuplicate}
         onToggleVisibility={() => visibility.setVisibility(page.access !== 1)}
         onToggleLock={() => lock.toggleLock(!page.is_locked)}
-        onToggleArchive={() => archive.toggleArchive(page.archived_at === null)}
+        onToggleArchive={() => {
+          if (onToggleArchive === undefined) {
+            archive.toggleArchive(page.archived_at === null);
+            return;
+          }
+          onToggleArchive(page.archived_at === null);
+        }}
         onRequestDelete={() => setDeleteOpen(true)}
         onRequestMove={() => setMoveOpen(true)}
       />
@@ -85,6 +113,7 @@ export function PageRowConnected({
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
         pageName={page.name}
+        rehomedCount={rehomedCount}
         pending={deletion.pending}
         onConfirm={() => {
           deletion.remove({

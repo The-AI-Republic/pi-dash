@@ -59629,4 +59629,117 @@ export class WebDriver implements ParityDriver {
   async aiWorkersSkeletonVisible(): Promise<boolean> {
     this.aiWorkersMissing();
   }
+
+  // --- Nested pages (D17, PAGE-084-090). The old app cannot show nested
+  // --- pages, so every method throws its D17 notice; the spec's skip
+  // --- guard keeps these unreachable on the oracle leg.
+  private pagesNestedNotApplicable(): never {
+    throw new Error("not applicable on the oracle (D17)");
+  }
+
+  async pagesNestedOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedOpenArchivedList(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedOpenRow(_title: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedWaitDetail(): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedWaitToast(_text: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedBack(): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedToastText(): Promise<string | null> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedRowTitles(): Promise<string[]> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedChildCount(_title: string): Promise<number | null> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedExpand(_title: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedCollapse(_title: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedDepth(_title: string): Promise<number | null> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedParentPath(_title: string): Promise<string | null> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedOpenPage(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedBreadcrumbs(): Promise<string[]> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedBreadcrumbLinked(_label: string): Promise<boolean> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedBreadcrumbClick(_label: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedOptionsOpen(): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedOptionsItems(): Promise<string[]> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedOptionsPick(_label: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedRowMenuOpen(_title: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedSearch(_text: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedSearchClear(): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedFavoritesFilter(): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedMovePickerOpen(_title: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedMoveTargets(): Promise<string[]> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedMoveSearch(_text: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedMovePick(_label: string | null): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedMoveRefusal(): Promise<string | null> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedMoveConfirm(): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedDragRow(_fromTitle: string, _ontoTitle: string | null): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedDeleteDialogOpen(_title: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedDeleteDialogText(): Promise<string> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedDeleteConfirm(): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedPaletteFind(_query: string): Promise<string[]> {
+    return this.pagesNestedNotApplicable();
+  }
 }

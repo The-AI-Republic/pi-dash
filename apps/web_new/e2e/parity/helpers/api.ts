@@ -14035,6 +14035,12 @@ export interface ParityPageRecord {
   updatedAt: string;
   descriptionHtml: string;
   isLocked: boolean;
+  /** Parent page id when the nested surface (PDASHOSS01-270) is live. */
+  parentId?: string | null;
+  /** Visible child count when the nested surface (PDASHOSS01-270) is live. */
+  subPagesCount?: number;
+  /** Shelved timestamp, when the record carries one. */
+  archivedAt?: string | null;
 }
 
 /** Read a page's live description binary (Yjs state stream). */
@@ -14166,6 +14172,13 @@ export async function serverPageRecord(
     updatedAt: rec["updated_at"] as string,
     descriptionHtml: typeof rec["description_html"] === "string" ? rec["description_html"] : "",
     isLocked: rec["is_locked"] === true,
+    ...(rec["parent_id"] === undefined
+      ? {}
+      : { parentId: typeof rec["parent_id"] === "string" ? rec["parent_id"] : null }),
+    ...(typeof rec["sub_pages_count"] === "number" ? { subPagesCount: rec["sub_pages_count"] } : {}),
+    ...(rec["archived_at"] === undefined
+      ? {}
+      : { archivedAt: typeof rec["archived_at"] === "string" ? rec["archived_at"] : null }),
   };
 }
 
@@ -22174,4 +22187,32 @@ export async function listFavoriteGroup(
     ? res.payload
     : ((res.payload as { results?: unknown[] }).results ?? []);
   return rows as ParityFavorite[];
+}
+
+// --- Nested pages (NEWFRONT-850, PAGE-084-090). Appended; existing
+// --- helpers above are untouched per the shared parity contract. The
+// --- nested surface lands with PDASHOSS01-270; these write the same
+// --- `parent` field the spec sketch defines and the UI sends.
+
+/** Reparent one page to `parentId`, or to the top level with null. */
+export async function serverPatchPageParent(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  parentId: string | null,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`,
+    sessionCookie,
+    { parent: parentId },
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(
+      `[parity] page parent patch failed with HTTP ${res.status}: ${JSON.stringify(res.payload).slice(0, 300)}.`
+    );
+  }
 }

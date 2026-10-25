@@ -33,6 +33,7 @@ import {
   serverDeleteProjectRaw,
   serverIdentifierTaken,
   serverPageRecord,
+  serverPatchPageParent,
   serverProjectFetchStatus,
   serverProjectRecord,
   serverPublishBoardFacts,
@@ -122,6 +123,47 @@ describe("serverPageRecord", () => {
     delete payload["id"];
     await expect(serverPageRecord("ws", "project", "page-1", "session=x", apiBase)).rejects.toThrow(
       "[parity] page record carried no string id."
+    );
+  });
+
+  it("leaves the nested fields undefined until the nested backend answers", async () => {
+    payload = freshPage();
+    const record = await serverPageRecord("ws", "project", "page-1", "session=x", apiBase);
+    expect(record.parentId).toBeUndefined();
+    expect(record.subPagesCount).toBeUndefined();
+    expect(record.archivedAt).toBeUndefined();
+  });
+
+  it("maps parent_id, sub_pages_count and archived_at when the nested backend answers", async () => {
+    payload = { ...freshPage(), parent_id: "parent-1", sub_pages_count: 3, archived_at: "2026-10-12T00:00:00Z" };
+    const record = await serverPageRecord("ws", "project", "page-1", "session=x", apiBase);
+    expect(record.parentId).toBe("parent-1");
+    expect(record.subPagesCount).toBe(3);
+    expect(record.archivedAt).toBe("2026-10-12T00:00:00Z");
+  });
+});
+
+describe("serverPatchPageParent", () => {
+  it("PATCHes the page with the parent id the sketch defines", async () => {
+    payload = { id: "page-1" };
+    await serverPatchPageParent("ws", "project", "page-1", "parent-1", "session=x", apiBase);
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("PATCH");
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/ws/projects/project/pages/page-1/");
+    expect(JSON.parse(stubSeen[0]?.body ?? "{}")).toEqual({ parent: "parent-1" });
+  });
+
+  it("sends an explicit null to detach a page to the top level", async () => {
+    payload = { id: "page-1" };
+    await serverPatchPageParent("ws", "project", "page-1", null, "session=x", apiBase);
+    expect(JSON.parse(stubSeen[0]?.body ?? "{}")).toEqual({ parent: null });
+  });
+
+  it("throws naming the nested rejection status", async () => {
+    stubStatus = 400;
+    payload = { parent: ["A page cannot be nested under itself."] };
+    await expect(serverPatchPageParent("ws", "project", "page-1", "page-1", "session=x", apiBase)).rejects.toThrow(
+      "[parity] page parent patch failed with HTTP 400"
     );
   });
 });
