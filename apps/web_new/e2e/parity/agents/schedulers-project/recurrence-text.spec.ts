@@ -33,7 +33,9 @@ test(
     const sentences: Record<string, string> = {
       [`agt20-daily-${workspaceSlug}`]: "every day",
       [`agt20-fortnight-${workspaceSlug}`]: "every 2 weeks on Monday, Friday",
-      [`agt20-once-${workspaceSlug}`]: "Once at dtstart",
+      // The area spec prefers the dialog's wording for the new app (AGT-020):
+      // the lists render the same sentence the builder shows.
+      [`agt20-once-${workspaceSlug}`]: driver.target === "web_new" ? "Fires once at the start time" : "Once at dtstart",
     };
 
     const project = await test.step("owner prepares installs with three rules", async () => {

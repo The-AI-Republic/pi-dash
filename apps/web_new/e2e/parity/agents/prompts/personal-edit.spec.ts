@@ -9,7 +9,12 @@
 // the card re-read, including that nobody else's view changes.
 // Row: AGT-025.
 import { test, expect } from "../../fixtures";
-import { serverPromptSections, serverPromptSectionUpsert, serverPromptSectionUpsertStatus } from "../../helpers/api";
+import {
+  serverPromptSectionRevert,
+  serverPromptSections,
+  serverPromptSectionUpsert,
+  serverPromptSectionUpsertStatus,
+} from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 import { schedulerHarness, seatMember } from "../support";
 import { EDITABLE_SECTION, LOCKED_SECTION, expectCard } from "./support";
@@ -50,10 +55,26 @@ test(
       expect(state?.revertVisible).toBe(false);
     });
 
-    await test.step("bug: the UI save fails inline on CSRF and stores nothing", async () => {
+    await test.step("the UI save persists the personal override", async () => {
       await driver.promptsEditorFill(PERSONAL_BODY);
       expect((await driver.promptsEditorState())?.saveEnabled).toBe(true);
       await driver.promptsEditorSave();
+      if (driver.target === "web_new") {
+        // Intended target (AGT-025): the save persists, closes the editor and
+        // the card marks the override as the member's own.
+        await expect.poll(async () => driver.promptsEditorState(), { timeout: 30_000 }).toBeNull();
+        const stored = await serverPromptSections(workspaceSlug, "coding-task", "user", member.session);
+        expect(stored.find((row) => row.key === EDITABLE_SECTION)?.body).toBe(PERSONAL_BODY);
+        await driver.promptsOpen(workspaceSlug);
+        const card = await expectCard(driver, EDITABLE_SECTION, (candidate) => candidate.body === PERSONAL_BODY);
+        expect(card.sourceBadge).toBe("Your override");
+        // The remaining steps assume the old leg's non-persisting save;
+        // drop the override so they start from the same baseline.
+        await serverPromptSectionRevert(workspaceSlug, EDITABLE_SECTION, "user", member.session);
+        await driver.promptsOpen(workspaceSlug);
+        return;
+      }
+      // bug: NEWFRONT-193 — the old app 403s on CSRF and keeps the editor open.
       await expect.poll(async () => (await driver.promptsEditorState())?.error ?? "", { timeout: 30_000 }).not.toBe("");
       const state = await driver.promptsEditorState();
       expect(state?.error).toContain("CSRF Failed");
