@@ -11,6 +11,7 @@
 // shell owns their seams and the URL protocol they share.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { PageVersionDetail } from "@pidash/api-client";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
@@ -88,9 +89,12 @@ export function PageDetailScreen({
     ...pageVersionsQueryOptions(client, workspaceSlug, projectId, pageId),
     enabled: paneOpen && search.paneTab === "info" && record.isSuccess,
   });
+  // One read of the address's version key: the overlay and both of its
+  // actions below work from this narrowed value, never from a re-read.
+  const openVersionId = search.version;
   const snapshot = useQuery({
-    ...pageVersionQueryOptions(client, workspaceSlug, projectId, pageId, search.version ?? ""),
-    enabled: search.version !== undefined && record.isSuccess,
+    ...pageVersionQueryOptions(client, workspaceSlug, projectId, pageId, openVersionId ?? ""),
+    enabled: openVersionId !== undefined && record.isSuccess,
   });
 
   const listRow = pages.data?.find((row) => row.id === pageId);
@@ -201,11 +205,10 @@ export function PageDetailScreen({
 
   // A failed snapshot read keeps its address; asking again drops the
   // rejected answer so the read flies afresh and the skeleton returns
-  // (PAGE-054).
-  const retryVersion = (): void => {
-    if (search.version === undefined) return;
+  // (PAGE-054). Only a mounted overlay can ask, so it always names one.
+  const retryVersion = (versionId: string): void => {
     void queryClient.invalidateQueries({
-      queryKey: pageKeys.version(workspaceSlug, projectId, pageId, search.version),
+      queryKey: pageKeys.version(workspaceSlug, projectId, pageId, versionId),
     });
   };
 
@@ -218,19 +221,20 @@ export function PageDetailScreen({
   const onEditorHandle = React.useCallback((handle: PageEditorHandle | null) => {
     editorHandle.current = handle;
   }, []);
-  const restoreVersion = React.useCallback(() => {
-    const opened = snapshot.data;
-    if (opened === undefined) return;
-    if (!applyPageRestore(editorHandle.current, snapshotBodyHtml(opened))) {
-      notifyError(PAGE_VERSION_RESTORE_FAILED);
-      return;
-    }
-    notifySuccess(PAGE_VERSION_RESTORE_SUCCESS);
-    // The restore is a new save, so the history and its timeline are
-    // stale from here on.
-    void queryClient.invalidateQueries({ queryKey: pageKeys.versions(workspaceSlug, projectId, pageId) });
-    closeVersion();
-  }, [snapshot.data, queryClient, workspaceSlug, projectId, pageId, closeVersion]);
+  const restoreVersion = React.useCallback(
+    (opened: PageVersionDetail) => {
+      if (!applyPageRestore(editorHandle.current, snapshotBodyHtml(opened))) {
+        notifyError(PAGE_VERSION_RESTORE_FAILED);
+        return;
+      }
+      notifySuccess(PAGE_VERSION_RESTORE_SUCCESS);
+      // The restore is a new save, so the history and its timeline are
+      // stale from here on.
+      void queryClient.invalidateQueries({ queryKey: pageKeys.versions(workspaceSlug, projectId, pageId) });
+      closeVersion();
+    },
+    [queryClient, workspaceSlug, projectId, pageId, closeVersion]
+  );
 
   if (body === "spinner") {
     return <PageDetailSpinner />;
@@ -358,16 +362,16 @@ export function PageDetailScreen({
           onSelectHeading={live.scrollToHeading}
         />
       </div>
-      {search.version !== undefined ? (
+      {openVersionId === undefined ? null : (
         <PageVersionOverlay
-          versionId={search.version}
+          versionId={openVersionId}
           snapshot={snapshot.data}
           failed={snapshot.isError}
           onClose={closeVersion}
-          onRetry={retryVersion}
+          onRetry={() => retryVersion(openVersionId)}
           restore={capabilities.canEdit ? { onRestore: restoreVersion } : null}
         />
-      ) : null}
+      )}
     </div>
   );
 }

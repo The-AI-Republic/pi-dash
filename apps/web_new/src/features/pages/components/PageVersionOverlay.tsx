@@ -58,9 +58,13 @@ export interface PageVersionOverlayProps {
   restore?: PageVersionRestore | null | undefined;
 }
 
-/** The restore action as the shell hands it down; absent without edit rights. */
+/**
+ * The restore action as the shell hands it down; absent without edit
+ * rights. It receives the snapshot on screen, so the write is always the
+ * body the reader is looking at rather than a second read of the address.
+ */
 export interface PageVersionRestore {
-  onRestore: () => void;
+  onRestore: (snapshot: PageVersionDetail) => void;
 }
 
 interface OverlayHeaderProps {
@@ -68,9 +72,11 @@ interface OverlayHeaderProps {
   onClose: () => void;
   /** Null when the snapshot is not known yet or the reader may not write. */
   restore: PageVersionRestore | null;
+  /** The snapshot on screen, which the restore writes back. */
+  snapshot: PageVersionDetail | undefined;
 }
 
-function OverlayHeader({ title, onClose, restore }: OverlayHeaderProps): React.ReactElement {
+function OverlayHeader({ title, onClose, restore, snapshot }: OverlayHeaderProps): React.ReactElement {
   return (
     <div className="flex shrink-0 items-center justify-between gap-(--space-4) border-b border-(--border) px-(--space-6) py-(--space-3)">
       <div className="flex min-w-0 items-center gap-(--space-3)">
@@ -80,8 +86,8 @@ function OverlayHeader({ title, onClose, restore }: OverlayHeaderProps): React.R
         </span>
       </div>
       <div className="flex shrink-0 items-center gap-(--space-2)">
-        {restore === null ? null : (
-          <Button variant="secondary" size="small" onClick={restore.onRestore}>
+        {restore === null || snapshot === undefined ? null : (
+          <Button variant="secondary" size="small" onClick={() => restore.onRestore(snapshot)}>
             {PAGE_VERSION_RESTORE}
           </Button>
         )}
@@ -119,7 +125,8 @@ export function PageVersionOverlay({
 }: PageVersionOverlayProps): React.ReactElement {
   // A failed read has no snapshot to write back, and the error panel is
   // the only action on screen (PAGE-054).
-  const shownRestore = failed || snapshot === undefined ? null : restore;
+  const shownRestore =
+    failed || snapshot === undefined || restore === null ? null : { onRestore: () => restore.onRestore(snapshot) };
   return (
     <div
       data-testid="page-version-overlay"
@@ -132,6 +139,7 @@ export function PageVersionOverlay({
         title={snapshot === undefined ? PAGE_VERSION_LOADING : snapshotTime(snapshot.last_saved_at)}
         onClose={onClose}
         restore={shownRestore}
+        snapshot={snapshot}
       />
       <div
         data-version-id={versionId}

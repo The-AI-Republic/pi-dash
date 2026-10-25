@@ -11,7 +11,7 @@
 
 import type { PageVersion } from "@pidash/api-client";
 
-import { pageMemberName, type PageActorMember } from "./pagePane.js";
+import { PAGE_DEACTIVATED_USER, type PageActorMember } from "./pagePane.js";
 
 /** The pinned label of the id-less live row; it never links anywhere. */
 export const PAGE_CURRENT_VERSION_LABEL = "Current version";
@@ -42,6 +42,11 @@ export function pageVersionTime(isoTimestamp: string): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+/** The snapshot owner's display name, or the neutral label once they left. */
+function versionAuthor(members: readonly PageActorMember[], ownedBy: string): string {
+  return members.find((member) => member.id === ownedBy)?.name ?? PAGE_DEACTIVATED_USER;
 }
 
 /** Newest first; an unparseable timestamp sorts last instead of garbage. */
@@ -78,7 +83,7 @@ export function pageVersionEntries(input: PageVersionEntriesInput): PageVersionE
   const snapshots = newestFirst(input.versions).map((version) => ({
     id: version.id,
     label: pageVersionTime(version.last_saved_at),
-    author: input.members === undefined ? "" : (pageMemberName(input.members, version.owned_by) ?? ""),
+    author: input.members === undefined ? "" : versionAuthor(input.members, version.owned_by),
     active: version.id === input.activeVersionId,
   }));
   return [live, ...snapshots];

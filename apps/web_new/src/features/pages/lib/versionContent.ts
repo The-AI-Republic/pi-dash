@@ -25,7 +25,15 @@ const RENDERABLE_TYPES = new Set([
 ]);
 
 /** Inline marks it can paint; an unknown mark is dropped, not its text. */
-const RENDERABLE_MARKS = new Set(["bold", "italic", "strike", "code", "link"]);
+type RenderableMark = { type: "bold" | "italic" | "strike" | "code" | "link"; attrs?: unknown };
+
+const RENDERABLE_MARKS: ReadonlySet<string> = new Set<RenderableMark["type"]>([
+  "bold",
+  "italic",
+  "strike",
+  "code",
+  "link",
+]);
 
 interface StructuredNode {
   type?: unknown;
@@ -59,19 +67,28 @@ function allRenderable(nodes: readonly StructuredNode[]): boolean {
   );
 }
 
-function wrapMark(mark: StructuredMark, inner: string): string {
-  if (mark.type === "bold") return `<strong>${inner}</strong>`;
-  if (mark.type === "italic") return `<em>${inner}</em>`;
-  if (mark.type === "strike") return `<s>${inner}</s>`;
-  if (mark.type === "code") return `<code>${inner}</code>`;
-  if (mark.type === "link") {
-    const href = attrsOf(mark.attrs)["href"];
-    return typeof href === "string" && href !== "" ? `<a href="${escapeText(href)}">${inner}</a>` : inner;
+function wrapMark(mark: RenderableMark, inner: string): string {
+  switch (mark.type) {
+    case "bold":
+      return `<strong>${inner}</strong>`;
+    case "italic":
+      return `<em>${inner}</em>`;
+    case "strike":
+      return `<s>${inner}</s>`;
+    case "code":
+      return `<code>${inner}</code>`;
+    case "link": {
+      const href = attrsOf(mark.attrs)["href"];
+      return typeof href === "string" && href !== "" ? `<a href="${escapeText(href)}">${inner}</a>` : inner;
+    }
   }
-  return inner;
 }
 
-/** Phrasing content: text with its marks, and hard breaks. */
+/**
+ * Phrasing content: text with its marks, and hard breaks. A stored node
+ * that is neither (a block where text belongs, or a text node with no
+ * text) paints nothing rather than guessing.
+ */
 function renderInline(nodes: readonly StructuredNode[]): string {
   return nodes
     .map((node) => {
@@ -80,21 +97,26 @@ function renderInline(nodes: readonly StructuredNode[]): string {
       const marks = nodeList(node.marks as unknown) as StructuredMark[];
       return marks
         .filter((mark) => RENDERABLE_MARKS.has(mark.type as string))
-        .reduceRight<string>((inner, mark) => wrapMark(mark, inner), escapeText(node.text));
+        .reduceRight<string>(
+          (inner, mark) => wrapMark({ type: mark.type as RenderableMark["type"], attrs: mark.attrs }, inner),
+          escapeText(node.text)
+        );
     })
     .join("");
 }
 
 /** Block content: one markup fragment per block, in document order. */
 function renderBlocks(nodes: readonly StructuredNode[]): string {
-  return nodes.map(renderBlock).join("");
+  return nodes.map((node) => renderBlock(node as RenderableBlock)).join("");
 }
 
 function renderListItem(item: StructuredNode): string {
   const children = nodeList(item.content);
   const blocks = children.filter((child) => child.type !== "bulletList" && child.type !== "orderedList");
   const nested = children.filter((child) => child.type === "bulletList" || child.type === "orderedList");
-  return `<li>${blocks.map(renderBlock).join("")}${nested.map(renderBlock).join("")}</li>`;
+  return `<li>${blocks.map((block) => renderBlock(block as RenderableBlock)).join("")}${nested
+    .map((block) => renderBlock(block as RenderableBlock))
+    .join("")}</li>`;
 }
 
 function plainText(node: StructuredNode): string {
@@ -102,7 +124,14 @@ function plainText(node: StructuredNode): string {
   return nodeList(node.content).map(plainText).join("");
 }
 
-function renderBlock(node: StructuredNode): string {
+/** A block the gate has already accepted; the switch below is total. */
+type RenderableBlock = {
+  type: "doc" | "paragraph" | "heading" | "bulletList" | "orderedList" | "blockquote" | "codeBlock" | "horizontalRule";
+  attrs?: unknown;
+  content?: unknown;
+};
+
+function renderBlock(node: RenderableBlock): string {
   const attrs = attrsOf(node.attrs);
   switch (node.type) {
     case "doc":
@@ -127,10 +156,6 @@ function renderBlock(node: StructuredNode): string {
       return `<pre><code>${escapeText(plainText(node))}</code></pre>`;
     case "horizontalRule":
       return "<hr>";
-    default:
-      // Only reachable from a hand-built tree; the gate above keeps real
-      // documents out of here.
-      return "";
   }
 }
 
@@ -144,6 +169,6 @@ export function snapshotBodyHtml(snapshot: {
 }): string {
   const document = snapshot.description_json as StructuredNode;
   if (document.type !== "doc" || !allRenderable([document])) return snapshot.description_html;
-  const rendered = renderBlock(document);
+  const rendered = renderBlock(document as RenderableBlock);
   return rendered.trim() === "" ? snapshot.description_html : rendered;
 }

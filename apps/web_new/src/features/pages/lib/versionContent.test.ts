@@ -144,6 +144,22 @@ describe("snapshotBodyHtml", () => {
     expect(html).toBe('<ol start="3"><li><p>three</p></li></ol><ol><li><p>one</p></li></ol>');
   });
 
+  it("paints nothing for a stored node where only phrasing content belongs", () => {
+    const html = snapshotBodyHtml({
+      description_json: doc(paragraph(text("kept"), { type: "horizontalRule" }, text(" "), { type: "text" })),
+      description_html: "",
+    });
+    expect(html).toBe("<p>kept </p>");
+  });
+
+  it("keeps the text of a mark with no attributes at all", () => {
+    const html = snapshotBodyHtml({
+      description_json: doc(paragraph(text("plain", [{ type: "link" }, { type: "bold" }]))),
+      description_html: "",
+    });
+    expect(html).toBe("<p><strong>plain</strong></p>");
+  });
+
   it("paints quotes, code blocks, dividers and hard breaks", () => {
     const html = snapshotBodyHtml({
       description_json: doc(
