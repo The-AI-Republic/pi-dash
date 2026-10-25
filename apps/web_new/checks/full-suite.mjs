@@ -26,7 +26,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const SUITES = [
-  { name: "web_new", dir: "apps/web_new" },
+  // The scheduled run is the only place the whole web_new suite runs, and it
+  // shares its host with other agent worktrees. Vitest sizes one process's
+  // fork pool from the CPU count alone (4 on that host), and when those cores
+  // are contended the pool spends much of the run waiting: the run that
+  // produced NEWFRONT-893 spent 62 min of wall time on ~72 min of CPU work,
+  // i.e. 1.2 cores. An explicit larger pool keeps more files in flight and
+  // recovered 1.9 cores in a 240-file sample (459 s against 715 s at the
+  // default size). 16 workers is bounded and every file still runs once.
+  { name: "web_new", dir: "apps/web_new", args: ["--maxWorkers=16"] },
   { name: "kit", dir: "packages/kit" },
   { name: "api-client", dir: "packages/api-client" },
 ];
@@ -146,12 +154,18 @@ function readReport(file) {
 // files) without a failing test to show for it. It keeps the output's tail.
 function runSuite(suite, files, { sh, tmp, root }) {
   const out = join(tmp, `${suite.name}-${files ? "rerun" : "all"}.json`);
+  // The default reporter is what makes a timeout diagnosable: with only the
+  // JSON reporter every line of test output goes to the report file, which a
+  // killed run never writes, so the crash carried no evidence at all. The
+  // default reporter's progress tail names the file that was still in flight.
   const args = [
     "exec",
     "vitest",
     "run",
+    "--reporter=default",
     "--reporter=json",
     `--outputFile=${out}`,
+    ...(suite.args ?? []),
     ...(files ?? []).map((file) => resolve(root, file)),
   ];
   const result = sh("pnpm", args, resolve(root, suite.dir), { timeoutMs: SUITE_TIMEOUT_MS });

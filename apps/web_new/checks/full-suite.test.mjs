@@ -13,6 +13,7 @@ import { classify, countsOf, excerpt, failuresOf, isCliEntry, main, parseArgs, u
 
 const ROOT = "/repo";
 const LOAD = "(file failed to load)";
+const WEB_WORKERS = "--maxWorkers=16";
 
 function report(files, extra = {}) {
   const tests = files.flatMap((file) => file.assertionResults ?? []);
@@ -148,7 +149,9 @@ function fakeShell({ runs = {}, install = { status: 0 } } = {}) {
     if (args[0] === "install") return { status: 0, output: "", timedOut: false, ...install };
     const flag = args.findIndex((arg) => arg.startsWith("--outputFile="));
     const outFile = args[flag].slice("--outputFile=".length);
-    const key = `${cwd.slice(ROOT.length + 1)}:${args.length > flag + 1 ? "rerun" : "all"}`;
+    // A re-run passes failing files after the output file; option values and
+    // the suite's worker flags are not file arguments.
+    const key = `${cwd.slice(ROOT.length + 1)}:${args.slice(flag + 1).some((arg) => arg.endsWith(".test.tsx") || arg.endsWith(".test.ts") || arg.endsWith(".test.mjs")) ? "rerun" : "all"}`;
     const run = runs[key] ?? {};
     if (run.report) writeFileSync(outFile, JSON.stringify(run.report));
     const status = run.status ?? (run.report ? (run.report.success === false ? 1 : 0) : 1);
@@ -206,6 +209,13 @@ describe("main", () => {
       `${ROOT}/packages/kit`,
       `${ROOT}/packages/api-client`,
     ]);
+    // Only web_new gets the larger pool; kit and api-client keep vitest's default.
+    expect(shell.calls[1].args).toContain(WEB_WORKERS);
+    expect(shell.calls[2].args).not.toContain(WEB_WORKERS);
+    expect(shell.calls[3].args).not.toContain(WEB_WORKERS);
+    // Both reporters: JSON for the summary, default so a killed run still has
+    // the progress tail that names the in-flight file.
+    expect(shell.calls[1].args).toEqual(expect.arrayContaining(["--reporter=default", "--reporter=json"]));
     expect(shell.calls[1].opts.timeoutMs).toBe(45 * 60 * 1000);
     expect(summary.head).toBe("0123456789abcdef");
     expect(summary.green).toBe(true);
