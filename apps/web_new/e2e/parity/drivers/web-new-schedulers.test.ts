@@ -343,24 +343,24 @@ describe("install dialog", () => {
     await expect(driver.schedulerProjectInstallErrors()).resolves.toEqual(["Start time is required."]);
   });
 
-  it("reveals the advanced rule field before filling a rule the builder hides", async () => {
+  it("opens the Advanced disclosure before filling a hidden raw rule", async () => {
     let expanded = false;
-    const toggle = fake({
+    const raw = fake({ visible: false });
+    const disclosure = fake({
       count: 1,
       click: async () => {
         expanded = true;
       },
       getAttribute: async (name: string) => (name === "aria-expanded" && expanded ? "true" : "false"),
     });
-    const raw = fake({ count: 1, visible: false, fill: vi.fn(async () => undefined) });
     const dialog = fake({
-      role: (role: string) => (role === "button" ? toggle : absent()),
+      role: (role: string) => (role === "button" ? disclosure : absent()),
       byLabel: (label: string) => (label === "Recurrence (RRULE)" ? raw : absent()),
     });
     const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
     await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=WEEKLY;BYDAY=MO" });
-    expect(toggle.click).toHaveBeenCalledTimes(1);
-    expect(raw.fill).toHaveBeenCalledWith("FREQ=WEEKLY;BYDAY=MO");
+    expect(disclosure.click).toHaveBeenCalledTimes(1);
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=WEEKLY;BYDAY=MO", { timeout: 30_000 });
   });
 
   it("fills an already visible rule without touching the disclosure", async () => {
@@ -373,7 +373,7 @@ describe("install dialog", () => {
     const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
     await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=DAILY" });
     expect(toggle.click).not.toHaveBeenCalled();
-    expect(raw.fill).toHaveBeenCalledWith("FREQ=DAILY");
+    expect(raw.fill).toHaveBeenCalledWith("FREQ=DAILY", { timeout: 30_000 });
   });
 
   it("reads edit values from the findings group, not the recurrence Ends radios", async () => {
@@ -805,7 +805,7 @@ describe("recurrence builder", () => {
     const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
     await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=DAILY;COUNT=2" });
     expect(toggle.click).toHaveBeenCalledTimes(1);
-    expect(fill).toHaveBeenCalledWith("FREQ=DAILY;COUNT=2");
+    expect(fill).toHaveBeenCalledWith("FREQ=DAILY;COUNT=2", { timeout: 30_000 });
   });
 
   it("fills the rule directly when the disclosure is already open", async () => {
@@ -821,7 +821,7 @@ describe("recurrence builder", () => {
     const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
     await new WebNewDriver(page).schedulerProjectEditFill({ rrule: "FREQ=DAILY" });
     expect(toggle.click).not.toHaveBeenCalled();
-    expect(fill).toHaveBeenCalledWith("FREQ=DAILY");
+    expect(fill).toHaveBeenCalledWith("FREQ=DAILY", { timeout: 30_000 });
   });
 
   it("treats a forced raw rule as already advanced", async () => {
