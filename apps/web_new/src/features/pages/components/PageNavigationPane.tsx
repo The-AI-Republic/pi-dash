@@ -17,14 +17,21 @@ import * as React from "react";
 import type { PageVersion } from "@pidash/api-client";
 import { edition } from "../../../core/edition/index.js";
 import { PAGE_PANE_TABS, pageDetailDeepHref, type PageDetailSearch, type PagePaneTab } from "../lib/pageDetail.js";
-import { PAGE_PANE_WIDTH_PX, type PageActorRow, type PageDocument, type PageHeading } from "../lib/pagePane.js";
+import {
+  PAGE_PANE_WIDTH_PX,
+  type PageActorMember,
+  type PageActorRow,
+  type PageDocument,
+  type PageHeading,
+} from "../lib/pagePane.js";
+import { pageVersionEntries, PAGE_CURRENT_VERSION_LABEL, type PageVersionEntry } from "../lib/pageVersions.js";
 import { PageActorsInfo } from "./PageActorsInfo.js";
 import { PageAssetsPanel } from "./PageAssetsPanel.js";
 import { PageDocumentStats } from "./PageDocumentStats.js";
 import { PageOutlinePanel } from "./PageOutlinePanel.js";
 
 export const PAGE_PANE_CLOSE = "Close navigation pane";
-export const PAGE_CURRENT_VERSION_LABEL = "Current version";
+export { PAGE_CURRENT_VERSION_LABEL };
 export const PAGE_NAVIGATION_LABEL = "Navigation pane";
 
 export interface PageNavigationPaneProps {
@@ -38,23 +45,15 @@ export interface PageNavigationPaneProps {
   actors: readonly PageActorRow[];
   /** Version history, newest first; undefined while the read is in flight. */
   versions: readonly PageVersion[] | undefined;
+  /** Directory-resolved authors for the timeline rows (PAGE-051). */
+  versionMembers: readonly PageActorMember[] | undefined;
   onSelectTab: (tab: PagePaneTab) => void;
   onClose: () => void;
   onSelectVersion: (versionId: string) => void;
+  /** The live row's action: drop the version key from the address. */
+  onSelectCurrentVersion: () => void;
   /** Bring one outline heading into view (PAGE-047). */
   onSelectHeading: (heading: PageHeading) => void;
-}
-
-function versionTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
 }
 
 function PaneTabs({
@@ -95,7 +94,60 @@ interface VersionTimelineProps {
   pageId: string;
   search: PageDetailSearch;
   versions: readonly PageVersion[] | undefined;
+  /** Directory-resolved authors for the dated rows (PAGE-051). */
+  members: readonly PageActorMember[] | undefined;
   onSelectVersion: (versionId: string) => void;
+  /** The live row's own action: close any snapshot the address names. */
+  onSelectCurrent: () => void;
+}
+
+/** Loading placeholders for a history read that has not answered yet. */
+function VersionTimelineSkeleton(): React.ReactElement {
+  return (
+    <>
+      {[0, 1, 2].map((index) => (
+        <li key={index} className="min-w-0">
+          <span
+            role="status"
+            aria-label="Loading versions"
+            className="block h-8 animate-pulse rounded-(--radius-control) bg-(--subtle)"
+          />
+        </li>
+      ))}
+    </>
+  );
+}
+
+function VersionEntryRow({
+  entry,
+  href,
+  onSelect,
+}: {
+  entry: PageVersionEntry;
+  href: string;
+  onSelect: () => void;
+}): React.ReactElement {
+  return (
+    <li className="min-w-0">
+      <Link
+        to={href}
+        {...(entry.id === null ? {} : { "data-version-id": entry.id })}
+        aria-current={entry.active ? "true" : undefined}
+        onClick={(event) => {
+          event.preventDefault();
+          onSelect();
+        }}
+        className={
+          entry.active
+            ? "flex min-w-0 items-start justify-between gap-(--space-2) rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) text-(--text)"
+            : "flex min-w-0 items-start justify-between gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
+        }
+      >
+        <p className={entry.id === null ? "text-body min-w-0 truncate" : "text-body min-w-0"}>{entry.label}</p>
+        {entry.author === "" ? null : <span className="text-caption min-w-0 truncate">{entry.author}</span>}
+      </Link>
+    </li>
+  );
 }
 
 function VersionTimeline({
@@ -104,54 +156,47 @@ function VersionTimeline({
   pageId,
   search,
   versions,
+  members,
   onSelectVersion,
+  onSelectCurrent,
 }: VersionTimelineProps): React.ReactElement {
+  const entries = pageVersionEntries({
+    versions,
+    activeVersionId: search.version,
+    members,
+  });
   return (
     <section aria-label="Version history" className="flex flex-col gap-(--space-1)">
       <h3 className="text-caption mb-(--space-2) tracking-wide text-(--text-muted) uppercase">Version history</h3>
       <ul className="flex flex-col gap-(--space-1)">
-        <li className="min-w-0">
-          <p className="text-body flex items-center justify-between rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) text-(--text)">
-            {PAGE_CURRENT_VERSION_LABEL}
-          </p>
-        </li>
-        {versions === undefined
-          ? [0, 1, 2].map((index) => (
-              <li key={index} className="min-w-0">
-                <span
-                  role="status"
-                  aria-label="Loading versions"
-                  className="block h-8 animate-pulse rounded-(--radius-control) bg-(--subtle)"
-                />
-              </li>
-            ))
-          : versions.map((version) => {
-              const href = pageDetailDeepHref(workspaceSlug, projectId, pageId, {
-                paneTab: "info",
-                version: version.id,
-              });
-              const active = version.id === search.version;
-              return (
-                <li key={version.id} className="min-w-0">
-                  <Link
-                    to={href}
-                    data-version-id={version.id}
-                    aria-current={active ? "true" : undefined}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      onSelectVersion(version.id);
-                    }}
-                    className={
-                      active
-                        ? "text-body flex items-center justify-between rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) text-(--text)"
-                        : "text-body flex items-center justify-between rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
-                    }
-                  >
-                    <p className="min-w-0 truncate">{versionTime(version.last_saved_at)}</p>
-                  </Link>
-                </li>
-              );
-            })}
+        {versions === undefined ? (
+          <>
+            <li className="min-w-0">
+              <p className="text-body flex items-center justify-between rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) text-(--text)">
+                {PAGE_CURRENT_VERSION_LABEL}
+              </p>
+            </li>
+            <VersionTimelineSkeleton />
+          </>
+        ) : (
+          entries.map((entry) =>
+            entry.id === null ? (
+              <VersionEntryRow
+                key="current"
+                entry={entry}
+                href={pageDetailDeepHref(workspaceSlug, projectId, pageId, search)}
+                onSelect={onSelectCurrent}
+              />
+            ) : (
+              <VersionEntryRow
+                key={entry.id}
+                entry={entry}
+                href={pageDetailDeepHref(workspaceSlug, projectId, pageId, { paneTab: "info", version: entry.id })}
+                onSelect={() => onSelectVersion(entry.id as string)}
+              />
+            )
+          )
+        )}
       </ul>
     </section>
   );
@@ -187,9 +232,11 @@ export function PageNavigationPane(props: PageNavigationPaneProps): React.ReactE
     document,
     actors,
     versions,
+    versionMembers,
     onSelectTab,
     onClose,
     onSelectVersion,
+    onSelectCurrentVersion,
   } = props;
   const open = search.paneTab !== undefined;
   // An edition's replacement body takes over the tab area only; the shell,
@@ -235,7 +282,9 @@ export function PageNavigationPane(props: PageNavigationPaneProps): React.ReactE
                 pageId={pageId}
                 search={search}
                 versions={versions}
+                members={versionMembers}
                 onSelectVersion={onSelectVersion}
+                onSelectCurrent={onSelectCurrentVersion}
               />
             </div>
           ) : null}

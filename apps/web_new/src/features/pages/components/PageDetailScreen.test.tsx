@@ -8,7 +8,7 @@
 // locked/shelved pages, the pane and the snapshot overlay.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { PageDetail, PageRow } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -60,6 +60,8 @@ interface Harness {
   versionsStatus: number;
   versionStatus: number;
   versionHold: Promise<void> | null;
+  versionDetailCalls: number;
+  versionJson: Record<string, unknown>;
   projectPageView: boolean;
   projectStatus: number;
 }
@@ -96,6 +98,8 @@ beforeEach(() => {
     versionsStatus: 200,
     versionStatus: 200,
     versionHold: null,
+    versionDetailCalls: 0,
+    versionJson: {},
     projectPageView: true,
     projectStatus: 200,
   };
@@ -143,6 +147,7 @@ beforeEach(() => {
       `/api/workspaces/acme/projects/[0-9a-f-]+/pages/[0-9a-f-]+/versions/([0-9a-f-]+)/$`
     ).exec(url);
     if (versionDetail !== null) {
+      harness.versionDetailCalls += 1;
       if (harness.versionHold !== null) await harness.versionHold;
       return jsonResponse(url, harness.versionStatus, {
         id: versionDetail[1],
@@ -151,7 +156,7 @@ beforeEach(() => {
         last_saved_at: "2026-10-20T12:00:00Z",
         description_binary: null,
         description_html: "<p>Stored snapshot body</p>",
-        description_json: {},
+        description_json: harness.versionJson,
         owned_by: PAGES_USER_ID,
         created_at: "2026-10-20T12:00:00Z",
         updated_at: "2026-10-20T12:00:00Z",
@@ -212,6 +217,18 @@ function renderScreen(search: PageDetailSearch = {}): {
   );
   return { changes };
 }
+
+const SNAPSHOT_ROW = {
+  id: "11111111-1111-4111-8111-111111111111",
+  workspace: "123e4567-e89b-12d3-a456-426614174000",
+  page: "33333333-3333-4333-8333-333333333333",
+  last_saved_at: "2026-10-20T12:00:00Z",
+  owned_by: PAGES_USER_ID,
+  created_at: "2026-10-20T12:00:00Z",
+  updated_at: "2026-10-20T12:00:00Z",
+  created_by: null,
+  updated_by: null,
+};
 
 describe("PageDetailScreen loading and panel", () => {
   it("spins while the record is unresolved and then paints the editor", async () => {
@@ -727,6 +744,51 @@ describe("PageDetailScreen deep links", () => {
     const { changes } = renderScreen({ paneTab: "info" });
     fireEvent.click(await screen.findByRole("link", { name: /Oct 20, 2026/ }));
     expect(changes.at(-1)).toEqual({ paneTab: "info", version: "11111111-1111-4111-8111-111111111111" });
+  });
+
+  it("names the snapshot's author in the timeline", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    renderScreen({ paneTab: "info" });
+    const link = await screen.findByRole("link", { name: /Oct 20, 2026/ });
+    await waitFor(() => expect(link).toHaveTextContent("Ada Byron"));
+  });
+
+  it("prefers the structured snapshot content over the stored markup", async () => {
+    harness.versionJson = {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Structured snapshot body" }] }],
+    };
+    renderScreen({ version: SNAPSHOT_ROW.id });
+    expect(await screen.findByText("Structured snapshot body")).toBeInTheDocument();
+    expect(screen.queryByText("Stored snapshot body")).not.toBeInTheDocument();
+  });
+
+  it("shows the error panel when the snapshot read fails", async () => {
+    harness.versionStatus = 500;
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    expect(await screen.findByRole("heading", { name: "Something went wrong!" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    const overlay = screen.getByRole("dialog", { name: "Version snapshot" });
+    expect(within(overlay).getByRole("heading", { level: 6 })).toHaveTextContent("Loading version details");
+  });
+
+  it("refetches the snapshot from the error panel's retry", async () => {
+    harness.versionStatus = 500;
+    renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    await screen.findByRole("heading", { name: "Something went wrong!" });
+    const before = harness.versionDetailCalls;
+    harness.versionStatus = 200;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Stored snapshot body")).toBeInTheDocument();
+    expect(harness.versionDetailCalls).toBeGreaterThan(before);
+  });
+
+  it("leaves the snapshot from the timeline's current row", async () => {
+    harness.versions = [SNAPSHOT_ROW];
+    const { changes } = renderScreen({ paneTab: "info", version: SNAPSHOT_ROW.id });
+    await screen.findByText("Stored snapshot body");
+    fireEvent.click(await screen.findByRole("link", { name: "Current version" }));
+    expect(changes.at(-1)).toEqual({ paneTab: "info" });
   });
 
   it("keeps the detail readable with the feature off and skips the collection read", async () => {

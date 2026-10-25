@@ -10,7 +10,7 @@
 // menu entries and collaboration client mount here in later slices; this
 // shell owns their seams and the URL protocol they share.
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
@@ -24,6 +24,7 @@ import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { pageDetailQueryOptions, pageVersionQueryOptions, pageVersionsQueryOptions } from "../api/detailQueries.js";
 import { usePageMark, usePageRename } from "../api/detailMutations.js";
 import { pagesListQueryOptions } from "../api/queries.js";
+import { pageKeys } from "../api/keys.js";
 import { isPageBodyReady, markPageBodyReady } from "../lib/pageBodyCache.js";
 import {
   closeVersionSearch,
@@ -68,6 +69,7 @@ export function PageDetailScreen({
   onSearchChange,
 }: PageDetailScreenProps): React.ReactElement {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const client = getAppClient();
   const project = useProjectRow(workspaceSlug, projectId);
   const roles = useProjectRoles(workspaceSlug);
@@ -108,6 +110,9 @@ export function PageDetailScreen({
   // the member directory answers; waiting for it here keeps the fallback
   // label for departed members from flashing on every load (PAGE-050).
   const directory = usePaletteWorkspaceMembers(workspaceSlug);
+  // The timeline names each snapshot's author from the same directory the
+  // attribution rows use (PAGE-051).
+  const versionMembers = pageActorMembers(directory.data);
 
   const body = resolvePageDetailBody({
     pending: record.isPending || me.isPending || roles.isPending || directory.isPending,
@@ -190,6 +195,16 @@ export function PageDetailScreen({
     onSearchChange(closeVersionSearch(search));
   };
 
+  // A failed snapshot read keeps its address; asking again drops the
+  // rejected answer so the read flies afresh and the skeleton returns
+  // (PAGE-054).
+  const retryVersion = (): void => {
+    if (search.version === undefined) return;
+    void queryClient.invalidateQueries({
+      queryKey: pageKeys.version(workspaceSlug, projectId, pageId, search.version),
+    });
+  };
+
   if (body === "spinner") {
     return <PageDetailSpinner />;
   }
@@ -207,7 +222,7 @@ export function PageDetailScreen({
     updatedAt: page.updated_at,
     ownedBy: page.owned_by,
     createdAt: page.created_at,
-    members: pageActorMembers(directory.data),
+    members: versionMembers,
   });
 
   return (
@@ -307,9 +322,11 @@ export function PageDetailScreen({
           document={paneDocument}
           actors={actors}
           versions={search.paneTab === "info" ? versions.data : undefined}
+          versionMembers={versionMembers}
           onSelectTab={openPaneTab}
           onClose={closePane}
           onSelectVersion={selectVersion}
+          onSelectCurrentVersion={closeVersion}
           onSelectHeading={live.scrollToHeading}
         />
       </div>
@@ -319,6 +336,7 @@ export function PageDetailScreen({
           snapshot={snapshot.data}
           failed={snapshot.isError}
           onClose={closeVersion}
+          onRetry={retryVersion}
         />
       ) : null}
     </div>
