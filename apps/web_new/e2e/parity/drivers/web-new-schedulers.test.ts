@@ -741,6 +741,17 @@ describe("calendar surface", () => {
     await new WebNewDriver(page).schedulerCalendarSetView("month");
     expect(click).toHaveBeenCalled();
     expect(waitFor).toHaveBeenCalled();
+
+    // The week side picks its own button and settles on the week grid.
+    const weekWaitFor = vi.fn(async () => undefined);
+    const week = fake({ count: 1, waitFor: weekWaitFor });
+    const weekPage = calendarPage({
+      week,
+      role: (role, options) =>
+        role === "button" && String(options?.["name"] ?? "") === "Week" ? fake({ click }) : absent(),
+    });
+    await new WebNewDriver(weekPage).schedulerCalendarSetView("week");
+    expect(weekWaitFor).toHaveBeenCalled();
   });
 
   it("steps the month view until its caption changes", async () => {
@@ -757,6 +768,19 @@ describe("calendar surface", () => {
     await expect(driver.schedulerCalendarTitle()).resolves.toBe("October 2026");
     await driver.schedulerCalendarStep("next");
     expect(click).toHaveBeenCalled();
+
+    // The month view's other direction clicks its own control.
+    label = "December 2026";
+    const previous = vi.fn(async () => {
+      label = "November 2026";
+    });
+    const backward = pageOf({
+      getByTestId: (id: string) => (id === "calendar-period-label" ? fake({ innerText: async () => label }) : absent()),
+      getByRole: (role, options) =>
+        role === "button" && String(options?.["name"] ?? "") === "Previous" ? fake({ click: previous }) : absent(),
+    });
+    await new WebNewDriver(backward).schedulerCalendarStep("prev");
+    expect(previous).toHaveBeenCalled();
   });
 
   it("steps the week view by its day caption, even within one month", async () => {
@@ -896,6 +920,29 @@ describe("calendar surface", () => {
     await expect(driver.schedulerCalendarWeekTodayMarked()).resolves.toBe(true);
     const noToday = pageOf({ getByTestId: () => fake({ testId: () => absent() }) });
     await expect(new WebNewDriver(noToday).schedulerCalendarWeekTodayMarked()).resolves.toBe(false);
+  });
+
+  it("reads a lane whose day has no header as unlabelled", async () => {
+    const block = fake({
+      locate: (selector: string) =>
+        selector === ":scope > span" ? fake({ items: [fake({ text: "9:00 AM" }), fake({ text: "Alpha" })] }) : absent(),
+      attribute: "Alpha · 9:00 AM",
+      evaluate: "rgb(1, 2, 3)",
+    });
+    const lane = fake({
+      locate: (selector: string) => (selector === "button[title]" ? fake({ items: [block] }) : absent()),
+    });
+    const week = fake({
+      testId: (id: string) => {
+        if (id === "calendar-week-day-head") return fake({ items: [] });
+        if (id === "calendar-week-day") return fake({ items: [lane] });
+        return absent();
+      },
+    });
+    const page = pageOf({ getByTestId: (id: string) => (id === "calendar-week-view" ? week : absent()) });
+    await expect(new WebNewDriver(page).schedulerCalendarWeekBlocks()).resolves.toEqual([
+      { day: "", time: "9:00 AM", name: "Alpha", title: "Alpha · 9:00 AM", background: "rgb(1, 2, 3)" },
+    ]);
   });
 
   it("reads the now-line offset or reports its absence", async () => {
