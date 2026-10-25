@@ -3159,7 +3159,9 @@ async fn view_issues_list(
         .map_err(|_| Denial::ServerError)?;
     let mut legacy_parts: Vec<String> = Vec::new();
     for (name, value) in legacy.predicates() {
-        let fragment = crate::app_issues::legacy_sql(&mut binder, name, value)
+        // UTC keeps this slice's current truncation; its own actor-zone
+        // fix follows the app_issues pattern separately.
+        let fragment = crate::app_issues::legacy_sql(&mut binder, name, value, &chrono_tz::UTC)
             .map_err(|_| Denial::ServerError)?;
         legacy_parts.push(fragment);
     }

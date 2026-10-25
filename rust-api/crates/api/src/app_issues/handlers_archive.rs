@@ -488,7 +488,9 @@ fn archive_filtered_set(
         .map_err(|_| Denial::ServerError)?;
     let mut legacy_sql_text = String::new();
     for (name, value) in legacy.predicates() {
-        let fragment = legacy_sql(&mut binder, name, value)?;
+        // The archive view shares the issue viewset's `TimezoneMixin`:
+        // `__date` terms truncate in the actor zone.
+        let fragment = legacy_sql(&mut binder, name, value, &gate.timezone)?;
         if legacy_sql_text.is_empty() {
             legacy_sql_text = fragment;
         } else {
