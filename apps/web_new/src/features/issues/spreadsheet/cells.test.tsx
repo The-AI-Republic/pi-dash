@@ -579,6 +579,25 @@ describe("SheetPropertyCell", () => {
     named.unmount();
   });
 
+  it("names a set point on a sheet a member cannot edit (EST-022)", async () => {
+    stubClient();
+    const known = renderCell("estimate", context({ editable: false }), issue({ estimate_point: ESTIMATE }));
+    await vi.waitFor(() => expect(within(known.container).getByText("3")).toBeInTheDocument());
+    expect(within(known.container).queryByText(ESTIMATE)).not.toBeInTheDocument();
+    known.unmount();
+    const unknown = renderCell("estimate", context({ editable: false }), issue({ estimate_point: "no-such-option" }));
+    expect(within(unknown.container).getByText("no-such-option")).toBeInTheDocument();
+    unknown.unmount();
+  });
+
+  it("names a set point on an editable sheet before its picker opens (EST-022)", async () => {
+    stubClient();
+    const editable = renderCell("estimate", context(), issue({ estimate_point: ESTIMATE }));
+    await vi.waitFor(() => expect(within(editable.container).getByRole("button")).toHaveTextContent("3"));
+    expect(within(editable.container).getByRole("button")).not.toHaveTextContent("None");
+    editable.unmount();
+  });
+
   it("falls back to the stored estimate when no option matches", async () => {
     stubClient();
     const frozen = context({ isRowReadOnly: () => true });
@@ -695,10 +714,13 @@ describe("SheetPropertyCell", () => {
     const due = renderCell("due_date", context({ editable: false }), issue({ target_date: "2026-10-20" }));
     expect(screen.getByText("Oct 20, 2026")).toBeInTheDocument();
     due.unmount();
-    const estimate = renderCell("estimate", context({ editable: false }), issue({ estimate_point: 3 }));
-    expect(screen.getByText("3")).toBeInTheDocument();
+    const estimate = renderCell("estimate", context({ editable: false }), issue({ estimate_point: ESTIMATE }));
+    await vi.waitFor(() => expect(within(estimate.container).getByText("3")).toBeInTheDocument());
     estimate.unmount();
-    const editableEstimate = renderCell("estimate", context(), issue({ estimate_point: 3 }));
+    const empty = renderCell("estimate", context({ editable: false }), issue({ estimate_point: null }));
+    expect(empty.container.querySelector("td")?.textContent).toBe("");
+    empty.unmount();
+    const editableEstimate = renderCell("estimate", context(), issue({ estimate_point: ESTIMATE }));
     fireEvent.click(within(editableEstimate.container).getByRole("button"));
     await screen.findByRole("option", { name: "3" });
     editableEstimate.unmount();
