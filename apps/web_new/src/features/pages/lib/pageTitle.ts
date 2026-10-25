@@ -35,6 +35,14 @@ export function pasteTitleText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * The text a paste event carries for the title: the plain-text flavor,
+ * with a paste that has none reading as blank and so refused.
+ */
+export function pastedTitleOf(text: string | undefined): string {
+  return pasteTitleText(text ?? "");
+}
+
 /** Characters a title save would carry: the clipped, trimmed text. */
 export function titleLength(text: string): number {
   return clipTitle(text).length;

@@ -18,7 +18,7 @@ import {
   PAGE_TITLE_MAX_LENGTH,
   PAGE_TITLE_PLACEHOLDER,
   clipTitle,
-  pasteTitleText,
+  pastedTitleOf,
   titleIsEmpty,
   titleRoom,
 } from "../lib/pageTitle.js";
@@ -136,10 +136,10 @@ function TitleShell({
           pageId={pageId}
           value={draft}
           editable={editable}
-          onDraftChange={editable ? schedule : () => undefined}
-          onCommit={editable ? commit : () => undefined}
-          {...(editable ? { onFocusChange: setFocused } : {})}
-          onJumpToBody={editable ? () => jumpRef.current?.() : () => undefined}
+          onDraftChange={editable ? schedule : undefined}
+          onCommit={editable ? commit : undefined}
+          onFocusChange={editable ? setFocused : undefined}
+          onJumpToBody={editable ? () => jumpRef.current?.() : undefined}
         />
       </React.Suspense>
       {editable && focused ? (
@@ -185,13 +185,14 @@ export interface TitleFieldProps {
   pageId: string;
   value: string;
   editable: boolean;
-  /** Every accepted edit, already inside the cap. */
-  onDraftChange: (next: string) => void;
-  /** Enter (or blur) asks for an immediate save. */
-  onCommit: (next: string) => void;
+  /** Every accepted edit, already inside the cap; read-only has none. */
+  onDraftChange?: ((next: string) => void) | undefined;
+  /** Enter (or blur) asks for an immediate save; read-only has none. */
+  onCommit?: ((next: string) => void) | undefined;
   /** Only editable fields report focus: a read-only title has no count. */
   onFocusChange?: ((focused: boolean) => void) | undefined;
-  onJumpToBody: () => void;
+  /** Editable fields only: a read-only title never hands the caret on. */
+  onJumpToBody?: (() => void) | undefined;
 }
 
 /** The heading node the title's editor holds: one level-one heading. */
@@ -220,12 +221,13 @@ type TitlePackages = {
   extensions: import("@tiptap/core").AnyExtension[];
 };
 
-let titlePackages: Promise<TitlePackages> | null = null;
-
-/** The lazy title chunk: Tiptap, the single-heading set, the cap filter. */
+/**
+ * The title chunk: Tiptap, the single-heading document, the placeholder
+ * and the shape guard. React.lazy caches this factory's result, so the
+ * chunk is loaded and its extensions built exactly once per session.
+ */
 async function loadTitlePackages(): Promise<TitlePackages> {
-  if (titlePackages !== null) return titlePackages;
-  titlePackages = (async () => {
+  return (async () => {
     const [
       { EditorContent, useEditor },
       { default: StarterKit },
@@ -239,6 +241,7 @@ async function loadTitlePackages(): Promise<TitlePackages> {
       import("@tiptap/pm/state"),
       import("@tiptap/pm/view"),
     ]);
+    type NodeType = import("@tiptap/pm/model").NodeType;
     // One heading, nothing else: the rest of the description kit stays
     // out of the title's chunk's document schema.
     const kitOptions = {
@@ -272,10 +275,10 @@ async function loadTitlePackages(): Promise<TitlePackages> {
             props: {
               decorations(state) {
                 if (!titleIsEmpty(titleTextBetween(state.doc))) return null;
-                const first = state.doc.firstChild;
-                if (first === null) return null;
+                // The title document is one heading, so the whole content
+                // is the node the placeholder belongs to.
                 return DecorationSet.create(state.doc, [
-                  Decoration.node(0, first.nodeSize, {
+                  Decoration.node(0, state.doc.content.size, {
                     "data-placeholder": PAGE_TITLE_PLACEHOLDER,
                     "data-empty": "true",
                     class: TITLE_EMPTY_HEADING_CLASS,
@@ -304,8 +307,7 @@ async function loadTitlePackages(): Promise<TitlePackages> {
               const singleHeading = state.doc.childCount === 1 && state.doc.firstChild?.type.name === "heading";
               const atCap = titleTextBetween(state.doc).length <= PAGE_TITLE_MAX_LENGTH;
               if (singleHeading && atCap) return null;
-              const headingType = state.schema.nodes.heading;
-              if (headingType === undefined) return null;
+              const headingType = state.schema.nodes.heading as NodeType;
               const folded = titleShapeOf(state.doc, state.selection.from);
               const text = titleTextOf(folded.text);
               const heading = headingType.create({ level: 1 }, text === "" ? undefined : state.schema.text(text));
@@ -326,7 +328,6 @@ async function loadTitlePackages(): Promise<TitlePackages> {
     ] as unknown as import("@tiptap/core").AnyExtension[];
     return { EditorContent, useEditor, extensions };
   })();
-  return titlePackages;
 }
 
 /** Attributes the ProseMirror surface carries for the title. */
@@ -401,12 +402,12 @@ const LazyTitleField = /* #__PURE__ */ React.lazy(async () => {
             // Enter never adds a line to a one-line title; it commits and
             // hands the caret to the body's first block (PAGE-026).
             event.preventDefault();
-            commitRef.current(valueRef.current);
-            jumpRef.current();
+            commitRef.current?.(valueRef.current);
+            jumpRef.current?.();
             return true;
           },
           handlePaste: (view, event) => {
-            const text = pasteTitleText(event.clipboardData?.getData("text/plain") ?? "");
+            const text = pastedTitleOf(event.clipboardData?.getData("text/plain"));
             // Both a blank paste and one with no room left are refused; a
             // paste with room inserts only the plain text that fits.
             event.preventDefault();
@@ -419,7 +420,7 @@ const LazyTitleField = /* #__PURE__ */ React.lazy(async () => {
         onUpdate: ({ editor: current }) => {
           const text = titleTextBetween(current.state.doc);
           setEmpty(titleIsEmpty(text));
-          draftRef.current(text);
+          draftRef.current?.(text);
         },
         onTransaction: ({ editor: current }) => {
           setEmpty(titleIsEmpty(titleTextBetween(current.state.doc)));
@@ -427,7 +428,7 @@ const LazyTitleField = /* #__PURE__ */ React.lazy(async () => {
         onFocus: () => focusRef.current?.(true),
         onBlur: () => {
           focusRef.current?.(false);
-          commitRef.current(valueRef.current);
+          commitRef.current?.(valueRef.current);
         },
       },
       [extensions]

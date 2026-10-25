@@ -124,6 +124,14 @@ export function PageDetailScreen({
   const syncStatus = usePageSyncStatus(pageId);
   const rename = usePageRename(workspaceSlug, projectId, pageId);
   const mark = usePageMark(workspaceSlug, projectId, pageId);
+  // One save path for the header's mark, on editable and read-only pages
+  // alike: a read-only header simply has no picker that could reach it.
+  const saveMark = React.useCallback(
+    (draft: Record<string, unknown>) => {
+      mark.mutate(draft);
+    },
+    [mark]
+  );
 
   // The pane reads the canvas, so headings, counts and assets follow
   // typing; before the canvas paints, the stored body stands in (PAGE-046).

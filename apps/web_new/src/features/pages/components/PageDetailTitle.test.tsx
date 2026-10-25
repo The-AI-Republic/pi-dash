@@ -24,7 +24,7 @@ import {
   titleTextOf,
   TITLE_EDITOR_ATTRIBUTES,
 } from "./PageDetailTitle.js";
-import { clipTitle, pasteTitleText, titleLength, titleOverflow, titleRoom } from "../lib/pageTitle.js";
+import { clipTitle, pastedTitleOf, pasteTitleText, titleLength, titleOverflow, titleRoom } from "../lib/pageTitle.js";
 
 const LOAD_TIMEOUT = { timeout: 10_000 };
 const TITLE_TEST_TIMEOUT = 30_000;
@@ -122,6 +122,8 @@ describe("title rules", () => {
 
   it("collapses whitespace in a pasted title so it stays one line", () => {
     expect(pasteTitleText("one\n\ntwo\tthree  ")).toBe("one two three");
+    expect(pastedTitleOf("one\ntwo")).toBe("one two");
+    expect(pastedTitleOf(undefined)).toBe("");
   });
 });
 
@@ -345,6 +347,36 @@ describe(
       expect(headingOf().textContent).toBe("Before!");
       mounted.rerender({ name: "Remote rename" });
       await vi.waitFor(() => expect(headingOf().textContent).toBe("Before!"));
+    });
+
+    it("sends nothing when Enter commits an unchanged title", async () => {
+      const mounted = await mount({ name: "Same" });
+      const user = userEvent.setup();
+      surfaceOf().focus();
+      caretToEnd();
+      await user.keyboard("{Enter}");
+      expect(mounted.onRename).not.toHaveBeenCalled();
+      expect(mounted.onJumpToBody).toHaveBeenCalled();
+    });
+
+    it("refuses a paste that carries no plain text", async () => {
+      const mounted = await mount({ name: "Old" });
+      surfaceOf().focus();
+      const before = mounted.onDraftChange.mock.calls.length;
+      // A paste event with no clipboard data at all (the browser handed
+      // over no text/plain flavor) is refused as a blank paste.
+      surfaceOf().dispatchEvent(new Event("paste", { bubbles: true, cancelable: true }));
+      await vi.waitFor(() => expect(headingOf().textContent).toBe("Old"));
+      expect(mounted.onDraftChange.mock.calls).toHaveLength(before);
+    });
+
+    it("shares one editor chunk across titles", async () => {
+      await mount({ name: "First" });
+      render(<PageDetailTitle pageId="page-2" name="Second" editable onRename={vi.fn()} />);
+      await vi.waitFor(
+        () => expect(document.querySelectorAll(".page-title-editor .ProseMirror")).toHaveLength(2),
+        LOAD_TIMEOUT
+      );
     });
 
     it("works without a rename handler", async () => {
