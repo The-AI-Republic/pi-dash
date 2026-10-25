@@ -11711,17 +11711,12 @@ export class WebNewDriver implements ParityDriver {
     const total = await radios.count();
     const options: { label: string; checked: boolean }[] = [];
     for (let i = 0; i < total; i++) {
-      // Native void inputs carry no text; the wrapping label holds the
-      // mode name (the oracle's radios are non-void, so its driver reads
-      // innerText directly).
+      // The web_new control is a button with role=radio, so its accessible
+      // name is the aria-label. The oracle's native inputs carry the mode
+      // name in innerText. Read the accessible name first, then fall back
+      // to the text for either shape.
       options.push({
-        label: (
-          (await radios
-            .nth(i)
-            .locator("xpath=ancestor::label[1]")
-            .innerText()
-            .catch(() => "")) ?? ""
-        ).trim(),
+        label: (await radios.nth(i).getAttribute("aria-label")) ?? (await radios.nth(i).innerText()).trim(),
         checked: await radios
           .nth(i)
           .isChecked()

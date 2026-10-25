@@ -14,7 +14,9 @@ import {
   serverAddProjectMembers,
   serverCleanupWorkspaceMember,
   serverCompleteOnboarding,
+  serverProjectMemberByEmail,
   serverProvisionWorkspaceMember,
+  serverRemoveProjectMember,
   serverWorkspaceMembers,
   signInSession,
 } from "../helpers/api";
@@ -52,6 +54,18 @@ async function membershipIdFor(seed: ParitySeedFacts, ownerSession: string, user
   const row = rows.find((entry) => entry.userId === userId);
   if (!row) throw new Error("[parity] provisioned member missing from workspace list.");
   return row.membershipId;
+}
+
+/**
+ * Drop the scenario's project membership before the workspace one.
+ * Removing only the workspace membership leaves the project row behind,
+ * and the next members-table scenario sees a stranger in the roster.
+ */
+async function removeProjectMember(seed: ParitySeedFacts, ownerSession: string, email: string): Promise<void> {
+  const member = await serverProjectMemberByEmail(seed.workspaceSlug, seed.projectId, email, ownerSession);
+  if (member !== null) {
+    await serverRemoveProjectMember(seed.workspaceSlug, seed.projectId, member.membershipId, ownerSession);
+  }
 }
 
 test(
@@ -157,6 +171,7 @@ test(
       expect(await driver.aiWorkersRuleDisabled()).toBe(true);
       expect(await driver.aiWorkersSaveVisible()).toBe(false);
     } finally {
+      await removeProjectMember(seed, session, member.email);
       await serverCleanupWorkspaceMember(
         seed.workspaceSlug,
         await membershipIdFor(seed, session, member.userId),
@@ -190,6 +205,7 @@ test(
         expect(await driver.isProjectRestrictionVisible()).toBe(true);
         expect(await driver.restrictionJoinLabel()).toBe("Join project");
       } finally {
+        await removeProjectMember(seed, session, outsider.email);
         await serverCleanupWorkspaceMember(
           seed.workspaceSlug,
           await membershipIdFor(seed, session, outsider.userId),
