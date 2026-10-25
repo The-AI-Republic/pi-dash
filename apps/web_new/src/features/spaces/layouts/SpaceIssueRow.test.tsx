@@ -172,14 +172,14 @@ describe("SpaceIssueRow read-only and open behavior (SPC-031/032)", () => {
       />
     );
     expect(screen.getByTestId("space-board-issue")).toHaveAttribute("data-selected", "true");
-    expect(screen.getByTestId("space-board-issue").className).toContain("border-(--accent-strong)");
+    expect(screen.getByTestId("space-board-issue").className).toContain("border-(--accent)");
     expect(screen.getByRole("link")).toHaveAttribute("aria-current", "true");
   });
 
   it("highlights a selected board card through the same exact-match flag", () => {
     renderCard({ card: true, selected: true });
     expect(screen.getByTestId("space-board-card")).toHaveAttribute("data-selected", "true");
-    expect(screen.getByTestId("space-board-card").className).toContain("border-(--accent-strong)");
+    expect(screen.getByTestId("space-board-card").className).toContain("border-(--accent)");
     expect(screen.getByRole("link", { name: /A very long public work item title/ })).toHaveAttribute(
       "aria-current",
       "true"
