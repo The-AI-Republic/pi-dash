@@ -76,6 +76,10 @@ function GeneralTabBody({
   const [cadenceDirty, setCadenceDirty] = React.useState(false);
   // True while submit waits on a fresh availability answer.
   const [checkingIdentifier, setCheckingIdentifier] = React.useState(false);
+  // True from submit until the write settles, including the availability
+  // check that runs before it: the control must never read "at rest" while
+  // a submit is still in flight.
+  const [submitting, setSubmitting] = React.useState(false);
   const [emblemOpen, setEmblemOpen] = React.useState(false);
   const [uploadOpen, setUploadOpen] = React.useState(false);
   // A refused emblem upload blocks every later save until a new upload
@@ -119,7 +123,7 @@ function GeneralTabBody({
 
   const submit = (event: React.FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    if (!canEdit || save.isPending || checkingIdentifier) return;
+    if (!canEdit || save.isPending || submitting) return;
     if (emblemUploadFailed) {
       notifyError(EMBLEM_UPLOAD_FAILED_TITLE, EMBLEM_UPLOAD_FAILED_MESSAGE);
       return;
@@ -138,38 +142,44 @@ function GeneralTabBody({
    */
   const confirmThenSave = async (fieldErrors: GeneralFieldErrors): Promise<void> => {
     const identifier = values.identifier.trim();
-    if (identifierChanged && identifier !== "") {
-      setCheckingIdentifier(true);
-      let check: { exists: number };
-      try {
-        check = await queryClient.fetchQuery(identifierQueryOptions(getAppClient(), workspaceSlug, identifier));
-      } catch {
-        setCheckingIdentifier(false);
-        setErrors({ ...fieldErrors, identifier: IDENTIFIER_CHECK_FAILED_MESSAGE });
-        return;
-      }
-      setCheckingIdentifier(false);
-      const unavailable = identifierUnavailable(check);
-      if (unavailable !== null) {
-        setErrors({ ...fieldErrors, identifier: unavailable });
-        return;
-      }
-    }
-    await save.mutateAsync(buildGeneralPayload({ values, cadenceDirty })).then(
-      (saved) => {
-        lastStored.current = saved;
-        setValues((current) => reseatGeneralForm(saved, current));
-        if (cadenceDirty) setCadenceDirty(true);
-      },
-      (error: unknown) => {
-        const conflict = generalConflictError(error);
-        if (conflict !== null) {
-          setErrors((current) => ({ ...current, [conflict.field]: conflict.message }));
+    setSubmitting(true);
+    try {
+      if (identifierChanged && identifier !== "") {
+        setCheckingIdentifier(true);
+        let check: { exists: number };
+        try {
+          check = await queryClient.fetchQuery(identifierQueryOptions(getAppClient(), workspaceSlug, identifier));
+        } catch {
+          setCheckingIdentifier(false);
+          setErrors({ ...fieldErrors, identifier: IDENTIFIER_CHECK_FAILED_MESSAGE });
           return;
         }
-        notifyError(PROJECT_SAVE_FAILED_TITLE, saveFailureMessage(error));
+        setCheckingIdentifier(false);
+        const unavailable = identifierUnavailable(check);
+        if (unavailable !== null) {
+          setErrors({ ...fieldErrors, identifier: unavailable });
+          return;
+        }
       }
-    );
+      await save.mutateAsync(buildGeneralPayload({ values, cadenceDirty })).then(
+        (saved) => {
+          lastStored.current = saved;
+          setValues((current) => reseatGeneralForm(saved, current));
+          if (cadenceDirty) setCadenceDirty(true);
+        },
+        (error: unknown) => {
+          const conflict = generalConflictError(error);
+          if (conflict !== null) {
+            setErrors((current) => ({ ...current, [conflict.field]: conflict.message }));
+            return;
+          }
+          notifyError(PROJECT_SAVE_FAILED_TITLE, saveFailureMessage(error));
+        }
+      );
+    } finally {
+      setCheckingIdentifier(false);
+      setSubmitting(false);
+    }
   };
 
   const timezones = useTimezones();
@@ -234,8 +244,8 @@ function GeneralTabBody({
       ) : null}
       {canEdit ? (
         <div className="flex justify-end">
-          <Button type="submit" loading={save.isPending}>
-            {save.isPending ? SAVING_LABEL : SAVE_LABEL}
+          <Button type="submit" loading={submitting || save.isPending}>
+            {submitting || save.isPending ? SAVING_LABEL : SAVE_LABEL}
           </Button>
         </div>
       ) : null}
