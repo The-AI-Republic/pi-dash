@@ -145,18 +145,34 @@ store). `src/core/` holds `api` (the singleton HTTP client), `query`,
   fails only with `Test timed out` under load is presumed a budget/queueing
   failure and must be re-run, not patched by skipping tests.
 - Scheduled full suite (`checks/full-suite.mjs`): the scheduler has 45 minutes
-  for web_new. That suite is ~19 000 tests and needs roughly 72 CPU-minutes,
-  so the result depends on how many cores the shared host actually grants it.
-  Measured on 2026-10-24, the shared 4-vCPU host was running other worktrees
-  at load 15-18 and granted it ~1.2 cores. The runner therefore oversubscribes
-  vitest's fork pool when the host has memory for it: 16 workers on a 4-vCPU
-  host with 30 GiB completed 1 672 files and 19 072 tests in 38 min at load
-  ~29, while the same pool on an 8-core / 8 GiB host spent 2.5 GiB and turned
-  green files into `Test timed out`. The pool is sized at 1.5 GiB per worker
-  and is never raised above vitest's CPU-count default when memory cannot
-  support it. If the scheduler starts timing out again, check the host's load
-  and free memory before blaming a test file; the default reporter's tail
-  names the file that was still in flight when the run was stopped.
+  for the whole checker, web_new included. That suite is ~19 000 tests and
+  needs roughly 72 CPU-minutes, so the result depends on how many cores the
+  shared host actually grants it. Measured on 2026-10-24, the shared 4-vCPU
+  host was running other worktrees at load 15-18 and granted it ~1.2 cores.
+  The runner therefore oversubscribes vitest's fork pool when the host has
+  memory for it: 16 workers on a 4-vCPU host with 30 GiB completed 1 672 files
+  and 19 072 tests in 38 min at load ~29, while the same pool on an 8-core /
+  8 GiB host spent 2.5 GiB and turned green files into `Test timed out`. The
+  pool is sized at 1.5 GiB per worker and is never raised above vitest's
+  CPU-count default when memory cannot support it.
+- The runner works in batches and keeps evidence as it goes. web_new runs 120
+  files per batch (200 for kit and api-client); a fast batch grows, a slow one
+  halves. Every batch starts a fresh fork pool, so worker heaps do not grow
+  across the whole suite — on the 8-core / 8 GiB host 240 files took 233 s as
+  one run and 190 s as two 120-file runs. Each batch also gets its own
+  deadline (12 min for the first, then 3x the previous batch, clipped to 3-20
+  min) and every suite shares a 42-minute budget that starts before `pnpm
+install`, so the summary is written before the scheduler's 45-minute stop.
+  A custom reporter (`checks/full-suite-progress.mjs`) appends one line per
+  finished file to a JSONL file as the batch runs; the stock JSON report is
+  only written at the end, which is why the timeout at NEWFRONT-908's
+  `226b49807` produced `files=0` and no file names. A batch that stalls keeps
+  the files it finished, and the rest are split in halves (three rounds at
+  most) so the file that never settles is named `(file did not finish)`
+  instead of the whole run being a bare timeout. A suite the budget stopped
+  reports the files it never reached under `crash`. The summary file is also
+  rewritten (with `complete: false`, `green: false`) before each suite and
+  after the last one, so a run stopped early still says how far it got.
 - Contract (`PIDASH_CONTRACT_BASE_URL=…`): api-client suites against a
   scratch Django seeded with `packages/api-client/contract/seed-contracts.py`.
 - E2E smoke (`pnpm --filter web_new test:e2e`, env-gated): Playwright,
