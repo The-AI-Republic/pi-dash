@@ -318,11 +318,19 @@ describe("PageDetailScreen title and body", () => {
     harness.page = record({ name: "" });
     harness.pages = [makePageRow({ id: harness.pageId, name: "" }), makePageRow({ id: OTHER, name: "Second page" })];
     renderScreen();
-    const field = await screen.findByRole("textbox", { name: "Page title" });
-    expect(field.closest(`[id="${harness.pageId}-title"]`)).not.toBeNull();
-    // The empty heading carries the placeholder, not the editing surface:
-    // the title text node is the h1 ProseMirror renders.
-    expect(field.querySelector("h1")).toHaveAttribute("data-placeholder", "Untitled");
+    // The title mounts behind a Suspense boundary whose fallback heading
+    // answers to the same role and name as the lazy editor: under load
+    // the found node can be swapped out and detached before the next line
+    // runs, so both reads below re-query the live node inside one retry
+    // instead of asserting on a stale reference (NEWFRONT-909).
+    await screen.findByRole("textbox", { name: "Page title" });
+    await waitFor(() => {
+      const live = screen.getByRole("textbox", { name: "Page title" });
+      expect(live.closest(`[id="${harness.pageId}-title"]`)).not.toBeNull();
+      // The empty heading carries the placeholder, not the editing surface:
+      // the title text node is the h1 ProseMirror renders.
+      expect(live.querySelector("h1")).toHaveAttribute("data-placeholder", "Untitled");
+    });
     // The switcher is fed by the preloaded collection, which may still be
     // in flight on the first paint.
     await waitFor(() =>
