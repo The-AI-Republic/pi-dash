@@ -462,6 +462,66 @@ def test_user_issues_state_id_in_filter(user_api, space, world):
     assert {row["id"] for row in res.json()["results"]} == {issue_a, issue_b}
 
 
+def test_user_issues_assignees_filter_keeps_duplicate_rows(user_api, space, world):
+    # PIDASHCONV-1372: legacy ?assignees=A,B fans out over the m2m join and
+    # Django counts/returns every copy (no .distinct() on this endpoint), so
+    # an issue assigned to both A and B appears twice with total_count == 2.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        issue_id = seed.issue(ws_id, project_id, name="Dual assigned")
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id = %s",
+                (uid, issue_id),
+            )
+        other_id, bot_id = world["other"]["id"], world["bot"]["id"]
+        seed.issue_assignee(ws_id, project_id, issue_id, other_id)
+        seed.issue_assignee(ws_id, project_id, issue_id, bot_id)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(url, params={"assignees": f"{other_id},{bot_id}"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 2
+    assert body["count"] == 2
+    assert body["total_results"] == 2
+    assert [row["id"] for row in body["results"]] == [issue_id, issue_id]
+
+
+def test_user_issues_labels_filter_keeps_duplicate_rows(user_api, space, world):
+    # PIDASHCONV-1372: same fan-out for ?labels=L1,L2 on an issue carrying
+    # both labels.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        issue_id = seed.issue(ws_id, project_id, name="Dual labeled")
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id = %s",
+                (uid, issue_id),
+            )
+        label_a = seed.label(ws_id, project_id, name="Dual A")
+        label_b = seed.label(ws_id, project_id, name="Dual B")
+        seed.issue_label(ws_id, project_id, issue_id, label_a)
+        seed.issue_label(ws_id, project_id, issue_id, label_b)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(url, params={"labels": f"{label_a},{label_b}"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 2
+    assert [row["id"] for row in body["results"]] == [issue_id, issue_id]
+
+
 def test_user_issues_non_member_denied(other_api, space, world):
     res = other_api.get(f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/")
     assert res.status_code == 403
