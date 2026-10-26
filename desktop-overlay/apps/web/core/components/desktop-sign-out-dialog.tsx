@@ -13,6 +13,9 @@ import { registerSignOutPrompt } from "@/services/agent-runtime";
 /**
  * The desktop's sign-out confirmation.
  *
+ * Signing out signs this computer's `pidash` CLI out as well, which stops the
+ * runs its daemon has in progress; when there are any, the dialog says so.
+ *
  * Signing out removes credentials and, by default, nothing else: an account's
  * chats with the built-in agent stay on this computer, hidden until that
  * account signs in again. The checkbox is the one place a user can ask for
@@ -23,6 +26,7 @@ export function DesktopSignOutDialog() {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
   const [deleteChatHistory, setDeleteChatHistory] = useState(false);
+  const [activeRuns, setActiveRuns] = useState(0);
   const pending = useRef<((choice: SignOutChoice | null) => void) | null>(null);
 
   const settle = (choice: SignOutChoice | null) => {
@@ -32,12 +36,13 @@ export function DesktopSignOutDialog() {
   };
 
   useEffect(() => {
-    registerSignOutPrompt((resolve) => {
+    registerSignOutPrompt((resolve, context) => {
       // A second request while one is open replaces it; the first is cancelled
       // rather than left waiting forever.
       pending.current?.(null);
       pending.current = resolve;
       setDeleteChatHistory(false);
+      setActiveRuns(context.activeRuns);
       setIsOpen(true);
     });
     return () => {
@@ -54,6 +59,13 @@ export function DesktopSignOutDialog() {
       title={t("Are you sure you want to sign out?")}
       content={
         <>
+          {activeRuns > 0 && (
+            <p role="alert" className="mt-1 text-danger-primary">
+              {activeRuns === 1
+                ? t("1 run in progress on this computer will be stopped.")
+                : t("{count} runs in progress on this computer will be stopped.", { count: activeRuns })}
+            </p>
+          )}
           <label className="mt-2 flex cursor-pointer items-center gap-2 text-primary">
             <Checkbox checked={deleteChatHistory} onChange={(event) => setDeleteChatHistory(event.target.checked)} />
             {t("Delete chat history")}

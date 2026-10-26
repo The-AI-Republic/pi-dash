@@ -14,6 +14,10 @@ const mocks = vi.hoisted(() => ({
   params: {} as Record<string, string>,
   projectIds: [] as string[],
   getProject: vi.fn(),
+  ensure: vi.fn(),
+  sync: vi.fn(),
+  signOut: vi.fn(),
+  followCli: vi.fn(),
 }));
 
 vi.mock("mobx-react", () => ({ observer: (component: unknown) => component }));
@@ -27,7 +31,7 @@ vi.mock("react-router", () => ({
     { id: "leaf", params: mocks.params },
   ],
 }));
-vi.mock("@/hooks/store/user", () => ({ useUser: () => ({ data: { id: "user" } }) }));
+vi.mock("@/hooks/store/user", () => ({ useUser: () => ({ data: { id: "user" }, signOut: mocks.signOut }) }));
 vi.mock("@/hooks/store/use-project", () => ({
   useProject: () => ({
     fetchProjectDetails: mocks.fetchProject,
@@ -37,11 +41,17 @@ vi.mock("@/hooks/store/use-project", () => ({
 }));
 // The sign-out dialog has its own test; here it only needs to mount.
 vi.mock("@/components/desktop-sign-out-dialog", () => ({ DesktopSignOutDialog: () => null }));
+vi.mock("@/components/desktop-daemon-notice", () => ({ DesktopDaemonNotice: () => null }));
 vi.mock("@/services/agent-runtime", () => ({
   connectAgentProject: mocks.connect,
   refreshAgentRuntime: mocks.refresh,
   resumeAgentRuntime: vi.fn(),
+  signOutFollowingCli: mocks.followCli,
   isDesktop: () => true,
+}));
+vi.mock("@/services/desktop-account-sync", () => ({
+  ensureSharedDaemon: mocks.ensure,
+  syncAccounts: mocks.sync,
 }));
 
 import { AgentRuntime } from "../../core/components/agent-runtime";
@@ -53,6 +63,10 @@ beforeEach(() => {
   mocks.projectIds = [];
   mocks.connect.mockResolvedValue(undefined);
   mocks.refresh.mockResolvedValue(undefined);
+  mocks.ensure.mockResolvedValue({ mode: "service", cli_outdated: false, message: null });
+  mocks.sync.mockResolvedValue("none");
+  mocks.signOut.mockResolvedValue(undefined);
+  mocks.followCli.mockImplementation((signOut: () => Promise<void>) => signOut());
 });
 
 afterEach(() => {
@@ -200,5 +214,58 @@ describe("desktop project availability refresh", () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(mocks.fetchProject).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("desktop account sync", () => {
+  it("starts the shared daemon, then syncs on launch, on focus and every 15 seconds", async () => {
+    mocks.params = {};
+    await act(async () => {
+      render(<AgentRuntime />);
+    });
+    expect(mocks.ensure).toHaveBeenCalledOnce();
+    expect(mocks.sync).toHaveBeenCalledOnce();
+    expect(mocks.ensure.mock.invocationCallOrder[0]).toBeLessThan(mocks.sync.mock.invocationCallOrder[0]);
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(mocks.sync).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(mocks.sync).toHaveBeenCalledTimes(3);
+    cleanup();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(mocks.sync).toHaveBeenCalledTimes(3);
+  });
+
+  it("still syncs when the daemon could not be started", async () => {
+    mocks.params = {};
+    mocks.ensure.mockRejectedValue(new Error("no CLI"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await act(async () => {
+      render(<AgentRuntime />);
+    });
+    expect(mocks.sync).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it("follows the CLI by signing the app out without asking or signing the CLI out", async () => {
+    mocks.params = { workspaceSlug: "workspace" };
+    await act(async () => {
+      render(<AgentRuntime />);
+    });
+    const options = mocks.sync.mock.calls[0][0] as {
+      desktopUserId: string;
+      workspaceSlug: string;
+      signOutDesktop: () => Promise<void>;
+    };
+    expect(options.desktopUserId).toBe("user");
+    expect(options.workspaceSlug).toBe("workspace");
+    await options.signOutDesktop();
+    expect(mocks.followCli).toHaveBeenCalledOnce();
+    expect(mocks.signOut).toHaveBeenCalledWith({ skipConfirmation: true });
   });
 });
