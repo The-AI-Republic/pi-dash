@@ -113,6 +113,11 @@ function createMentionNode(
  */
 function createStoredImageNode(Image: TiptapImage) {
   return Image.extend({
+    // The live server's name for the stored picture (NEWFRONT-929): only
+    // this node name comes back from Yjs sync as image-component. The
+    // element behaviour is unchanged — both spellings still parse, and
+    // the stored form still renders only when an asset id is stored.
+    name: "imageComponent",
     parseHTML() {
       return [{ tag: "img" }, { tag: "image-component" }];
     },

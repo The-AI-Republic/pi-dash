@@ -257,16 +257,23 @@ export function insertPageTable(editor: PageEditorRef): void {
   editor.chain().focus().insertPageTable({ rows: 3, cols: 3, withHeaderRow: false }).run();
 }
 
-/** The mark attribute one colour kind writes (PAGE-036). */
-const COLOR_ATTRIBUTE = { text: "textColor", background: "backgroundColor" } as const;
-/** The mark name the letter/wash pair lives on. */
-export const PAGE_COLOR_MARK = "pageColor";
+/**
+ * The mark attribute one colour kind writes (PAGE-036). The mark
+ * attribute for letters is the live server's `color`; the adapter's own
+ * pair keeps the `textColor` name, so only this table maps the two.
+ */
+const COLOR_ATTRIBUTE = { text: "color", background: "backgroundColor" } as const;
+/** The mark name the letter/wash pair lives on: the live server's own (NEWFRONT-929). */
+export const PAGE_COLOR_MARK = "customColor";
 
 /** The pair the current range carries, read from the mark's attributes. */
-function currentPageColor(editor: PageEditorRef): { textColor: string | null; backgroundColor: string | null } {
+function currentPageColor(editor: PageEditorRef): {
+  color: string | null;
+  backgroundColor: string | null;
+} {
   const attributes = editor.getAttributes?.(PAGE_COLOR_MARK) ?? {};
   return {
-    textColor: typeof attributes.textColor === "string" ? attributes.textColor : null,
+    color: typeof attributes.color === "string" ? attributes.color : null,
     backgroundColor: typeof attributes.backgroundColor === "string" ? attributes.backgroundColor : null,
   };
 }
@@ -290,7 +297,7 @@ export function clearPageColor(editor: PageEditorRef, kind: "text" | "background
   const chain = editor.chain().focus();
   // Clearing the last remaining kind drops the mark itself, so the text
   // returns to plain styling rather than an empty span.
-  if (next.textColor === null && next.backgroundColor === null) {
+  if (next.color === null && next.backgroundColor === null) {
     chain.unsetMark(PAGE_COLOR_MARK).run();
     return;
   }
@@ -309,7 +316,7 @@ export function runInsertImage(editor: PageEditorRef, src: string, storedSrc: st
     .chain()
     .focus()
     .insertContent({
-      type: "image",
+      type: "imageComponent",
       attrs: {
         src,
         "data-stored-src": storedSrc,
@@ -365,9 +372,11 @@ export function editorFormattingState(editor: PageEditorRef): PageFormattingStat
  */
 function pageColorAttrs(editor: PageEditorRef): { textColor?: unknown; backgroundColor?: unknown } | null {
   if (editor.getAttributes === undefined) return null;
-  const attrs = editor.getAttributes("pageColor") as { textColor?: unknown; backgroundColor?: unknown };
-  if (attrs.textColor === undefined && attrs.backgroundColor === undefined) return null;
-  return attrs;
+  const attrs = editor.getAttributes(PAGE_COLOR_MARK) as { color?: unknown; backgroundColor?: unknown };
+  if (attrs.color === undefined && attrs.backgroundColor === undefined) return null;
+  // The formatting state names the letter kind `textColor`; the mark
+  // attribute is the server's `color`, mapped here at the boundary.
+  return { textColor: attrs.color, backgroundColor: attrs.backgroundColor };
 }
 
 /** True when the document holds no text at all (placeholder decision). */

@@ -92,7 +92,7 @@ describe("comment editor extensions", () => {
     const comment = (await loadCommentExtensions()) as unknown as AnyExtension[];
     expect(comment).toHaveLength(description.length + 2);
     const names = comment.map((extension) => extension.name).sort();
-    expect(names).toContain("image");
+    expect(names).toContain("imageComponent");
     expect(names).toContain("mention");
   });
 

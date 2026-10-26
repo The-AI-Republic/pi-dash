@@ -55,18 +55,20 @@ export const PAGE_TABLE_COLUMN_WIDTH = 150;
  * the other in place (PAGE-036). The adapter reads the current pair and
  * writes both attributes back, so neither write erases the other. The
  * data attributes are the stored form; the CSS paints them from the
- * palette tokens.
+ * palette tokens. The mark and attribute names are the live server's own
+ * (NEWFRONT-929): only those names survive the Yjs round trip the server
+ * serializes back to HTML.
  */
 function createPageColorMark(Mark: Core["Mark"], mergeAttributes: MergeAttributes) {
   return Mark.create({
-    name: "pageColor",
+    name: "customColor",
     addAttributes() {
       return {
-        textColor: {
+        color: {
           default: null,
           parseHTML: (element: HTMLElement) => element.getAttribute("data-text-color"),
           renderHTML: (attributes: Record<string, unknown>) => {
-            const value = attributes.textColor;
+            const value = attributes.color;
             return typeof value === "string" && value !== "" ? { "data-text-color": value } : {};
           },
         },
