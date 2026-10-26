@@ -93,6 +93,24 @@ function plainPaste(target: HTMLElement, text: string): void {
   target.dispatchEvent(event);
 }
 
+/** Put a collapsed caret after `needle`, where a "/" trigger belongs. */
+function caretAtEndOf(root: HTMLElement, needle: string): void {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const text = node.textContent ?? "";
+    if (!text.includes(needle)) continue;
+    const range = document.createRange();
+    range.setStart(node, text.indexOf(needle) + needle.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+    return;
+  }
+  throw new Error(`no text node holds ${needle}`);
+}
+
 afterEach(() => {
   resetPageBodyDrafts();
   resetPageBodyActions();
@@ -177,6 +195,23 @@ describe(
       await vi.waitFor(() =>
         expect(screen.getByRole("button", { name: "Bold" })).toHaveAttribute("aria-pressed", "true")
       );
+    });
+
+    it("keeps the transient surfaces out of the measured body container (PAGE-037/049)", async () => {
+      mount();
+      const editable = await body();
+      const user = userEvent.setup();
+      // Type a slash at the caret: the palette opens as a real user sees it.
+      editable.focus();
+      caretAtEndOf(editable, "Stored words");
+      await user.keyboard(" /he");
+      const palette = await screen.findByTestId("page-slash-palette", undefined, { timeout: 10_000 });
+      const container = editable.closest(".editor-container");
+      expect(container).not.toBeNull();
+      // The pane counts the blocks inside `.editor-container`, so a palette
+      // row rendered there would lift Characters/Paragraphs as you type.
+      expect(container?.contains(palette)).toBe(false);
+      expect(container?.contains(screen.getByTestId("page-body-interactions"))).toBe(false);
     });
 
     it("reopens a body typed earlier this session over the stored one", async () => {

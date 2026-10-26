@@ -32,6 +32,7 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     deleteBlock: vi.fn(),
     moveBlock: vi.fn(),
     blockAtPoint: vi.fn(() => null),
+    caretAnchor: vi.fn(() => null),
     setLink: vi.fn(),
     unsetLink: vi.fn(),
     html: vi.fn(() => ""),

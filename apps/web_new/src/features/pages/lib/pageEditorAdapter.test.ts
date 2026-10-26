@@ -16,6 +16,7 @@ import {
   duplicatePageBlock,
   movePageBlock,
   pageBlockAtPoint,
+  pageCaretAnchor,
   insertPageEmoji,
   insertPageEmbed,
   insertPageEntityReference,
@@ -582,12 +583,14 @@ describe("link and selection reads", () => {
           to: 5,
           $from: {
             parent: { type: { name: "paragraph" }, attrs: {}, textContent: "abcdef" },
-            textBetween: () => "bcd",
+            // ProseMirror's range text lives on the document, not the position.
+            doc: { textBetween: (from: number, to: number) => "abcdef".slice(from, to) },
           },
         },
       },
     };
-    expect(selectedPageText(ref)).toBe("bcd");
+    // Positions 2–5 of "abcdef" (1-based document offsets) are "cde".
+    expect(selectedPageText(ref)).toBe("cde");
   });
 
   it("falls back to the caret's block text when nothing is selected", () => {
@@ -612,9 +615,14 @@ describe("link and selection reads", () => {
       state: {
         selection: {
           $from: {
-            parent: { type: { name: "paragraph" }, attrs: {}, textContent: "ab/cd" },
+            parent: {
+              type: { name: "paragraph" },
+              attrs: {},
+              textContent: "ab/cd",
+              // The trigger text comes from the caret's own block node.
+              textBetween: (from: number, to: number) => "ab/cd".slice(from, to),
+            },
             parentOffset: 5,
-            textBetween: () => "ab/cd",
           },
         },
       },
@@ -670,16 +678,20 @@ function documentEditor(blocks: { type: string; text?: string }[]) {
 }
 
 describe("page block actions (PAGE-037)", () => {
-  it("resolves the hovered top-level block and its offset from the editor top", () => {
+  it("resolves the hovered top-level block and its viewport top and left", () => {
     const { ref } = documentEditor([
       { type: "paragraph", text: "first" },
       { type: "paragraph", text: "last" },
     ]);
+    const view = ref.view;
+    if (view === undefined) throw new Error("no view");
+    view.coordsAtPos = (position) => ({ top: position, left: position });
     // Blocks occupy 0–12 and 12–24; a point at 15 lands in the second.
     expect(pageBlockAtPoint(ref, 15, 300)).toEqual({
       from: 12,
       to: 24,
       top: 12,
+      left: 12,
       json: { type: "paragraph", content: [{ type: "text", text: "last" }] },
     });
   });
@@ -692,6 +704,16 @@ describe("page block actions (PAGE-037)", () => {
     expect(pageBlockAtPoint(ref, 0, 0)).toBeNull();
     const { ref: bare } = editor();
     expect(pageBlockAtPoint(bare, 0, 0)).toBeNull();
+  });
+
+  it("reports the caret's viewport position for the surfaces (PAGE-037)", () => {
+    const { ref } = documentEditor([{ type: "paragraph" }]);
+    const view = ref.view;
+    if (view === undefined) throw new Error("no view");
+    view.coordsAtPos = () => ({ top: 340, left: 220 });
+    expect(pageCaretAnchor(ref)).toEqual({ top: 340, left: 220 });
+    const { ref: bare } = editor();
+    expect(pageCaretAnchor(bare)).toBeNull();
   });
 
   it("moves a block up or down by rewriting it over its sibling", () => {

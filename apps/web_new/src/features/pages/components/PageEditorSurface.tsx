@@ -319,30 +319,42 @@ export function PageEditorSurface({
           }
         />
       ) : null}
-      <div className={`editor-container text-size-${fontSize ?? "large-font"} text-face-${fontStyle ?? "sans-serif"}`}>
-        {bodyPending ? (
-          <PageBodySkeleton />
-        ) : (
-          <React.Suspense
-            fallback={<RichTextView html={initialHtml} label={PAGE_BODY_LABEL} resolveAsset={resolveAsset} />}
-          >
-            {/* The editor instance belongs to one page: a navigation to a
-                sibling page opens its own document, never the old one. */}
-            <PageBodyEditor
-              key={pageId}
-              initialHtml={initialHtml}
-              resolveAsset={resolveAsset}
-              workspaceSlug={workspaceSlug}
-              onChange={onChange}
-              onFormattingChange={setState}
-              onReady={onReady}
-              label={PAGE_BODY_LABEL}
-              placeholder={PAGE_BODY_PLACEHOLDER}
-              handleKeyDown={handleKeyDown}
-              onPasteHtml={onPasteHtml}
-              onPasteText={onPasteText}
-              claimsPasteText={claimsPasteText}
-            />
+      {/* The transient surfaces sit beside the body, never inside the
+          measured `.editor-container`: the pane reads that container's
+          blocks, so palette and mention rows must not lift the counts.
+          The wrapper gives them the editor's own box to position in. */}
+      <div className="relative">
+        <div
+          className={`editor-container text-size-${fontSize ?? "large-font"} text-face-${fontStyle ?? "sans-serif"}`}
+        >
+          {bodyPending ? (
+            <PageBodySkeleton />
+          ) : (
+            <React.Suspense
+              fallback={<RichTextView html={initialHtml} label={PAGE_BODY_LABEL} resolveAsset={resolveAsset} />}
+            >
+              {/* The editor instance belongs to one page: a navigation to a
+                  sibling page opens its own document, never the old one. */}
+              <PageBodyEditor
+                key={pageId}
+                initialHtml={initialHtml}
+                resolveAsset={resolveAsset}
+                workspaceSlug={workspaceSlug}
+                onChange={onChange}
+                onFormattingChange={setState}
+                onReady={onReady}
+                label={PAGE_BODY_LABEL}
+                placeholder={PAGE_BODY_PLACEHOLDER}
+                handleKeyDown={handleKeyDown}
+                onPasteHtml={onPasteHtml}
+                onPasteText={onPasteText}
+                claimsPasteText={claimsPasteText}
+              />
+            </React.Suspense>
+          )}
+        </div>
+        {bodyPending ? null : (
+          <React.Suspense fallback={null}>
             <PageBodyInteractionLayer
               workspaceSlug={workspaceSlug}
               projectId={projectId}

@@ -43,6 +43,7 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     deleteBlock: vi.fn(),
     moveBlock: vi.fn(),
     blockAtPoint: vi.fn(() => null),
+    caretAnchor: vi.fn(() => null),
     setLink: vi.fn(),
     unsetLink: vi.fn(),
     html: vi.fn(() => "<p>html</p>"),
@@ -255,13 +256,86 @@ describe("PageBodyInteractionLayer", () => {
   });
 
   it("forwards duplicate and delete from the block menu", () => {
-    const { page } = mount();
+    const page = handle();
+    const hovered = { from: 0, to: 12, json: { type: "paragraph" }, top: 8 };
+    (page.blockAtPoint as ReturnType<typeof vi.fn>).mockReturnValue(hovered);
+    mount({ getHandle: () => page });
+    fireEvent.mouseMove(document, { clientX: 120, clientY: 340 });
     fireEvent.click(screen.getByTestId("page-block-handle"));
     fireEvent.click(screen.getByRole("menuitem", { name: "Duplicate" }));
-    expect(page.duplicateBlock).toHaveBeenCalledTimes(1);
+    expect(page.duplicateBlock).toHaveBeenCalledWith(hovered);
     fireEvent.click(screen.getByTestId("page-block-handle"));
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
-    expect(page.deleteBlock).toHaveBeenCalledTimes(1);
+    expect(page.deleteBlock).toHaveBeenCalledWith(hovered);
+  });
+
+  it("keeps the hovered block while the pointer moves onto the handle itself (PAGE-037)", () => {
+    const page = handle();
+    const hovered = { from: 12, to: 20, json: { type: "paragraph" }, top: 40 };
+    (page.blockAtPoint as ReturnType<typeof vi.fn>).mockReturnValue(hovered);
+    mount({ getHandle: () => page });
+    fireEvent.mouseMove(document, { clientX: 120, clientY: 340 });
+    const handleButton = screen.getByTestId("page-block-handle");
+    // The handle lives in the gutter, where the editor cannot place the
+    // point: the hover target must survive the pointer moving onto it.
+    (page.blockAtPoint as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    fireEvent.mouseMove(handleButton, { clientX: 30, clientY: 344 });
+    fireEvent.mouseMove(handleButton, { clientX: 30, clientY: 346 });
+    expect(screen.getByTestId("page-block-handle")).toBeInTheDocument();
+    fireEvent.click(handleButton);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Move down" }));
+    expect(page.moveBlock).toHaveBeenCalledWith(hovered, "down");
+  });
+
+  it("hides the handle once the pointer leaves the editor and its handle", () => {
+    const page = handle();
+    (page.blockAtPoint as ReturnType<typeof vi.fn>).mockReturnValue({
+      from: 0,
+      to: 12,
+      json: { type: "paragraph" },
+      top: 0,
+    });
+    mount({ getHandle: () => page });
+    fireEvent.mouseMove(document, { clientX: 120, clientY: 340 });
+    expect(screen.getByTestId("page-block-handle")).toBeInTheDocument();
+    (page.blockAtPoint as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    fireEvent.mouseMove(document, { clientX: 900, clientY: 900 });
+    expect(screen.queryByTestId("page-block-handle")).not.toBeInTheDocument();
+  });
+
+  it("opens the link fields when a click lands inside a link (PAGE-043)", () => {
+    const page = handle();
+    (page.hasSelection as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    (page.linkHref as ReturnType<typeof vi.fn>).mockReturnValue("https://example.com/docs");
+    mount({ getHandle: () => page });
+    expect(screen.queryByTestId("page-link-bubble")).not.toBeInTheDocument();
+    fireEvent.click(document.body);
+    expect(screen.getByRole("textbox", { name: "Paste a link" })).toHaveValue("https://example.com/docs");
+    fireEvent.change(screen.getByRole("textbox", { name: "Paste a link" }), {
+      target: { value: "https://example.com/edited" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply link" }));
+    expect(page.setLink).toHaveBeenCalledWith("https://example.com/edited");
+  });
+
+  it("leaves a click outside any link alone", () => {
+    const page = handle();
+    (page.hasSelection as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    (page.linkHref as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    mount({ getHandle: () => page });
+    fireEvent.click(document.body);
+    expect(screen.queryByTestId("page-link-bubble")).not.toBeInTheDocument();
+    expect(page.setLink).not.toHaveBeenCalled();
+  });
+
+  it("anchors the palette beside the caret rather than at the body's end (PAGE-037)", () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/head");
+    (page.caretAnchor as ReturnType<typeof vi.fn>).mockReturnValue({ top: 180, left: 24 });
+    mount({ getHandle: () => page });
+    const palette = screen.getByTestId("page-slash-palette").parentElement;
+    expect(palette?.style.top).toBe("204px");
+    expect(palette?.style.left).toBe("24px");
   });
 
   it("clears one colour kind and applies the other before reporting the edit", () => {
@@ -376,7 +450,7 @@ describe("PageBodyInteractionLayer", () => {
     expect(screen.queryByRole("textbox", { name: "Paste a link" })).not.toBeInTheDocument();
   });
 
-  it("ignores every command while the editor has not mounted", async () => {
+  it("renders no surface while the editor has not mounted", () => {
     const view = render(
       <PageBodyInteractionLayer
         workspaceSlug="acme"
@@ -388,8 +462,33 @@ describe("PageBodyInteractionLayer", () => {
       />
     );
     expect(view.queryByTestId("page-emoji-picker")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Block actions" }));
+    fireEvent.mouseMove(document, { clientX: 120, clientY: 340 });
+    expect(view.queryByTestId("page-block-handle")).not.toBeInTheDocument();
+  });
+
+  it("ignores a block action once the editor went away (PAGE-037)", () => {
+    const page = handle();
+    (page.blockAtPoint as ReturnType<typeof vi.fn>).mockReturnValue({
+      from: 0,
+      to: 12,
+      json: { type: "paragraph" },
+      top: 0,
+    });
+    const { rerender } = mount({ getHandle: () => page });
+    fireEvent.mouseMove(document, { clientX: 120, clientY: 340 });
+    rerender(
+      <PageBodyInteractionLayer
+        workspaceSlug="acme"
+        projectId="project-1"
+        getHandle={() => null}
+        html="<p>html</p>"
+        onPickImage={vi.fn()}
+        onDocumentChange={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByTestId("page-block-handle"));
     fireEvent.click(screen.getByRole("menuitem", { name: "Duplicate" }));
+    expect(page.duplicateBlock).not.toHaveBeenCalled();
   });
 
   it("dismisses the mention popup without inserting", async () => {

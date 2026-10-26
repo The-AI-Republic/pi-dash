@@ -11,7 +11,7 @@ import * as React from "react";
 
 import { searchMentionPeople } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
-import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
+import type { PageEditorHandle, PageHoveredBlock } from "../lib/pageEditorAdapter.js";
 import { PAGE_BODY_EMOJIS, slashQueryAt, type PageBlockMenuAction, type PageCatalogEntry } from "../lib/pageBlocks.js";
 import { mentionQueryAt } from "../../../shared/editor/mention.js";
 import type { PageEmbedAttributes } from "../lib/pageBlocks.js";
@@ -71,13 +71,11 @@ export function PageBodyInteractionLayer({
   const [picker, setPicker] = React.useState<"embed" | "entity" | null>(null);
   const [pickerQuery, setPickerQuery] = React.useState("");
   const [pickerChoices, setPickerChoices] = React.useState<PageEntityChoice[]>([]);
+  const [anchor, setAnchor] = React.useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const [handleOpen, setHandleOpen] = React.useState(false);
-  const [hoveredBlock, setHoveredBlock] = React.useState<{
-    from: number;
-    to: number;
-    json: unknown;
-    top: number;
-  } | null>(null);
+  const handleRef = React.useRef<HTMLDivElement | null>(null);
+  const bubbleRef = React.useRef<HTMLDivElement | null>(null);
+  const [hoveredBlock, setHoveredBlock] = React.useState<PageHoveredBlock | null>(null);
 
   // The triggers live in the text before the caret; the layer reads them
   // after every editor update rather than parsing the document HTML.
@@ -89,6 +87,12 @@ export function PageBodyInteractionLayer({
       setSlashQuery(slashQueryAt(before));
       setMentionQuery(mentionQueryAt(before)?.text ?? null);
       setSelectionActive(handle.hasSelection());
+      // The surfaces open beside the caret, measured against the editor's
+      // own box, so they never fall to the end of a long body (PAGE-037).
+      const caret = handle.caretAnchor();
+      if (caret !== null) {
+        setAnchor({ top: Math.max(0, Math.round(caret.top)), left: Math.max(0, Math.round(caret.left)) });
+      }
       const href = handle.linkHref();
       setLink((current) => (href === null ? { href: "", open: false } : { href, open: current.open }));
     };
@@ -99,16 +103,44 @@ export function PageBodyInteractionLayer({
 
   // The drag handle follows the pointer, so its actions always target the
   // block being hovered rather than whichever block holds the caret
-  // (PAGE-037). A pointer outside the editor clears the hovered block.
+  // (PAGE-037). The handle itself sits in the gutter outside the editor's
+  // box, where the editor cannot place a point, so a pointer over the
+  // handle or its open menu keeps the block it was opened for.
   React.useEffect(() => {
     const onPointerMove = (event: MouseEvent): void => {
       const handle = getHandle();
       const block = handle?.blockAtPoint(event.clientX, event.clientY) ?? null;
-      setHoveredBlock(block);
-      if (block === null) setHandleOpen(false);
+      if (block !== null) {
+        setHoveredBlock(block);
+        return;
+      }
+      const surface = handleRef.current;
+      if (surface !== null && event.target instanceof Node && surface.contains(event.target)) return;
+      setHoveredBlock(null);
+      setHandleOpen(false);
     };
     document.addEventListener("mousemove", onPointerMove);
     return () => document.removeEventListener("mousemove", onPointerMove);
+  }, [getHandle]);
+
+  // A click inside a link moves the caret into it without selecting text,
+  // so the bubble's own Link control never appeared. Clicking a link opens
+  // its editable fields in place instead (PAGE-043); a real text selection
+  // still gets the formatting bubble with its manual Link toggle.
+  React.useEffect(() => {
+    const onClick = (event: MouseEvent): void => {
+      const handle = getHandle();
+      if (handle === null) return;
+      // The bubble's own controls toggle it; their clicks must not reopen
+      // the fields they just closed.
+      const bubble = bubbleRef.current;
+      if (bubble !== null && event.target instanceof Node && bubble.contains(event.target)) return;
+      const href = handle.linkHref();
+      if (href === null || handle.hasSelection()) return;
+      setLink({ href, open: true });
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
   }, [getHandle]);
 
   // Escape dismisses whichever transient surface is open — the slash
@@ -311,20 +343,30 @@ export function PageBodyInteractionLayer({
     [getHandle, onDocumentChange]
   );
 
+  // The surfaces sit in their own zero-height layer beside the body, never
+  // inside the measured `.editor-container`: the pane's live read counts
+  // that container's blocks, so palette rows must not become paragraphs.
+  // They are positioned in viewport coordinates, so a long body's caret
+  // still gets its palette beside it rather than at the document's end.
+  const shown = hoveredBlock !== null || handleOpen;
+  const popover = { position: "fixed", top: anchor.top + 24, left: anchor.left } as const;
   return (
-    <div data-testid="page-body-interactions" aria-label={PAGE_BODY_INTERACTION_LABEL} className="relative">
-      <div className="pointer-events-none absolute top-0 -left-8 flex flex-col gap-(--space-1)">
-        <div className="pointer-events-auto">
-          <PageBlockHandle
-            onSelect={blockAction}
-            open={handleOpen}
-            onOpenChange={setHandleOpen}
-            top={hoveredBlock?.top ?? 0}
-          />
+    <div data-testid="page-body-interactions" aria-label={PAGE_BODY_INTERACTION_LABEL} className="pointer-events-none">
+      {shown ? (
+        <div
+          ref={handleRef}
+          className="pointer-events-auto fixed z-20"
+          style={{ top: (hoveredBlock?.top ?? 0) - 4, left: (hoveredBlock?.left ?? 0) - 32 }}
+        >
+          <PageBlockHandle onSelect={blockAction} open={handleOpen} onOpenChange={setHandleOpen} />
         </div>
-      </div>
+      ) : null}
       {selectionActive || link.open ? (
-        <div className="absolute -top-12 left-0 z-30">
+        <div
+          ref={bubbleRef}
+          className="pointer-events-auto fixed z-30"
+          style={{ top: Math.max(0, anchor.top - 48), left: anchor.left }}
+        >
           <PageSelectionBubble
             link={{ ...link, onApply: applyLink, onRemove: removeLink }}
             onCommand={runBubbleCommand}
@@ -333,17 +375,17 @@ export function PageBodyInteractionLayer({
         </div>
       ) : null}
       {slashQuery !== null ? (
-        <div className="absolute top-0 left-0 z-20">
+        <div className="pointer-events-auto z-20" style={popover}>
           <PageSlashPalette query={slashQuery} onPick={pickEntry} onDismiss={() => setSlashQuery(null)} />
         </div>
       ) : null}
       {emojiOpen ? (
-        <div className="absolute top-0 left-0 z-20">
+        <div className="pointer-events-auto z-20" style={popover}>
           <PageEmojiPicker onPick={pickEmoji} onDismiss={() => setEmojiOpen(false)} />
         </div>
       ) : null}
       {picker === null ? null : (
-        <div className="absolute top-0 left-0 z-20">
+        <div className="pointer-events-auto z-20" style={popover}>
           <PageEntityPicker
             state={{
               query: pickerQuery,
@@ -356,7 +398,7 @@ export function PageBodyInteractionLayer({
         </div>
       )}
       {mentionQuery !== null ? (
-        <div className="absolute top-0 left-0 z-20">
+        <div className="pointer-events-auto z-20" style={popover}>
           <PageMentionSuggestions
             state={{
               query: mentionQuery,

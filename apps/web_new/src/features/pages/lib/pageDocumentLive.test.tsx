@@ -80,6 +80,18 @@ describe("useLivePageDocument", () => {
     expect(state().document.stats.words).toBe(4);
   });
 
+  it("ignores transient surfaces rendered beside the body, so counts stay put (PAGE-037/049)", async () => {
+    render(<Harness html="<p>Draft body</p>" />);
+    // The palette and mention popups are siblings of `.editor-container`,
+    // not blocks inside it: their rows must not lift Characters or
+    // Paragraphs while a trigger is open.
+    paint(
+      '<div><div class="editor-container"><p>Draft body</p></div>' +
+        '<div data-testid="page-body-interactions"><p>Insert block</p><p>Heading 2</p><ul><li>Ada</li></ul></div></div>'
+    );
+    await waitFor(() => expect(state().document.stats).toMatchObject({ paragraphs: 1, characters: 10 }));
+  });
+
   it("scopes asset rows to the page's workspace", async () => {
     render(<Harness html="" />);
     paint('<img src="asset-3">');

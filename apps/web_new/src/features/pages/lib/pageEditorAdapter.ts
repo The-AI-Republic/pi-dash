@@ -79,9 +79,12 @@ export interface PageEditorDocument {
 
 /** The view methods the hovered-block resolver needs. */
 export interface PageEditorView {
-  dom: { getBoundingClientRect: () => { top: number }; contains: (node: Node | null) => boolean };
+  dom: {
+    getBoundingClientRect: () => { top: number; left?: number; width?: number; height?: number };
+    contains: (node: Node | null) => boolean;
+  };
   posAtCoords: (coords: { left: number; top: number }) => { pos: number } | null;
-  coordsAtPos: (position: number) => { top: number };
+  coordsAtPos: (position: number) => { top: number; left?: number };
   state: { doc: PageEditorDocument };
 }
 
@@ -102,7 +105,13 @@ export interface PageEditorRef {
       to?: number;
       $from: {
         depth?: number;
-        parent: { type: { name: string }; attrs: Record<string, unknown>; textContent: string };
+        parent: {
+          type: { name: string };
+          attrs: Record<string, unknown>;
+          textContent: string;
+          textBetween?: (from: number, to: number, block?: string, leaf?: string) => string;
+        };
+        doc?: { textBetween: (from: number, to: number, block?: string, leaf?: string) => string };
         start?: () => number;
         parentOffset?: number;
         before?: (depth: number) => number;
@@ -148,6 +157,12 @@ export interface PageEditorHandle {
   moveBlock: (target: PageCaretBlock, direction: "up" | "down") => void;
   /** The top-level block under a viewport point, for the hover handle. */
   blockAtPoint: (clientX: number, clientY: number) => PageHoveredBlock | null;
+  /**
+   * Where the caret sits in viewport coordinates. The transient surfaces
+   * anchor here so they open beside the caret rather than at the end of
+   * the document (PAGE-037/042).
+   */
+  caretAnchor: () => { top: number; left: number } | null;
   /** Set the link on the selection in place (PAGE-043). */
   setLink: (href: string) => void;
   /** Remove the link mark from the selection (PAGE-043). */
@@ -391,6 +406,7 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
     deleteBlock: (target) => deletePageBlock(editor, target),
     moveBlock: (target, direction) => movePageBlock(editor, target, direction),
     blockAtPoint: (clientX, clientY) => pageBlockAtPoint(editor, clientX, clientY),
+    caretAnchor: () => pageCaretAnchor(editor),
     setLink: (href) => linkSelection(editor, href),
     unsetLink: () => unlinkSelection(editor),
     html: () => editor.getHTML(),
@@ -482,10 +498,26 @@ export function movePageBlock(editor: PageEditorRef, target: PageCaretBlock, dir
   editor.chain().focus().insertContentAt({ from: target.from, to: target.to }, next.json).run();
 }
 
+/**
+ * The caret's position in viewport coordinates, which is the space the
+ * transient surfaces are positioned in. A view without geometry answers
+ * null and the surfaces fall back to the editor's own top.
+ */
+export function pageCaretAnchor(editor: PageEditorRef): { top: number; left: number } | null {
+  const view = editor.view;
+  if (view === undefined) return null;
+  const from = editor.state.selection.from;
+  const position = typeof from === "number" ? from : 0;
+  const coords = view.coordsAtPos(position);
+  return { top: coords.top, left: coords.left ?? 0 };
+}
+
 /** One top-level block plus where the hover handle should sit beside it. */
 export interface PageHoveredBlock extends PageCaretBlock {
-  /** Distance from the editor's own top edge to the block's top, in px. */
+  /** The block's top edge in viewport coordinates, in px. */
   top: number;
+  /** The block's left edge in viewport coordinates, in px. */
+  left: number;
 }
 
 /**
@@ -506,9 +538,8 @@ export function pageBlockAtPoint(editor: PageEditorRef, clientX: number, clientY
   // takes the document's final position.
   const inside = blocks.find((block) => found.pos >= block.from && found.pos < block.to) ?? blocks[blocks.length - 1];
   if (inside === undefined) return null;
-  const editorTop = view.dom.getBoundingClientRect().top;
-  const blockTop = view.coordsAtPos(inside.from).top;
-  return { ...inside, top: Math.round(blockTop - editorTop) };
+  const blockCoords = view.coordsAtPos(inside.from);
+  return { ...inside, top: Math.round(blockCoords.top), left: Math.round(blockCoords.left ?? 0) };
 }
 
 /** Insert one slash-catalogue entry at the caret (PAGE-037). */
@@ -608,8 +639,10 @@ export function selectedPageText(editor: PageEditorRef): string {
   const { $from } = editor.state.selection;
   const selection = editor.state.selection;
   if (selection.from !== undefined && selection.to !== undefined && selection.to > selection.from) {
-    const textBetween = $from.textBetween;
-    if (textBetween !== undefined) return textBetween(selection.from, selection.to, " ");
+    // ProseMirror puts `textBetween` on the document, not on a resolved
+    // position, so a range's text comes from the document it belongs to.
+    const doc = $from.doc;
+    if (doc !== undefined) return doc.textBetween(selection.from, selection.to, " ");
   }
   return $from.parent.textContent ?? "";
 }
@@ -629,6 +662,9 @@ export function deleteContentBeforeCaret(editor: PageEditorRef, length: number):
 /** Text before the caret in its own block, for slash and @ queries. */
 export function pageTextBeforeCaret(editor: PageEditorRef): string {
   const { $from } = editor.state.selection;
-  if ($from.textBetween === undefined || $from.parentOffset === undefined) return "";
-  return $from.textBetween(0, $from.parentOffset, undefined, "\ufffc");
+  // The text comes from the caret's own block: a resolved position has no
+  // `textBetween`, only the node does (PAGE-037/041 trigger detection).
+  const block = $from.parent;
+  if (typeof block.textBetween !== "function" || $from.parentOffset === undefined) return "";
+  return block.textBetween(0, $from.parentOffset, undefined, "\ufffc");
 }
