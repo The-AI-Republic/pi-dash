@@ -443,6 +443,26 @@ describe("the read-only module peek", () => {
     expect(fake.keys).toEqual([]);
   });
 
+  it("keeps reading when the opened status list cannot be dismissed", async () => {
+    const fake = peekPage({
+      [STATUS_CONTROL]: { count: 1, visible: true, disabled: false },
+      "page role(option,)": { count: 6 },
+      [`${PEEK_PANEL} testid(modules-links-empty)`]: { count: 1, visible: true },
+    });
+    fake.keyboardFails = true;
+
+    // The list opened, so a dismissal is attempted; a refused Escape is
+    // swallowed and the unlocked reading stands.
+    await expect(new WebNewDriver(fake.asPage()).archivesModulePeekReadOnly()).resolves.toEqual({
+      name: "Archived module",
+      statusLocked: false,
+      addLinkOffered: false,
+      summaryShown: true,
+    });
+    expect(fake.clicks).toContain(STATUS_CONTROL);
+    expect(fake.keys).toEqual(["Escape"]);
+  });
+
   it("keeps reading when the disclosure's empty note never lands", async () => {
     const fake = peekPage({
       [STATUS_CONTROL]: { count: 0 },
