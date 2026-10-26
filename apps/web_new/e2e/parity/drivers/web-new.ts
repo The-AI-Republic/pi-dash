@@ -21809,18 +21809,23 @@ export class WebNewDriver implements ParityDriver {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, {
       waitUntil: "domcontentloaded",
     });
-    // Either the body editor or the live loader proves the detail
-    // mounted; the loader is the terminal state while the socket can
-    // never connect and the local cache is empty.
+    // The title shell mounts once the record resolves, but its editor is
+    // a lazy chunk behind a clickable-but-inert fallback heading: typing
+    // into the fallback is silently lost. Editable pages settle on the
+    // mounted live contenteditable; read-only pages (which mount no
+    // editor) settle on the shell's readonly marker. The live loader is
+    // NOT a settle signal: it shows transiently on every load until the
+    // socket syncs, so racing it returns before the editors exist
+    // (NEWFRONT-920). Offline callers whose editors never mount navigate
+    // directly and poll the loader instead (see collab-live PAGE-068).
     await Promise.race([
-      this.pagesLiveBodyEditor()
+      this.pagesLiveTitleField()
         .first()
-        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .waitFor({ state: "visible", timeout: 60_000 })
         .catch(() => undefined),
       this.page
-        .getByTestId("page-live-loader")
-        .first()
-        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .locator('[data-testid="page-detail-title"][data-readonly="true"]')
+        .waitFor({ state: "visible", timeout: 60_000 })
         .catch(() => undefined),
     ]);
   }
@@ -21838,11 +21843,28 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesLiveBodyText(): Promise<string> {
-    return ((await this.pagesLiveBodyEditor().first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    // Read-only pages mount no contenteditable; their static body reads
+    // through the canvas container instead (NEWFRONT-920).
+    if ((await this.pagesLiveBodyEditor().count()) > 0) {
+      return ((await this.pagesLiveBodyEditor().first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    }
+    return (
+      (await this.page
+        .locator(".editor-container")
+        .first()
+        .innerText({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
   async pagesLiveTitleText(): Promise<string> {
-    return ((await this.pagesLiveTitleField().first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    // Read-only pages mount no live editor; their static face reads
+    // through the labelled textbox instead (NEWFRONT-920, PAGE-026).
+    if ((await this.pagesLiveTitleField().count()) > 0) {
+      return ((await this.pagesLiveTitleField().first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    }
+    const face = this.page.getByTestId("page-detail-title").getByRole("textbox", { name: "Page title" });
+    return ((await face.first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
 
   async pagesLiveTypeInBody(text: string): Promise<void> {
@@ -29290,15 +29312,11 @@ export class WebNewDriver implements ParityDriver {
     return this.pagesToolbarIconButtons().count();
   }
   async pagesToolbarClick(index: number): Promise<void> {
-    // Keyboard activation, not a mouse click: the floating selection bubble
-    // renders over the sticky bar for first-line selections and intercepts
-    // pointer events (NEWFRONT-927). Focus plus Enter is a real activation
-    // path — the command refocuses the editor and applies to the stored
-    // selection — so the proof still runs the bar's own handler. Revert to
-    // a mouse click once NEWFRONT-927 lands.
-    const button = this.pagesToolbarIconButtons().nth(index);
-    await button.focus({ timeout: WebNewDriver.WAIT_MS });
-    await button.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+    // Real mouse click: the floating selection bubble used to cover the
+    // sticky bar for first-line selections and intercept pointer events
+    // (NEWFRONT-927, fixed); it now flips below the caret, so clicks go
+    // through to the buttons again.
+    await this.pagesToolbarIconButtons().nth(index).click({ timeout: WebNewDriver.WAIT_MS });
   }
   async pagesToolbarActive(index: number): Promise<boolean> {
     const attr = await this.pagesToolbarIconButtons().nth(index).getAttribute("data-active", {
