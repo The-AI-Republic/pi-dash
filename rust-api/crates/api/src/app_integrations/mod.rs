@@ -54,6 +54,7 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_types::WorkspaceId;
 
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
 /// Owned D-33 app-integration routes (cutover granularity: registered
 /// paths serve from Rust, everything else keeps proxying). Sibling
@@ -183,13 +184,17 @@ pub fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// Parse a UUID path segment: Django's `<uuid:>` converter 404s on
-/// garbage, so unparseable ids behave as missing rows (the D-02 `space`
-/// `parse_id` precedent).
+/// Parse a UUID path segment: Django's `<uuid:>` converter routes only
+/// the canonical lowercase hyphenated spelling, so anything else takes
+/// the route's existing unmatched path (the D-02 `space` `parse_id`
+/// precedent). `Uuid::parse` also accepts uppercase, simple, braced and
+/// `urn:uuid:` spellings that Django resolver-404s (PIDASHCONV-1463).
 #[allow(clippy::result_large_err)]
 pub fn parse_id(raw: &str) -> Result<Uuid, Response> {
-    raw.parse::<Uuid>()
-        .map_err(|_| Denial::NotFound.into_response())
+    match classify_uuid_segment(raw) {
+        UuidSegment::Canonical(id) => Ok(id),
+        UuidSegment::NonCanonical | UuidSegment::Garbage => Err(Denial::NotFound.into_response()),
+    }
 }
 
 /// An app path: the owned methods serve from Rust, everything else falls
@@ -266,4 +271,27 @@ pub async fn workspace_id_or_404(pool: &PgPool, slug: &str) -> Result<Uuid, Deni
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_id;
+
+    #[test]
+    fn parse_id_serves_canonical_spelling_only() {
+        // Django's `<uuid:>` converter routes only the canonical
+        // lowercase hyphenated spelling; `Uuid::parse` also accepts the
+        // rest, which take the unmatched path like garbage
+        // (PIDASHCONV-1463).
+        assert!(parse_id("3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f").is_ok());
+        for raw in [
+            "3F9A2C1E-9B1A-4D2E-8F3A-1A2B3C4D5E6F",
+            "3f9a2c1e9b1a4d2e8f3a1a2b3c4d5e6f",
+            "{3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f}",
+            "urn:uuid:3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f",
+            "not-a-uuid",
+        ] {
+            assert!(parse_id(raw).is_err(), "{raw}");
+        }
+    }
 }
