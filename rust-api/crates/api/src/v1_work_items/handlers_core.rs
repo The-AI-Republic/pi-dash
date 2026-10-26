@@ -6464,6 +6464,25 @@ async fn create_issue_inner(
         .await
         .map_err(|error| db_error(error, "write-commit"))?;
 
+    // Django's `post_save` fires inside `Issue.objects.create`, before the
+    // assignee/label `bulk_create`s (and before the `created_at` /
+    // `created_by` second save, whose transition no-ops on `prev == current`),
+    // so the entry prompt sees empty m2m. A new row has no prior state, so
+    // creating directly in a ticking state arms the clock and creates the
+    // entry run (PIDASHCONV-1216).
+    fire_after_save(
+        state,
+        &pre.pool,
+        new_id,
+        pre.actor.id,
+        None,
+        state_id,
+        None,
+        Some(pre.actor.id),
+        Utc::now(),
+    )
+    .await?;
+
     create_m2m(
         &pre.pool,
         &new_id,
@@ -6495,23 +6514,6 @@ async fn create_issue_inner(
         .await
         .map(|_| ())
         .map_err(|error| save_error(&error, "write-override"))?;
-
-    // `Issue.save()` fires the orchestration receiver: a new row has no
-    // prior state (`capture_prior_state` → `None`), so creating directly in
-    // a ticking state arms the clock and creates the entry run
-    // (PIDASHCONV-1216).
-    fire_after_save(
-        state,
-        &pre.pool,
-        new_id,
-        pre.actor.id,
-        None,
-        state_id,
-        None,
-        Some(pre.actor.id),
-        Utc::now(),
-    )
-    .await?;
 
     // Task fan-out (`:516-539`): the activity carries the `django_dumps`
     // text of the NORMALIZED body, the webhook the body object itself.
