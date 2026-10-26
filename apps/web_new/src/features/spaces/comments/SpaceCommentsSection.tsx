@@ -16,6 +16,7 @@ import * as React from "react";
 import { spaceRuntime } from "../api/client.js";
 import { spaceCommentsQueryOptions } from "../api/queries.js";
 import { spaceReturnPath, spaceSignInHref, type SpaceBoardSearch } from "../lib/address.js";
+import { useSpaceEmbedded } from "../lib/spaceEmbed.js";
 import { spaceMessage } from "../lib/spaceMessages.js";
 import { SpaceCommentRow } from "./SpaceCommentRow.js";
 
@@ -51,15 +52,18 @@ export function SpaceCommentsSection({
   resolveAsset,
   composer,
 }: SpaceCommentsSectionProps): React.ReactElement | null {
+  const framed = useSpaceEmbedded();
+  const inEmbed = embedded || framed;
+  const query = spaceCommentsQueryOptions(spaceRuntime.client, anchor, issueId);
   const comments = useQuery({
-    ...spaceCommentsQueryOptions(spaceRuntime.client, anchor, issueId),
-    enabled,
+    ...query,
+    enabled: enabled && query.enabled !== false,
   });
   if (!enabled) return null;
 
   const rows: readonly SpaceComment[] = comments.data ?? [];
   return (
-    <section data-testid="space-comments" className="issue-comments-section flex flex-col gap-(--space-3)">
+    <section data-testid="space-comments" className="flex flex-col gap-(--space-3)">
       <h3 className="text-emphasis m-0">{spaceMessage("comments.heading")}</h3>
       {comments.isError ? (
         <div data-testid="space-comments-error" className="flex flex-col items-start gap-(--space-2)">
@@ -90,7 +94,7 @@ export function SpaceCommentsSection({
         </div>
       )}
       {viewerId === null ? (
-        embedded ? null : (
+        inEmbed ? null : (
           <a
             href={spaceCommentsSignInHref(anchor, search)}
             data-testid="space-comments-signin"

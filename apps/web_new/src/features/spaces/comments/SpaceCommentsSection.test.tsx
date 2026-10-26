@@ -10,8 +10,10 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const runtime = vi.hoisted(() => ({ client: null as unknown }));
+const embed = vi.hoisted(() => ({ framed: false }));
 
 vi.mock("../api/client.js", () => ({ spaceRuntime: runtime }));
+vi.mock("../lib/spaceEmbed.js", () => ({ useSpaceEmbedded: () => embed.framed }));
 
 import { createClient } from "@pidash/api-client";
 
@@ -73,6 +75,7 @@ function reply(status: number, body: unknown): Awaited<ReturnType<Transport>> {
 
 interface SetupOptions {
   comments?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
+  issueId?: string;
   enabled?: boolean;
   embedded?: boolean;
   viewerId?: string | null;
@@ -92,7 +95,7 @@ function setup(options: SetupOptions = {}) {
     <QueryClientProvider client={queryClient}>
       <SpaceCommentsSection
         anchor={ANCHOR}
-        issueId={ISSUE_ID}
+        issueId={options.issueId ?? ISSUE_ID}
         search={{ board: "kanban", peekId: ISSUE_ID, state: [ISSUE_ID] }}
         enabled={options.enabled ?? true}
         viewerId={options.viewerId === undefined ? ADA : options.viewerId}
@@ -107,6 +110,7 @@ function setup(options: SetupOptions = {}) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  embed.framed = false;
 });
 
 describe("SpaceCommentsSection gating", () => {
@@ -135,13 +139,31 @@ describe("SpaceCommentsSection gating", () => {
       "href",
       "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3D11111111-1111-4111-8111-111111111111%26state%3D11111111-1111-4111-8111-111111111111"
     );
-    expect(link).toHaveTextContent("Sign in to add your comment");
+    expect(link).toHaveTextContent("Sign in to join the conversation");
   });
 
-  it("suppresses the anonymous invitation inside a frame", async () => {
+  it("suppresses the anonymous invitation when the host marks the board embedded", async () => {
     setup({ viewerId: null, embedded: true });
     await screen.findByTestId("space-comments-empty");
     expect(screen.queryByTestId("space-comments-signin")).not.toBeInTheDocument();
+  });
+
+  it("suppresses the anonymous invitation when the window is actually framed", async () => {
+    embed.framed = true;
+    setup({ viewerId: null });
+    await screen.findByTestId("space-comments-empty");
+    expect(screen.queryByTestId("space-comments-signin")).not.toBeInTheDocument();
+  });
+
+  it("does not read the thread for an invalid issue address", () => {
+    const { requests } = setup({ issueId: "not-an-issue" });
+    expect(screen.getByTestId("space-comments-loading")).toBeInTheDocument();
+    expect(requests).toEqual([]);
+  });
+
+  it("does not carry the legacy comment section class", async () => {
+    setup();
+    expect((await screen.findByTestId("space-comments")).className).not.toContain("issue-comments-section");
   });
 });
 

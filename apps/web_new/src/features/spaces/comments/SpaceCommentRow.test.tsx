@@ -77,6 +77,16 @@ describe("SpaceCommentRow", () => {
     expect(screen.getByText("A")).toBeInTheDocument();
   });
 
+  it("renders the author's stored avatar image when available", () => {
+    render(
+      <SpaceCommentRow
+        comment={comment({ actor_detail: { ...comment().actor_detail!, avatar_url: "avatar-1.png" } })}
+        resolveAsset={(src) => `/assets/${src}`}
+      />
+    );
+    expect(screen.getByRole("img", { name: "Ada L" }).querySelector("img")).toHaveAttribute("src", "avatar-1.png");
+  });
+
   it("renders an own-line speaker label only for agent rows (SPC-052)", () => {
     const { rerender } = render(
       <SpaceCommentRow
@@ -95,16 +105,18 @@ describe("SpaceCommentRow", () => {
   it("keeps folded bodies collapsed and toggles them in place (SPC-051)", async () => {
     const user = userEvent.setup();
     render(<SpaceCommentRow comment={comment({ labels: ["fold"] })} resolveAsset={(src) => src} />);
-    const toggle = screen.getByRole("button", { name: /Folded comment/ });
+    const toggle = screen.getByRole("button", { name: "Show moderated comment" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("there", { selector: "strong" })).not.toBeInTheDocument();
 
     await user.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveTextContent("Hide moderated comment");
     expect(screen.getByText("there", { selector: "strong" })).toBeInTheDocument();
 
     await user.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveTextContent("Show moderated comment");
     expect(screen.queryByText("there", { selector: "strong" })).not.toBeInTheDocument();
   });
 

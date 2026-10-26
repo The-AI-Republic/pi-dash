@@ -13,10 +13,7 @@ import { timeAgo } from "../../../shared/lib/timeAgo.js";
 /** How often a visible relative age is recomputed. */
 export const SPACE_AGE_TICK_MS = 60_000;
 
-/**
- * Current relative age of an ISO timestamp. Returns the text and a stable
- * clock reading so callers can format tooltips from the same instant.
- */
+/** Current relative age of an ISO timestamp, refreshed on a minute cadence. */
 export function useRelativeAge(isoTimestamp: string, tickMs: number = SPACE_AGE_TICK_MS): string {
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {

@@ -48,7 +48,7 @@ export function spaceCommentAuthor(comment: Pick<SpaceComment, "actor_detail">):
         ? "Unknown author"
         : first
       : display;
-  const initial = name.trim().charAt(0).toUpperCase() || "?";
+  const initial = name.charAt(0).toUpperCase();
   const avatar = detail.avatar_url?.trim();
   return { name, initial, avatar: avatar === undefined || avatar === "" ? undefined : avatar, isBot: detail.is_bot };
 }

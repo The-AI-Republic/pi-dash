@@ -66,7 +66,7 @@ export function SpaceCommentRow({ comment, resolveAsset }: SpaceCommentRowProps)
           ) : null}
         </div>
         {showBody ? (
-          <div className="issue-comments-section flex min-w-0 flex-col gap-(--space-1)">
+          <div className="flex min-w-0 flex-col gap-(--space-1)">
             {speaker === null ? null : (
               <span className="text-meta font-medium text-(--text)">
                 {speaker}
