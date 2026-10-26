@@ -10298,11 +10298,15 @@ fn json_has_nonfinite(value: &Value) -> bool {
 
 /// Triage get-or-create (`views/intake.py:173-184`): the lookup by
 /// `(project, slug)` first; the insert on a miss (a lost race hits the
-/// unique `name`+`project` row → the `IntegrityError` 400).
+/// unique `name`+`project` row → the `IntegrityError` 400). The insert
+/// carries the `State.save` resequence (`max + 15000` over the live
+/// non-triage project states, `65000` when there are none) and the
+/// crum `created_by` (the request user).
 async fn ensure_triage(
     pool: &sqlx::PgPool,
     slug: &str,
     project: &ProjectRow,
+    user_id: &Uuid,
 ) -> Result<Uuid, Denial> {
     // The pinned lookup selects `*`; read `id` by name off the row
     // (`query_scalar` cannot decode a multi-column row).
@@ -10318,6 +10322,14 @@ async fn ensure_triage(
     if let Some(id) = existing {
         return Ok(id);
     }
+    let max_sequence: Option<f64> = sqlx::query_scalar(&intake_queries::triage_max_sequence_sql())
+        .bind(project.id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let sequence = max_sequence
+        .map(|max| max + 15000.0)
+        .unwrap_or(intake_queries::TRIAGE_SEQUENCE_FALLBACK);
     let id = Uuid::new_v4();
     let created_at = cycle_mod::micros_now();
     let updated_at = cycle_mod::micros_now();
@@ -10327,6 +10339,8 @@ async fn ensure_triage(
         .bind(updated_at)
         .bind(project.id)
         .bind(project.workspace_id)
+        .bind(user_id)
+        .bind(sequence)
         .execute(pool)
         .await;
     match result {
@@ -10753,7 +10767,7 @@ async fn intake_create(
         _ => return Err(Denial::InvalidPriority),
     };
 
-    let triage_id = ensure_triage(&ctx.pool, &slug, &project).await?;
+    let triage_id = ensure_triage(&ctx.pool, &slug, &project, &ctx.user_id).await?;
     let description_json = issue_data
         .get("description")
         .filter(|value| !is_falsy_json(value))

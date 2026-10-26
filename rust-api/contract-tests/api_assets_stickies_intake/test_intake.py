@@ -553,3 +553,34 @@ def test_intake_denied_caller_bad_zone_still_403(org):
     _set_user_timezone(org, org.outsider["id"], BAD_ZONE)
     r = _call_intake(org, "GET", _base(org), None, role="outsider")
     assert r.status_code == 403, r.text
+
+
+def test_intake_create_triage_state_resequenced_and_stamped(org):
+    """PIDASHCONV-1404: the auto-created Triage state is resequenced to
+    ``max(live non-triage project states) + 15000`` (``State.save``) and
+    ``created_by`` is stamped with the caller (``BaseModel.save`` via crum),
+    not the 65000/NULL literals of the ``State.objects.create`` call."""
+    for name, group, sequence in (
+        ("Backlog", "backlog", 15000.0),
+        ("Todo", "unstarted", 25000.0),
+        ("In Progress", "started", 35000.0),
+        ("In Review", "review", 40000.0),
+        ("In Test", "test", 42500.0),
+        ("Done", "completed", 45000.0),
+        ("Cancelled", "cancelled", 55000.0),
+    ):
+        seed_d21.create_state(
+            org.conn,
+            workspace_id=org.workspace["id"],
+            project_id=org.project["id"],
+            name=name,
+            group=group,
+            sequence=sequence,
+        )
+    org.create_intake_issue(name="first in triage")
+    sequence, created_by_id = org.conn.execute(
+        'SELECT sequence, created_by_id FROM states WHERE project_id = %s AND "group" = %s',
+        (org.project["id"], "triage"),
+    ).fetchone()
+    assert sequence == 70000.0
+    assert str(created_by_id) == org.admin["id"]
