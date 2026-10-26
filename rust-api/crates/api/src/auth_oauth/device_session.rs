@@ -13,12 +13,14 @@
 //! * `POST auth/revoke/` — invalidate the caller's CLI token, idempotent
 //!   (`device.py:485-511`).
 //!
-//! Only these three path+method pairs are registered, so the edge serves
-//! exactly this family from Rust while every sibling path keeps proxying
-//! to Django — route registration is the cutover granularity, no flag
-//! needed. Every other method on the owned paths proxies too, so Django
-//! answers its own 405-after-auth and metadata OPTIONS byte for byte
-//! (the loop-handlers precedent).
+//! Only these three path+method pairs are served from Rust while every
+//! sibling path keeps proxying to Django — route registration is the
+//! cutover granularity, no flag needed. Every other method on the owned
+//! paths answers locally in DRF order (auth first, then the 405), because
+//! the token lives in Rust's database and a proxied verdict would fail
+//! Django's copy of the gate before its own method check (PIDASHCONV-1478);
+//! only OPTIONS still proxies so DRF's metadata response is preserved byte
+//! for byte (the `v1_openapi::owned` precedent).
 //!
 //! Layering: the device-machine / rotate SQL text and pure helpers
 //! (`normalize_host_label`, `machine_token_label`, touch-field selection,
@@ -55,7 +57,7 @@
 //!   Python (500); the auth shell answers 500 the same way.
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use base64::Engine as _;
@@ -96,31 +98,44 @@ pub fn routes() -> Router<AppState> {
         .route(REVOKE_PATH, owned_post(post(post_revoke)))
 }
 
-/// A GET-owned path: the GET handler serves from Rust, everything else
-/// falls through to Django.
+/// A GET-owned path: the GET handler serves from Rust; every other
+/// method answers the local 405 past the auth gate, and only OPTIONS
+/// proxies for DRF's metadata. HEAD is explicit: the view defines no
+/// `head`, so DRF 405s it — axum's automatic GET-backed HEAD would
+/// wrongly answer 200.
 fn owned_get(
     get_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
     get_handler
-        .post(crate::edge::proxy)
-        .put(crate::edge::proxy)
-        .patch(crate::edge::proxy)
-        .delete(crate::edge::proxy)
-        .head(crate::edge::proxy)
+        .post(workspaces_method_not_allowed)
+        .put(workspaces_method_not_allowed)
+        .patch(workspaces_method_not_allowed)
+        .delete(workspaces_method_not_allowed)
+        .head(workspaces_method_not_allowed)
+        .trace(workspaces_method_not_allowed)
+        .connect(workspaces_method_not_allowed)
         .options(crate::edge::proxy)
+        .fallback(workspaces_method_not_allowed)
 }
 
-/// A POST-owned path: the POST handler serves from Rust, everything
-/// else falls through to Django.
+/// A POST-owned path: the POST handler serves from Rust; every other
+/// method answers the local 405 past the auth gate, and only OPTIONS
+/// proxies for DRF's metadata. HEAD is explicit (DRF 405s it) so the
+/// denial keeps its body, which runserver sends on the wire — axum's
+/// automatic GET-backed HEAD would strip it.
 fn owned_post(
     post_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
     post_handler
-        .get(crate::edge::proxy)
-        .put(crate::edge::proxy)
-        .patch(crate::edge::proxy)
-        .delete(crate::edge::proxy)
+        .get(post_only_method_not_allowed)
+        .put(post_only_method_not_allowed)
+        .patch(post_only_method_not_allowed)
+        .delete(post_only_method_not_allowed)
+        .head(post_only_method_not_allowed)
+        .trace(post_only_method_not_allowed)
+        .connect(post_only_method_not_allowed)
         .options(crate::edge::proxy)
+        .fallback(post_only_method_not_allowed)
 }
 
 fn invalid_token() -> Response {
@@ -322,6 +337,71 @@ async fn is_member(
 
 fn not_found(error: &str) -> Failure {
     Failure::bare_error(StatusCode::NOT_FOUND, error)
+}
+
+// ---------------------------------------------------------------------------
+// wrong-method denial (PIDASHCONV-1478)
+// ---------------------------------------------------------------------------
+
+/// DRF `default_response_headers` `Allow` for the GET-owned view:
+/// `WorkspaceListEndpoint` defines only `get` (`device.py:395`), so
+/// `_allowed_methods` is `GET, OPTIONS` (plus the inherited DRF
+/// `options`; there is no `head`).
+const ALLOW_WORKSPACES: &str = "GET, OPTIONS";
+/// DRF `default_response_headers` `Allow` for the POST-owned views,
+/// which define only `post` (`device.py:417,496`).
+const ALLOW_POST_ONLY: &str = "POST, OPTIONS";
+
+/// DRF `MethodNotAllowed` body for these views (compact JSON, probed
+/// live): `{"detail":"Method \"<M>\" not allowed."}`. `method` is an
+/// `http::Method`, whose token charset needs no JSON escaping.
+fn not_allowed_body(method: &str) -> String {
+    format!(r#"{{"detail":"Method \"{method}\" not allowed."}}"#)
+}
+
+/// Wrong method on `GET auth/workspaces/`: DRF order — the auth gate
+/// first (its 401/403 stand), then the 405.
+async fn workspaces_method_not_allowed(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    deny_method(&state, &method, &headers, ALLOW_WORKSPACES).await
+}
+
+/// Wrong method on the POST-owned paths: the same DRF order with the
+/// POST-only `Allow`.
+async fn post_only_method_not_allowed(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    deny_method(&state, &method, &headers, ALLOW_POST_ONLY).await
+}
+
+/// Authenticate, then answer DRF's 405. A proxied verdict cannot work
+/// here: the token lives in Rust's database, so Django's copy of the
+/// gate 403s before its own method check.
+async fn deny_method(
+    state: &AppState,
+    method: &Method,
+    headers: &HeaderMap,
+    allow: &'static str,
+) -> Response {
+    let pool = match pool_of(state) {
+        Ok(pool) => pool,
+        Err(failure) => return failure.into_response(),
+    };
+    if let Err(denial) = authenticate(&pool, state.settings().secret_key.as_bytes(), headers).await
+    {
+        return denial;
+    }
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(axum::http::header::ALLOW, allow)
+        .body(axum::body::Body::from(not_allowed_body(method.as_str())))
+        .expect("static denial response")
 }
 
 /// One `{"slug", "name"}` entry in Python dict order
@@ -849,6 +929,27 @@ mod tests {
             INVALID_TOKEN_BODY,
             r#"{"detail":"Given API token is not valid"}"#
         );
+    }
+
+    #[test]
+    fn method_not_allowed_body_and_allow_match_live_django() {
+        // DRF `exception_handler` (`{'Detail': ...}`) + compact
+        // `JSONRenderer`, and each view's `_allowed_methods`
+        // (PIDASHCONV-1478).
+        assert_eq!(
+            not_allowed_body("GET"),
+            r#"{"detail":"Method \"GET\" not allowed."}"#
+        );
+        assert_eq!(
+            not_allowed_body("POST"),
+            r#"{"detail":"Method \"POST\" not allowed."}"#
+        );
+        assert_eq!(
+            not_allowed_body("DELETE"),
+            r#"{"detail":"Method \"DELETE\" not allowed."}"#
+        );
+        assert_eq!(ALLOW_WORKSPACES, "GET, OPTIONS");
+        assert_eq!(ALLOW_POST_ONLY, "POST, OPTIONS");
     }
 
     #[test]
