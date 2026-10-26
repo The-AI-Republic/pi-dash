@@ -75,6 +75,18 @@ describe("PageVersionOverlay", () => {
     expect(screen.getByRole("heading", { level: 6 })).toHaveTextContent("Oct 20, 2026");
   });
 
+  it("covers the canvas rather than the window, so the page header stays reachable", () => {
+    // §4.5: "a full-canvas overlay above the editor". The header's own
+    // controls (copy link, the switcher) sit outside it and stay clickable
+    // while a snapshot is open, so the overlay fills its containing column
+    // and never claims the whole window or traps the page as a modal.
+    overlay(SNAPSHOT);
+    const surface = screen.getByRole("dialog", { name: "Version snapshot" });
+    expect(surface).toHaveClass("absolute", "inset-0");
+    expect(surface.className).not.toContain("fixed");
+    expect(surface).not.toHaveAttribute("aria-modal");
+  });
+
   it("renders the frozen structured snapshot without an editable region", () => {
     const { container } = overlay(SNAPSHOT);
     expect(screen.getByText("Structured snapshot body")).toBeInTheDocument();

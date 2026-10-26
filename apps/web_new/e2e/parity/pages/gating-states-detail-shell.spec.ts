@@ -143,6 +143,39 @@ function requireGuest(seed: ParitySeedFacts): { email: string; password: string 
   return { email: seed.guestEmail, password: seed.guestPassword };
 }
 
+/**
+ * D17 (nested pages) added two entries the oracle predates: `Add sub-page`
+ * (PAGE-084) and `Move to…` (PAGE-087). They are pinned new-feature rows,
+ * not a change to the oracle's surface, so these matrix scenarios read the
+ * oracle's exact list on both legs and expect the documented suffix only on
+ * the web_new leg (the same leg split PAGE-083 already uses).
+ */
+const D17_ROW_SUFFIX = ["Add sub-page", "Move to…"];
+
+/**
+ * The same two entries follow their own gates, which the oracle rows it
+ * shares a menu with never had to express: `Add sub-page` needs member and
+ * up, `Move to…` needs the page's owner or an admin (PAGE-084/087), and an
+ * archived page takes neither because a shelved page cannot parent.
+ */
+const D17_ROW_MEMBER_SUFFIX = ["Add sub-page"];
+const D17_ROW_ARCHIVED_SUFFIX = ["Move to…"];
+
+/** A D17 detail-menu suffix: `Add sub-page` for members and above. */
+const D17_DETAIL_ENTRY = "Add sub-page";
+
+/** The detail menu's own pinned prefix, with the D17 entry after history. */
+function withD17Detail(items: string[], leg: string): string[] {
+  if (leg !== "web_new") return items;
+  const history = items.indexOf("Version history");
+  if (history < 0) return [...items, D17_DETAIL_ENTRY];
+  return [...items.slice(0, history + 1), D17_DETAIL_ENTRY, ...items.slice(history + 1)];
+}
+
+function withD17(items: string[], suffix: readonly string[], leg: string): string[] {
+  return leg === "web_new" ? [...items, ...suffix] : items;
+}
+
 /** True when the status reads as a successful mutation answer. */
 function isOkStatus(status: number): boolean {
   return status === 200 || status === 201 || status === 204;
@@ -170,46 +203,48 @@ test(
       await driver.pagesGatingOpenList(seed.workspaceSlug, projectId);
       expect(await driver.pagesGatingCreateOffered()).toBe(true);
       expect(await driver.pagesGatingRowStarOffered(openName)).toBe(true);
-      expect(await driver.pagesGatingRowMenuItems(openName)).toEqual([
-        "Open in new tab",
-        "Copy link",
-        "Make a copy",
-        "Lock",
-        "Make private",
-        "Archive",
-      ]);
+      expect(await driver.pagesGatingRowMenuItems(openName)).toEqual(
+        withD17(
+          ["Open in new tab", "Copy link", "Make a copy", "Lock", "Make private", "Archive"],
+          D17_ROW_SUFFIX,
+          driver.target
+        )
+      );
       await driver.pagesGatingOpenList(seed.workspaceSlug, projectId, "?type=private");
-      expect(await driver.pagesGatingRowMenuItems(`${stamp} private`)).toEqual([
-        "Open in new tab",
-        "Copy link",
-        "Make a copy",
-        "Lock",
-        "Make public",
-        "Archive",
-      ]);
+      expect(await driver.pagesGatingRowMenuItems(`${stamp} private`)).toEqual(
+        withD17(
+          ["Open in new tab", "Copy link", "Make a copy", "Lock", "Make public", "Archive"],
+          D17_ROW_SUFFIX,
+          driver.target
+        )
+      );
       await driver.pagesGatingOpenList(seed.workspaceSlug, projectId, "?type=archived");
-      expect(await driver.pagesGatingRowMenuItems(`${stamp} shelved`)).toEqual([
-        "Open in new tab",
-        "Copy link",
-        "Make a copy",
-        "Lock",
-        "Restore",
-        "Delete",
-      ]);
+      expect(await driver.pagesGatingRowMenuItems(`${stamp} shelved`)).toEqual(
+        withD17(
+          ["Open in new tab", "Copy link", "Make a copy", "Lock", "Restore", "Delete"],
+          D17_ROW_ARCHIVED_SUFFIX,
+          driver.target
+        )
+      );
 
       await driver.pagesGatingOpenDetail(seed.workspaceSlug, projectId, openId);
       expect(await driver.pagesGatingWaitDetailSettled()).toBe("editor");
       expect(await driver.pagesGatingDetailCluster()).toMatchObject({ star: true, copyLink: true, menu: true });
-      expect(await driver.pagesGatingDetailMenuItems()).toEqual([
-        "Full width",
-        "Sticky toolbar",
-        "Copy markdown",
-        "Version history",
-        "Make a copy",
-        "Archive",
-        "Make private",
-        "Export",
-      ]);
+      expect(await driver.pagesGatingDetailMenuItems()).toEqual(
+        withD17Detail(
+          [
+            "Full width",
+            "Sticky toolbar",
+            "Copy markdown",
+            "Version history",
+            "Make a copy",
+            "Archive",
+            "Make private",
+            "Export",
+          ],
+          driver.target
+        )
+      );
 
       // Server baselines: the owner passes every gate (exact codes pinned).
       const base = `/api/workspaces/${seed.workspaceSlug}/projects/${projectId}`;
@@ -279,20 +314,20 @@ test(
       await driver.pagesGatingOpenList(seed.workspaceSlug, projectId);
       expect(await driver.pagesGatingCreateOffered()).toBe(true);
       expect(await driver.pagesGatingRowStarOffered(openName)).toBe(true);
-      expect(await driver.pagesGatingRowMenuItems(openName)).toEqual(["Open in new tab", "Copy link", "Make a copy"]);
+      expect(await driver.pagesGatingRowMenuItems(openName)).toEqual(
+        withD17(["Open in new tab", "Copy link", "Make a copy"], D17_ROW_MEMBER_SUFFIX, driver.target)
+      );
       expect(await driver.pagesGatingRowTitles()).toEqual([openName]);
 
       await driver.pagesGatingOpenDetail(seed.workspaceSlug, projectId, openId);
       expect(await driver.pagesGatingWaitDetailSettled()).toBe("editor");
       expect(await driver.pagesGatingDetailCluster()).toMatchObject({ star: true, copyLink: true, menu: true });
-      expect(await driver.pagesGatingDetailMenuItems()).toEqual([
-        "Full width",
-        "Sticky toolbar",
-        "Copy markdown",
-        "Version history",
-        "Make a copy",
-        "Export",
-      ]);
+      expect(await driver.pagesGatingDetailMenuItems()).toEqual(
+        withD17Detail(
+          ["Full width", "Sticky toolbar", "Copy markdown", "Version history", "Make a copy", "Export"],
+          driver.target
+        )
+      );
 
       // Server half of the matrix: reads and member actions pass while the
       // admin actions refuse (lock excepted — the server allows it although
@@ -407,14 +442,13 @@ test(
       await driver.pagesGatingOpenList(seed.workspaceSlug, projectId);
       expect(await driver.pagesGatingCreateOffered()).toBe(true);
       expect(await driver.pagesGatingRowStarOffered(openName)).toBe(true);
-      expect(await driver.pagesGatingRowMenuItems(openName)).toEqual([
-        "Open in new tab",
-        "Copy link",
-        "Make a copy",
-        "Lock",
-        "Make private",
-        "Archive",
-      ]);
+      expect(await driver.pagesGatingRowMenuItems(openName)).toEqual(
+        withD17(
+          ["Open in new tab", "Copy link", "Make a copy", "Lock", "Make private", "Archive"],
+          D17_ROW_SUFFIX,
+          driver.target
+        )
+      );
       await driver.pagesGatingOpenList(seed.workspaceSlug, projectId, "?type=private");
       expect(await driver.pagesGatingRowTitles()).toEqual([]);
 
@@ -456,12 +490,18 @@ test(
       await driver.openEntry();
       await driver.signInWithPassword(seed.email, seed.password);
       await driver.pagesGatingOpenList(seed.workspaceSlug, projectId);
+      // This row pins the absence of the licensed cross-project move. D17
+      // added a different capability — moving a page inside its project's
+      // tree — so the web_new leg reads that entry as the documented
+      // PAGE-087 suffix and the oracle leg still carries no move at all.
+      const withoutTreeMove = (items: string[]): string[] =>
+        driver.target === "web_new" ? items.filter((item) => item !== "Move to…") : items;
       const rowItems = await driver.pagesGatingRowMenuItems(openName);
-      expect(rowItems.some((item) => item.toLowerCase().includes("move"))).toBe(false);
+      expect(withoutTreeMove(rowItems).some((item) => item.toLowerCase().includes("move"))).toBe(false);
       await driver.pagesGatingOpenDetail(seed.workspaceSlug, projectId, openId);
       expect(await driver.pagesGatingWaitDetailSettled()).toBe("editor");
       const detailItems = await driver.pagesGatingDetailMenuItems();
-      expect(detailItems.some((item) => item.toLowerCase().includes("move"))).toBe(false);
+      expect(withoutTreeMove(detailItems).some((item) => item.toLowerCase().includes("move"))).toBe(false);
 
       // The community tree carries no move affordance; the endpoint call
       // leaves the page where it is (the exact refusal is recorded, not
