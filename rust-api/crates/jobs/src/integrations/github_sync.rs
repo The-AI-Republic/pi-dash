@@ -661,7 +661,8 @@ impl GithubRestClient {
     /// The default construction (`GithubClient(token=token)`):
     /// 30-second timeout against `https://api.github.com`.
     pub fn live(token: &str) -> Result<Self, GithubError> {
-        Self::connect(token, PROVIDER_TIMEOUT_SECS, GITHUB_API_BASE)
+        let base = super::github_api_base_override().unwrap_or_else(|| GITHUB_API_BASE.to_owned());
+        Self::connect(token, PROVIDER_TIMEOUT_SECS, &base)
     }
 
     fn send(

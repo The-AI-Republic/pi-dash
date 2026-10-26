@@ -994,7 +994,8 @@ impl GithubClient for ReqwestGithubClient {
     /// (`github_client.py:39-52`): empty tokens fail closed with
     /// `Auth("empty token")`; installations mint via [`installation_token`].
     fn connect(auth: &ClientAuth) -> Result<Self, GithubError> {
-        Self::connect_with_api_base(auth, GITHUB_API_BASE)
+        let base = super::github_api_base_override().unwrap_or_else(|| GITHUB_API_BASE.to_owned());
+        Self::connect_with_api_base(auth, &base)
     }
 
     fn get_authenticated_user(&self) -> Result<Value, GithubError> {
