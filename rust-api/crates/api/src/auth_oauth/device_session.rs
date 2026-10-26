@@ -169,7 +169,7 @@ async fn authenticate(
     headers: &HeaderMap,
 ) -> Result<Caller, Response> {
     let Some(raw) = headers.get(token_kernel::API_KEY_HEADER) else {
-        // `if not token: return None` (`api_authentication.py:70-72`) —
+        // `if not token: return None` (`api_authentication.py:68-69`) —
         // the `IsAuthenticated` gate then answers 401.
         return Err(Failure::unauthorized().into_response());
     };
@@ -185,6 +185,17 @@ async fn authenticate(
     } else {
         authenticate_api(pool, presented).await
     }
+}
+
+/// Whether the request presents a credential for the auth gate: the
+/// `X-Api-Key` header is set to a non-empty value. Mirrors the no-DB
+/// 401 branches of [`authenticate`] exactly (a missing or empty header
+/// never reaches the pool); undecodable bytes still need the lookup (a
+/// miss is 403, never 401).
+fn has_presented_credential(headers: &HeaderMap) -> bool {
+    headers
+        .get(token_kernel::API_KEY_HEADER)
+        .is_some_and(|raw| !matches!(raw.to_str(), Ok(value) if value.is_empty()))
 }
 
 /// One `api_tokens` row for the lookup: `(id, user_id, is_active,
@@ -388,6 +399,15 @@ async fn deny_method(
     headers: &HeaderMap,
     allow: &'static str,
 ) -> Response {
+    // The gate before the pool: Django's `authenticate` returns None
+    // without a query when no credential is presented
+    // (`api_authentication.py:68-69`), and `IsAuthenticated` answers
+    // 401 — so a credential-less request 401s here without demanding
+    // a pool (PIDASHCONV-1536). Only a presented credential needs the
+    // lookup below.
+    if !has_presented_credential(headers) {
+        return Failure::unauthorized().into_response();
+    }
     let pool = match pool_of(state) {
         Ok(pool) => pool,
         Err(failure) => return failure.into_response(),
@@ -950,6 +970,30 @@ mod tests {
         );
         assert_eq!(ALLOW_WORKSPACES, "GET, OPTIONS");
         assert_eq!(ALLOW_POST_ONLY, "POST, OPTIONS");
+    }
+
+    #[test]
+    fn presented_credential_mirrors_authenticate_no_db_branches() {
+        // Missing or empty is the 401 without a query
+        // (`api_authentication.py:68-69`); anything else — including
+        // undecodable bytes, a lookup miss — needs the pool
+        // (PIDASHCONV-1536).
+        use axum::http::{HeaderName, HeaderValue};
+        let name: HeaderName = token_kernel::API_KEY_HEADER
+            .parse()
+            .expect("api key header name");
+        let empty = HeaderMap::new();
+        assert!(!has_presented_credential(&empty));
+        let mut headers = HeaderMap::new();
+        headers.insert(name.clone(), HeaderValue::from_static(""));
+        assert!(!has_presented_credential(&headers));
+        headers.insert(name.clone(), HeaderValue::from_static("x"));
+        assert!(has_presented_credential(&headers));
+        headers.insert(
+            name,
+            HeaderValue::from_bytes(&[0xff]).expect("opaque bytes"),
+        );
+        assert!(has_presented_credential(&headers));
     }
 
     #[test]

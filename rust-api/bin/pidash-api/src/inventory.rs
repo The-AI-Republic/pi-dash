@@ -800,11 +800,11 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "api_v1", path: "/api/v1/auth/device/token/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/machine-token/",
-        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/revoke/",
-        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/workspaces/",
-        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/runners/{runner_id}/",
         owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/users/me/",
@@ -1905,6 +1905,11 @@ mod tests {
                     pidash_db::redis::RedisHandle::from_settings(&execute_settings),
                     execute_settings.secret_key.clone(),
                 ),
+                // No Redis client in the mirror (handlers never run
+                // here), like the runner-seams and turn-seam mirrors
+                // above; `worker()` builds this from REDIS_URL.
+                redis: None,
+                runner: execute_settings.runner.clone(),
             },
             keys: crate::model_runtime::keys::KeyResolver::from_env(
                 execute_settings.assistant.key_cache_ttl_secs,
