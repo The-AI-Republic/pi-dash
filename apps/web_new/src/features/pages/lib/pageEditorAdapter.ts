@@ -175,6 +175,8 @@ export interface PageEditorHandle {
   hasSelection: () => boolean;
   /** The selection's document range, or null when nothing is selected (PAGE-075). */
   selectionRange: () => PageTextRange | null;
+  /** The caret's document position, or null when the selection is missing (PAGE-078). */
+  caretPosition: () => number | null;
   /**
    * Write markup at a position or over a range: a number inserts at the
    * caret-side position, a range replaces it (PAGE-075 assistant
@@ -425,6 +427,7 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
     },
     hasSelection: () => pageSelectionRange(editor) !== null,
     selectionRange: () => pageSelectionRange(editor),
+    caretPosition: () => pageCaretPosition(editor),
     insertAt: (at, html) => {
       editor.chain().focus().insertContentAt(at, html).run();
     },
@@ -658,6 +661,19 @@ export function pageSelectionRange(editor: PageEditorRef): PageTextRange | null 
   const { from, to } = editor.state.selection;
   if (from === undefined || to === undefined || to <= from) return null;
   return { from, to };
+}
+
+/**
+ * The caret's document position: the selection head, which is where a
+ * collapsed caret sits. A slash palette only exists at a collapsed
+ * caret, so the registry snippet lands here rather than on the
+ * selection range, which a collapsed caret never yields (PAGE-078).
+ */
+export function pageCaretPosition(editor: PageEditorRef): number | null {
+  const { from, to } = editor.state.selection;
+  if (to !== undefined) return to;
+  if (from !== undefined) return from;
+  return null;
 }
 
 /** The selected text, or the text block under the caret (link prefill). */

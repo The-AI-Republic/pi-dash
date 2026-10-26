@@ -141,15 +141,6 @@ export function PageDetailScreen({
   const role = roles.data?.[projectId] ?? null;
   const viewerId = me.data?.id ?? null;
   const instance = useAppInstanceBootstrap();
-  // The assistant handle mounts only where the edition declares it, the
-  // viewer stands as a project member or above, and the instance has an
-  // LLM configuration to answer with (PAGE-075). The community build
-  // fails the first input and renders no assistant surface.
-  const assistantReady = pageAssistantReady({
-    editionEnabled: isPageAssistantEnabled(edition),
-    authorized: isProjectAuthorized(role),
-    configured: instance.data?.bootstrap?.config.has_llm_configured === true,
-  });
 
   const capabilities = React.useMemo(() => {
     if (page === undefined) return null;
@@ -162,6 +153,15 @@ export function PageDetailScreen({
       projectRole: role,
     });
   }, [page, viewerId, role]);
+  // The assistant handle mounts only where the edition declares it, the
+  // viewer may edit the page, and the instance has an LLM configuration
+  // to answer with (PAGE-075). The community build fails the first
+  // input and renders no assistant surface.
+  const assistantReady = pageAssistantReady({
+    editionEnabled: isPageAssistantEnabled(edition),
+    authorized: capabilities?.canEdit === true,
+    configured: instance.data?.bootstrap?.config.has_llm_configured === true,
+  });
 
   // The attribution rows cannot say who edited or created the page until
   // the member directory answers; waiting for it here keeps the fallback

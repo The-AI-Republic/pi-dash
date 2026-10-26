@@ -1583,7 +1583,7 @@ describe("PageDetailScreen assistant gate (PAGE-075)", () => {
     expect(screen.queryByTestId("page-ai-handle")).not.toBeInTheDocument();
   });
 
-  it("mounts the assistant where the flag, standing and model all hold", async () => {
+  it("mounts the assistant where the flag, edit permission and model all hold", async () => {
     edition.flags = { "page-assistant": true };
     harness.instanceLlm = true;
     renderScreen();
@@ -1591,13 +1591,24 @@ describe("PageDetailScreen assistant gate (PAGE-075)", () => {
     expect(await screen.findByTestId("page-assistant-mount")).toBeInTheDocument();
   });
 
-  it("keeps the assistant shut for a guest-role viewer even with the flag and model", async () => {
+  it("mounts the assistant for a page owner on a guest project role", async () => {
+    // The gate is edit permission, not the project role: an owner edits
+    // the page, so the handle mounts even for a project guest.
     edition.flags = { "page-assistant": true };
     harness.instanceLlm = true;
     harness.role = 5;
     renderScreen();
     await screen.findByRole("textbox", { name: "Page title" });
-    await screen.findByTestId("page-emoji-count");
+    expect(await screen.findByTestId("page-assistant-mount")).toBeInTheDocument();
+  });
+
+  it("keeps the assistant shut for a guest who cannot edit", async () => {
+    edition.flags = { "page-assistant": true };
+    harness.instanceLlm = true;
+    harness.role = 5;
+    harness.viewer = VIEWER;
+    renderScreen();
+    await screen.findByRole("heading", { name: "Page not found" });
     expect(screen.queryByTestId("page-assistant-mount")).not.toBeInTheDocument();
   });
 });

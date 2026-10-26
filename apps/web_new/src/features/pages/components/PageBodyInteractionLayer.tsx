@@ -49,7 +49,7 @@ export interface PageBodyInteractionLayerProps {
   /** Edition resolver test hook: embed kind this build may render. */
   embed?: PageEmbedAttributes | null;
   /**
-   * The assistant handle may mount: the cloud flag, member standing and
+   * The assistant handle may mount: the cloud flag, edit permission and
    * a configured model all hold (PAGE-075). The community build passes
    * false and renders no assistant surface.
    */
@@ -247,11 +247,13 @@ export function PageBodyInteractionLayer({
       // erased before the chosen entry's effect lands in the body.
       handle.deleteBeforeCaret((slashQuery ?? "").length + 1);
       // A cloud registry snippet inserts its markup where the trigger was
-      // (PAGE-078); the community catalogue carries no such entries.
+      // (PAGE-078); the community catalogue carries no such entries. The
+      // palette only exists at a collapsed caret, which carries no
+      // selection range, so the snippet lands at the caret position.
       if (entry.action.type === "snippet") {
-        const caret = handle.selectionRange();
+        const caret = handle.caretPosition();
         if (caret === null) return;
-        handle.insertAt(caret.to, entry.action.html);
+        handle.insertAt(caret, entry.action.html);
         onDocumentChange(handle.html());
         return;
       }

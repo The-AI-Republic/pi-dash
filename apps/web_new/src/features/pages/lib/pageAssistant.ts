@@ -78,7 +78,7 @@ export function pageAssistantTask(instruction: string, toneKey: string): string 
 export interface PageAssistantAccess {
   /** The edition declares the page-assistant flag (cloud builds). */
   editionEnabled: boolean;
-  /** The viewer stands as a project member or above. */
+  /** The viewer may edit the page (owner or member-or-above standing). */
   authorized: boolean;
   /** The instance has an LLM configuration to answer with. */
   configured: boolean;

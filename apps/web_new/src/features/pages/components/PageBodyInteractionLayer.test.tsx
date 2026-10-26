@@ -59,6 +59,7 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     linkHref: vi.fn(() => null),
     hasSelection: vi.fn(() => true),
     selectionRange: vi.fn(() => null),
+    caretPosition: vi.fn(() => null),
     insertAt: vi.fn(),
     textBeforeCaret: vi.fn(() => ""),
     deleteBeforeCaret: vi.fn(),
@@ -919,9 +920,11 @@ describe("cloud slash registry (PAGE-078)", () => {
     edition.slots = {
       "page.slashRegistry": { entries: [{ label: "Cloud callout", group: "Cloud", html: "<p>x</p>" }] },
     };
+    // A slash palette only exists at a collapsed caret, which carries no
+    // selection range — the snippet lands at the caret position instead.
     const page = handle();
     (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/");
-    (page.selectionRange as ReturnType<typeof vi.fn>).mockReturnValue({ from: 4, to: 4 });
+    (page.caretPosition as ReturnType<typeof vi.fn>).mockReturnValue(4);
     const { onDocumentChange } = mount({ getHandle: () => page });
     fireEvent.mouseDown(screen.getByRole("button", { name: "Cloud callout" }));
     expect(page.deleteBeforeCaret).toHaveBeenCalledWith(1);

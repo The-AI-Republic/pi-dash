@@ -19,7 +19,7 @@ import {
 } from "./pageAssistant.js";
 
 describe("pageAssistantReady", () => {
-  it("requires the edition flag, member standing and a configured model", () => {
+  it("requires the edition flag, edit permission and a configured model", () => {
     expect(pageAssistantReady({ editionEnabled: true, authorized: true, configured: true })).toBe(true);
   });
 

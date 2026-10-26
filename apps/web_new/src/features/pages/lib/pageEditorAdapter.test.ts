@@ -33,6 +33,7 @@ import {
   pageEditorHandle,
   PAGE_BODY_START,
   pageSelectionRange,
+  pageCaretPosition,
   replacePageBody,
   runBlockKind,
   runInsertImage,
@@ -272,6 +273,34 @@ describe("pageEditorHandle", () => {
     };
     expect(pageSelectionRange(selected)).toEqual({ from: 2, to: 5 });
     expect(pageEditorHandle(selected).selectionRange()).toEqual({ from: 2, to: 5 });
+  });
+
+  it("reads the caret position where the palette inserts (PAGE-078)", () => {
+    const base = editor();
+    const collapsed = {
+      ...base.ref,
+      state: { selection: { from: 4, to: 4, $from: base.ref.state.selection.$from } },
+    };
+    // A collapsed caret carries no range but still has a position.
+    expect(pageSelectionRange(collapsed)).toBeNull();
+    expect(pageCaretPosition(collapsed)).toBe(4);
+    expect(pageEditorHandle(collapsed).caretPosition()).toBe(4);
+    const ranged = {
+      ...base.ref,
+      state: { selection: { from: 2, to: 9, $from: base.ref.state.selection.$from } },
+    };
+    expect(pageCaretPosition(ranged)).toBe(9);
+  });
+
+  it("answers no caret position without a selection", () => {
+    const base = editor();
+    expect(pageCaretPosition(base.ref)).toBeNull();
+    expect(pageEditorHandle(base.ref).caretPosition()).toBeNull();
+    const headless = {
+      ...base.ref,
+      state: { selection: { from: 2, $from: base.ref.state.selection.$from } },
+    };
+    expect(pageCaretPosition(headless)).toBe(2);
   });
 
   it("captures no range for a collapsed or half-open selection", () => {

@@ -96,7 +96,7 @@ export interface PageEditorSurfaceProps {
   uploadImage?: ((file: File) => Promise<UploadedPageImage>) | undefined;
   /**
    * The assistant handle may mount in the interaction layer: the cloud
-   * flag, member standing and a configured model all hold (PAGE-075).
+   * flag, edit permission and a configured model all hold (PAGE-075).
    */
   assistantReady?: boolean | undefined;
 }
