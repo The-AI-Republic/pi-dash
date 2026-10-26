@@ -9321,7 +9321,7 @@ async fn validate_issue_input(
     }
     if matches!(patch.parent, Some(Some(_))) {
         return Err(Denial::FieldErrors(single_non_field(
-            "Parent is not valid please pass a valid parent_id",
+            "Parent is not valid issue_id please pass a valid issue_id",
         )));
     }
     if matches!(patch.estimate_point, Some(Some(_))) {
