@@ -434,6 +434,16 @@ describe("colour commands", () => {
     expect(editorFormattingState(ref)).toMatchObject({ textColor: null, backgroundColor: null });
   });
 
+  it("reports no colour when the mark carries neither kind", () => {
+    const { ref } = editor({ markAttrs: {} });
+    expect(editorFormattingState(ref)).toMatchObject({ textColor: null, backgroundColor: null });
+  });
+
+  it("maps a wash-only mark into the formatting state", () => {
+    const { ref } = editor({ markAttrs: { backgroundColor: "green" } });
+    expect(editorFormattingState(ref)).toMatchObject({ textColor: null, backgroundColor: "green" });
+  });
+
   it("writes a colour even when the editor cannot report its attributes", () => {
     const { ref, calls } = editor();
     applyPageColor(ref, "text", "gray");
