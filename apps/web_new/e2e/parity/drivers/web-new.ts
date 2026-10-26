@@ -498,6 +498,40 @@ export function moduleVisibleTexts(nodes: Element[]): string[] {
 export class WebNewDriver implements ParityDriver {
   readonly target: ParityTarget = "web_new";
   readonly page: Page;
+
+  /** Detail canvas the page editor mounts inside (PAGE-022). */
+  private static readonly PAGE_CANVAS = "#page-content-container";
+  /**
+   * The title surface, present on every readable page. It is an editable
+   * field on a page the viewer can edit (PAGE-026) and static heading text
+   * on a locked, shelved or otherwise read-only one, so waiting for the
+   * wrapper settles both variants rather than only the editable one.
+   */
+  private static readonly PAGE_TITLE = '[data-testid="page-detail-title"]';
+  /** The shared refusal panel for a forbidden, missing or deleted page (PAGE-023). */
+  private static readonly PAGE_REFUSAL = '[data-testid="page-detail-panel"]';
+  /**
+   * The editor side menu's assistant handle (PAGE-075). The page slice that
+   * builds the menu publishes this hook; until it exists nothing matches.
+   */
+  private static readonly PAGE_AI_HANDLE = '[data-testid="page-ai-handle"]';
+  /**
+   * The page editor's assistant entry: the published hook first, and the
+   * product's own assistant brand as a fallback so a menu built without the
+   * hook is still reported rather than read as an absence (PAGE-075).
+   */
+  private static readonly PAGE_AI_ENTRY_NAMES = /^ask pi dash\b/i;
+  /**
+   * Writing-helper calls, watched from open and read by the scenarios. The
+   * intended editor routes the selected text to the workspace assistant
+   * root (pages spec §9.3); the retired rephrase endpoint is watched too so
+   * a build that still fires it is not read as "no requests".
+   */
+  private static readonly EDITOR_TASK_PATTERNS = [
+    "**/api/workspaces/*/ai-assistant/",
+    "**/api/workspaces/*/rephrase-grammar/",
+  ] as const;
+  private pageEditorTaskRequests: string[] = [];
   /** When this driver was built: the fixture runs at the test's start. */
   private readonly startedAt = Date.now();
 
@@ -15564,17 +15598,78 @@ export class WebNewDriver implements ParityDriver {
     if ((await editor.count()) === 0) return null;
     return ((await editor.textContent()) ?? "").trim();
   }
-  async pageEditorOpen(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
-    return todo("pageEditorOpen");
+  async pageEditorOpen(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    // Start watching before navigation: the assistant menu posts while the
+    // page is open, and a scenario reads the log afterwards (AGT-063).
+    this.pageEditorTaskRequests = [];
+    for (const pattern of WebNewDriver.EDITOR_TASK_PATTERNS) {
+      await this.page.unroute(pattern);
+      await this.page.route(pattern, async (route) => {
+        this.pageEditorTaskRequests.push(route.request().url());
+        await route.fallback();
+      });
+    }
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // The detail resolves the record, roles and body before it paints the
+    // record. Settle on the canvas or on the shared refusal panel: reading
+    // the AI affordances off a spinner, or off the app's not-found route,
+    // would report an absence that was never the page.
+    // Both waits run at once and a spent timeout is a "not shown" answer,
+    // not an error, so whichever surface appears settles the open.
+    const canvas = this.page.locator(WebNewDriver.PAGE_CANVAS).first();
+    const refusal = this.page.locator(WebNewDriver.PAGE_REFUSAL).first();
+    // A readable page mounts the canvas even when its stored body is empty:
+    // the default page body (`<p></p>`) paints inside a zero-height box, so
+    // waiting for visibility would never settle. Attachment is the shell's
+    // own signal that the record resolved into the readable branch; the
+    // refusal panel still has to be visible because it is the painted answer.
+    const shown = (locator: Locator, state: "attached" | "visible") =>
+      locator.waitFor({ state, timeout: WebNewDriver.WAIT_MS }).then(
+        () => true,
+        () => false
+      );
+    const canvasShown = shown(canvas, "attached");
+    const refusalShown = shown(refusal, "visible");
+    if (!(await Promise.race([canvasShown, refusalShown])) && !(await canvasShown) && !(await refusalShown)) {
+      throw new Error(`[parity] the page detail settled on neither a canvas nor the refusal panel: ${pageId}.`);
+    }
+    if ((await canvas.count()) === 0) return;
+    // A readable page paints its title above the body; the body itself is
+    // read-only until the editor slices land (PAGE-026), so the title is the
+    // canvas's stable marker rather than a contenteditable block. The title
+    // wrapper serves both the editable field and the static heading, so a
+    // readable page the viewer cannot edit still settles instead of throwing.
+    await this.page.locator(WebNewDriver.PAGE_TITLE).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async pageEditorAiHandleCount(): Promise<number> {
-    return todo("pageEditorAiHandleCount");
+    // The side menu (with the AI handle, when a build enables it) reveals on
+    // block hover; sweep the body blocks, let the reveal settle, then count
+    // what appeared. A body block with no painted box (an empty `<p></p>`
+    // stores bytes but no height) cannot receive a hover, so it is skipped
+    // rather than waited on. The community build has no handle
+    // (NEWFRONT-206), so the honest answer today is zero.
+    const blocks = this.page.locator(`${WebNewDriver.PAGE_CANVAS} .rich-text-content p`);
+    const total = await blocks.count();
+    for (let index = 0; index < Math.min(total, 5); index += 1) {
+      const block = blocks.nth(index);
+      if (!(await block.isVisible())) continue;
+      await block.hover();
+      await this.page.waitForTimeout(500);
+    }
+    await this.page.waitForTimeout(2000);
+    return this.page.locator(WebNewDriver.PAGE_AI_HANDLE).count();
   }
+
   async pageEditorAiMenuVisible(): Promise<boolean> {
-    return todo("pageEditorAiMenuVisible");
+    const canvas = this.page.locator(WebNewDriver.PAGE_CANVAS).first();
+    const menu = canvas.getByRole("button", { name: WebNewDriver.PAGE_AI_ENTRY_NAMES });
+    return (await menu.count()) > 0 && (await menu.first().isVisible());
   }
+
   async pageEditorRephraseRequests(): Promise<string[]> {
-    return todo("pageEditorRephraseRequests");
+    return [...this.pageEditorTaskRequests];
   }
 
   // --- Desktop agent-runtime web-observable sides (NEWFRONT-207, DESK-001–010,
