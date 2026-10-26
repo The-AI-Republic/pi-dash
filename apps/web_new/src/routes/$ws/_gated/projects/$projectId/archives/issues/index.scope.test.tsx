@@ -25,7 +25,7 @@ vi.mock("../../../../../../../features/issues/contexts/ArchivedIssuesScreen.js",
 
 import { createAppClient, resetAppClient } from "../../../../../../../core/api/client.js";
 import { authKeys } from "../../../../../../../features/auth/index.js";
-import { ArchivedIssuesTab, Route } from "./index.js";
+import { Route } from "./index.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const OTHER = "323e4567-e89b-12d3-a456-426614174002";
@@ -80,9 +80,15 @@ function renderTab(search: Record<string, unknown>): { rerender: () => void } {
   vi.spyOn(Route, "useSearch").mockReturnValue(search as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(authKeys.project("acme", PROJECT), detailRow());
+  // The route component stays private: the router's code splitter leaves a
+  // route component in the eager tree when the module exports it, which
+  // pulls the archived list into the initial JS (NEWFRONT-910). Render the
+  // definition's component the way the router does.
+  const Component = Route.options.component;
+  if (!Component) throw new Error("archived issues tab has no component");
   const tree = () => (
     <QueryClientProvider client={queryClient}>
-      <ArchivedIssuesTab />
+      <Component />
     </QueryClientProvider>
   );
   const { rerender } = render(tree());

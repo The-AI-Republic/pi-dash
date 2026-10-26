@@ -6,6 +6,11 @@
 // the read-only archived list with its ?peekIssueId= selection. Closing
 // the peek strips every peek param; opening writes the item without
 // pushing history.
+//
+// The component stays private on purpose: the router's code splitter
+// leaves a route component in the eager chunk when its module exports it.
+// Exported, this tab pulled the archived list, display control and rich
+// filters into the initial JS and blew the size ceiling (NEWFRONT-910).
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
@@ -23,7 +28,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/archives/i
   component: ArchivedIssuesTab,
 });
 
-export function ArchivedIssuesTab(): React.ReactElement {
+function ArchivedIssuesTab(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   const search = Route.useSearch();
   const navigate = useNavigate();
