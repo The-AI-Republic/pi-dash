@@ -41,6 +41,8 @@ export interface PageEditorChain {
   setMark: (name: string, attributes: Record<string, unknown>) => PageEditorChain;
   /** Remove one mark from the range (PAGE-036 clear). */
   unsetMark: (name: string) => PageEditorChain;
+  /** Point the selection at a document range (the Ctrl+A repair, PAGE-031). */
+  setTextSelection: (range: { from: number; to: number }) => PageEditorChain;
   /** Insert one node or HTML string at the caret (PAGE-034). */
   insertContent: (content: unknown) => PageEditorChain;
   /** Write content at a position or over a range (PAGE-037 block moves). */
@@ -70,10 +72,25 @@ export interface PageResolvedPosition {
   node?: (depth: number) => { nodeSize: number; toJSON: () => unknown };
 }
 
+/** One document node, narrowed to the reads the block geometry makes. */
+export interface PageEditorNode {
+  nodeSize: number;
+  toJSON: () => unknown;
+  type: { name: string };
+  /** How many children the node holds. */
+  childCount?: number;
+  /** One child by index, for the endpoint walk. */
+  child?: (index: number) => PageEditorNode;
+  /** True when the node is a text container (a paragraph, a heading…). */
+  isTextblock?: boolean;
+  /** The node's own inline size, without its own open/close tokens. */
+  content?: { size: number };
+}
+
 /** The document half of the editor view the block geometry reads. */
-export interface PageEditorDocument {
+export interface PageEditorDocument extends PageEditorNode {
   childCount: number;
-  child: (index: number) => { nodeSize: number; toJSON: () => unknown; type: { name: string } };
+  child: (index: number) => PageEditorNode;
   resolve: (position: number) => PageResolvedPosition;
 }
 
@@ -204,11 +221,83 @@ export interface PageEditorHandle {
 }
 
 /**
+ * The inline endpoints of the document, or null when it has no text
+ * block to select. A whole-document selection starts at the document's
+ * first valid position and ends at its content end — both *outside* the
+ * blocks the command is meant to restyle, so ProseMirror's block range
+ * resolves at the document and a list lift has nothing to act on. The
+ * endpoints here are the first text-block position and the last text
+ * block's inline end, which is the range a native Ctrl+A over the text
+ * produces (PAGE-031).
+ */
+export function pageTextEndpoints(doc: PageEditorDocument): { from: number; to: number } | null {
+  const firstTextblock = (node: PageEditorNode, position: number, root: boolean): number | null => {
+    if (node.isTextblock === true) return position + 1;
+    const childCount = node.childCount ?? 0;
+    let offset = root ? position : position + 1;
+    for (let index = 0; index < childCount; index++) {
+      const child = node.child?.(index);
+      if (child === undefined) return null;
+      const found = firstTextblock(child, offset, false);
+      if (found !== null) return found;
+      offset += child.nodeSize;
+    }
+    return null;
+  };
+  const lastTextblock = (node: PageEditorNode, position: number, root: boolean): number | null => {
+    if (node.isTextblock === true) return position + 1 + (node.content?.size ?? 0);
+    const childCount = node.childCount ?? 0;
+    let offset = root ? position : position + 1;
+    let last: number | null = null;
+    for (let index = 0; index < childCount; index++) {
+      const child = node.child?.(index);
+      if (child === undefined) return null;
+      const found = lastTextblock(child, offset, false);
+      if (found !== null) last = found;
+      offset += child.nodeSize;
+    }
+    return last;
+  };
+  const from = firstTextblock(doc, 0, true);
+  const to = lastTextblock(doc, 0, true);
+  if (from === null || to === null) return null;
+  return { from, to };
+}
+
+/**
+ * The selection repaired to the document's text endpoints when it runs
+ * past them, or null when it already points inside the text (a partial
+ * selection, a caret) or repair is not possible. Only the ends that sit
+ * on a document boundary are pulled inward: a selection that starts
+ * before the first text block keeps its start at that block's first
+ * position, and one that ends at the document's content end keeps its
+ * end at the last text block's inline end. That is what makes a Ctrl+A
+ * whole-document selection behave like the same selection made with the
+ * mouse (PAGE-031).
+ */
+function textEndpointRange(editor: PageEditorRef): { from: number; to: number } | null {
+  const doc = editor.view?.state.doc;
+  if (doc === undefined) return null;
+  const { from, to } = editor.state.selection;
+  // A caret restyles the block it sits in already; expanding it into the
+  // whole document would change what the command means.
+  if (from === undefined || to === undefined || from === to) return null;
+  const endpoints = pageTextEndpoints(doc);
+  if (endpoints === null) return null;
+  const start = from <= endpoints.from ? endpoints.from : from;
+  const end = to >= endpoints.to ? endpoints.to : to;
+  if (start === from && end === to) return null;
+  if (start > end) return null;
+  return { from: start, to: end };
+}
+
+/**
  * Run one formatting command: focus the editor first so a click on a
  * toolbar button never drops the selection it is meant to restyle.
  */
 export function runPageCommand(editor: PageEditorRef, command: PageFormatCommand): void {
-  const chain = editor.chain().focus();
+  const repair = textEndpointRange(editor);
+  const chain = repair === null ? editor.chain().focus() : editor.chain().focus().setTextSelection(repair);
   switch (command) {
     case "bold":
       chain.toggleBold().run();
