@@ -34,7 +34,7 @@ export function formatOccurrenceInstant(dtstart: string, tzid: string): string {
   try {
     return instantFormatFor(tzid)
       .formatToParts(at)
-      .map((part) => (part.type === "timeZoneName" ? part.value.replace("GMT+00:00", "UTC") : part.value))
+      .map((part) => (part.type === "timeZoneName" ? part.value.replace(/^GMT([+-]00:00)?$/, "UTC") : part.value))
       .join("");
   } catch {
     // An IANA name this runtime does not know: show the unambiguous instant.
