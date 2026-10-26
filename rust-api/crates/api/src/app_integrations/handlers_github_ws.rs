@@ -1151,7 +1151,7 @@ async fn ensure_github_integration(
            (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
             title, provider, network, description, author,
             webhook_url, webhook_secret, redirect_url, metadata, verified, avatar_url)
-           VALUES ($1,$2,$2,$4,NULL,NULL,'GitHub','github',1,$3,'','','','{}',true,NULL)"#,
+           VALUES ($1,$2,$2,$4,NULL,NULL,'GitHub','github',1,$3,'','','','','{}',true,NULL)"#,
     )
     .bind(id)
     .bind(now)
