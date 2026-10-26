@@ -28,7 +28,7 @@ use crate::cloud::http::{
 use crate::cloud::protocol::{CreateRunnerCmd, MachineMsg};
 use crate::config::schema::AgentKind;
 use crate::daemon::state::StateHandle;
-use crate::daemon::supervisor::RunnerSpawnCtx;
+use crate::daemon::supervisor::{RunnerSpawnCtx, SessionDevMachineId};
 
 /// Server default; the open response's welcome frame can override it.
 const DEFAULT_LONG_POLL_SECS: u64 = 25;
@@ -40,6 +40,10 @@ pub(crate) struct MachineControl {
     client: MachineClient,
     spawn_ctx: RunnerSpawnCtx,
     daemon_state: StateHandle,
+    /// Shared with the supervisor's config watcher: the id this session
+    /// addresses. Updated *before* a merged id is written to `config.toml`
+    /// so the watcher recognises that write as ours.
+    session_dev_machine_id: SessionDevMachineId,
 }
 
 impl MachineControl {
@@ -47,11 +51,13 @@ impl MachineControl {
         client: MachineClient,
         spawn_ctx: RunnerSpawnCtx,
         daemon_state: StateHandle,
+        session_dev_machine_id: SessionDevMachineId,
     ) -> Self {
         Self {
             client,
             spawn_ctx,
             daemon_state,
+            session_dev_machine_id,
         }
     }
 
@@ -172,11 +178,9 @@ impl MachineControl {
         let previous = self.client.dev_machine_id();
         tracing::info!(%previous, %survivor, "dev machine merged; switching to the surviving record");
         let paths = self.spawn_ctx.paths.clone();
+        let session = self.session_dev_machine_id.clone();
         let persisted = tokio::task::spawn_blocking(move || {
-            crate::config::file::mutate_config(&paths, |cfg| {
-                cfg.daemon.dev_machine_id = Some(survivor);
-                Ok(())
-            })
+            persist_adopted_dev_machine_id(&paths, &session, survivor)
         })
         .await;
         match persisted {
@@ -313,6 +317,24 @@ fn parse_agent_kind(raw: &str) -> Result<AgentKind> {
     }
     <AgentKind as clap::ValueEnum>::from_str(raw, false)
         .map_err(|_| anyhow::anyhow!("unknown agent kind {raw:?}"))
+}
+
+/// Record `survivor` as the session's dev machine, then persist it to
+/// `config.toml`. The order matters: the supervisor's config watcher
+/// compares what it reads against the session's id, so publishing the id
+/// first keeps the watcher from treating our own write as an outside change
+/// and restarting this session.
+pub(crate) fn persist_adopted_dev_machine_id(
+    paths: &crate::util::paths::Paths,
+    session: &SessionDevMachineId,
+    survivor: Uuid,
+) -> Result<()> {
+    *session.lock().expect("session dev machine id poisoned") = Some(survivor);
+    crate::config::file::mutate_config(paths, |cfg| {
+        cfg.daemon.dev_machine_id = Some(survivor);
+        Ok(())
+    })?;
+    Ok(())
 }
 
 /// Errors that no amount of retrying fixes: the credential itself is

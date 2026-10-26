@@ -51,14 +51,16 @@ const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const RELOAD_CANCEL_GRACE: Duration = Duration::from_secs(10);
 
 /// Why [`Supervisor::run`] returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum SupervisorExit {
     /// Shutdown requested (signal or IPC). The process should exit.
     Shutdown,
     /// `config.toml` changed the daemon's identity (cloud, machine token)
     /// or dropped a running runner. Everything was torn down; the caller
-    /// re-reads the config and starts a fresh supervisor in-process.
-    Reload,
+    /// starts a fresh supervisor in-process from the carried config, which
+    /// has already been parsed and validated — an invalid edit never gets
+    /// this far (see [`ConfigWatch`]).
+    Reload(Box<Config>),
 }
 
 /// The parts of `config.toml` a running supervisor is bound to.
@@ -129,37 +131,62 @@ fn classify_config_change(
     ConfigChange::Unchanged
 }
 
-/// Re-reads `config.toml` when its bytes change. Parses without the
-/// loader's legacy migrations: only identity and runner ids matter here.
+/// Re-reads `config.toml` when its bytes change. A change only counts once
+/// it loads (with the loader's legacy migrations) *and* validates: a broken
+/// or half-written edit is logged and ignored, and the daemon keeps running
+/// on its last good config instead of tearing its runners down for it.
 struct ConfigWatch {
-    path: std::path::PathBuf,
+    paths: Paths,
     last_text: Option<String>,
 }
 
 impl ConfigWatch {
     fn new(paths: &Paths) -> Self {
-        let path = paths.config_path();
-        let last_text = std::fs::read_to_string(&path).ok();
-        Self { path, last_text }
+        let last_text = std::fs::read_to_string(paths.config_path()).ok();
+        Self {
+            paths: paths.clone(),
+            last_text,
+        }
     }
 
-    /// The config, if the file changed since the last call and parses.
+    /// The config, if the file changed since the last call, parses and
+    /// validates.
     fn changed(&mut self) -> Option<Config> {
-        let text = std::fs::read_to_string(&self.path).ok()?;
+        let text = std::fs::read_to_string(self.paths.config_path()).ok()?;
         if self.last_text.as_deref() == Some(text.as_str()) {
             return None;
         }
-        match toml::from_str::<Config>(&text) {
-            Ok(cfg) => {
-                self.last_text = Some(text);
-                Some(cfg)
-            }
+        let loaded = crate::config::file::parse_config(&self.paths, &text).and_then(|cfg| {
+            cfg.validate()
+                .map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
+            Ok(cfg)
+        });
+        self.last_text = Some(text);
+        match loaded {
+            Ok(cfg) => Some(cfg),
             Err(e) => {
-                tracing::warn!("config.toml changed but does not parse; ignoring: {e}");
-                self.last_text = Some(text);
+                tracing::error!(
+                    "config.toml changed but cannot be used; keeping the running config until it is fixed: {e:#}"
+                );
                 None
             }
         }
+    }
+}
+
+/// The dev-machine id the live machine control session addresses. The
+/// session moves it itself when the cloud reports a merge (and persists the
+/// survivor to `config.toml`), so the config watcher can tell that
+/// self-inflicted change apart from an outside one and leave the session
+/// alone.
+pub(crate) type SessionDevMachineId = Arc<std::sync::Mutex<Option<uuid::Uuid>>>;
+
+/// Fold a dev-machine id the machine session adopted on its own into the
+/// running identity, so the config watcher doesn't mistake the session's
+/// own `config.toml` write for an outside change and restart it.
+fn sync_session_dev_machine_id(identity: &mut RunningIdentity, session: &SessionDevMachineId) {
+    if let Some(id) = *session.lock().expect("session dev machine id poisoned") {
+        identity.dev_machine_id = Some(id);
     }
 }
 
@@ -167,9 +194,13 @@ impl ConfigWatch {
 fn spawn_machine_control(
     transport: Option<&SharedHttpTransport>,
     identity: &RunningIdentity,
+    session_dev_machine_id: &SessionDevMachineId,
     spawn_ctx: &RunnerSpawnCtx,
     state: &StateHandle,
 ) -> Option<tokio::task::JoinHandle<()>> {
+    *session_dev_machine_id
+        .lock()
+        .expect("session dev machine id poisoned") = None;
     let (Some(shared), Some(token), Some(dev_machine_id)) = (
         transport,
         identity.shared_machine_token.clone(),
@@ -177,11 +208,15 @@ fn spawn_machine_control(
     ) else {
         return None;
     };
+    *session_dev_machine_id
+        .lock()
+        .expect("session dev machine id poisoned") = Some(dev_machine_id);
     let client = MachineClient::new(shared.clone(), dev_machine_id, token);
     let control = crate::daemon::machine_control::MachineControl::new(
         client,
         spawn_ctx.clone(),
         state.clone(),
+        session_dev_machine_id.clone(),
     );
     Some(tokio::spawn(async move { control.run().await }))
 }
@@ -358,8 +393,14 @@ impl Supervisor {
         // machine token and a persisted dev_machine_id — both written
         // by `pidash auth login` / modern enrollments; legacy installs
         // without them simply don't get the channel.
-        let mut machine_handle =
-            spawn_machine_control(transport.as_ref(), &identity, &spawn_ctx, &state);
+        let session_dev_machine_id: SessionDevMachineId = Arc::default();
+        let mut machine_handle = spawn_machine_control(
+            transport.as_ref(),
+            &identity,
+            &session_dev_machine_id,
+            &spawn_ctx,
+            &state,
+        );
         if machine_handle.is_none() && !opts.offline {
             tracing::info!(
                 "machine control session disabled (missing dev_machine_id or mt_ token in config)"
@@ -392,6 +433,7 @@ impl Supervisor {
                     let Some(new_cfg) = config_watch.changed() else { continue };
                     let live: Vec<uuid::Uuid> =
                         hello_runners.read().await.keys().copied().collect();
+                    sync_session_dev_machine_id(&mut identity, &session_dev_machine_id);
                     match classify_config_change(&identity, &live, &new_cfg) {
                         ConfigChange::Unchanged => {}
                         ConfigChange::DevMachineId(id) => {
@@ -406,13 +448,14 @@ impl Supervisor {
                             machine_handle = spawn_machine_control(
                                 transport.as_ref(),
                                 &identity,
+                                &session_dev_machine_id,
                                 &spawn_ctx,
                                 &state,
                             );
                         }
                         ConfigChange::Reload(why) => {
                             tracing::info!("{why}; reloading the daemon in-process");
-                            break SupervisorExit::Reload;
+                            break SupervisorExit::Reload(Box::new(new_cfg));
                         }
                     }
                 }
@@ -451,7 +494,7 @@ impl Supervisor {
         // stop the agents explicitly instead of relying on process exit to
         // kill them. The drain above already told the cloud these runs
         // failed.
-        if exit == SupervisorExit::Reload {
+        if matches!(exit, SupervisorExit::Reload(_)) {
             cancel_in_flight_runs(&hello_runners, &mailboxes).await;
         }
 
@@ -1412,8 +1455,12 @@ struct ChatWarm {
 enum ChatCommand {
     Warm(ChatWarm),
     Message(ChatTurn),
-    Cancel { reason: Option<String> },
-    Close { reason: Option<String> },
+    Cancel {
+        reason: Option<String>,
+    },
+    Close {
+        reason: Option<String>,
+    },
     /// Tear down this runtime to make room for another session (or to free the
     /// runner's working dir for an assign) WITHOUT closing the
     /// cloud session: it stays open and a later warm/message revives it via
@@ -3932,7 +3979,11 @@ impl AssignWorker {
                 reason,
             } => {
                 run_events.flush_before_lifecycle(&self.out).await;
-                let policy = Policy::new(&self.runner_config.approval_policy, workspace_root, crate::cloud::protocol::ApprovalMode::Ask);
+                let policy = Policy::new(
+                    &self.runner_config.approval_policy,
+                    workspace_root,
+                    crate::cloud::protocol::ApprovalMode::Ask,
+                );
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
                     bridge.send_approval(&approval_id, auto).await.ok();
@@ -4210,7 +4261,11 @@ mod tests {
             let mut config = runner_config("general-tasks", "TEST", wd.clone());
             config.project_slug = None; // no cloud context lookup in this test
             config.agent.kind = kind;
-            let missing_binary = tmp.path().join("missing-agent").to_string_lossy().into_owned();
+            let missing_binary = tmp
+                .path()
+                .join("missing-agent")
+                .to_string_lossy()
+                .into_owned();
             config.codex.binary = missing_binary.clone();
             config.claude_code.binary = missing_binary;
             let runner_paths = paths.for_runner(config.runner_id);
@@ -5021,5 +5076,79 @@ mod tests {
         assert!(watch.changed().is_none());
         std::fs::write(paths.config_path(), "not = [valid").unwrap();
         assert!(watch.changed().is_none(), "unparseable config is ignored");
+    }
+
+    #[test]
+    fn config_watch_ignores_a_config_that_fails_validation() {
+        // A reload must never be triggered by a config the next supervisor
+        // would refuse: the daemon keeps running on its last good config.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let r = runner_config("a", "P", PathBuf::from("/tmp/a"));
+        let good = identity_config(Some("mt_one"), vec![r.clone()]);
+        crate::config::file::write_config(&paths, &good).unwrap();
+        let mut watch = ConfigWatch::new(&paths);
+
+        // Parses, but two runners share a name.
+        let mut dup = r.clone();
+        dup.runner_id = uuid::Uuid::new_v4();
+        dup.workspace.working_dir = PathBuf::from("/tmp/b");
+        let invalid = identity_config(Some("mt_two"), vec![r.clone(), dup]);
+        assert!(invalid.validate().is_err(), "fixture must be invalid");
+        crate::config::file::write_config(&paths, &invalid).unwrap();
+        assert!(watch.changed().is_none(), "invalid config is not a change");
+        assert!(watch.changed().is_none(), "and is not re-reported");
+
+        // Fixed: now it counts, and it is the validated config.
+        let fixed = identity_config(Some("mt_two"), vec![r]);
+        crate::config::file::write_config(&paths, &fixed).unwrap();
+        let seen = watch.changed().expect("valid change detected");
+        assert_eq!(
+            seen.cli.unwrap().token.as_deref(),
+            Some("mt_two"),
+            "the fixed config is reported"
+        );
+    }
+
+    #[test]
+    fn machine_session_adopting_a_merged_id_does_not_restart_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let base = identity_config(Some("mt_one"), vec![]);
+        crate::config::file::write_config(&paths, &base).unwrap();
+        let mut identity = RunningIdentity::of(&base);
+        let mut watch = ConfigWatch::new(&paths);
+        let session: SessionDevMachineId =
+            Arc::new(std::sync::Mutex::new(base.daemon.dev_machine_id));
+
+        // The session learns of a merge (409) and persists the survivor.
+        let survivor = uuid::Uuid::from_u128(2);
+        crate::daemon::machine_control::persist_adopted_dev_machine_id(&paths, &session, survivor)
+            .unwrap();
+        assert_eq!(
+            crate::config::file::load_config(&paths)
+                .unwrap()
+                .daemon
+                .dev_machine_id,
+            Some(survivor)
+        );
+        let seen = watch.changed().expect("config.toml was rewritten");
+        sync_session_dev_machine_id(&mut identity, &session);
+        assert_eq!(
+            classify_config_change(&identity, &[], &seen),
+            ConfigChange::Unchanged,
+            "the session's own write must not abort it"
+        );
+
+        // A change the session didn't make still reopens it.
+        let mut moved = seen.clone();
+        moved.daemon.dev_machine_id = Some(uuid::Uuid::from_u128(3));
+        crate::config::file::write_config(&paths, &moved).unwrap();
+        let seen = watch.changed().unwrap();
+        sync_session_dev_machine_id(&mut identity, &session);
+        assert_eq!(
+            classify_config_change(&identity, &[], &seen),
+            ConfigChange::DevMachineId(Some(uuid::Uuid::from_u128(3)))
+        );
     }
 }
