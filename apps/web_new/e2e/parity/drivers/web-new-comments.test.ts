@@ -215,15 +215,21 @@ describe("web_new comment driver", () => {
     await expect(new WebNewDriver(page.page).activityComposerText()).resolves.toBe("a draft");
   });
 
-  it("types into the composer, presses Enter and waits for the card", async () => {
+  it("types into the composer, clicks Comment and waits for the card", async () => {
     const steps: string[] = [];
     const editor = locator({
       click: async () => void steps.push("click"),
-      fill: async (value: string) => void steps.push(`fill:${value}`),
-      press: async (key: string) => void steps.push(`press:${key}`),
+      pressSequentially: async (value: string) => void steps.push(`type:${value}`),
     });
     const page = pageOf({
-      composer: locator({ locator: () => editor }),
+      composer: locator({
+        locator: () => editor,
+        getByRole: (role: string, options?: unknown) => {
+          expect(role).toBe("button");
+          expect((options as { name?: unknown }).name).toBe("Comment");
+          return locator({ click: async () => void steps.push("submit") });
+        },
+      }),
       cards: (text) =>
         locator({
           waitFor: async () => {
@@ -232,7 +238,7 @@ describe("web_new comment driver", () => {
         }),
     });
     await new WebNewDriver(page.page).activityPostComment("Hello there");
-    expect(steps).toEqual(["click", "fill:Hello there", "press:Enter", "card:Hello there"]);
+    expect(steps).toEqual(["click", "type:Hello there", "submit", "card:Hello there"]);
   });
 
   it("hovers the card, opens the menu trigger and waits for an item", async () => {
