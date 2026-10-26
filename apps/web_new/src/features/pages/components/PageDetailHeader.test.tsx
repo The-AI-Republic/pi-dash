@@ -35,6 +35,9 @@ vi.mock("../../../shared/shell/toaster.js", () => ({
   notifyError: vi.fn(),
 }));
 
+const edition = vi.hoisted(() => ({ slots: {} as Record<string, unknown> }));
+vi.mock("@pidash/edition", () => ({ edition }));
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { PAGES_PAGE_ID, PAGES_PROJECT_ID, makePageRow } from "../testing.js";
 import { PAGE_PREFERENCES_DEFAULTS } from "../lib/pagePreferences.js";
@@ -129,6 +132,7 @@ beforeEach(() => {
 afterEach(() => {
   resetAppClient();
   resetPageBodyActions();
+  edition.slots = {};
 });
 
 describe("PageDetailHeader", () => {
@@ -438,5 +442,54 @@ describe("PageDetailHeader offline pill", () => {
     });
     expect(screen.queryByTestId("page-offline-pill")).not.toBeInTheDocument();
     expect(screen.getByText("Syncing...")).toBeInTheDocument();
+  });
+});
+
+describe("PageDetailHeader cloud slots (PAGE-076-078)", () => {
+  function actionNames(): string[] {
+    const header = screen.getByTestId("page-detail-header");
+    return within(header)
+      .getAllByRole("button")
+      .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent ?? "");
+  }
+
+  it("renders no share, roster or extra actions in the community build", () => {
+    renderHeader();
+    const names = actionNames().slice(actionNames().indexOf(PAGE_PANE_TOGGLE_LABEL));
+    expect(names.some((name) => /share/i.test(name))).toBe(false);
+    expect(names.some((name) => /copy link/i.test(name))).toBe(true);
+    expect(names.some((name) => /favorit/i.test(name))).toBe(true);
+    // The pinned community cluster: pane toggle, star, lock, copy, options.
+    expect(names).toHaveLength(5);
+    expect(names.some((name) => /share|extension|plugin|extra/i.test(name))).toBe(false);
+  });
+
+  it("seats filled slots around the built-in cluster in pinned order", () => {
+    edition.slots = {
+      "page.share": () => <button type="button">Cloud share</button>,
+      "page.collaborators": () => <button type="button">Cloud roster</button>,
+      "page.headerActions": () => <button type="button">Cloud extras</button>,
+    };
+    renderHeader();
+    const names = actionNames();
+    expect(names.indexOf("Cloud extras")).toBeLessThan(names.indexOf("Cloud roster"));
+    expect(names.indexOf("Cloud roster")).toBeLessThan(names.indexOf(PAGE_PANE_TOGGLE_LABEL));
+    expect(names.indexOf(PAGE_COPY_LINK_LABEL)).toBeLessThan(names.indexOf("Cloud share"));
+    expect(names.indexOf("Cloud share")).toBeLessThan(names.indexOf(PAGE_OPTIONS_LABEL));
+  });
+
+  it("passes the page address to each filled slot", () => {
+    const seen: Record<string, unknown>[] = [];
+    const probe = (props: Record<string, unknown>) => {
+      seen.push(props);
+      return null;
+    };
+    edition.slots = { "page.share": probe, "page.collaborators": probe, "page.headerActions": probe };
+    renderHeader();
+    expect(seen).toEqual([
+      { workspaceSlug: "acme", projectId: PAGES_PROJECT_ID, pageId: PAGES_PAGE_ID },
+      { workspaceSlug: "acme", projectId: PAGES_PROJECT_ID, pageId: PAGES_PAGE_ID },
+      { workspaceSlug: "acme", projectId: PAGES_PROJECT_ID, pageId: PAGES_PAGE_ID },
+    ]);
   });
 });

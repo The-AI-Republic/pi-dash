@@ -276,3 +276,67 @@ describe("PageNavigationPane", () => {
     expect(link).toHaveTextContent(/^Oct 20, 2026/);
   });
 });
+
+describe("PageNavigationPane extra tabs (PAGE-078)", () => {
+  const SENTIMENT = {
+    value: "sentiment",
+    label: "Sentiment",
+    Body: () => <p>edition sentiment panel</p>,
+  };
+
+  it("offers exactly the community tabs when the slot is absent", () => {
+    renderPane({ search: { paneTab: "outline" } });
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Outline", "Info", "Assets"]);
+  });
+
+  it("lists extra tabs after the community tabs and shows their body on pick", () => {
+    edition.slots = { "page.extraPaneTabs": { tabs: [SENTIMENT] } };
+    try {
+      const { onSelectTab } = renderPane({ search: { paneTab: "outline" } });
+      expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+        "Outline",
+        "Info",
+        "Assets",
+        "Sentiment",
+      ]);
+      expect(screen.getByTestId("page-outline")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("tab", { name: "Sentiment" }));
+      expect(screen.getByText("edition sentiment panel")).toBeInTheDocument();
+      expect(screen.queryByTestId("page-outline")).not.toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: "Sentiment" })).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByRole("tab", { name: "Outline" })).toHaveAttribute("aria-selected", "false");
+      // The extra pick never touches the address.
+      expect(onSelectTab).not.toHaveBeenCalled();
+    } finally {
+      edition.slots = {};
+    }
+  });
+
+  it("returns to the community body when a community tab is picked", () => {
+    edition.slots = { "page.extraPaneTabs": { tabs: [SENTIMENT] } };
+    try {
+      const { onSelectTab } = renderPane({ search: { paneTab: "outline" } });
+      fireEvent.click(screen.getByRole("tab", { name: "Sentiment" }));
+      expect(screen.getByText("edition sentiment panel")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("tab", { name: "Info" }));
+      expect(onSelectTab).toHaveBeenCalledWith("info");
+      expect(screen.queryByText("edition sentiment panel")).not.toBeInTheDocument();
+      expect(screen.getByTestId("page-outline")).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: "Outline" })).toHaveAttribute("aria-selected", "true");
+    } finally {
+      edition.slots = {};
+    }
+  });
+
+  it("hides the version timeline while an extra tab shows on the info address", () => {
+    edition.slots = { "page.extraPaneTabs": { tabs: [SENTIMENT] } };
+    try {
+      renderPane({ search: { paneTab: "info" } });
+      expect(screen.getByText(PAGE_CURRENT_VERSION_LABEL)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("tab", { name: "Sentiment" }));
+      expect(screen.queryByText(PAGE_CURRENT_VERSION_LABEL)).not.toBeInTheDocument();
+    } finally {
+      edition.slots = {};
+    }
+  });
+});

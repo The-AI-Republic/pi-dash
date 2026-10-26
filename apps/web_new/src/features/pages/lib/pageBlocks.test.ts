@@ -89,6 +89,16 @@ describe("page slash catalogue", () => {
     expect(filterPickerCommands("  EMB  ").map((entry) => entry.label)).toEqual(["Embed work item"]);
     expect(filterPickerCommands("ent").map((entry) => entry.label)).toEqual(["Entity reference"]);
   });
+
+  it("appends cloud registry snippets after the community catalogue (PAGE-078)", () => {
+    const snippet = { label: "Cloud callout", group: "Cloud", action: { type: "snippet", html: "<p>x</p>" } } as const;
+    const unqueried = filterSlashEntries("", [snippet]);
+    expect(unqueried).toHaveLength(36);
+    expect(unqueried[35]).toEqual(snippet);
+    expect(unqueried.slice(0, 35).map((entry) => entry.label)).toEqual(pageSlashLabels());
+    expect(filterSlashEntries("callout", [snippet]).map((entry) => entry.label)).toEqual(["Callout", "Cloud callout"]);
+    expect(filterSlashEntries("zzz", [snippet])).toEqual([]);
+  });
 });
 
 describe("page body markup fragments", () => {

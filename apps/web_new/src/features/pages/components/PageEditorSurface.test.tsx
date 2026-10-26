@@ -134,6 +134,17 @@ describe(
       expect(await body()).toHaveAttribute("contenteditable", "true");
     });
 
+    it("threads the assistant gate to the interaction layer (PAGE-075)", async () => {
+      const plain = mount();
+      expect(plain.getByTestId("page-body-interactions")).toBeInTheDocument();
+      expect(plain.queryByTestId("page-assistant-mount")).not.toBeInTheDocument();
+      plain.unmount();
+      const ready = mount({ assistantReady: true });
+      expect(ready.getByTestId("page-assistant-mount")).toBeInTheDocument();
+      ready.unmount();
+      await vi.dynamicImportSettled();
+    });
+
     it("marks the bar wide and stamps the stored type preferences", async () => {
       mount({ fullWidth: true, fontSize: "small-font", fontStyle: "serif" });
       await body();

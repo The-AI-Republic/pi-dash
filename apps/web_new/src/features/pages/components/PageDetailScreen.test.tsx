@@ -52,6 +52,9 @@ import { PageDetailScreen } from "./PageDetailScreen.js";
 import { mentionNameFor, resetMentionDirectory } from "../../../shared/editor/mentionDirectory.js";
 import { requestEntityPeek, resetEntityPeek } from "../../../shared/shell/entityPeek.js";
 
+const edition = vi.hoisted(() => ({ flags: {} as Record<string, boolean>, slots: {} as Record<string, unknown> }));
+vi.mock("@pidash/edition", () => ({ edition }));
+
 const issuePeek = vi.hoisted(() => vi.fn());
 vi.mock("../../issues/peek/ResolvingIssuePeek.js", () => ({
   ResolvingIssuePeek: (props: { peeked: string; peekProjectId?: string | null; onClose: () => void }) => {
@@ -96,6 +99,8 @@ interface Harness {
   versionJson: Record<string, unknown>;
   projectPageView: boolean;
   projectStatus: number;
+  /** The instance bootstrap answers with an LLM configuration. */
+  instanceLlm: boolean;
 }
 
 let harness: Harness;
@@ -142,11 +147,14 @@ beforeEach(() => {
     versionJson: {},
     projectPageView: true,
     projectStatus: 200,
+    instanceLlm: false,
   };
   resetPageBodyCache();
   resetPageBodyDrafts();
   resetPageExportDialog();
   router.navigate.mockReset();
+  edition.flags = {};
+  edition.slots = {};
   createAppClient("https://api.test", (async (requested: string, init: { method: string; body?: string | null }) => {
     const url = requested.split("?")[0] ?? requested;
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
@@ -174,6 +182,50 @@ beforeEach(() => {
     }
     if (url.endsWith("/project-roles/")) {
       return jsonResponse(url, 200, harness.role === null ? {} : { [PROJECT]: harness.role });
+    }
+    if (url.endsWith("/api/instances/")) {
+      if (!harness.instanceLlm) return jsonResponse(url, 200, { is_setup_done: false });
+      return jsonResponse(url, 200, {
+        config: {
+          enable_signup: true,
+          is_workspace_creation_disabled: false,
+          is_google_enabled: false,
+          is_github_enabled: false,
+          is_gitlab_enabled: false,
+          is_gitea_enabled: false,
+          is_magic_login_enabled: false,
+          is_email_password_enabled: true,
+          is_smtp_configured: false,
+          is_self_managed: true,
+          instance_changelog_url: "",
+          has_llm_configured: true,
+        },
+        instance: {
+          id: "123e4567-e89b-12d3-a456-426614174000",
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-01-01T00:00:00.000Z",
+          created_by: null,
+          updated_by: null,
+          deleted_at: null,
+          instance_name: "test",
+          whitelist_emails: null,
+          instance_id: "test",
+          current_version: "1.0.0",
+          latest_version: null,
+          edition: "oss",
+          domain: "test.example",
+          last_checked_at: "2026-01-01T00:00:00.000Z",
+          namespace: null,
+          is_telemetry_enabled: false,
+          is_support_required: false,
+          is_setup_done: true,
+          is_signup_screen_visited: true,
+          is_verified: false,
+          is_test: true,
+          is_current_version_deprecated: false,
+          workspaces_exist: true,
+        },
+      });
     }
     const projectRead = new RegExp(`/api/workspaces/acme/projects/([0-9a-f-]+)/$`).exec(url);
     if (projectRead !== null) {
@@ -1517,5 +1569,46 @@ describe("PageDetailScreen export entry (PAGE-074)", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Export" }));
     expect(await screen.findByTestId("stub-export-dialog")).toBeInTheDocument();
     expect(screen.getByTestId("stub-export-html")).toHaveTextContent("Draft body");
+  });
+});
+
+describe("PageDetailScreen assistant gate (PAGE-075)", () => {
+  it("mounts no assistant surface in the community build", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    // The interaction layer is up (its count hook renders) but the
+    // assistant gate stays shut: no flag, no model configuration.
+    await screen.findByTestId("page-emoji-count");
+    expect(screen.queryByTestId("page-assistant-mount")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("page-ai-handle")).not.toBeInTheDocument();
+  });
+
+  it("mounts the assistant where the flag, edit permission and model all hold", async () => {
+    edition.flags = { "page-assistant": true };
+    harness.instanceLlm = true;
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(await screen.findByTestId("page-assistant-mount")).toBeInTheDocument();
+  });
+
+  it("mounts the assistant for a page owner on a guest project role", async () => {
+    // The gate is edit permission, not the project role: an owner edits
+    // the page, so the handle mounts even for a project guest.
+    edition.flags = { "page-assistant": true };
+    harness.instanceLlm = true;
+    harness.role = 5;
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(await screen.findByTestId("page-assistant-mount")).toBeInTheDocument();
+  });
+
+  it("keeps the assistant shut for a guest who cannot edit", async () => {
+    edition.flags = { "page-assistant": true };
+    harness.instanceLlm = true;
+    harness.role = 5;
+    harness.viewer = VIEWER;
+    renderScreen();
+    await screen.findByRole("heading", { name: "Page not found" });
+    expect(screen.queryByTestId("page-assistant-mount")).not.toBeInTheDocument();
   });
 });

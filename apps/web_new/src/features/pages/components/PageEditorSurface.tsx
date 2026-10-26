@@ -94,6 +94,11 @@ export interface PageEditorSurfaceProps {
    * asset contract; tests inject a stub instead of running the pipeline.
    */
   uploadImage?: ((file: File) => Promise<UploadedPageImage>) | undefined;
+  /**
+   * The assistant handle may mount in the interaction layer: the cloud
+   * flag, edit permission and a configured model all hold (PAGE-075).
+   */
+  assistantReady?: boolean | undefined;
 }
 
 /**
@@ -121,6 +126,7 @@ export function PageEditorSurface({
   bodyPending = false,
   onHandle,
   uploadImage,
+  assistantReady = false,
 }: PageEditorSurfaceProps): React.ReactElement {
   const handleRef = React.useRef<PageEditorHandle | null>(null);
   const [state, setState] = React.useState<PageFormattingState>(EMPTY_FORMATTING_STATE);
@@ -366,6 +372,7 @@ export function PageEditorSurface({
             html={bodyHtml}
             onPickImage={openPageImagePicker}
             onDocumentChange={setBodyHtml}
+            assistantReady={assistantReady}
           />
         </React.Suspense>
       )}

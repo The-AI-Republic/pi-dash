@@ -19,11 +19,13 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
+import { edition, isPageAssistantEnabled } from "../../../core/edition/index.js";
 import { meQueryOptions } from "../../../core/session/queries.js";
 import { descriptionAssetSrc } from "../../../shared/editor/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { RichTextView } from "../../../shared/editor/RichTextView.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
+import { useAppInstanceBootstrap } from "../../instance/index.js";
 import { usePaletteWorkspaceMembers } from "../../../shared/shell/contextual/index.js";
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { usePageExportDialog, type PageExportHost } from "../../pages-export/index.js";
@@ -58,6 +60,7 @@ import { snapshotBodyHtml } from "../lib/versionContent.js";
 import { pageAncestors, pageDeleteKnownCount } from "../lib/pageNested.js";
 import { quickCreateAccess } from "../lib/pageCreate.js";
 import { copyPageLink } from "../lib/share.js";
+import { pageAssistantReady } from "../lib/pageAssistant.js";
 import { usePageSyncStatus } from "../lib/pageSync.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
 import { PageDeleteDialog } from "./PageDeleteDialog.js";
@@ -137,6 +140,7 @@ export function PageDetailScreen({
   });
   const role = roles.data?.[projectId] ?? null;
   const viewerId = me.data?.id ?? null;
+  const instance = useAppInstanceBootstrap();
 
   const capabilities = React.useMemo(() => {
     if (page === undefined) return null;
@@ -149,6 +153,15 @@ export function PageDetailScreen({
       projectRole: role,
     });
   }, [page, viewerId, role]);
+  // The assistant handle mounts only where the edition declares it, the
+  // viewer may edit the page, and the instance has an LLM configuration
+  // to answer with (PAGE-075). The community build fails the first
+  // input and renders no assistant surface.
+  const assistantReady = pageAssistantReady({
+    editionEnabled: isPageAssistantEnabled(edition),
+    authorized: capabilities?.canEdit === true,
+    configured: instance.data?.bootstrap?.config.has_llm_configured === true,
+  });
 
   // The attribution rows cannot say who edited or created the page until
   // the member directory answers; waiting for it here keeps the fallback
@@ -494,6 +507,7 @@ export function PageDetailScreen({
                     fontStyle={preferences.font_style}
                     bodyPending={!bodyReady}
                     onHandle={onEditorHandle}
+                    assistantReady={assistantReady}
                   />
                 ) : (
                   <>

@@ -17,6 +17,7 @@ import { Ellipsis, Link2, PanelRight } from "lucide-react";
 import * as React from "react";
 
 import { ProjectMark } from "../../../shared/pickers/ProjectMark.js";
+import { edition } from "../../../core/edition/index.js";
 import { PAGE_ACCESS_PRIVATE, type PageRow as PageRowData } from "@pidash/api-client";
 import { pageDetailHref, pageTabHref } from "../lib/pageList.js";
 import type { PageSiblingOption } from "../lib/pageDetail.js";
@@ -161,6 +162,14 @@ export function PageDetailHeader({
     onPreferenceChange
   );
 
+  // Cloud header slots (PAGE-076–078): extra actions after the sync
+  // badge, the collaborator strip before the pane toggle, and the share
+  // control between the link copy and the options menu. The community
+  // edition leaves all three absent and renders nothing.
+  const ExtraHeaderActions = edition.slots?.["page.headerActions"];
+  const Collaborators = edition.slots?.["page.collaborators"];
+  const Share = edition.slots?.["page.share"];
+
   return (
     <div
       data-testid="page-detail-header"
@@ -216,6 +225,12 @@ export function PageDetailHeader({
       )}
       <span className="flex-1" aria-hidden="true" />
       {offlineVisible ? <PageOfflinePill /> : <PageSyncBadge status={syncStatus} />}
+      {ExtraHeaderActions === undefined ? null : (
+        <ExtraHeaderActions workspaceSlug={workspaceSlug} projectId={projectId} pageId={page.id} />
+      )}
+      {Collaborators === undefined ? null : (
+        <Collaborators workspaceSlug={workspaceSlug} projectId={projectId} pageId={page.id} />
+      )}
       <IconButton
         label={PAGE_PANE_TOGGLE_LABEL}
         aria-expanded={paneOpen}
@@ -230,6 +245,7 @@ export function PageDetailHeader({
       <IconButton label={copied ? PAGE_COPIED_LINK_LABEL : PAGE_COPY_LINK_LABEL} size="small" onClick={handleCopy}>
         <Link2 size={16} strokeWidth={1.5} aria-hidden="true" />
       </IconButton>
+      {Share === undefined ? null : <Share workspaceSlug={workspaceSlug} projectId={projectId} pageId={page.id} />}
       <Menu
         trigger={
           <IconButton label={PAGE_OPTIONS_LABEL} size="small">
