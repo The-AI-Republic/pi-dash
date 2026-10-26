@@ -1164,22 +1164,37 @@ pub(crate) async fn handle_patch(
         Ok(None) => return Denial::NotFound.into_response(),
         Err(error) => return server_error(error),
     };
+    // `if not asset.storage_metadata: delay` — BEFORE `request.data`
+    // parses, exactly like Python (`asset.py:214-217`: the `.delay`
+    // precedes the first `request.data` access because DRF parses
+    // lazily). A rejected body (415/500) still starts the back-fill
+    // (PIDASHCONV-1408). The proxy arm stays publish-free: the Django
+    // upstream enqueues there itself, so publishing first would queue
+    // the job twice.
+    let storage_metadata = asset.storage_metadata.unwrap_or(Value::Null);
+    let metadata_missing =
+        pidash_jobs::v1_assets::tasks::storage_metadata_missing(&storage_metadata);
     // `request.data` parses here — after the lookup, like Python.
     let data = match parse_object(&headers, &body) {
         Ok(data) => data,
         Err(ProxyOr500::Proxy) => {
             return proxy_through(state, method, uri, headers, body).await;
         }
-        Err(ProxyOr500::ServerError) => return server_error("request.data has no .get"),
+        Err(ProxyOr500::ServerError) => {
+            if metadata_missing {
+                publish_metadata(pool, &asset_id).await;
+            }
+            return server_error("request.data has no .get");
+        }
         Err(ProxyOr500::Unsupported(content_type)) => {
+            if metadata_missing {
+                publish_metadata(pool, &asset_id).await;
+            }
             return crate::v1_assets::sticky::Denial::UnsupportedMediaType(content_type)
                 .into_response();
         }
     };
-    // `if not asset.storage_metadata: delay` — before the save, exactly
-    // like Python (`asset.py:214-215`).
-    let storage_metadata = asset.storage_metadata.unwrap_or(Value::Null);
-    if pidash_jobs::v1_assets::tasks::storage_metadata_missing(&storage_metadata) {
+    if metadata_missing {
         publish_metadata(pool, &asset_id).await;
     }
     // `asset.attributes = request.data.get("attributes", current)` —
