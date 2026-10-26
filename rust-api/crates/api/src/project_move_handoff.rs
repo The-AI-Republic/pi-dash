@@ -1434,10 +1434,13 @@ impl FinalizeAgentRunSeam for HandoffStore<'_, '_> {
 /// recorded, or the active run that won); `Ok(None)` is every early-out
 /// (unknown run, non-terminal source, no marker, moved again, no pod).
 /// Any failure `Err`s — callers swallow it after their own failure log.
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects (PIDASHCONV-1514).
 pub(crate) async fn complete_project_move_handoff(
     pool: &PgPool,
     state: &AppState,
     run_id: Uuid,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<Option<Uuid>, ()> {
     let settings = state.settings();
     let cloud = settings.cloud_agent.clone();
@@ -1465,9 +1468,7 @@ pub(crate) async fn complete_project_move_handoff(
     for id in terminal_effects {
         pairs.extend(finalize_kernel::plan_publish_effects(id));
     }
-    // No crum user here: the handoff completion runs behind the port
-    // seam, which carries no request user (PIDASHCONV-1483 follow-up).
-    drain_publish_effects(pool, state, pairs, None).await;
+    drain_publish_effects(pool, state, pairs, terminal_created_by).await;
     let now = now_micros();
     for id in dispatches {
         // `dispatch_agent_run` leaves the runner-plane drain to the caller
@@ -1572,7 +1573,7 @@ mod tests {
             .await
             .expect("temp agent_run");
         let state = AppState::with_edge("0.1.0", EdgeHandle::for_tests("http://127.0.0.1:1"));
-        let outcome = complete_project_move_handoff(&pool, &state, Uuid::new_v4()).await;
+        let outcome = complete_project_move_handoff(&pool, &state, Uuid::new_v4(), None).await;
         assert_eq!(outcome, Ok(None));
         // A run with no work item is the same early-out (`row.0` is NULL).
         let orphan = Uuid::new_v4();
@@ -1581,7 +1582,7 @@ mod tests {
             .execute(&pool)
             .await
             .expect("insert orphan run");
-        let outcome = complete_project_move_handoff(&pool, &state, orphan).await;
+        let outcome = complete_project_move_handoff(&pool, &state, orphan, None).await;
         assert_eq!(outcome, Ok(None));
     }
 

@@ -2824,9 +2824,14 @@ async fn fire_bundle(
                 .await
             }
             FireOp::Handoff(run_id) => {
-                if crate::project_move_handoff::complete_project_move_handoff(pool, state, run_id)
-                    .await
-                    .is_err()
+                if crate::project_move_handoff::complete_project_move_handoff(
+                    pool,
+                    state,
+                    run_id,
+                    terminal_created_by,
+                )
+                .await
+                .is_err()
                 {
                     tracing::warn!(
                         "{}",

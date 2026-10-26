@@ -1632,7 +1632,10 @@ async fn drain_delete_effects(
                 }
             }
             DeleteEffect::CompleteProjectMoveHandoff { runner_id, run_id } => {
-                if let Err(error) = ports.complete_project_move_handoff(run_id).await {
+                if let Err(error) = ports
+                    .complete_project_move_handoff(run_id, terminal_created_by)
+                    .await
+                {
                     tracing::error!(
                         error = ?error,
                         "{}",

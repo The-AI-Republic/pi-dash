@@ -812,8 +812,14 @@ impl RunnerPorts for SessionPorts<'_> {
             .await
     }
 
-    async fn complete_project_move_handoff(&self, run_id: Uuid) -> Result<(), PortError> {
-        self.live.complete_project_move_handoff(run_id).await
+    fn complete_project_move_handoff(
+        &self,
+        run_id: Uuid,
+        terminal_created_by: Option<Uuid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PortError>> + Send + '_>>
+    {
+        self.live
+            .complete_project_move_handoff(run_id, terminal_created_by)
     }
 
     async fn agent_system_user_id(&self) -> Result<Uuid, PortError> {
@@ -1677,7 +1683,7 @@ async fn fire_open_effects(
             }
             session_kernel::SessionEffect::CompleteProjectMoveHandoff { run_id } => {
                 ports
-                    .complete_project_move_handoff(run_id)
+                    .complete_project_move_handoff(run_id, terminal_created_by)
                     .await
                     .map_err(|_| server_error())?;
             }

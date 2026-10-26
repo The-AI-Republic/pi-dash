@@ -1355,10 +1355,13 @@ async fn drain_publish_pair(
 /// through the D-12 provider, drains through [`drain_kernel`] — all
 /// unguarded, so any failure propagates to the poll (TRACE bug 2).
 /// The cancel retry is the isolated twin (`:223-241`, one log line).
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects.
 async fn fire_session_effect(
     pool: &sqlx::postgres::PgPool,
     state: &AppState,
     effect: session_kernel::SessionEffect,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<(), ()> {
     use session_kernel::SessionEffect;
     match effect {
@@ -1388,9 +1391,14 @@ async fn fire_session_effect(
             .map(|_| ()),
         SessionEffect::DrainPod { pod_id } => drain_pod_by_id(pool, state, pod_id).await,
         SessionEffect::CompleteProjectMoveHandoff { run_id } => {
-            crate::project_move_handoff::complete_project_move_handoff(pool, state, run_id)
-                .await
-                .map(|_| ())
+            crate::project_move_handoff::complete_project_move_handoff(
+                pool,
+                state,
+                run_id,
+                terminal_created_by,
+            )
+            .await
+            .map(|_| ())
         }
     }
 }
@@ -1735,22 +1743,28 @@ pub async fn runner_session_poll(
     // The heartbeat commit fires the reap registrations in order:
     // the cancel retry, then one publish pair per finalized run in
     // reap order, then the drain effects. Only the drain effects
-    // propagate (TRACE bug 2).
+    // propagate (TRACE bug 2). Daemon request: the crum user is the
+    // runner owner.
+    let terminal_created_by = Some(auth.runner.owner_id);
     if let Some(retry) = reap.retry_cancel {
-        if fire_session_effect(&pool, &state, retry).await.is_err() {
+        if fire_session_effect(&pool, &state, retry, terminal_created_by)
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
     if !reap.publish_pairs.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
-        // Daemon request: the crum user is the runner owner.
-        let terminal_created_by = Some(auth.runner.owner_id);
         for pair in reap.publish_pairs {
             drain_publish_pair(&pool, &ports, pair, terminal_created_by).await;
         }
     }
     for effect in reap.drain_effects {
-        if fire_session_effect(&pool, &state, effect).await.is_err() {
+        if fire_session_effect(&pool, &state, effect, terminal_created_by)
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
