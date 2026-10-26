@@ -172,6 +172,15 @@ fn string_date_filter(
         today.checked_sub_signed(delta)
     }
     .ok_or(IssueFilterError::DateOverflow)?;
+    // Python `date` spans 0001-01-01..=9999-12-31: `now +/- timedelta`
+    // raises `OverflowError` beyond it (Django's generic 500), while
+    // `NaiveDate` spans years -262143..=262143. Reject the gap so every
+    // caller answers the same 500 it already maps `DateOverflow` to.
+    let python_min = NaiveDate::from_ymd_opt(1, 1, 1).expect("0001-01-01 is a valid date");
+    let python_max = NaiveDate::from_ymd_opt(9999, 12, 31).expect("9999-12-31 is a valid date");
+    if day < python_min || day > python_max {
+        return Err(IssueFilterError::DateOverflow);
+    }
     let key = if subsequent == "after" {
         format!("{date_term}__gte")
     } else {
@@ -1221,6 +1230,57 @@ mod tests {
         ] {
             let filter = issue_filters_get(&get_map(&[("start_date", query)]), "", today());
             assert_eq!(filter, Err(IssueFilterError::DateOverflow), "{query}");
+        }
+    }
+
+    #[test]
+    fn mid_range_relative_dates_outside_python_range_are_date_overflow() {
+        // PIDASHCONV-1474: Python `date` spans years 1..=9999, so `now
+        // +/- timedelta` raises `OverflowError` (Django's generic 500)
+        // beyond it, while `NaiveDate` spans years -262143..=262143.
+        // Results in the gap must be `DateOverflow`, not a
+        // far-past/far-future predicate. 1428572 weeks = 10,000,004 days
+        // (~year 29405 from `today()`); 400000 months = 12,000,000 days.
+        for query in [
+            "1428572_weeks;after;fromnow",
+            "1428572_weeks;before;past",
+            "400000_months;after;fromnow",
+            "400000_months;before;past",
+        ] {
+            let filter = issue_filters_get(&get_map(&[("start_date", query)]), "", today());
+            assert_eq!(filter, Err(IssueFilterError::DateOverflow), "{query}");
+        }
+    }
+
+    #[test]
+    fn python_range_edges_pin_last_ok_and_first_overflow() {
+        // PIDASHCONV-1474: the largest whole-week offset staying inside
+        // 0001-01-01..=9999-12-31 succeeds; one more week overflows.
+        let max_day = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
+        let min_day = NaiveDate::from_ymd_opt(1, 1, 1).unwrap();
+        let days_to_max = (max_day - today()).num_days();
+        let days_to_min = (today() - min_day).num_days();
+        for (weeks_ok, direction, key, forward) in [
+            (days_to_max / 7, "after;fromnow", "start_date__gte", true),
+            (days_to_min / 7, "before;past", "start_date__lte", false),
+        ] {
+            let ok_query = format!("{weeks_ok}_weeks;{direction}");
+            let filter = issue_filters_get(&get_map(&[("start_date", &ok_query)]), "", today());
+            let filter = filter.unwrap_or_else(|err| panic!("{ok_query}: {err:?}"));
+            let delta = chrono::TimeDelta::try_days(weeks_ok * 7).unwrap();
+            let expected = if forward {
+                today().checked_add_signed(delta).unwrap()
+            } else {
+                today().checked_sub_signed(delta).unwrap()
+            };
+            assert_eq!(
+                filter.get(key),
+                Some(&FilterValue::Day(expected)),
+                "{ok_query}"
+            );
+            let over_query = format!("{}_weeks;{direction}", weeks_ok + 1);
+            let filter = issue_filters_get(&get_map(&[("start_date", &over_query)]), "", today());
+            assert_eq!(filter, Err(IssueFilterError::DateOverflow), "{over_query}");
         }
     }
 
