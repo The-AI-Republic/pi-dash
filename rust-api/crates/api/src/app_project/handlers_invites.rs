@@ -663,13 +663,16 @@ fn parse_html_body(
 /// Bodies parse after the gate (the handler builds on `request.data`):
 /// an empty body is `{}` (DRF never raises `ParseError` on it — the
 /// cycles live probe); form and multipart bodies parse through the
-/// shared DRF negotiation (PIDASHCONV-1508); a non-empty body without a
-/// JSON content type answers the `UnsupportedMediaType` 415 naming the
-/// content type (`text/plain` when missing); otherwise axum's `Json`
-/// rejection bytes apply (malformed JSON stays DRF-unmatched — its
-/// messages carry parser positions serde cannot reproduce — documented,
-/// never hit by the suite). The flag reports HTML (form/multipart)
-/// input so the board PATCH can apply the serializer's HTML-only rules.
+/// shared DRF negotiation (PIDASHCONV-1508); a non-empty body whose
+/// content type the JSON parser does not satisfy answers the
+/// `UnsupportedMediaType` 415 naming the content type verbatim (empty
+/// when the header is missing — uvicorn/prod; runserver's `text/plain`
+/// there is a wsgiref artifact the port does not reproduce); otherwise
+/// axum's `Json` rejection bytes apply (malformed JSON stays
+/// DRF-unmatched — its messages carry parser positions serde cannot
+/// reproduce — documented, never hit by the suite). The flag reports
+/// HTML (form/multipart) input so the board PATCH can apply the
+/// serializer's HTML-only rules.
 #[allow(clippy::result_large_err)]
 async fn parse_body(
     state: &AppState,
@@ -677,7 +680,7 @@ async fn parse_body(
     spec: &crate::v1_cycles_modules::body::BodySpec,
 ) -> Result<(Value, bool), Response> {
     use axum::extract::FromRequest;
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
         return Ok((Value::Object(Map::new()), false));
@@ -693,23 +696,47 @@ async fn parse_body(
     {
         return parse_html_body(&parts.headers, &bytes, spec).map(|body| (body, true));
     }
-    if !mime.eq_ignore_ascii_case("application/json") {
-        let named = if content_type.is_empty() {
-            "text/plain"
-        } else {
-            content_type
-        };
+    if !matches_json_parser(content_type) {
         // DRF `UnsupportedMediaType` (`detail`, lowercase; the media
         // type quotes are part of the message — live probe 2026-10-03).
-        let message = format!("Unsupported media type \"{named}\" in request.");
+        let message = format!("Unsupported media type \"{content_type}\" in request.");
         let body = format!("{{\"detail\":{}}}", json_string(&message));
         return Err(Denial::Raw(StatusCode::UNSUPPORTED_MEDIA_TYPE, body).into_response());
+    }
+    // A wildcard content type selects the JSON parser (DRF `select_parser`
+    // first-match): normalize the header so axum's `Json` extractor takes
+    // the same path — and renders the same rejection bytes — as a plain
+    // `application/json` request.
+    let base = content_type.split(';').next().unwrap_or("").trim();
+    if !base.eq_ignore_ascii_case("application/json") {
+        parts.headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        );
     }
     let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
     match axum::Json::<Value>::from_request(req, state).await {
         Ok(axum::Json(body)) => Ok((body, false)),
         Err(rejection) => Err(rejection.into_response()),
     }
+}
+
+/// DRF `media_type_matches('application/json', content_type)`
+/// (`rest_framework/utils/mediatypes.py:_MediaType.match` with the parser
+/// side holding no params and no wildcards): the JSON parser is first in
+/// `DEFAULT_PARSER_CLASSES` (no override in `settings/common.py`), so any
+/// content type it satisfies parses as JSON — `application/json` in any
+/// case with any params, plus the `*/*`, `application/*` (and `*/json`)
+/// request-side wildcards. The `v1_cycles_modules::body` `select_parser`
+/// precedent (PIDASHCONV-627); form/multipart divert to `parse_html_body`
+/// above (PIDASHCONV-1508), never reach this check.
+fn matches_json_parser(content_type: &str) -> bool {
+    let base = content_type.split(';').next().unwrap_or("").trim();
+    let Some((main, sub)) = base.split_once('/') else {
+        return false;
+    };
+    (main == "*" || main.eq_ignore_ascii_case("application"))
+        && (sub == "*" || sub.eq_ignore_ascii_case("json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -4184,6 +4211,39 @@ mod tests {
             INTEGRITY_ERROR_BODY,
             handle_exception(&ViewError::IntegrityError).1
         );
+    }
+
+    /// `matches_json_parser` truth table, mirroring DRF
+    /// `media_type_matches('application/json', content_type)`
+    /// (`rest_framework/utils/mediatypes.py`), verified against the
+    /// installed DRF (PIDASHCONV-1517).
+    #[test]
+    fn json_parser_match_table() {
+        let cases: &[(&str, bool)] = &[
+            ("application/json", true),
+            ("Application/JSON", true),
+            ("application/json; charset=utf-8", true),
+            ("*/*", true),
+            ("application/*", true),
+            ("*/json", true),
+            ("text/plain", false),
+            ("", false),
+            ("foo", false),
+            ("application/json-patch", false),
+            ("text/*", false),
+            ("multipart/*", false),
+            ("*", false),
+            ("application/xml", false),
+            ("application / json", false),
+            ("* /*", false),
+        ];
+        for (content_type, want) in cases {
+            assert_eq!(
+                matches_json_parser(content_type),
+                *want,
+                "content type {content_type:?}"
+            );
+        }
     }
 
     #[test]
