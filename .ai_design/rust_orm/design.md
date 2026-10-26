@@ -223,23 +223,24 @@ the write itself.
 
 ## 8. Units (filed as stage-8 issues under PIDASHCONV-1)
 
+Consolidated from 15 to 8 issues on 2026-10-26. Each surviving issue lists its
+absorbed units as numbered parts. The cancelled issues (PIDASHCONV-1522, 1523,
+1524, 1526, 1531, 1532, 1533) point at the issue that now holds their scope.
+
 | Unit | Issue | Repo | Summary | Blocked by |
 |---|---|---|---|---|
 | ORM-01 | PIDASHCONV-1519 | OSS | SeaORM dependency, `DatabaseConnection` on `AppState`/worker ctx, entities for §4 tables, parity test | — |
-| ORM-02 | PIDASHCONV-1520 | OSS | `domain` framework: `WriteCtx`, `WriteTxn`, `DomainError`, `run()`, one activity/webhook enqueue module, public orchestration transition (lift `issue_transition` out of `pub(crate)`) | ORM-01 |
-| ORM-03 | PIDASHCONV-1521 | OSS | `domain::issues` create/update/state/archive/workpad + hooks; migrate app and v1 issue handlers | ORM-02 |
-| ORM-04 | PIDASHCONV-1522 | OSS | migrate the remaining issue writers: drafts, intake ×3, agent tools, git/GitHub sync, automation, ticker dispatch | ORM-03 |
-| ORM-05 | PIDASHCONV-1523 | OSS | `domain::issues::move_to_project`: one public `MoveStore` impl replacing both `PoolMoveStore` copies, options for caller deltas | ORM-03 |
-| ORM-06 | PIDASHCONV-1524 | OSS | `domain::comments` + `domain::relations`; migrate all seven comment writers and the relation writers | ORM-02 |
+| ORM-02 (+08) | PIDASHCONV-1520 | OSS | `domain` framework: `WriteCtx`, `WriteTxn`, `DomainError`, `run()`, one activity/webhook enqueue module, public issue transition; plus `domain::tokens` and `domain::assistant` with their writers migrated | ORM-01 |
+| ORM-03 (+04, 05, 06) | PIDASHCONV-1521 | OSS | `domain::issues` (create/update/state/archive/workpad, `move_to_project` with one `MoveStore`), `domain::comments`, `domain::relations`; migrate every issue, move, comment and relation writer | ORM-02 |
 | ORM-07 | PIDASHCONV-1525 | OSS | `domain::identity`, `domain::workspaces`, `domain::projects`; migrate signups, admin, ops, invites, project/state create | ORM-02 |
-| ORM-08 | PIDASHCONV-1526 | OSS | `domain::tokens` + `domain::assistant`; migrate their writers | ORM-02 |
 | ORM-09 | PIDASHCONV-1527 | OSS | write guard (ratchet) + allowlist + workflow | — |
 | ORM-10 | PIDASHCONV-1528 | OSS | Rust bug: GitHub/Google/Gitea OAuth signups skip `user_notification_preferences` | — |
 | ORM-11 | PIDASHCONV-1529 | overlay | overlay write guard (ratchet) | — |
-| ORM-12 | PIDASHCONV-1530 | overlay | move the overlay's issue/comment/relation/workpad/token writes onto `domain` | ORM-03, ORM-05, ORM-06, ORM-08, ORM-11 |
-| ORM-13 | PIDASHCONV-1531 | overlay | move the overlay's identity/workspace/member/instance writes onto `domain` | ORM-07, ORM-08, ORM-11 |
-| ORM-14 | PIDASHCONV-1532 | overlay | move the overlay's assistant writes onto `domain` | ORM-08, ORM-11 |
-| ORM-15 | PIDASHCONV-1533 | both | gate: both allowlists empty, SQL constants de-publicised (§D8), all contract suites green on both binaries, README extension-surface section, Porting guide updated | all of the above |
+| ORM-12 (+13, 14, 15) | PIDASHCONV-1530 | overlay | move every overlay write to OSS-owned tables onto `domain`, then the gate (§9): both allowlists empty, Porting guide updated | ORM-02, ORM-03, ORM-07, ORM-09, ORM-10, ORM-11 |
+
+Each OSS domain issue makes the SQL constants it replaces `pub(crate)` or
+private in its own PR (§D8). The overlay pins its OSS commit, so this cannot
+break it; ORM-12 migrates the overlay call sites when it bumps `OSS_PIN`.
 
 ## 9. Done (stage-8 ORM gate)
 
