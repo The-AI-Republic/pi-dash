@@ -25375,11 +25375,10 @@ export class WebNewDriver implements ParityDriver {
 
   /** The path part of a request address, without query or fragment. */
   private pagesGatingPathname(raw: string): string {
-    try {
-      return new URL(raw).pathname;
-    } catch {
-      return raw.split("?")[0]?.split("#")[0] ?? raw;
-    }
+    // Neither a query value nor a fragment ever carries a page id, and the
+    // three route shapes all end at a slash, so cutting them off first lets
+    // each shape test its own tail of the address.
+    return raw.replace(/[?#].*$/, "");
   }
 
   /**
@@ -25693,8 +25692,10 @@ export class WebNewDriver implements ParityDriver {
       // they need their own names to be seen (PAGE-020 pins that the plain
       // collection answers without either being called).
       if (!raw.includes("/pages") && !raw.includes("favorite-pages") && !raw.includes("archived-pages")) return;
-      const [path, query] = raw.split("?", 2);
-      this.pagesGatingSpyLog.push({ method: request.method(), path: path ?? raw, query: query ?? "" });
+      const cut = raw.indexOf("?");
+      const path = cut === -1 ? raw : raw.slice(0, cut);
+      const query = cut === -1 ? "" : raw.slice(cut + 1);
+      this.pagesGatingSpyLog.push({ method: request.method(), path, query });
     };
     this.pagesGatingSpyHandler = handler;
     this.page.on("request", handler);
@@ -25747,7 +25748,8 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesGatingSortCycle(): Promise<void> {
     const current = await this.pagesGatingSortLabel();
-    const next = WebNewDriver.PAGES_GATING_SORT_LABELS.find((label) => label !== current) ?? "Name";
+    // The control always shows one of the known keys, so another key exists.
+    const next = WebNewDriver.PAGES_GATING_SORT_LABELS.find((label) => label !== current)!;
     await this.page.getByRole("button", { name: current, exact: true }).first().click({
       timeout: WebNewDriver.WAIT_MS,
     });
@@ -25787,7 +25789,7 @@ export class WebNewDriver implements ParityDriver {
     const match = /\/pages\/([0-9a-fA-F-]{8}[0-9a-fA-F-]*)/.exec(this.page.url());
     if (match === null) throw new Error("[parity] quick-create never landed on a page id.");
     await this.pagesGatingWaitDetailSettled();
-    return match[1] ?? "";
+    return match[1]!;
   }
 
   async pagesGatingWaitDetailSettled(): Promise<"editor" | "panel"> {

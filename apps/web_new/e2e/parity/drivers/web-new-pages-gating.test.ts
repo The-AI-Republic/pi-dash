@@ -459,6 +459,18 @@ describe("list navigation and addresses", () => {
     expect(stub.calls.goBacks).toBe(1);
     await expect(driver.pagesGatingRowTitles()).resolves.toEqual(["Alpha"]);
   });
+
+  it("waits out a loading variant before it settles the list", async () => {
+    const driver = new WebNewDriver(pageDouble().page);
+    const variants = ["loading", "empty", "empty"];
+    const read = vi.fn(async () => variants.shift() ?? "empty");
+    (driver as unknown as { pagesGatingListVariant: () => Promise<string> }).pagesGatingListVariant = read;
+
+    await driver.pagesGatingOpenList("acme", "project-1");
+
+    // The first read is still mid-load, so the settle has to read again.
+    expect(read.mock.calls.length).toBeGreaterThan(1);
+  });
 });
 
 describe("gated list controls", () => {
@@ -920,6 +932,7 @@ describe("request spy and toasts", () => {
     if (listen === undefined) throw new Error("expected the spy to listen");
 
     listen({ url: () => "http://new.test/other/pages/", method: () => "GET" });
+    listen({ url: () => "http://new.test/api/workspaces/acme/projects/project-1/boards/", method: () => "GET" });
     listen({ url: () => `${LIST_URL}?type=private`, method: () => "GET" });
     listen({
       url: () => "http://new.test/api/workspaces/acme/projects/project-1/favorite-pages/",
@@ -1336,6 +1349,22 @@ describe("detail shell and switcher", () => {
     });
   });
 
+  it("reads an empty title whose placeholder heading has not mounted yet", async () => {
+    // The static empty marker is present while the title chunk loads and the
+    // placeholder heading arrives with it, so emptiness alone owes no text.
+    const stub = detailPage({
+      title: loc({
+        innerText: async () => "Untitled",
+        locator: (selector) => (selector === '[data-empty="true"]' ? loc() : absent()),
+      }),
+    });
+    await expect(new WebNewDriver(stub.page).pagesGatingTitleFacts("page-1")).resolves.toEqual({
+      text: "Untitled",
+      placeholder: null,
+      height: 0,
+    });
+  });
+
   it("reports the body skeleton from either cold-load surface", async () => {
     const skeletonPage = detailPage({ skeleton: loc() });
     await expect(new WebNewDriver(skeletonPage.page).pagesGatingBodySkeletonVisible()).resolves.toBe(true);
@@ -1589,6 +1618,15 @@ describe("detail wait, spinner and creation", () => {
 
     await expect(driver.pagesGatingQuickCreate()).resolves.toBe("abc12345-0000");
     expect(createClick).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("rejects a create that never lands on a page id", async () => {
+    const stub = pageDouble({
+      url: "http://new.test/acme/projects/project-1/pages",
+      testIds: (id) => (id === "pages-quick-create" ? loc({ click: async () => undefined }) : absent()),
+      onWaitForURL: () => undefined,
+    });
+    await expect(new WebNewDriver(stub.page).pagesGatingQuickCreate()).rejects.toThrow("never landed on a page id");
   });
 
   it("clicks create without waiting for navigation", async () => {
