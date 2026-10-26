@@ -1592,12 +1592,16 @@ async fn emit_celery(pool: &PgPool, task: &str, args: Vec<Value>) -> Result<(), 
 /// * publish / apply / handoff are isolated (log + continue);
 /// * drain / cleanup propagate (a failure aborts the rest and 500s —
 ///   rows already committed).
+///
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects.
 async fn drain_delete_effects(
     pool: &PgPool,
     ports: &LivePorts,
     redis: Option<&redis::Client>,
     runner: &pidash_db::config::RunnerSettings,
     effects: Vec<DeleteEffect>,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<(), Response> {
     for effect in effects {
         match effect {
@@ -1617,7 +1621,9 @@ async fn drain_delete_effects(
                 }
             }
             DeleteEffect::ApplyTerminalEffectsInline { run_id } => {
-                if let Err(error) = execute_terminal_effects(pool, ports, run_id).await {
+                if let Err(error) =
+                    execute_terminal_effects(pool, ports, run_id, terminal_created_by).await
+                {
                     tracing::error!(
                         run_id = %run_id,
                         error = ?error,
@@ -1731,12 +1737,15 @@ pub async fn runner_delete(
     if tx.commit().await.is_err() {
         return server_error();
     }
+    // Web request: the crum user is the requester.
+    let terminal_created_by = Some(user_id);
     if let Err(response) = drain_delete_effects(
         &pool,
         &ports,
         redis.as_ref(),
         &state.settings().runner,
         effects,
+        terminal_created_by,
     )
     .await
     {
@@ -1824,12 +1833,15 @@ pub async fn machine_delete(
     if tx.commit().await.is_err() {
         return server_error();
     }
+    // Web request: the crum user is the requester.
+    let terminal_created_by = Some(user_id);
     if let Err(response) = drain_delete_effects(
         &pool,
         &ports,
         redis.as_ref(),
         &state.settings().runner,
         effects,
+        terminal_created_by,
     )
     .await
     {

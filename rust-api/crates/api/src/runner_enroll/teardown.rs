@@ -667,7 +667,10 @@ pub async fn runner_refresh(
         if tx.commit().await.is_err() {
             return server_error();
         }
-        if fire_bundle(&pool, &state, bundle).await.is_err() {
+        if fire_bundle(&pool, &state, bundle, Some(runner.owner_id))
+            .await
+            .is_err()
+        {
             return server_error();
         }
         return unauthorized(REFRESH_TOKEN_REPLAYED_BODY);
@@ -704,7 +707,10 @@ pub async fn runner_refresh(
         if tx.commit().await.is_err() {
             return server_error();
         }
-        if fire_bundle(&pool, &state, bundle).await.is_err() {
+        if fire_bundle(&pool, &state, bundle, Some(runner.owner_id))
+            .await
+            .is_err()
+        {
             return server_error();
         }
         return unauthorized(MEMBERSHIP_REVOKED_BODY);
@@ -847,7 +853,10 @@ pub async fn runner_self_revoke(
     if tx.commit().await.is_err() {
         return server_error();
     }
-    if fire_bundle(&pool, &state, bundle).await.is_err() {
+    if fire_bundle(&pool, &state, bundle, Some(auth.runner.owner_id))
+        .await
+        .is_err()
+    {
         return server_error();
     }
 
@@ -1139,7 +1148,10 @@ pub async fn dev_machine_revoke(
         return server_error();
     }
     for bundle in bundles {
-        if fire_bundle(&pool, &state, bundle).await.is_err() {
+        if fire_bundle(&pool, &state, bundle, Some(user_id))
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
@@ -1368,7 +1380,10 @@ pub async fn runner_revoke(
     // The frame + close run OUTSIDE the tx, only on a fresh revoke
     // (`:488-490`); the re-read + serialize run in both arms (`:491-492`).
     if let Some(bundle) = bundle {
-        if fire_bundle(&pool, &state, bundle).await.is_err() {
+        if fire_bundle(&pool, &state, bundle, Some(user_id))
+            .await
+            .is_err()
+        {
             return server_error();
         }
         let pubsub = PoolPubsubStore::new(&pool, &state);
@@ -2786,13 +2801,27 @@ fn fire_plan(bundle: EffectBundle) -> Vec<FireOp> {
 /// effects isolated each, handoffs isolated each (swallowed after the
 /// failure log), drains and cleanup propagating (the source registers
 /// them bare, and a raise stops Django's `on_commit` chain).
-async fn fire_bundle(pool: &PgPool, state: &AppState, bundle: EffectBundle) -> Result<(), ()> {
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects (runner owner on daemon paths, web
+/// requester on web paths).
+async fn fire_bundle(
+    pool: &PgPool,
+    state: &AppState,
+    bundle: EffectBundle,
+    terminal_created_by: Option<Uuid>,
+) -> Result<(), ()> {
     let runner_id = bundle.runner_id;
     let ports = crate::runner_runs::LivePorts::new(pool.clone(), state);
     for op in fire_plan(bundle) {
         match op {
             FireOp::Publish(effect) => {
-                crate::project_move_handoff::drain_one_publish(pool, &ports, effect).await
+                crate::project_move_handoff::drain_one_publish(
+                    pool,
+                    &ports,
+                    effect,
+                    terminal_created_by,
+                )
+                .await
             }
             FireOp::Handoff(run_id) => {
                 if crate::project_move_handoff::complete_project_move_handoff(pool, state, run_id)

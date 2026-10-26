@@ -1081,8 +1081,15 @@ pub async fn delete_runner(
     for pod_id in drains {
         run_effects.push(LifecycleEffect::DrainPod { pod_id });
     }
-    if let Err(response) =
-        drain_lifecycle_effects(&pool, &LivePorts::new(pool.clone(), &state), run_effects).await
+    // API-token request: the crum user is the token owner.
+    let terminal_created_by = Some(caller.user_id);
+    if let Err(response) = drain_lifecycle_effects(
+        &pool,
+        &LivePorts::new(pool.clone(), &state),
+        run_effects,
+        terminal_created_by,
+    )
+    .await
     {
         return response;
     }

@@ -914,6 +914,10 @@ pub async fn execute_apply_paused(
                 .agent_system_user_id()
                 .await
                 .map_err(|_| server_error())?;
+            // `BaseModel.save` stamps the crum request user (`runner.owner`
+            // on daemon endpoints, `authentication.py:118`) as `created_by`
+            // and leaves `updated_by` NULL on create — including the
+            // `Description` row `IssueComment.save` creates.
             insert_comment(
                 tx,
                 &lifecycle_kernel::CommentInsert {
@@ -922,7 +926,7 @@ pub async fn execute_apply_paused(
                     project_id,
                     workspace_id,
                     actor_id: Some(actor_id),
-                    created_by_id: None,
+                    created_by_id: Some(runner.owner_id),
                     updated_by_id: None,
                     plan,
                 },
@@ -1036,11 +1040,15 @@ pub enum TerminalEffectsError {
 /// `Err` propagates to the `_publish_effects` log (isolated there),
 /// except the capacity dispatch/drains, which propagate with the
 /// marker unset for the reconciler — also via `Err`, since the
-/// caller logs without writing anything.
+/// caller logs without writing anything. `created_by` is the ambient
+/// crum request user the failure comment (and its description) bind
+/// as `created_by_id`: the runner owner on daemon endpoints, the web
+/// requester on web paths, `None` on worker paths.
 pub async fn execute_terminal_effects(
     pool: &PgPool,
     ports: &impl RunnerPorts,
     run_id: Uuid,
+    created_by: Option<Uuid>,
 ) -> Result<bool, TerminalEffectsError> {
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
     let mut hooks = pidash_db::tx::Transaction::begin(pool).await.map_err(db)?;
@@ -1097,7 +1105,8 @@ pub async fn execute_terminal_effects(
                 .execute(&mut **hooks.inner())
                 .await
                 .map_err(db)?;
-            let commented = post_failure_comment(hooks.inner(), ports, run_id, &error).await;
+            let commented =
+                post_failure_comment(hooks.inner(), ports, run_id, &error, created_by).await;
             match commented {
                 Ok(()) => {
                     sqlx::query("RELEASE SAVEPOINT failure_comment")
@@ -1254,12 +1263,14 @@ pub async fn execute_terminal_effects(
 /// failure savepoint: suppressed for infra noise, silent without a
 /// work item or on a dedupe hit, otherwise one `SYSTEM` comment from
 /// the agent user. `Err` rolls back to the savepoint (logged by the
-/// caller).
+/// caller). `created_by` is the ambient crum request user (see
+/// [`execute_terminal_effects`]).
 async fn post_failure_comment(
     hooks: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ports: &impl RunnerPorts,
     run_id: Uuid,
     error: &str,
+    created_by: Option<Uuid>,
 ) -> Result<(), TerminalEffectsError> {
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
     // Suppression returns before any SQL (`finalization.py:136-147`).
@@ -1296,6 +1307,10 @@ async fn post_failure_comment(
         .agent_system_user_id()
         .await
         .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
+    // `created_by` is the ambient crum request user (`BaseModel.save`):
+    // the runner owner on daemon endpoints, the web requester on web
+    // paths, `None` on worker paths (which carry no crum user).
+    // `updated_by` stays NULL on create.
     insert_comment(
         hooks,
         &lifecycle_kernel::CommentInsert {
@@ -1304,7 +1319,7 @@ async fn post_failure_comment(
             project_id,
             workspace_id,
             actor_id: Some(actor_id),
-            created_by_id: None,
+            created_by_id: created_by,
             updated_by_id: None,
             plan,
         },
@@ -1379,11 +1394,14 @@ async fn apply_scheduler_hook(
 ///
 /// The returns are the source's isolation semantics, not dead arms: a
 /// real drain (or dispatch) failure propagates (`server_error()`), and
-/// the isolated effects log and continue.
+/// the isolated effects log and continue. `terminal_created_by` is the
+/// ambient crum request user for the inline terminal effects (see
+/// [`execute_terminal_effects`]).
 pub async fn drain_lifecycle_effects(
     pool: &PgPool,
     ports: &impl RunnerPorts,
     effects: Vec<LifecycleEffect>,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<(), Response> {
     for effect in effects {
         match effect {
@@ -1454,7 +1472,9 @@ pub async fn drain_lifecycle_effects(
                 }
             }
             LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
-                if let Err(error) = execute_terminal_effects(pool, ports, run_id).await {
+                if let Err(error) =
+                    execute_terminal_effects(pool, ports, run_id, terminal_created_by).await
+                {
                     tracing::error!(
                         ?error,
                         run_id = %run_id,
@@ -2216,7 +2236,9 @@ async fn run_completed_inner(
     }
     if !effects.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
-        if drain_lifecycle_effects(&pool, &ports, effects)
+        // Daemon request: the crum user is the runner owner.
+        let terminal_created_by = preamble.runner.as_ref().map(|runner| runner.owner_id);
+        if drain_lifecycle_effects(&pool, &ports, effects, terminal_created_by)
             .await
             .is_err()
         {
@@ -2314,7 +2336,7 @@ async fn run_paused_inner(
         return server_error();
     }
     if !effects.is_empty()
-        && drain_lifecycle_effects(&pool, &ports, effects)
+        && drain_lifecycle_effects(&pool, &ports, effects, Some(runner.owner_id))
             .await
             .is_err()
     {
@@ -2414,7 +2436,7 @@ async fn run_failed_inner(
             return server_error();
         }
         if !effects.is_empty()
-            && drain_lifecycle_effects(&pool, &ports, effects)
+            && drain_lifecycle_effects(&pool, &ports, effects, Some(runner.owner_id))
                 .await
                 .is_err()
         {
@@ -2442,7 +2464,7 @@ async fn run_failed_inner(
         return server_error();
     }
     if !effects.is_empty()
-        && drain_lifecycle_effects(&pool, &ports, effects)
+        && drain_lifecycle_effects(&pool, &ports, effects, Some(runner.owner_id))
             .await
             .is_err()
     {
@@ -2463,6 +2485,8 @@ async fn run_failed_requeue(
     run_id: Uuid,
     busy_flip: bool,
 ) -> Response {
+    // Daemon request: the crum user is the runner owner.
+    let terminal_created_by = Some(runner.owner_id);
     let locked = match lock_non_terminal(&mut tx, run_id).await {
         Ok(locked) => locked,
         Err(closed) => {
@@ -2495,7 +2519,11 @@ async fn run_failed_requeue(
         if commit_tx(tx).await.is_err() {
             return server_error();
         }
-        if !effects.is_empty() && drain_lifecycle_effects(pool, ports, effects).await.is_err() {
+        if !effects.is_empty()
+            && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+                .await
+                .is_err()
+        {
             return server_error();
         }
         return json_response(StatusCode::OK, r#"{"ok":true,"cancelled":true}"#.to_owned());
@@ -2514,7 +2542,11 @@ async fn run_failed_requeue(
     if commit_tx(tx).await.is_err() {
         return server_error();
     }
-    if !effects.is_empty() && drain_lifecycle_effects(pool, ports, effects).await.is_err() {
+    if !effects.is_empty()
+        && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+            .await
+            .is_err()
+    {
         return server_error();
     }
     json_response(
@@ -2595,7 +2627,9 @@ async fn run_cancelled_inner(
     }
     if !effects.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
-        if drain_lifecycle_effects(&pool, &ports, effects)
+        // Daemon request: the crum user is the runner owner.
+        let terminal_created_by = preamble.runner.as_ref().map(|runner| runner.owner_id);
+        if drain_lifecycle_effects(&pool, &ports, effects, terminal_created_by)
             .await
             .is_err()
         {
