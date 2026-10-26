@@ -58,8 +58,12 @@ use uuid::Uuid;
 
 use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{append_event, dispatch_agent_run};
-use crate::orchestration::{LiveCreationStore, StoreDeps};
+use crate::orchestration::{
+    fire_tick_seam::emit_logs, live_inputs::JobsMatcher, preflight_eligibility_or_bounce,
+    LiveCreationStore, StoreDeps,
+};
 use crate::queue::{enqueue, enqueue_in, NewJob};
+use crate::runner_runs::sweeps_chat::terminal_effects_job;
 use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
@@ -69,13 +73,15 @@ use pidash_services::assistant::markdown::to_safe_html;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
 use pidash_services::assistant::tools_issues::{escape_icontains, PROJECT_WRITE_GATE_SQL};
 use pidash_services::dispatch::tools as plan;
-use pidash_services::dispatch::{consume_admission_token, LlmProfile};
+use pidash_services::dispatch::{admission::AdmissionCache, consume_admission_token, LlmProfile};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::creation::STATE_SELECT_SQL;
 use pidash_services::orchestration::entries::{
-    handle_issue_state_transition, PreflightSeam, TransitionRequest,
+    fire_state_transition, handle_issue_state_transition, FireOutcome, FireRequest, PreflightSeam,
+    TransitionRequest,
 };
 use pidash_services::orchestration::relations as rel;
+use pidash_services::runner_runs::{finalization, LifecycleEffect};
 
 use super::agent::{ToolExecutor, ToolOutcome};
 use super::github::{GithubAppContext, GithubFailure, GithubRestClient};
@@ -1115,12 +1121,14 @@ async fn state_view_tx(
 /// a tool-supplied completed state, insert the issue plus its
 /// sequence row, and return the brief. The title/description are
 /// pre-validated by the dispatch; `stripped_title` is what stores.
+/// Returns the brief plus the post-commit fire inputs — the caller
+/// drives [`fire_create_transition`] once the audit commits.
 async fn op_create_project_issue(
     tx: &mut Transaction<'_>,
     scope: &ToolScope,
     description: &str,
     stripped_title: &str,
-) -> Result<Value, ToolExecError> {
+) -> Result<(Value, CreateDispatch), ToolExecError> {
     // `run.scheduler_binding.project_id` (the raw attname): the tool
     // uses the binding's project even when the run also has a bound
     // issue in another project.
@@ -1293,8 +1301,221 @@ async fn op_create_project_issue(
         None,
     );
     let created = plan::issue_created(&plan::issue_brief(&detail));
-    serde_json::to_value(created)
-        .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
+    let value = serde_json::to_value(created).map_err(|error| {
+        ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
+    })?;
+    Ok((value, CreateDispatch { issue_id, state_id }))
+}
+
+/// What a create hands its caller for the post-commit orchestration
+/// fire (`signals.py:74-107`): the new issue plus its resolved state.
+/// `state_id` is `None` when the project has no state at all — the
+/// fire's early return (Django's `prev == current` no-op).
+struct CreateDispatch {
+    issue_id: Uuid,
+    state_id: Option<Uuid>,
+}
+
+/// Preflight for the tool's create: the live
+/// `preflight_eligibility_or_bounce` driver over the jobs
+/// [`JobsMatcher`]. A create is not an agent move (`moved_by_run` is
+/// `None`), so `dispatch_now` is reachable and the eligibility gate
+/// must run for real — the transition sibling's [`BinPreflight`] would
+/// fail closed here. Mirrors the api crate's `LivePreflight`; the deps
+/// travel by `Option` because the driver takes them by value while the
+/// seam only lends `&mut self`, and the driver consults preflight at
+/// most once per fire.
+struct LiveToolPreflight<C, H, P> {
+    pool: PgPool,
+    deps: Option<StoreDeps<C, H, P>>,
+    matcher: JobsMatcher,
+    now: DateTime<Utc>,
+    jitter_secs: f64,
+}
+
+impl<C, H, P> PreflightSeam for LiveToolPreflight<C, H, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    async fn preflight_eligibility_or_bounce(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+        triggered_by: &str,
+    ) -> Result<bool, pidash_services::orchestration::creation::CreationError> {
+        let Some(deps) = self.deps.take() else {
+            return Err(pidash_services::orchestration::creation::CreationError::Db(
+                "tool create reached preflight twice: the driver consults at most once".to_owned(),
+            ));
+        };
+        let out = preflight_eligibility_or_bounce(
+            &self.pool,
+            deps,
+            &self.matcher,
+            self.now,
+            self.jitter_secs,
+            issue_id,
+            Some(creator_id),
+            pod_id,
+            triggered_by,
+        )
+        .await
+        .map_err(|error| {
+            pidash_services::orchestration::creation::CreationError::Db(error.to_string())
+        })?;
+        emit_logs(&out.outcome.logs);
+        Ok(out.outcome.proceed)
+    }
+}
+
+/// The [`StoreDeps`] behind the create fire: the transition shape
+/// ([`drive_transition`]) — creator presence prefetched from the pool,
+/// the actor-is-creator closures — over the fire's own clock. Built
+/// twice per fire (store + preflight), like the v1 path's
+/// `dispatch_deps_for_ids` pair.
+fn create_fire_deps(
+    ctx: &ToolCtx,
+    creator: Uuid,
+    has_key: bool,
+    now_unix_secs: i64,
+) -> StoreDeps<
+    RedisAdmissionCache,
+    impl Fn(Uuid) -> bool + Clone + Send + Sync,
+    impl Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+> {
+    StoreDeps {
+        cloud: ctx.cloud.clone(),
+        managed: ctx.managed.clone(),
+        cache: RedisAdmissionCache::from_env(),
+        has_usable_llm_config: move |user: Uuid| user == creator && has_key,
+        toolsets: ctx.toolsets.clone(),
+        llm_profile: move |user: Option<Uuid>| {
+            let key = user == Some(creator) && has_key;
+            let profile = agent_model_profile_for_user(key);
+            LlmProfile {
+                available: profile.available,
+                reason_code: profile.reason_code,
+            }
+        },
+        now_unix_secs,
+    }
+}
+
+/// The post-save fire for a tool-created issue
+/// (`fire_state_transition`, `signals.py:74-107`): a new row has no
+/// prior state, so creating directly in a ticking state arms the clock
+/// and creates the entry run — the v1 create fire (`fire_after_save`,
+/// PIDASHCONV-1216) over the tool's write.
+///
+/// Best-effort: the issue already committed, so nothing here fails the
+/// tool. A failed handler rolls the fire transaction back and logs the
+/// verbatim line (the counter already bumped inside); a lookup storage
+/// failure only warns. `created_by` is the run creator — the signal
+/// fires inside `impersonate(run.created_by)` (`tools.py:357`), so the
+/// crum user stamps the ticker row.
+async fn fire_create_transition(
+    ctx: &ToolCtx,
+    creator_id: Uuid,
+    issue_id: Uuid,
+    state_id: Option<Uuid>,
+) {
+    let Some(current_state_id) = state_id else {
+        return;
+    };
+    let now = Utc::now();
+    let has_key = match crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(
+        &ctx.pool, creator_id,
+    )
+    .await
+    {
+        Ok(row) => row.as_ref().is_some_and(|row| row.has_api_key()),
+        Err(error) => {
+            tracing::warn!(%error, "tool create fire: llm presence lookup failed; fire skipped");
+            return;
+        }
+    };
+    let store_deps = create_fire_deps(ctx, creator_id, has_key, now.timestamp());
+    let preflight_deps = create_fire_deps(ctx, creator_id, has_key, now.timestamp());
+    let tx = match Transaction::begin(&ctx.pool).await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(%error, "tool create fire: begin failed; fire skipped");
+            return;
+        }
+    };
+    let mut store = LiveCreationStore::new(tx, &ctx.pool, store_deps);
+    let mut preflight = LiveToolPreflight {
+        pool: ctx.pool.clone(),
+        deps: Some(preflight_deps),
+        matcher: JobsMatcher::new(ctx.pool.clone()),
+        now,
+        jitter_secs: 0.0,
+    };
+    let request = FireRequest {
+        issue_id,
+        prev_state_id: None,
+        current_state_id: Some(current_state_id),
+        dispatch_immediate: true,
+        moved_by_run: None,
+        now,
+        // Caller-drawn jitter (L5 quirk-5): none, like the v1 create
+        // fire over the same entered-bucket event.
+        jitter_secs: 0.0,
+        created_by: Some(creator_id),
+    };
+    let outcome = fire_state_transition(&mut store, &mut preflight, &request).await;
+    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::warn!(%error, "tool create fire: state lookup failed; issue stands unfired");
+            return;
+        }
+    };
+    if !matches!(outcome, FireOutcome::Called(_)) {
+        // NoTransition (unreachable: a `Some` state always differs from
+        // the `None` prior) / Failed: nothing this drive wrote is kept.
+        let _ = tx.rollback().await;
+        if let FireOutcome::Failed { log_line, .. } = outcome {
+            tracing::error!("{log_line}");
+        }
+        return;
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(%error, "tool create fire: commit failed; issue stands unfired");
+        return;
+    }
+    for run_id in dispatches {
+        if let Err(error) = dispatch_agent_run(pool, &ctx.cloud, run_id, now).await {
+            tracing::warn!(%error, "tool create fire: entry-run dispatch failed");
+        }
+    }
+    for consume in &deferred {
+        consume_admission_token(&cache, consume);
+    }
+    for effect_id in terminal_effects {
+        for effect in finalization::plan_publish_effects(effect_id) {
+            match effect {
+                LifecycleEffect::PublishTerminalEffects { run_id } => {
+                    let job = terminal_effects_job(&run_id);
+                    if let Err(error) = enqueue(pool, &job).await {
+                        tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
+                    }
+                }
+                LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+                    tracing::warn!(
+                        "skipping inline terminal effects for run {run_id}: no live RunnerRunsSeams \
+                         (PIDASHCONV-859); the queued effects task covers the hooks idempotently"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2699,8 +2920,9 @@ async fn dispatch_fn(
                         ledger_id,
                     } = audit;
                     match op_create_project_issue(&mut tx, &scope, description, &stripped).await {
-                        Ok(result) => {
-                            write_commit(
+                        Ok((result, fire)) => {
+                            let creator_id = scope.creator_id;
+                            let committed = write_commit(
                                 ctx,
                                 WriteAudit {
                                     tx,
@@ -2710,7 +2932,24 @@ async fn dispatch_fn(
                                 TOOL_CREATE_PROJECT_ISSUE,
                                 result,
                             )
-                            .await
+                            .await;
+                            // The orchestration post-save fire
+                            // (`signals.py:74-107`): Django's
+                            // `Issue.objects.create` runs it inside the
+                            // save; here signals are explicit calls after
+                            // the commit lands (the v1 create shape,
+                            // PIDASHCONV-1216). Best-effort: the issue
+                            // already committed.
+                            if committed.is_ok() {
+                                fire_create_transition(
+                                    ctx,
+                                    creator_id,
+                                    fire.issue_id,
+                                    fire.state_id,
+                                )
+                                .await;
+                            }
+                            committed
                         }
                         Err(error) => {
                             let _ = tx.rollback().await;
