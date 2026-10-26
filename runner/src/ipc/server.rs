@@ -34,6 +34,11 @@ pub struct IpcServer {
     /// ownership.
     pub instances: Arc<std::sync::RwLock<HashMap<Uuid, RunnerInstance>>>,
     pub(crate) spawn_ctx: crate::daemon::supervisor::RunnerSpawnCtx,
+    /// Cancelled when the supervisor that owns this server goes away (an
+    /// in-process reload). Stops the accept loop *and* every open
+    /// connection, so a subscribed client cannot keep streaming a dead
+    /// supervisor's state and the socket / pipe name is free to rebind.
+    pub(crate) cancel: tokio_util::sync::CancellationToken,
 }
 
 impl IpcServer {
@@ -66,14 +71,26 @@ impl IpcServer {
 
         let me = Arc::new(self);
         loop {
-            let (stream, _) = listener.accept().await?;
-            let server = me.clone();
-            tokio::spawn(async move {
-                if let Err(e) = server.handle_conn(stream).await {
-                    tracing::warn!("ipc conn error: {e:#}");
-                }
-            });
+            let (stream, _) = tokio::select! {
+                _ = me.cancel.cancelled() => return Ok(()),
+                r = listener.accept() => r?,
+            };
+            me.spawn_conn(stream);
         }
+    }
+
+    fn spawn_conn(self: &Arc<Self>, stream: IpcStream) {
+        let server = self.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = server.cancel.cancelled() => {}
+                r = server.handle_conn(stream) => {
+                    if let Err(e) = r {
+                        tracing::warn!("ipc conn error: {e:#}");
+                    }
+                }
+            }
+        });
     }
 
     #[cfg(windows)]
@@ -86,20 +103,17 @@ impl IpcServer {
 
         let me = Arc::new(self);
         loop {
-            server
-                .connect()
-                .await
-                .with_context(|| format!("accepting named-pipe client at {pipe_name}"))?;
+            tokio::select! {
+                _ = me.cancel.cancelled() => return Ok(()),
+                r = server.connect() => {
+                    r.with_context(|| format!("accepting named-pipe client at {pipe_name}"))?
+                }
+            }
             let connected = server;
             server = ServerOptions::new()
                 .create(&pipe_name)
                 .with_context(|| format!("creating next named pipe {pipe_name}"))?;
-            let server = me.clone();
-            tokio::spawn(async move {
-                if let Err(e) = server.handle_conn(connected).await {
-                    tracing::warn!("ipc conn error: {e:#}");
-                }
-            });
+            me.spawn_conn(connected);
         }
     }
 

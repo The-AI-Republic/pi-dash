@@ -35,16 +35,17 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .validate()
         .context("config.toml failed validation; refusing to start the daemon")?;
 
-    // Zero runners is only a hard error when the daemon would have
-    // nothing at all to do. With a shared machine token AND a
-    // dev_machine_id, the daemon opens the machine control session and
-    // the cloud can create the first runner remotely (web "Add runner"
-    // → connected dev machine) — that path requires an idle daemon to
-    // be running.
+    // Zero runners and no machine session means nothing to do *yet*: this
+    // is a signed-out host (sign-out parks the runners). Stay up and idle —
+    // the supervisor watches config.toml and comes alive on the next
+    // `pidash auth login` (from the CLI or the desktop app), and the IPC
+    // socket keeps answering `auth status` meanwhile. With a shared machine
+    // token AND a dev_machine_id the daemon opens the machine control
+    // session, through which the cloud can create the first runner.
     if config.runners.is_empty() && !supports_machine_control(&config) {
-        anyhow::bail!(
-            "no runners configured in config.toml — \
-             register one with `pidash runner add --project <SLUG>`."
+        tracing::info!(
+            "no runners configured and not signed in; idling until config.toml changes \
+             (`pidash auth login`, then `pidash runner add --project <SLUG>`)"
         );
     }
 

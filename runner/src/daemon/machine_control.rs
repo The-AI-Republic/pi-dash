@@ -58,7 +58,13 @@ impl MachineControl {
     /// Session lifecycle: open with backoff → poll until evicted or a
     /// fatal auth error → reopen. Mirrors `HttpLoop::run`'s inline
     /// 1→30s doubling with reset-on-success.
-    pub async fn run(self) {
+    ///
+    /// The open request carries this computer's fingerprint, so the cloud
+    /// may fold duplicate records into ours — or tell us (409
+    /// `dev_machine_merged`) that ours was folded into another. Then the
+    /// survivor's id is persisted to `config.toml` and the session reopens
+    /// against it.
+    pub async fn run(mut self) {
         let shutdown = self.daemon_state.shutdown_notified();
         let shutdown_fut = shutdown.notified();
         tokio::pin!(shutdown_fut);
@@ -85,6 +91,10 @@ impl MachineControl {
                     backoff_secs = 1;
                     tracing::info!(session_id = %resp.session_id, "machine control session open");
                     resp.session_id
+                }
+                Err(TransportError::DevMachineMerged { dev_machine_id }) => {
+                    self.adopt_survivor(dev_machine_id).await;
+                    continue;
                 }
                 Err(e) => {
                     if is_fatal(&e) {
@@ -133,6 +143,10 @@ impl MachineControl {
                         tracing::info!("machine session evicted ({reason}); reopening");
                         break 'poll;
                     }
+                    Err(TransportError::DevMachineMerged { dev_machine_id }) => {
+                        self.adopt_survivor(dev_machine_id).await;
+                        break 'poll;
+                    }
                     Err(e) => {
                         if is_fatal(&e) {
                             tracing::error!("machine control session unrecoverable: {e}");
@@ -149,6 +163,28 @@ impl MachineControl {
                 }
             }
         }
+    }
+
+    /// Our dev-machine record was merged into `survivor`: remember the new
+    /// id (config first, so the next daemon start uses it too) and address
+    /// it from now on.
+    async fn adopt_survivor(&mut self, survivor: Uuid) {
+        let previous = self.client.dev_machine_id();
+        tracing::info!(%previous, %survivor, "dev machine merged; switching to the surviving record");
+        let paths = self.spawn_ctx.paths.clone();
+        let persisted = tokio::task::spawn_blocking(move || {
+            crate::config::file::mutate_config(&paths, |cfg| {
+                cfg.daemon.dev_machine_id = Some(survivor);
+                Ok(())
+            })
+        })
+        .await;
+        match persisted {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!("could not persist merged dev_machine_id: {e:#}"),
+            Err(e) => tracing::warn!("persisting merged dev_machine_id panicked: {e}"),
+        }
+        self.client = self.client.with_dev_machine_id(survivor);
     }
 
     async fn handle_message(&self, msg: PollMessage) {
