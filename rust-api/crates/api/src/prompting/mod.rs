@@ -381,9 +381,10 @@ async fn check_user_throttle(state: &AppState, user_id: &uuid::Uuid) -> Result<(
 //
 // * safe methods (`GET`/`HEAD`/`OPTIONS`/`TRACE`) skip everything;
 // * an `Origin` header is verified first (same-origin or a trusted
-//   origin from `CSRF_TRUSTED_ORIGINS`, which the project sets to
-//   `CORS_ALLOWED_ORIGINS` — `settings/common.py:612` — so the Rust
-//   `Settings.cors_allowed_origins` is the same list);
+//   origin from `CSRF_TRUSTED_ORIGINS`, which OSS sets to the CORS
+//   list (`settings/common.py:617`) and the cloud overlay augments
+//   with the desktop origins — the Rust
+//   `Settings.csrf_trusted_origins`);
 // * `is_secure()` follows the URI scheme, or `X-Forwarded-Proto: https`
 //   when `Settings.secure_proxy_ssl_header` is set (the production
 //   profile, mirroring `middleware/security.rs::is_secure`). When the
@@ -434,7 +435,7 @@ fn check_csrf_cookie(
     let settings = state.settings();
     let secure = request_is_secure(uri_scheme, headers, settings.secure_proxy_ssl_header);
     enforce_csrf_cookie(
-        &settings.cors_allowed_origins,
+        &settings.csrf_trusted_origins,
         settings.session.cookie_domain.as_deref(),
         secure,
         headers,
@@ -3022,6 +3023,46 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn csrf_origin_trust_comes_from_the_csrf_list() {
+        // PIDASHCONV-1506: the gate reads `Settings.csrf_trusted_origins`,
+        // not the CORS list, so a cloud overlay that augments CSRF trust
+        // (the desktop triple under wildcard CORS) applies here while
+        // CORS semantics stay untouched.
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.cors_allowed_origins = vec!["https://cors-only.example".to_owned()];
+        settings.cors_allow_all_origins = true;
+        settings.csrf_trusted_origins = vec!["http://tauri.localhost".to_owned()];
+        let state = AppState::with_settings("test", settings);
+        let secret = "a".repeat(CSRF_SECRET_LENGTH);
+        let headers_for = |origin: &'static str| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("host", axum::http::HeaderValue::from_static("127.0.0.1:1"));
+            headers.insert("origin", axum::http::HeaderValue::from_static(origin));
+            headers.insert(
+                "cookie",
+                axum::http::HeaderValue::from_str(&format!("csrftoken={secret}")).expect("cookie"),
+            );
+            headers.insert(
+                "x-csrftoken",
+                axum::http::HeaderValue::from_str(&secret).expect("token"),
+            );
+            headers
+        };
+        // Trusted via the CSRF list alone (the CORS list is irrelevant).
+        assert!(check_csrf(&state, None, &headers_for("http://tauri.localhost"), "PUT").is_ok());
+        // An origin on the CORS list but not the CSRF list is rejected.
+        assert!(check_csrf(
+            &state,
+            None,
+            &headers_for("https://cors-only.example"),
+            "PUT"
+        )
+        .is_err());
+        // An origin on neither list is rejected.
+        assert!(check_csrf(&state, None, &headers_for("https://evil.test"), "PUT").is_err());
     }
 
     #[test]
