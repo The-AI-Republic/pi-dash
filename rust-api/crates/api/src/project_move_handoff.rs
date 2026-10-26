@@ -99,11 +99,13 @@ fn redis_client(state: &AppState) -> Option<redis::Client> {
 
 /// Drain one publish effect, isolated with its failure log
 /// (`agent_run_finalization.py` `_publish_effects`: the emit and the
-/// inline apply sit in separate `try` blocks).
+/// inline apply sit in separate `try` blocks). `terminal_created_by`
+/// is the ambient crum request user for the inline terminal effects.
 pub(crate) async fn drain_one_publish(
     pool: &PgPool,
     ports: &crate::runner_runs::LivePorts,
     effect: LifecycleEffect,
+    terminal_created_by: Option<Uuid>,
 ) {
     let label = match &effect {
         LifecycleEffect::PublishTerminalEffects { run_id } => {
@@ -114,9 +116,14 @@ pub(crate) async fn drain_one_publish(
         }
         unexpected => format!("failed to drain unexpected terminal effect: {unexpected:?}"),
     };
-    if crate::runner_runs::run_endpoints::drain_lifecycle_effects(pool, ports, vec![effect])
-        .await
-        .is_err()
+    if crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+        pool,
+        ports,
+        vec![effect],
+        terminal_created_by,
+    )
+    .await
+    .is_err()
     {
         tracing::error!("{label}");
     }
@@ -127,13 +134,14 @@ pub(crate) async fn drain_publish_effects(
     pool: &PgPool,
     state: &AppState,
     effects: Vec<LifecycleEffect>,
+    terminal_created_by: Option<Uuid>,
 ) {
     if effects.is_empty() {
         return;
     }
     let ports = crate::runner_runs::LivePorts::new(pool.clone(), state);
     for effect in effects {
-        drain_one_publish(pool, &ports, effect).await;
+        drain_one_publish(pool, &ports, effect, terminal_created_by).await;
     }
 }
 
@@ -1457,7 +1465,9 @@ pub(crate) async fn complete_project_move_handoff(
     for id in terminal_effects {
         pairs.extend(finalize_kernel::plan_publish_effects(id));
     }
-    drain_publish_effects(pool, state, pairs).await;
+    // No crum user here: the handoff completion runs behind the port
+    // seam, which carries no request user (PIDASHCONV-1483 follow-up).
+    drain_publish_effects(pool, state, pairs, None).await;
     let now = now_micros();
     for id in dispatches {
         // `dispatch_agent_run` leaves the runner-plane drain to the caller

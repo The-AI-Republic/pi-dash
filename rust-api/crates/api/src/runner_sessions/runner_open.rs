@@ -1653,9 +1653,10 @@ async fn fire_open_effects(
     pool: &PgPool,
     state: &AppState,
     effects: OpenEffects,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<(), Response> {
     let ports = SessionPorts::new(pool, state);
-    drain_lifecycle_effects(pool, &ports, effects.lifecycle).await?;
+    drain_lifecycle_effects(pool, &ports, effects.lifecycle, terminal_created_by).await?;
     for effect in effects.session_drains {
         match effect {
             session_kernel::SessionEffect::RetryCancelDelivery { runner_id, message } => {
@@ -1971,7 +1972,9 @@ async fn runner_session_open_inner(
         Ok(outcome) => outcome,
         Err(fail) => return txn_fail_response(fail, runner_id),
     };
-    if let Err(response) = fire_open_effects(&pool, &state, effects).await {
+    // Daemon request: the crum user is the runner owner.
+    let terminal_created_by = Some(runner.owner_id);
+    if let Err(response) = fire_open_effects(&pool, &state, effects, terminal_created_by).await {
         return response;
     }
 

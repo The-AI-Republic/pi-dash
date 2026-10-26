@@ -145,12 +145,14 @@ pub(crate) enum CreationDrainError<E> {
 /// infallible), dispatches (`dispatch_agent_run` per id, failures
 /// propagate), deferred admission consumes (best-effort). A
 /// [`DispatchDecision::PodDrain`] drains through `drain_pod`, the
-/// caller's own D-14 pod-drain recipe.
+/// caller's own D-14 pod-drain recipe. `terminal_created_by` is the
+/// ambient crum request user for the inline terminal effects.
 pub(crate) async fn drain_creation_outboxes<F, Fut, E>(
     pool: &PgPool,
     state: &AppState,
     outboxes: CreationOutboxes,
     drain_pod: F,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<(), CreationDrainError<E>>
 where
     F: Fn(Uuid) -> Fut,
@@ -161,7 +163,7 @@ where
         for id in outboxes.terminal_effects {
             pairs.extend(finalize_kernel::plan_publish_effects(id));
         }
-        drain_publish_effects(pool, state, pairs).await;
+        drain_publish_effects(pool, state, pairs, terminal_created_by).await;
     }
     let cloud = state.settings().cloud_agent.clone();
     let now = now_micros();

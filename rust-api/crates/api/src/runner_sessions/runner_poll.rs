@@ -1324,10 +1324,13 @@ async fn drain_pod(
 /// Drain one finalized run's publish pair, each effect isolated with
 /// its failure log (`agent_run_finalization.py` `_publish_effects`:
 /// the emit and the inline apply sit in separate `try` blocks).
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects.
 async fn drain_publish_pair(
     pool: &sqlx::postgres::PgPool,
     ports: &LivePorts,
     pair: [LifecycleEffect; 2],
+    terminal_created_by: Option<Uuid>,
 ) {
     for effect in pair {
         let label = match &effect {
@@ -1339,7 +1342,7 @@ async fn drain_publish_pair(
             }
             unexpected => format!("failed to drain unexpected terminal effect: {unexpected:?}"),
         };
-        if drain_lifecycle_effects(pool, ports, vec![effect])
+        if drain_lifecycle_effects(pool, ports, vec![effect], terminal_created_by)
             .await
             .is_err()
         {
@@ -1740,8 +1743,10 @@ pub async fn runner_session_poll(
     }
     if !reap.publish_pairs.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
+        // Daemon request: the crum user is the runner owner.
+        let terminal_created_by = Some(auth.runner.owner_id);
         for pair in reap.publish_pairs {
-            drain_publish_pair(&pool, &ports, pair).await;
+            drain_publish_pair(&pool, &ports, pair, terminal_created_by).await;
         }
     }
     for effect in reap.drain_effects {

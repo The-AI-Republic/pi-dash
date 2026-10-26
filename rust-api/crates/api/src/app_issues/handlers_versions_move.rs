@@ -1171,9 +1171,15 @@ async fn move_issue(
                     redis: redis.as_ref(),
                     runner: &state.settings().runner,
                 };
-                drain_creation_outboxes(&pool, &state, outboxes, |pod_id| {
-                    drain_pod_by_id(&pool, &pubsub, pod_id)
-                })
+                // Web request: the crum user is the requester.
+                let terminal_created_by = Some(user_id);
+                drain_creation_outboxes(
+                    &pool,
+                    &state,
+                    outboxes,
+                    |pod_id| drain_pod_by_id(&pool, &pubsub, pod_id),
+                    terminal_created_by,
+                )
                 .await
                 .map_err(|error| {
                     match error {

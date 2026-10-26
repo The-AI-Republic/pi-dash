@@ -185,7 +185,9 @@ pub(crate) async fn fire_issue_transition(
         for id in terminal_effects {
             pairs.extend(pidash_services::runner_runs::finalization::plan_publish_effects(id));
         }
-        crate::project_move_handoff::drain_publish_effects(pool, state, pairs).await;
+        // Web request: the crum user is the requester.
+        crate::project_move_handoff::drain_publish_effects(pool, state, pairs, Some(actor_id))
+            .await;
     }
     let cloud = state.settings().cloud_agent.clone();
     for run_id in dispatches {
