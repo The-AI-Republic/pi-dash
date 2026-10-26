@@ -24,6 +24,16 @@ export type { ArchivedCyclesScreenProps } from "./components/ArchivedCyclesScree
 export { ARCHIVED_CYCLES_SEARCH_LABEL, ArchivedCyclesSearchBox } from "./components/ArchivedCyclesSearchBox.js";
 export type { ArchivedCyclesSearchBoxProps } from "./components/ArchivedCyclesSearchBox.js";
 export { ArchivedCyclesSkeleton } from "./components/ArchivedCyclesSkeleton.js";
+export {
+  ARCHIVED_MODULES_FILTERS_HEADING,
+  ARCHIVED_MODULES_SEARCH_HEADING,
+  ARCHIVED_MODULES_ZERO_HEADING,
+  ArchivedModulesEmpty,
+} from "./components/ArchivedModulesEmpty.js";
+export type { ArchivedModulesEmptyKind, ArchivedModulesEmptyProps } from "./components/ArchivedModulesEmpty.js";
+export { ArchivedModulesScreen } from "./components/ArchivedModulesScreen.js";
+export type { ArchivedModulesScreenProps } from "./components/ArchivedModulesScreen.js";
+export { ArchivedModulesSkeleton } from "./components/ArchivedModulesSkeleton.js";
 export { ArchivesCountBadge } from "./components/ArchivesCountBadge.js";
 export type { ArchivesCountBadgeProps } from "./components/ArchivesCountBadge.js";
 export { ArchivesDetailFrame } from "./components/ArchivesDetailFrame.js";

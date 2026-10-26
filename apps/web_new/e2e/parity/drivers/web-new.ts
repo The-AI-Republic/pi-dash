@@ -16988,8 +16988,13 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Archived modules (NEWFRONT-225, ARCH-020..025). Throwing stubs;
   // --- the new-app area issue implements them against apps/web_new.
-  async archivesOpenModulesTab(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("archivesOpenModulesTab");
+  async archivesOpenModulesTab(workspaceSlug: string, projectId: string): Promise<void> {
+    // Enter the way a viewer does: the live modules screen, then the
+    // project's Archives entry and the strip's Modules tab.
+    await this.archivesOpenLiveModules(workspaceSlug, projectId);
+    await this.archivesGoToProjectArchives(projectId);
+    await this.archivesSelectArchivesTab("Modules");
+    await this.archivesAwaitArchivedModulesSettled();
   }
   async archivesOpenCyclesTab(_workspaceSlug: string, projectId: string): Promise<void> {
     // Callers arrive on the live screen, so the sidebar Archives entry
@@ -17031,11 +17036,19 @@ export class WebNewDriver implements ParityDriver {
       timeout: WebNewDriver.WAIT_MS,
     });
   }
-  async archivesOpenLiveModulePeek(_name: string): Promise<void> {
-    return todo("archivesOpenLiveModulePeek");
+  async archivesOpenLiveModulePeek(name: string): Promise<void> {
+    // The live row's own info control opens the peek the same way a
+    // viewer does; slice D's row hook presses it and waits for the panel.
+    await this.modulesListRowOpenPeek(name);
+    await expect.poll(() => this.archivesModulePeekName(), { timeout: WebNewDriver.WAIT_MS }).toBe(name);
   }
-  async archivesOpenLiveModules(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("archivesOpenLiveModules");
+  async archivesOpenLiveModules(workspaceSlug: string, projectId: string): Promise<void> {
+    const target = `/${workspaceSlug}/projects/${projectId}/modules`;
+    const current = new URL(this.page.url()).pathname.replace(/\/$/, "");
+    if (!current.endsWith(`/projects/${projectId}/modules`)) {
+      await this.page.goto(target, { waitUntil: "domcontentloaded" });
+    }
+    await this.modulesListWaitSettled();
   }
   async archivesOpenLiveCycles(workspaceSlug: string, projectId: string): Promise<void> {
     await this.openLiveCyclesSettled(workspaceSlug, projectId);
@@ -17058,11 +17071,16 @@ export class WebNewDriver implements ParityDriver {
       await this.page.waitForTimeout(300);
     }
   }
-  async archivesAwaitModuleRow(_name: string): Promise<void> {
-    return todo("archivesAwaitModuleRow");
+  async archivesAwaitModuleRow(name: string): Promise<void> {
+    await this.modulesRow(name).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async archivesModuleRowNames(): Promise<string[]> {
-    return todo("archivesModuleRowNames");
+    // Both lists render the same row component; names read in display
+    // order from the list container the current screen owns.
+    const container = this.page.getByTestId("modules-list").last();
+    if ((await container.count()) === 0) return [];
+    const names = await container.getByTestId("modules-row-name").allInnerTexts();
+    return names.map((name) => name.trim()).filter((name) => name !== "");
   }
   async archivesCycleRowNames(): Promise<string[]> {
     return this.cycleRowNames();
@@ -17074,13 +17092,24 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesSetModuleSort");
   }
   async archivesOpenModuleSearch(): Promise<void> {
-    return todo("archivesOpenModuleSearch");
+    // The archived header mounts the live search control: a collapsed
+    // magnifier that expands to a focused field.
+    const trigger = this.page.getByRole("button", { name: "Search modules" }).first();
+    if (await this.isShown(trigger)) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.archivedModulesSearchInput().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Search modules by name",
+      undefined,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
   async archivesModuleSearchVisible(): Promise<boolean> {
     return todo("archivesModuleSearchVisible");
   }
-  async archivesTypeModuleSearch(_text: string): Promise<void> {
-    return todo("archivesTypeModuleSearch");
+  async archivesTypeModuleSearch(text: string): Promise<void> {
+    await this.archivedModulesSearchInput().fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
   async archivesModuleSearchText(): Promise<string> {
     return todo("archivesModuleSearchText");
@@ -17089,7 +17118,9 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesEscapeModuleSearch");
   }
   async archivesClearModuleSearch(): Promise<void> {
-    return todo("archivesClearModuleSearch");
+    const box = this.page.getByTestId("modules-search-field").first();
+    await box.getByRole("button", { name: "Clear search" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.archivedModulesSearchText(), { timeout: WebNewDriver.WAIT_MS }).toBe("");
   }
   async archivesCollapseSearchOutside(): Promise<void> {
     // Re-selecting the current tab trips the search box's outside-click
@@ -17102,44 +17133,135 @@ export class WebNewDriver implements ParityDriver {
         : "issues";
     await this.archivesTabLink(tab).click({ timeout: WebNewDriver.WAIT_MS });
   }
+  /** The archived header's filters trigger. */
+  private archivedModulesFiltersTrigger(): Locator {
+    return this.page.getByTestId("modules-filter-trigger").first();
+  }
   async archivesOpenModuleFilters(): Promise<void> {
-    return todo("archivesOpenModuleFilters");
+    if (!(await this.isShown(this.page.getByTestId("modules-filter-panel")))) {
+      await this.archivedModulesFiltersTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.getByTestId("modules-filter-panel").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async archivesModuleFilterGroups(): Promise<string[]> {
-    return todo("archivesModuleFilterGroups");
+    const groups = this.page.getByTestId("modules-filter-panel").getByTestId("modules-filter-group");
+    const titles = await groups.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-filter-group") ?? "")
+    );
+    return titles.filter((title) => title !== "");
   }
-  async archivesToggleLeadFilter(_label: string): Promise<void> {
-    return todo("archivesToggleLeadFilter");
+  async archivesToggleLeadFilter(label: string): Promise<void> {
+    const group = this.page
+      .getByTestId("modules-filter-panel")
+      .locator('[data-testid="modules-filter-group"][data-filter-group="Lead"]')
+      .first();
+    await group.locator(`[data-filter-option="${label}"]`).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async archivesModuleChips(): Promise<ArchivesModuleChip[]> {
-    return todo("archivesModuleChips");
+    const chips = this.page.getByTestId("modules-filter-chips").getByTestId("modules-filter-chip");
+    return chips.evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        key: (node.getAttribute("data-chip-key") ?? "").trim(),
+        text: (node.textContent ?? "").trim().replace(/\s+/g, " "),
+      }))
+    );
   }
-  async archivesRemoveModuleChip(_key: string): Promise<void> {
-    return todo("archivesRemoveModuleChip");
+  async archivesRemoveModuleChip(key: string): Promise<void> {
+    const chip = this.page
+      .getByTestId("modules-filter-chips")
+      .locator(`[data-testid="modules-filter-chip"][data-chip-key="${key}"]`)
+      .first();
+    await chip.locator('[data-testid="modules-filter-chip-value"] button').first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
   async archivesClearModuleFilters(): Promise<void> {
-    return todo("archivesClearModuleFilters");
+    const row = this.page.getByTestId("modules-filter-chips");
+    if ((await row.count()) === 0) return;
+    await row.getByTestId("modules-filter-clear-all").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async archivesModuleFiltersActive(): Promise<boolean> {
     return todo("archivesModuleFiltersActive");
   }
   async archivesCloseModuleFilters(): Promise<void> {
-    return todo("archivesCloseModuleFilters");
+    if (await this.isShown(this.page.getByTestId("modules-filter-panel"))) {
+      await this.page.keyboard.press("Escape");
+    }
+    await this.page
+      .getByTestId("modules-filter-panel")
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
   async archivesModulesEmptyKind(): Promise<ArchivesModulesEmptyKind> {
-    return todo("archivesModulesEmptyKind");
+    await this.archivesAwaitArchivedModulesSettled();
+    if ((await this.archivesModuleRowNames()).length > 0) return "rows";
+    const empty = this.page.getByTestId("archived-modules-empty").first();
+    if ((await empty.count()) === 0) {
+      throw new Error("[parity] archived modules tab settled with neither rows nor a known empty state.");
+    }
+    const kind = await empty.getAttribute("data-empty-kind");
+    if (kind === "zero" || kind === "search" || kind === "filters") return kind;
+    throw new Error(`[parity] archived modules tab shows an unknown empty kind ${JSON.stringify(kind)}.`);
+  }
+  /** Input of the archived screen's name search (the shared modules field). */
+  private archivedModulesSearchInput(): Locator {
+    return this.page.getByTestId("modules-search-input").first();
+  }
+  private async archivedModulesSearchText(): Promise<string> {
+    return this.archivedModulesSearchInput().inputValue();
+  }
+  /**
+   * Wait until the archived tab settles: rows, a known empty, or the
+   * error state with its retry. The screen's own skeleton must be gone;
+   * a direct visit fetches its own data, so no live visit is needed.
+   */
+  private async archivesAwaitArchivedModulesSettled(): Promise<void> {
+    await this.page.waitForFunction(
+      () => {
+        const content = document.querySelector('[data-testid="archives-content"]');
+        if (content === null) return false;
+        if (content.querySelector('[data-testid="archived-modules-screen"]') === null) return false;
+        if (content.querySelector('[data-testid="archived-modules-skeleton"]') !== null) return false;
+        return (
+          content.querySelector('[data-testid="modules-list"]') !== null ||
+          content.querySelector('[data-testid="archived-modules-empty"]') !== null ||
+          content.querySelector('[data-testid="archived-modules-load-error"]') !== null
+        );
+      },
+      undefined,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
   async archivesModulesShowsSkeleton(_workspaceSlug: string, _projectId: string): Promise<boolean> {
     return todo("archivesModulesShowsSkeleton");
   }
-  async archivesOpenModulePeek(_name: string): Promise<void> {
-    return todo("archivesOpenModulePeek");
+  async archivesOpenModulePeek(name: string): Promise<void> {
+    // An archived row opens its peek from the row body itself; pressing
+    // the progress marker is the body press (it is never a control).
+    const row = this.modulesRow(name);
+    await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByTestId("modules-row-progress").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.archivesModulePeekName(), { timeout: WebNewDriver.WAIT_MS }).toBe(name);
   }
   async archivesModulePeekName(): Promise<string | null> {
-    return todo("archivesModulePeekName");
+    // The panel names the module in its heading; it is absent until an
+    // address carries the peek key.
+    if (!new URL(this.page.url()).searchParams.has("peekModule")) return null;
+    const panel = this.modulesPeekPanel();
+    if (!(await this.isShown(panel))) return null;
+    const heading = panel.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    const name = ((await heading.innerText()) ?? "").trim();
+    return name === "" ? null : name;
   }
   async archivesCloseModulePeek(): Promise<void> {
-    return todo("archivesCloseModulePeek");
+    await this.modulesPeekPanel()
+      .getByRole("button", { name: "Close preview", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(() => !new URL(location.href).searchParams.has("peekModule"), undefined, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
   async archivesOpenCyclePeek(name: string): Promise<void> {
     await this.openArchivedCyclePeek(name);
@@ -17168,14 +17290,16 @@ export class WebNewDriver implements ParityDriver {
   async archivesLiveModuleMenuEntries(_name: string): Promise<ArchivesMenuEntry[]> {
     return todo("archivesLiveModuleMenuEntries");
   }
-  async archivesChooseLiveModuleMenuEntry(_name: string, _title: string): Promise<void> {
-    return todo("archivesChooseLiveModuleMenuEntry");
+  async archivesChooseLiveModuleMenuEntry(name: string, title: string): Promise<void> {
+    await this.modulesOpenRowMenu(name);
+    await this.modulesMenuChoose(title);
   }
   async archivesArchivedModuleMenuEntries(_name: string): Promise<ArchivesMenuEntry[]> {
     return todo("archivesArchivedModuleMenuEntries");
   }
-  async archivesChooseArchivedModuleMenuEntry(_name: string, _title: string): Promise<void> {
-    return todo("archivesChooseArchivedModuleMenuEntry");
+  async archivesChooseArchivedModuleMenuEntry(name: string, title: string): Promise<void> {
+    await this.modulesOpenRowMenu(name);
+    await this.modulesMenuChoose(title);
   }
   async archivesArchiveDialog(): Promise<ArchivesArchiveDialog | null> {
     const dialog = this.page.locator('[role="dialog"]').first();
@@ -17234,7 +17358,13 @@ export class WebNewDriver implements ParityDriver {
     return dialog.getByRole("button").last();
   }
   async archivesFailNextModuleWrite(): Promise<void> {
-    return todo("archivesFailNextModuleWrite");
+    // Archive and restore share the path shape; failing the next one of
+    // either is what the failure scenarios ask for.
+    await this.page.route(
+      (url) => /\/modules\/[0-9a-fA-F-]{36}\/archive\/$/.test(url.pathname),
+      (route) => route.abort(),
+      { times: 1 }
+    );
   }
 
   // Archived work-items list, filters, display, peek (NEWFRONT-222,

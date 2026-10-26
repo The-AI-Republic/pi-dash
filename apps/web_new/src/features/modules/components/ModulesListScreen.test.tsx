@@ -273,6 +273,15 @@ describe("ModulesListScreen", () => {
     expect(titles).toEqual(["Edit", "Open in new tab", "Copy link", "Archive", "Delete"]);
   });
 
+  it("opens this screen's archive confirmation from the default row menu", async () => {
+    harness.modules = [makeModuleRow({ status: "completed" })];
+    renderScreen();
+    const triggers = await screen.findAllByTestId("module-row-menu-trigger");
+    fireEvent.click(triggers[0]!);
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Archive/ }));
+    expect(await screen.findByRole("heading", { name: "Archive module \u201cDelivery\u201d" })).toBeInTheDocument();
+  });
+
   it("mounts the shared quick menu on board cards", async () => {
     writeProjectLayout(MODULES_PROJECT_ID, "board");
     renderScreen();

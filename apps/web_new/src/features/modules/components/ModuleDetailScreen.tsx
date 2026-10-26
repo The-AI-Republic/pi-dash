@@ -143,6 +143,7 @@ export function ModuleDetailScreen({
                   moduleId={moduleId}
                   canEdit={canEdit}
                   extraEntries={headerMenuEntries}
+                  archiveModule={{ id: module.id, name: module.name, status: module.status }}
                 />
               </>
             }

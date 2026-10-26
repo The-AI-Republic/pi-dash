@@ -2,15 +2,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Module actions menu on the detail page (parity/specs/modules.md §7.2,
-// §7.5, MOD-024/025). Edit opens the shared update dialog prefilled from
-// the module; Delete opens the confirmation and, once the delete lands,
-// returns the user to the modules list — the page they were on no longer
-// exists. The menu is one overflow trigger marked for the shell
+// §7.4, §7.5, MOD-024/025/026). Edit opens the shared update dialog
+// prefilled from the module; Archive opens slice G's confirmation for a
+// finished module; Delete opens the confirmation and, once the delete
+// lands, returns the user to the modules list — the page they were on no
+// longer exists. The menu is one overflow trigger marked for the shell
 // (`data-main-menu`); later slices extend it through `extraEntries` rather
-// than forking a second menu. Edit and Delete are editor entries — a guest
-// offers only the read-only entries another slice supplies, and with none
-// of those the header shows no menu at all (§4.5). The component brings
-// its own dialog provider, so a detail host only has to mount the menu.
+// than forking a second menu, and `archiveModule` splices the Archive entry
+// in beside those read-only entries so the opener runs inside this
+// component's own dialog provider. Edit, Archive and Delete are editor
+// entries — a guest offers only the read-only entries another slice
+// supplies, and with none of those the header shows no menu at all
+// (§4.5). The component brings its own dialog provider, so a detail host
+// only has to mount the menu.
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -19,7 +23,9 @@ import { Ellipsis } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../../core/api/client.js";
+import type { ModuleStatus } from "@pidash/api-client";
 import { moduleDeleteLanding } from "../../lib/moduleForm.js";
+import { moduleArchiveMenuEntry } from "../menus/moduleArchiveEntry.js";
 import { moduleProjectFactsQueryOptions, moduleProjectIdentifier } from "../../api/projectFacts.js";
 import { moduleDetailQueryOptions } from "../sidebar/moduleSidebarQueries.js";
 import { ModuleDialogProvider, useModuleDialogs } from "./ModuleDialogProvider.js";
@@ -33,8 +39,13 @@ export interface ModuleDetailActionsProps {
   moduleId: string;
   /** True for project admins and members; guests get no Edit or Delete. */
   canEdit: boolean;
-  /** Entries other slices own (archive/restore, copy link, open…). */
+  /** Entries other slices own (copy link, open in new tab…). */
   extraEntries?: readonly MenuEntry[] | undefined;
+  /**
+   * The module this page shows. Present, editors get the Archive entry on
+   * a finished module (slice G, MOD-026); absent, the menu offers none.
+   */
+  archiveModule?: { id: string; name: string; status: ModuleStatus } | undefined;
   /** Menu trigger's accessible label. */
   label?: string | undefined;
 }
@@ -65,6 +76,7 @@ function ModuleActionsMenu({
   moduleId,
   canEdit,
   extraEntries = [],
+  archiveModule,
   label = "Module actions",
 }: ModuleDetailActionsProps): React.ReactElement {
   const navigate = useNavigate();
@@ -80,6 +92,18 @@ function ModuleActionsMenu({
         dialogs?.openEdit(record);
       },
     });
+    if (archiveModule !== undefined) {
+      items.push(
+        ...moduleArchiveMenuEntry({
+          status: archiveModule.status,
+          canEdit,
+          module: { id: archiveModule.id, name: archiveModule.name },
+          onArchive: (target) => {
+            dialogs?.openArchive(target);
+          },
+        })
+      );
+    }
     items.push({
       label: MODULE_MENU_DELETE,
       onSelect: () => {

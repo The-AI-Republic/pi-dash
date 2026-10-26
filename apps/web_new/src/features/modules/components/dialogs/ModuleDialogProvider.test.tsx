@@ -9,7 +9,7 @@
 // the provider has no openers at all.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ModuleRow } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -99,6 +99,26 @@ describe("ModuleDialogProvider", () => {
     expect(screen.getByTestId("module-delete-body")).toHaveTextContent("Delivery");
   });
 
+  it("opens the archive confirmation for the named module", () => {
+    renderProvider();
+    act(() => handle?.openArchive({ id: MODULES_MODULE_ID, name: "Delivery" }));
+    expect(screen.getByTestId("module-archive-body")).toHaveTextContent("Delivery");
+  });
+
+  it("closes the archive confirmation without writing, with or without a landing", async () => {
+    const onArchived = vi.fn();
+    renderProvider();
+    act(() => handle?.openArchive({ id: MODULES_MODULE_ID, name: "Delivery" }, { onArchived }));
+    await act(async () => {
+      screen.getByRole("button", { name: "Cancel" }).click();
+    });
+    await waitFor(() => expect(screen.queryByTestId("module-archive-body")).not.toBeInTheDocument());
+    expect(onArchived).not.toHaveBeenCalled();
+
+    act(() => handle?.openArchive({ id: MODULES_MODULE_ID, name: "Delivery" }));
+    expect(screen.getByTestId("module-archive-body")).toHaveTextContent("Delivery");
+  });
+
   it("closes each dialog through its own onOpenChange", async () => {
     renderProvider();
     act(() => handle?.openDelete({ id: MODULES_MODULE_ID, name: "Delivery" }));
@@ -110,6 +130,20 @@ describe("ModuleDialogProvider", () => {
     expect(await screen.findByRole("heading", { name: "Create module" })).toBeInTheDocument();
     // A later create replaces the earlier session rather than stacking.
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
+
+  it("dismisses the save and delete dialogs on Escape", async () => {
+    renderProvider();
+    act(() => handle?.openCreate());
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    });
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Create module" })).not.toBeInTheDocument());
+    act(() => handle?.openDelete({ id: MODULES_MODULE_ID, name: "Delivery" }));
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    });
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Delete module" })).not.toBeInTheDocument());
   });
 
   it("keeps the openers stable across renders", () => {

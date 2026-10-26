@@ -22,6 +22,7 @@ export {
   moduleProjectTimeZone,
   moduleViewEnabled,
 } from "./api/projectFacts.js";
+export { archivedModulesQueryOptions } from "./api/archivedQueries.js";
 export { modulesListQueryOptions } from "./api/queries.js";
 export { ModuleDateControl, type ModuleDateControlProps } from "./components/accessories/ModuleDateControl.js";
 export {
@@ -41,6 +42,7 @@ export {
 } from "./components/ModuleSegmentedBar.js";
 export { ModuleFeatureSettings, type ModuleFeatureSettingsProps } from "./components/ModuleFeatureSettings.js";
 export {
+  ModuleArchiveDialog,
   ModuleCreateAction,
   ModuleDeleteDialog,
   ModuleDetailActions,
@@ -52,6 +54,8 @@ export {
   MODULE_MENU_DELETE,
   MODULE_MENU_EDIT,
   useModuleDialogs,
+  type ModuleArchiveDialogProps,
+  type ModuleArchiveTarget,
   type ModuleCreateActionProps,
   type ModuleDeleteDialogProps,
   type ModuleDeleteOptions,
@@ -81,7 +85,6 @@ export { ModulesSortMenu, type ModulesSortMenuProps } from "./components/Modules
 export { ModuleLayoutIcon } from "./components/ModuleLayoutIcon.js";
 export { ModuleListRow, moduleRowHoverClass, type ModuleListRowProps } from "./components/ModuleListRow.js";
 export {
-  MODULE_ARCHIVE_GATE_HINT,
   MODULE_MENU_ARCHIVE,
   MODULE_MENU_COPY,
   MODULE_MENU_OPEN,
@@ -89,9 +92,12 @@ export {
   MODULE_RESTORE_SUCCESS_BODY,
   MODULE_RESTORE_SUCCESS_TITLE,
   ModuleRowMenu,
+  moduleArchiveMenuEntry,
+  MODULE_ARCHIVE_GATE_HINT,
   moduleCanArchive,
   moduleDetailMenuEntries,
   moduleMenuEntries,
+  type ModuleArchiveEntryInput,
   type ModuleMenuAssembly,
   type ModuleMenuEntryId,
   type ModuleMenuEntryPlan,
@@ -309,14 +315,22 @@ export {
   type ModuleSortKey,
 } from "./lib/moduleListControls.js";
 export {
+  ARCHIVED_MODULES_DISPLAY_STORAGE_KEY,
   MODULES_LIST_DISPLAY_STORAGE_KEY,
+  archivedModulesDisplayScope,
+  currentArchivedProjectDisplay,
   currentProjectDisplay,
   parseDisplayRecord,
   readDisplayRecord,
+  readArchivedProjectDisplay,
   readProjectDisplay,
+  resetArchivedDisplayCache,
   resetModuleDisplayCache,
+  useArchivedModuleDisplay,
   useModuleListDisplay,
+  writeArchivedProjectDisplay,
   writeProjectDisplay,
+  type ModuleDisplayScope,
   type ModuleListDisplay,
   type ModuleListDisplayHandle,
   type ModuleListDisplayRecord,
@@ -336,6 +350,24 @@ export {
   type ModuleStateSegmentGroup,
 } from "./lib/moduleIdentity.js";
 export { parseModulesListSearch, type ModulesListSearch } from "./lib/moduleListSearch.js";
+export {
+  ARCHIVED_MODULE_FILTER_DIMENSIONS,
+  archivedModuleFilters,
+  archivedModulesSearched,
+  archivedModulesVisible,
+  hasArchivedModuleFilters,
+  MODULE_ARCHIVE_CONFIRM,
+  MODULE_ARCHIVE_HEADING,
+  MODULE_ARCHIVE_SUCCESS_BODY,
+  MODULE_ARCHIVE_SUCCESS_TITLE,
+  moduleArchiveDialogBody,
+  moduleArchiveDialogTitle,
+  moduleArchiveLanding,
+  resolveArchivedModulesBody,
+  toArchivedModuleRow,
+  type ArchivedModulesBody,
+  type ArchivedModulesBodyInput,
+} from "./lib/moduleArchive.js";
 export { moduleBoardGridClass, modulePeekFromSearch, withModulePeek } from "./lib/modulePeek.js";
 export { modulePressHitControl } from "./lib/modulePress.js";
 export {

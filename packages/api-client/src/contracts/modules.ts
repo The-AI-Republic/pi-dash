@@ -611,6 +611,7 @@ export const ArchivedModuleListItem = z.object({
   status: z.string(),
   lead_id: nullableUuid(),
   member_ids: z.array(uuid()),
+  sort_order: z.number(),
   total_issues: z.number(),
   is_favorite: z.boolean(),
   cancelled_issues: z.number(),

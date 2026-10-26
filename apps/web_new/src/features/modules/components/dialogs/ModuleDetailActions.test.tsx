@@ -67,16 +67,20 @@ function detail(overrides: Partial<ModuleDetail> = {}): ModuleDetail {
   };
 }
 
-let harness: { deleteStatus: number };
+let harness: { deleteStatus: number; archiveStatus: number };
 
 beforeEach(() => {
-  harness = { deleteStatus: 204 };
+  harness = { deleteStatus: 204, archiveStatus: 200 };
   routerHarness.navigate.mockReset();
   createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
     if (url === `https://api.test${PROJECT_PATH}`) return jsonResponse(url, 200, makeProjectRow());
     if (url === `https://api.test${DETAIL_PATH}` && (init.method ?? "GET") === "GET") {
       return jsonResponse(url, 200, detail());
+    }
+    if (url === `https://api.test${DETAIL_PATH}archive/` && init.method === "POST") {
+      if (harness.archiveStatus === 200) return jsonResponse(url, 200, { archived_at: "2026-03-01T00:00:00Z" });
+      return jsonResponse(url, harness.archiveStatus, { error: "Only completed or cancelled modules can be archived" });
     }
     if (url === `https://api.test${DETAIL_PATH}` && init.method === "DELETE") {
       if (harness.deleteStatus === 204) return jsonResponse(url, 204, null);
@@ -180,6 +184,48 @@ describe("ModuleDetailActions", () => {
   it("renders no trigger for a guest with nothing read-only to offer", () => {
     renderActions({ canEdit: false });
     expect(screen.queryByRole("button", { name: "Module actions" })).not.toBeInTheDocument();
+  });
+
+  it("offers Archive to an editor on a finished module and confirms through the shared dialog", async () => {
+    renderActions({ archiveModule: { id: MODULES_MODULE_ID, name: "Delivery", status: "completed" } });
+    await openMenu();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+    expect(await screen.findByRole("heading", { name: "Archive module “Delivery”" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await waitFor(() =>
+      expect(routerHarness.navigate).toHaveBeenCalledWith({ to: LIST_PATH, search: {}, replace: true })
+    );
+    expect(notify.notifySuccess).toHaveBeenCalledWith("Archive success", expect.stringContaining("archives"));
+  });
+
+  it("disables Archive with the reason until the module is finished", async () => {
+    renderActions({ archiveModule: { id: MODULES_MODULE_ID, name: "Delivery", status: "in-progress" } });
+    await openMenu();
+    const entry = await screen.findByRole("menuitem", { name: /^Archive/ });
+    expect(entry).toHaveAttribute("aria-disabled", "true");
+    expect(entry).toHaveTextContent("Only completed or cancelled modules can be archived.");
+  });
+
+  it("reports a refused archive without leaving the page", async () => {
+    harness.archiveStatus = 400;
+    renderActions({ archiveModule: { id: MODULES_MODULE_ID, name: "Delivery", status: "completed" } });
+    await openMenu();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
+    await waitFor(() =>
+      expect(notify.notifyError).toHaveBeenCalledWith("Error!", expect.stringContaining("Only completed or cancelled"))
+    );
+    expect(routerHarness.navigate).not.toHaveBeenCalled();
+  });
+
+  it("offers no Archive entry to a guest", async () => {
+    renderActions({
+      canEdit: false,
+      extraEntries: [{ label: "Copy link", onSelect: vi.fn() }],
+      archiveModule: { id: MODULES_MODULE_ID, name: "Delivery", status: "completed" },
+    });
+    await openMenu();
+    expect(screen.queryByRole("menuitem", { name: "Archive" })).not.toBeInTheDocument();
   });
 
   it("still lets a guest open the menu but never writes", async () => {
