@@ -31,15 +31,18 @@ pub const TASK_NAMES: [&str; 2] = [RUN_TURN_TASK, SWEEP_TASK];
 /// sweep's live store and the Redis client its post-commit `turn_failed`
 /// publish (`None` skips the publish); the seam drives the turn pipeline
 /// (see [`run_turn::TurnSeam`] for the port boundary). `hard_limit_secs` is
-/// the configured `ASSISTANT_TURN_HARD_LIMIT` for the sweep's stale cutoff.
+/// the configured `ASSISTANT_TURN_HARD_LIMIT` for the sweep's stale cutoff;
+/// `soft_limit_secs` is the configured `ASSISTANT_TURN_SOFT_LIMIT` for the
+/// turn runner's stream deadline.
 pub fn register_assistant_tasks<S: TurnSeam + 'static>(
     registry: &mut crate::worker::Registry,
     pool: sqlx::PgPool,
     redis: Option<redis::Client>,
     seam: std::sync::Arc<S>,
     hard_limit_secs: i64,
+    soft_limit_secs: i64,
 ) {
-    register_turn_handler(registry, pool.clone(), seam);
+    register_turn_handler(registry, pool.clone(), seam, soft_limit_secs);
     register_sweep_handler(registry, pool, redis, hard_limit_secs);
 }
 
@@ -173,6 +176,7 @@ mod tests {
             None,
             Arc::new(NoopSeam),
             run_turn::TURN_HARD_LIMIT_SECS as i64,
+            run_turn::TURN_SOFT_LIMIT_SECS as i64,
         );
         for name in TASK_NAMES {
             assert!(registry.owns(name), "{name} must run locally");

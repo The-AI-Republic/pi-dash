@@ -48,16 +48,16 @@
 //!   the rest of this map tracks the frozen `tasks.py` until PIDASHCONV-1055
 //!   merges `main`.)
 //! - `run_assistant_turn` (`:476-491`, `name="assistant.run_turn"`,
-//!   `acks_late=False`, `max_retries=0`, soft 300 / hard 330) →
+//!   `acks_late=False`, `max_retries=0`, soft/hard limits from settings) →
 //!   [`RUN_TURN_TASK`] + [`register_turn_handler`]. Celery retries are
 //!   disabled for the turn task, so the handler returns [`Verdict::Ack`] or
 //!   [`Verdict::Fail`] — never `Retry`. The `SoftTimeLimitExceeded` arm
-//!   (`:486-489`) is the stream-phase deadline in [`drive_turn`]: past
-//!   [`TURN_SOFT_LIMIT_SECS`] the stream drops (aborting the agent), the
-//!   open row fails, and the turn fails with `turn_timeout`. There is no
-//!   hard-kill equivalent — a timed-out turn ends in its fail write, and
-//!   anything still `RUNNING` past 390s is recovered by the sweep like any
-//!   other crashed turn.
+//!   (`:486-489`) is the stream-phase deadline in [`drive_turn`]: past the
+//!   configured soft limit (300 at defaults) the stream drops (aborting the
+//!   agent), the open row fails, and the turn fails with `turn_timeout`.
+//!   There is no hard-kill equivalent — a timed-out turn ends in its fail
+//!   write, and anything still `RUNNING` past the sweep cutoff is recovered
+//!   by the sweep like any other crashed turn.
 //! - `_close_turn_connection` (`:494-508`) has no equivalent: it releases the
 //!   worker's thread-local Django connection, and `sqlx` pooling (plus the
 //!   seam owning its own pool handle) needs no turn-end release.
@@ -87,7 +87,8 @@ use crate::worker::{HandlerError, Registry, Verdict};
 /// Celery task name (`tasks.py:477`, `@shared_task(name=...)`).
 pub const RUN_TURN_TASK: &str = "assistant.run_turn";
 
-/// Soft time limit, seconds (`tasks.py:45`, `ASSISTANT_TURN_SOFT_LIMIT`).
+/// Soft time limit default, seconds (`tasks.py:45`,
+/// `ASSISTANT_TURN_SOFT_LIMIT` when unset).
 pub const TURN_SOFT_LIMIT_SECS: u64 = 300;
 /// Hard time limit, seconds (`tasks.py:46`, `ASSISTANT_TURN_HARD_LIMIT`).
 pub const TURN_HARD_LIMIT_SECS: u64 = 330;
@@ -964,21 +965,31 @@ pub enum DriveResult {
 /// server is exactly when the user must hear about it.
 ///
 /// The stream phase runs under the soft-limit deadline
-/// ([`TURN_SOFT_LIMIT_SECS`] from drive start, like Celery counting from
-/// task start): past it the stream drops (aborting the agent), the open row
+/// (`soft_limit_secs` from drive start, like Celery counting from task
+/// start): past it the stream drops (aborting the agent), the open row
 /// fails, and the turn fails with `turn_timeout` — the
 /// `SoftTimeLimitExceeded` arm (`tasks.py:486-489`).
-pub async fn drive_turn<S: TurnSeam>(seam: &S, turn_id: Uuid) -> Result<DriveResult, SeamError> {
+///
+/// `soft_limit_secs` is the configured `ASSISTANT_TURN_SOFT_LIMIT`
+/// (`settings.assistant.turn_soft_limit`), not the
+/// [`TURN_SOFT_LIMIT_SECS`] default: Django reads the same setting at
+/// `tasks.py:45`, so a hard-coded 300 here would kill healthy long turns
+/// for any operator who raised the limit (PIDASHCONV-1458).
+pub async fn drive_turn<S: TurnSeam>(
+    seam: &S,
+    turn_id: Uuid,
+    soft_limit_secs: i64,
+) -> Result<DriveResult, SeamError> {
     drive_turn_with_deadline(
         seam,
         turn_id,
-        tokio::time::Instant::now() + Duration::from_secs(TURN_SOFT_LIMIT_SECS),
+        tokio::time::Instant::now() + Duration::from_secs(soft_limit_secs.max(0) as u64),
     )
     .await
 }
 
 /// [`drive_turn`] with an explicit stream-phase deadline (the production
-/// deadline is `now + TURN_SOFT_LIMIT_SECS`; tests pass a near one).
+/// deadline is `now + soft_limit_secs`; tests pass a near one).
 pub async fn drive_turn_with_deadline<S: TurnSeam>(
     seam: &S,
     turn_id: Uuid,
@@ -1310,10 +1321,15 @@ pub fn parse_run_turn_arg(job: &JobRow) -> Result<Uuid, String> {
 /// live worker: the domain gate flips ownership after the proxy pass, so
 /// until then `assistant.run_turn` still routes to `PythonOwned` (see
 /// [`crate::worker::route_for`]).
+///
+/// `soft_limit_secs` is the configured `ASSISTANT_TURN_SOFT_LIMIT`
+/// (`settings.assistant.turn_soft_limit`); the handler drives
+/// [`drive_turn`] under `now + soft` like Celery's `soft_time_limit`.
 pub fn register_turn_handler<S: TurnSeam + 'static>(
     registry: &mut Registry,
     _pool: PgPool,
     seam: Arc<S>,
+    soft_limit_secs: i64,
 ) {
     registry.register(
         RUN_TURN_TASK,
@@ -1325,7 +1341,7 @@ pub fn register_turn_handler<S: TurnSeam + 'static>(
                         Ok(id) => id,
                         Err(error) => return Ok(Verdict::Fail { error }),
                     };
-                    match drive_turn(seam.as_ref(), turn_id).await {
+                    match drive_turn(seam.as_ref(), turn_id, soft_limit_secs).await {
                         Ok(_) => Ok(Verdict::Ack),
                         Err(error) => Ok(Verdict::Fail {
                             error: error.to_string(),
@@ -2032,19 +2048,52 @@ mod tests {
         );
     }
 
+    /// PIDASHCONV-1458: [`drive_turn`] honors the configured soft limit,
+    /// not the 300 default — with a 1s limit a stream stalled past it
+    /// fails with `turn_timeout` (against a hard-coded 300 the same
+    /// stream would ride out the 5s stall and complete).
+    #[tokio::test]
+    async fn drive_turn_honors_configured_soft_limit() {
+        let mut seam = FakeSeam::ok(vec![]);
+        seam.stall_at_pull = Some(1);
+        let out = drive_turn(&seam, Uuid::new_v4(), 1).await.unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: CODE_TURN_TIMEOUT.to_owned(),
+                detail: DETAIL_TURN_TIMEOUT.to_owned(),
+            }
+        );
+        let calls = seam.take_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "fail_turn:turn_timeout:The assistant took too long to respond."),
+            "the turn failed with turn_timeout: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("complete_turn")),
+            "never completes: {calls:?}"
+        );
+    }
+
     #[tokio::test]
     async fn drive_noop_paths() {
         // Missing/ineligible context: silent return, nothing else runs.
         let mut seam = FakeSeam::ok(vec![]);
         seam.ctx = None;
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Noop);
         assert_eq!(seam.take_calls().as_slice(), ["load_context"]);
 
         // Lost claim: same silence after mark_running.
         let mut seam = FakeSeam::ok(vec![]);
         seam.claim = false;
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Noop);
         assert_eq!(
             seam.take_calls().as_slice(),
@@ -2059,7 +2108,9 @@ mod tests {
             code: "llm_config_missing".to_owned(),
             detail: "Configure your AI provider in Settings.".to_owned(),
         });
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(
             out,
             DriveResult::ModelFailed {
@@ -2082,7 +2133,9 @@ mod tests {
             },
             StreamItem::End,
         ]);
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Completed);
         assert_eq!(seam.saw("start_row").len(), 1);
         let deltas = seam.saw("emit_delta");
@@ -2115,7 +2168,9 @@ mod tests {
     async fn drive_degraded_toolsets_still_completes() {
         let mut seam = FakeSeam::ok(vec![StreamItem::End]);
         seam.toolsets = Err(SeamError("boom".to_owned()));
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Completed);
         assert_eq!(seam.saw("emit_skipped:all tool servers").len(), 1);
     }
@@ -2127,7 +2182,9 @@ mod tests {
         let mut seam = FakeSeam::ok(vec![StreamItem::End]);
         seam.toolsets = Err(SeamError("boom".to_owned()));
         seam.fail_emit = true;
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Completed);
         assert_eq!(seam.saw("emit_skipped:all tool servers").len(), 1);
         assert_eq!(seam.saw("complete_turn").len(), 1);
@@ -2139,7 +2196,9 @@ mod tests {
         // a pre-set key with an eventless stream still completes.
         let mut seam = FakeSeam::ok(vec![StreamItem::End]);
         seam.cancel_after = Some(0);
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Completed);
         assert!(seam.saw("cancel_turn").is_empty());
     }
@@ -2159,7 +2218,9 @@ mod tests {
         // the delivered-but-unprocessed event, `tasks.py:231-233`): the open
         // row fails as cancelled, then the turn cancels.
         seam.cancel_after = Some(2);
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Cancelled);
         assert!(seam.saw("finalize_row:cancelled:").len() == 1);
         assert_eq!(seam.saw("cancel_turn").len(), 1);
@@ -2171,7 +2232,9 @@ mod tests {
         // UsageLimit on open → iteration_limit, no row work.
         let mut seam = FakeSeam::ok(vec![]);
         seam.open_err = Some(AgentError::UsageLimit("25 requests".to_owned()));
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(
             out,
             DriveResult::Failed {
@@ -2192,7 +2255,9 @@ mod tests {
                 message: "could not connect".to_owned(),
                 status_code: None,
             }));
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(
             out,
             DriveResult::Failed {
@@ -2227,7 +2292,9 @@ mod tests {
                     code: code.clone(),
                     detail: detail.clone(),
                 }));
-            let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+            let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+                .await
+                .unwrap();
             assert_eq!(
                 out,
                 DriveResult::Failed {
@@ -2270,7 +2337,9 @@ mod tests {
             code: quota[0].as_str().unwrap().to_owned(),
             detail: quota[1].as_str().unwrap().to_owned(),
         });
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(
             out,
             DriveResult::Failed {
@@ -2293,7 +2362,9 @@ mod tests {
             name: "dead".to_owned(),
             reason: "boom".to_owned(),
         }];
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert!(matches!(out, DriveResult::Failed { .. }));
         assert_eq!(seam.saw("emit_skipped:dead").len(), 1);
     }
@@ -2313,7 +2384,9 @@ mod tests {
             StreamItem::End,
         ]);
         seam.fail_row_op_at = Some(2); // the delta flush after the row opened
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(
             out,
             DriveResult::Failed {
@@ -2336,7 +2409,9 @@ mod tests {
             chunk: "hi".to_owned(),
         }]);
         seam.fail_row_op_at = Some(1);
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert!(matches!(out, DriveResult::Failed { .. }));
         assert!(seam.saw("finalize_row:").is_empty());
         assert_eq!(seam.saw("fail_turn:").len(), 1);
@@ -2354,7 +2429,9 @@ mod tests {
             StreamItem::End,
         ]);
         seam.fail_row_op_at = Some(2); // the close pair's flush
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert!(matches!(out, DriveResult::Failed { .. }));
         assert!(seam.saw("finalize_row:failed:hi").len() == 1);
         assert!(
@@ -2375,7 +2452,9 @@ mod tests {
             StreamItem::End,
         ]);
         seam.fail_row_op_at = Some(3); // the completed close at stream end
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert!(matches!(out, DriveResult::Failed { .. }));
         assert!(seam.saw("finalize_row:completed:hi").len() == 1);
         assert!(seam.saw("finalize_row:failed:hi").len() == 1);
@@ -2391,7 +2470,9 @@ mod tests {
             chunk: "hi".to_owned(),
         }]);
         seam.fail_cancel_check = true;
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert!(matches!(out, DriveResult::Failed { .. }));
         assert!(seam.saw("start_row").is_empty());
         assert_eq!(seam.saw("fail_turn:").len(), 1);
@@ -2407,7 +2488,9 @@ mod tests {
         }]);
         seam.fail_row_op_at = Some(1);
         seam.fail_turn_write = true;
-        let err = drive_turn(&seam, Uuid::new_v4()).await.unwrap_err();
+        let err = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap_err();
         assert_eq!(err, SeamError("boom: fail write failed".to_owned()));
     }
 

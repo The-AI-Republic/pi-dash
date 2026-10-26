@@ -69,6 +69,15 @@ SLOW_INTERVAL = 20.0
 SOFT_LIMIT_SECS = 300
 SWEEP_CUTOFF_SECS = 390
 
+#: Configured soft limit survival (PIDASHCONV-1458): the stub streams one
+#: chunk every 20s for ~400s — past the 300s default kill point, inside a
+#: 600s configured soft limit, the 600s per-request client timeout, and the
+#: 960s sweep cutoff the worker-plane job's ASSISTANT_TURN_HARD_LIMIT=900
+#: yields.
+SOFT_STREAM_CHUNKS = 20
+SOFT_STREAM_INTERVAL = 20.0
+CONFIGURED_SOFT_LIMIT_SECS = 600
+
 TIMEOUT_CODE = "turn_timeout"
 TIMEOUT_DETAIL = "The assistant took too long to respond."
 
@@ -453,16 +462,22 @@ class _PreforkWorker:
     solo worker on the same broker, and is terminated on stop. Boot takes
     ~30s (Django import + pool fork); readiness is the consumer's mingle
     sync plus a pool grace.
+
+    ``extra_env`` overrides the inherited environment for the worker
+    process (PIDASHCONV-1458: the configured-soft-limit test boots with
+    ``ASSISTANT_TURN_SOFT_LIMIT=600`` while the job default stays 300).
     """
 
-    def __init__(self):
+    def __init__(self, extra_env=None):
         self.queue = f"contract-slow-{uuid.uuid4().hex[:8]}"
+        self.extra_env = dict(extra_env or {})
         self._proc = None
         self._log_path = None
 
     def start(self):
         env = dict(os.environ)
         env["DJANGO_SETTINGS_MODULE"] = "pi_dash.settings.local"
+        env.update(self.extra_env)
         handle, self._log_path = tempfile.mkstemp(
             prefix="contract-slow1253-", suffix=".log"
         )
@@ -483,7 +498,10 @@ class _PreforkWorker:
         while time.monotonic() < deadline:
             with open(self._log_path, errors="replace") as fh:
                 tail = fh.read()
-            if "mingle: sync complete" in tail:
+            # "sync complete" when neighbors answered (CI: the shared solo
+            # worker is on the broker), "all alone" without (a local run
+            # with no other worker) — either means the consumer is up.
+            if "mingle: sync complete" in tail or "mingle: all alone" in tail:
                 time.sleep(10)
                 return self.queue
             if self._proc.poll() is not None:
@@ -822,6 +840,70 @@ def test_slow_stream_fails_at_soft_limit(db_conn, broker_url):
         assert "turn_completed" not in kinds, "turn_completed followed turn_failed"
         assert _turn_row(db_conn, turn_id)["status"] == "failed"
         assert "assistant_delta" not in kinds, "deltas are pruned on failure"
+    finally:
+        stub.stop()
+        worker.stop()
+
+
+def test_turn_honors_configured_soft_limit(db_conn, broker_url):
+    """A turn streaming past 300s but inside ASSISTANT_TURN_SOFT_LIMIT completes (PIDASHCONV-1458).
+
+    The test-scoped prefork worker boots with ASSISTANT_TURN_SOFT_LIMIT=600
+    (the shared solo worker never enforces time limits, and the job default
+    must stay 300 for ``test_slow_stream_fails_at_soft_limit``): the stub
+    streams for ~400s — past the default 300s kill point — and the turn
+    completes instead of failing with ``turn_timeout``. The Rust mirror is
+    ``tasks_assistant/test_soft_limit_rust_replay.py``.
+    """
+    worker = _PreforkWorker(
+        extra_env={"ASSISTANT_TURN_SOFT_LIMIT": str(CONFIGURED_SOFT_LIMIT_SECS)}
+    )
+    queue = worker.start()
+    stub = _StubProvider(
+        chunks=tuple(f"long-{i}" for i in range(SOFT_STREAM_CHUNKS)),
+        interval=SOFT_STREAM_INTERVAL,
+    )
+    base = stub.start()
+    try:
+        user, workspace, client = _seed_member(db_conn, "softlimit")
+        _configure_llm(client, base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        t0 = time.monotonic()
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url, queue=queue)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "completed"
+            else None,
+            what="long turn completed",
+            timeout=SOFT_STREAM_CHUNKS * SOFT_STREAM_INTERVAL + 120,
+        )
+        elapsed = time.monotonic() - t0
+        assert elapsed > SOFT_LIMIT_SECS, (
+            f"completed after {elapsed:.0f}s: never streamed past the 300s default kill point"
+        )
+        assert row["completed_at"] is not None
+        assert row["error_code"] in (None, ""), "completion writes no error code"
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT display_content, status FROM assistant_message "
+                "WHERE turn_id = %s AND kind = 'assistant' ORDER BY seq",
+                (turn_id,),
+            )
+            assistant_rows = cur.fetchall()
+        assert assistant_rows, "the stream wrote at least one assistant row"
+        assert "".join(r["display_content"] for r in assistant_rows) == "".join(
+            f"long-{i}" for i in range(SOFT_STREAM_CHUNKS)
+        )
+        assert all(r["status"] == "completed" for r in assistant_rows)
+
+        kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
+        assert "turn_started" in kinds
+        assert "turn_completed" in kinds
+        assert "turn_failed" not in kinds, "no failure inside the configured limit"
+        assert "assistant_delta" not in kinds, "deltas are pruned on completion"
     finally:
         stub.stop()
         worker.stop()

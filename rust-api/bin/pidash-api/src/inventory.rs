@@ -1967,6 +1967,9 @@ mod tests {
                 )
                 .expect("live turn seam builds"),
             ),
+            // The same configured soft limit `worker()` passes (test env:
+            // 300, like Django's unset default).
+            execute_settings.assistant.turn_soft_limit,
         );
 
         // The const union, independent of the table.

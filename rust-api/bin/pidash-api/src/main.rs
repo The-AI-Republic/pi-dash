@@ -265,6 +265,10 @@ async fn worker(concurrency: u32) -> MainResult {
         )
         .map_err(|error| format!("assistant turn seam: {error}"))?,
     );
+    // The configured soft limit for the turn runner's stream deadline
+    // (PIDASHCONV-1458), like Celery's `soft_time_limit` — read before
+    // `settings` moves into the OSS context below.
+    let turn_soft_limit = settings.assistant.turn_soft_limit;
     pidash_jobs::register_oss_handlers(
         &mut registry,
         &pidash_jobs::OssWorkerCtx {
@@ -283,6 +287,7 @@ async fn worker(concurrency: u32) -> MainResult {
         &mut registry,
         pools.primary().clone(),
         turn_seam,
+        turn_soft_limit,
     );
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
