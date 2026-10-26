@@ -71,6 +71,13 @@ export function PageBodyInteractionLayer({
   const [picker, setPicker] = React.useState<"embed" | "entity" | null>(null);
   const [pickerQuery, setPickerQuery] = React.useState("");
   const [pickerChoices, setPickerChoices] = React.useState<PageEntityChoice[]>([]);
+  const [handleOpen, setHandleOpen] = React.useState(false);
+  const [hoveredBlock, setHoveredBlock] = React.useState<{
+    from: number;
+    to: number;
+    json: unknown;
+    top: number;
+  } | null>(null);
 
   // The triggers live in the text before the caret; the layer reads them
   // after every editor update rather than parsing the document HTML.
@@ -89,6 +96,41 @@ export function PageBodyInteractionLayer({
     document.addEventListener("selectionchange", sync);
     return () => document.removeEventListener("selectionchange", sync);
   }, [html, getHandle]);
+
+  // The drag handle follows the pointer, so its actions always target the
+  // block being hovered rather than whichever block holds the caret
+  // (PAGE-037). A pointer outside the editor clears the hovered block.
+  React.useEffect(() => {
+    const onPointerMove = (event: MouseEvent): void => {
+      const handle = getHandle();
+      const block = handle?.blockAtPoint(event.clientX, event.clientY) ?? null;
+      setHoveredBlock(block);
+      if (block === null) setHandleOpen(false);
+    };
+    document.addEventListener("mousemove", onPointerMove);
+    return () => document.removeEventListener("mousemove", onPointerMove);
+  }, [getHandle]);
+
+  // Escape dismisses whichever transient surface is open — the slash
+  // palette, emoji picker, mention popup, entity/embed picker or the
+  // block-actions menu — without touching the document (PAGE-037/042).
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      const anyOpen = slashQuery !== null || emojiOpen || mentionQuery !== null || picker !== null || handleOpen;
+      if (!anyOpen) return;
+      event.preventDefault();
+      setSlashQuery(null);
+      setEmojiOpen(false);
+      setMentionQuery(null);
+      setMentionPeople([]);
+      setPicker(null);
+      setPickerChoices([]);
+      setHandleOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [slashQuery, emojiOpen, mentionQuery, picker, handleOpen]);
 
   // Mention suggestions are project-scoped and debounced by React Query's
   // own cache; an empty query still lists the project's members.
@@ -230,11 +272,14 @@ export function PageBodyInteractionLayer({
     (action: PageBlockMenuAction) => {
       const handle = getHandle();
       if (handle === null) return;
-      if (action === "Duplicate") handle.duplicateBlock();
-      else handle.deleteBlock();
+      const target = hoveredBlock;
+      if (action === "Duplicate") handle.duplicateBlock(target);
+      else if (action === "Delete") handle.deleteBlock(target);
+      else if (target !== null) handle.moveBlock(target, action === "Move up" ? "up" : "down");
+      setHandleOpen(false);
       onDocumentChange(handle.html());
     },
-    [getHandle, onDocumentChange]
+    [getHandle, hoveredBlock, onDocumentChange]
   );
 
   const applyLink = React.useCallback(
@@ -270,7 +315,12 @@ export function PageBodyInteractionLayer({
     <div data-testid="page-body-interactions" aria-label={PAGE_BODY_INTERACTION_LABEL} className="relative">
       <div className="pointer-events-none absolute top-0 -left-8 flex flex-col gap-(--space-1)">
         <div className="pointer-events-auto">
-          <PageBlockHandle onSelect={blockAction} />
+          <PageBlockHandle
+            onSelect={blockAction}
+            open={handleOpen}
+            onOpenChange={setHandleOpen}
+            top={hoveredBlock?.top ?? 0}
+          />
         </div>
       </div>
       {selectionActive || link.open ? (
@@ -289,7 +339,7 @@ export function PageBodyInteractionLayer({
       ) : null}
       {emojiOpen ? (
         <div className="absolute top-0 left-0 z-20">
-          <PageEmojiPicker onPick={pickEmoji} />
+          <PageEmojiPicker onPick={pickEmoji} onDismiss={() => setEmojiOpen(false)} />
         </div>
       ) : null}
       {picker === null ? null : (

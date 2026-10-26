@@ -110,6 +110,33 @@ describe("pastedAssetIds", () => {
 });
 
 describe("clonePastedAssets and rewritePastedAssets", () => {
+  it("names a pasted clone's row readably rather than by its UUID (PAGE-039)", async () => {
+    pageAssets.duplicatePageAsset.mockResolvedValue({ asset_id: "clone-9" });
+    pageAssets.pageAssetUrl.mockReturnValue("/served/clone-9/");
+    const clones = await clonePastedAssets(
+      CLIENT,
+      { workspaceSlug: "acme", projectId: "p", pageId: "page-b" },
+      '<image-component src="asset-a"></image-component>'
+    );
+    const rewritten = rewritePastedAssets('<image-component src="asset-a"></image-component>', clones);
+    const parsed = new DOMParser().parseFromString(rewritten, "text/html");
+    expect(parsed.querySelector("image-component")?.getAttribute("alt")).toBe("image-clone-9");
+  });
+
+  it("keeps an existing alt on a cloned picture", async () => {
+    pageAssets.duplicatePageAsset.mockResolvedValue({ asset_id: "clone-10" });
+    pageAssets.pageAssetUrl.mockReturnValue("/served/clone-10/");
+    const clones = await clonePastedAssets(
+      CLIENT,
+      { workspaceSlug: "acme", projectId: "p", pageId: "page-b" },
+      '<image-component src="asset-b" alt="Chart"></image-component>'
+    );
+    const rewritten = rewritePastedAssets('<image-component src="asset-b" alt="Chart"></image-component>', clones);
+    expect(
+      new DOMParser().parseFromString(rewritten, "text/html").querySelector("image-component")?.getAttribute("alt")
+    ).toBe("Chart");
+  });
+
   it("clones each foreign id and rewrites the markup to the new source", async () => {
     pageAssets.duplicatePageAsset.mockResolvedValue({ asset_id: "clone-2" });
     pageAssets.pageAssetUrl.mockReturnValue("/served/clone-2/");

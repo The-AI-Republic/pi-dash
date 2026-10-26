@@ -110,6 +110,13 @@ export function rewritePastedAssets(html: string, clones: ReadonlyMap<string, Up
     element.setAttribute("src", clone.assetUrl === "" ? clone.assetId : clone.assetUrl);
     element.setAttribute("data-stored-src", clone.assetId);
     element.setAttribute("status", "uploaded");
+    // The assets pane names a row by its alt text, falling back to the
+    // stored source's file name (a UUID). Carry the old app's readable
+    // `image-<id>` label through the clone so the row stays legible
+    // (PAGE-039).
+    if ((element.getAttribute("alt") ?? "").trim() === "") {
+      element.setAttribute("alt", `image-${clone.assetId}`);
+    }
   }
   return document.body.innerHTML;
 }

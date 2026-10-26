@@ -30,6 +30,8 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     insertText: vi.fn(),
     duplicateBlock: vi.fn(),
     deleteBlock: vi.fn(),
+    moveBlock: vi.fn(),
+    blockAtPoint: vi.fn(() => null),
     setLink: vi.fn(),
     unsetLink: vi.fn(),
     html: vi.fn(() => ""),

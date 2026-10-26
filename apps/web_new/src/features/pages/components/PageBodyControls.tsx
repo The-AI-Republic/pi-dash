@@ -180,11 +180,28 @@ function groupEntries(entries: readonly PageCatalogEntry[]): [string, PageCatalo
   return [...groups.entries()];
 }
 
-/** The hover drag handle and its Delete/Duplicate menu. */
-export function PageBlockHandle({ onSelect }: { onSelect: (action: PageBlockMenuAction) => void }): React.ReactElement {
-  const [open, setOpen] = React.useState(false);
+/** The hover drag handle and its block-actions menu. */
+export function PageBlockHandle({
+  onSelect,
+  open: controlledOpen,
+  onOpenChange,
+  top = 0,
+}: {
+  onSelect: (action: PageBlockMenuAction) => void;
+  /** Open state when the interaction layer owns dismissal (Escape). */
+  open?: boolean | undefined;
+  onOpenChange?: ((open: boolean) => void) | undefined;
+  /** Vertical offset beside the hovered block. */
+  top?: number | undefined;
+}): React.ReactElement {
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = (value: boolean): void => {
+    if (controlledOpen === undefined) setUncontrolledOpen(value);
+    onOpenChange?.(value);
+  };
   return (
-    <div className="relative">
+    <div className="relative" style={{ top }}>
       <button
         id="drag-handle"
         type="button"
@@ -192,7 +209,7 @@ export function PageBlockHandle({ onSelect }: { onSelect: (action: PageBlockMenu
         aria-expanded={open}
         data-testid="page-block-handle"
         onMouseDown={(event) => event.preventDefault()}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setOpen(!open)}
         className="grid size-6 place-items-center rounded-(--radius-control) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
       >
         <GripVertical size={14} strokeWidth={1.75} aria-hidden="true" />
@@ -224,27 +241,48 @@ export function PageBlockHandle({ onSelect }: { onSelect: (action: PageBlockMenu
 }
 
 /** The inline body emoji picker (PAGE-042). */
-export function PageEmojiPicker({ onPick }: { onPick: (glyph: string) => void }): React.ReactElement {
+export function PageEmojiPicker({
+  onPick,
+  onDismiss,
+}: {
+  onPick: (glyph: string) => void;
+  onDismiss: () => void;
+}): React.ReactElement {
   return (
     <div
       data-testid="page-emoji-picker"
       aria-label={PAGE_EMOJI_LABEL}
-      className="shadow-popover z-20 grid w-64 grid-cols-8 gap-px rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-2)"
+      className="shadow-popover z-20 flex w-64 flex-col gap-(--space-1) rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-2)"
     >
-      {PAGE_BODY_EMOJIS.map((glyph) => (
+      <div className="flex items-center justify-between gap-(--space-2)">
+        <h6 className="text-caption font-medium text-(--text-muted)">Emoji</h6>
         <button
-          key={glyph}
-          id={`emoji-item-${PAGE_BODY_EMOJIS.indexOf(glyph)}`}
           type="button"
-          onMouseDown={(event) => {
-            event.preventDefault();
-            onPick(glyph);
-          }}
-          className="text-body grid size-7 place-items-center rounded-(--radius-control) hover:bg-(--subtle)"
+          aria-label="Dismiss emoji picker"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={onDismiss}
+          className="text-caption rounded-(--radius-control) px-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
         >
-          {glyph}
+          Close
         </button>
-      ))}
+      </div>
+      <div className="grid grid-cols-8 gap-px">
+        {PAGE_BODY_EMOJIS.map((glyph) => (
+          <button
+            key={glyph}
+            id={`emoji-item-${PAGE_BODY_EMOJIS.indexOf(glyph)}`}
+            data-testid="page-emoji-option"
+            type="button"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              onPick(glyph);
+            }}
+            className="text-body grid size-7 place-items-center rounded-(--radius-control) hover:bg-(--subtle)"
+          >
+            {glyph}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

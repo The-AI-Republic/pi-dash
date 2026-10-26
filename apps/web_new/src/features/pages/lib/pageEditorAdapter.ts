@@ -43,8 +43,8 @@ export interface PageEditorChain {
   unsetMark: (name: string) => PageEditorChain;
   /** Insert one node or HTML string at the caret (PAGE-034). */
   insertContent: (content: unknown) => PageEditorChain;
-  /** Add the next block after the caret without joining it (PAGE-037). */
-  insertContentAt: (position: number | "end", content: unknown) => PageEditorChain;
+  /** Write content at a position or over a range (PAGE-037 block moves). */
+  insertContentAt: (position: number | "end" | { from: number; to: number }, content: unknown) => PageEditorChain;
   /** Delete one document range (drag-handle Delete). */
   deleteRange: (range: { from: number; to: number }) => PageEditorChain;
   /** Set or replace the link mark on the selection (PAGE-043). */
@@ -62,6 +62,29 @@ export interface PageEditorChain {
  */
 export type PageFocusPosition = number | "start" | "end";
 
+/** A resolved document position, narrowed to what the block reads use. */
+export interface PageResolvedPosition {
+  depth?: number;
+  before?: (depth: number) => number;
+  after?: (depth: number) => number;
+  node?: (depth: number) => { nodeSize: number; toJSON: () => unknown };
+}
+
+/** The document half of the editor view the block geometry reads. */
+export interface PageEditorDocument {
+  childCount: number;
+  child: (index: number) => { nodeSize: number; toJSON: () => unknown; type: { name: string } };
+  resolve: (position: number) => PageResolvedPosition;
+}
+
+/** The view methods the hovered-block resolver needs. */
+export interface PageEditorView {
+  dom: { getBoundingClientRect: () => { top: number }; contains: (node: Node | null) => boolean };
+  posAtCoords: (coords: { left: number; top: number }) => { pos: number } | null;
+  coordsAtPos: (position: number) => { top: number };
+  state: { doc: PageEditorDocument };
+}
+
 /** What the adapter needs from a Tiptap editor. */
 export interface PageEditorRef {
   chain: () => PageEditorChain;
@@ -71,6 +94,8 @@ export interface PageEditorRef {
   commands: { focus: (position?: PageFocusPosition) => void };
   /** Tiptap's mark-attribute read; optional so simple probes still work. */
   getAttributes?: (name: string) => Record<string, unknown>;
+  /** Present on a live editor; absent on simple probes and in unit tests. */
+  view?: PageEditorView;
   state: {
     selection: {
       from?: number;
@@ -100,8 +125,8 @@ export interface PageEditorHandle {
   applyColor: (kind: "text" | "background", key: string) => void;
   /** Clear one colour kind back to plain text/wash (PAGE-036). */
   clearColor: (kind: "text" | "background") => void;
-  /** Insert an uploaded picture at the caret (PAGE-034). */
-  insertImage: (src: string, storedSrc: string) => void;
+  /** Insert an uploaded picture at the caret (PAGE-034). `alt` names its row. */
+  insertImage: (src: string, storedSrc: string, alt?: string) => void;
   /** Restyle the block under the caret as the given typography entry. */
   applyBlockKind: (kind: PageBlockKind) => void;
   /** Run one slash-catalogue entry (PAGE-037). */
@@ -117,8 +142,12 @@ export interface PageEditorHandle {
   /** Insert plain text at the caret (the slash Mention command's trigger). */
   insertText: (text: string) => void;
   /** Duplicate or delete the block that owns the caret (PAGE-037). */
-  duplicateBlock: () => void;
-  deleteBlock: () => void;
+  duplicateBlock: (target?: PageCaretBlock | null) => void;
+  deleteBlock: (target?: PageCaretBlock | null) => void;
+  /** Move a block one slot up or down past its sibling (PAGE-037). */
+  moveBlock: (target: PageCaretBlock, direction: "up" | "down") => void;
+  /** The top-level block under a viewport point, for the hover handle. */
+  blockAtPoint: (clientX: number, clientY: number) => PageHoveredBlock | null;
   /** Set the link on the selection in place (PAGE-043). */
   setLink: (href: string) => void;
   /** Remove the link mark from the selection (PAGE-043). */
@@ -250,13 +279,18 @@ export function clearPageColor(editor: PageEditorRef, kind: "text" | "background
  * upload status the oracle reads back, while the editable surface paints
  * the upload's served URL in `src`.
  */
-export function runInsertImage(editor: PageEditorRef, src: string, storedSrc: string): void {
+export function runInsertImage(editor: PageEditorRef, src: string, storedSrc: string, alt?: string): void {
   editor
     .chain()
     .focus()
     .insertContent({
       type: "image",
-      attrs: { src, "data-stored-src": storedSrc, status: "uploaded" },
+      attrs: {
+        src,
+        "data-stored-src": storedSrc,
+        status: "uploaded",
+        ...(alt === undefined ? {} : { alt }),
+      },
     })
     .run();
 }
@@ -336,7 +370,7 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
     insertTable: () => insertPageTable(editor),
     applyColor: (kind, key) => applyPageColor(editor, kind, key),
     clearColor: (kind) => clearPageColor(editor, kind),
-    insertImage: (src, storedSrc) => runInsertImage(editor, src, storedSrc),
+    insertImage: (src, storedSrc, alt) => runInsertImage(editor, src, storedSrc, alt),
     applyCatalogBlock: (block) => runCatalogBlock(editor, block),
     insertEmoji: (glyph) => insertPageEmoji(editor, glyph),
     insertMention: (target) =>
@@ -353,8 +387,10 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
     insertText: (text) => {
       editor.chain().focus().insertContent(text).run();
     },
-    duplicateBlock: () => duplicatePageBlock(editor),
-    deleteBlock: () => deletePageBlock(editor),
+    duplicateBlock: (target) => duplicatePageBlock(editor, target),
+    deleteBlock: (target) => deletePageBlock(editor, target),
+    moveBlock: (target, direction) => movePageBlock(editor, target, direction),
+    blockAtPoint: (clientX, clientY) => pageBlockAtPoint(editor, clientX, clientY),
     setLink: (href) => linkSelection(editor, href),
     unsetLink: () => unlinkSelection(editor),
     html: () => editor.getHTML(),
@@ -396,18 +432,83 @@ export function caretBlockRange(editor: PageEditorRef): PageCaretBlock | null {
   return { from: $from.before(1), to: $from.after(1), json: $from.node(1).toJSON() };
 }
 
-/** Duplicate the block under the caret, immediately after itself. */
-export function duplicatePageBlock(editor: PageEditorRef): void {
-  const block = caretBlockRange(editor);
+/** Duplicate one block, immediately after itself (default: the caret's). */
+export function duplicatePageBlock(editor: PageEditorRef, target?: PageCaretBlock | null): void {
+  const block = target ?? caretBlockRange(editor);
   if (block === null) return;
   editor.chain().focus().insertContentAt(block.to, block.json).run();
 }
 
-/** Remove the block under the caret (never the surrounding document). */
-export function deletePageBlock(editor: PageEditorRef): void {
-  const block = caretBlockRange(editor);
+/** Remove one block (default: the caret's), never the surrounding document. */
+export function deletePageBlock(editor: PageEditorRef, target?: PageCaretBlock | null): void {
+  const block = target ?? caretBlockRange(editor);
   if (block === null) return;
   editor.chain().focus().deleteRange({ from: block.from, to: block.to }).run();
+}
+
+/** Every top-level block with its document range, in reading order. */
+export function pageTopLevelBlocks(editor: PageEditorRef): PageCaretBlock[] {
+  const doc = editor.view?.state.doc;
+  if (doc === undefined) return [];
+  const blocks: PageCaretBlock[] = [];
+  let position = 0;
+  for (let index = 0; index < doc.childCount; index++) {
+    const child = doc.child(index);
+    blocks.push({ from: position, to: position + child.nodeSize, json: child.toJSON() });
+    position += child.nodeSize;
+  }
+  return blocks;
+}
+
+/**
+ * Swap one block with its sibling above or below (PAGE-037). The later
+ * range is rewritten first so replacing the earlier one never shifts the
+ * range still to be written.
+ */
+export function movePageBlock(editor: PageEditorRef, target: PageCaretBlock, direction: "up" | "down"): void {
+  const blocks = pageTopLevelBlocks(editor);
+  const index = blocks.findIndex((block) => block.from === target.from && block.to === target.to);
+  if (index === -1) return;
+  if (direction === "up") {
+    const previous = blocks[index - 1];
+    if (previous === undefined) return;
+    editor.chain().focus().insertContentAt({ from: target.from, to: target.to }, previous.json).run();
+    editor.chain().focus().insertContentAt({ from: previous.from, to: previous.to }, target.json).run();
+    return;
+  }
+  const next = blocks[index + 1];
+  if (next === undefined) return;
+  editor.chain().focus().insertContentAt({ from: next.from, to: next.to }, target.json).run();
+  editor.chain().focus().insertContentAt({ from: target.from, to: target.to }, next.json).run();
+}
+
+/** One top-level block plus where the hover handle should sit beside it. */
+export interface PageHoveredBlock extends PageCaretBlock {
+  /** Distance from the editor's own top edge to the block's top, in px. */
+  top: number;
+}
+
+/**
+ * The top-level block under a viewport point (PAGE-037). The drag handle
+ * is driven by where the pointer actually is, so its menu always acts on
+ * the block that was hovered rather than whichever block holds the caret.
+ * A point outside the editor, or one ProseMirror cannot place, answers
+ * null and the handle hides.
+ */
+export function pageBlockAtPoint(editor: PageEditorRef, clientX: number, clientY: number): PageHoveredBlock | null {
+  const view = editor.view;
+  if (view === undefined) return null;
+  const found = view.posAtCoords({ left: clientX, top: clientY });
+  if (found === null) return null;
+  const blocks = pageTopLevelBlocks(editor);
+  if (blocks.length === 0) return null;
+  // The block whose half-open range holds the point; the last block also
+  // takes the document's final position.
+  const inside = blocks.find((block) => found.pos >= block.from && found.pos < block.to) ?? blocks[blocks.length - 1];
+  if (inside === undefined) return null;
+  const editorTop = view.dom.getBoundingClientRect().top;
+  const blockTop = view.coordsAtPos(inside.from).top;
+  return { ...inside, top: Math.round(blockTop - editorTop) };
 }
 
 /** Insert one slash-catalogue entry at the caret (PAGE-037). */

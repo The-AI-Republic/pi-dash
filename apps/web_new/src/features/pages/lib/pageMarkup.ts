@@ -63,7 +63,11 @@ function blockMarkdown(element: Element): string {
     const label = element.getAttribute("entity_name") ?? element.getAttribute("entity_identifier") ?? "";
     return label === "" ? "" : `[${label}]`;
   }
-  if (tag === "callout-component" || tag === "aside") {
+  if (
+    tag === "callout-component" ||
+    tag === "aside" ||
+    (tag === "div" && element.getAttribute("data-block-type") === "callout-component")
+  ) {
     return childrenBlocks(element)
       .map((line) => `> ${line}`)
       .join("\n");
@@ -78,7 +82,7 @@ function blockMarkdown(element: Element): string {
       .map((line) => `> ${line}`)
       .join("\n");
   }
-  if (tag === "hr") return "---";
+  if (tag === "hr" || (tag === "div" && element.getAttribute("data-type") === "horizontalRule")) return "---";
   if (tag === "ul" || tag === "ol") {
     return listMarkdown(element, tag === "ol");
   }

@@ -7,6 +7,11 @@
 // in their own dynamic loader so Tiptap and ProseMirror stay out of the
 // eager closure; each node changes only parse/render, never app data.
 
+import { UpgradePill } from "@pidash/kit";
+import { createElement } from "react";
+import { createRoot } from "react-dom/client";
+
+import { edition } from "../../core/edition/index.js";
 import { requestEntityPeek } from "../shell/entityPeek.js";
 import { parseEntityPeekAttributes } from "./entityPeekAttributes.js";
 
@@ -14,7 +19,9 @@ type Core = typeof import("@tiptap/core");
 type MergeAttributes = Core["mergeAttributes"];
 
 /** Stored element names shared with the read surface. */
-export const PAGE_CALLOUT_TAG = "callout-component";
+export const PAGE_CALLOUT_TAG = "div";
+export const PAGE_CALLOUT_BLOCK_TYPE = "callout-component";
+export const PAGE_CALLOUT_BLOCK_TYPE_ATTRIBUTE = "data-block-type";
 export const PAGE_ENTITY_REFERENCE_TAG = "entity-reference-component";
 export const PAGE_EMOJI_TAG = "span";
 
@@ -49,18 +56,59 @@ function attribute(name: string) {
   };
 }
 
-/** One callout: a block container that serialises as a stored element. */
+/**
+ * One callout: a block container stored in the form the live editor and
+ * the server's allowlist already understand — `div[data-block-type=
+ * "callout-component"]` — rather than a bespoke custom tag. The read
+ * surface paints the same element as an aside.
+ */
 function createCallout(Node: Core["Node"], mergeAttributes: MergeAttributes) {
   return Node.create({
     name: "pageCallout",
     group: "block",
     content: "block+",
     defining: true,
+    addAttributes() {
+      return {
+        "data-block-type": { default: PAGE_CALLOUT_BLOCK_TYPE },
+        "data-background": attribute("data-background"),
+        "data-icon-name": attribute("data-icon-name"),
+        "data-icon-color": attribute("data-icon-color"),
+        "data-emoji-unicode": attribute("data-emoji-unicode"),
+        "data-emoji-url": attribute("data-emoji-url"),
+        "data-logo-in-use": attribute("data-logo-in-use"),
+      };
+    },
     parseHTML() {
-      return [{ tag: PAGE_CALLOUT_TAG }, { tag: 'aside[data-type="callout"]' }];
+      return [
+        { tag: `div[${PAGE_CALLOUT_BLOCK_TYPE_ATTRIBUTE}="${PAGE_CALLOUT_BLOCK_TYPE}"]` },
+        { tag: 'aside[data-type="callout"]' },
+      ];
     },
     renderHTML({ HTMLAttributes }: { HTMLAttributes: Record<string, unknown> }) {
-      return [PAGE_CALLOUT_TAG, mergeAttributes({ "data-type": "callout" }, HTMLAttributes), 0];
+      return [PAGE_CALLOUT_TAG, mergeAttributes(HTMLAttributes), 0];
+    },
+  });
+}
+
+/**
+ * Divider as the stored wrapper every other part expects: the old editor
+ * serialises `div[data-type="horizontalRule"]`, the API markdown converter
+ * reads that wrapper, and a bare `<hr>` is dropped on the way through.
+ * StarterKit's horizontal rule renders `<hr>`, so the page set replaces it
+ * with this node of the same name.
+ */
+function createHorizontalRule(Node: Core["Node"], mergeAttributes: MergeAttributes) {
+  return Node.create({
+    name: "horizontalRule",
+    group: "block",
+    atom: true,
+    selectable: true,
+    parseHTML() {
+      return [{ tag: 'div[data-type="horizontalRule"]' }, { tag: "hr" }];
+    },
+    renderHTML({ HTMLAttributes }: { HTMLAttributes: Record<string, unknown> }) {
+      return ["div", mergeAttributes({ "data-type": "horizontalRule" }, HTMLAttributes), ["div", {}]];
     },
   });
 }
@@ -130,26 +178,22 @@ function createEmbed(Node: Core["Node"], mergeAttributes: MergeAttributes) {
     },
     addNodeView() {
       return ({ node }: { node: { attrs: Record<string, unknown> } }) => {
+        const attributes = pageEmbedAttributesOf(node.attrs);
         const dom = document.createElement("issue-embed-component");
         dom.setAttribute("contenteditable", "false");
-        dom.setAttribute("data-edition", "community");
         for (const [name, value] of Object.entries(node.attrs)) {
           if (typeof value === "string" && value !== "") dom.setAttribute(name, value);
         }
-        const card = document.createElement("div");
-        card.setAttribute("data-embed-upgrade", "");
-        const title = document.createElement("p");
-        title.textContent = "Work-item embeds are a Pro feature";
-        const body = document.createElement("p");
-        body.textContent = "Upgrade to show live work items inside a page.";
-        const link = document.createElement("a");
-        link.setAttribute("href", "https://airepublic.com/pricing");
-        link.setAttribute("target", "_blank");
-        link.setAttribute("rel", "noreferrer");
-        link.textContent = "Upgrade";
-        card.append(title, body, link);
-        dom.append(card);
-        return { dom };
+        // The edition seam (§13.4): a licensed build fills the slot with a
+        // resolver; community leaves it absent and paints the upgrade card.
+        const Resolver = edition.slots?.["page.embed.workItem"];
+        const mount = document.createElement("div");
+        mount.setAttribute("contenteditable", "false");
+        dom.append(mount);
+        dom.setAttribute("data-edition", Resolver === undefined ? "community" : "licensed");
+        const root = createRoot(mount);
+        root.render(Resolver === undefined ? communityEmbedCard(attributes) : createElement(Resolver, { attributes }));
+        return { dom, destroy: () => root.unmount() };
       };
     },
   });
@@ -219,13 +263,56 @@ function createEntityReference(Node: Core["Node"], mergeAttributes: MergeAttribu
   });
 }
 
+/** The five attributes an embed stores, narrowed from a node's attrs. */
+export function pageEmbedAttributesOf(attrs: Record<string, unknown>): PageEmbedNodeAttributes {
+  const stringOf = (name: string): string => (typeof attrs[name] === "string" ? (attrs[name] as string) : "");
+  return {
+    id: stringOf("id"),
+    entity_identifier: stringOf("entity_identifier"),
+    project_identifier: stringOf("project_identifier"),
+    workspace_identifier: stringOf("workspace_identifier"),
+    entity_name: stringOf("entity_name"),
+  };
+}
+
+/** The kit's outbound-link styling, reused rather than restyled locally. */
+const OUTBOUND_LINK_CLASS = "text-(--accent) underline underline-offset-2 hover:text-(--accent-hover)";
+
+/** Community's upgrade card, rendered through kit's UpgradePill (§6.2). */
+function communityEmbedCard(attributes: PageEmbedNodeAttributes) {
+  return createElement(
+    "div",
+    { "data-embed-upgrade": "", "data-testid": "page-embed-upgrade", className: "page-embed-upgrade" },
+    createElement(
+      "p",
+      { className: "flex items-center gap-(--space-2) font-medium" },
+      "Work-item embeds are a Pro feature",
+      createElement(UpgradePill)
+    ),
+    createElement("p", null, "Upgrade to show live work items inside a page."),
+    createElement(
+      "a",
+      {
+        href: "https://airepublic.com/pricing",
+        target: "_blank",
+        rel: "noopener noreferrer",
+        className: OUTBOUND_LINK_CLASS,
+      },
+      "Upgrade",
+      " ",
+      attributes.entity_name
+    )
+  );
+}
+
 /**
- * The four page block nodes, built only after the Tiptap chunk resolves.
+ * The five page block nodes, built only after the Tiptap chunk resolves.
  */
 export async function loadPageBlockExtensions(): Promise<unknown[]> {
   const [{ Node, mergeAttributes }] = await Promise.all([import("@tiptap/core")]);
   return [
     createCallout(Node, mergeAttributes),
+    createHorizontalRule(Node, mergeAttributes),
     createEmoji(Node, mergeAttributes),
     createEmbed(Node, mergeAttributes),
     createEntityReference(Node, mergeAttributes),

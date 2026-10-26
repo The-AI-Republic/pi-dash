@@ -41,6 +41,8 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     insertText: vi.fn(),
     duplicateBlock: vi.fn(),
     deleteBlock: vi.fn(),
+    moveBlock: vi.fn(),
+    blockAtPoint: vi.fn(() => null),
     setLink: vi.fn(),
     unsetLink: vi.fn(),
     html: vi.fn(() => "<p>html</p>"),
@@ -285,12 +287,57 @@ describe("PageBodyInteractionLayer", () => {
     expect(screen.queryByTestId("page-emoji-picker")).not.toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole("button", { name: "Emoji" }));
     const picker = screen.getByTestId("page-emoji-picker");
-    const first = picker.querySelector("button");
+    const first = picker.querySelector('[data-testid="page-emoji-option"]');
     if (first === null) throw new Error("the picker has no entries");
     fireEvent.mouseDown(first);
     expect(page.insertEmoji).toHaveBeenCalledWith(first.textContent);
     expect(onDocumentChange).toHaveBeenCalledWith("<p>html</p>");
     expect(screen.queryByTestId("page-emoji-picker")).not.toBeInTheDocument();
+  });
+
+  it("dismisses the slash palette and the emoji picker with Escape (PAGE-037/042)", () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/head");
+    const { unmount } = mount({ getHandle: () => page });
+    expect(screen.getByRole("button", { name: "Heading 2" })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("button", { name: "Heading 2" })).not.toBeInTheDocument();
+    unmount();
+
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/emoji");
+    mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Emoji" }));
+    expect(screen.getByTestId("page-emoji-picker")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("page-emoji-picker")).not.toBeInTheDocument();
+  });
+
+  it("targets the hovered block, not the caret's block, and offers move up/down (PAGE-037)", () => {
+    const page = handle();
+    const hovered = { from: 12, to: 20, json: { type: "paragraph" }, top: 40 };
+    (page.blockAtPoint as ReturnType<typeof vi.fn>).mockReturnValue(hovered);
+    mount({ getHandle: () => page });
+    fireEvent.mouseMove(document, { clientX: 120, clientY: 340 });
+    fireEvent.click(screen.getByRole("button", { name: "Block actions" }));
+    const menu = screen.getByRole("menu");
+    for (const label of ["Move up", "Move down", "Duplicate", "Delete"]) {
+      expect(within(menu).getByRole("menuitem", { name: label })).toBeInTheDocument();
+    }
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Move up" }));
+    expect(page.moveBlock).toHaveBeenCalledWith(hovered, "up");
+    expect(page.duplicateBlock).not.toHaveBeenCalled();
+    expect(page.deleteBlock).not.toHaveBeenCalled();
+  });
+
+  it("dismisses the entity picker with Escape without inserting anything", async () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/entity");
+    mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Entity reference" }));
+    await screen.findByTestId("page-entity-picker");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("page-entity-picker")).not.toBeInTheDocument();
+    expect(page.insertEntityReference).not.toHaveBeenCalled();
   });
 
   it("applies and removes a link, then closes the editor from its own control", () => {

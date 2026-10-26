@@ -166,8 +166,8 @@ export function filterSlashEntries(query: string): PageCatalogEntry[] {
   return [...structural, ...producers, ...commands];
 }
 
-/** Drag-handle menu entries, in pinned order. */
-export const PAGE_BLOCK_MENU_LABELS = ["Delete", "Duplicate"] as const;
+/** Drag-handle menu entries, in pinned order (spec §6.1 move actions). */
+export const PAGE_BLOCK_MENU_LABELS = ["Delete", "Duplicate", "Move up", "Move down"] as const;
 export type PageBlockMenuAction = (typeof PAGE_BLOCK_MENU_LABELS)[number];
 
 /** Placeholder glyphs the body emoji picker offers, in order. */

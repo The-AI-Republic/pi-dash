@@ -187,15 +187,20 @@ export async function loadStoredImageExtension() {
 }
 
 /** Description editing: paragraphs, headings, lists, code, links. */
-export async function loadDescriptionExtensions() {
+export async function loadDescriptionExtensions(options: { horizontalRule?: boolean } = {}) {
   const [{ default: StarterKit }, { default: Link }] = await Promise.all([
     import("@tiptap/starter-kit"),
     import("@tiptap/extension-link"),
   ]);
   // Links stay inert while editing: a click moves the caret instead of
   // navigating away mid-edit. Serialized links keep the extension's
-  // default target/rel (pinned in compat.test.ts).
-  return [StarterKit, Link.configure({ openOnClick: false })];
+  // default target/rel (pinned in compat.test.ts). The page set supplies
+  // its own stored-form divider node (PAGE-037), so it turns StarterKit's
+  // `<hr>` rule off.
+  return [
+    StarterKit.configure(options.horizontalRule === false ? { horizontalRule: false } : {}),
+    Link.configure({ openOnClick: false }),
+  ];
 }
 
 /**

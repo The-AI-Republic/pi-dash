@@ -245,7 +245,11 @@ export function PageEditorSurface({
         .then((uploaded) => {
           handleRef.current?.insertImage(
             uploaded.assetUrl === "" ? pageAssetUrl(workspaceSlug, projectId, uploaded.assetId) : uploaded.assetUrl,
-            uploaded.assetId
+            uploaded.assetId,
+            // The assets pane reads alt first; a bare UUID source would
+            // otherwise be its row name. The old app's `image-<id>` label
+            // keeps the row readable (PAGE-039).
+            `image-${uploaded.assetId}`
           );
         })
         .catch((error: unknown) => {

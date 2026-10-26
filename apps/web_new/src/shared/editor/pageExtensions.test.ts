@@ -79,9 +79,9 @@ describe("page extension set", () => {
     const base = (await loadDescriptionExtensions()) as unknown as AnyExtension[];
     const page = await loadPageExtensions();
     // Four page marks/blocks, four table nodes, one colour mark, one
-    // stored-image node, one mention and the four block nodes (callout,
-    // emoji, embed, entity reference).
-    expect(page).toHaveLength(base.length + 15);
+    // stored-image node, one mention and the five page block nodes
+    // (callout, divider, emoji, embed, entity reference).
+    expect(page).toHaveLength(base.length + 16);
     const names = page.map((extension) => extension.name);
     expect(names).toContain("underline");
     expect(names).toContain("textAlign");

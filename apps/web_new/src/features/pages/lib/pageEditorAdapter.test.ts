@@ -14,6 +14,8 @@ import {
   deleteContentBeforeCaret,
   deletePageBlock,
   duplicatePageBlock,
+  movePageBlock,
+  pageBlockAtPoint,
   insertPageEmoji,
   insertPageEmbed,
   insertPageEntityReference,
@@ -618,5 +620,123 @@ describe("link and selection reads", () => {
     };
     expect(pageTextBeforeCaret(ref)).toBe("ab/cd");
     expect(pageTextBeforeCaret(editor().ref)).toBe("");
+  });
+
+  it("inserts a picture with the alt text the assets pane reads (PAGE-039)", () => {
+    const { ref, calls } = editor();
+    runInsertImage(ref, "/api/assets/a/", "a", "image-a");
+    expect(calls).toEqual(["focus", "insertContent([object Object])", "run"]);
+  });
+});
+
+/** A document half-probe over a small fixed block list (PAGE-037 moves). */
+function documentEditor(blocks: { type: string; text?: string }[]) {
+  const { chain, calls } = chainSpy();
+  const children = blocks.map((block) => ({
+    nodeSize: 12,
+    type: { name: block.type },
+    toJSON: () => ({ type: block.type, content: [{ type: "text", text: block.text ?? "" }] }),
+  }));
+  const doc = {
+    childCount: children.length,
+    child: (index: number) => {
+      const child = children[index];
+      if (child === undefined) throw new Error("no such block");
+      return child;
+    },
+    resolve: () => ({}),
+  };
+  const ref: PageEditorRef = {
+    chain: () => chain,
+    isActive: () => false,
+    getHTML: () => "",
+    commands: { focus: () => undefined },
+    view: {
+      dom: { getBoundingClientRect: () => ({ top: 0 }), contains: () => true },
+      posAtCoords: ({ left }) => ({ pos: left }),
+      coordsAtPos: (position) => ({ top: position }),
+      state: { doc },
+    },
+    state: {
+      selection: {
+        from: 0,
+        to: 0,
+        $from: { depth: 0, parent: { type: { name: "doc" }, attrs: {}, textContent: "" } },
+      },
+    },
+  };
+  return { ref, calls };
+}
+
+describe("page block actions (PAGE-037)", () => {
+  it("resolves the hovered top-level block and its offset from the editor top", () => {
+    const { ref } = documentEditor([
+      { type: "paragraph", text: "first" },
+      { type: "paragraph", text: "last" },
+    ]);
+    // Blocks occupy 0–12 and 12–24; a point at 15 lands in the second.
+    expect(pageBlockAtPoint(ref, 15, 300)).toEqual({
+      from: 12,
+      to: 24,
+      top: 12,
+      json: { type: "paragraph", content: [{ type: "text", text: "last" }] },
+    });
+  });
+
+  it("answers null when the editor cannot place the point", () => {
+    const { ref } = documentEditor([{ type: "paragraph" }]);
+    const view = ref.view;
+    if (view === undefined) throw new Error("no view");
+    view.posAtCoords = () => null;
+    expect(pageBlockAtPoint(ref, 0, 0)).toBeNull();
+    const { ref: bare } = editor();
+    expect(pageBlockAtPoint(bare, 0, 0)).toBeNull();
+  });
+
+  it("moves a block up or down by rewriting it over its sibling", () => {
+    const up = documentEditor([
+      { type: "paragraph", text: "first" },
+      { type: "paragraph", text: "last" },
+    ]);
+    movePageBlock(up.ref, { from: 12, to: 24, json: { type: "paragraph" } }, "up");
+    expect(up.calls).toEqual([
+      "focus",
+      "insertContentAt([object Object], [object Object])",
+      "run",
+      "focus",
+      "insertContentAt([object Object], [object Object])",
+      "run",
+    ]);
+
+    const down = documentEditor([
+      { type: "paragraph", text: "first" },
+      { type: "paragraph", text: "last" },
+    ]);
+    movePageBlock(down.ref, { from: 0, to: 12, json: { type: "paragraph" } }, "down");
+    expect(down.calls.filter((call) => call === "run")).toHaveLength(2);
+  });
+
+  it("ignores a move past the first or last block, or an unknown target", () => {
+    const first = documentEditor([{ type: "paragraph" }, { type: "paragraph" }]);
+    movePageBlock(first.ref, { from: 0, to: 12, json: { type: "paragraph" } }, "up");
+    expect(first.calls).toEqual([]);
+
+    const last = documentEditor([{ type: "paragraph" }, { type: "paragraph" }]);
+    movePageBlock(last.ref, { from: 12, to: 24, json: { type: "paragraph" } }, "down");
+    expect(last.calls).toEqual([]);
+
+    const stray = documentEditor([{ type: "paragraph" }]);
+    movePageBlock(stray.ref, { from: 99, to: 111, json: "elsewhere" }, "up");
+    expect(stray.calls).toEqual([]);
+  });
+
+  it("duplicates and deletes an explicitly passed block instead of the caret's", () => {
+    const duplicate = editor();
+    duplicatePageBlock(duplicate.ref, { from: 3, to: 9, json: "block" });
+    expect(duplicate.calls).toEqual(["focus", "insertContentAt(9, block)", "run"]);
+
+    const remove = editor();
+    deletePageBlock(remove.ref, { from: 3, to: 9, json: "block" });
+    expect(remove.calls).toEqual(["focus", "deleteRange([object Object])", "run"]);
   });
 });

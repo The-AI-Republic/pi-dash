@@ -31,12 +31,13 @@ describe("page block nodes", () => {
     expect(names).toContain("mention");
   });
 
-  it("round-trips a callout", async () => {
-    const editor = await editorFor('<callout-component data-type="callout"><p>notice</p></callout-component>');
+  it("round-trips a callout in the allowlisted stored form", async () => {
+    const editor = await editorFor('<div data-block-type="callout-component"><p>notice</p></div>');
     try {
       const html = editor.getHTML();
-      expect(html).toContain("<callout-component");
+      expect(html).toContain('<div data-block-type="callout-component"');
       expect(html).toContain("notice");
+      expect(html).not.toContain("<callout-component");
     } finally {
       editor.destroy();
     }
@@ -120,10 +121,16 @@ describe("page block nodes", () => {
     try {
       const embed = editor.view.dom.querySelector("issue-embed-component");
       expect(embed).not.toBeNull();
-      const link = embed?.querySelector("a");
-      expect(link?.getAttribute("href")).toContain("pricing");
-      expect(link?.getAttribute("target")).toBe("_blank");
+      const link = await vi.waitFor(() => {
+        const found = embed?.querySelector("a");
+        expect(found).not.toBeNull();
+        return found as HTMLAnchorElement;
+      });
+      expect(link.getAttribute("href")).toContain("pricing");
+      expect(link.getAttribute("target")).toBe("_blank");
+      expect(link.className).toContain("underline");
       expect(embed?.textContent).toContain("Pro feature");
+      expect(embed?.textContent).toContain("Pro");
     } finally {
       editor.destroy();
     }

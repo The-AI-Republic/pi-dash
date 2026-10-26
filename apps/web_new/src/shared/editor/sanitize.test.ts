@@ -225,7 +225,10 @@ describe("renderableHtml", () => {
     expect(html).toContain('data-project-identifier="P"');
     expect(html).toContain('data-workspace-identifier="ws"');
     expect(html).toContain("Work-item embeds are a Pro feature");
-    expect(html).toContain('<a href="https://airepublic.com/pricing" target="_blank" rel="noreferrer">Upgrade</a>');
+    const link = /<a href="https:\/\/airepublic.com\/pricing"[^>]*target="_blank"[^>]*>(.*?)<\/a>/.exec(html);
+    expect(link).not.toBeNull();
+    expect(link?.[0]).toContain('class="text-(--accent) underline');
+    expect(link?.[1]).toBe("Upgrade");
   });
 
   it("renders an entity reference as a preview card with peek identifiers", () => {

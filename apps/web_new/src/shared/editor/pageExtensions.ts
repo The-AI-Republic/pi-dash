@@ -39,7 +39,7 @@ export async function loadPageExtensions(workspaceSlug = ""): Promise<AnyExtensi
     import("@tiptap/extension-text-align"),
     import("@tiptap/extension-task-list"),
     import("@tiptap/extension-task-item"),
-    loadDescriptionExtensions(),
+    loadDescriptionExtensions({ horizontalRule: false }),
     loadPageTableExtensions(),
     loadPageColorMark(),
     loadStoredImageExtension(),

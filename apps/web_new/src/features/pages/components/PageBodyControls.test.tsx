@@ -54,7 +54,12 @@ describe("PageBlockHandle", () => {
     render(<PageBlockHandle onSelect={onSelect} />);
     fireEvent.mouseDown(screen.getByTestId("page-block-handle"));
     fireEvent.click(screen.getByTestId("page-block-handle"));
-    expect(screen.getAllByRole("menuitem").map((node) => node.textContent)).toEqual(["Delete", "Duplicate"]);
+    expect(screen.getAllByRole("menuitem").map((node) => node.textContent)).toEqual([
+      "Delete",
+      "Duplicate",
+      "Move up",
+      "Move down",
+    ]);
     fireEvent.mouseDown(screen.getByRole("menuitem", { name: "Delete" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Duplicate" }));
     expect(onSelect).toHaveBeenCalledWith("Duplicate");
@@ -65,11 +70,14 @@ describe("PageBlockHandle", () => {
 describe("PageEmojiPicker", () => {
   it("reports the glyph of the chosen picker item", () => {
     const onPick = vi.fn();
-    render(<PageEmojiPicker onPick={onPick} />);
-    const first = screen.getByTestId("page-emoji-picker").querySelector("button");
+    const onDismiss = vi.fn();
+    render(<PageEmojiPicker onPick={onPick} onDismiss={onDismiss} />);
+    const first = screen.getByTestId("page-emoji-picker").querySelector("button[type=button][id^=emoji-item-]");
     if (first === null) throw new Error("the picker has no entries");
     fireEvent.mouseDown(first);
     expect(onPick).toHaveBeenCalledWith(first.textContent);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss emoji picker" }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 });
 
