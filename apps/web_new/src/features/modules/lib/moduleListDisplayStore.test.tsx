@@ -45,7 +45,7 @@ function memoryStorage(
   };
 }
 
-const DISPLAY = {
+const DISPLAY: ModuleListDisplayInput = {
   query: "alpha",
   sort: { key: "due-date", direction: "descending" },
   filters: {
@@ -56,7 +56,21 @@ const DISPLAY = {
     "start-date": [{ kind: "preset", value: "week-1" }],
     "due-date": [{ kind: "range", value: { start: "2026-10-20", end: "2026-11-20" } }],
   },
-} as const;
+};
+
+type ModuleListDisplayInput = Parameters<typeof writeProjectDisplay>[1];
+
+/** A mutable copy of DISPLAY's filters (the fixture itself is readonly). */
+function displayFilters(): ModuleListDisplayInput["filters"] {
+  return {
+    favorites: true,
+    status: ["completed"],
+    lead: ["u1"],
+    members: [],
+    "start-date": [{ kind: "preset", value: "week-1" }],
+    "due-date": [{ kind: "range", value: { start: "2026-10-20", end: "2026-11-20" } }],
+  };
+}
 
 beforeEach(() => {
   globalThis.localStorage.clear();
@@ -228,20 +242,91 @@ describe("archived screen scope", () => {
   it("writes and reads the archived record without touching the live one", () => {
     const storage = memoryStorage();
     writeProjectDisplay("p1", { ...readProjectDisplay("p1", storage), query: "live" }, storage);
-    writeArchivedProjectDisplay("p1", { ...readArchivedProjectDisplay("p1", storage), query: "archived" }, storage);
-    expect(readArchivedProjectDisplay("p1", storage).query).toBe("archived");
+    writeArchivedProjectDisplay(
+      "p1",
+      { ...readArchivedProjectDisplay("p1", storage), query: "archived", filters: displayFilters() },
+      storage
+    );
+    // The archived scope keeps its filters and ordering, never its search
+    // (archives §5.2), while the live list still remembers its own.
+    expect(readArchivedProjectDisplay("p1", storage).query).toBe("");
+    expect(readArchivedProjectDisplay("p1", storage).filters.lead).toEqual(["u1"]);
     expect(readProjectDisplay("p1", storage).query).toBe("live");
     expect(archivedModulesDisplayScope.readRecord(storage)).toHaveProperty("p1");
     expect(modulesListDisplayScope.readRecord(storage)).toHaveProperty("p1");
   });
 
-  it("gives the current project the remembered archived narrowing", () => {
+  it("never writes the archived search, even when the writer passes one", () => {
+    const storage = memoryStorage();
+    writeArchivedProjectDisplay(
+      "p1",
+      { ...readArchivedProjectDisplay("p1", storage), filters: displayFilters(), query: "atlas" },
+      storage
+    );
+    const raw = JSON.parse(storage.data[ARCHIVED_MODULES_DISPLAY_STORAGE_KEY] ?? "{}") as Record<
+      string,
+      { query?: string; filters?: { lead?: string[] } }
+    >;
+    expect(raw.p1?.query).toBe("");
+    expect(raw.p1?.filters?.lead).toEqual(["u1"]);
+  });
+
+  it("gives the current project the remembered archived narrowing without its search", () => {
     const storage = memoryStorage({ [ARCHIVED_MODULES_DISPLAY_STORAGE_KEY]: JSON.stringify({ p1: DISPLAY }) });
     const current = currentArchivedProjectDisplay("p1", storage);
-    expect(current.query).toBe("alpha");
+    // A record left by an older build can carry a query; the archived
+    // scope ignores it so a reload always starts with an empty box.
+    expect(current.query).toBe("");
+    expect(current.sort).toEqual({ key: "due-date", direction: "descending" });
     expect(current.filters.lead).toEqual(["u1"]);
     // Repeat reads share the reference until the next write.
     expect(currentArchivedProjectDisplay("p1", storage)).toBe(current);
+  });
+
+  it("drops the archived search when the screen is entered again", () => {
+    const storage = memoryStorage();
+    function SearchProbe(): React.ReactElement {
+      const { display, setQuery } = useArchivedModuleDisplay("p1", storage);
+      return (
+        <div>
+          <span data-testid="session-query">{display.query}</span>
+          <button onClick={() => setQuery("atlas")}>search</button>
+        </div>
+      );
+    }
+    render(<SearchProbe />);
+    act(() => screen.getByRole("button", { name: "search" }).click());
+    // This visit keeps what was typed...
+    expect(screen.getByTestId("session-query")).toHaveTextContent("atlas");
+    expect(readArchivedProjectDisplay("p1", storage).query).toBe("");
+    // ...and a reload starts from the stored entry, which carries no search.
+    resetArchivedDisplayCache();
+    expect(currentArchivedProjectDisplay("p1", storage).query).toBe("");
+  });
+
+  it("keeps the live list's search in storage so it survives a reload", () => {
+    const storage = memoryStorage();
+    writeProjectDisplay(
+      "p1",
+      { ...readProjectDisplay("p1", storage), filters: displayFilters(), query: "alpha" },
+      storage
+    );
+    const raw = JSON.parse(storage.data[MODULES_LIST_DISPLAY_STORAGE_KEY] ?? "{}") as Record<
+      string,
+      { query?: string }
+    >;
+    expect(raw.p1?.query).toBe("alpha");
+  });
+
+  it("survives a refused archived write without inventing a stored entry", () => {
+    const storage = memoryStorage({}, true);
+    writeArchivedProjectDisplay(
+      "p1",
+      { ...readArchivedProjectDisplay("p1", storage), filters: displayFilters() },
+      storage
+    );
+    expect(archivedModulesDisplayScope.readRecord(storage)).toEqual({});
+    expect(readArchivedProjectDisplay("p1", storage).filters.lead).toEqual([]);
   });
 
   it("defaults an unknown project to an unnarrowed archive", () => {
@@ -297,10 +382,13 @@ describe("archived screen scope", () => {
     act(() => screen.getByRole("button", { name: "set-query" }).click());
     expect(screen.getByTestId("archived-query")).toHaveTextContent("atlas");
     expect(screen.getByTestId("live-query")).toHaveTextContent("");
-    expect(readArchivedProjectDisplay("p1", storage).query).toBe("atlas");
+    // In memory only: the stored entry never gains the search text.
+    expect(readArchivedProjectDisplay("p1", storage).query).toBe("");
     expect(readProjectDisplay("p1", storage).query).toBe("");
     act(() => screen.getByRole("button", { name: "set-lead" }).click());
     expect(screen.getByTestId("archived-lead")).toHaveTextContent("u1");
     expect(readArchivedProjectDisplay("p1", storage).filters.lead).toEqual(["u1"]);
+    // A later narrowing write never drops the session's own search.
+    expect(screen.getByTestId("archived-query")).toHaveTextContent("atlas");
   });
 });

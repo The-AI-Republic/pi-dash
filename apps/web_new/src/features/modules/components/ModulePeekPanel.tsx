@@ -4,16 +4,19 @@
 // The module quick look (parity/specs/modules.md §5, MOD-019). One panel
 // over the list or the archived tab, driven by the `peekModule` key. It
 // mounts the shared work-item peek chrome — the same frame the issues area
-// uses — and fills it with the module sidebar in read-only mode, so the
+// uses — and fills it with the module sidebar in the viewer's mode, so the
 // detail page and the peek never drift into two different sidebars. A
 // short work-item summary sits above the sidebar, read from the same detail
 // record the sidebar uses.
 //
 // The panel does not own its address: the screen hands it the close writer
-// and hides it when the key leaves. An archived mount reads the archived
-// detail and stays read-only in every role; a module that no longer
-// resolves shows the missing state here (never a blank panel), while the
-// address stays reachable so the reader can close it.
+// and hides it when the key leaves. A live mount follows the viewer's
+// project role, so an editor can change the module from the panel exactly
+// as on the detail page (archives ARCH-025 compares the archived panel with
+// this live twin); an archived mount reads the archived detail and stays
+// read-only in every role. A module that no longer resolves shows the
+// missing state here (never a blank panel), while the address stays
+// reachable so the reader can close it.
 
 import { Skeleton } from "@pidash/kit";
 import type { ApiClient, ModuleDetail, ArchivedModuleDetail } from "@pidash/api-client";
@@ -142,7 +145,7 @@ export function ModulePeekPanel({
             workspaceSlug={workspaceSlug}
             projectId={projectId}
             moduleId={moduleId}
-            readOnly
+            readOnly={archived}
             archived={archived}
             canEdit={canEdit}
             client={client}
@@ -151,7 +154,7 @@ export function ModulePeekPanel({
                 workspaceSlug={workspaceSlug}
                 projectId={projectId}
                 moduleId={moduleId}
-                readOnly
+                readOnly={archived}
                 archived={archived}
                 canEdit={canEdit}
                 client={client}
