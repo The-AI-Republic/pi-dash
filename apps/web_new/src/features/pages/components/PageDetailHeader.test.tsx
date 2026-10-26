@@ -42,7 +42,7 @@ import {
   PAGE_COPY_LINK_LABEL,
   PAGE_CRUMB,
   PAGE_HISTORY_ITEM,
-  PAGE_OPEN_PANE_LABEL,
+  PAGE_PANE_TOGGLE_LABEL,
   PAGE_OPTIONS_LABEL,
 } from "./PageDetailHeader.js";
 
@@ -125,7 +125,7 @@ describe("PageDetailHeader", () => {
 
   it("offers the navigation-pane toggle in the action strip", () => {
     const { onOpenPane } = renderHeader();
-    const toggle = screen.getByRole("button", { name: PAGE_OPEN_PANE_LABEL });
+    const toggle = screen.getByRole("button", { name: PAGE_PANE_TOGGLE_LABEL });
     expect(toggle.querySelector("svg.lucide-panel-right")).not.toBeNull();
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(toggle);
@@ -134,7 +134,7 @@ describe("PageDetailHeader", () => {
 
   it("reports the pane as expanded while it is open", () => {
     renderHeader({ paneOpen: true });
-    expect(screen.getByRole("button", { name: PAGE_OPEN_PANE_LABEL })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: PAGE_PANE_TOGGLE_LABEL })).toHaveAttribute("aria-expanded", "true");
   });
 
   it("shows the sync badge and hides the star from guests", () => {

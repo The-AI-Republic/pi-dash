@@ -44,6 +44,10 @@ export interface PageFormattingState {
   code: boolean;
   /** Block kind under the caret; null when the selection spans blocks. */
   block: PageBlockKind | null;
+  /** Stored letter colour key of the range, or null for plain text. */
+  textColor: string | null;
+  /** Stored wash colour key of the range, or null for no highlight. */
+  backgroundColor: string | null;
 }
 
 /** The state a bar holds before any editor reports one. */
@@ -57,6 +61,8 @@ export const EMPTY_FORMATTING_STATE: PageFormattingState = {
   blockquote: false,
   code: false,
   block: "paragraph",
+  textColor: null,
+  backgroundColor: null,
 };
 
 /** What the reader needs from the editor: attribute probing plus the caret. */
@@ -67,6 +73,8 @@ export interface PageEditorProbe {
   caretBlock: () => { type: string; attrs: Record<string, unknown> } | null;
   /** True while the caret is inside a task list item. */
   inTaskList: () => boolean;
+  /** The colour mark's attributes over the caret/selection, if any. */
+  colorAttrs?: () => { textColor?: unknown; backgroundColor?: unknown } | null;
 }
 
 /** A stored heading level clamped to the six the selector offers. */
@@ -105,7 +113,14 @@ export function readFormattingState(probe: PageEditorProbe): PageFormattingState
     blockquote: probe.isActive("blockquote"),
     code: probe.isActive("code"),
     block: block?.type === "heading" ? blockKindForHeading(Number(block.attrs["level"] ?? 1)) : "paragraph",
+    textColor: colorKey(probe.colorAttrs?.()?.textColor),
+    backgroundColor: colorKey(probe.colorAttrs?.()?.backgroundColor),
   };
+}
+
+/** A stored colour attribute read as a key, or null when it carries none. */
+function colorKey(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 /** Two states are the same; the bar skips a repaint when they match. */
@@ -119,6 +134,8 @@ export function formattingStatesEqual(left: PageFormattingState, right: PageForm
     left.list === right.list &&
     left.blockquote === right.blockquote &&
     left.code === right.code &&
-    left.block === right.block
+    left.block === right.block &&
+    left.textColor === right.textColor &&
+    left.backgroundColor === right.backgroundColor
   );
 }

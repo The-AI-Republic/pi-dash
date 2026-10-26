@@ -9,13 +9,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyPageColor,
   caretBlockOf,
+  clearPageColor,
   editorFormattingState,
+  insertPageTable,
+  PAGE_COLOR_MARK,
   pageDocumentEmpty,
   pageEditorHandle,
   PAGE_BODY_START,
   replacePageBody,
   runBlockKind,
+  runInsertImage,
   runPageCommand,
   type PageEditorChain,
   type PageEditorRef,
@@ -57,6 +62,7 @@ function editor(
     block?: { type: string; attrs: Record<string, unknown> };
     focus?: (position?: PageFocusPosition) => void;
     runResult?: boolean;
+    markAttrs?: Record<string, unknown>;
   } = {}
 ): {
   ref: PageEditorRef;
@@ -87,6 +93,7 @@ function editor(
         },
       },
     },
+    ...(options.markAttrs === undefined ? {} : { getAttributes: () => options.markAttrs ?? {} }),
   };
   return { ref, calls, focused };
 }
@@ -198,5 +205,89 @@ describe("pageEditorHandle", () => {
   it("reads the live formatting state", () => {
     const { ref } = editor({ active: ["italic"] });
     expect(pageEditorHandle(ref).readState()).toMatchObject({ italic: true });
+  });
+});
+
+describe("table and image commands", () => {
+  it("focuses first and drops the toolbar's 3×3 table", () => {
+    const { ref, calls } = editor();
+    insertPageTable(ref);
+    expect(calls).toEqual(["focus", "insertPageTable([object Object])", "run"]);
+  });
+
+  it("inserts an uploaded picture with its stored id and status", () => {
+    const { ref, calls } = editor();
+    runInsertImage(ref, "/api/assets/v2/workspaces/acme/projects/p/a/", "a");
+    expect(calls[0]).toBe("focus");
+    expect(calls[1]).toBe("insertContent([object Object])");
+    expect(calls[2]).toBe("run");
+  });
+
+  it("exposes table and image insertion on the handle", () => {
+    const { ref, calls } = editor();
+    const handle = pageEditorHandle(ref);
+    handle.insertTable();
+    handle.insertImage("/api/assets/a/", "a");
+    expect(calls).toEqual([
+      "focus",
+      "insertPageTable([object Object])",
+      "run",
+      "focus",
+      "insertContent([object Object])",
+      "run",
+    ]);
+  });
+});
+
+describe("colour commands", () => {
+  it("writes both attributes so the untouched kind survives", () => {
+    const { ref, calls } = editor({ markAttrs: { textColor: "pink", backgroundColor: null } });
+    applyPageColor(ref, "background", "green");
+    expect(calls[0]).toBe("focus");
+    expect(calls[1]).toBe(`setMark(${PAGE_COLOR_MARK}, [object Object])`);
+    expect(calls[2]).toBe("run");
+  });
+
+  it("clears one kind and keeps the other", () => {
+    const { ref, calls } = editor({ markAttrs: { textColor: "pink", backgroundColor: "green" } });
+    clearPageColor(ref, "text");
+    expect(calls).toEqual(["focus", `setMark(${PAGE_COLOR_MARK}, [object Object])`, "run"]);
+  });
+
+  it("drops the mark when the last kind is cleared", () => {
+    const { ref, calls } = editor({ markAttrs: { textColor: "pink", backgroundColor: null } });
+    clearPageColor(ref, "text");
+    expect(calls).toEqual(["focus", `unsetMark(${PAGE_COLOR_MARK})`, "run"]);
+  });
+
+  it("exposes both colour actions on the handle", () => {
+    const { ref, calls } = editor({ markAttrs: { textColor: null, backgroundColor: null } });
+    const handle = pageEditorHandle(ref);
+    handle.applyColor("text", "gray");
+    handle.clearColor("text");
+    expect(calls).toEqual([
+      "focus",
+      `setMark(${PAGE_COLOR_MARK}, [object Object])`,
+      "run",
+      "focus",
+      `unsetMark(${PAGE_COLOR_MARK})`,
+      "run",
+    ]);
+  });
+
+  it("reads the stored colour pair into the formatting state", () => {
+    const { ref } = editor({ markAttrs: { textColor: "pink", backgroundColor: "green" } });
+    expect(editorFormattingState(ref)).toMatchObject({ textColor: "pink", backgroundColor: "green" });
+  });
+
+  it("reports no colour when the probe has no attributes", () => {
+    const { ref } = editor();
+    expect(editorFormattingState(ref)).toMatchObject({ textColor: null, backgroundColor: null });
+  });
+
+  it("writes a colour even when the editor cannot report its attributes", () => {
+    const { ref, calls } = editor();
+    applyPageColor(ref, "text", "gray");
+    expect(calls).toEqual(["focus", `setMark(${PAGE_COLOR_MARK}, [object Object])`, "run"]);
   });
 });

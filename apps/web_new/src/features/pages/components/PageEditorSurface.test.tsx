@@ -8,7 +8,7 @@
 // holds the body area until the document is known, and the canvas hands
 // its command handle to a caller outside it (the version restore).
 
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,10 +18,26 @@ import { PageEditorSurface, PAGE_BODY_LABEL, PAGE_BODY_PLACEHOLDER } from "./Pag
 
 const EDITOR_TEST_TIMEOUT = 30_000;
 
+const toaster = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock("../../../shared/shell/toaster.js", () => ({
+  notifyError: toaster.notifyError,
+}));
+
+const appClient = vi.hoisted(() => ({ getAppClient: vi.fn(() => ({ kind: "app-client" })) }));
+vi.mock("../../../core/api/client.js", () => ({ getAppClient: appClient.getAppClient }));
+
+const pageAssets = vi.hoisted(() => ({ uploadPageAsset: vi.fn() }));
+vi.mock("@pidash/api-client", async (original) => {
+  const actual = await original<typeof import("@pidash/api-client")>();
+  return { ...actual, uploadPageAsset: pageAssets.uploadPageAsset };
+});
+
 function mount(props: Partial<React.ComponentProps<typeof PageEditorSurface>> = {}): ReturnType<typeof render> {
   return render(
     <PageEditorSurface
       pageId="page-1"
+      workspaceSlug="acme"
+      projectId="project-1"
       name="Launch notes"
       descriptionHtml="<p>Stored words</p>"
       logoProps={{}}
@@ -51,6 +67,9 @@ async function body(): Promise<HTMLElement> {
 
 afterEach(() => {
   resetPageBodyDrafts();
+  toaster.notifyError.mockReset();
+  appClient.getAppClient.mockClear();
+  pageAssets.uploadPageAsset.mockReset();
 });
 
 describe(
@@ -194,6 +213,136 @@ describe(
         fireEvent.click(await screen.findByRole("menuitem", { name: "Heading 2" }));
       });
       await vi.waitFor(() => expect(screen.getByTestId("page-toolbar-typography")).toHaveTextContent("Heading 2"));
+    });
+
+    it("renders the table, image and colour entries after the core twelve", async () => {
+      mount();
+      await body();
+      const bar = screen.getByRole("toolbar", { name: "Formatting" });
+      expect(within(bar).getByRole("button", { name: "Table" })).toBeInTheDocument();
+      expect(within(bar).getByRole("button", { name: "Image" })).toBeInTheDocument();
+      expect(within(bar).getByRole("button", { name: "Color" })).toBeInTheDocument();
+      expect(bar.querySelectorAll("button.grid.size-7")).toHaveLength(14);
+    });
+
+    it("drops a table at the caret from the toolbar tile", async () => {
+      mount();
+      const editable = await body();
+      editable.focus();
+      fireEvent.click(screen.getByRole("button", { name: "Table" }));
+      await vi.waitFor(() => expect(editable.querySelector("table")).not.toBeNull());
+      expect(editable.querySelector("table tr")?.children).toHaveLength(3);
+    });
+
+    it("uploads a picked picture through the injected path and inserts it inline", async () => {
+      const uploadImage = vi.fn().mockResolvedValue({
+        assetId: "asset-1",
+        assetUrl: "/api/assets/v2/workspaces/acme/projects/project-1/asset-1/",
+      });
+      mount({ uploadImage });
+      const editable = await body();
+      const input = screen.getByTestId("page-toolbar-image-input");
+      fireEvent.change(input, { target: { files: [new File(["x"], "shot.png", { type: "image/png" })] } });
+      await vi.waitFor(() => expect(uploadImage).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => {
+        const image = editable.querySelector("image-component");
+        expect(image).not.toBeNull();
+        expect(image?.getAttribute("status")).toBe("uploaded");
+      });
+      expect(toaster.notifyError).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the project asset URL when the upload names none", async () => {
+      const uploadImage = vi.fn().mockResolvedValue({ assetId: "asset-9", assetUrl: "" });
+      mount({ uploadImage });
+      const editable = await body();
+      fireEvent.change(screen.getByTestId("page-toolbar-image-input"), {
+        target: { files: [new File(["x"], "shot.png", { type: "image/png" })] },
+      });
+      await vi.waitFor(() => {
+        expect(editable.querySelector("image-component img")?.getAttribute("src")).toBe(
+          "/api/assets/v2/workspaces/acme/projects/project-1/asset-9/"
+        );
+      });
+    });
+
+    it("reports a refused upload instead of inserting a broken picture", async () => {
+      const uploadImage = vi.fn().mockRejectedValue(new Error("Too large."));
+      mount({ uploadImage });
+      const editable = await body();
+      fireEvent.change(screen.getByTestId("page-toolbar-image-input"), {
+        target: { files: [new File(["x"], "shot.png", { type: "image/png" })] },
+      });
+      await vi.waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Too large."));
+      expect(editable.querySelector("image-component")).toBeNull();
+    });
+
+    it("refuses a second pick while the upload is in flight", async () => {
+      let release: (value: { assetId: string; assetUrl: string }) => void = () => undefined;
+      const uploadImage = vi.fn().mockReturnValue(
+        new Promise((resolve) => {
+          release = resolve;
+        })
+      );
+      mount({ uploadImage });
+      await body();
+      fireEvent.change(screen.getByTestId("page-toolbar-image-input"), {
+        target: { files: [new File(["x"], "shot.png", { type: "image/png" })] },
+      });
+      await vi.waitFor(() => expect(screen.getByRole("button", { name: "Image" })).toBeDisabled());
+      release({ assetId: "a", assetUrl: "/api/assets/a/" });
+      await vi.waitFor(() => expect(screen.getByRole("button", { name: "Image" })).toBeEnabled());
+    });
+
+    it("resolves a stored asset id for the editing surface", async () => {
+      mount({ descriptionHtml: '<p><image-component src="asset-7"></image-component></p>' });
+      const editable = await body();
+      await vi.waitFor(() =>
+        expect(editable.querySelector("image-component img")?.getAttribute("src")).toBe(
+          "/api/assets/v2/workspaces/acme/projects/project-1/asset-7/"
+        )
+      );
+    });
+
+    it("uploads through the shared pipeline when no uploader is injected", async () => {
+      pageAssets.uploadPageAsset.mockResolvedValue({ assetId: "asset-5", assetUrl: "/api/assets/asset-5/" });
+      mount();
+      const editable = await body();
+      fireEvent.change(screen.getByTestId("page-toolbar-image-input"), {
+        target: { files: [new File(["x"], "shot.png", { type: "image/png" })] },
+      });
+      await vi.waitFor(() => expect(pageAssets.uploadPageAsset).toHaveBeenCalledTimes(1));
+      expect(appClient.getAppClient).toHaveBeenCalled();
+      const call = pageAssets.uploadPageAsset.mock.calls[0] as unknown[];
+      expect(call[1]).toBe("acme");
+      expect(call[2]).toBe("project-1");
+      expect(call[3]).toBe("page-1");
+      await vi.waitFor(() => expect(editable.querySelector("image-component")).not.toBeNull());
+    });
+
+    it("applies and clears a letter colour from the bar's popover", async () => {
+      mount();
+      const editable = await body();
+      const user = userEvent.setup();
+      await user.dblClick(within(editable).getByText("Stored words"));
+      fireEvent.click(screen.getByRole("button", { name: "Color" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Letter color Pink" }));
+      await vi.waitFor(() => expect(editable.querySelector('[data-text-color="pink"]')).not.toBeNull());
+
+      await vi.waitFor(() => expect(screen.getByTestId("page-color-preview")).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: "Color" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Clear letter color" }));
+      await vi.waitFor(() => expect(editable.querySelector("[data-text-color]")).toBeNull());
+    });
+
+    it("opens the colour popover with eight swatches and a clear per row", async () => {
+      mount();
+      await body();
+      fireEvent.click(screen.getByRole("button", { name: "Color" }));
+      for (const kind of ["text", "background"] as const) {
+        const row = await screen.findByTestId(`page-color-row-${kind}`);
+        expect(within(row).getAllByRole("button")).toHaveLength(9);
+      }
     });
   },
   EDITOR_TEST_TIMEOUT

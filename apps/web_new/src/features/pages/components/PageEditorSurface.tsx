@@ -12,26 +12,39 @@
 
 import * as React from "react";
 
+import { pageAssetUrl } from "@pidash/api-client";
+
+import { getAppClient } from "../../../core/api/client.js";
 import {
   EMPTY_FORMATTING_STATE,
   type PageBlockKind,
   type PageFormatCommand,
   type PageFormattingState,
 } from "../../../shared/editor/index.js";
+import { descriptionAssetSrc } from "../../../shared/editor/index.js";
 import { RichTextView } from "../../../shared/editor/RichTextView.js";
+import { notifyError } from "../../../shared/shell/toaster.js";
 import { getPageBodyDraft, setPageBodyDraft } from "../lib/pageBodyDraft.js";
+import { pageImageUploadFailure, uploadPageImage, type UploadedPageImage } from "../lib/pageMedia.js";
 import { pageKeyCommand } from "../lib/pageToolbar.js";
 import { titleIsEmpty } from "../lib/pageTitle.js";
 import { PageBodyEditor, type PageEditorHandle } from "./PageBodyEditor.js";
 import { PageCanvasHeader } from "./PageCanvasHeader.js";
+import { PageColorButton } from "./PageColorButton.js";
 import { PageBodySkeleton } from "./PageDetailLoading.js";
 import { PageFormattingBar } from "./PageFormattingBar.js";
+import { PageImageButton } from "./PageImageButton.js";
+import { PageTableButton } from "./PageTableButton.js";
 
 export const PAGE_BODY_LABEL = "Page body";
 export const PAGE_BODY_PLACEHOLDER = "Start writing, or press / for commands";
 
 export interface PageEditorSurfaceProps {
   pageId: string;
+  /** Workspace the page belongs to: asset URLs and upload grants (PAGE-034). */
+  workspaceSlug: string;
+  /** Project the page belongs to. */
+  projectId: string;
   /** Stored record name. */
   name: string;
   /** Stored body HTML; a draft typed this session wins over it. */
@@ -55,10 +68,17 @@ export interface PageEditorSurfaceProps {
    * before the editor chunk resolves.
    */
   onHandle?: ((handle: PageEditorHandle | null) => void) | undefined;
+  /**
+   * Upload one picked picture. The default goes through the shared page
+   * asset contract; tests inject a stub instead of running the pipeline.
+   */
+  uploadImage?: ((file: File) => Promise<UploadedPageImage>) | undefined;
 }
 
 export function PageEditorSurface({
   pageId,
+  workspaceSlug,
+  projectId,
   name,
   descriptionHtml,
   logoProps,
@@ -67,14 +87,22 @@ export function PageEditorSurface({
   showBar,
   bodyPending = false,
   onHandle,
+  uploadImage,
 }: PageEditorSurfaceProps): React.ReactElement {
   const handleRef = React.useRef<PageEditorHandle | null>(null);
   const [state, setState] = React.useState<PageFormattingState>(EMPTY_FORMATTING_STATE);
+  const [uploading, setUploading] = React.useState(false);
   // The typed title, before its debounce saves it: an empty draft keeps
   // the mark affordance pinned even though the stored name still has text.
   const [titleDraft, setTitleDraft] = React.useState(name);
   React.useEffect(() => setTitleDraft(name), [name]);
   const initialHtml = React.useMemo(() => getPageBodyDraft(pageId) ?? descriptionHtml, [pageId, descriptionHtml]);
+  // A stored body keeps the asset id; the editor paints the served URL
+  // while serialization writes the id back (PAGE-034, ISS-127).
+  const resolveAsset = React.useCallback(
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId }),
+    [workspaceSlug, projectId]
+  );
 
   const onHandleRef = React.useRef(onHandle);
   onHandleRef.current = onHandle;
@@ -111,6 +139,42 @@ export function PageEditorSurface({
     handleRef.current?.applyBlockKind(kind);
   }, []);
 
+  const pickColor = React.useCallback((kind: "text" | "background", key: string) => {
+    handleRef.current?.applyColor(kind, key);
+  }, []);
+
+  const clearColor = React.useCallback((kind: "text" | "background") => {
+    handleRef.current?.clearColor(kind);
+  }, []);
+
+  const upload = React.useCallback(
+    async (file: File): Promise<UploadedPageImage> => {
+      if (uploadImage !== undefined) return uploadImage(file);
+      return uploadPageImage(getAppClient(), { workspaceSlug, projectId, pageId, file });
+    },
+    [uploadImage, workspaceSlug, projectId, pageId]
+  );
+
+  const pickImage = React.useCallback(
+    (file: File) => {
+      setUploading(true);
+      void upload(file)
+        .then((uploaded) => {
+          handleRef.current?.insertImage(
+            uploaded.assetUrl === "" ? pageAssetUrl(workspaceSlug, projectId, uploaded.assetId) : uploaded.assetUrl,
+            uploaded.assetId
+          );
+        })
+        .catch((error: unknown) => {
+          notifyError(pageImageUploadFailure(error));
+        })
+        .finally(() => {
+          setUploading(false);
+        });
+    },
+    [upload, workspaceSlug, projectId]
+  );
+
   const handleKeyDown = React.useCallback((event: KeyboardEvent): boolean => {
     // Only the chords the editor leaves unbound (the alignments) run
     // here: ProseMirror skips its own key handler once a chord is
@@ -139,17 +203,38 @@ export function PageEditorSurface({
         titleEmpty={titleIsEmpty(titleDraft)}
         onMarkPick={onMarkPick}
       />
-      {showBar ? <PageFormattingBar state={state} onCommand={run} onBlockKind={pickBlock} /> : null}
+      {showBar ? (
+        <PageFormattingBar
+          state={state}
+          onCommand={run}
+          onBlockKind={pickBlock}
+          mediaControls={
+            <>
+              <PageTableButton onInsert={() => handleRef.current?.insertTable()} />
+              <PageImageButton onPick={pickImage} busy={uploading} />
+              <PageColorButton
+                textColor={state.textColor}
+                backgroundColor={state.backgroundColor}
+                onPick={pickColor}
+                onClear={clearColor}
+              />
+            </>
+          }
+        />
+      ) : null}
       <div className="editor-container">
         {bodyPending ? (
           <PageBodySkeleton />
         ) : (
-          <React.Suspense fallback={<RichTextView html={initialHtml} label={PAGE_BODY_LABEL} />}>
+          <React.Suspense
+            fallback={<RichTextView html={initialHtml} label={PAGE_BODY_LABEL} resolveAsset={resolveAsset} />}
+          >
             {/* The editor instance belongs to one page: a navigation to a
                 sibling page opens its own document, never the old one. */}
             <PageBodyEditor
               key={pageId}
               initialHtml={initialHtml}
+              resolveAsset={resolveAsset}
               onChange={onChange}
               onFormattingChange={setState}
               onReady={onReady}

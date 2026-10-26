@@ -35,7 +35,18 @@ export {
 } from "./components/PageCreateDialog.js";
 export { PageFavoriteStar, type PageFavoriteStarProps } from "./components/PageFavoriteStar.js";
 export { PageDetailScreen, type PageDetailScreenProps } from "./components/PageDetailScreen.js";
-export { PageDetailHeader, PAGE_CRUMB, type PageDetailHeaderProps } from "./components/PageDetailHeader.js";
+export {
+  PageDetailHeader,
+  PAGE_CRUMB,
+  PAGE_PANE_TOGGLE_LABEL,
+  type PageDetailHeaderProps,
+} from "./components/PageDetailHeader.js";
+export {
+  PageFloatingPaneToggle,
+  PAGE_FLOATING_PANE_TEST_ID,
+  PAGE_OPEN_PANE_LABEL,
+  type PageFloatingPaneToggleProps,
+} from "./components/PageFloatingPaneToggle.js";
 export {
   PageDetailTitle,
   PAGE_TITLE_MAX_LENGTH,
