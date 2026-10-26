@@ -11516,10 +11516,14 @@ export class WebNewDriver implements ParityDriver {
 
   private async schedulerScheduleValues(dialog: Locator): Promise<SchedulerScheduleValues> {
     const toggle = dialog.getByRole("switch").first();
+    // The rule textarea lives under the builder's advanced disclosure
+    // (AGT-065); reveal it before reading, as a person would.
+    const rawRule = dialog.getByLabel("Recurrence (RRULE)");
+    if (!(await rawRule.first().isVisible())) await this.schedulerRecurrenceAdvanced();
     return {
       dtstart: await dialog.getByLabel("Starts at").inputValue({ timeout: WebNewDriver.WAIT_MS }),
       tzid: await dialog.getByLabel("Time zone").inputValue({ timeout: WebNewDriver.WAIT_MS }),
-      rrule: await dialog.getByLabel("Recurrence (RRULE)").inputValue({ timeout: WebNewDriver.WAIT_MS }),
+      rrule: await rawRule.first().inputValue({ timeout: WebNewDriver.WAIT_MS }),
       extraContext: await dialog.getByLabel("Project context (optional)").inputValue({ timeout: WebNewDriver.WAIT_MS }),
       enabled: (await toggle.getAttribute("aria-checked")) === "true",
     };
@@ -11923,12 +11927,7 @@ export class WebNewDriver implements ParityDriver {
       .getByRole("radio", { checked: true });
     return {
       ...schedule,
-      outcomeLabel: (
-        (await checked
-          .first()
-          .innerText()
-          .catch(() => "")) ?? ""
-      ).trim(),
+      outcomeLabel: await this.schedulerOutcomeLabel(checked.first()),
       pod: await dialog.getByLabel("Pod").inputValue(),
     };
   }
@@ -11955,6 +11954,21 @@ export class WebNewDriver implements ParityDriver {
     // monthly fields come and go with it, but the control itself always
     // renders for an expressible rule.
     return dialog.getByLabel("Repeat unit");
+  }
+
+  /** The visible words on one outcome radio, whatever element carries them. */
+  private async schedulerOutcomeLabel(radio: Locator): Promise<string> {
+    // The findings field uses button-radios, so their own text is what a
+    // person sees. An input radio has no text: read its accessible name,
+    // then fall back to a wrapping label only when one exists (waiting on
+    // an absent label would burn the whole scenario timeout).
+    const own = ((await radio.innerText().catch(() => "")) ?? "").trim();
+    if (own !== "") return own;
+    const named = ((await radio.getAttribute("aria-label").catch(() => null)) ?? "").trim();
+    if (named !== "") return named;
+    const wrapped = radio.locator("xpath=ancestor::label[1]");
+    if ((await wrapped.count().catch(() => 0)) === 0) return "";
+    return ((await wrapped.innerText().catch(() => "")) ?? "").trim();
   }
 
   async schedulerRecurrenceFacts(): Promise<SchedulerRecurrenceFacts> {
@@ -12134,16 +12148,10 @@ export class WebNewDriver implements ParityDriver {
     const total = await radios.count();
     const options: { label: string; checked: boolean }[] = [];
     for (let i = 0; i < total; i++) {
-      // The web_new control is a button with role=radio, so its accessible
-      // name is the aria-label. The oracle's native inputs carry the mode
-      // name in innerText. Read the accessible name first, then fall back
-      // to the text for either shape.
+      const radio = radios.nth(i);
       options.push({
-        label: (await radios.nth(i).getAttribute("aria-label")) ?? (await radios.nth(i).innerText()).trim(),
-        checked: await radios
-          .nth(i)
-          .isChecked()
-          .catch(() => false),
+        label: await this.schedulerOutcomeLabel(radio),
+        checked: await radio.isChecked().catch(() => false),
       });
     }
     // The help line is the paragraph right after the option row.
@@ -15173,15 +15181,22 @@ export class WebNewDriver implements ParityDriver {
     await this.page.unroute("**/api/workspaces/*/ai-assistant/threads/*/messages/");
   }
   async assistantLastToast(): Promise<{ title: string; message: string } | null> {
+    // The kit keeps a dismissed card mounted at zero height while it
+    // animates out, and its text remains readable then. Only a card that
+    // is still visible and carries text counts as showing.
     const candidates = this.page.locator('[data-testid="toast-notification"]');
     const count = await candidates.count();
-    if (count === 0) return null;
-    const lines = ((await candidates.last().innerText()).trim() || "")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-    if (lines.length === 0) return null;
-    return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+    for (let index = 0; index < count; index += 1) {
+      const card = candidates.nth(index);
+      if (!(await card.isVisible().catch(() => false))) continue;
+      const lines = ((await card.innerText().catch(() => "")) ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      if (lines.length === 0) continue;
+      return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+    }
+    return null;
   }
   async assistantCurrentHash(): Promise<string> {
     return new URL(this.page.url()).hash;

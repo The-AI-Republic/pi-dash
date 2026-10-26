@@ -250,7 +250,7 @@ describe("BindingDetailBody", () => {
     expect(screen.queryByText(/This scheduler install is not available/)).not.toBeInTheDocument();
     const grid = screen.getByRole("heading", { name: "Configuration" }).nextElementSibling;
     if (grid === null) throw new Error("grid missing");
-    expect(within(grid as HTMLElement).getByText("Once at dtstart")).toBeInTheDocument();
+    expect(within(grid as HTMLElement).getByText("Fires once at the start time")).toBeInTheDocument();
   });
 
   it("badges a completed finite series once reported", async () => {

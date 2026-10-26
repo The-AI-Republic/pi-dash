@@ -33,7 +33,11 @@
     "/{ws}/settings/projects/*",
     "/{ws}/runners/*",
     "/{ws}/ai-dev-machines/*",
-    "/{ws}/projects/{projectId}/runners/*"
+    "/{ws}/projects/{projectId}/runners/*",
+    "/{ws}/schedulers",
+    "/{ws}/prompts",
+    "/{ws}/assistant/*",
+    "/{ws}/projects/{projectId}/schedulers/*"
   ],
   "reservedTopLevel": [
     "404",

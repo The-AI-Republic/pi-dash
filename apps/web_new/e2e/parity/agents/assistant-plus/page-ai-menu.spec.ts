@@ -9,6 +9,11 @@
 // box, keystrokes dismiss the popup) with no rephrase backend route.
 // Intended is a typed request that posts, renders the returned markup
 // for review, and inserts on confirmation. Row: AGT-063.
+// web_new leg (NEWFRONT-609 gate): the same absence is the intended
+// community behavior, not the bug — the page assistant menu ships
+// cloud-gated (PAGE-075), so the community build renders no handle or
+// menu by design. The helper itself is proven on the issue editor half
+// (editor-ai.spec.ts) and by the menu's unit tests.
 import { test, expect } from "../../fixtures";
 import { serverCreatePage, serverCreateProject, serverRephraseStatus } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";

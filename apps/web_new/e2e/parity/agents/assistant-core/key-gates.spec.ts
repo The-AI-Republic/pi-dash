@@ -45,7 +45,10 @@ test(
     });
 
     await test.step("chat sends while dictation reads unconfigured", async () => {
-      expect(await driver.assistantMicLabel()).toBe("Set up voice dictation");
+      // The microphone renders only once the speech-config read resolves,
+      // so poll for the keyless label and its hint instead of assuming the
+      // read landed with the empty state.
+      await expect.poll(() => driver.assistantMicLabel(), { timeout: 60_000 }).toBe("Set up voice dictation");
       expect(await driver.assistantDictationHint()).toBe("Voice dictation isn't set up. Configure it.");
       await driver.assistantFillDraft(`gated chat ${tag}`);
       await driver.assistantPressEnter();
@@ -65,7 +68,7 @@ test(
       await driver.assistantOpenThread(workspaceSlug, locked.id);
       await expect.poll(() => driver.assistantComposerReason(), { timeout: 60_000 }).toBe(API_KEY_REMINDER);
       expect(await driver.assistantTextareaDisabled()).toBe(true);
-      expect(await driver.assistantMicLabel()).toBe("Hold to dictate");
+      await expect.poll(() => driver.assistantMicLabel(), { timeout: 60_000 }).toBe("Hold to dictate");
       expect(await driver.assistantDictationHint()).toBeNull();
       await driver.assistantOpenLanding(workspaceSlug);
       await expect.poll(() => driver.assistantSetupCard(), { timeout: 60_000 }).not.toBeNull();

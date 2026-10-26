@@ -4,9 +4,11 @@
 // Oracle scenario (NEWFRONT-186): the receipt tab shows one card per agent
 // kind with its ordered composed sections and a collapsible full assembled
 // template matching the compiled API read; the side nav lists the kinds
-// with counts and anchors. BUG (NEWFRONT-194): the count badge and nav
-// counts render the literal `{{count}} sections` template (i18next-style
-// placeholder under the ICU `t()`), so the scenario locks that in.
+// with counts and anchors. bug: NEWFRONT-194 — the old app's count badge
+// and nav counts render the literal `{{count}} sections` template (an
+// i18next-style placeholder under the ICU `t()`); the intended target, and
+// what apps/web_new ships, renders the resolved section count. The gate
+// asserts both targets so the row proves the target, not the old bug.
 // Row: AGT-028.
 import { test, expect } from "../../fixtures";
 import { serverPromptCompiled, serverPromptSections } from "../../helpers/api";
@@ -15,6 +17,11 @@ import { schedulerHarness, seatMember } from "../support";
 import { PROMPT_KINDS } from "./support";
 
 const ROWS = ["AGT-028"];
+
+/** The count copy the intended target renders for `count` sections. */
+function countLabel(count: number): string {
+  return count === 1 ? "1 section" : `${count} sections`;
+}
 
 test(
   specTitle(ROWS, "bug: NEWFRONT-194 receipts show the literal count template; numbering and assembly hold"),
@@ -52,8 +59,9 @@ test(
       for (const card of cards) {
         const expected = serverSections.sections.get(card.kind) ?? [];
         expect(expected.length).toBeGreaterThan(0);
-        // Bug: the badge renders the uninterpolated template.
-        expect(card.countBadge).toBe("{{count}} sections");
+        // bug: NEWFRONT-194 — the old app renders the raw template; the
+        // intended target renders the resolved count (apps/web_new).
+        expect(card.countBadge).toBe(driver.target === "web_new" ? countLabel(expected.length) : "{{count}} sections");
         expect(card.sections.map((section) => section.key)).toEqual(expected.map((row) => row.key));
         card.sections.forEach((section, index) => {
           expect(section.num).toBe(String(index + 1).padStart(2, "0"));
@@ -81,8 +89,11 @@ test(
       const nav = await driver.promptsReceiptNav();
       expect(nav.map((entry) => entry.kind).sort()).toEqual([...PROMPT_KINDS].sort());
       for (const entry of nav) {
-        // Bug: the nav counts render the same uninterpolated template.
-        expect(entry.count).toBe("{{count}} sections");
+        const expected = serverSections.sections.get(entry.kind) ?? [];
+        expect(expected.length).toBeGreaterThan(0);
+        // Same deviation as the badge: raw template on the old app, the
+        // resolved count on the intended target.
+        expect(entry.count).toBe(driver.target === "web_new" ? countLabel(expected.length) : "{{count}} sections");
       }
       const hash = await driver.promptsReceiptNavJump("review");
       expect(hash).toBe("#prompt-receipt-review");
@@ -97,7 +108,8 @@ test(
       await expect.poll(async () => (await driver.promptsReceiptCards()).length, { timeout: 30_000 }).toBe(3);
       const cards = await driver.promptsReceiptCards();
       for (const card of cards) {
-        expect(card.countBadge).toBe("{{count}} sections");
+        const expected = serverSections.sections.get(card.kind) ?? [];
+        expect(card.countBadge).toBe(driver.target === "web_new" ? countLabel(expected.length) : "{{count}} sections");
       }
       await driver.promptsReceiptToggle("coding-task");
       expect(await driver.promptsReceiptTemplate("coding-task")).toBe(

@@ -154,7 +154,7 @@ describe("formatters", () => {
 
   it("renders the readable schedule", () => {
     expect(scheduleText({ rrule: "FREQ=WEEKLY;BYDAY=MO" })).toBe("every week on Monday");
-    expect(scheduleText({ rrule: "" })).toBe("Once at dtstart");
+    expect(scheduleText({ rrule: "" })).toBe("Fires once at the start time");
   });
 });
 

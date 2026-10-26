@@ -201,7 +201,9 @@ test(
       const header = await driver.schedulerBindingHeader();
       expect(header.badges).not.toContain("Completed");
       const config = await driver.schedulerBindingConfig();
-      expect(config.find((row) => row.label === "Schedule")?.value).toContain("Once at dtstart");
+      expect(config.find((row) => row.label === "Schedule")?.value).toContain(
+        driver.target === "web_new" ? "Fires once at the start time" : "Once at dtstart"
+      );
     });
 
     await test.step("a project member reads the detail without managing it", async () => {

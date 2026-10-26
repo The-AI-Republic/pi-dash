@@ -57,12 +57,30 @@ test(
       expect((await driver.promptsEditorState())?.draft).toBe(PERSONAL_BODY);
     });
 
-    await test.step("bug: the UI confirm fails on CSRF with the override kept", async () => {
+    await test.step("the UI confirm reverts the personal override", async () => {
       await driver.promptsEditorRevertOpen();
       await driver.promptsRevertConfirm();
-      // The dialog closes and the failure lands inline behind it.
-      await expect.poll(async () => (await driver.promptsEditorState())?.error ?? "", { timeout: 30_000 }).not.toBe("");
       await expect.poll(async () => driver.promptsRevertDialog(), { timeout: 30_000 }).toBeNull();
+      if (driver.target === "web_new") {
+        // Intended target (AGT-027): the revert drops the override and closes
+        // the editor, and the card falls back to the workspace row.
+        await expect.poll(async () => driver.promptsEditorState(), { timeout: 30_000 }).toBeNull();
+        const rows = await serverPromptSections(workspaceSlug, "coding-task", "user", member.session);
+        // Dropping the personal override falls back to the workspace row,
+        // which is itself an override in this scenario.
+        expect(rows.find((row) => row.key === EDITABLE_SECTION)?.source).toBe("workspace");
+        await driver.promptsOpen(workspaceSlug);
+        const card = await expectCard(driver, EDITABLE_SECTION, (candidate) => candidate.body === WORKSPACE_BODY);
+        expect(card.sourceBadge).toBe("Workspace override");
+        // The next step reverts again through the API and expects an active
+        // override to drop; put it back so the flow starts where it did on
+        // the old leg (where the UI revert never landed).
+        await serverPromptSectionUpsert(workspaceSlug, EDITABLE_SECTION, "user", PERSONAL_BODY, member.session);
+        await driver.promptsOpen(workspaceSlug);
+        return;
+      }
+      // bug: NEWFRONT-193 — the old app 403s on CSRF and keeps the override.
+      await expect.poll(async () => (await driver.promptsEditorState())?.error ?? "", { timeout: 30_000 }).not.toBe("");
       const state = await driver.promptsEditorState();
       // The revert path reports only its generic message (it drops the
       // server's detail, unlike the save path), while the override stays.

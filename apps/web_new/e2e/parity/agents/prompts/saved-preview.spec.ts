@@ -4,9 +4,11 @@
 // Oracle scenario (NEWFRONT-186): the saved-prompt preview form renders
 // under an expanded receipt for admins only, takes an issue target for
 // coding/review kinds and an install target for the scheduler kind, and
-// refuses empty targets by disabling submit. BUG (NEWFRONT-193): submit
-// 403s on CSRF, so the scenario locks in the inline CSRF failure and
-// proves the intended render through the CSRF-paired API.
+// refuses empty targets by disabling submit. bug: NEWFRONT-193 — the old
+// app's submit 403s on CSRF, so it renders the CSRF failure inline; the
+// intended target, and what apps/web_new ships, renders the prompt text
+// or the target error inline. The gate asserts both targets so the row
+// proves the target, not the old bug.
 // Row: AGT-030.
 import { test, expect } from "../../fixtures";
 import {
@@ -68,8 +70,19 @@ test(
       expect(await driver.promptsSavedPreviewSubmitEnabled("coding-task")).toBe(false);
     });
 
-    await test.step("bug: the issue-targeted submit fails inline on CSRF", async () => {
+    await test.step("the issue-targeted submit renders the prompt or fails inline", async () => {
       await driver.promptsSavedPreviewSubmit("coding-task", targets.issueId);
+      if (driver.target === "web_new") {
+        // Intended target (AGT-030): the form renders the prompt text.
+        await expect
+          .poll(async () => (await driver.promptsSavedPreviewResult("coding-task")).prompt ?? "", { timeout: 30_000 })
+          .not.toBe("");
+        const result = await driver.promptsSavedPreviewResult("coding-task");
+        expect(result.prompt).toContain(targets.issueName);
+        expect(result.error).toBeNull();
+        return;
+      }
+      // bug: NEWFRONT-193 — the old app 403s on CSRF and shows that inline.
       await expect
         .poll(async () => (await driver.promptsSavedPreviewResult("coding-task")).error ?? "", { timeout: 30_000 })
         .not.toBe("");
@@ -97,16 +110,26 @@ test(
       expect(missing.status).toBe(404);
     });
 
-    await test.step("bug: the install-targeted submit fails inline on CSRF", async () => {
+    await test.step("the install-targeted submit renders the prompt or fails inline", async () => {
       await driver.promptsReceiptToggle("scheduler");
       expect(await driver.promptsSavedPreviewVisible("scheduler")).toBe(true);
       await driver.promptsSavedPreviewSubmit("scheduler", targets.bindingId);
-      await expect
-        .poll(async () => (await driver.promptsSavedPreviewResult("scheduler")).error ?? "", { timeout: 30_000 })
-        .not.toBe("");
-      const result = await driver.promptsSavedPreviewResult("scheduler");
-      expect(result.error).toContain("CSRF Failed");
-      expect(result.prompt).toBeNull();
+      if (driver.target === "web_new") {
+        await expect
+          .poll(async () => (await driver.promptsSavedPreviewResult("scheduler")).prompt ?? "", { timeout: 30_000 })
+          .not.toBe("");
+        const intended = await driver.promptsSavedPreviewResult("scheduler");
+        expect(intended.prompt.length).toBeGreaterThan(0);
+        expect(intended.error).toBeNull();
+      } else {
+        // bug: NEWFRONT-193 — the old app 403s on CSRF and shows that inline.
+        await expect
+          .poll(async () => (await driver.promptsSavedPreviewResult("scheduler")).error ?? "", { timeout: 30_000 })
+          .not.toBe("");
+        const legacy = await driver.promptsSavedPreviewResult("scheduler");
+        expect(legacy.error).toContain("CSRF Failed");
+        expect(legacy.prompt).toBeNull();
+      }
       const rendered = await serverPromptPreview(
         workspaceSlug,
         "scheduler",

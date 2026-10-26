@@ -241,9 +241,9 @@ describe("configuration grid", () => {
     expect(configRows(binding({ tzid: "" }), null).find((row) => row.label === "Time zone")?.value).toBe("UTC");
   });
 
-  it("reads a blank stored rule as Once at dtstart", () => {
+  it("reads a blank stored rule as the dialog's single firing", () => {
     const row = configRows(binding({ rrule: "" }), null).find((entry) => entry.label === "Schedule");
-    expect(row?.value).toBe("Once at dtstart");
+    expect(row?.value).toBe("Fires once at the start time");
     expect(row?.title).toBe("");
   });
 });

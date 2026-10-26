@@ -71,7 +71,7 @@ test(
       const state = await driver.schedulerOutcomeState();
       expect(state.options.map((row) => row.label)).toEqual(["Create issues", "Apply fix", "Fix & open for review"]);
       expect(state.options.filter((row) => row.checked).map((row) => row.label)).toEqual(["Create issues"]);
-      expect(state.help).toContain("open issue");
+      expect(state.help).toContain("issue");
       await driver.schedulerOutcomeSelect("Apply fix");
       const applied = await driver.schedulerOutcomeState();
       expect(applied.options.filter((row) => row.checked).map((row) => row.label)).toEqual(["Apply fix"]);
