@@ -116,3 +116,90 @@ fn auth_helper_reads_rotations_and_refuses_missing_or_invalid_credentials() {
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
 }
+
+#[test]
+fn user_runner_on_same_project_is_left_untouched() {
+    // A shared default config: the user's own runner serves FIRST. Enroll
+    // must not adopt it as the managed runner (it tries to create a new one,
+    // which fails here because there is no cloud), and remove / rebind must
+    // leave it alone.
+    let root = tempfile::tempdir().unwrap();
+    let paths = Paths::resolve(
+        Some(root.path().join("config")),
+        Some(root.path().join("data")),
+    )
+    .unwrap();
+    paths.ensure().unwrap();
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "version": 2, "daemon": {"cloud_url": "http://127.0.0.1:1"},
+        "cli": {"token": "mt_review_fake", "workspace_slug": "test"},
+        "runner": [{
+            "name": "mine", "runner_id": uuid::Uuid::new_v4(), "workspace_slug": "test",
+            "project_slug": "FIRST", "workspace": {"working_dir": root.path().join("mine")},
+            "agent": {"kind": "codex"}, "codex": {"binary": "my-own-codex"},
+        }],
+    }))
+    .unwrap();
+    file::write_config(&paths, &cfg).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pidash"));
+        command
+            .env("PIDASH_CONFIG_DIR", &paths.config_dir)
+            .env("PIDASH_DATA_DIR", &paths.data_dir)
+            .args(args);
+        if args[1] != "remove" {
+            command
+                .arg("--engine")
+                .arg(root.path().join("engine"))
+                .arg("--codex-home")
+                .arg(root.path().join("engine-home"))
+                .arg("--path-prepend")
+                .arg(root.path().join("bin"))
+                .arg("--model-token-file")
+                .arg(root.path().join("model.token"));
+        }
+        command.output().unwrap()
+    };
+
+    let enroll = run(&[
+        "__managed",
+        "enroll",
+        "--workspace",
+        "test",
+        "--project",
+        "FIRST",
+        "--working-dir",
+        root.path().join("desktop").to_str().unwrap(),
+    ]);
+    assert!(
+        !enroll.status.success(),
+        "enroll must create its own runner (no cloud here), not reuse the user's: {}",
+        String::from_utf8_lossy(&enroll.stdout)
+    );
+    let rebind = run(&["__managed", "rebind"]);
+    assert!(
+        rebind.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rebind.stderr)
+    );
+    let remove = run(&[
+        "__managed",
+        "remove",
+        "--workspace",
+        "test",
+        "--project",
+        "FIRST",
+    ]);
+    assert!(remove.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&remove.stdout).trim(),
+        r#"{"ok":true,"removed":0}"#
+    );
+
+    // (Enroll may mint the local dev_machine_id; the runner set must not change.)
+    let after = file::load_config(&paths).unwrap();
+    assert_eq!(
+        serde_json::to_value(&after.runners).unwrap(),
+        serde_json::to_value(&cfg.runners).unwrap()
+    );
+}

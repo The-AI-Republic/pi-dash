@@ -176,15 +176,18 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
         .and_then(|c| c.token.clone())
         .context("no [cli].token — run `__managed bootstrap` first")?;
 
-    // Reuse an existing runner for this project rather than minting a second:
-    // the desktop calls enroll every time it opens a project, and the cloud
-    // caps bundled runners per project anyway.
+    // Reuse an existing built-in-engine runner for this project rather than
+    // minting a second: the desktop calls enroll every time it opens a
+    // project, and the cloud caps bundled runners per project anyway. The
+    // config is shared with the user's own `pidash` runners, so only a
+    // managed runner qualifies — a user's runner on the same project is never
+    // reused or rewritten.
     if let Some(existing) = cfg
         .runners
         .iter()
-        .find(|r| r.project_slug.as_deref() == Some(args.project.as_str()))
+        .find(|r| r.project_slug.as_deref() == Some(args.project.as_str()) && is_managed_runner(r))
     {
-        set_managed_codex_fields(paths, &args)?;
+        set_managed_codex_fields(paths, &args, existing.runner_id)?;
         activate_if_running(paths, &existing.name).await?;
         println!(
             "{{\"ok\":true,\"reused\":true,\"runner_id\":\"{}\",\"name\":{:?}}}",
@@ -236,7 +239,7 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
     // deliberately not part of ApplyEnrollOptions: no other caller has a
     // bundled engine, and threading them through would put desktop-only
     // concepts into the shared enrollment path.
-    set_managed_codex_fields(paths, &args)?;
+    set_managed_codex_fields(paths, &args, applied.runner.runner_id)?;
     activate_if_running(paths, &applied.runner.name).await?;
 
     println!(
@@ -249,8 +252,11 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
 fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     let mut cfg = file::load_config(paths).context("loading config.toml")?;
     let before = cfg.runners.len();
-    cfg.runners
-        .retain(|r| r.project_slug.as_deref() != Some(args.project.as_str()));
+    // Only the desktop's own (managed) runners; the user's runners on the
+    // same project stay.
+    cfg.runners.retain(|r| {
+        r.project_slug.as_deref() != Some(args.project.as_str()) || !is_managed_runner(r)
+    });
     if cfg.runners.len() == before {
         println!("{{\"ok\":true,\"removed\":0}}");
         return Ok(());
@@ -388,24 +394,35 @@ async fn activate_if_running(paths: &Paths, name: &str) -> Result<()> {
 /// Refresh all host-owned engine paths before the daemon starts. AppImage
 /// resource paths change on every launch, including for projects not reopened.
 /// Working directories and user-installed runners are deliberately preserved.
-fn set_managed_codex_fields(paths: &Paths, args: &EnrollArgs) -> Result<()> {
-    set_engine_paths(paths, &args.engine_paths, Some(&args.project))
+fn set_managed_codex_fields(paths: &Paths, args: &EnrollArgs, runner_id: uuid::Uuid) -> Result<()> {
+    set_engine_paths(paths, &args.engine_paths, Some(runner_id))
 }
 
-fn set_engine_paths(paths: &Paths, args: &EnginePathsArgs, project: Option<&str>) -> Result<()> {
+/// A runner the desktop app provisioned for its bundled engine: a Codex
+/// runner carrying the managed Codex fields (`codex_home` /
+/// `model_token_file`, which `Config::validate` keeps all-or-nothing). The
+/// user's own runners never have them.
+pub fn is_managed_runner(runner: &crate::config::schema::RunnerConfig) -> bool {
+    runner.agent.kind == AgentKind::Codex
+        && (runner.codex.codex_home.is_some() || runner.codex.model_token_file.is_some())
+}
+
+/// Point managed runners at the current engine paths: every existing managed
+/// runner, plus `target` (a runner just created by enroll, which has no
+/// managed fields yet). User runners are never touched.
+fn set_engine_paths(
+    paths: &Paths,
+    args: &EnginePathsArgs,
+    target: Option<uuid::Uuid>,
+) -> Result<()> {
     file::mutate_config(paths, |cfg| {
-        if project.is_some_and(|project| {
-            !cfg.runners
-                .iter()
-                .any(|r| r.project_slug.as_deref() == Some(project))
-        }) {
-            anyhow::bail!("enrolled runner for {project:?} not found in config");
+        if let Some(id) = target
+            && !cfg.runners.iter().any(|r| r.runner_id == id)
+        {
+            anyhow::bail!("enrolled runner {id} not found in config");
         }
         for runner in &mut cfg.runners {
-            if (project.is_some() && runner.project_slug.as_deref() == project)
-                || runner.codex.codex_home.is_some()
-                || runner.codex.model_token_file.is_some()
-            {
+            if Some(runner.runner_id) == target || is_managed_runner(runner) {
                 runner.codex.binary = args.engine.to_string_lossy().into_owned();
                 runner.codex.codex_home = Some(args.codex_home.clone());
                 runner.codex.path_prepend = Some(args.path_prepend.clone());
