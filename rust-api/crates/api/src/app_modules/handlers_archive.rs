@@ -657,8 +657,16 @@ async fn archived_detail(
             queries::LABEL_ESTIMATE_ROW_KEYS,
             &labels,
         ));
-        if let Some(chart) =
-            archived_chart(&pool, &slug, &project_id, &module_id, row.as_ref(), true).await?
+        if let Some(chart) = archived_chart(
+            &pool,
+            &slug,
+            &project_id,
+            &module_id,
+            row.as_ref(),
+            true,
+            &timezone,
+        )
+        .await?
         {
             out.push_str(",\"completion_chart\":");
             out.push_str(&chart);
@@ -681,7 +689,17 @@ async fn archived_detail(
         &labels,
     ));
     out.push_str(",\"completion_chart\":");
-    match archived_chart(&pool, &slug, &project_id, &module_id, row.as_ref(), false).await? {
+    match archived_chart(
+        &pool,
+        &slug,
+        &project_id,
+        &module_id,
+        row.as_ref(),
+        false,
+        &timezone,
+    )
+    .await?
+    {
         Some(chart) => out.push_str(&chart),
         None => out.push_str("{}"),
     }
@@ -700,6 +718,7 @@ async fn archived_chart(
     module_id: &uuid::Uuid,
     row: Option<&Map<String, Value>>,
     estimate: bool,
+    timezone: &chrono_tz::Tz,
 ) -> Result<Option<String>, Denial> {
     let Some(row) = row else {
         return Ok(None);
@@ -733,6 +752,7 @@ async fn archived_chart(
         target,
         total_issues,
         estimate,
+        timezone,
     )
     .await?;
     Ok(Some(chart))

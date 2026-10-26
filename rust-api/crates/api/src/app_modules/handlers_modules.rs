@@ -1819,6 +1819,9 @@ pub(crate) fn render_distribution_array(keys: &[&str], rows: &[Map<String, Value
 /// `burndown_plot` module branch (`utils/analytics_plot.py:198-264`,
 /// `plot_type="points"` or `"issues"`): per-day remaining over the
 /// module's date range, future days `null`.
+/// Completions truncate in the actor's active zone (`TimezoneMixin`
+/// activates `user_timezone`; `TruncDate` follows it), bound as `$4`;
+/// "today" stays the UTC day (`timezone.now().date()`).
 /// Shared with sibling handler issue 407 (archived detail).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_burndown_chart(
@@ -1830,6 +1833,7 @@ pub(crate) async fn fetch_burndown_chart(
     target: chrono::NaiveDate,
     total_issues: i64,
     points: bool,
+    timezone: &Tz,
 ) -> Result<String, Denial> {
     let days = (target - start).num_days();
     let mut chart = String::from("{");
@@ -1837,8 +1841,8 @@ pub(crate) async fn fetch_burndown_chart(
         chart.push('}');
         return Ok(chart);
     }
-    // Per-day completed inputs, truncated in UTC (`TIME_ZONE "UTC"`,
-    // the D-27 `burndown_*_sql` precedent).
+    // Per-day completed inputs, truncated in the actor's zone (bound
+    // `$4`; the cycle PIDASHCONV-1184 precedent).
     let scope_where = distribution_from_where(false, false);
     // Points total sums ALL live module-issue estimates, not just the
     // completed ones (`analytics_plot.py:212-214` — no completed filter
@@ -1861,7 +1865,7 @@ pub(crate) async fn fetch_burndown_chart(
     };
     let rows: Vec<(Option<chrono::NaiveDate>, Option<f64>, Option<i64>)> = if points {
         sqlx::query_as(&format!(
-            "SELECT (issues.completed_at AT TIME ZONE 'UTC')::date AS d, \
+            "SELECT (issues.completed_at AT TIME ZONE $4)::date AS d, \
              CAST(estimate_points.value AS FLOAT) AS v, NULL::bigint AS n \
              {scope_where} AND estimate_points.id IS NOT NULL AND issues.completed_at IS NOT NULL \
              ORDER BY issues.completed_at"
@@ -1869,18 +1873,20 @@ pub(crate) async fn fetch_burndown_chart(
         .bind(slug)
         .bind(project_id)
         .bind(module_id)
+        .bind(timezone.name())
         .fetch_all(pool)
         .await
         .map_err(|_| Denial::ServerError)?
     } else {
         sqlx::query_as(&format!(
-            "SELECT (issues.completed_at AT TIME ZONE 'UTC')::date AS d, NULL::float AS v, \
+            "SELECT (issues.completed_at AT TIME ZONE $4)::date AS d, NULL::float AS v, \
              COUNT(*) AS n {scope_where} AND issues.completed_at IS NOT NULL \
              GROUP BY d ORDER BY d"
         ))
         .bind(slug)
         .bind(project_id)
         .bind(module_id)
+        .bind(timezone.name())
         .fetch_all(pool)
         .await
         .map_err(|_| Denial::ServerError)?
@@ -2038,6 +2044,7 @@ async fn module_retrieve(
                     target,
                     total_issues,
                     true,
+                    &timezone,
                 )
                 .await?;
                 out.push_str(",\"completion_chart\":");
@@ -2085,6 +2092,7 @@ async fn module_retrieve(
                 target,
                 total_issues,
                 false,
+                &timezone,
             )
             .await?;
             out.push_str(&chart);

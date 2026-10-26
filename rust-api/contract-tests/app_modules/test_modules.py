@@ -9,6 +9,8 @@ ModuleWriteSerializer, so its key set differs from the annotated
 create/PATCH shapes. Pinned here on purpose.
 """
 
+from datetime import datetime, timedelta, timezone
+
 from .conftest import (
     MODULE_DETAIL_KEYS as DETAIL_KEYS,
     MODULE_ROW_KEYS,
@@ -16,6 +18,8 @@ from .conftest import (
     modules_url,
     session_headers,
 )
+
+from _harness.seed import estimate, estimate_point
 
 # PUT renders the bare ModuleWriteSerializer instance (fields="__all__"
 # plus member_ids), exposing created_by/updated_by/project/workspace.
@@ -272,3 +276,76 @@ def test_list_no_fields_shape(api, seed, tenant_a, project_a, auth_a):
         assert list(entry) == MODULE_VALUES_ORDER, (suffix, list(entry))
         assert "archived_at" not in entry
         assert set(entry) == MODULE_ROW_KEYS, sorted(set(entry) ^ MODULE_ROW_KEYS)
+
+
+def test_retrieve_completion_chart_uses_actor_timezone(
+    api, seed, db, tenant_a, project_a, auth_a,
+):
+    """Burndown charts bucket completions in the actor zone (PIDASHCONV-1423).
+
+    The completion lands at 20:00 UTC two days ago, which is the next
+    calendar day in Asia/Tokyo. Django's TruncDate (TimezoneMixin active
+    zone) counts it on the Tokyo day, so the UTC day still shows the
+    issue/points pending; a UTC truncation counts it a day early.
+    """
+    today = datetime.now(timezone.utc).date()
+    utc_day = str(today - timedelta(days=2))
+    tokyo_day = str(today - timedelta(days=1))
+    completed_at = datetime.combine(
+        today - timedelta(days=2), datetime.min.time()
+    ).replace(tzinfo=timezone.utc) + timedelta(hours=20)
+    ws = tenant_a["workspace"]["id"]
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE users SET user_timezone = %s WHERE id = %s",
+            ("Asia/Tokyo", tenant_a["user"]["id"]),
+        )
+    mid = seed.module(ws, project_a, name="CT1423 burndown")
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE modules SET start_date = %s, target_date = %s WHERE id = %s",
+            (
+                (today - timedelta(days=3)).isoformat(),
+                (today + timedelta(days=3)).isoformat(),
+                mid,
+            ),
+        )
+    est = estimate(db, project_a, ws)
+    ep = estimate_point(db, est["id"], project_a, ws, value="5")
+    try:
+        issue_id = seed.issue(
+            ws, project_a, name="ct1423 issue", completed_at=completed_at,
+        )
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE projects SET estimate_id = %s WHERE id = %s",
+                (est["id"], project_a),
+            )
+            cur.execute(
+                "UPDATE issues SET estimate_point_id = %s WHERE id = %s",
+                (ep["id"], issue_id),
+            )
+        seed.module_issue(ws, project_a, mid, issue_id)
+        r = api.get(module_url(tenant_a, project_a, mid), headers=auth_a)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        issues_chart = body["distribution"]["completion_chart"]
+        assert issues_chart[utc_day] == 1, issues_chart
+        assert issues_chart[tokyo_day] == 0, issues_chart
+        points_chart = body["estimate_distribution"]["completion_chart"]
+        assert points_chart[utc_day] == 5.0, points_chart
+        assert points_chart[tokyo_day] == 0.0, points_chart
+    finally:
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET estimate_point_id = NULL WHERE project_id = %s",
+                (project_a,),
+            )
+            cur.execute(
+                "UPDATE projects SET estimate_id = NULL WHERE id = %s",
+                (project_a,),
+            )
+            cur.execute(
+                "DELETE FROM estimate_points WHERE project_id = %s", (project_a,),
+            )
+            cur.execute("DELETE FROM estimates WHERE project_id = %s", (project_a,))
