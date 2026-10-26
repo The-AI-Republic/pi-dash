@@ -18,6 +18,7 @@ import {
   moduleInstantDay,
   moduleInstantReading,
   moduleOffsetChip,
+  moduleRangeClick,
   moduleRangeDurationDays,
   moduleRangeReading,
   moduleZoneOffsetMinutes,
@@ -344,5 +345,54 @@ describe("moduleRangeReading", () => {
     const reading = moduleRangeReading({ start: "2026-10-15", target: null }, "America/New_York");
     expect(reading.userText).toBe("Oct 15, 2026");
     expect(reading.note).toContain(MODULE_USER_ZONE_HEADING);
+  });
+});
+
+describe("moduleRangeClick", () => {
+  it("anchors the start on an empty selection", () => {
+    expect(moduleRangeClick({ start: null, end: null }, "2026-11-04")).toEqual({
+      start: "2026-11-04",
+      end: null,
+    });
+    expect(moduleRangeClick({ start: "", end: "" }, "2026-11-04")).toEqual({
+      start: "2026-11-04",
+      end: null,
+    });
+  });
+
+  it("extends a lone start to a later day", () => {
+    expect(moduleRangeClick({ start: "2026-11-04", end: null }, "2026-11-11")).toEqual({
+      start: "2026-11-04",
+      end: "2026-11-11",
+    });
+  });
+
+  it("re-anchors a lone start to an earlier day", () => {
+    expect(moduleRangeClick({ start: "2026-11-04", end: null }, "2026-10-30")).toEqual({
+      start: "2026-10-30",
+      end: null,
+    });
+  });
+
+  it("clears both sides when the lone day is clicked again", () => {
+    expect(moduleRangeClick({ start: "2026-11-04", end: null }, "2026-11-04")).toEqual({
+      start: null,
+      end: null,
+    });
+    expect(moduleRangeClick({ start: "2026-11-04", end: "" }, "2026-11-04")).toEqual({
+      start: null,
+      end: null,
+    });
+  });
+
+  it("re-anchors a complete range to the clicked day", () => {
+    expect(moduleRangeClick({ start: "2026-11-04", end: "2026-11-11" }, "2026-11-04")).toEqual({
+      start: "2026-11-04",
+      end: null,
+    });
+    expect(moduleRangeClick({ start: "2026-11-04", end: "2026-11-11" }, "2026-12-01")).toEqual({
+      start: "2026-12-01",
+      end: null,
+    });
   });
 });

@@ -95,6 +95,14 @@ describe("DateRangeCalendar", () => {
     expect(screen.getByRole("button", { name: "October 15, 2026" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: "October 25, 2026" })).not.toHaveAttribute("data-in-range");
   });
+
+  it("reports raw day clicks when onDayClick replaces the mapping", () => {
+    const onDayClick = vi.fn();
+    render(<DateRangeCalendar value={{ start: "2026-10-10", end: "2026-10-20" }} onDayClick={onDayClick} />);
+    fireEvent.click(screen.getByRole("button", { name: "October 15, 2026" }));
+    expect(onDayClick).toHaveBeenCalledTimes(1);
+    expect(onDayClick).toHaveBeenCalledWith("2026-10-15");
+  });
 });
 
 describe("DateRangePicker", () => {
@@ -118,6 +126,47 @@ describe("DateRangePicker", () => {
     expect(screen.getByRole("button", { name: "Dates" })).toHaveTextContent("Start date - Oct 20, 2026");
     rerender(<DateRangePicker mode="merged" label="Dates" value={{ start: null, end: null }} onChange={() => {}} />);
     expect(screen.getByRole("button", { name: "Dates" })).toHaveTextContent("Select dates");
+  });
+
+  it("resolves day clicks through onDayClick alone, with no onChange mapping", () => {
+    const onDayClick = vi.fn();
+    render(
+      <DateRangePicker mode="split" label="Dates" value={{ start: "2026-10-10", end: null }} onDayClick={onDayClick} />
+    );
+    fireEvent.click(screen.getByTestId("date-range-picker-trigger"));
+    const calendar = screen.getByTestId("date-range-picker-calendar");
+    fireEvent.click(within(calendar).getByRole("button", { name: "October 15, 2026" }));
+    expect(onDayClick).toHaveBeenCalledTimes(1);
+    expect(onDayClick).toHaveBeenCalledWith("2026-10-15");
+  });
+
+  it("hides the clear control while no onChange mapping is set", () => {
+    render(
+      <DateRangePicker
+        mode="split"
+        label="Dates"
+        value={{ start: "2026-10-10", end: null }}
+        onDayClick={() => {}}
+        clearable
+      />
+    );
+    expect(screen.queryByTestId("date-range-picker-clear")).not.toBeInTheDocument();
+  });
+
+  it("reports popup state through a controlled onOpenChange", () => {
+    const onOpenChange = vi.fn();
+    render(
+      <DateRangePicker
+        mode="merged"
+        label="Dates"
+        value={{ start: null, end: null }}
+        onChange={() => {}}
+        open={false}
+        onOpenChange={onOpenChange}
+      />
+    );
+    fireEvent.click(screen.getByTestId("date-range-picker-trigger"));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
   });
 
   it("pins the default trigger at the caller's keyboard position", () => {

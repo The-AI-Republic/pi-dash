@@ -99,6 +99,22 @@ import {
   moduleMenuEntries,
   moduleRowHoverClass,
   openModuleInNewTab,
+  applyModuleInlinePatch,
+  canEditModule,
+  canShowModuleStar,
+  flipModuleFavorite,
+  flipModuleFavoriteInList,
+  MODULE_FAVORITE_ADDED,
+  MODULE_FAVORITE_REMOVED,
+  MODULE_NO_LEAD_TOOLTIP,
+  ModuleDateControl,
+  ModuleLeadMark,
+  moduleRangeClick,
+  ModuleRowAccessories,
+  ModuleStarButton,
+  ModuleStatusControl,
+  useModuleFavorite,
+  useModuleInlineSave,
 } from "./index.js";
 
 describe("modules barrel", () => {
@@ -222,5 +238,24 @@ describe("modules barrel", () => {
     expect(defaultModuleLinkScheme).toBeDefined();
     expect(moduleLinkTitle).toBeDefined();
     expect(useModuleLinksWrite).toBeDefined();
+  });
+
+  it("re-exports the row/card accessories later slices reuse", () => {
+    expect(canEditModule).toBeDefined();
+    expect(canShowModuleStar).toBeDefined();
+    expect(moduleRangeClick).toBeDefined();
+    expect(applyModuleInlinePatch).toBeDefined();
+    expect(useModuleInlineSave).toBeDefined();
+    expect(flipModuleFavorite).toBeDefined();
+    expect(flipModuleFavoriteInList).toBeDefined();
+    expect(MODULE_FAVORITE_ADDED).toBe("Module added to favorites.");
+    expect(MODULE_FAVORITE_REMOVED).toBe("Module removed from favorites.");
+    expect(useModuleFavorite).toBeDefined();
+    expect(ModuleDateControl).toBeDefined();
+    expect(ModuleStatusControl).toBeDefined();
+    expect(ModuleLeadMark).toBeDefined();
+    expect(MODULE_NO_LEAD_TOOLTIP).toBe("No lead");
+    expect(ModuleStarButton).toBeDefined();
+    expect(ModuleRowAccessories).toBeDefined();
   });
 });

@@ -29,7 +29,7 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { emptyModuleFilters, toggleModuleFilterValue } from "../lib/moduleListControls.js";
 import { jsonResponse, makeDirectoryEntry, MODULES_LEAD_ID, MODULES_PROJECT_ID, makeModuleRow } from "../testing.js";
 import { ModuleListProvider, type ModuleListContextValue } from "./moduleListContext.js";
-import { ModulesListBody } from "./ModulesListBody.js";
+import { ModulesListBody, renderModule } from "./ModulesListBody.js";
 
 const ROWS = [
   makeModuleRow({ id: "323e4567-e89b-12d3-a456-426614174002", name: "Module 10" }),
@@ -72,10 +72,19 @@ function renderWithContext(
   modules = ROWS,
   props: Partial<React.ComponentProps<typeof ModulesListBody>> = {}
 ): ReturnType<typeof render> {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <ModuleListProvider value={value}>
-      <ModulesListBody workspaceSlug="acme" projectId={MODULES_PROJECT_ID} layout="list" modules={modules} {...props} />
-    </ModuleListProvider>
+    <QueryClientProvider client={queryClient}>
+      <ModuleListProvider value={value}>
+        <ModulesListBody
+          workspaceSlug="acme"
+          projectId={MODULES_PROJECT_ID}
+          layout="list"
+          modules={modules}
+          {...props}
+        />
+      </ModuleListProvider>
+    </QueryClientProvider>
   );
 }
 
@@ -158,10 +167,13 @@ describe("ModulesListBody", () => {
     const filters = toggleModuleFilterValue(emptyModuleFilters(), "status", "completed");
     const { rerender } = renderWithContext(context({ query: "zzz", filters }));
     expect(screen.getByTestId("modules-no-match")).toBeInTheDocument();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     rerender(
-      <ModuleListProvider value={context()}>
-        <ModulesListBody workspaceSlug="acme" projectId={MODULES_PROJECT_ID} layout="list" modules={ROWS} />
-      </ModuleListProvider>
+      <QueryClientProvider client={queryClient}>
+        <ModuleListProvider value={context()}>
+          <ModulesListBody workspaceSlug="acme" projectId={MODULES_PROJECT_ID} layout="list" modules={ROWS} />
+        </ModuleListProvider>
+      </QueryClientProvider>
     );
     expect(names()).toEqual(["Alpha", "Module 2", "Module 10"]);
   });
@@ -275,5 +287,72 @@ describe("ModulesListBody", () => {
     );
     expect(screen.queryByTestId("modules-no-match")).not.toBeInTheDocument();
     expect(screen.getByRole("list", { name: "Modules" })).toBeEmptyDOMElement();
+  });
+
+  it("fills the row accessory slots for an editor", () => {
+    renderWithContext(context(), ROWS, { memberRole: 15 });
+    const first = screen.getAllByTestId("modules-row")[0]!;
+    expect(within(first).getByTestId("modules-row-accessories")).toBeInTheDocument();
+    expect(within(first).getByTestId("modules-row-dates-trigger")).toBeEnabled();
+    expect(within(first).getByTestId("modules-row-status")).toBeEnabled();
+    expect(within(first).getByTestId("modules-row-lead")).toBeInTheDocument();
+    expect(within(first).getByTestId("modules-row-star")).toBeInTheDocument();
+  });
+
+  it("locks the row accessories for a guest", () => {
+    renderWithContext(context(), ROWS, { memberRole: 5 });
+    const first = screen.getAllByTestId("modules-row")[0]!;
+    expect(within(first).getByTestId("modules-row-dates-trigger")).toBeDisabled();
+    expect(within(first).getByTestId("modules-row-status")).toBeDisabled();
+    expect(within(first).getByTestId("modules-row-lead")).toBeInTheDocument();
+    expect(within(first).queryByTestId("modules-row-star")).not.toBeInTheDocument();
+  });
+
+  it("locks the row accessories on archived rows", () => {
+    renderWithContext(context(), ROWS, { memberRole: 15, archived: true });
+    const first = screen.getAllByTestId("modules-row")[0]!;
+    expect(within(first).getByTestId("modules-row-dates-trigger")).toBeDisabled();
+    expect(within(first).getByTestId("modules-row-status")).toBeDisabled();
+    expect(within(first).queryByTestId("modules-row-star")).not.toBeInTheDocument();
+  });
+
+  it("fills the card accessory slots for an editor", () => {
+    renderWithContext(context(), ROWS, { layout: "board", memberRole: 15 });
+    const first = screen.getAllByTestId("modules-board-card")[0]!;
+    expect(within(first).getByTestId("modules-card-status-pill")).toBeEnabled();
+    expect(within(first).getByTestId("modules-card-dates-control-trigger")).toBeEnabled();
+    expect(within(first).getByTestId("modules-card-star")).toBeInTheDocument();
+  });
+
+  it("locks the card accessories for a guest", () => {
+    renderWithContext(context(), ROWS, { layout: "board", memberRole: 5 });
+    const first = screen.getAllByTestId("modules-board-card")[0]!;
+    expect(within(first).getByTestId("modules-card-status-pill")).toBeDisabled();
+    expect(within(first).getByTestId("modules-card-dates-control-trigger")).toBeDisabled();
+    expect(within(first).queryByTestId("modules-card-star")).not.toBeInTheDocument();
+  });
+
+  it("renders a read-only row when no options arrive", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        {renderModule("list", "acme", MODULES_PROJECT_ID, ROWS[0]!)}
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("modules-row-dates-trigger")).toBeDisabled();
+    expect(screen.getByTestId("modules-row-status")).toBeDisabled();
+    expect(screen.queryByTestId("modules-row-star")).not.toBeInTheDocument();
+  });
+
+  it("renders a read-only card when no options arrive", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        {renderModule("board", "acme", MODULES_PROJECT_ID, ROWS[0]!)}
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("modules-card-status-pill")).toBeDisabled();
+    expect(screen.getByTestId("modules-card-dates-control-trigger")).toBeDisabled();
+    expect(screen.queryByTestId("modules-card-star")).not.toBeInTheDocument();
   });
 });

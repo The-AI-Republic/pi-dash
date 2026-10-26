@@ -35,14 +35,24 @@ import {
 /** Trigger shape: one smart label, or two spans joined by an arrow. */
 export type DateRangeMode = "merged" | "split";
 
-export interface DateRangeCalendarProps {
+/**
+ * How day clicks resolve: the default adjust-one-end mapping through
+ * onChange, or raw day clicks through onDayClick for surfaces whose
+ * spec re-anchors the selection (modules §4.1), which take the day and
+ * compute their own next range. Exactly one mapping is set, so a caller
+ * never passes a dead callback to satisfy the other.
+ */
+export type DateRangeChangeProps =
+  | { onChange: (range: RangeValue) => void; onDayClick?: never }
+  | { onChange?: never; onDayClick: (dayIso: string) => void };
+
+export type DateRangeCalendarProps = {
   value: RangeValue;
-  onChange: (range: RangeValue) => void;
   min?: string | null | undefined;
   max?: string | null | undefined;
   weekStart?: number | undefined;
   testId?: string | undefined;
-}
+} & DateRangeChangeProps;
 
 function initialVisibleMonth(value: RangeValue): { year: number; month0: number } {
   const anchor = parseIsoDay(value.start) ?? parseIsoDay(value.end);
@@ -54,14 +64,11 @@ function initialVisibleMonth(value: RangeValue): { year: number; month0: number 
 }
 
 /** Range calendar: caption selects plus the day grid. No popover. */
-export function DateRangeCalendar({
-  value,
-  onChange,
-  min,
-  max,
-  weekStart = DEFAULT_WEEK_START,
-  testId = "date-range-calendar",
-}: DateRangeCalendarProps): React.ReactElement {
+export function DateRangeCalendar(props: DateRangeCalendarProps): React.ReactElement {
+  const { value, min, max, weekStart = DEFAULT_WEEK_START, testId = "date-range-calendar" } = props;
+  // The mapping half as its own union, so the day-click branch below
+  // narrows exactly one of the two callbacks into existence.
+  const change: DateRangeChangeProps = props;
   const [visible, setVisible] = React.useState(() => initialVisibleMonth(value));
   const weeks = monthGrid(visible.year, visible.month0, weekStart, min ?? null, max ?? null);
   const headers = orderedWeekdays(weekStart);
@@ -139,7 +146,13 @@ export function DateRangeCalendar({
               aria-label={formatDayLong(cell.iso)}
               aria-pressed={endpoint}
               disabled={cell.disabled}
-              onClick={() => onChange(applyRangeClick(value, cell.iso))}
+              onClick={() => {
+                if (change.onDayClick !== undefined) {
+                  change.onDayClick(cell.iso);
+                  return;
+                }
+                change.onChange(applyRangeClick(value, cell.iso));
+              }}
               className={
                 endpoint
                   ? "text-body flex h-8 items-center justify-center rounded-(--radius-control) bg-(--accent) font-medium text-(--bg)"
@@ -159,9 +172,8 @@ export function DateRangeCalendar({
   );
 }
 
-export interface DateRangePickerProps {
+export type DateRangePickerProps = {
   value: RangeValue;
-  onChange: (range: RangeValue) => void;
   mode: DateRangeMode;
   min?: string | null | undefined;
   max?: string | null | undefined;
@@ -186,7 +198,7 @@ export interface DateRangePickerProps {
   /** Controlled popup state; omit for the picker's own state. */
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
-}
+} & DateRangeChangeProps;
 
 function mergedLabel(
   value: RangeValue,
@@ -201,25 +213,27 @@ function mergedLabel(
 }
 
 /** Date-range dropdown: merged or split trigger plus the portalled range calendar. */
-export function DateRangePicker({
-  value,
-  onChange,
-  mode,
-  min,
-  max,
-  weekStart = DEFAULT_WEEK_START,
-  label,
-  mergedPlaceholder = "Select dates",
-  fromPlaceholder = "Start date",
-  toPlaceholder = "End date",
-  disabled = false,
-  clearable = false,
-  testId = "date-range-picker",
-  tabIndex,
-  trigger,
-  open: controlledOpen,
-  onOpenChange,
-}: DateRangePickerProps): React.ReactElement {
+export function DateRangePicker(props: DateRangePickerProps): React.ReactElement {
+  const {
+    value,
+    mode,
+    min,
+    max,
+    weekStart = DEFAULT_WEEK_START,
+    label,
+    mergedPlaceholder = "Select dates",
+    fromPlaceholder = "Start date",
+    toPlaceholder = "End date",
+    disabled = false,
+    clearable = false,
+    testId = "date-range-picker",
+    tabIndex,
+    trigger,
+    open: controlledOpen,
+    onOpenChange,
+    ...change
+  } = props;
+  const { onChange } = change;
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false);
   const open = controlledOpen ?? uncontrolledOpen;
   function setOpen(next: boolean): void {
@@ -273,10 +287,10 @@ export function DateRangePicker({
           max={max}
           weekStart={normalizedStart}
           testId={`${testId}-calendar`}
-          onChange={onChange}
+          {...change}
         />
       </Popover>
-      {showClear ? (
+      {showClear && onChange !== undefined ? (
         <button
           type="button"
           aria-label={`Clear ${label}`}

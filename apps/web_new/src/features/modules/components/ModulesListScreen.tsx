@@ -95,6 +95,8 @@ interface ModulesListSettledProps {
   onFiltersChange: (filters: ModuleListFilters) => void;
   members: readonly WorkspaceMember[] | undefined;
   meId: string | null;
+  /** The viewer's project role number; the row/card accessories read it. */
+  memberRole: number | null;
   shownLayout: ModulesLayout;
   loading: boolean;
   modules: readonly ModuleRow[];
@@ -129,6 +131,7 @@ function ModulesListSettled({
   onFiltersChange,
   members,
   meId,
+  memberRole,
   shownLayout,
   loading,
   modules,
@@ -197,6 +200,7 @@ function ModulesListSettled({
         onOpenPeek={openPeek}
         archived={archived}
         members={members}
+        memberRole={memberRole}
         rowMenu={menuForRow}
       />
     );
@@ -356,6 +360,7 @@ export function ModulesListScreen({
           onFiltersChange={setFilters}
           members={directory.data}
           meId={me.data?.id ?? null}
+          memberRole={roles.data?.[projectId] ?? null}
           shownLayout={shownLayout}
           loading={state === "skeleton"}
           modules={modules.data ?? []}
