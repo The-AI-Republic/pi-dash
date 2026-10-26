@@ -1284,9 +1284,13 @@ async fn get_or_create_workspace_integration(
     {
         return Ok(existing);
     }
+    // `APIToken.objects.create(...)` / `WorkspaceIntegration.objects.create(...)`
+    // (`github.py:114-128`): `BaseModel.save` stamps `created_by` with the
+    // request user and leaves `updated_by` NULL on create
+    // (`db/models/base.py:36-39`).
     let token_id = Uuid::new_v4();
     sqlx::query(
-        r#"INSERT INTO "api_tokens" ("id", "created_at", "updated_at", "label", "description", "is_active", "last_used", "token", "user_id", "user_type", "workspace_id", "expired_at", "is_service", "allowed_rate_limit") VALUES ($1, now(), now(), $2, 'GitHub integration FK shim — not for auth', false, NULL, $3, $4, 1, $5, NULL, false, '60/min')"#,
+        r#"INSERT INTO "api_tokens" ("id", "created_at", "updated_at", "created_by_id", "label", "description", "is_active", "last_used", "token", "user_id", "user_type", "workspace_id", "expired_at", "is_service", "allowed_rate_limit") VALUES ($1, now(), now(), $4, $2, 'GitHub integration FK shim — not for auth', false, NULL, $3, $4, 1, $5, NULL, false, '60/min')"#,
     )
     .bind(token_id)
     .bind(format!("github-integration-{workspace_id}"))
@@ -1298,7 +1302,7 @@ async fn get_or_create_workspace_integration(
     .map_err(|error| GithubTransportError(error.to_string()))?;
     let wi_id = Uuid::new_v4();
     sqlx::query(
-        r#"INSERT INTO "workspace_integrations" ("id", "metadata", "config", "actor_id", "api_token_id", "integration_id", "workspace_id", "created_at", "updated_at") VALUES ($1, '{}', '{}', $2, $3, $4, $5, now(), now())"#,
+        r#"INSERT INTO "workspace_integrations" ("id", "metadata", "config", "actor_id", "api_token_id", "integration_id", "workspace_id", "created_at", "updated_at", "created_by_id") VALUES ($1, '{}', '{}', $2, $3, $4, $5, now(), now(), $2)"#,
     )
     .bind(wi_id)
     .bind(actor_id)
@@ -1322,6 +1326,7 @@ async fn get_or_create_workspace_integration(
 async fn upsert_git_account_for_app(
     connection: &mut sqlx::PgConnection,
     installation: &pidash_db::integrations::github_models::github_app_installation::GithubAppInstallation,
+    actor_id: Uuid,
 ) -> Result<(), GithubTransportError> {
     let status = if installation.suspended_at.is_some() {
         "degraded"
@@ -1402,8 +1407,11 @@ async fn upsert_git_account_for_app(
             .transpose()
             .map_err(|error| GithubTransportError(error.to_string()))?
             .ok_or_else(|| GithubTransportError("workspace integration missing".to_owned()))?;
+            // The `update_or_create` create branch stamps `created_by`
+            // with the request user and leaves `updated_by` NULL
+            // (`BaseModel.save`, `db/models/base.py:36-39`).
             sqlx::query(
-                r#"INSERT INTO "git_provider_accounts" ("id", "created_at", "updated_at", "workspace_id", "provider", "host_url", "auth_type", "external_account_id", "external_account_login", "display_name", "capabilities", "credential_config", "workspace_integration_id", "status", "verified_at", "last_check_error", "metadata") VALUES ($1, now(), now(), $2, 'github', 'https://github.com', 'github_app', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+                r#"INSERT INTO "git_provider_accounts" ("id", "created_at", "updated_at", "created_by_id", "workspace_id", "provider", "host_url", "auth_type", "external_account_id", "external_account_login", "display_name", "capabilities", "credential_config", "workspace_integration_id", "status", "verified_at", "last_check_error", "metadata") VALUES ($1, now(), now(), $13, $2, 'github', 'https://github.com', 'github_app', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
             )
             .bind(Uuid::new_v4())
             .bind(workspace_id)
@@ -1417,12 +1425,59 @@ async fn upsert_git_account_for_app(
             .bind(installation.verified_at)
             .bind(&installation.last_check_error)
             .bind(&metadata)
+            .bind(actor_id)
         }
     }
     .execute(&mut *connection)
     .await
     .map(|_| ())
     .map_err(|error| GithubTransportError(error.to_string()))
+}
+
+/// `GithubAppInstallation.objects.update_or_create(workspace_integration=wi,
+/// defaults=...)` (`github.py:261-264`): exactly one row per workspace
+/// integration (the OneToOne carries the column-level unique). Returns the
+/// row id. `BaseModel.save` stamps `created_by` with the request user and
+/// leaves `updated_by` NULL on create (`db/models/base.py:36-39`); the
+/// conflict branch rewrites the defaults columns only, never
+/// `created_by_id`.
+#[allow(clippy::too_many_arguments)]
+async fn upsert_installation_row(
+    connection: &mut sqlx::PgConnection,
+    workspace_integration_id: Uuid,
+    actor_id: Uuid,
+    installation_id: i64,
+    account_login: &str,
+    account_type: &str,
+    repository_selection: &str,
+    repository_count: i32,
+    permissions: &serde_json::Value,
+    events: &serde_json::Value,
+    installed_at: Option<DateTime<Utc>>,
+    suspended_at: Option<DateTime<Utc>>,
+) -> Result<Uuid, GithubTransportError> {
+    sqlx::query(
+        r#"INSERT INTO "github_app_installations" ("id", "created_at", "updated_at", "created_by_id", "workspace_integration_id", "installation_id", "account_login", "account_type", "repository_selection", "repository_count", "permissions", "events", "installed_at", "suspended_at", "last_check_error") VALUES ($1, now(), now(), $12, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '') ON CONFLICT ("workspace_integration_id") DO UPDATE SET "installation_id" = EXCLUDED."installation_id", "account_login" = EXCLUDED."account_login", "account_type" = EXCLUDED."account_type", "repository_selection" = EXCLUDED."repository_selection", "repository_count" = EXCLUDED."repository_count", "permissions" = EXCLUDED."permissions", "events" = EXCLUDED."events", "installed_at" = EXCLUDED."installed_at", "suspended_at" = EXCLUDED."suspended_at", "last_check_error" = '', "updated_at" = now() RETURNING "id""#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(workspace_integration_id)
+    .bind(installation_id)
+    .bind(account_login)
+    .bind(account_type)
+    .bind(repository_selection)
+    .bind(repository_count)
+    .bind(permissions)
+    .bind(events)
+    .bind(installed_at)
+    .bind(suspended_at)
+    .bind(actor_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| GithubTransportError(error.to_string()))
+    .and_then(|row| {
+        row.try_get("id")
+            .map_err(|error| GithubTransportError(error.to_string()))
+    })
 }
 
 /// `_upsert_app_installation` (`github.py:229-267`): the transactional
@@ -1519,30 +1574,21 @@ async fn upsert_app_installation(
             "GitHub installation is already connected to workspace {slug}"
         )));
     }
-    // `update_or_create(workspace_integration=wi, defaults=...)`
-    // (`github.py:261-264`): exactly one row per workspace integration
-    // (the OneToOne carries the column-level unique).
-    let row_id: Uuid = sqlx::query(
-        r#"INSERT INTO "github_app_installations" ("id", "created_at", "updated_at", "workspace_integration_id", "installation_id", "account_login", "account_type", "repository_selection", "repository_count", "permissions", "events", "installed_at", "suspended_at", "last_check_error") VALUES ($1, now(), now(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '') ON CONFLICT ("workspace_integration_id") DO UPDATE SET "installation_id" = EXCLUDED."installation_id", "account_login" = EXCLUDED."account_login", "account_type" = EXCLUDED."account_type", "repository_selection" = EXCLUDED."repository_selection", "repository_count" = EXCLUDED."repository_count", "permissions" = EXCLUDED."permissions", "events" = EXCLUDED."events", "installed_at" = EXCLUDED."installed_at", "suspended_at" = EXCLUDED."suspended_at", "last_check_error" = '', "updated_at" = now() RETURNING "id""#,
+    let row_id = upsert_installation_row(
+        &mut transaction,
+        wi.id,
+        actor_id,
+        installation_id,
+        &account_login,
+        &account_type,
+        &repository_selection,
+        repository_count,
+        &permissions,
+        &events,
+        installed_at,
+        suspended_at,
     )
-    .bind(Uuid::new_v4())
-    .bind(wi.id)
-    .bind(installation_id)
-    .bind(&account_login)
-    .bind(&account_type)
-    .bind(&repository_selection)
-    .bind(repository_count)
-    .bind(&permissions)
-    .bind(&events)
-    .bind(installed_at)
-    .bind(suspended_at)
-    .fetch_one(&mut *transaction)
-    .await
-    .map_err(|error| GithubTransportError(error.to_string()))
-    .and_then(|row| {
-        row.try_get("id")
-            .map_err(|error| GithubTransportError(error.to_string()))
-    })?;
+    .await?;
     let installation = app_installation_by_id(&mut transaction, row_id)
         .await
         .map_err(|error| GithubTransportError(error.to_string()))?
@@ -1557,7 +1603,7 @@ async fn upsert_app_installation(
                 GithubTransportError("installation refresh save failed".to_owned())
             }
         })?;
-    upsert_git_account_for_app(&mut transaction, &installation).await?;
+    upsert_git_account_for_app(&mut transaction, &installation, actor_id).await?;
     transaction
         .commit()
         .await
@@ -2415,6 +2461,262 @@ mod tests {
             last_checked_at: None,
             last_check_error: String::new(),
         }
+    }
+
+    /// Live-kernel DB pool (PIDASHCONV-1083 convention): unset
+    /// DATABASE_URL (plain `cargo test`) skips these tests.
+    async fn kernel_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::PgPool::connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-kernel test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// Seed an active user + workspace (column lists mirror
+    /// `_harness.db.Database.make_user/make_workspace`). Tag-derived
+    /// names keep reruns collision-free.
+    async fn seed_kernel_world(pool: &sqlx::PgPool, tag: &str) -> (Uuid, Uuid) {
+        let user_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("k1465a-{tag}"))
+        .bind(format!("k1465a-{tag}@example.test"))
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                "owner_id", "timezone", "background_color")
+               VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+        )
+        .bind(now)
+        .bind(workspace_id)
+        .bind(format!("kernel ws {tag}"))
+        .bind(format!("k1465a-{tag}"))
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        (user_id, workspace_id)
+    }
+
+    async fn cleanup_kernel_world(
+        pool: &sqlx::PgPool,
+        user_id: Uuid,
+        workspace_id: Uuid,
+        integration_id: Option<Uuid>,
+    ) {
+        sqlx::query(r#"DELETE FROM "git_provider_accounts" WHERE "workspace_id" = $1"#)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("cleanup accounts");
+        sqlx::query(
+            r#"DELETE FROM "github_app_installations" WHERE "workspace_integration_id" IN
+               (SELECT "id" FROM "workspace_integrations" WHERE "workspace_id" = $1)"#,
+        )
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("cleanup installations");
+        sqlx::query(r#"DELETE FROM "workspace_integrations" WHERE "workspace_id" = $1"#)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("cleanup workspace integrations");
+        sqlx::query(r#"DELETE FROM "api_tokens" WHERE "workspace_id" = $1"#)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("cleanup tokens");
+        if let Some(integration_id) = integration_id {
+            sqlx::query(r#"DELETE FROM "integrations" WHERE "id" = $1"#)
+                .bind(integration_id)
+                .execute(pool)
+                .await
+                .expect("cleanup integration");
+        }
+        sqlx::query(r#"DELETE FROM "workspaces" WHERE "id" = $1"#)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("cleanup workspace");
+        sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("cleanup user");
+    }
+
+    /// PIDASHCONV-1465: the callback SQL kernels must stamp `created_by`
+    /// with the request actor and leave `updated_by` NULL on create,
+    /// exactly like `BaseModel.save` (`db/models/base.py:36-39`). The
+    /// HTTP callback is sealed in tests (the exchange chain posts to
+    /// hardcoded https://api.github.com URLs on both backends), so this
+    /// drives `get_or_create_workspace_integration`,
+    /// `upsert_installation_row` and `upsert_git_account_for_app`
+    /// directly with fabricated inputs — the oauth_github kernel
+    /// convention (PIDASHCONV-1083).
+    #[tokio::test]
+    async fn callback_kernels_stamp_created_by() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = Uuid::new_v4().simple().to_string();
+        let tag = tag[..8].to_owned();
+        let (user_id, workspace_id) = seed_kernel_world(&pool, &tag).await;
+        // The `github` integrations row is shared process-wide: only
+        // delete it in cleanup when this run created it.
+        let integration_preexisted: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM "integrations" WHERE "provider" = 'github')"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("integration probe");
+        let mut connection = pool.acquire().await.expect("connection");
+        let wi = get_or_create_workspace_integration(&mut connection, workspace_id, user_id)
+            .await
+            .expect("workspace integration");
+        let token_stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            r#"SELECT "created_by_id", "updated_by_id" FROM "api_tokens" WHERE "workspace_id" = $1"#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("token row");
+        assert_eq!(token_stamps.0, Some(user_id), "api_tokens created_by");
+        assert_eq!(token_stamps.1, None, "api_tokens updated_by");
+        let wi_stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            r#"SELECT "created_by_id", "updated_by_id" FROM "workspace_integrations" WHERE "id" = $1"#,
+        )
+        .bind(wi.id)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("workspace integration row");
+        assert_eq!(
+            wi_stamps.0,
+            Some(user_id),
+            "workspace_integrations created_by"
+        );
+        assert_eq!(wi_stamps.1, None, "workspace_integrations updated_by");
+        // `installation_id` is globally unique: random per run.
+        let installation_id = 1_000_000_000 + (Uuid::new_v4().as_u128() % 8_000_000_000) as i64;
+        let row_id = upsert_installation_row(
+            &mut connection,
+            wi.id,
+            user_id,
+            installation_id,
+            "kernel-octocat",
+            "Organization",
+            "selected",
+            3,
+            &serde_json::json!({}),
+            &serde_json::json!([]),
+            None,
+            None,
+        )
+        .await
+        .expect("installation row");
+        let installation_stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            r#"SELECT "created_by_id", "updated_by_id" FROM "github_app_installations" WHERE "id" = $1"#,
+        )
+        .bind(row_id)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("installation row");
+        assert_eq!(
+            installation_stamps.0,
+            Some(user_id),
+            "github_app_installations created_by"
+        );
+        assert_eq!(
+            installation_stamps.1, None,
+            "github_app_installations updated_by"
+        );
+        let installation = app_installation_by_id(&mut connection, row_id)
+            .await
+            .expect("fetch installation")
+            .expect("installation present");
+        upsert_git_account_for_app(&mut connection, &installation, user_id)
+            .await
+            .expect("git account");
+        let account_stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            r#"SELECT "created_by_id", "updated_by_id" FROM "git_provider_accounts" WHERE "workspace_id" = $1"#,
+        )
+        .bind(workspace_id)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("account row");
+        assert_eq!(
+            account_stamps.0,
+            Some(user_id),
+            "git_provider_accounts created_by"
+        );
+        assert_eq!(account_stamps.1, None, "git_provider_accounts updated_by");
+        // The `ON CONFLICT DO UPDATE` branch must rewrite the defaults
+        // without touching `created_by_id`: re-upsert the same workspace
+        // integration with a different actor and installation id. (The
+        // proposed row conflicts, so the unknown actor never reaches the
+        // table; `updated_by` on this branch is the known out-of-scope
+        // divergence and is deliberately not asserted.)
+        let other_actor = Uuid::new_v4();
+        let installation_id_2 = 1_000_000_000 + (Uuid::new_v4().as_u128() % 8_000_000_000) as i64;
+        let row_id_2 = upsert_installation_row(
+            &mut connection,
+            wi.id,
+            other_actor,
+            installation_id_2,
+            "kernel-octocat-2",
+            "Organization",
+            "selected",
+            5,
+            &serde_json::json!({}),
+            &serde_json::json!([]),
+            None,
+            None,
+        )
+        .await
+        .expect("installation re-upsert");
+        assert_eq!(row_id_2, row_id, "conflict branch returns same row");
+        let restamps: (Option<Uuid>, i64) = sqlx::query_as(
+            r#"SELECT "created_by_id", "installation_id" FROM "github_app_installations" WHERE "id" = $1"#,
+        )
+        .bind(row_id)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("installation row after conflict");
+        assert_eq!(restamps.0, Some(user_id), "conflict keeps created_by");
+        assert_eq!(restamps.1, installation_id_2, "conflict rewrites defaults");
+        drop(connection);
+        cleanup_kernel_world(
+            &pool,
+            user_id,
+            workspace_id,
+            (!integration_preexisted).then_some(wi.integration_id),
+        )
+        .await;
     }
 
     #[test]
