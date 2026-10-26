@@ -73,6 +73,14 @@ export function ThreadView({ workspaceSlug, threadId, state, configured }: Threa
     followTail(bodyRef.current, tailRef.current);
   }, [chat.entries]);
 
+  // A reply's markdown renders after its row lands, so the list grows again
+  // a moment after the scroll above. Keep the tail in view while the
+  // scrollport keeps growing, but stop once the reader scrolls away: their
+  // position wins from then on (AGT-047).
+  React.useEffect(() => {
+    followTailWhileGrowing(bodyRef.current, tailRef.current);
+  }, []);
+
   const submit = (content: string): void => {
     setDraft("");
     chat.send(content);
@@ -160,6 +168,44 @@ export function followTail(body: HTMLElement | null, tail: HTMLElement | null): 
   if (body === null || tail === null) return;
   if (typeof tail.scrollIntoView === "function") tail.scrollIntoView({ block: "end" });
   body.scrollTop = body.scrollHeight;
+}
+
+/** How far from the end still counts as "following the tail", in pixels. */
+const TAIL_TOLERANCE_PX = 24;
+
+/**
+ * Whether the scrollport sits at its end. The tail marker leaves the list's
+ * bottom padding visible, so anything within one line of the end counts.
+ */
+export function isFollowingTail(body: HTMLElement): boolean {
+  return Math.abs(body.scrollHeight - body.scrollTop - body.clientHeight) < TAIL_TOLERANCE_PX;
+}
+
+/**
+ * Keep the tail in view while content above it keeps growing. A reply grows
+ * its row when the markdown renderer resolves, which happens after the
+ * entries effect already scrolled; without this the newest row drifts below
+ * the fold under load. Growth re-pins only while the reader is still at the
+ * end — an explicit scroll up wins, and the watch re-arms when they come
+ * back down. Growth is watched on the DOM, not the scrollport's box: the
+ * port keeps its height and the list inside it is what grows. Returns a
+ * disposer; hosts without a MutationObserver rely on the entries effect.
+ */
+export function followTailWhileGrowing(body: HTMLElement | null, tail: HTMLElement | null): () => void {
+  if (body === null || tail === null || typeof MutationObserver === "undefined") return () => undefined;
+  let pinned = true;
+  const remember = (): void => {
+    pinned = isFollowingTail(body);
+  };
+  const observer = new MutationObserver(() => {
+    if (pinned) followTail(body, tail);
+  });
+  observer.observe(body, { childList: true, subtree: true, characterData: true });
+  body.addEventListener("scroll", remember, { passive: true });
+  return () => {
+    observer.disconnect();
+    body.removeEventListener("scroll", remember);
+  };
 }
 
 /**

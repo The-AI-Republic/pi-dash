@@ -23,7 +23,7 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { sttConfigKeys } from "../../../shared/dictation/index.js";
 import { assistantKeys } from "../api/keys.js";
 import { transcriptKey } from "../api/threadKeys.js";
-import { ThreadView, followTail } from "./ThreadView.js";
+import { ThreadView, followTail, followTailWhileGrowing, isFollowingTail } from "./ThreadView.js";
 
 const stream = vi.hoisted(() => ({
   subscriptions: [] as { close: () => void; handlers: { onEvent: (event: unknown) => void } }[],
@@ -327,6 +327,73 @@ describe("ThreadView transcript", () => {
       expect(scrollIntoView).toHaveBeenCalled();
     } finally {
       Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("treats a scrollport within one line of the end as following the tail", () => {
+    const body = document.createElement("div");
+    Object.defineProperty(body, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(body, "clientHeight", { value: 400, configurable: true });
+    body.scrollTop = 600;
+    expect(isFollowingTail(body)).toBe(true);
+    body.scrollTop = 590;
+    expect(isFollowingTail(body)).toBe(true);
+    body.scrollTop = 200;
+    expect(isFollowingTail(body)).toBe(false);
+  });
+
+  it("re-pins the tail when the list grows after the first scroll", async () => {
+    const body = document.createElement("div");
+    Object.defineProperty(body, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(body, "clientHeight", { value: 400, configurable: true });
+    body.scrollTop = 200;
+    const tail = document.createElement("div");
+    const dispose = followTailWhileGrowing(body, tail);
+    try {
+      // The reply's markdown lands: the list grows, so the port stops at the end.
+      Object.defineProperty(body, "scrollHeight", { value: 1200, configurable: true });
+      body.appendChild(document.createElement("span"));
+      await waitFor(() => expect(body.scrollTop).toBe(1200));
+    } finally {
+      dispose();
+    }
+  });
+
+  it("stops following once the reader scrolls up, and resumes at the end", async () => {
+    const body = document.createElement("div");
+    Object.defineProperty(body, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(body, "clientHeight", { value: 400, configurable: true });
+    const tail = document.createElement("div");
+    const dispose = followTailWhileGrowing(body, tail);
+    try {
+      body.appendChild(document.createElement("span"));
+      await waitFor(() => expect(body.scrollTop).toBe(1000));
+      body.scrollTop = 120;
+      fireEvent.scroll(body);
+      Object.defineProperty(body, "scrollHeight", { value: 1200, configurable: true });
+      body.appendChild(document.createElement("span"));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(body.scrollTop).toBe(120);
+      body.scrollTop = 800;
+      fireEvent.scroll(body);
+      Object.defineProperty(body, "scrollHeight", { value: 1400, configurable: true });
+      body.appendChild(document.createElement("span"));
+      await waitFor(() => expect(body.scrollTop).toBe(1400));
+    } finally {
+      dispose();
+    }
+  });
+
+  it("does nothing when the host has no MutationObserver", () => {
+    const original = globalThis.MutationObserver;
+    // A host without the API still renders: the entries effect alone follows.
+    vi.stubGlobal("MutationObserver", undefined);
+    try {
+      expect(() => followTailWhileGrowing(document.createElement("div"), document.createElement("div"))).not.toThrow();
+    } finally {
+      vi.stubGlobal("MutationObserver", original);
     }
   });
 });
