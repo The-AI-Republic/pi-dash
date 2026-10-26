@@ -20,6 +20,13 @@ async function signInAndOpenIssues(
   await driver.signInWithPasswordRetry(seed.email, seed.password);
 }
 
+/** Tick the first row's selection control on the new app (ISS-108). */
+async function selectFirstRow(driver: { page: import("@playwright/test").Page }): Promise<void> {
+  const first = driver.page.getByTestId("selection-checkbox").first();
+  await first.waitFor({ state: "visible", timeout: 120_000 });
+  await first.click();
+}
+
 test(
   specTitle(["ISS-108"], "bug: NEWFRONT-129 list selection follows the target"),
   { tag: specTags(["ISS-108"]) },

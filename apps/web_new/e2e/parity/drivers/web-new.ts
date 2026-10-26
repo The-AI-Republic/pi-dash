@@ -633,6 +633,9 @@ export class WebNewDriver implements ParityDriver {
   /** How long one body-paint poll waits before reading the column again. */
   private static readonly PAINT_STEP_MS = 250;
 
+  /** Markup hook shared by the row and group selection controls (ISS-108). */
+  private static readonly SELECTION_CONTROL_ID = "selection-checkbox";
+
   // --- Archives shell (NEWFRONT-698, ARCH-001..003). Tab strip and
   // --- navigation, addresses, titles, badge, back control, skeleton
   // --- slot, traffic spy and priming. Other slices call these
@@ -2294,12 +2297,34 @@ export class WebNewDriver implements ParityDriver {
     return todo("expandListRows");
   }
 
-  async switchIssueLayout(_label: string): Promise<void> {
-    return todo("switchIssueLayout");
+  async switchIssueLayout(label: string): Promise<void> {
+    // Specs name the control by its tooltip/aria text ("Timeline Layout").
+    // Map that back to a stored layout key and use the same switcher path
+    // the layouts rows exercise.
+    const kind = WebNewDriver.layoutKeyFromLabel(label);
+    await this.layoutsSwitchTo(kind);
   }
 
   async ensureListLayout(): Promise<void> {
-    return todo("ensureListLayout");
+    // Best effort: a page without the switcher (an empty state, a dead
+    // navigation) leaves the layout alone for the caller's polling.
+    try {
+      await this.layoutsSwitchTo("list");
+    } catch {
+      // Nothing to switch.
+    }
+  }
+
+  /** The stored layout key a switcher label names, defaulting to list. */
+  private static layoutKeyFromLabel(label: string): LayoutsLayoutKey {
+    const wanted = label
+      .trim()
+      .replace(/\s+layout$/i, "")
+      .toLowerCase();
+    for (const [key, text] of Object.entries(WebNewDriver.CYCLE_LAYOUT_LABELS)) {
+      if (text.toLowerCase() === wanted) return key as LayoutsLayoutKey;
+    }
+    return "list";
   }
 
   async toggleAdvancedGit(): Promise<void> {

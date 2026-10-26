@@ -30,6 +30,7 @@ export function RowSelectionCheckbox({
   return (
     <input
       type="checkbox"
+      data-testid="selection-checkbox"
       aria-label={label}
       checked={checked}
       onClick={(event) => {
@@ -60,6 +61,7 @@ export function GroupSelectionCheckbox({ state, label, onToggle }: GroupSelectio
     <input
       ref={ref}
       type="checkbox"
+      data-testid="selection-checkbox"
       aria-label={label}
       checked={state === "complete"}
       onClick={(event) => event.stopPropagation()}
