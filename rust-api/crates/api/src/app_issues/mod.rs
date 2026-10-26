@@ -2457,7 +2457,7 @@ fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> V
             },
             _ => value.clone(),
         },
-        "completed_at" | "deleted_at" => match value {
+        "created_at" | "updated_at" | "completed_at" | "deleted_at" => match value {
             Value::String(text) => match chrono::DateTime::parse_from_rfc3339(text) {
                 Ok(aware) => Value::String(crate::serializer::render_datetime(
                     &aware.with_timezone(&chrono::Utc),
@@ -2469,7 +2469,9 @@ fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> V
         "sort_order" => match value {
             Value::Number(number) => {
                 let float = number.as_f64().unwrap_or(f64::NAN);
-                Value::String(crate::paginator::py_float_str(float))
+                serde_json::Number::from_f64(float)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| value.clone())
             }
             _ => value.clone(),
         },
@@ -3242,6 +3244,45 @@ mod tests {
             )
             .await,
             StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn grouped_rows_render_like_ungrouped() {
+        // PIDASHCONV-1510: Django serves grouped rows through the same
+        // `issue_on_results` `.values()` dicts as the flat list, so
+        // `sort_order` is a JSON number and datetimes carry `Z` — not the
+        // `row_to_json` string/`+00:00` spellings.
+        let mut row = Map::new();
+        row.insert(
+            "sort_order".to_owned(),
+            Value::Number(serde_json::Number::from(10000)),
+        );
+        row.insert(
+            "created_at".to_owned(),
+            Value::String("2026-10-26T06:51:00.235877+00:00".to_owned()),
+        );
+        row.insert(
+            "updated_at".to_owned(),
+            Value::String("2026-10-26T06:51:00.235877+00:00".to_owned()),
+        );
+        let fields = vec![
+            "sort_order".to_owned(),
+            "created_at".to_owned(),
+            "updated_at".to_owned(),
+        ];
+        let shaped = shape_map(&row, &fields, &chrono_tz::UTC, false);
+        assert_eq!(
+            serde_json::to_string(&shaped["sort_order"]).unwrap(),
+            "10000.0"
+        );
+        assert_eq!(
+            shaped["created_at"],
+            Value::String("2026-10-26T06:51:00.235877Z".to_owned())
+        );
+        assert_eq!(
+            shaped["updated_at"],
+            Value::String("2026-10-26T06:51:00.235877Z".to_owned())
         );
     }
 
