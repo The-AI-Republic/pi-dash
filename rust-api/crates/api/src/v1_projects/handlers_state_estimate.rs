@@ -82,7 +82,7 @@ use std::collections::HashMap;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State as AxumState};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono_tz::Tz;
@@ -102,6 +102,7 @@ use pidash_types::{ProjectId, WorkspaceId};
 use super::perms::{decide, gate_for, V1ProjectsGate, V1Route, CLASS_DENIAL_BODY};
 use crate::paginator::{self, Cursor, PageResponse};
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
 /// One `machine_token` auth lookup row: user, workspace, dev-machine, revocation.
 type MachineTokenLookup = Option<(
@@ -2121,6 +2122,25 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
         .is_some_and(|code| code == "23505")
 }
 
+/// Rebuild a request from its parts and proxy it to Django (the resolver
+/// 404 for a `state_id` spelling Django itself would never route to the
+/// view).
+async fn proxy_through(
+    state: AppState,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::from(body))
+        .expect("rebuild proxy request");
+    *req.headers_mut() = headers;
+    crate::edge::proxy(AxumState(state), req).await
+}
+
 // ---------------------------------------------------------------------------
 // GET states/<state_id>/ — `StateDetailAPIEndpoint.get` (`views/state.py:200-211`)
 // ---------------------------------------------------------------------------
@@ -2132,7 +2152,22 @@ async fn retrieve_state(
     Path((slug, project_raw, state_id)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     headers: HeaderMap,
+    method: Method,
+    uri: Uri,
+    body: Bytes,
 ) -> Response {
+    // Django routes this segment through the `<uuid:state_id>` converter
+    // (`api/urls/state.py:19`), whose regex is lowercase-hyphenated
+    // canonical form only, matched case-sensitively — every other spelling
+    // resolver-404s before auth. `Uuid::parse_str` also accepts uppercase,
+    // simple, braced and `urn:uuid:` spellings, so proxy the
+    // parseable-but-non-canonical ones for Django's own resolver 404
+    // before auth runs (PIDASHCONV-1095 / -1132 / -1162 / -1193 / -1205
+    // precedent, PIDASHCONV-1393). Garbage keeps the existing auth-first
+    // path (`parse_state_id`).
+    if matches!(classify_uuid_segment(&state_id), UuidSegment::NonCanonical) {
+        return proxy_through(state, method, uri, headers, body).await;
+    }
     match retrieve_state_inner(&state, &headers, &slug, &project_raw, &state_id, &query).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
@@ -2196,9 +2231,17 @@ fn parse_state_id(raw: &str) -> Result<Uuid, HandlerError> {
 async fn patch_state(
     AxumState(state): AxumState<AppState>,
     Path((slug, project_raw, state_id)): Path<(String, String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // Same canonical-spelling gate as the GET handler: a
+    // parseable-but-non-canonical segment proxies for Django's resolver
+    // 404 before auth; garbage keeps the auth-first path (PIDASHCONV-1393).
+    if matches!(classify_uuid_segment(&state_id), UuidSegment::NonCanonical) {
+        return proxy_through(state, method, uri, headers, body).await;
+    }
     match patch_state_inner(&state, &headers, &slug, &project_raw, &state_id, body).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
@@ -2396,8 +2439,17 @@ async fn state_external_exists(
 async fn delete_state(
     AxumState(state): AxumState<AppState>,
     Path((slug, project_raw, state_id)): Path<(String, String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
+    // Same canonical-spelling gate as the GET handler: a
+    // parseable-but-non-canonical segment proxies for Django's resolver
+    // 404 before auth; garbage keeps the auth-first path (PIDASHCONV-1393).
+    if matches!(classify_uuid_segment(&state_id), UuidSegment::NonCanonical) {
+        return proxy_through(state, method, uri, headers, body).await;
+    }
     match delete_state_inner(&state, &headers, &slug, &project_raw, &state_id).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
