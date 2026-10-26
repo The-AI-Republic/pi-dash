@@ -14,6 +14,7 @@ import {
   CLI_OUTDATED_MESSAGE,
   cliErrorCode,
   cliErrorMessage,
+  daemonUserUnknown,
   getDaemonAuthStatus,
   observeDesktopAuth,
   reportDaemonStatus,
@@ -296,6 +297,15 @@ async function ensureCliSignedIn(workspaceSlug: string): Promise<void> {
     status = await read();
   }
   if (!status.signed_in) throw new Error("Pi Dash could not sign in the pidash CLI on this computer.");
+  // A CLI that cannot name its user may be someone else's sign-in: enrolling
+  // this account's runner under it is not ours to decide. Account sync asks
+  // the user whether to re-sign it.
+  if (daemonUserUnknown(status)) {
+    throw new Error(
+      "The pidash CLI on this computer is signed in to an account Pi Dash cannot identify. " +
+        "Switch it to this account when asked, or sign the CLI in again, to use the built-in agent."
+    );
+  }
   if (status.user && status.user.id !== account) {
     throw new Error(
       `The pidash CLI on this computer is signed in as ${status.user.email || "another account"}. ` +

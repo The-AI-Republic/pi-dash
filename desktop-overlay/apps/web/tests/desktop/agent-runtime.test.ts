@@ -15,7 +15,15 @@ const calls: { path: string; method: string; body: Record<string, unknown> }[] =
 // The CLI on this computer, as `pidash auth status --json` reports it. Signed
 // in as whichever account the runtime last handed a command, unless a test
 // says otherwise.
-type CliState = { signedIn: boolean; user?: string; email?: string; workspace?: string | null; activeRuns?: number };
+type CliState = {
+  signedIn: boolean;
+  user?: string;
+  email?: string;
+  workspace?: string | null;
+  activeRuns?: number;
+  /** A config from before the CLI recorded who signed it in. */
+  userUnknown?: boolean;
+};
 let cli: CliState = { signedIn: true };
 let lastAccount = "";
 let cliError: Record<string, { code: string; message: string } | undefined> = {};
@@ -30,7 +38,7 @@ const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => 
       return {
         signed_in: cli.signedIn,
         cloud_url: "http://localhost:18002",
-        user: cli.signedIn ? { id: cli.user ?? lastAccount, email: cli.email ?? "" } : null,
+        user: cli.signedIn && !cli.userUnknown ? { id: cli.user ?? lastAccount, email: cli.email ?? "" } : null,
         workspace_slug: cli.signedIn ? (cli.workspace ?? null) : null,
         dev_machine_id: null,
         changed_at: null,
@@ -203,6 +211,15 @@ describe("desktop agent lifecycle", () => {
     const runtime = await import("../../core/services/agent-runtime");
     runtime.resumeAgentRuntime("user-a");
     await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("z@example.test");
+    expect(invoked("pidash_cli_login")).toEqual([]);
+    expect(invoked("managed_enroll")).toEqual([]);
+  });
+
+  it("does not enroll under a CLI whose user is unknown", async () => {
+    cli = { signedIn: true, userUnknown: true };
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("cannot identify");
     expect(invoked("pidash_cli_login")).toEqual([]);
     expect(invoked("managed_enroll")).toEqual([]);
   });

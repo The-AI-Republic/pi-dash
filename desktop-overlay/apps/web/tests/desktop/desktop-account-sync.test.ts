@@ -96,10 +96,39 @@ describe("the sync rule", () => {
     ["a tie goes to the app", "user-b", LATE, daemon({ changed_at: LATE }), "sign_daemon_in"],
     ["CLI never recorded a change", "user-a", EARLY, signedOut(null), "sign_daemon_in"],
     ["app never recorded a change", "user-a", null, signedOut(EARLY), "sign_desktop_out"],
-    ["CLI signed in, account unknown", "user-a", LATE, daemon({ user: null, changed_at: EARLY }), "sign_daemon_in"],
+    ["CLI signed in, account unknown", "user-a", LATE, daemon({ user: null, changed_at: EARLY }), "confirm_sign_daemon_in"],
+    [
+      "legacy CLI: account unknown, no change recorded",
+      "user-a",
+      LATE,
+      daemon({ user: null, changed_at: null }),
+      "confirm_sign_daemon_in",
+    ],
+    [
+      "CLI flags its account as unknown",
+      "user-a",
+      LATE,
+      daemon({ user_unknown: true, changed_at: null }),
+      "confirm_sign_daemon_in",
+    ],
+    [
+      "CLI newer, account unknown",
+      "user-a",
+      EARLY,
+      daemon({ user: null, changed_at: LATE }),
+      "sign_desktop_out_then_handoff",
+    ],
   ] as const)("%s", async (_name, desktopUserId, changedAt, cli, expected) => {
     const { decideAccountSync } = await import("../../core/services/desktop-account-sync");
     expect(decideAccountSync({ desktopUserId, desktopChangedAt: changedAt, daemon: cli })).toBe(expected);
+  });
+
+  it("trusts an unknown CLI user the app's session was handed from", async () => {
+    const { decideAccountSync } = await import("../../core/services/desktop-account-sync");
+    const cli = daemon({ user: null, changed_at: null });
+    expect(decideAccountSync({ desktopUserId: "user-a", desktopChangedAt: LATE, daemon: cli, handedOff: true })).toBe(
+      "none"
+    );
   });
 });
 
@@ -182,6 +211,65 @@ describe("a sync pass", () => {
       );
       expect(signOutDesktop).toHaveBeenCalledOnce();
       expect(commands()).not.toContain("pidash_cli_login");
+    });
+
+    it("asks before re-signing a CLI whose user is unknown, even with nothing running", async () => {
+      status = daemon({ user: null, changed_at: null, active_runs: 0 });
+      const sync = await import("../../core/services/desktop-account-sync");
+      const prompt = vi.fn((_request: unknown, resolve: (confirmed: boolean) => void) => resolve(true));
+      sync.registerAccountSwitchPrompt(prompt);
+      await expect(
+        sync.syncAccounts({ desktopUserId: "user-a", desktopEmail: "a@example.test", signOutDesktop })
+      ).resolves.toBe("confirm_sign_daemon_in");
+      expect(prompt.mock.calls[0][0]).toEqual({ daemonEmail: "", desktopEmail: "a@example.test", activeRuns: 0 });
+      expect(commands()).toContain("pidash_cli_login");
+    });
+
+    it("does not ask again about the same state once declined", async () => {
+      status = daemon({ user: null, changed_at: null, active_runs: 3 });
+      const sync = await import("../../core/services/desktop-account-sync");
+      const prompt = vi.fn((_request: unknown, resolve: (confirmed: boolean) => void) => resolve(false));
+      sync.registerAccountSwitchPrompt(prompt);
+      await expect(sync.syncAccounts({ desktopUserId: "user-a", signOutDesktop })).resolves.toBe(
+        "sign_desktop_out_then_handoff"
+      );
+      // The 15 s timer and focus keep calling; the answer stands.
+      await sync.syncAccounts({ desktopUserId: "user-a", signOutDesktop });
+      await sync.syncAccounts({ desktopUserId: "user-a", signOutDesktop });
+      expect(prompt).toHaveBeenCalledOnce();
+      expect(signOutDesktop).toHaveBeenCalledOnce();
+      expect(commands()).not.toContain("pidash_cli_login");
+    });
+
+    it("after a decline hands the CLI's account over and then leaves it be", async () => {
+      // Declined: the app was signed out (which wipes webview storage) and
+      // the next pass hands the unknown CLI user's account to the app.
+      status = daemon({ user: null, changed_at: null, active_runs: 3 });
+      const sync = await import("../../core/services/desktop-account-sync");
+      const prompt = vi.fn((_request: unknown, resolve: (confirmed: boolean) => void) => resolve(false));
+      sync.registerAccountSwitchPrompt(prompt);
+      await expect(sync.syncAccounts({ signOutDesktop })).resolves.toBe("handoff");
+      // Signed in by the handoff, with a newer app-side change than the CLI's.
+      await expect(sync.syncAccounts({ desktopUserId: "user-z", signOutDesktop })).resolves.toBe("none");
+      expect(prompt).not.toHaveBeenCalled();
+      expect(signOutDesktop).not.toHaveBeenCalled();
+    });
+
+    it("forgets a handoff that failed, so a later sign-in is still asked about", async () => {
+      status = daemon({ user: null, changed_at: null, active_runs: 0 });
+      const sync = await import("../../core/services/desktop-account-sync");
+      const base = invoke.getMockImplementation()!;
+      invoke.mockImplementation(async (command: string, args?: { userId?: string | null }) => {
+        if (command === "pidash_desktop_handoff") throw { code: "no_handoff_key", message: "no key" };
+        return base(command, args);
+      });
+      const prompt = vi.fn((_request: unknown, resolve: (confirmed: boolean) => void) => resolve(true));
+      sync.registerAccountSwitchPrompt(prompt);
+      await expect(sync.syncAccounts({ signOutDesktop })).rejects.toBeDefined();
+      await expect(sync.syncAccounts({ desktopUserId: "user-z", signOutDesktop })).resolves.toBe(
+        "confirm_sign_daemon_in"
+      );
+      expect(prompt).toHaveBeenCalledOnce();
     });
 
     it("never stops runs without asking, even with no dialog mounted", async () => {

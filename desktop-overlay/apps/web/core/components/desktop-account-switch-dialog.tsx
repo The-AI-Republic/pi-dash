@@ -13,9 +13,28 @@ import { registerAccountSwitchPrompt } from "@/services/desktop-account-sync";
 /**
  * Asked by account sync before it switches this computer's `pidash` CLI —
  * and so its daemon — to the app's account while the CLI's own account has
- * runs in progress. Switching stops them. Declining keeps the CLI's account:
- * the app signs out and takes that account over instead.
+ * runs in progress (switching stops them), or while the CLI is signed in as
+ * a user it cannot name (it may be someone else's sign-in). Declining keeps
+ * the CLI's account: the app signs out and takes that account over instead.
  */
+function switchMessage(t: (key: string, params?: Record<string, unknown>) => string, request: AccountSwitch) {
+  const params = { daemonEmail: request.daemonEmail, desktopEmail: request.desktopEmail, count: request.activeRuns };
+  if (!request.daemonEmail) {
+    return request.activeRuns > 0
+      ? t(
+          "Pi Dash on this computer is signed in to an account it cannot identify, with {count} runs in progress. Switch it to {desktopEmail}? Those runs will be stopped.",
+          params
+        )
+      : t("Pi Dash on this computer is signed in to an account it cannot identify. Switch it to {desktopEmail}?", params);
+  }
+  return request.activeRuns > 0
+    ? t(
+        "Pi Dash on this computer is signed in as {daemonEmail} with {count} runs in progress. Switch it to {desktopEmail}? Those runs will be stopped.",
+        params
+      )
+    : t("Pi Dash on this computer is signed in as {daemonEmail}. Switch it to {desktopEmail}?", params);
+}
+
 export function DesktopAccountSwitchDialog() {
   const { t } = useTranslation();
   const [request, setRequest] = useState<AccountSwitch | null>(null);
@@ -46,14 +65,7 @@ export function DesktopAccountSwitchDialog() {
       variant="primary"
       title={t("Switch Pi Dash on this computer?")}
       content={
-        request && (
-          <p className="mt-1">
-            {t(
-              "Pi Dash on this computer is signed in as {daemonEmail} with {count} runs in progress. Switch it to {desktopEmail}? Those runs will be stopped.",
-              { daemonEmail: request.daemonEmail, desktopEmail: request.desktopEmail, count: request.activeRuns }
-            )}
-          </p>
-        )
+        request && <p className="mt-1">{switchMessage(t, request)}</p>
       }
       primaryButtonText={{ default: t("Switch"), loading: t("Switch") }}
       isSubmitting={false}

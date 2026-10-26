@@ -23,6 +23,11 @@
  *   grant the app approves itself); the CLI's newer → sign the app out, after
  *   which the next pass hands the CLI's account over if it has one.
  *
+ * Re-signing a CLI that may belong to someone else is never silent when it
+ * could stop runs or when the CLI's user is unknown (a config from before the
+ * CLI recorded it): the user is asked, and declining lets the CLI's account
+ * win.
+ *
  * The app's own last-change time is kept by the host (`desktop_auth_observe`),
  * outside the webview storage that sign-out wipes.
  */
@@ -46,11 +51,30 @@ export type DaemonAuthStatus = {
   changed_at: string | null;
   daemon_running: boolean;
   active_runs: number;
+  /**
+   * The CLI is signed in but cannot say as whom (a config from before it
+   * recorded the user). Older CLIs omit it; `signed_in` with no `user` means
+   * the same.
+   */
+  user_unknown?: boolean;
 };
+
+/** Signed in, but as nobody the CLI can name. */
+export function daemonUserUnknown(daemon: DaemonAuthStatus): boolean {
+  return daemon.signed_in && (daemon.user_unknown === true || !daemon.user?.id);
+}
 
 /** Who runs the shared daemon, as the host reports it. */
 export type DaemonMode = "service" | "child" | "idle" | "unavailable";
-export type DaemonStatus = { mode: DaemonMode; cli_outdated: boolean; message: string | null };
+/** A runner still in a legacy per-workspace config: adopt could not move it. */
+export type UnadoptedRunner = { name: string; workspace: string; reason: string };
+export type DaemonStatus = {
+  mode: DaemonMode;
+  cli_outdated: boolean;
+  message: string | null;
+  /** Older hosts omit it. */
+  unadopted?: UnadoptedRunner[];
+};
 
 /** The app's signed-in user and when that last changed, as the host keeps it. */
 export type DesktopAuthMark = { user_id: string | null; changed_at: string | null };
@@ -59,6 +83,8 @@ export type SyncDecision =
   | "none"
   | "handoff"
   | "sign_daemon_in"
+  /** The app wins, but the CLI's user is unknown: ask before re-signing it. */
+  | "confirm_sign_daemon_in"
   | "sign_desktop_out"
   | "sign_desktop_out_then_handoff";
 
@@ -230,16 +256,24 @@ export function decideAccountSync(input: {
   desktopUserId: string | null;
   desktopChangedAt: string | null;
   daemon: DaemonAuthStatus;
+  /**
+   * The app's session came from this very CLI sign-in by a handoff, so they
+   * are the same user even when the CLI cannot say who that is.
+   */
+  handedOff?: boolean;
 }): SyncDecision {
   const { desktopUserId, desktopChangedAt, daemon } = input;
   if (!desktopUserId) return daemon.signed_in ? "handoff" : "none";
-  if (daemon.signed_in && daemon.user?.id === desktopUserId) return "none";
+  const userUnknown = daemonUserUnknown(daemon);
+  if (daemon.signed_in && !userUnknown && daemon.user?.id === desktopUserId) return "none";
+  if (userUnknown && input.handedOff) return "none";
   const desktopAt = Date.parse(desktopChangedAt ?? "");
   const daemonAt = Date.parse(daemon.changed_at ?? "");
   // A tie, or a CLI that never recorded a change, goes to the app: it is the
-  // side the user is looking at.
+  // side the user is looking at. But a CLI signed in as someone it cannot
+  // name may be another person's — that is the user's call, not ours.
   const daemonNewer = Number.isFinite(daemonAt) && (!Number.isFinite(desktopAt) || daemonAt > desktopAt);
-  if (!daemonNewer) return "sign_daemon_in";
+  if (!daemonNewer) return userUnknown ? "confirm_sign_daemon_in" : "sign_daemon_in";
   return daemon.signed_in ? "sign_desktop_out_then_handoff" : "sign_desktop_out";
 }
 
@@ -259,7 +293,7 @@ async function resolveDesktopUser(known: string | null | undefined): Promise<str
   }
 }
 
-/** What the account-switch confirmation shows. */
+/** What the account-switch confirmation shows. `daemonEmail` is empty when the CLI cannot name its user. */
 export type AccountSwitch = { daemonEmail: string; desktopEmail: string; activeRuns: number };
 type AccountSwitchPrompt = (request: AccountSwitch, resolve: (confirmed: boolean) => void) => void;
 
@@ -302,6 +336,43 @@ function rememberAttempt(key: string) {
   }
 }
 
+// The CLI sign-in the app's session was last handed from. It lets a pass
+// recognise "same user" when the CLI cannot name its user — otherwise
+// declining a switch (which hands the CLI's account to the app) would only
+// lead to the same question again. Signing the app out wipes it with the rest
+// of the webview's storage.
+const HANDOFF_KEY = "pidash-account-sync-handoff";
+
+function daemonSignIn(daemon: DaemonAuthStatus): string {
+  return [daemon.cloud_url ?? "", daemon.dev_machine_id ?? "", daemon.workspace_slug ?? "", daemon.changed_at ?? ""].join(
+    "|"
+  );
+}
+
+function handedOffFrom(): string | null {
+  try {
+    return sessionStorage.getItem(HANDOFF_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberHandoff(daemon: DaemonAuthStatus) {
+  try {
+    sessionStorage.setItem(HANDOFF_KEY, daemonSignIn(daemon));
+  } catch {
+    // Without storage an unknown CLI user is asked about again; still safe.
+  }
+}
+
+function forgetHandoff() {
+  try {
+    sessionStorage.removeItem(HANDOFF_KEY);
+  } catch {
+    // Nothing was stored.
+  }
+}
+
 export type SyncOptions = {
   /** The app's user as the store knows it; omitted or empty asks the server. */
   desktopUserId?: string | null;
@@ -335,7 +406,12 @@ async function runSync(options: SyncOptions): Promise<SyncDecision> {
   const desktopUserId = await resolveDesktopUser(options.desktopUserId);
   if (desktopUserId === undefined) return "none";
   const mark = await observeDesktopAuth(desktopUserId);
-  const decision = decideAccountSync({ desktopUserId, desktopChangedAt: mark.changed_at, daemon });
+  const decision = decideAccountSync({
+    desktopUserId,
+    desktopChangedAt: mark.changed_at,
+    daemon,
+    handedOff: handedOffFrom() === daemonSignIn(daemon),
+  });
   if (decision === "none") return decision;
 
   const key = [decision, desktopUserId ?? "", daemon.user?.id ?? "", daemon.changed_at ?? "", mark.changed_at ?? ""].join(
@@ -347,16 +423,25 @@ async function runSync(options: SyncOptions): Promise<SyncDecision> {
   switch (decision) {
     case "handoff":
       // The host loads the redeem link in this window; the page goes away.
-      await invoke<void>("pidash_desktop_handoff");
+      rememberHandoff(daemon);
+      try {
+        await invoke<void>("pidash_desktop_handoff");
+      } catch (error) {
+        forgetHandoff();
+        throw error;
+      }
       break;
     case "sign_daemon_in":
-      // Switching a CLI that is signed in as someone else stops its runs, so
-      // that is never silent. Declining means the CLI's account wins: sign
-      // the app out, and the next pass hands the CLI's account over — the
-      // two never stay mismatched.
-      if (daemon.signed_in && daemon.user && daemon.active_runs > 0) {
+    case "confirm_sign_daemon_in":
+      // Switching a CLI that is signed in as someone else stops its runs, and
+      // one whose user is unknown may not be the app's user at all, so
+      // neither is silent. Declining means the CLI's account wins: sign the
+      // app out, and the next pass hands the CLI's account over — the two
+      // never stay mismatched. The attempt is remembered above, so polling
+      // does not ask again about the same state.
+      if (decision === "confirm_sign_daemon_in" || (daemon.signed_in && daemon.active_runs > 0)) {
         const confirmed = await confirmAccountSwitch({
-          daemonEmail: daemon.user.email,
+          daemonEmail: daemon.user?.email ?? "",
           desktopEmail: options.desktopEmail ?? "",
           activeRuns: daemon.active_runs,
         });

@@ -28,12 +28,10 @@ import { DesktopAccountSwitchDialog } from "../../core/components/desktop-accoun
 
 afterEach(cleanup);
 
-async function ask() {
+async function ask(request: Request = { daemonEmail: "b@example.test", desktopEmail: "a@example.test", activeRuns: 2 }) {
   let answer: Promise<boolean> = Promise.resolve(false);
   await act(async () => {
-    answer = new Promise((resolve) =>
-      mocks.prompt!({ daemonEmail: "b@example.test", desktopEmail: "a@example.test", activeRuns: 2 }, resolve)
-    );
+    answer = new Promise((resolve) => mocks.prompt!(request, resolve));
   });
   return answer;
 }
@@ -49,6 +47,18 @@ describe("desktop account switch confirmation", () => {
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Switch" }));
     await expect(answer).resolves.toBe(true);
+  });
+
+  it.each([
+    [
+      2,
+      "Pi Dash on this computer is signed in to an account it cannot identify, with 2 runs in progress. Switch it to a@example.test? Those runs will be stopped.",
+    ],
+    [0, "Pi Dash on this computer is signed in to an account it cannot identify. Switch it to a@example.test?"],
+  ])("asks about a CLI whose user is unknown (%i runs)", async (activeRuns, text) => {
+    render(<DesktopAccountSwitchDialog />);
+    void ask({ daemonEmail: "", desktopEmail: "a@example.test", activeRuns });
+    expect(await screen.findByText(text)).toBeTruthy();
   });
 
   it("declines on cancel, and when it unmounts", async () => {
