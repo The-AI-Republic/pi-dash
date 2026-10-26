@@ -1,8 +1,9 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Pages detail shell (parity/specs/pages.md §4, §6.5–§6.9, §7, PAGE-022–025,
-// 045–050, 055–060, 079–080, 084/086). One record read by URL id with visit
+// Pages detail shell (parity/specs/pages.md §4, §6.5–§6.9, §7, §8.1–§8.3,
+// §8.6, §9.6, PAGE-022–025, 045–050, 055–064, 074, 079–080, 084/086). One
+// record read by URL id with visit
 // tracking plus the shared collection read that feeds the sibling switcher;
 // the header cluster with its action controls and options menu, the
 // not-found panel, the centered record spinner, the title and body
@@ -25,6 +26,7 @@ import { RichTextView } from "../../../shared/editor/RichTextView.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
 import { usePaletteWorkspaceMembers } from "../../../shared/shell/contextual/index.js";
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
+import { usePageExportDialog, type PageExportHost } from "../../pages-export/index.js";
 import { pageDetailQueryOptions, pageVersionQueryOptions, pageVersionsQueryOptions } from "../api/detailQueries.js";
 import { usePageMark, usePageRename } from "../api/detailMutations.js";
 import { useDuplicatePage } from "../api/mutations.js";
@@ -34,6 +36,9 @@ import { pagesListQueryOptions } from "../api/queries.js";
 import { pageKeys } from "../api/keys.js";
 import { pageForestQueryOptions } from "../api/treeQueries.js";
 import { isPageBodyReady, markPageBodyReady } from "../lib/pageBodyCache.js";
+import { getPageBodyDraft } from "../lib/pageBodyDraft.js";
+import { pageBodyMarkdown } from "../lib/pageMarkup.js";
+import { usePageSaveFallback } from "../lib/pageSaveFallback.js";
 import {
   closeVersionSearch,
   historySearch,
@@ -340,6 +345,26 @@ export function PageDetailScreen({
     [queryClient, workspaceSlug, projectId, pageId, closeVersion]
   );
 
+  // The newest local body, whatever surface holds it: the live editor
+  // when one is mounted, otherwise the session draft, otherwise the stored
+  // snapshot (PAGE-064, PAGE-074).
+  const readLiveHtml = (): string => editorHandle.current?.html() ?? getPageBodyDraft(pageId) ?? storedHtml;
+  // The socket-loss fallback (PAGE-064) owns body persistence while the
+  // sync state reports the fault badge on an editable page; its manual
+  // save is the surface's save-gesture handler.
+  const saveFallback = usePageSaveFallback({
+    workspaceSlug,
+    projectId,
+    pageId,
+    title: page?.name ?? "",
+    active: (capabilities?.canEdit ?? false) && syncStatus === "lost",
+    readHtml: readLiveHtml,
+  });
+  // The export entry (PAGE-074) appears only once the exports area
+  // registers its dialog; with no registration the menu has no entry.
+  const ExportDialog = usePageExportDialog();
+  const [exportOpen, setExportOpen] = React.useState(false);
+
   if (body === "spinner") {
     return <PageDetailSpinner />;
   }
@@ -359,6 +384,14 @@ export function PageDetailScreen({
     createdAt: page.created_at,
     members: versionMembers,
   });
+  // The export dialog reads the live body through these getters (PAGE-074).
+  const exportHost: PageExportHost = {
+    pageTitle,
+    projectId,
+    workspaceSlug,
+    getHtml: readLiveHtml,
+    getMarkdown: () => pageBodyMarkdown(readLiveHtml()),
+  };
 
   return (
     // The screen owns its own height and clips horizontally: the pane's
@@ -367,7 +400,6 @@ export function PageDetailScreen({
     // content area (PAGE-045). The canvas column below is the page's
     // vertical scroller.
     <div data-testid="page-detail-screen" className="flex h-full min-h-0 flex-col overflow-x-clip">
-      {/* No onExport yet: the export entry and its dialog mount in NEWFRONT-846 (PAGE-074). */}
       <PageDetailHeader
         workspaceSlug={workspaceSlug}
         projectId={projectId}
@@ -378,6 +410,7 @@ export function PageDetailScreen({
         ancestors={ancestors}
         siblings={siblings}
         syncStatus={syncStatus}
+        editable={capabilities.canEdit}
         showStar={isProjectAuthorized(role)}
         showLock={canManage}
         canDuplicate={isProjectAuthorized(role)}
@@ -395,6 +428,13 @@ export function PageDetailScreen({
         paneOpen={paneOpen}
         preferences={preferences}
         onPreferenceChange={setPreference}
+        {...(ExportDialog === null
+          ? {}
+          : {
+              onExport: () => {
+                setExportOpen(true);
+              },
+            })}
         {...(isProjectAuthorized(role) && !capabilities.isShelved
           ? {
               onAddSubPage: () => {
@@ -408,6 +448,9 @@ export function PageDetailScreen({
             }
           : {})}
       />
+      {ExportDialog !== null && exportOpen ? (
+        <ExportDialog host={exportHost} open onClose={() => setExportOpen(false)} />
+      ) : null}
       <div className="flex min-h-0 flex-1">
         <div data-testid="page-canvas-stage" className="relative flex min-h-0 min-w-0 flex-1">
           <div data-testid="page-canvas-scroll" className="min-h-0 min-w-0 flex-1 overflow-y-auto">
@@ -445,6 +488,7 @@ export function PageDetailScreen({
                     onRename={saveName}
                     onMarkPick={saveMark}
                     showBar={showBar}
+                    onSave={saveFallback.requestManualSave}
                     fullWidth={preferences.full_width}
                     fontSize={preferences.font_size}
                     fontStyle={preferences.font_style}

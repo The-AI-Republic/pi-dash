@@ -44,8 +44,10 @@ import { PAGES_USER_ID, jsonResponse, makePageRow, makeProjectRow, makeWorkspace
 import { resetPageBodyCache } from "../lib/pageBodyCache.js";
 import type { PageDetailSearch } from "../lib/pageDetail.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
-import { getPageBodyDraft } from "../lib/pageBodyDraft.js";
+import { getPageBodyDraft, resetPageBodyDrafts, setPageBodyDraft } from "../lib/pageBodyDraft.js";
+import { reportPageSync } from "../lib/pageSync.js";
 import { applyPageRestore } from "../lib/pageRestore.js";
+import { registerPageExportDialog, resetPageExportDialog, type PageExportHost } from "../../pages-export/index.js";
 import { PageDetailScreen } from "./PageDetailScreen.js";
 import { mentionNameFor, resetMentionDirectory } from "../../../shared/editor/mentionDirectory.js";
 import { requestEntityPeek, resetEntityPeek } from "../../../shared/shell/entityPeek.js";
@@ -73,6 +75,7 @@ interface Harness {
   pageStatus: number;
   pageCalls: string[];
   pageWrites: { method: string; body: unknown }[];
+  descriptionWrites: { method: string; body: unknown }[];
   pages: PageRow[];
   childrenByParent: Record<string, PageRow[]>;
   pagesStatus: number;
@@ -118,6 +121,7 @@ beforeEach(() => {
     pageStatus: 200,
     pageCalls: [],
     pageWrites: [],
+    descriptionWrites: [],
     pages: [],
     childrenByParent: {},
     pagesStatus: 200,
@@ -140,6 +144,8 @@ beforeEach(() => {
     projectStatus: 200,
   };
   resetPageBodyCache();
+  resetPageBodyDrafts();
+  resetPageExportDialog();
   router.navigate.mockReset();
   createAppClient("https://api.test", (async (requested: string, init: { method: string; body?: string | null }) => {
     const url = requested.split("?")[0] ?? requested;
@@ -216,6 +222,27 @@ beforeEach(() => {
       harness.pageWrites.push({ method: init.method, body: body === undefined ? null : JSON.parse(body) });
       return jsonResponse(url, 200, { id: recordRead[1], name: "Renamed" });
     }
+    if (url.endsWith("/description/") && init.method === "GET") {
+      return {
+        ...jsonResponse(url, 200, null),
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer as ArrayBuffer,
+      };
+    }
+    if (url.endsWith("/live/convert-document/") && init.method === "POST") {
+      return jsonResponse(url, 200, {
+        description_binary: "e30=",
+        description_html: "<p>Draft body</p>",
+        description_json: { type: "doc" },
+      });
+    }
+    if (url.endsWith("/description/") && init.method === "PATCH") {
+      const body = (init as { body?: string }).body;
+      harness.descriptionWrites.push({
+        method: init.method,
+        body: body === undefined ? null : JSON.parse(body),
+      });
+      return jsonResponse(url, 200, { message: "ok" });
+    }
     if (url.endsWith("/duplicate/") && init.method === "POST") {
       harness.pageWrites.push({ method: "DUPLICATE", body: null });
       return jsonResponse(url, 200, {
@@ -276,6 +303,8 @@ beforeEach(() => {
 afterEach(() => {
   resetMentionDirectory();
   resetEntityPeek();
+  resetPageBodyDrafts();
+  resetPageExportDialog();
 });
 
 afterEach(() => {
@@ -1369,5 +1398,124 @@ describe("PageDetailScreen header actions (PAGE-055-060)", () => {
     expect(harness.pageWrites.some((write) => write.method === "DELETE")).toBe(false);
     expect(router.navigate).not.toHaveBeenCalled();
     expect(screen.getByTestId("page-archived-marker")).toBeInTheDocument();
+  });
+});
+
+describe("PageDetailScreen fallback persistence (PAGE-064)", () => {
+  it("patches all three forms once the sync state settles on the fault badge", async () => {
+    setPageBodyDraft(harness.pageId, "<p>fallback marker words</p>");
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await waitFor(() => expect(harness.descriptionWrites.length).toBeGreaterThan(0), { timeout: 10_000 });
+    const first = harness.descriptionWrites[0];
+    expect(first?.method).toBe("PATCH");
+    expect(Object.keys((first?.body ?? {}) as Record<string, unknown>).sort()).toEqual([
+      "description_binary",
+      "description_html",
+      "description_json",
+    ]);
+  });
+
+  it("sends nothing while the socket reports synced", async () => {
+    renderScreen();
+    reportPageSync(harness.pageId, "synced");
+    await screen.findByRole("textbox", { name: "Page title" });
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    expect(harness.descriptionWrites).toEqual([]);
+  });
+
+  it("sends nothing on a read-only page", async () => {
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByTestId("page-detail-screen");
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    expect(harness.descriptionWrites).toEqual([]);
+  });
+});
+
+describe("PageDetailScreen export entry (PAGE-074)", () => {
+  function StubExportDialog({
+    host,
+    open,
+    onClose,
+  }: {
+    host: PageExportHost;
+    open: boolean;
+    onClose: () => void;
+  }): React.ReactElement | null {
+    if (!open) return null;
+    return (
+      <div data-testid="stub-export-dialog">
+        <span data-testid="stub-export-title">{host.pageTitle}</span>
+        <span data-testid="stub-export-html">{host.getHtml()}</span>
+        <span data-testid="stub-export-markdown">{host.getMarkdown()}</span>
+        <button type="button" onClick={onClose}>
+          Close stub export
+        </button>
+      </div>
+    );
+  }
+
+  async function openOptions(): Promise<void> {
+    fireEvent.click(screen.getByRole("button", { name: "Page options" }));
+    await screen.findByRole("menuitem", { name: "Version history" });
+  }
+
+  it("opens the registered dialog from the menu with the live body", async () => {
+    registerPageExportDialog(StubExportDialog);
+    setPageBodyDraft(harness.pageId, "<p>Live export words</p>");
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    // The live handle wins over the draft once the editor mounts.
+    await waitFor(() => expect(document.querySelector('[contenteditable="true"]')).not.toBeNull(), {
+      timeout: 15_000,
+    });
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Export" }));
+    expect(await screen.findByTestId("stub-export-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("stub-export-title")).toHaveTextContent("Launch notes");
+    expect(screen.getByTestId("stub-export-html")).toHaveTextContent("Live export words");
+    expect(screen.getByTestId("stub-export-markdown")).toHaveTextContent("Live export words");
+  });
+
+  it("closes the dialog on request", async () => {
+    registerPageExportDialog(StubExportDialog);
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Export" }));
+    expect(await screen.findByTestId("stub-export-dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close stub export" }));
+    await waitFor(() => expect(screen.queryByTestId("stub-export-dialog")).not.toBeInTheDocument());
+  });
+
+  it("offers no export entry without a registered dialog", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await openOptions();
+    expect(screen.queryByRole("menuitem", { name: "Export" })).not.toBeInTheDocument();
+  });
+
+  it("exports a locked page from the session draft", async () => {
+    registerPageExportDialog(StubExportDialog);
+    setPageBodyDraft(harness.pageId, "<p>Drafted export words</p>");
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByTestId("page-detail-screen");
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Export" }));
+    expect(await screen.findByTestId("stub-export-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("stub-export-html")).toHaveTextContent("Drafted export words");
+  });
+
+  it("exports a locked page from the stored snapshot without a draft", async () => {
+    registerPageExportDialog(StubExportDialog);
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByTestId("page-detail-screen");
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Export" }));
+    expect(await screen.findByTestId("stub-export-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("stub-export-html")).toHaveTextContent("Draft body");
   });
 });

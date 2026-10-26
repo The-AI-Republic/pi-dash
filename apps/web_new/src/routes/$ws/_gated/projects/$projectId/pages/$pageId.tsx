@@ -21,6 +21,12 @@ function PageDetailComponent(): React.ReactElement {
   const { ws, projectId, pageId } = Route.useParams();
   const search = Route.useSearch();
   const navigate = useNavigate();
+  // The export chunk registers its dialog into the detail seam on import,
+  // so the load starts from the route body and the dialog stays out of
+  // the initial bundle (PAGE-074, NEWFRONT-846).
+  React.useEffect(() => {
+    void import("../../../../../../features/pages-export/register.js");
+  }, []);
   return (
     <PageDetailScreen
       workspaceSlug={ws}
