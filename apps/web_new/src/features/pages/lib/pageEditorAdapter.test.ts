@@ -6,7 +6,7 @@
 // the body start, the formatting state the bar reads back, and the whole
 // body replacement the version restore writes (PAGE-053).
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyPageColor,
@@ -433,6 +433,10 @@ describe("pageEditorHandle", () => {
 });
 
 describe("table and image commands", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("focuses first and drops the toolbar's 3×3 table", () => {
     const { ref, calls } = editor();
     insertPageTable(ref);
@@ -445,6 +449,43 @@ describe("table and image commands", () => {
     expect(calls[0]).toBe("focus");
     expect(calls[1]).toBe("insertContent([object Object])");
     expect(calls[2]).toBe("run");
+  });
+
+  it("gives every inserted picture its own shared-form id (PAGE-039)", () => {
+    const inserted: Array<Record<string, unknown>> = [];
+    const chain = new Proxy({} as PageEditorChain, {
+      get: (_target, property: string) => {
+        if (property === "run") return () => true;
+        return (...args: unknown[]) => {
+          if (property === "insertContent") inserted.push((args[0] as { attrs: Record<string, unknown> }).attrs);
+          return chain;
+        };
+      },
+    });
+    const ref = { chain: () => chain, isActive: () => false, getHTML: () => "<p></p>" } as unknown as PageEditorRef;
+    runInsertImage(ref, "/served/a", "a");
+    runInsertImage(ref, "/served/b", "b");
+    const ids = inserted.map((attrs) => String(attrs.id));
+    expect(ids[0]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(ids[1]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
+  it("keeps the shared id form where randomUUID is unavailable (PAGE-039)", () => {
+    const inserted: Array<Record<string, unknown>> = [];
+    const chain = new Proxy({} as PageEditorChain, {
+      get: (_target, property: string) => {
+        if (property === "run") return () => true;
+        return (...args: unknown[]) => {
+          if (property === "insertContent") inserted.push((args[0] as { attrs: Record<string, unknown> }).attrs);
+          return chain;
+        };
+      },
+    });
+    const ref = { chain: () => chain, isActive: () => false, getHTML: () => "<p></p>" } as unknown as PageEditorRef;
+    vi.stubGlobal("crypto", {});
+    runInsertImage(ref, "/served/a", "a");
+    expect(String(inserted[0]?.id)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
 
   it("exposes table and image insertion on the handle", () => {
@@ -590,7 +631,7 @@ describe("page block catalogue commands", () => {
   it("inserts a body emoji as marked inline markup", () => {
     const { ref, calls } = editor();
     insertPageEmoji(ref, "🎉");
-    expect(calls).toEqual(["focus", 'insertContent(<span data-type="emoji">🎉</span>)', "run"]);
+    expect(calls).toEqual(["focus", 'insertContent(<span data-type="emoji" data-name="party">🎉</span>)', "run"]);
   });
 
   it("inserts an embed as the stored element", () => {

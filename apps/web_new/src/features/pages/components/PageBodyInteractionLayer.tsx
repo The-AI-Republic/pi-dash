@@ -16,6 +16,13 @@ import type { PageEditorHandle, PageHoveredBlock, PageTextRange } from "../lib/p
 import { readFormattingBarBottom, resolveSelectionBubbleTop } from "../lib/pageBubblePlacement.js";
 import { pageAssistantBelowHtml } from "../lib/pageAssistant.js";
 import { PAGE_BODY_EMOJIS, slashQueryAt, type PageBlockMenuAction, type PageCatalogEntry } from "../lib/pageBlocks.js";
+import {
+  PAGE_POPOVER_VIEWPORT_MARGIN,
+  pagePopoverMaxSize,
+  pagePopoverPlacement,
+  pageTriggerReopened,
+  type PopoverSize,
+} from "../lib/pageBodyPopovers.js";
 import { mentionQueryAt } from "../../../shared/editor/mention.js";
 import type { PageEmbedAttributes } from "../lib/pageBlocks.js";
 import {
@@ -84,6 +91,16 @@ export function PageBodyInteractionLayer({
   const [pickerQuery, setPickerQuery] = React.useState("");
   const [pickerChoices, setPickerChoices] = React.useState<PageEntityChoice[]>([]);
   const [anchor, setAnchor] = React.useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  // The popover's own painted box and the viewport it is clamped inside.
+  // The size is read from the surface that actually opened, so one rule
+  // places the palette, the pickers and the mention popup alike.
+  const popoverRef = React.useRef<HTMLDivElement | null>(null);
+  const [popoverSize, setPopoverSize] = React.useState<PopoverSize>({ width: 0, height: 0 });
+  const [viewport, setViewport] = React.useState<PopoverSize>({ width: 0, height: 0 });
+  // The document a dismissal covered: the trigger stays shut until the
+  // body changes, so Escape is not undone by the next selection update
+  // re-deriving the same query from unchanged text (PAGE-037).
+  const [dismissedStamp, setDismissedStamp] = React.useState<string | null>(null);
   const [handleOpen, setHandleOpen] = React.useState(false);
   // The assistant's snapshotted selection: text for the task prompt plus
   // the range the reply writes back to once the menu closes (PAGE-075).
@@ -99,8 +116,9 @@ export function PageBodyInteractionLayer({
       const handle = getHandle();
       if (handle === null) return;
       const before = handle.textBeforeCaret();
-      setSlashQuery(slashQueryAt(before));
-      setMentionQuery(mentionQueryAt(before)?.text ?? null);
+      const reopened = pageTriggerReopened(dismissedStamp, html);
+      setSlashQuery(reopened ? slashQueryAt(before) : null);
+      setMentionQuery(reopened ? (mentionQueryAt(before)?.text ?? null) : null);
       setSelectionActive(handle.hasSelection());
       // The surfaces open beside the caret, measured against the editor's
       // own box, so they never fall to the end of a long body (PAGE-037).
@@ -114,7 +132,7 @@ export function PageBodyInteractionLayer({
     sync();
     document.addEventListener("selectionchange", sync);
     return () => document.removeEventListener("selectionchange", sync);
-  }, [html, getHandle]);
+  }, [html, getHandle, dismissedStamp]);
 
   // The drag handle follows the pointer, so its actions always target the
   // block being hovered rather than whichever block holds the caret
@@ -174,6 +192,9 @@ export function PageBodyInteractionLayer({
         assistant !== null;
       if (!anyOpen) return;
       event.preventDefault();
+      // Remember the document so the palette (and the mention popup) does
+      // not reopen for the same trigger on the next selection pass.
+      if (slashQuery !== null || mentionQuery !== null) setDismissedStamp(html);
       setSlashQuery(null);
       setEmojiOpen(false);
       setMentionQuery(null);
@@ -185,7 +206,7 @@ export function PageBodyInteractionLayer({
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [slashQuery, emojiOpen, mentionQuery, picker, handleOpen, assistant]);
+  }, [slashQuery, emojiOpen, mentionQuery, picker, handleOpen, assistant, html]);
 
   // Mention suggestions are project-scoped and debounced by React Query's
   // own cache; an empty query still lists the project's members.
@@ -426,13 +447,55 @@ export function PageBodyInteractionLayer({
     action: { type: "snippet", html: entry.html },
   }));
 
+  // The viewport the popovers are clamped inside, kept current while one
+  // is open: a window resized under a long palette must not push its last
+  // rows off-screen.
+  const anyPopoverOpen = slashQuery !== null || emojiOpen || picker !== null || mentionQuery !== null;
+  React.useEffect(() => {
+    if (!anyPopoverOpen) return;
+    const measure = (): void => {
+      setViewport({ width: window.innerWidth, height: window.innerHeight });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [anyPopoverOpen]);
+
+  // The size of the surface that actually painted, read after layout so
+  // the placement rule sees the palette's real extent (a filtered list is
+  // shorter than the full catalogue).
+  React.useEffect(() => {
+    if (!anyPopoverOpen) {
+      setPopoverSize({ width: 0, height: 0 });
+      return;
+    }
+    const surface = popoverRef.current;
+    if (surface === null) return;
+    const box = surface.getBoundingClientRect();
+    if (box.width === 0 && box.height === 0) return;
+    const next = { width: Math.ceil(box.width), height: Math.ceil(box.height) };
+    setPopoverSize((current) => (current.width === next.width && current.height === next.height ? current : next));
+  }, [anyPopoverOpen, slashQuery, emojiOpen, picker, mentionQuery]);
+
   // The surfaces sit in their own zero-height layer beside the body, never
   // inside the measured `.editor-container`: the pane's live read counts
   // that container's blocks, so palette rows must not become paragraphs.
   // They are positioned in viewport coordinates, so a long body's caret
   // still gets its palette beside it rather than at the document's end.
   const shown = hoveredBlock !== null || handleOpen;
-  const popover = { position: "fixed", top: anchor.top + 24, left: anchor.left } as const;
+  const placed = pagePopoverPlacement(anchor, popoverSize, viewport);
+  const maxSize = pagePopoverMaxSize(viewport);
+  // A popover larger than the viewport scrolls inside its cap rather than
+  // extending past the edge.
+  const overflowsViewport = popoverSize.width > maxSize.width || popoverSize.height > maxSize.height;
+  const popover: React.CSSProperties = {
+    position: "fixed",
+    top: placed.top,
+    left: placed.left,
+    maxWidth: `calc(100vw - ${2 * PAGE_POPOVER_VIEWPORT_MARGIN}px)`,
+    maxHeight: `calc(100vh - ${2 * PAGE_POPOVER_VIEWPORT_MARGIN}px)`,
+    ...(overflowsViewport ? { overflowY: "auto" } : {}),
+  };
   return (
     <div data-testid="page-body-interactions" aria-label={PAGE_BODY_INTERACTION_LABEL} className="pointer-events-none">
       {shown ? (
@@ -477,7 +540,7 @@ export function PageBodyInteractionLayer({
         </div>
       ) : null}
       {slashQuery !== null ? (
-        <div className="pointer-events-auto z-20" style={popover}>
+        <div ref={popoverRef} className="pointer-events-auto z-20" style={popover}>
           <PageSlashPalette
             query={slashQuery}
             onPick={pickEntry}
@@ -487,12 +550,12 @@ export function PageBodyInteractionLayer({
         </div>
       ) : null}
       {emojiOpen ? (
-        <div className="pointer-events-auto z-20" style={popover}>
+        <div ref={popoverRef} className="pointer-events-auto z-20" style={popover}>
           <PageEmojiPicker onPick={pickEmoji} onDismiss={() => setEmojiOpen(false)} />
         </div>
       ) : null}
       {picker === null ? null : (
-        <div className="pointer-events-auto z-20" style={popover}>
+        <div ref={popoverRef} className="pointer-events-auto z-20" style={popover}>
           <PageEntityPicker
             state={{
               query: pickerQuery,
@@ -505,7 +568,7 @@ export function PageBodyInteractionLayer({
         </div>
       )}
       {mentionQuery !== null ? (
-        <div className="pointer-events-auto z-20" style={popover}>
+        <div ref={popoverRef} className="pointer-events-auto z-20" style={popover}>
           <PageMentionSuggestions
             state={{
               query: mentionQuery,

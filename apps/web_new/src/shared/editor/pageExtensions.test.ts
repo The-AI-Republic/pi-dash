@@ -5,7 +5,7 @@
 // Page extension set (parity/specs/pages.md §10.1, PAGE-028–036): the
 // description core plus underline, paragraph/heading alignment,
 // checkable lists, the table nodes, the letter/wash colour mark and the
-// stored image node. Stored page markup must survive parse and serialize,
+// body picture node. Stored page markup must survive parse and serialize,
 // because saving and reloading is how a formatting choice persists.
 
 import type { AnyExtension } from "@tiptap/core";
@@ -63,10 +63,16 @@ const FIXTURES: Fixture[] = [
     keeps: ['data-text-color="pink"', 'data-background-color="green"'],
   },
   {
-    name: "stored image",
+    name: "stored picture",
     html: '<image-component src="asset-1" status="uploaded" data-stored-src="asset-1"></image-component>',
     text: "",
     keeps: ["<image-component", 'status="uploaded"', 'src="asset-1"'],
+  },
+  {
+    name: "legacy bare picture",
+    html: '<p>before</p><img src="asset-2" alt="image-asset-2">',
+    text: "before",
+    keeps: ["<image-component", 'alt="image-asset-2"', 'src="asset-2"'],
   },
 ];
 
@@ -78,9 +84,9 @@ describe("page extension set", () => {
   it("adds underline, alignment, checkable lists, tables, colour and images to the description core", async () => {
     const base = (await loadDescriptionExtensions()) as unknown as AnyExtension[];
     const page = await loadPageExtensions();
-    // Four page marks/blocks, four table nodes, one colour mark, one
-    // stored-image node, one mention and the five page block nodes
-    // (callout, divider, emoji, embed, entity reference).
+    // Underline, alignment, two task nodes, four table nodes, one colour
+    // mark, one mention and the six page block nodes (callout, divider,
+    // emoji, embed, entity reference, body picture).
     expect(page).toHaveLength(base.length + 16);
     const names = page.map((extension) => extension.name);
     expect(names).toContain("underline");
@@ -93,11 +99,15 @@ describe("page extension set", () => {
     expect(names).toContain("tableHeader");
     expect(names).toContain("customColor");
     expect(names).toContain("imageComponent");
+    // The body picture replaces the description's plain image node: the
+    // shared document schema knows only the component, and a plain node is
+    // dropped when the body is saved.
+    expect(names).not.toContain("image");
     expect(names).toContain("mention");
-    expect(names).toContain("pageCallout");
-    expect(names).toContain("pageEmoji");
-    expect(names).toContain("pageEmbed");
-    expect(names).toContain("pageEntityReference");
+    expect(names).toContain("calloutComponent");
+    expect(names).toContain("emoji");
+    expect(names).toContain("issue-embed-component");
+    expect(names).toContain("entity-reference-component");
     expect(names).toContain("starterKit");
   });
 

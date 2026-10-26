@@ -31029,169 +31029,760 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Pages blocks/embeds/mentions/links (NEWFRONT-316, PAGE-037-044).
-  async pagesBlocksOpenDetail(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
-    return todo("pagesBlocksOpenDetail");
+  // The page body's editing surface. Everything here probes the shipped
+  // page detail: the live editor inside the canvas, the slash palette and
+  // the other transient surfaces beside it, the pane's assets and info
+  // tabs, and the header's options menu. The editor only mounts once the
+  // live document is ready (PAGE-065), so the first wait is for an
+  // editable surface rather than for a canvas box.
+
+  /** The page canvas the editor and the header live inside (PAGE-022). */
+  private pagesBlocksCanvas(): Locator {
+    return this.page.locator(WebNewDriver.PAGE_CANVAS).first();
   }
+
+  /**
+   * The body editor: the contenteditable inside the canvas's editor
+   * container. The title field is its own editable region in the canvas
+   * header, outside that container, so this reads the body alone.
+   */
+  private pagesBlocksEditor(): Locator {
+    return this.page.locator(`${WebNewDriver.PAGE_CANVAS} .editor-container [contenteditable="true"]`).first();
+  }
+
+  /** The palette popup, only present while a live slash query is open. */
+  private pagesBlocksSlashRoot(): Locator {
+    return this.page.locator('[data-testid="page-slash-palette"]');
+  }
+
+  /** The hovered block's handle and the menu it opens (PAGE-037). */
+  private pagesBlocksHandle(): Locator {
+    return this.page.locator('[data-testid="page-block-handle"]').first();
+  }
+
+  private pagesBlocksHandleMenu(): Locator {
+    return this.pagesBlocksHandle().locator("xpath=..").locator('[role="menu"]');
+  }
+
+  /** The selection bubble beside a selection (formatting + link). */
+  private pagesBlocksBubble(): Locator {
+    return this.page.locator("div.horizontal-scrollbar").first();
+  }
+
+  private pagesBlocksLinkInput(): Locator {
+    return this.page.locator('[data-testid="page-link-bubble"] input[type="url"]').first();
+  }
+
+  private pagesBlocksPane(): Locator {
+    return this.page.locator('[data-testid="page-navigation-pane"][data-open="true"]').first();
+  }
+
+  /**
+   * Settle the detail on its editable body. The live loader is the body's
+   * placeholder while the session connects; a refusal panel means the
+   * record never resolved, so it is reported rather than waited out.
+   */
+  private async pagesBlocksWaitEditor(): Promise<void> {
+    await this.pagesBlocksCanvas().waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const editor = this.pagesBlocksEditor();
+    const refusal = this.page.locator(WebNewDriver.PAGE_REFUSAL);
+    const settle = (locator: Locator, state: "attached" | "visible") =>
+      locator.waitFor({ state, timeout: WebNewDriver.WAIT_MS }).then(
+        () => true,
+        () => false
+      );
+    const outcome = await Promise.race([
+      settle(editor, "visible").then((shown) => (shown ? "editor" : "missing")),
+      settle(refusal, "visible").then((shown) => (shown ? "refusal" : "missing")),
+    ]);
+    if (outcome === "refusal") {
+      throw new Error("[parity] the page detail rendered its refusal panel, not the body editor.");
+    }
+    if (outcome !== "editor") {
+      const loading = (await this.page.locator('[data-testid="page-live-loader"]').count()) > 0;
+      throw new Error(`[parity] the page body editor never mounted${loading ? " (still on the live loader)" : ""}.`);
+    }
+    await this.page
+      .locator(WebNewDriver.PAGE_TITLE)
+      .first()
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    await this.pagesBlocksWaitSettled();
+  }
+
+  /**
+   * Wait until the mounted body stops re-rendering. A live document keeps
+   * arriving after the editor paints (the cached body first, then the
+   * synced one and any save echoes), and a caret or a selection placed
+   * mid-arrival is discarded — or the blocks are re-ordered — by the next
+   * application. The quiet window is what tells the two apart: two reads
+   * can match between two applications that are still on their way.
+   */
+  private async pagesBlocksWaitSettled(): Promise<void> {
+    await this.pagesBlocksEditor()
+      .evaluate((element) => {
+        const quietMs = 700;
+        return new Promise<void>((resolve) => {
+          let timer = 0;
+          const done = (): void => {
+            observer.disconnect();
+            resolve();
+          };
+          const observer = new MutationObserver(() => {
+            clearTimeout(timer);
+            timer = setTimeout(done, quietMs);
+          });
+          observer.observe(element, { childList: true, characterData: true, subtree: true });
+          timer = setTimeout(done, quietMs);
+          setTimeout(done, 15_000);
+        });
+      })
+      .catch(() => undefined);
+  }
+
+  /** Focus the editor without relying on the caret's current position. */
+  private async pagesBlocksFocusEditor(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const editor = document.querySelector('#page-content-container .editor-container [contenteditable="true"]');
+      if (editor === null || !(editor instanceof HTMLElement)) return false;
+      if (editor.contains(document.activeElement)) return true;
+      editor.focus();
+      return editor.contains(document.activeElement);
+    });
+  }
+
+  async pagesBlocksOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, { waitUntil: "domcontentloaded" });
+    await this.pagesBlocksWaitEditor();
+  }
+
   async pagesBlocksOpenDetailQuery(
-    _workspaceSlug: string,
-    _projectId: string,
-    _pageId: string,
-    _query: string
+    workspaceSlug: string,
+    projectId: string,
+    pageId: string,
+    query: string
   ): Promise<void> {
-    return todo("pagesBlocksOpenDetailQuery");
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}?${query}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.pagesBlocksWaitEditor();
   }
+
   async pagesBlocksReload(): Promise<void> {
-    return todo("pagesBlocksReload");
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.pagesBlocksWaitEditor();
   }
+
   async pagesBlocksEditorText(): Promise<string> {
-    return todo("pagesBlocksEditorText");
+    const editor = this.pagesBlocksEditor();
+    if ((await editor.count()) === 0) return "";
+    return ((await editor.innerText().catch(() => "")) ?? "").trim();
   }
+
   async pagesBlocksEditorHtml(): Promise<string> {
-    return todo("pagesBlocksEditorHtml");
+    const editor = this.pagesBlocksEditor();
+    if ((await editor.count()) === 0) return "";
+    return ((await editor.innerHTML().catch(() => "")) ?? "").trim();
   }
+
   async pagesBlocksEditorClickEnd(): Promise<void> {
-    return todo("pagesBlocksEditorClickEnd");
+    const editor = this.pagesBlocksEditor();
+    await editor.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // A click alone is not enough: a live document still applying after the
+    // click paints can reset the editor's selection while the browser
+    // selection stays put, and the next keystroke then lands at the body's
+    // start. Each attempt settles the body, places the caret, settles
+    // again, and confirms the caret really sits at the end of the last
+    // block before handing back.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await this.pagesBlocksWaitSettled();
+      await this.pagesBlocksClickLastBlock(editor);
+      await this.page.keyboard.press("End");
+      await this.pagesBlocksWaitSettled();
+      if (await this.pagesBlocksCaretAtEnd()) return;
+    }
   }
-  async pagesBlocksEditorType(_text: string): Promise<void> {
-    return todo("pagesBlocksEditorType");
+
+  /** Click the body's last painted text block, avoiding its text run. */
+  private async pagesBlocksClickLastBlock(editor: Locator): Promise<void> {
+    const paragraphs = editor.locator("p");
+    const total = await paragraphs.count();
+    for (let index = total - 1; index >= 0; index--) {
+      const box = await paragraphs
+        .nth(index)
+        .boundingBox()
+        .catch(() => null);
+      if (box === null || box.height < 4) continue;
+      // Past the line's text, not its middle: a block whose content is a
+      // link would otherwise take the click on the anchor, which never
+      // reaches the editor.
+      await paragraphs.nth(index).click({
+        position: { x: Math.max(4, box.width - 8), y: box.height / 2 },
+        timeout: WebNewDriver.WAIT_MS,
+      });
+      return;
+    }
+    await editor.click({ position: { x: 24, y: 16 }, timeout: WebNewDriver.WAIT_MS });
   }
-  async pagesBlocksEditorPressKey(_chord: string): Promise<void> {
-    return todo("pagesBlocksEditorPressKey");
+
+  /** Whether the selection currently sits at the end of the last block. */
+  private async pagesBlocksCaretAtEnd(): Promise<boolean> {
+    return this.pagesBlocksEditor()
+      .evaluate((element) => {
+        const selection = window.getSelection();
+        if (selection === null || selection.rangeCount === 0 || !selection.isCollapsed) return false;
+        const blocks = Array.from(element.querySelectorAll("p, h1, h2, h3, h4, h5, h6, li, pre"));
+        const last = blocks[blocks.length - 1];
+        if (last === undefined) return false;
+        const range = selection.getRangeAt(0);
+        const node = range.startContainer;
+        if (node !== last && !last.contains(node)) return false;
+        const tail = last.lastChild;
+        if (tail !== null && tail.nodeType === Node.ELEMENT_NODE) return range.startContainer === last;
+        return range.startContainer === tail && range.startOffset === (tail?.textContent ?? "").length;
+      })
+      .catch(() => false);
   }
+
+  async pagesBlocksEditorType(text: string): Promise<void> {
+    if (!(await this.pagesBlocksFocusEditor())) await this.pagesBlocksEditorClickEnd();
+    await this.page.keyboard.type(text);
+  }
+
+  async pagesBlocksEditorPressKey(chord: string): Promise<void> {
+    await this.page.keyboard.press(chord);
+  }
+
   async pagesBlocksEditorPressEnter(): Promise<void> {
-    return todo("pagesBlocksEditorPressEnter");
+    await this.pagesBlocksWaitSettled();
+    await this.page.keyboard.press("Enter");
   }
+
   async pagesBlocksEditorPressBackspace(): Promise<void> {
-    return todo("pagesBlocksEditorPressBackspace");
+    await this.page.keyboard.press("Backspace");
   }
-  async pagesBlocksEditorPasteHtml(_html: string): Promise<void> {
-    return todo("pagesBlocksEditorPasteHtml");
+
+  async pagesBlocksEditorPasteHtml(html: string): Promise<void> {
+    await this.pagesBlocksEditorClickEnd();
+    await this.pagesBlocksEditor().evaluate((element, markup) => {
+      const transfer = new DataTransfer();
+      transfer.setData("text/html", markup);
+      element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
+    }, html);
   }
-  async pagesBlocksEditorPasteText(_text: string): Promise<void> {
-    return todo("pagesBlocksEditorPasteText");
+
+  /**
+   * Arm a one-shot watcher for the next clipboard paste. A paste reaches the
+   * editor on an asynchronous clipboard event, so the DOM still holds the
+   * pre-paste content the instant the keystroke returns; the caller reads
+   * through {@link pagesBlocksWaitPasteLanded} instead of racing it.
+   */
+  private async pagesBlocksArmPasteWatch(): Promise<void> {
+    await this.page.evaluate(() => {
+      const state = { seen: false, mutated: false };
+      (window as unknown as Record<string, unknown>).__pagesBlocksPasteState = state;
+      const markSeen = () => {
+        state.seen = true;
+      };
+      document.addEventListener("paste", markSeen, { capture: true, once: true });
+      const editor = document.querySelector('#page-content-container .editor-container [contenteditable="true"]');
+      if (editor === null) return;
+      const observer = new MutationObserver(() => {
+        state.mutated = true;
+        observer.disconnect();
+      });
+      observer.observe(editor, { childList: true, characterData: true, subtree: true });
+    });
   }
+
+  /**
+   * Wait for the armed paste to land. Best effort: replacing a selection
+   * with identical text can leave the DOM untouched, so a miss falls through
+   * and the scenario's own assertions decide.
+   */
+  private async pagesBlocksWaitPasteLanded(): Promise<void> {
+    await expect
+      .poll(
+        () =>
+          this.page.evaluate(() => {
+            const state = (window as unknown as Record<string, unknown>).__pagesBlocksPasteState as
+              | { seen?: boolean; mutated?: boolean }
+              | undefined;
+            return state?.seen === true && state?.mutated === true;
+          }),
+        { timeout: 10_000 }
+      )
+      .toBe(true)
+      .catch(() => undefined);
+  }
+
+  async pagesBlocksEditorPasteText(text: string): Promise<void> {
+    await this.pagesBlocksWaitSettled();
+    // The async clipboard is denied without an explicit grant in headless,
+    // and the write would fail before the keystroke could carry it.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.page.evaluate((value) => navigator.clipboard.writeText(value), text);
+    // The paste must carry the fresh write; a stale clipboard deletes the
+    // selection instead.
+    await expect.poll(() => this.page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 }).toBe(text);
+    await this.pagesBlocksArmPasteWatch();
+    await this.page.keyboard.press("ControlOrMeta+v");
+    await this.pagesBlocksWaitPasteLanded();
+  }
+
   async pagesBlocksEditorSelectAll(): Promise<void> {
-    return todo("pagesBlocksEditorSelectAll");
+    await this.page.keyboard.press("ControlOrMeta+a");
   }
+
   async pagesBlocksEditorCopy(): Promise<void> {
-    return todo("pagesBlocksEditorCopy");
+    await this.page.keyboard.press("ControlOrMeta+c");
   }
+
   async pagesBlocksEditorPaste(): Promise<void> {
-    return todo("pagesBlocksEditorPaste");
+    await this.pagesBlocksArmPasteWatch();
+    await this.page.keyboard.press("ControlOrMeta+v");
+    await this.pagesBlocksWaitPasteLanded();
   }
-  async pagesBlocksParagraphSelectText(_text: string): Promise<void> {
-    return todo("pagesBlocksParagraphSelectText");
+
+  async pagesBlocksParagraphSelectText(text: string): Promise<void> {
+    // Triple-click selects the whole rendered line and, unlike a
+    // programmatic text-range selection, moves the editor's own selection
+    // to match. Bubble commands and paste act on that selection, so the
+    // two must agree.
+    await this.pagesBlocksEditor()
+      .locator("p", { hasText: text })
+      .first()
+      .click({ clickCount: 3, timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesBlocksSlashOpen(): Promise<boolean> {
-    return todo("pagesBlocksSlashOpen");
+    return (await this.pagesBlocksSlashRoot().count()) > 0;
   }
+
+  /**
+   * Open the palette below the caret. Keyboard-only on purpose: clicking
+   * re-targets inside lists and tables, and a drag-select plus Enter eats
+   * text. The double Enter exits list and quote blocks first.
+   */
+  private async pagesBlocksSlashShow(): Promise<void> {
+    await this.page.keyboard.press("Enter");
+    await this.page.keyboard.press("Enter");
+    await this.page.keyboard.press("/");
+    await this.pagesBlocksSlashRoot().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
   async pagesBlocksSlashItems(): Promise<string[]> {
-    return todo("pagesBlocksSlashItems");
+    await this.pagesBlocksEditorClickEnd();
+    await this.pagesBlocksSlashShow();
+    const names = await this.pagesBlocksSlashRoot().locator("button p").allTextContents();
+    await this.pagesBlocksSlashDismiss();
+    return names.map((name) => name.trim()).filter((name) => name !== "");
   }
-  async pagesBlocksSlashChoose(_entry: string, _occurrence?: number): Promise<void> {
-    return todo("pagesBlocksSlashChoose");
+
+  async pagesBlocksSlashChoose(entry: string, occurrence = 0): Promise<void> {
+    await this.pagesBlocksSlashShow();
+    // Exact names: the colour rows repeat labels, so a loose match would
+    // resolve a wash entry to its letter counterpart. Occurrence is the
+    // row's position among entries with that same label.
+    await this.pagesBlocksSlashRoot()
+      .getByRole("button", { name: entry, exact: true })
+      .nth(occurrence)
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesBlocksSlashOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
+    // Choosing can leave the caret outside the editor, so the next
+    // keystroke would go nowhere. Restore focus without moving the caret.
+    if (!(await this.pagesBlocksFocusEditor())) {
+      await expect.poll(() => this.pagesBlocksFocusEditor(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
+    }
   }
+
   async pagesBlocksSlashDismiss(): Promise<void> {
-    return todo("pagesBlocksSlashDismiss");
+    if (await this.pagesBlocksSlashOpen()) {
+      await this.page.keyboard.press("Escape");
+      await expect.poll(() => this.pagesBlocksSlashOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
+    }
   }
+
+  /** Hover the editor's last content block, skipping trailing empty paragraphs. */
+  private async pagesBlocksHoverLastBlock(): Promise<void> {
+    const blocks = this.pagesBlocksEditor().locator("xpath=./*");
+    const total = await blocks.count();
+    for (let index = total - 1; index >= 0; index--) {
+      const block = blocks.nth(index);
+      const tag = await block.evaluate((element) => element.tagName.toLowerCase()).catch(() => "");
+      const text = ((await block.innerText().catch(() => "")) ?? "").trim();
+      if (tag === "p" && text === "") continue;
+      // Center the block first: at the viewport edge a settled container
+      // can cover the point the pointer would otherwise land on.
+      await block.evaluate((element) => element.scrollIntoView({ block: "center" })).catch(() => {});
+      await block.hover({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    if (total > 0) {
+      await blocks.last().hover({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.pagesBlocksEditor().hover({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async pagesBlocksDragHandleVisible(): Promise<boolean> {
-    return todo("pagesBlocksDragHandleVisible");
+    await this.pagesBlocksHoverLastBlock();
+    const handle = this.pagesBlocksHandle();
+    if ((await handle.count()) === 0) return false;
+    return handle.isVisible().catch(() => false);
   }
+
   async pagesBlocksDragOpenMenu(): Promise<void> {
-    return todo("pagesBlocksDragOpenMenu");
+    await this.pagesBlocksHoverLastBlock();
+    const handle = this.pagesBlocksHandle();
+    await handle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The handle sits in the editor's left gutter, where the app sidebar
+    // can cover its click point; a covered click times out even though the
+    // handle is visible. Dispatch the click at the handle's own
+    // coordinates: the menu resolves its block from the pointer position.
+    const box = await handle.boundingBox({ timeout: WebNewDriver.WAIT_MS });
+    if (box !== null) {
+      await handle.dispatchEvent("click", {
+        clientX: Math.round(box.x + box.width / 2),
+        clientY: Math.round(box.y + box.height / 2),
+      });
+    } else {
+      await handle.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await expect
+      .poll(() => this.pagesBlocksHandleMenu().locator('[role="menuitem"]').count(), { timeout: WebNewDriver.WAIT_MS })
+      .toBeGreaterThan(0);
   }
+
   async pagesBlocksDragMenuItems(): Promise<string[]> {
-    return todo("pagesBlocksDragMenuItems");
+    const texts = await this.pagesBlocksHandleMenu().locator('[role="menuitem"]').allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text !== "");
   }
-  async pagesBlocksDragMenuChoose(_label: string): Promise<void> {
-    return todo("pagesBlocksDragMenuChoose");
+
+  async pagesBlocksDragMenuChoose(label: string): Promise<void> {
+    await this.pagesBlocksHandleMenu().getByRole("menuitem", { name: label, exact: true }).first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await expect.poll(() => this.pagesBlocksHandleMenu().count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
   }
-  async pagesBlocksUploadImage(_file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
-    return todo("pagesBlocksUploadImage");
+
+  async pagesBlocksUploadImage(file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
+    await this.pagesBlocksEditorClickEnd();
+    await this.pagesBlocksSlashShow();
+    const [chooser] = await Promise.all([
+      this.page.waitForEvent("filechooser", { timeout: WebNewDriver.WAIT_MS }),
+      this.pagesBlocksSlashRoot()
+        .getByRole("button", { name: "Image", exact: true })
+        .click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    await chooser.setFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
+    await this.pagesBlocksEditor().locator("img").first().waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesBlocksInlineImages(): Promise<PagesBlocksInlineImage[]> {
-    return todo("pagesBlocksInlineImages");
+    const images = this.pagesBlocksEditor().locator("img");
+    const total = await images.count();
+    const rows: PagesBlocksInlineImage[] = [];
+    for (let index = 0; index < total; index++) {
+      const image = images.nth(index);
+      rows.push({ src: (await image.getAttribute("src")) ?? "", alt: await image.getAttribute("alt") });
+    }
+    return rows;
   }
+
+  /** Open the pane on one tab by its address key, then settle its body. */
+  private async pagesBlocksOpenPaneTab(tab: "outline" | "info" | "assets"): Promise<void> {
+    const url = new URL(this.page.url());
+    url.searchParams.set("paneTab", tab);
+    await this.page.goto(url.toString(), { waitUntil: "domcontentloaded" });
+    await this.pagesBlocksWaitEditor();
+    await this.pagesBlocksPane().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
   async pagesBlocksAssetsTabOpen(): Promise<void> {
-    return todo("pagesBlocksAssetsTabOpen");
+    await this.pagesBlocksOpenPaneTab("assets");
   }
+
   async pagesBlocksAssetsTabRows(): Promise<PagesBlocksAssetRow[]> {
-    return todo("pagesBlocksAssetsTabRows");
+    const rows = this.pagesBlocksPane().locator('[data-testid="page-asset-row"]');
+    const total = await rows.count();
+    const found: PagesBlocksAssetRow[] = [];
+    for (let index = 0; index < total; index++) {
+      const name = (
+        (await rows
+          .nth(index)
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (name === "") continue;
+      found.push({ name, kind: null });
+    }
+    return found;
   }
+
   async pagesBlocksAssetsTabEmptyVisible(): Promise<boolean> {
-    return todo("pagesBlocksAssetsTabEmptyVisible");
+    const empty = this.pagesBlocksPane().locator('[data-testid="page-assets-empty"]');
+    if ((await empty.count()) === 0) return false;
+    return empty
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
+
   async pagesBlocksEmbedUpgradeVisible(): Promise<boolean> {
-    return todo("pagesBlocksEmbedUpgradeVisible");
+    const embeds = this.pagesBlocksEditor().locator("issue-embed-component");
+    if ((await embeds.count()) === 0) return false;
+    return (await embeds.locator('[data-testid="page-embed-upgrade"]').count()) > 0;
   }
+
   async pagesBlocksEmbedUpgradeHref(): Promise<string | null> {
-    return todo("pagesBlocksEmbedUpgradeHref");
+    const embeds = this.pagesBlocksEditor().locator("issue-embed-component");
+    if ((await embeds.count()) === 0) return null;
+    const link = embeds.locator('[data-testid="page-embed-upgrade"] a').first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
   }
-  async pagesBlocksMentionSuggest(_query: string): Promise<string[]> {
-    return todo("pagesBlocksMentionSuggest");
+
+  async pagesBlocksMentionSuggest(query: string): Promise<string[]> {
+    await this.pagesBlocksEditorClickEnd();
+    await this.page.keyboard.type(`@${query}`);
+    await this.page
+      .locator('[id^="mention-item-"]')
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const texts = await this.page.locator('[id^="mention-item-"]').allTextContents();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text !== "");
   }
-  async pagesBlocksMentionChoose(_displayName: string): Promise<void> {
-    return todo("pagesBlocksMentionChoose");
+
+  async pagesBlocksMentionChoose(displayName: string): Promise<void> {
+    await this.page
+      .locator('[id^="mention-item-"]', { hasText: displayName })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesBlocksEditor()
+      .locator("mention-component")
+      .first()
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesBlocksMentionChips(): Promise<string[]> {
-    return todo("pagesBlocksMentionChips");
+    const texts = await this.pagesBlocksEditor().locator("mention-component").allTextContents();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text !== "");
   }
+
   async pagesBlocksEmojiOpen(): Promise<void> {
-    return todo("pagesBlocksEmojiOpen");
+    await this.pagesBlocksEditorClickEnd();
+    await this.pagesBlocksSlashShow();
+    await this.pagesBlocksSlashRoot()
+      .getByRole("button", { name: "Emoji", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator('[data-testid="page-emoji-picker"] [data-testid="page-emoji-option"]')
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesBlocksEmojiItems(): Promise<string[]> {
-    return todo("pagesBlocksEmojiItems");
+    const texts = await this.page
+      .locator('[data-testid="page-emoji-picker"] [data-testid="page-emoji-option"]')
+      .allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text !== "");
   }
-  async pagesBlocksEmojiChoose(_index: number): Promise<void> {
-    return todo("pagesBlocksEmojiChoose");
+
+  async pagesBlocksEmojiChoose(index: number): Promise<void> {
+    const before = await this.pagesBlocksEditorText();
+    await this.page
+      .locator('[data-testid="page-emoji-picker"] [data-testid="page-emoji-option"]')
+      .nth(index)
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesBlocksEditorText(), { timeout: WebNewDriver.WAIT_MS }).not.toBe(before);
   }
+
   async pagesBlocksMentionSections(): Promise<string[]> {
-    return todo("pagesBlocksMentionSections");
+    const popup = this.page.locator('[data-testid="page-mention-suggestions"]');
+    if ((await popup.count()) === 0) return [];
+    const titles = await popup.locator("h6").allTextContents();
+    return titles.map((title) => title.trim()).filter((title) => title !== "");
   }
+
   async pagesBlocksMentionChipHrefs(): Promise<string[]> {
-    return todo("pagesBlocksMentionChipHrefs");
+    const links = this.pagesBlocksEditor().locator("mention-component a");
+    const total = await links.count();
+    const hrefs: string[] = [];
+    for (let index = 0; index < total; index++) hrefs.push((await links.nth(index).getAttribute("href")) ?? "");
+    return hrefs;
   }
+
   async pagesBlocksLinkSelect(): Promise<void> {
-    return todo("pagesBlocksLinkSelect");
+    // A drag is the gesture that both paints a browser selection and moves
+    // the editor's own selection, so the bubble and its link fields agree
+    // on what is selected. A programmatic text selection paints only the
+    // former, and the bubble's actions then act on a stale cursor.
+    const link = this.pagesBlocksEditor().locator("a").first();
+    const box = await link.boundingBox({ timeout: WebNewDriver.WAIT_MS });
+    if (box === null) throw new Error("[parity] the body's first link has no painted box to select.");
+    const middle = box.y + box.height / 2;
+    await this.page.mouse.move(box.x + 1, middle);
+    await this.page.mouse.down();
+    await this.page.mouse.move(box.x + Math.max(2, box.width - 1), middle, { steps: 8 });
+    await this.page.mouse.up();
+    await this.pagesBlocksBubble().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesBlocksLinkBubbleVisible(): Promise<boolean> {
-    return todo("pagesBlocksLinkBubbleVisible");
+    const bubble = this.pagesBlocksBubble();
+    if ((await bubble.count()) === 0) return false;
+    return bubble
+      .getByRole("button", { name: "Link", exact: true })
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
+
+  /** Open the bubble's link fields, checking state first: a blind re-click toggles them shut. */
+  private async pagesBlocksLinkOpenInput(): Promise<void> {
+    const input = this.pagesBlocksLinkInput();
+    if ((await input.count()) > 0) return;
+    await this.pagesBlocksBubble().getByRole("button", { name: "Link", exact: true }).first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await input.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
   async pagesBlocksLinkPrefill(): Promise<string> {
-    return todo("pagesBlocksLinkPrefill");
+    await this.pagesBlocksLinkOpenInput();
+    return this.pagesBlocksLinkInput().inputValue();
   }
-  async pagesBlocksLinkEdit(_href: string): Promise<void> {
-    return todo("pagesBlocksLinkEdit");
+
+  async pagesBlocksLinkEdit(href: string): Promise<void> {
+    await this.pagesBlocksLinkOpenInput();
+    await this.pagesBlocksLinkInput().fill(href);
+    await this.page.keyboard.press("Enter");
+    await expect.poll(() => this.pagesBlocksLinkInput().count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
   }
+
   async pagesBlocksLinkRemove(): Promise<void> {
-    return todo("pagesBlocksLinkRemove");
+    await this.pagesBlocksLinkOpenInput();
+    await this.page
+      .locator('[data-testid="page-link-bubble"]')
+      .getByRole("button", { name: "Remove link", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesBlocksLinkHref(): Promise<string | null> {
-    return todo("pagesBlocksLinkHref");
+    const link = this.pagesBlocksEditor().locator("a").first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
   }
-  async pagesBlocksBubbleFormat(_index: number): Promise<void> {
-    return todo("pagesBlocksBubbleFormat");
+
+  async pagesBlocksBubbleFormat(index: number): Promise<void> {
+    // The bubble's icon controls in reading order; the Link toggle has no
+    // aria-label and sits after them, so this index never reaches it.
+    await this.pagesBlocksBubble().locator("button[aria-label]").nth(index).click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  private pagesBlocksOptionsTrigger(): Locator {
+    return this.page.getByRole("button", { name: "Page options", exact: true }).first();
+  }
+
   async pagesBlocksOptionsOpen(): Promise<void> {
-    return todo("pagesBlocksOptionsOpen");
+    // Re-clicking the trigger toggles the menu shut, so check the state
+    // first. The menu's items arrive with their own reads, so the open
+    // waits until the population settles rather than for its first row.
+    const items = this.page.getByRole("menuitem");
+    if ((await items.count()) === 0) {
+      await this.pagesBlocksOptionsTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await items.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    let stable = 0;
+    let previous = -1;
+    for (let poll = 0; poll < 40 && stable < 4; poll++) {
+      const count = await items.count();
+      stable = count === previous ? stable + 1 : 1;
+      previous = count;
+      await this.page.waitForTimeout(150);
+    }
   }
+
   async pagesBlocksOptionsItems(): Promise<string[]> {
-    return todo("pagesBlocksOptionsItems");
+    await this.pagesBlocksOptionsOpen();
+    const texts = await this.page.getByRole("menuitem").allTextContents();
+    await this.page.keyboard.press("Escape");
+    return [...new Set(texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text !== ""))];
   }
+
   async pagesBlocksOptionsCopyMarkdown(): Promise<void> {
-    return todo("pagesBlocksOptionsCopyMarkdown");
+    await this.pagesBlocksEditor().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesBlocksOptionsOpen();
+    await this.page.getByRole("menuitem", { name: "Copy markdown", exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    // A previous attempt's notice can still be up when this write lands,
+    // so the wait matches any visible card carrying the success text.
+    await expect
+      .poll(
+        async () => {
+          const toast = await this.rulesLastToast();
+          return toast === null ? "" : `${toast.title} ${toast.message}`.trim();
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toContain("Markdown copied to clipboard.");
   }
+
   async pagesBlocksToastText(): Promise<string | null> {
-    return todo("pagesBlocksToastText");
+    return this.toastText();
   }
+
   async pagesBlocksClipboardText(): Promise<string> {
-    return todo("pagesBlocksClipboardText");
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
+
   async pagesBlocksHeaderLockCycle(): Promise<void> {
-    return todo("pagesBlocksHeaderLockCycle");
+    // Lock and unlock through the header control, waiting for each state
+    // to land. Used only as the copy recovery (PAGE-044).
+    const lock = this.page.locator('[data-testid="page-detail-lock"]').first();
+    await lock.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await lock.scrollIntoViewIfNeeded();
+    await lock.click({ timeout: WebNewDriver.WAIT_MS });
+    const locked = this.page.getByRole("button", { name: "Locked", exact: true }).first();
+    await locked.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await locked.click({ timeout: WebNewDriver.WAIT_MS });
+    // Unlocking paints a short-lived transitional label, so the settled
+    // state is the plain Lock control again rather than its own name.
+    await this.page.getByRole("button", { name: "Lock", exact: true }).first().waitFor({
+      state: "visible",
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    // The lock/unlock notices outlive the cycle; a following toast read
+    // would report them instead of the next action's notice.
+    await expect
+      .poll(
+        async () => {
+          const text = await this.toastText();
+          return text !== null && /lock/i.test(text);
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(false);
   }
-  async pagesBlocksInfoStats(_expectedCharacters?: number, _skipNavigate?: boolean): Promise<PagesBlocksInfoStats> {
-    return todo("pagesBlocksInfoStats");
+
+  async pagesBlocksInfoStats(expectedCharacters?: number, skipNavigate = false): Promise<PagesBlocksInfoStats> {
+    if (!skipNavigate) await this.pagesBlocksOpenPaneTab("info");
+    const readCard = async (key: "words" | "characters"): Promise<number | null> => {
+      const card = this.pagesBlocksPane().locator(`[data-stat="${key}"] h6`).first();
+      if ((await card.count()) === 0) return null;
+      const raw = ((await card.innerText().catch(() => "")) ?? "").trim();
+      const value = Number.parseInt(raw.replace(/[^0-9-]/g, ""), 10);
+      return Number.isFinite(value) ? value : null;
+    };
+    // The pane can paint its cards before the body arrives, so the asserted
+    // count is polled rather than read once.
+    if (expectedCharacters !== undefined) {
+      await expect.poll(() => readCard("characters"), { timeout: WebNewDriver.WAIT_MS }).toBe(expectedCharacters);
+    }
+    return { words: await readCard("words"), characters: await readCard("characters") };
   }
   // Workspace issue exports settings (NEWFRONT-381, rows EXP-001..013).
   // Appended; existing stubs above are untouched per the shared driver

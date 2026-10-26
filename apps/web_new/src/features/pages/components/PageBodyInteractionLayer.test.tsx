@@ -454,6 +454,78 @@ describe("PageBodyInteractionLayer", () => {
     expect(screen.queryByTestId("page-emoji-picker")).not.toBeInTheDocument();
   });
 
+  it("keeps a dismissed palette shut while the document is unchanged (PAGE-037)", () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/head");
+    const { rerender } = mount({ getHandle: () => page });
+    expect(screen.getByTestId("page-slash-palette")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("page-slash-palette")).not.toBeInTheDocument();
+    // A selection pass re-derives the same `/head` from an unchanged body;
+    // the dismissed palette must not pop back open.
+    rerender(
+      <PageBodyInteractionLayer
+        workspaceSlug="acme"
+        projectId="project-1"
+        getHandle={() => page}
+        html="<p>html</p>"
+        onPickImage={vi.fn()}
+        onDocumentChange={vi.fn()}
+        assistantReady={false}
+      />
+    );
+    expect(screen.queryByTestId("page-slash-palette")).not.toBeInTheDocument();
+  });
+
+  it("opens the palette again after the body changes (PAGE-037)", () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/head");
+    const { rerender } = mount({ getHandle: () => page });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("page-slash-palette")).not.toBeInTheDocument();
+    rerender(
+      <PageBodyInteractionLayer
+        workspaceSlug="acme"
+        projectId="project-1"
+        getHandle={() => page}
+        html="<p>html edited</p>"
+        onPickImage={vi.fn()}
+        onDocumentChange={vi.fn()}
+        assistantReady={false}
+      />
+    );
+    expect(screen.getByTestId("page-slash-palette")).toBeInTheDocument();
+  });
+
+  it("keeps the palette inside the viewport when the caret is near the bottom (PAGE-037)", () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/head");
+    (page.caretAnchor as ReturnType<typeof vi.fn>).mockReturnValue({ top: window.innerHeight - 8, left: 24 });
+    const getBoundingClientRect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockReturnValue({
+        width: 256,
+        height: 320,
+        top: 0,
+        left: 0,
+        right: 256,
+        bottom: 320,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+    try {
+      mount({ getHandle: () => page });
+      const surface = screen.getByTestId("page-slash-palette").parentElement;
+      const top = Number.parseFloat(surface?.style.top ?? "");
+      expect(top).toBeGreaterThanOrEqual(0);
+      expect(top + 320).toBeLessThanOrEqual(window.innerHeight);
+      expect(surface?.style.maxHeight).toContain("100vh");
+    } finally {
+      getBoundingClientRect.mockRestore();
+    }
+  });
+
   it("targets the hovered block, not the caret's block, and offers move up/down (PAGE-037)", () => {
     const page = handle();
     const hovered = { from: 12, to: 20, json: { type: "paragraph" }, top: 40 };

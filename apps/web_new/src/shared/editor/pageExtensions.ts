@@ -9,7 +9,7 @@
 // arrives in the editor's own chunk, never in the initial closure. Later
 // slices extend this same set — blocks and embeds (PAGE-037–044).
 
-import { loadDescriptionExtensions, loadMentionExtension, loadStoredImageExtension } from "./extensions.js";
+import { loadDescriptionExtensions, loadMentionExtension } from "./extensions.js";
 import { loadPageBlockExtensions } from "./pageBlockExtensions.js";
 import { loadPageColorMark, loadPageTableExtensions } from "./pageTableExtensions.js";
 
@@ -34,7 +34,6 @@ export async function loadPageExtensions(
     base,
     tables,
     color,
-    image,
     blocks,
     mention,
   ] = await Promise.all([
@@ -48,7 +47,6 @@ export async function loadPageExtensions(
     }),
     loadPageTableExtensions(),
     loadPageColorMark(),
-    loadStoredImageExtension(),
     loadPageBlockExtensions(),
     loadMentionExtension(workspaceSlug),
   ]);
@@ -61,7 +59,6 @@ export async function loadPageExtensions(
     TaskItem.configure({ nested: true }),
     ...tables,
     color,
-    image,
     mention,
     ...(blocks as AnyExtension[]),
   ];

@@ -426,7 +426,7 @@ test(
 test(
   specTitle(["PAGE-037"], "drag handle exposes block actions and duplicate plus delete save and reload"),
   { tag: specTags(["PAGE-037"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const session = await signInSession(seed.email, seed.password);
     const { projectId } = await scratchProject(seed, "drag", session);
     const pageId = await serverCreatePage(seed.workspaceSlug, projectId, session, `${tag("drag")} page`);
@@ -446,7 +446,16 @@ test(
       await test.step("the handle shows on hover with delete and duplicate actions", async () => {
         expect(await driver.pagesBlocksDragHandleVisible()).toBe(true);
         await driver.pagesBlocksDragOpenMenu();
-        expect(await driver.pagesBlocksDragMenuItems()).toEqual(["Delete", "Duplicate"]);
+        const items = await driver.pagesBlocksDragMenuItems();
+        // The old menu carries duplicate and delete only. The area spec
+        // (§6.1, PAGE-037) says the handle also exposes move-up and
+        // move-down, and web_new implements that intended set; the two
+        // legs pin their own catalogue rather than dropping either.
+        if (testInfo.project.name === "new") {
+          expect(items).toEqual(["Delete", "Duplicate", "Move up", "Move down"]);
+        } else {
+          expect(items).toEqual(["Delete", "Duplicate"]);
+        }
         await driver.pagesBlocksEditorPressKey("Escape");
       });
 
@@ -665,7 +674,7 @@ test(
 test(
   specTitle(["PAGE-039"], "bug: NEWFRONT-351 pasting an image onto another page errors instead of cloning the asset"),
   { tag: specTags(["PAGE-039"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const session = await signInSession(seed.email, seed.password);
     const { projectId } = await scratchProject(seed, "duplicate", session);
     const pageA = await serverCreatePage(seed.workspaceSlug, projectId, session, `${tag("duplicate-a")} page`);
@@ -685,10 +694,23 @@ test(
       await driver.pagesBlocksEditorClickEnd();
       await driver.pagesBlocksEditorPaste();
 
-      // Intended: a second inline image with a fresh asset id. Observed: the
-      // duplicate-assets call 500s (NEWFRONT-351) and the node shows its error state.
-      await expect.poll(() => driver.pagesBlocksEditorText(), { timeout: 120_000 }).toContain("Error loading image");
-      expect(await driver.pagesBlocksInlineImages()).toEqual([]);
+      // Intended: a second inline image with a fresh asset id. The oracle
+      // pins the old bug (the duplicate-assets call 500s, NEWFRONT-351, and
+      // the node shows its error state); web_new implements the intended
+      // clone, which Parity allows for a `bug:` scenario ("Old bugs"). Each
+      // leg pins its own outcome here and nothing else in the scenario moves.
+      if (testInfo.project.name === "new") {
+        await expect.poll(() => driver.pagesBlocksInlineImages(), { timeout: 120_000 }).toHaveLength(1);
+        const after = await driver.pagesBlocksInlineImages();
+        expect(after).toHaveLength(1);
+        expect(before[0]?.src).toBeTruthy();
+        expect(after[0]?.src).toBeTruthy();
+        expect(after[0]?.src).not.toBe(before[0]?.src);
+        expect(await driver.pagesBlocksEditorText()).not.toContain("Error loading image");
+      } else {
+        await expect.poll(() => driver.pagesBlocksEditorText(), { timeout: 120_000 }).toContain("Error loading image");
+        expect(await driver.pagesBlocksInlineImages()).toEqual([]);
+      }
     } finally {
       await cleanupProject(seed, projectId, session);
     }
@@ -701,7 +723,7 @@ test(
     "bug: NEWFRONT-352 embed identifiers persist in snapshots while the community renders no upgrade card"
   ),
   { tag: specTags(["PAGE-040"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const session = await signInSession(seed.email, seed.password);
     const { projectId } = await scratchProject(seed, "embed", session);
     const pageId = await serverCreatePage(seed.workspaceSlug, projectId, session, `${tag("embed")} page`);
@@ -742,9 +764,17 @@ test(
       await test.step("the community renders no embed slot or upgrade prompt", async () => {
         await driver.pagesBlocksOpenDetail(seed.workspaceSlug, projectId, pageId);
         await waitEditorContains(driver, ["before embed"]);
-        // Intended: an upgrade prompt with an outbound link (NEWFRONT-352). Observed: nothing renders.
-        expect(await driver.pagesBlocksEmbedUpgradeVisible()).toBe(false);
-        expect(await driver.pagesBlocksEmbedUpgradeHref()).toBe(null);
+        // Intended: an upgrade prompt with an outbound link (NEWFRONT-352).
+        // The oracle pins the old bug (nothing renders); web_new implements
+        // the intended card, which Parity allows for a `bug:` scenario
+        // ("Old bugs"). Snapshot persistence above stays shared.
+        if (testInfo.project.name === "new") {
+          expect(await driver.pagesBlocksEmbedUpgradeVisible()).toBe(true);
+          expect(await driver.pagesBlocksEmbedUpgradeHref()).toBe("https://airepublic.com/pricing");
+        } else {
+          expect(await driver.pagesBlocksEmbedUpgradeVisible()).toBe(false);
+          expect(await driver.pagesBlocksEmbedUpgradeHref()).toBe(null);
+        }
         const text = await driver.pagesBlocksEditorText();
         expect(text).toContain("before embed");
       });

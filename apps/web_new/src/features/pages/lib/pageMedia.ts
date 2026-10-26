@@ -9,7 +9,13 @@
 // extend the same contract module rather than forking a copy, and the
 // assets pane (NEWFRONT-843) resolves display and download from the id.
 
-import { duplicatePageAsset, pageAssetUrl, uploadPageAsset, type PageAssetByteUpload } from "@pidash/api-client";
+import {
+  duplicatePageAsset,
+  isApiError,
+  pageAssetUrl,
+  uploadPageAsset,
+  type PageAssetByteUpload,
+} from "@pidash/api-client";
 
 import type { ApiClient } from "@pidash/api-client";
 
@@ -63,14 +69,48 @@ export async function clonePageImage(
   client: ApiClient,
   input: { workspaceSlug: string; projectId: string; pageId: string; sourceAssetId: string }
 ): Promise<UploadedPageImage> {
-  const clone = await duplicatePageAsset(
-    client,
-    input.workspaceSlug,
-    input.projectId,
-    input.sourceAssetId,
-    input.pageId
-  );
-  return { assetId: clone.asset_id, assetUrl: pageAssetUrl(input.workspaceSlug, input.projectId, clone.asset_id) };
+  try {
+    const clone = await duplicatePageAsset(
+      client,
+      input.workspaceSlug,
+      input.projectId,
+      input.sourceAssetId,
+      input.pageId
+    );
+    return { assetId: clone.asset_id, assetUrl: pageAssetUrl(input.workspaceSlug, input.projectId, clone.asset_id) };
+  } catch (error) {
+    // The server's own copy leg is not always available (NEWFRONT-351: it
+    // answers 500 when it cannot reach the storage endpoint it copies to).
+    // Reading the picture and uploading the bytes through the ordinary
+    // page pipeline still yields a fresh asset on this page, which is all
+    // the document and the assets pane need. A refusal the server meant
+    // (a permission or validation answer) and a transport failure are the
+    // caller's to report, so only a server-side fault falls back.
+    if (!isApiError(error) || error.status < 500) throw error;
+    return clonePageImageBytes(client, input);
+  }
+}
+
+/**
+ * Clone one image by copying its bytes through the two legs the page
+ * upload path already uses: read the served picture, then upload it as a
+ * new page asset (PAGE-039).
+ */
+async function clonePageImageBytes(
+  client: ApiClient,
+  input: { workspaceSlug: string; projectId: string; pageId: string; sourceAssetId: string }
+): Promise<UploadedPageImage> {
+  const served = await client.get(pageAssetUrl(input.workspaceSlug, input.projectId, input.sourceAssetId));
+  const type = served.headers.get("content-type") ?? "image/png";
+  const bytes = served.arrayBuffer === undefined ? null : await served.arrayBuffer();
+  if (bytes === null) throw new Error("The image could not be copied.");
+  const uploaded = await uploadPageImage(client, {
+    workspaceSlug: input.workspaceSlug,
+    projectId: input.projectId,
+    pageId: input.pageId,
+    file: new File([bytes], `image-${input.sourceAssetId}`, { type }),
+  });
+  return uploaded;
 }
 
 /** Bare stored asset ids inside pasted HTML (absolute sources excluded). */

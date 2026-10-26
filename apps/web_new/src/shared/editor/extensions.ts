@@ -179,18 +179,6 @@ function createStoredImageNode(Image: TiptapImage) {
   }).configure({ inline: false, allowBase64: false });
 }
 
-/**
- * The shared stored-image node on its own, for the page editor: a page
- * body stores toolbar images exactly like a description does
- * (`image-component` with the asset id and an upload status), so the
- * page set attaches the same node without the issue-description extras
- * (PAGE-034, ISS-127).
- */
-export async function loadStoredImageExtension() {
-  const { default: Image } = await import("@tiptap/extension-image");
-  return createStoredImageNode(Image);
-}
-
 /** Description editing: paragraphs, headings, lists, code, links. */
 export async function loadDescriptionExtensions(options: { horizontalRule?: boolean; history?: boolean } = {}) {
   const [{ default: StarterKit }, { default: Link }] = await Promise.all([
