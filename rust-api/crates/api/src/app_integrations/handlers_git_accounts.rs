@@ -63,7 +63,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::Router;
-use chrono::{SecondsFormat, Utc};
+use chrono::Utc;
 
 use pidash_db::app_integrations::queries_git;
 use pidash_db::config::encryption::Keyring;
@@ -304,10 +304,12 @@ fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
 
 /// `verified_at.isoformat() if verified_at else None`
 /// (`services.py:273`): Python renders a UTC-aware datetime as
-/// `...+00:00` with microseconds only when nonzero — exactly
-/// `AutoSi` without `Z`.
+/// `...+00:00` with exactly six fraction digits when microseconds
+/// are nonzero, none when zero — via
+/// [`crate::assistant::common::py_iso`] (chrono `AutoSi` is not
+/// equivalent: it trims trailing zeros. PIDASHCONV-1464).
 fn isoformat_or_none(dt: Option<chrono::DateTime<Utc>>) -> serde_json::Value {
-    dt.map(|dt| serde_json::Value::String(dt.to_rfc3339_opts(SecondsFormat::AutoSi, false)))
+    dt.map(|dt| serde_json::Value::String(crate::assistant::common::py_iso(&dt)))
         .unwrap_or(serde_json::Value::Null)
 }
 
@@ -1376,6 +1378,35 @@ async fn list_repos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isoformat_or_none_matches_python_isoformat() {
+        // `None` renders `null`; whole seconds render no fraction;
+        // trailing-zero micros keep six digits; nanosecond values
+        // truncate to microseconds (PIDASHCONV-1464).
+        assert_eq!(isoformat_or_none(None), serde_json::Value::Null);
+        let whole = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(
+            isoformat_or_none(Some(whole)),
+            serde_json::json!("2026-10-22T10:00:05+00:00")
+        );
+        let trailing = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.12+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(
+            isoformat_or_none(Some(trailing)),
+            serde_json::json!("2026-10-22T10:00:05.120000+00:00")
+        );
+        let nanos = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.123456789+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(
+            isoformat_or_none(Some(nanos)),
+            serde_json::json!("2026-10-22T10:00:05.123456+00:00")
+        );
+    }
 
     #[test]
     fn providers_body_is_byte_exact() {

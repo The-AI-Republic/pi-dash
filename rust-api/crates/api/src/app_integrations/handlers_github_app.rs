@@ -74,7 +74,7 @@ use axum::extract::{Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -264,9 +264,13 @@ async fn callback_actor(
 }
 
 /// `install_session.expires_at.isoformat()` / DRF datetime rendering:
-/// RFC 3339 with `+00:00` (Django never renders `Z`).
+/// Python `isoformat()` with `+00:00` (Django never renders `Z`):
+/// exactly six fraction digits when microseconds are nonzero, none
+/// when zero. chrono `AutoSi` trims trailing zeros (`.120`) and
+/// prints nanos (9 digits), so this shares
+/// [`crate::assistant::common::py_iso`] (PIDASHCONV-1464).
 fn isoformat(value: &DateTime<Utc>) -> String {
-    value.to_rfc3339_opts(SecondsFormat::AutoSi, false)
+    crate::assistant::common::py_iso(value)
 }
 
 /// `str(e)[:2000]` — code-point truncation, never splitting UTF-8.
@@ -943,7 +947,10 @@ async fn refresh_app_installation(
     let mut refreshed = installation.clone();
     match list_installation_repository_count(config, installation.installation_id).await {
         Ok(repository_count) => {
-            let now = Utc::now();
+            // `timezone.now()` (`github.py:197`) is microsecond-exact;
+            // truncate so the stamped row — serialized below into the
+            // 200 body — matches the stored value (PIDASHCONV-1464).
+            let now = crate::runner_enroll::now_micros();
             refreshed.repository_count = repository_count;
             refreshed.verified_at = Some(now);
             refreshed.last_checked_at = Some(now);
@@ -952,7 +959,7 @@ async fn refresh_app_installation(
         Err(error) => {
             // `except Exception` (`github.py:216-223`): stamp the
             // failure, log, save, and raise only when asked.
-            refreshed.last_checked_at = Some(Utc::now());
+            refreshed.last_checked_at = Some(crate::runner_enroll::now_micros());
             refreshed.last_check_error = truncate_error(&error.to_string());
             save_installation_refresh(&mut *connection, &refreshed, extra_update_fields)
                 .await
@@ -2717,6 +2724,25 @@ mod tests {
             (!integration_preexisted).then_some(wi.integration_id),
         )
         .await;
+    }
+
+    #[test]
+    fn isoformat_matches_python_isoformat() {
+        // Whole seconds render no fraction; trailing-zero micros keep
+        // six digits; nanosecond in-memory stamps (the refresh path)
+        // truncate to microseconds (PIDASHCONV-1464).
+        let whole = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(isoformat(&whole), "2026-10-22T10:00:05+00:00");
+        let trailing = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.12+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(isoformat(&trailing), "2026-10-22T10:00:05.120000+00:00");
+        let nanos = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.123456789+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(isoformat(&nanos), "2026-10-22T10:00:05.123456+00:00");
     }
 
     #[test]

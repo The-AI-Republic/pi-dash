@@ -1680,6 +1680,49 @@ class Seeder:
             "url": f"https://github.com/{owner}/{name}",
         }
 
+    def create_git_repository_binding(
+        self,
+        workspace_id: str,
+        project_id: str,
+        account_id: str,
+        actor_id: str,
+        *,
+        last_synced_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Seed a ``git_repositories`` + ``git_repository_bindings`` pair."""
+        repo_id = _uid()
+        full = f"contract-owner-{self.tag[:6]}/contract-repo-{self._n + 1}"
+        self.db.execute(
+            """INSERT INTO git_repositories
+               (id, provider, host_url, external_id, namespace, name, full_name,
+                web_url, clone_url_http, clone_url_ssh, default_branch,
+                is_private, metadata, created_at, updated_at)
+               VALUES (%s,'github','https://github.com',%s,%s,%s,%s,
+                       %s,%s,%s,'main',false,'{}',now(),now())""",
+            (
+                repo_id,
+                f"contract:{repo_id[:8]}",
+                f"contract-owner-{self.tag[:6]}",
+                f"contract-repo-{self._n + 1}",
+                full,
+                f"https://github.com/{full}",
+                f"https://github.com/{full}.git",
+                f"git@github.com:{full}.git",
+            ),
+        )
+        self._put("git_repositories", repo_id)
+        binding_id = _uid()
+        self.db.execute(
+            """INSERT INTO git_repository_bindings
+               (id, project_id, workspace_id, repository_id, provider_account_id,
+                actor_id, is_sync_enabled, clone_auth_mode, last_synced_at,
+                last_sync_error, metadata, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,false,'runner_managed',%s,'','{}',now(),now())""",
+            (binding_id, project_id, workspace_id, repo_id, account_id, actor_id, last_synced_at),
+        )
+        self._put("git_repository_bindings", binding_id)
+        return {"id": binding_id, "repository_id": repo_id}
+
     def create_github_app_installation(self, wi_id: str) -> dict[str, Any]:
         """Seed a ``github_app_installations`` row with a unique install id."""
         installation_id = random.randint(1_000_000, 9_999_999)
