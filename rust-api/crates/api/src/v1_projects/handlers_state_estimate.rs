@@ -296,8 +296,11 @@ enum HandlerError {
     /// 404, `Http404("Project not found")` (unresolvable project identifier —
     ///   DRF propagates the args: `NotFound("Project not found")`).
     ProjectNotFound,
-    /// 400, `{"detail": ...}` (`ParseError`: bad per_page/cursor/JSON).
+    /// 400, `{"Detail": ...}` (`ParseError`: bad per_page/cursor/JSON).
     BadDetail(String),
+    /// 415, DRF `select_parser` (`{"Detail": ...}`): the state writes read
+    /// `request.data` (PIDASHCONV-1391).
+    UnsupportedMediaType(String),
     /// 400, serializer `errors` dict (already rendered).
     FieldErrors(String),
     /// 400, view-inline `{"error": ...}` bodies.
@@ -325,6 +328,10 @@ impl HandlerError {
             ),
             HandlerError::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            HandlerError::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             HandlerError::FieldErrors(body) | HandlerError::Conflict(body) => {
@@ -1176,14 +1183,46 @@ fn drf_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// Parse the request body the way DRF's parsers do for these views: an empty
-/// body is empty data; otherwise JSON (malformed → 400 `{"detail": ...}`);
-/// a non-object JSON value answers 400 `non_field_errors`.
-fn read_object_body(body: Bytes) -> Result<serde_json::Map<String, Value>, HandlerError> {
-    if body.is_empty() {
-        return Ok(serde_json::Map::new());
+/// State write-path body spec: no list fields; blank `sequence`/`group`/
+/// `is_triage`/`default` form values behave as absent (all verified live).
+/// `description`/`external_*` keep `''` (`allow_blank`, stored verbatim).
+const STATE_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &["sequence", "group", "is_triage", "default"],
+    };
+
+/// Content-negotiated state write body (PIDASHCONV-1391): empty bodies are
+/// `{}`, form/multipart arrives as the HTML-input map (last value wins,
+/// blank optionals skipped per [`STATE_BODY_SPEC`]), JSON keeps the existing
+/// serde + `JSON parse error` mapping over the decoded text, and a media type
+/// no DRF parser accepts (or a missing `Content-Type` with a body) is the 415.
+///
+/// Multipart *file* parts are dropped: no state field is a file field, so a
+/// text-only multipart request is the whole named surface (same convention as
+/// PIDASHCONV-1149).
+fn parse_write_body(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<serde_json::Map<String, Value>, HandlerError> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    match negotiate_body(headers, body, &STATE_BODY_SPEC) {
+        Err(BodyError::UnsupportedMediaType(detail)) => {
+            Err(HandlerError::UnsupportedMediaType(detail))
+        }
+        Err(BodyError::ParseDetail(detail)) => Err(HandlerError::BadDetail(detail)),
+        Err(BodyError::ServerError) => Err(HandlerError::ServerError),
+        Ok(NegotiatedBody::Empty) => Ok(serde_json::Map::new()),
+        Ok(NegotiatedBody::JsonText { text, .. }) => read_json_object(text.as_bytes()),
+        Ok(NegotiatedBody::Form { map, .. }) => Ok(map),
     }
-    let value: Value = serde_json::from_slice(&body)
+}
+
+/// Parse decoded JSON source text the way DRF's parsers do for these views:
+/// malformed → 400 `{"detail": ...}`; a non-object JSON value answers 400
+/// `non_field_errors`.
+fn read_json_object(body: &[u8]) -> Result<serde_json::Map<String, Value>, HandlerError> {
+    let value: Value = serde_json::from_slice(body)
         .map_err(|e| HandlerError::BadDetail(format!("JSON parse error - {e}")))?;
     match value {
         Value::Object(map) => Ok(map),
@@ -1855,7 +1894,7 @@ async fn create_state_inner(
         "POST",
     )
     .await?;
-    let raw = read_object_body(body)?;
+    let raw = parse_write_body(headers, &body)?;
     // Field validation first: DRF never calls `validate()` after field errors,
     // so the default-flip stays dormant on this path.
     let input = validate_state_input(&raw, false)
@@ -2265,7 +2304,7 @@ async fn patch_state_inner(
         .await
         .map_err(|_| HandlerError::ServerError)?
         .ok_or(HandlerError::NotFound)?;
-    let raw = read_object_body(body)?;
+    let raw = parse_write_body(headers, &body)?;
     let input = validate_state_input(&raw, true)
         .map_err(|errors| HandlerError::FieldErrors(field_errors_body(&errors)))?;
     // Partial `validate()`: the triage check sees the supplied group (or
@@ -2827,6 +2866,38 @@ mod tests {
             Err(HandlerError::BadError(message))
             if message == "The required key does not exist."
         ));
+    }
+
+    #[test]
+    fn write_body_negotiates() {
+        let headers_for = |content_type: &str, len: usize| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", content_type.parse().unwrap());
+            headers.insert("content-length", len.to_string().parse().unwrap());
+            headers
+        };
+        // Form input: text values arrive as scalars, blank optionals behave
+        // as absent, blank text stays in the map.
+        let body = b"name=S1&color=%23fff&sequence=&description=";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let map = parse_write_body(&headers, body).expect("form");
+        assert_eq!(map.get("name"), Some(&Value::String("S1".to_owned())));
+        assert!(!map.contains_key("sequence"));
+        assert_eq!(map.get("description"), Some(&Value::String(String::new())));
+        // Unknown media types 415 with the DRF detail.
+        let text_body = b"{\"description\": \"x\"}";
+        let headers = headers_for("text/plain", text_body.len());
+        let err = parse_write_body(&headers, text_body).expect_err("415");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            body,
+            r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#
+        );
+        assert!(matches!(err, HandlerError::UnsupportedMediaType(_)));
+        // Empty bodies are `{}`.
+        let map = parse_write_body(&HeaderMap::new(), b"").expect("empty");
+        assert!(map.is_empty());
     }
 }
 

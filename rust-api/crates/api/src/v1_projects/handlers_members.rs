@@ -237,6 +237,8 @@ pub enum Denial {
     BadError(String),
     BadJson(Value),
     BadPayload,
+    UnsupportedMediaType(String),
+    ParseDetail(String),
     ServerError,
 }
 
@@ -259,6 +261,14 @@ impl Denial {
                 Some(serde_json::to_string(value).expect("json body")),
             ),
             Denial::BadPayload => (StatusCode::BAD_REQUEST, Some(INVALID_PAYLOAD_BODY.into())),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Some(format!("{{\"detail\":{}}}", json_string(message))),
+            ),
+            Denial::ParseDetail(message) => (
+                StatusCode::BAD_REQUEST,
+                Some(format!("{{\"detail\":{}}}", json_string(message))),
+            ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Some(SERVER_ERROR_BODY.into()),
@@ -648,8 +658,8 @@ fn pool(state: &AppState) -> Result<sqlx::PgPool, Denial> {
 }
 
 /// The owned request parts a gated handler hands back to Django when the
-/// body turns out to be empty or unparseable (bundled so the four body
-/// handlers stay under the argument-count lint).
+/// JSON body turns out to be unparseable (bundled so the four body handlers
+/// stay under the argument-count lint).
 struct ProxyRequest {
     method: Method,
     uri: Uri,
@@ -657,17 +667,73 @@ struct ProxyRequest {
     body: Bytes,
 }
 
-/// Parse a collected body (`None` = empty or unparseable).
+/// Decode negotiated JSON source text (`None` = unparseable).
 ///
-/// DRF parses the body inside the handler — after authN, the rewrite and the
-/// permission gate — so an empty body is `JSONParser`'s `ParseError` 400
-/// (`JSON parse error - Expecting value: line 1 column 1 (char 0)`), a
-/// malformed body is the same 400 family with the serde/json message
-/// swapped in, and an unauthenticated caller with a bad body still sees
-/// 401/403 first (`parsers.py:56-68`). Callers hand `None` back to Django
-/// via [`proxy_through`] for those exact bytes.
-fn parse_body_json(body: &Bytes) -> Option<Value> {
+/// Callers hand `None` back to Django via [`proxy_through`] for the exact
+/// `ParseError` bytes (an unauthenticated caller with a bad body still sees
+/// 401/403 first — parsing runs after the gate — `parsers.py:56-68`). Empty
+/// bodies never reach here: negotiation maps them to `{}` (verified live —
+/// the earlier `ParseError`-for-empty reading was wrong).
+fn parse_body_json(body: &[u8]) -> Option<Value> {
     serde_json::from_slice(body).ok()
+}
+
+/// Member write-path body spec: no list fields; a blank form `role` behaves
+/// as absent (the `ChoiceField` blank-input rule — not required, no
+/// `allow_blank` — verified live). A blank form `member` stays in the map so
+/// the `RelatedField` null rule fires downstream.
+const MEMBER_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &["role"],
+    };
+
+/// Invitation write-path body spec: same shape as the member spec (`role`
+/// is the same optional choice; `email` keeps `''` so the `CharField` blank
+/// rule fires — verified live).
+const INVITE_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &["role"],
+    };
+
+/// Content-negotiated member/invitation write body (PIDASHCONV-1391): empty
+/// bodies are `{}`, form/multipart arrives as the HTML-input map (last value
+/// wins, blank `role` skipped per `spec`), JSON keeps the existing decode
+/// (`None` still proxies for Django's exact `ParseError` bytes), and a media
+/// type no DRF parser accepts (or a missing `Content-Type` with a body) is
+/// the 415. The flag reports HTML (form/multipart) input so member call sites
+/// can apply the `RelatedField` blank rule.
+///
+/// Multipart *file* parts are dropped: no member/invitation field is a file
+/// field, so a text-only multipart request is the whole named surface (same
+/// convention as PIDASHCONV-1149).
+fn parse_write_body(
+    headers: &HeaderMap,
+    body: &[u8],
+    spec: &crate::v1_cycles_modules::body::BodySpec,
+) -> Result<(Option<Value>, bool), Denial> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    match negotiate_body(headers, body, spec) {
+        Err(BodyError::UnsupportedMediaType(detail)) => Err(Denial::UnsupportedMediaType(detail)),
+        Err(BodyError::ParseDetail(detail)) => Err(Denial::ParseDetail(detail)),
+        Err(BodyError::ServerError) => Err(Denial::ServerError),
+        Ok(NegotiatedBody::Empty) => Ok((Some(Value::Object(serde_json::Map::new())), false)),
+        Ok(NegotiatedBody::JsonText { text, .. }) => Ok((parse_body_json(text.as_bytes()), false)),
+        Ok(NegotiatedBody::Form { map, .. }) => Ok((Some(Value::Object(map)), true)),
+    }
+}
+
+/// DRF `RelatedField.run_validation` forces a present-but-empty HTML value to
+/// `None` before the null check (`relations.py:150-154`, probed POST +
+/// PATCH), so form `member=` fails `may not be null` instead of the UUID
+/// message. Applied to the form arm only: the JSON arm keeps the existing
+/// path (which answers the UUID message — a pre-existing deviation, see PR
+/// notes).
+fn member_blank_to_null(data: &mut serde_json::Map<String, Value>) {
+    if matches!(data.get("member"), Some(Value::String(s)) if s.is_empty()) {
+        data.insert("member".to_owned(), Value::Null);
+    }
 }
 
 /// `type(data).__name__` for the serializer non-dict message
@@ -1607,9 +1673,11 @@ async fn pm_create_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(actor.timezone.as_deref())?;
     // The body parses after the gate (`post()`: the serializer is built
-    // from `request.data`); empty/unparseable bodies proxy for the exact
-    // `ParseError` bytes.
-    let Some(json) = parse_body_json(&req.body) else {
+    // from `request.data`); unparseable JSON proxies for Django's exact
+    // `ParseError` bytes, while empty bodies are `{}` and a media type no
+    // DRF parser accepts is the 415 (PIDASHCONV-1391).
+    let (maybe_json, from_form) = parse_write_body(&req.headers, &req.body, &MEMBER_BODY_SPEC)?;
+    let Some(json) = maybe_json else {
         let ProxyRequest {
             method,
             uri,
@@ -1619,10 +1687,13 @@ async fn pm_create_inner(
         return Ok(proxy_through(state.clone(), method, uri, headers, body).await);
     };
 
-    let data = match json {
+    let mut data = match json {
         Value::Object(map) => map,
         ref other => return Err(non_dict_denial(other)),
     };
+    if from_form {
+        member_blank_to_null(&mut data);
+    }
     let mut errors = FieldErrors::default();
     let member_id = match data.get("member") {
         None => {
@@ -1939,10 +2010,12 @@ async fn pm_detail_patch_inner(
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
     // The body parses after the row fetch (`patch()`: `objects.get` runs
-    // before the serializer reads `request.data`); empty/unparseable bodies
-    // proxy for the exact `ParseError` bytes, non-dict bodies 400 with no
-    // write.
-    let Some(json) = parse_body_json(&req.body) else {
+    // before the serializer reads `request.data`); unparseable JSON proxies
+    // for Django's exact `ParseError` bytes, while empty bodies are `{}` and
+    // a media type no DRF parser accepts is the 415 (PIDASHCONV-1391).
+    // Non-dict bodies 400 with no write.
+    let (maybe_json, from_form) = parse_write_body(&req.headers, &req.body, &MEMBER_BODY_SPEC)?;
+    let Some(json) = maybe_json else {
         let ProxyRequest {
             method,
             uri,
@@ -1952,10 +2025,13 @@ async fn pm_detail_patch_inner(
         return Ok(proxy_through(state.clone(), method, uri, headers, body).await);
     };
 
-    let data = match json {
+    let mut data = match json {
         Value::Object(map) => map,
         ref other => return Err(non_dict_denial(other)),
     };
+    if from_form {
+        member_blank_to_null(&mut data);
+    }
     let mut errors = FieldErrors::default();
     // Partial: absent keys keep their rows; present keys validate. A failed
     // present key leaves the old value in place, but the errors below stop
@@ -2157,9 +2233,11 @@ async fn inv_create_inner(
         return Err(Denial::InviteNotFound);
     };
     // The body parses after the workspace fetch (`create()`: `objects.get`
-    // runs before the serializer reads `request.data`); empty/unparseable
-    // bodies proxy for the exact `ParseError` bytes.
-    let Some(json) = parse_body_json(&req.body) else {
+    // runs before the serializer reads `request.data`); unparseable JSON
+    // proxies for Django's exact `ParseError` bytes, while empty bodies are
+    // `{}` and a media type no DRF parser accepts is the 415 (PIDASHCONV-1391).
+    let (maybe_json, _) = parse_write_body(&req.headers, &req.body, &INVITE_BODY_SPEC)?;
+    let Some(json) = maybe_json else {
         let ProxyRequest {
             method,
             uri,
@@ -2343,9 +2421,12 @@ async fn inv_detail_patch_inner(
         .await?
         .ok_or(Denial::InviteNotFound)?;
     // The body parses after the row fetch (`partial_update()`: `get_object`
-    // runs before `request.data`); empty/unparseable bodies proxy for the
-    // exact `ParseError` bytes, non-dict bodies 400 with no write.
-    let Some(json) = parse_body_json(&req.body) else {
+    // runs before `request.data`); unparseable JSON proxies for Django's
+    // exact `ParseError` bytes, while empty bodies are `{}` and a media type
+    // no DRF parser accepts is the 415 (PIDASHCONV-1391). Non-dict bodies
+    // 500 with no write (the email guard reads `.get` before validation).
+    let (maybe_json, _) = parse_write_body(&req.headers, &req.body, &INVITE_BODY_SPEC)?;
+    let Some(json) = maybe_json else {
         let ProxyRequest {
             method,
             uri,
@@ -3038,6 +3119,57 @@ mod tests {
         assert!(parse_invite_pk("11111111-1111-1111-1111-111111111111").is_ok());
         assert!(matches!(parse_invite_pk("abc"), Err(Denial::BadDetail)));
     }
+
+    #[test]
+    fn write_body_negotiates() {
+        let headers_for = |content_type: &str, len: usize| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", content_type.parse().unwrap());
+            headers.insert("content-length", len.to_string().parse().unwrap());
+            headers
+        };
+        // Form input: last value wins, blank `role` behaves as absent.
+        let body = b"member=ae5c9c1e-7b6e-4c7e-bf2c-9d1e5f6a7b8c&role=";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let (json, from_form) = parse_write_body(&headers, body, &MEMBER_BODY_SPEC).expect("form");
+        assert!(from_form);
+        let map = json.expect("map").as_object().cloned().expect("object");
+        assert_eq!(
+            map.get("member"),
+            Some(&Value::String(
+                "ae5c9c1e-7b6e-4c7e-bf2c-9d1e5f6a7b8c".to_owned()
+            ))
+        );
+        assert!(!map.contains_key("role"));
+        // A blank form `member` fails like null downstream.
+        let mut blank = serde_json::Map::new();
+        blank.insert("member".to_owned(), Value::String(String::new()));
+        member_blank_to_null(&mut blank);
+        assert_eq!(blank.get("member"), Some(&Value::Null));
+        // The JSON arm keeps the existing decode.
+        let json_body = br#"{"role": 5}"#;
+        let headers = headers_for("application/json", json_body.len());
+        let (json, from_form) =
+            parse_write_body(&headers, json_body, &MEMBER_BODY_SPEC).expect("json");
+        assert!(!from_form);
+        assert_eq!(json, Some(serde_json::json!({"role": 5})));
+        // Unknown media types 415 with the DRF detail.
+        let text_body = br#"{"role": 5}"#;
+        let headers = headers_for("text/plain", text_body.len());
+        let err = parse_write_body(&headers, text_body, &MEMBER_BODY_SPEC).expect_err("415");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            body.as_deref(),
+            Some(r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#)
+        );
+        assert!(matches!(err, Denial::UnsupportedMediaType(_)));
+        // Empty bodies are `{}`.
+        let (json, from_form) =
+            parse_write_body(&HeaderMap::new(), b"", &MEMBER_BODY_SPEC).expect("empty");
+        assert!(!from_form);
+        assert_eq!(json, Some(Value::Object(serde_json::Map::new())));
+    }
 }
 
 /// Live scratch-DB round trips (env-gated, the `queries_projmem` precedent):
@@ -3107,6 +3239,9 @@ mod live_tests {
         }
         if !body.is_empty() {
             builder = builder.header("content-type", "application/json");
+            // Hyper sets this on the wire; negotiation keys emptiness off it
+            // exactly like Django keys off CONTENT_LENGTH.
+            builder = builder.header("content-length", body.len().to_string());
         }
         let req = builder.body(axum::body::Body::from(body)).expect("request");
         let response = app.oneshot(req).await.expect("serve");
