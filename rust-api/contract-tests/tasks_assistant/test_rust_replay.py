@@ -985,11 +985,19 @@ def _terminal_turn(db_conn, turn_id):
     return None
 
 
-def _drive_create_issue(db_conn, tag, *, pod=False, runner=False):
+def _drive_create_issue(db_conn, tag, *, pod=False, runner=False, backlog=False):
     """Seed, drive one ``create_issue`` tool call, wait for the terminal
-    turn. Returns (user, project_id, state_id, pod_id, turn_id)."""
+    turn. Returns (user, project_id, state_id, pod_id, turn_id, requests),
+    where requests are the provider stub's captured payloads (the
+    follow-up request carries the tool result). ``backlog`` seeds one
+    Backlog state so the bounce has a target (PIDASHCONV-1444)."""
     user, workspace = _seed_member(db_conn, f"create-{tag}")
     project_id, state_id = _seed_ticking_project(db_conn, user, workspace)
+    if backlog:
+        seed_helpers.Seed(db_conn).state(
+            project_id, workspace["id"], name="Backlog", group="backlog"
+        )
+        db_conn.commit()
     pod_id = _seed_pod(db_conn, workspace, project_id) if pod else None
     if runner:
         assert pod_id is not None
@@ -1016,7 +1024,30 @@ def _drive_create_issue(db_conn, tag, *, pod=False, runner=False):
         )
     finally:
         stub.stop()
-    return user, project_id, state_id, pod_id, turn_id
+    return user, project_id, state_id, pod_id, turn_id, stub.requests
+
+
+def _backlog_state_id(db_conn, project_id):
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM states WHERE project_id = %s AND \"group\" = 'backlog'",
+            (project_id,),
+        )
+        return cur.fetchone()[0]
+
+
+def _tool_result(requests):
+    """The tool call's result dict, from the follow-up request's tool message.
+
+    Both lanes send the executed tool's return back to the model as an
+    OpenAI ``role: tool`` message whose content is the result JSON, so the
+    stub's captured payloads observe exactly what the tool returned.
+    """
+    assert len(requests) >= 2, "the turn makes a follow-up request after the tool call"
+    messages = requests[1].get("messages") or []
+    tools = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+    assert len(tools) == 1, "the follow-up carries exactly one tool result"
+    return json.loads(tools[0]["content"])
 
 
 def _assert_tool_created_issue(db_conn, project_id, state_id, tag):
@@ -1050,7 +1081,9 @@ def _assert_ticker_armed(db_conn, issue, user_id):
 
 def test_create_issue_arms_ticker_without_pod(db_conn):
     """No pod: the fire arms the clock, no entry run (``no-pod-available``)."""
-    user, project_id, state_id, _pod_id, _turn_id = _drive_create_issue(db_conn, "nopod")
+    user, project_id, state_id, _pod_id, _turn_id, _requests = _drive_create_issue(
+        db_conn, "nopod"
+    )
     issue = _assert_tool_created_issue(db_conn, project_id, state_id, "nopod")
     _assert_ticker_armed(db_conn, issue, user["id"])
     assert _run_rows(db_conn, issue["id"]) == []
@@ -1059,7 +1092,7 @@ def test_create_issue_arms_ticker_without_pod(db_conn):
 
 def test_create_issue_bounces_without_runner(db_conn):
     """Pod without a runner: the bounce posts, the ticker disarms, no run."""
-    user, project_id, state_id, _pod_id, _turn_id = _drive_create_issue(
+    user, project_id, state_id, _pod_id, _turn_id, _requests = _drive_create_issue(
         db_conn, "bounce", pod=True
     )
     issue = _assert_tool_created_issue(db_conn, project_id, state_id, "bounce")
@@ -1079,7 +1112,7 @@ def test_create_issue_bounces_without_runner(db_conn):
 
 def test_create_issue_dispatches_entry_run(db_conn):
     """Pod with a user-owned runner: an entry run dispatches immediately."""
-    user, project_id, state_id, pod_id, _turn_id = _drive_create_issue(
+    user, project_id, state_id, pod_id, _turn_id, _requests = _drive_create_issue(
         db_conn, "dispatch", pod=True, runner=True
     )
     issue = _assert_tool_created_issue(db_conn, project_id, state_id, "dispatch")
@@ -1108,3 +1141,39 @@ def test_create_issue_dispatches_entry_run(db_conn):
     assert "transition probe dispatch" in run["prompt"]
     assert _run_event_count(db_conn, run["id"]) == 0
     assert _comment_rows(db_conn, issue["id"]) == []
+
+
+def test_create_issue_bounce_reports_backlog_tool_result(db_conn):
+    """Bounce to a Backlog target: the DB row AND the tool result say Backlog.
+
+    PIDASHCONV-1444, the Rust mirror of the Django oracle case: the
+    drive's bounce moves the row to Backlog, and the tool result must
+    report the post-drive row — the requested ticking state is the
+    pre-fix failure.
+    """
+    user, project_id, _state_id, _pod_id, _turn_id, requests = _drive_create_issue(
+        db_conn, "bouncereport", pod=True, backlog=True
+    )
+    backlog_id = _backlog_state_id(db_conn, project_id)
+    issues = _issue_rows(db_conn, project_id)
+    assert len(issues) == 1, "the tool call created exactly one issue"
+    issue = issues[0]
+    assert issue["name"] == "transition probe bouncereport"
+    assert str(issue["state_id"]) == str(backlog_id), "the bounce moves the row to Backlog"
+    assert issue["sequence_id"] == 1
+    result = _tool_result(requests)
+    assert result["created"] is True
+    assert str(result["id"]) == str(issue["id"])
+    assert result["state"] == "Backlog"
+    assert result["state_group"] == "backlog"
+    tickers = _ticker_rows(db_conn, issue["id"])
+    assert len(tickers) == 1
+    ticker = tickers[0]
+    assert ticker["enabled"] is False
+    assert ticker["disarm_reason"] == "left_ticking_state"
+    assert ticker["next_run_at"] is None
+    assert str(ticker["created_by_id"]) == str(user["id"])
+    comments = _comment_rows(db_conn, issue["id"])
+    assert len(comments) == 1, "the bounce posts exactly one comment"
+    assert comments[0]["comment_stripped"] == BOUNCE_STRIPPED
+    assert _run_rows(db_conn, issue["id"]) == []
