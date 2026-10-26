@@ -3776,9 +3776,12 @@ fn python_type_name(value: &Value) -> &'static str {
 
 /// `PrimaryKeyRelatedField.to_internal_value` for the `created_by` /
 /// `updated_by` / `intake` PATCH keys: `None` stays (all three allow
-/// null); bools fail `incorrect_type` outright (DRF raises `TypeError`
-/// before the lookup); strings and ints prep as UUIDs — a prep failure
-/// is Django's curly-quote `invalid` message *as a field error* (DRF
+/// null), and so does the exact empty string (DRF
+/// `RelatedField.run_validation` forces `''` to `None` on every input,
+/// JSON included — PIDASHCONV-1518); bools fail `incorrect_type`
+/// outright (DRF raises `TypeError` before the lookup); strings and
+/// ints prep as UUIDs — a prep failure is Django's curly-quote
+/// `invalid` message *as a field error* (DRF
 /// converts the escaped `ValidationError` via `get_error_detail`, live
 /// probe 2026-10-03), and a prep success must exist in the queryset or
 /// fail `does_not_exist` (the `users` table has no soft-delete column;
@@ -3796,6 +3799,9 @@ async fn validate_patch_pk(
     value: &Value,
 ) -> Result<PkValidation, Denial> {
     if value.is_null() {
+        return Ok(PkValidation::Null);
+    }
+    if matches!(value, Value::String(text) if text.is_empty()) {
         return Ok(PkValidation::Null);
     }
     if value.is_boolean() {
@@ -3888,7 +3894,9 @@ async fn board_partial_update(
     // `BOARD_PATCH_BODY_SPEC` already dropped the bools and
     // `updated_by`), and an HTML `view_props` string JSON-decodes (the
     // `JSONString` mark) — or fails the field below. The JSON arm skips
-    // all of this: `""` runs `to_internal_value` there.
+    // all of this: `""` runs `to_internal_value` there, except on the
+    // PK keys, where the `RelatedField` rule maps it to null first
+    // (PIDASHCONV-1518).
     let mut data = data.clone();
     let mut view_props_json_failed = false;
     let mut view_props_decoded_null = false;
@@ -3997,8 +4005,23 @@ async fn board_partial_update(
     ] {
         if let Some(value) = data.get(field) {
             match validate_patch_pk(&pool, table, live_only, value).await? {
-                PkValidation::Null => sets.push((column, PatchValue::Null)),
-                PkValidation::Id(id) => sets.push((column, PatchValue::Uuid(id))),
+                // `updated_by` validates (a bad value still 400s) but
+                // never writes: `BaseModel.save()` re-stamps
+                // `updated_by` to the current user on every update
+                // (`db/models/base.py`, via crum), overwriting the
+                // validated value — so the audit stamp below always
+                // wins, and emitting both would double-SET the column
+                // (Postgres 42601, PIDASHCONV-1518).
+                PkValidation::Null => {
+                    if field != "updated_by" {
+                        sets.push((column, PatchValue::Null));
+                    }
+                }
+                PkValidation::Id(id) => {
+                    if field != "updated_by" {
+                        sets.push((column, PatchValue::Uuid(id)));
+                    }
+                }
                 PkValidation::FieldError(message) => errors.push(field, message),
             }
         }
