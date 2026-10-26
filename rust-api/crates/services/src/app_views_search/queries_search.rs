@@ -1165,13 +1165,20 @@ pub fn build_issue_search(input: &IssueSearchInput<'_>) -> Result<BuiltQuery, Is
         );
     }
 
-    // `exclude_issues_in_module` (:90-95): same collapse with the module
-    // pinned. `if module:` — empty was normalised to `None` by the caller.
+    // `exclude_issues_in_module` (:90-95): Django splits the multi-valued
+    // `exclude()` into two subqueries — any link row to M (live or
+    // soft-deleted) AND any live link to *any* module — so unlike the
+    // cycle arm above, pinning M does NOT collapse to one `NOT EXISTS`.
+    // Emitted verbatim in Django's shape (verified against the 4.2.30
+    // compiler). `if module:` — empty was normalised to `None` by the
+    // caller.
     if let Some(mid) = opt(input.module) {
         let module = builder.uuid(mid);
         wheres.push(format!(
-            "NOT EXISTS (SELECT 1 FROM module_issues \
-             WHERE issue_id = issues.id AND module_id = {module} AND deleted_at IS NULL)"
+            "NOT (EXISTS (SELECT 1 FROM module_issues \
+             WHERE issue_id = issues.id AND module_id = {module}) AND EXISTS (SELECT 1 FROM issues U0 \
+             LEFT JOIN module_issues U1 ON U0.id = U1.issue_id \
+             WHERE U1.deleted_at IS NULL AND U0.id = issues.id))"
         ));
     }
 
@@ -1707,7 +1714,16 @@ mod tests {
             "NOT EXISTS (SELECT 1 FROM cycle_issues \
              WHERE issue_id = issues.id AND deleted_at IS NULL)"
         ));
-        assert!(sql.contains("module_issues"));
+        // Split exclude, not the cycle-style collapse: any link row to M
+        // AND any live link to any module (Django 4.2.30 compiler output).
+        assert!(sql.contains(
+            "NOT (EXISTS (SELECT 1 FROM module_issues \
+             WHERE issue_id = issues.id AND module_id = $"
+        ));
+        assert!(sql.contains(
+            "LEFT JOIN module_issues U1 ON U0.id = U1.issue_id \
+             WHERE U1.deleted_at IS NULL AND U0.id = issues.id)"
+        ));
         assert!(sql.contains("issues.target_date IS NULL"));
         assert!(sql.contains("issues.created_by_id = $"));
         assert!(sql.ends_with("LIMIT 100"));
