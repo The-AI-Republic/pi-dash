@@ -113,7 +113,7 @@ impl Failure {
 
     /// 415, DRF's `UnsupportedMediaType` for a non-empty body under an
     /// unhandled content type. The raw header is echoed verbatim (a
-    /// missing header arrives as `text/plain`, the WSGI default).
+    /// missing header echoes as `""`: DRF sees `media_type=""`).
     pub fn unsupported_media_type(raw_content_type: &str) -> Self {
         Self::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -303,14 +303,14 @@ pub enum ParsedBody {
 ///   become [`BodyField::File`]. A missing boundary is DRF's exact
 ///   `Multipart form parse error - Invalid boundary in multipart: None`
 ///   400; an otherwise unparseable body degrades to `{}` like Django.
-/// * Anything else (including a missing header, which the WSGI server
-///   reports as `text/plain`) is 415 with the raw header echoed
+/// * Anything else (including a missing header, which DRF sees as
+///   `media_type=""`) is 415 with the raw header echoed
 ///   verbatim: `Unsupported media type "<ct>" in request.`
 pub fn parse_body(body: &[u8], content_type: Option<&str>) -> Result<ParsedBody, Failure> {
     if body.is_empty() {
         return Ok(ParsedBody::Object(Vec::new()));
     }
-    let raw = content_type.unwrap_or("text/plain");
+    let raw = content_type.unwrap_or("");
     let essence = raw.split(';').next().unwrap_or("").trim().to_lowercase();
     match essence.as_str() {
         "application/json" => match serde_json::from_slice(body) {
@@ -1079,12 +1079,12 @@ mod tests {
             r#"{"non_field_errors":["No data provided"]}"#.to_owned()
         );
         // Malformed JSON is a parse error; unknown types are 415 with the
-        // raw header echoed (missing arrives as text/plain).
+        // raw header echoed (a missing header echoes as "").
         assert!(parse_body(b"{bad", json).is_err());
         let err = parse_body(b"a=1", None).expect_err("missing ct is 415");
         assert_eq!(
             err.body,
-            r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#.to_owned()
+            r#"{"detail":"Unsupported media type \"\" in request."}"#.to_owned()
         );
         // Forms parse last-wins with forgiving decoding.
         let form = Some("application/x-www-form-urlencoded");
