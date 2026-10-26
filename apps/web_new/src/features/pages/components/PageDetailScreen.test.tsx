@@ -1344,6 +1344,9 @@ describe("PageDetailScreen header actions (PAGE-055-060)", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     const dialog = await screen.findByRole("dialog", { name: "Delete page" });
     expect(within(dialog).getByText("Launch notes")).toBeInTheDocument();
+    // A shelved page does not carry its subtree count, so the dialog reads the
+    // children once and holds Delete until it knows how many are re-homed.
+    await waitFor(() => expect(screen.queryByTestId("page-delete-rehomed-loading")).not.toBeInTheDocument());
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(harness.pageWrites.some((write) => write.method === "DELETE")).toBe(true));
     expect(notifySuccess).toHaveBeenCalledWith("Page deleted successfully.");
