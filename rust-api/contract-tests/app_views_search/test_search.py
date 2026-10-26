@@ -373,3 +373,37 @@ def test_fts_uses_issues_fts_idx(db, seed, tenant_a, project_a):
         )
         plan = "\n".join(row[0] for row in cur.fetchall())
     assert "issues_fts_idx" in plan, plan
+
+
+def test_search_issues_module_exclusion_split_exclude(
+    api, seed, tenant_a, project_a, auth_a
+):
+    """?module=M keeps Django's split exclude (PIDASHCONV-1449): exclude()
+    over the multi-valued issue_module join compiles to NOT (any link row
+    to M AND any live link to any module), so an issue soft-removed from M
+    but still live in N is excluded, while a control with only a
+    soft-deleted link to M is still listed."""
+    ws_id = tenant_a["workspace"]["id"]
+    mod_m = seed.module(ws_id, project_a)
+    mod_n = seed.module(ws_id, project_a)
+    issue_id = seed.issue(ws_id, project_a, name="split exclude target")
+    control_id = seed.issue(ws_id, project_a, name="split exclude control")
+    seed.module_issue(ws_id, project_a, mod_m, issue_id)
+    seed.module_issue(ws_id, project_a, mod_n, issue_id)
+    seed.module_issue(ws_id, project_a, mod_m, control_id)
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE module_issues SET deleted_at = now(), updated_at = now()"
+            " WHERE module_id = %s AND issue_id IN (%s, %s)",
+            (mod_m, issue_id, control_id),
+        )
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}"
+        f"/projects/{project_a}/search-issues/",
+        headers=auth_a,
+        params={"module": str(mod_m)},
+    )
+    assert r.status_code == 200, r.text
+    ids = [row["id"] for row in r.json()]
+    assert issue_id not in ids
+    assert control_id in ids
