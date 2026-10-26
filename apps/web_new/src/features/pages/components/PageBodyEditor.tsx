@@ -68,8 +68,8 @@ type TiptapEditor = Parameters<typeof import("@tiptap/react").EditorContent>[0][
 /**
  * Load the page editor: the Tiptap chunk plus the page extension set.
  * The live variant also loads the collaboration binding and drops the
- * standalone undo history (the binding keeps its own); the document it
- * binds arrives per mount through the collab prop.
+ * standalone undo history (collaborative editing has no undo); the
+ * document it binds arrives per mount through the collab prop.
  */
 async function loadPageEditor(
   workspaceSlug: string,

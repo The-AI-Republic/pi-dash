@@ -44,6 +44,7 @@ interface FakeHarness {
   close: (code: number) => void;
   synced: () => void;
   stateless: (payload: string) => void;
+  authFailed: () => void;
   cacheReady: () => void;
   connect: ReturnType<typeof vi.fn>;
   disconnect: ReturnType<typeof vi.fn>;
@@ -59,6 +60,7 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
   const closes = new Set<(code: number, reason: string) => void>();
   const synceds = new Set<() => void>();
   const frames = new Set<(payload: string) => void>();
+  const authFailures = new Set<() => void>();
   const readys = new Set<() => void>();
   let ready = options.cacheReady ?? true;
   const lengths = options.lengths ?? new Map<string, number>();
@@ -101,6 +103,12 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
           frames.delete(listener);
         };
       },
+      onAuthFailed: (listener) => {
+        authFailures.add(listener);
+        return () => {
+          authFailures.delete(listener);
+        };
+      },
       connect,
       disconnect,
       destroy: vi.fn(() => undefined),
@@ -129,6 +137,9 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
     },
     stateless: (payload) => {
       for (const listener of frames) listener(payload);
+    },
+    authFailed: () => {
+      for (const listener of authFailures) listener();
     },
     cacheReady: () => {
       ready = true;
@@ -281,6 +292,27 @@ describe("createPageLiveSession", () => {
     expect(harness.connect).toHaveBeenCalledTimes(1);
   });
 
+  it("ends a rejected handshake immediately and drops the idling socket", async () => {
+    const harness = fakeHarness();
+    const session = startSession(harness);
+    harness.open();
+    expect(session.getStage()).toEqual({ kind: "awaiting-sync" });
+    harness.authFailed();
+    expect(session.getStage()).toEqual({ kind: "disconnected", reason: "auth" });
+    expect(sync.reportPageSync).toHaveBeenLastCalledWith(PAGE_ID, "lost");
+    expect(harness.disconnect).toHaveBeenCalledTimes(2);
+    // A repeat and the socket's own late close stay terminal: no redial.
+    harness.authFailed();
+    harness.close(1006);
+    vi.advanceTimersByTime(120_000);
+    expect(session.getStage()).toEqual({ kind: "disconnected", reason: "auth" });
+    expect(harness.connect).toHaveBeenCalledTimes(1);
+    expect(harness.disconnect).toHaveBeenCalledTimes(2);
+    await flush();
+    expect(harness.fetchBinary).toHaveBeenCalledTimes(1);
+    expect(session.getFallback()).toBe("done");
+  });
+
   it("exhausts retries into terminal with the fault report", async () => {
     const harness = fakeHarness();
     const session = startSession(harness);
@@ -366,6 +398,17 @@ describe("createPageLiveSession", () => {
     harness.stateless(errorFrame());
     expect(shell.notifyError).toHaveBeenCalledTimes(1);
     harness.stateless(errorFrame({ data: { error_message: "Another refusal.", error_type: "store" } }));
+    expect(shell.notifyError).toHaveBeenCalledTimes(2);
+  });
+
+  it("notices a recurring failure again after a clean sync", () => {
+    const harness = fakeHarness();
+    startSession(harness);
+    harness.stateless(errorFrame());
+    expect(shell.notifyError).toHaveBeenCalledTimes(1);
+    harness.open();
+    harness.synced();
+    harness.stateless(errorFrame());
     expect(shell.notifyError).toHaveBeenCalledTimes(2);
   });
 
@@ -504,6 +547,7 @@ describe("createPageLiveSession", () => {
     harness.open();
     harness.close(1006);
     harness.synced();
+    harness.authFailed();
     vi.advanceTimersByTime(120_000);
     expect(announced).toEqual(["reconnecting"]);
     expect(harness.connect).toHaveBeenCalledTimes(1);

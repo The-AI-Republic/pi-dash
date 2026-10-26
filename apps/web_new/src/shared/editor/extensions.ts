@@ -197,7 +197,7 @@ export async function loadDescriptionExtensions(options: { horizontalRule?: bool
   // default target/rel (pinned in compat.test.ts). The page set supplies
   // its own stored-form divider node (PAGE-037), so it turns StarterKit's
   // `<hr>` rule off. A collaborative page editor (PAGE-065) turns the
-  // undo history off too: the collaboration binding keeps its own.
+  // undo history off too: collaborative editing has no undo.
   return [
     StarterKit.configure({
       ...(options.horizontalRule === false ? { horizontalRule: false } : null),

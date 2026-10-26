@@ -35,6 +35,8 @@ export interface PageLiveConnectionPort {
   onClose(listener: (code: number, reason: string) => void): () => void;
   onSynced(listener: () => void): () => void;
   onStateless(listener: (payload: string) => void): () => void;
+  /** A rejected handshake: the mount answers with a message, no close. */
+  onAuthFailed(listener: () => void): () => void;
   /** One dial: resolves once open, rejects when the upgrade fails. */
   connect(): Promise<void>;
   disconnect(): void;
@@ -211,6 +213,11 @@ export async function createPageLiveBackend(
       };
       provider.on("stateless", forward);
       return () => provider.off("stateless", forward);
+    },
+    onAuthFailed: (listener) => {
+      const forward = (): void => listener();
+      provider.on("authenticationFailed", forward);
+      return () => provider.off("authenticationFailed", forward);
     },
     connect: async () => {
       await socket.connect();

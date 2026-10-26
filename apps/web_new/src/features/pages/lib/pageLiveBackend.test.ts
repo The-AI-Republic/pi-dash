@@ -203,6 +203,18 @@ describe("createPageLiveBackend", () => {
     expect(synced).toHaveBeenCalledTimes(1);
   });
 
+  it("forwards rejected handshakes", async () => {
+    const backend = await createPageLiveBackend(INPUT, stubImporters());
+    const provider = FakeProvider.instances[0];
+    const authFailed = vi.fn();
+    const stop = backend.connection.onAuthFailed(authFailed);
+    provider?.emit("authenticationFailed", { reason: "permission-denied" });
+    expect(authFailed).toHaveBeenCalledTimes(1);
+    stop();
+    provider?.emit("authenticationFailed", { reason: "permission-denied" });
+    expect(authFailed).toHaveBeenCalledTimes(1);
+  });
+
   it("forwards only string stateless payloads", async () => {
     const backend = await createPageLiveBackend(INPUT, stubImporters());
     const provider = FakeProvider.instances[0];

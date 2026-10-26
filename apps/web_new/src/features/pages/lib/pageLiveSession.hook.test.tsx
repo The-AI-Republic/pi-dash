@@ -89,6 +89,7 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
         };
       },
       onStateless: () => () => undefined,
+      onAuthFailed: () => () => undefined,
       connect,
       disconnect: vi.fn(() => undefined),
       destroy: vi.fn(() => undefined),

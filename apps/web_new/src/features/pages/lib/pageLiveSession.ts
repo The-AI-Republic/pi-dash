@@ -200,7 +200,19 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
     handleDrop(pageLiveCloseKind(code));
   };
 
+  const handleAuthFailed = (): void => {
+    // A rejected handshake answers with a message and leaves the socket
+    // idling, so the terminal lands here: drop the socket before its late
+    // close arrives, which the terminal guard then ignores.
+    if (stage.kind === "disconnected") return;
+    handleDrop("auth");
+    backend.connection.disconnect();
+  };
+
   const handleSynced = (): void => {
+    // A clean sync re-arms failure notices: a recurring failure after a
+    // recovery toasts again instead of staying suppressed.
+    lastNotice = "";
     transition({ type: "synced" });
   };
 
@@ -248,7 +260,8 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
         backend.connection.onOpen(handleOpen),
         backend.connection.onClose(handleClose),
         backend.connection.onSynced(handleSynced),
-        backend.connection.onStateless(handleStateless)
+        backend.connection.onStateless(handleStateless),
+        backend.connection.onAuthFailed(handleAuthFailed)
       );
       dial();
     },
