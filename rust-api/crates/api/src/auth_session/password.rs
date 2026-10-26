@@ -67,6 +67,7 @@ use serde_json::Value;
 use pidash_services::auth_session::{password as pw, tasks as t, MAX_URL_REDIRECT_LENGTH};
 
 use crate::auth_session::render::disallowed_redirect;
+use crate::auth_session::throttle_ident;
 use crate::state::AppState;
 
 /// Register the seven password/CSRF routes. Nothing else: sibling paths
@@ -601,18 +602,6 @@ fn now_float() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// DRF `get_ident` (`throttling.py:23-40`, `NUM_PROXIES` unset): the
-/// `X-Forwarded-For` header with all whitespace stripped, else the peer
-/// address.
-fn throttle_ident(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if !xff.is_empty() {
-            return xff.split_whitespace().collect();
-        }
-    }
-    peer.map(|p| p.ip().to_string()).unwrap_or_default()
-}
-
 /// `get_client_ip` (`utils/ip_address.py`): first `X-Forwarded-For`
 /// token (no stripping), else the peer address.
 fn client_ip(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> Option<String> {
@@ -816,7 +805,7 @@ async fn get_csrf_token(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         actor.is_some(),
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1037,7 +1026,7 @@ async fn change_password(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         true,
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1173,7 +1162,7 @@ async fn set_password(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         true,
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1418,7 +1407,7 @@ async fn forgot_password(
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_SCOPE,
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_RATE,
         false,
-        &throttle_ident(&headers, peer),
+        &throttle_ident(&headers, peer.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1897,6 +1886,14 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use tower::ServiceExt;
+
+    #[test]
+    fn peerless_throttle_ident_is_drf_none() {
+        // PIDASHCONV-1419: with no XFF and no peer, DRF's `cache_format
+        // % {'ident': None}` renders "None", never "".
+        let headers = axum::http::HeaderMap::new();
+        assert_eq!(throttle_ident(&headers, None), "None");
+    }
 
     #[test]
     fn overlong_redirect_location_answers_400() {
