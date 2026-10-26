@@ -57,6 +57,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::app_intake::queries;
+use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::issue_filters::{
     issue_filters_get, FilterValue, IssueFilterError, ISSUE_FILTER_KEYS,
 };
@@ -1700,10 +1701,12 @@ pub async fn issue_save_columns(
     fallback_completed_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Result<IssueSaveOutcome, Denial> {
+    // `Issue.save` strips with `utils/html_processor.py` (MLStripper,
+    // entities decoded), not Django's verbatim `strip_tags`.
     let description_stripped = if description_html.is_empty() {
         None
     } else {
-        Some(crate::space::sanitize::strip_tags(description_html))
+        Some(ml_strip_tags(description_html))
     };
     // The null-state arm assigns without touching `completed_at`.
     let state_was_null = state_id.is_none();
@@ -5834,9 +5837,11 @@ async fn insert_issue(
 ) -> Result<(), Response> {
     // `save`: `None` only when the html itself is `""`/`None`;
     // otherwise the stripped text, even when it strips to `""`.
+    // The stripper is `utils/html_processor.py` (MLStripper, entities
+    // decoded), not Django's verbatim `strip_tags`.
     let description_stripped = match validated.description_html.as_deref() {
         None | Some("") => None,
-        Some(html) => Some(crate::space::sanitize::strip_tags(html)),
+        Some(html) => Some(ml_strip_tags(html)),
     };
     if let Err(error) = sqlx::query(
         "INSERT INTO \"issues\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"parent_id\", \"state_id\", \"point\", \"estimate_point_id\", \"name\", \"description_json\", \"description_html\", \"description_stripped\", \"description_binary\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"sort_order\", \"completed_at\", \"archived_at\", \"is_draft\", \"external_source\", \"external_id\", \"type_id\", \"git_work_branch\", \"workpad\", \"created_via\", \"assigned_pod_id\", \"agent_executor\") VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NULL, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, '', $29, $30, $31)",
