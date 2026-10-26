@@ -29,6 +29,41 @@ export {
 export type { SpacePeekModeSwitchProps, SpacePeekPresentation } from "./peek/SpacePeekModeSwitch.js";
 export { SpaceOverlayProperties, spaceOverlayPriority, spaceOverlayState } from "./peek/SpaceOverlayProperties.js";
 export type { SpaceOverlayPropertiesProps } from "./peek/SpaceOverlayProperties.js";
+export {
+  currentSpaceVote,
+  groupSpaceReactions,
+  nextSpaceReaction,
+  nextSpaceVote,
+  optimisticSpaceReactions,
+  optimisticSpaceVotes,
+  SPACE_HINT_NAMES,
+  spaceEmojiToReaction,
+  spaceReactionEmoji,
+  spaceReactionHint,
+  spaceVoteHint,
+  tallySpaceVotes,
+  viewerSpaceReacted,
+} from "./engagement/model.js";
+export type {
+  SpaceEngageableIssue,
+  SpaceHintWords,
+  SpaceReactionGroup,
+  SpaceReactionWrite,
+  SpaceVoter,
+  SpaceVoteSideState,
+  SpaceVoteTally,
+  SpaceVoteWrite,
+} from "./engagement/model.js";
+export { SpaceIssueEngagement } from "./engagement/SpaceIssueEngagement.js";
+export type { SpaceIssueEngagementProps } from "./engagement/SpaceIssueEngagement.js";
+export { SpaceReactionBar } from "./engagement/SpaceReactionBar.js";
+export type { SpaceReactionBarProps } from "./engagement/SpaceReactionBar.js";
+export { SPACE_REACTION_SHELF, SpaceReactionPicker } from "./engagement/SpaceReactionPicker.js";
+export type { SpaceReactionPickerProps } from "./engagement/SpaceReactionPicker.js";
+export { SpaceVoteControls } from "./engagement/SpaceVoteControls.js";
+export type { SpaceVoteControlsProps } from "./engagement/SpaceVoteControls.js";
+export { useSpaceEngagement } from "./engagement/useSpaceEngagement.js";
+export type { SpaceEngagement } from "./engagement/useSpaceEngagement.js";
 export { useClipboardWritePermission } from "./lib/clipboard.js";
 export {
   formatSpacePropertyDate,

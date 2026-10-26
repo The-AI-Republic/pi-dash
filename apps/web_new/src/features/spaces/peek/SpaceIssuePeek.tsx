@@ -5,9 +5,9 @@
 // shared peek panel supplies the presentation shell, focus guard and
 // dismissal paths; this layer owns the public data: one detail read
 // through the public runtime, the read-only key/title/description block,
-// the three-field property panel, the clipboard-gated copy action and
-// the loading/error branches. Activity, votes and reactions belong to
-// later slices and are deliberately absent.
+// the engagement section below the title, the three-field property panel,
+// the clipboard-gated copy action and the loading/error branches. The
+// activity section belongs to a later slice and is deliberately absent.
 //
 // On load the address's `peekId` is the source of truth; a malformed id
 // or a 404/403 is reported through onInvalid so the board can drop the
@@ -30,6 +30,8 @@ import { isSpaceIssueId } from "../lib/peek.js";
 import { notifySpaceCopyFailure, notifySpaceCopySuccess } from "../lib/spaceNotices.js";
 import { spaceMessage } from "../lib/spaceMessages.js";
 import { issueKey } from "../components/BoardShell.js";
+import { SpaceIssueEngagement } from "../engagement/SpaceIssueEngagement.js";
+import type { SpaceBoardSearch } from "../lib/address.js";
 import { SpaceOverlayProperties } from "./SpaceOverlayProperties.js";
 import { SpacePeekModeSwitch, type SpacePeekPresentation } from "./SpacePeekModeSwitch.js";
 
@@ -52,6 +54,13 @@ export interface SpaceIssuePeekProps {
   embedded?: boolean | undefined;
   /** First presentation; the side dock unless the host says otherwise. */
   initialPresentation?: SpacePeekPresentation | undefined;
+  /** Publisher engagement flags; each half renders only while its flag is on. */
+  votesEnabled?: boolean | undefined;
+  reactionsEnabled?: boolean | undefined;
+  /** Board position the anonymous sign-in redirect carries back to. */
+  search?: SpaceBoardSearch | undefined;
+  /** Anonymous activations leave here; without one the page navigates. */
+  onRequireSignIn?: (() => void) | undefined;
 }
 
 /** Status code of a detail refusal that means "not this board's issue". */
@@ -100,6 +109,10 @@ export function SpaceIssuePeek({
   onInvalid,
   embedded = false,
   initialPresentation = "side",
+  votesEnabled = false,
+  reactionsEnabled = false,
+  search,
+  onRequireSignIn,
 }: SpaceIssuePeekProps): React.ReactElement {
   const [presentation, setPresentation] = React.useState<SpacePeekPresentation>(initialPresentation);
   const client = spaceRuntime.client;
@@ -190,7 +203,18 @@ export function SpaceIssuePeek({
           <SpacePeekSkeleton full={presentation === "full"} />
         )
       ) : (
-        <SpaceIssuePeekBody issue={issue} states={states} full={presentation === "full"} resolveAsset={resolveAsset} />
+        <SpaceIssuePeekBody
+          anchor={anchor}
+          search={search}
+          issue={issue}
+          states={states}
+          full={presentation === "full"}
+          resolveAsset={resolveAsset}
+          votesEnabled={votesEnabled}
+          reactionsEnabled={reactionsEnabled}
+          embedded={embedded}
+          onRequireSignIn={onRequireSignIn}
+        />
       )}
     </PeekPanel>
   );
@@ -198,15 +222,27 @@ export function SpaceIssuePeek({
 
 /** The detail and property columns; full gives properties their own lane. */
 function SpaceIssuePeekBody({
+  anchor,
+  search,
   issue,
   states,
   full,
   resolveAsset,
+  votesEnabled,
+  reactionsEnabled,
+  embedded,
+  onRequireSignIn,
 }: {
+  anchor: string;
+  search: SpaceBoardSearch | undefined;
   issue: SpaceBoardIssueDetail;
   states: readonly SpaceBoardState[] | undefined;
   full: boolean;
   resolveAsset: (src: string) => string;
+  votesEnabled: boolean;
+  reactionsEnabled: boolean;
+  embedded: boolean;
+  onRequireSignIn: (() => void) | undefined;
 }): React.ReactElement {
   const hasDescription = hasStoredDescriptionContent(issue.description_html);
   return (
@@ -214,6 +250,15 @@ function SpaceIssuePeekBody({
       className={full ? "flex min-h-0 flex-1 flex-col gap-(--space-6) md:flex-row" : "flex flex-col gap-(--space-6)"}
     >
       <div data-testid="space-peek-detail" className="flex min-w-0 flex-1 flex-col gap-(--space-4)">
+        <SpaceIssueEngagement
+          anchor={anchor}
+          search={search ?? {}}
+          issue={issue}
+          votesEnabled={votesEnabled}
+          reactionsEnabled={reactionsEnabled}
+          embedded={embedded}
+          onRequireSignIn={onRequireSignIn}
+        />
         {hasDescription ? (
           <RichTextView
             html={issue.description_html}

@@ -24,6 +24,8 @@ import {
   spaceSettingsQueryOptions,
   spaceStatesQueryOptions,
 } from "../api/queries.js";
+import { useSpaceEngagement } from "../engagement/useSpaceEngagement.js";
+import { useSpaceEmbedded } from "../lib/spaceEmbed.js";
 import { AppliedFilters } from "../filters/AppliedFilters.js";
 import { SpaceFilterPanel } from "../filters/SpaceFilterPanel.js";
 import { useSpaceFilterNav } from "../filters/useSpaceFilterNav.js";
@@ -35,6 +37,7 @@ import {
   isValidAnchor,
   parseSpaceBoardSearch,
   spaceIssueHref,
+  spaceSignInHref,
   type SpaceBoardFilters,
   type SpaceBoardSearch,
   type SpaceLayout,
@@ -132,6 +135,26 @@ function ResolvedBoard({
   const { offered, active, select } = useSettledSpaceLayout(anchor, search, settings.view_props);
   const filterNav = useSpaceFilterNav(anchor, search, filters);
   const peekNav = useSpacePeekNav(anchor, search);
+  const navigate = useNavigate();
+  // Anonymous engagement leaves for sign-in carrying the whole board
+  // position — anchor, layout, filters and the open issue (SPC-047/048).
+  const requireSignIn = React.useCallback(() => {
+    void navigate({ href: spaceSignInHref(anchor, search) });
+  }, [anchor, navigate, search]);
+  const engagement = useSpaceEngagement(spaceRuntime.client, anchor, requireSignIn);
+  const embedded = useSpaceEmbedded();
+  const handleVote = React.useCallback(
+    (issue: SpaceBoardIssue, side: 1 | -1) => {
+      void engagement.vote(issue, side);
+    },
+    [engagement]
+  );
+  const handleReact = React.useCallback(
+    (issue: SpaceBoardIssue, code: string) => {
+      void engagement.react(issue, code);
+    },
+    [engagement]
+  );
   const identifier = settings.project_details?.identifier ?? "";
   return (
     <div data-testid="space-board">
@@ -156,6 +179,11 @@ function ResolvedBoard({
           seed={peekSeed(issues.data, search.peekId)}
           onClose={peekNav.close}
           onInvalid={peekNav.invalid}
+          embedded={embedded}
+          votesEnabled={settings.is_votes_enabled}
+          reactionsEnabled={settings.is_reactions_enabled}
+          search={search}
+          onRequireSignIn={requireSignIn}
         />
       )}
       {issues.isError || states.isError || labels.isError ? (
@@ -183,6 +211,9 @@ function ResolvedBoard({
             votesEnabled={settings.is_votes_enabled}
             reactionsEnabled={settings.is_reactions_enabled}
             openIssue={peekNav.open}
+            onVote={handleVote}
+            onReact={handleReact}
+            viewerId={engagement.viewerId}
           />
           <SpaceProductBadge />
         </>
@@ -203,6 +234,9 @@ function BoardContent({
   votesEnabled,
   reactionsEnabled,
   openIssue,
+  onVote,
+  onReact,
+  viewerId,
 }: {
   anchor: string;
   layout: SpaceLayout;
@@ -215,6 +249,9 @@ function BoardContent({
   votesEnabled: boolean;
   reactionsEnabled: boolean;
   openIssue: (issueId: string) => void;
+  onVote: (issue: SpaceBoardIssue, vote: 1 | -1) => void;
+  onReact: (issue: SpaceBoardIssue, reaction: string) => void;
+  viewerId: string | null;
 }): React.ReactElement {
   return (
     <BoardLayouts
@@ -231,6 +268,9 @@ function BoardContent({
       issueHref={(issue) => spaceIssueHref(anchor, search, issue.id)}
       votesEnabled={votesEnabled}
       reactionsEnabled={reactionsEnabled}
+      onVote={onVote}
+      onReact={onReact}
+      viewerId={viewerId}
     />
   );
 }

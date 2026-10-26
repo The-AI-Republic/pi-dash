@@ -351,6 +351,39 @@ describe("SpaceIssueRow board footer (SPC-029)", () => {
   });
 });
 
+describe("SpaceIssueRow footer engagement (SPC-047/048)", () => {
+  const ADA_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+  it("marks the visitor's own vote side and reaction pills", () => {
+    renderCard({ card: true, votesEnabled: true, reactionsEnabled: true, viewerId: ADA_ID });
+    expect(screen.getByTestId("space-card-vote-up")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("space-card-vote-down")).toHaveAttribute("aria-pressed", "false");
+    const pills = screen.getAllByTestId("space-card-reaction");
+    expect(pills[0]).toHaveAttribute("aria-pressed", "true");
+    expect(pills[1]).toHaveAttribute("aria-pressed", "false");
+    fireEvent.focus(screen.getByTestId("space-card-vote-up"));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Ada (you), Ada");
+    fireEvent.blur(screen.getByTestId("space-card-vote-up"));
+    fireEvent.focus(pills[0]!);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Ada (you), Ada");
+  });
+
+  it("shows no own mark without a viewer", () => {
+    renderCard({ card: true, votesEnabled: true, reactionsEnabled: true });
+    expect(screen.getByTestId("space-card-vote-up")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getAllByTestId("space-card-reaction")[0]).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("adds a picked emoji through the footer's picker", async () => {
+    const onReact = vi.fn();
+    const issue = richIssue();
+    renderCard({ issue, card: true, reactionsEnabled: true, onReact });
+    await userEvent.click(screen.getByTestId("space-card-reaction-add"));
+    await userEvent.click(screen.getByRole("button", { name: "🔥" }));
+    expect(onReact).toHaveBeenCalledWith(issue, "128293");
+  });
+});
+
 describe("SpaceIssueRow embed behavior (SPC-015)", () => {
   it("hides the reaction add control inside a frame but keeps counts readable", () => {
     embed.framed = true;

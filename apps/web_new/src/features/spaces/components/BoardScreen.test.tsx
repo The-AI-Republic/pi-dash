@@ -582,3 +582,45 @@ describe("space overlay address round trip (SPC-030/040/042)", () => {
     expect(screen.getByTestId("space-board")).toBeInTheDocument();
   });
 });
+
+describe("BoardScreen engagement wiring (SPC-047/048)", () => {
+  function engagedBoard() {
+    return {
+      settings: () => reply(200, { ...settings, is_votes_enabled: true, is_reactions_enabled: true }),
+    };
+  }
+
+  it("sends anonymous card votes to sign-in carrying the board position, with no write", async () => {
+    const requests = renderBoard(engagedBoard(), ANCHOR, { board: "kanban" });
+    await userEvent.click(await screen.findByTestId("space-card-vote-up"));
+    expect(navigation.navigate).toHaveBeenCalledWith({
+      href: "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban",
+    });
+    expect(requests.filter((url) => url.includes("/votes/"))).toHaveLength(0);
+  });
+
+  it("sends anonymous card reactions to sign-in through the footer's picker", async () => {
+    const requests = renderBoard(engagedBoard(), ANCHOR, { board: "kanban" });
+    await userEvent.click(await screen.findByTestId("space-card-reaction-add"));
+    await userEvent.click(screen.getByRole("button", { name: "🎉" }));
+    expect(navigation.navigate).toHaveBeenCalledWith({
+      href: "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban",
+    });
+    expect(requests.filter((url) => url.includes("/reactions/"))).toHaveLength(0);
+  });
+
+  it("threads the publisher flags into the open overlay", async () => {
+    renderBoard(engagedBoard(), ANCHOR, { board: "kanban", peekId: ISSUE_ID });
+    expect(await screen.findByTestId("space-peek-engagement")).toBeInTheDocument();
+    expect(screen.getByTestId("space-peek-vote-up")).toBeInTheDocument();
+    expect(screen.getByTestId("space-peek-reaction-add")).toBeInTheDocument();
+  });
+
+  it("hides the overlay reactions and inerts the votes inside a frame", async () => {
+    embed.framed = true;
+    renderBoard(engagedBoard(), ANCHOR, { board: "kanban", peekId: ISSUE_ID });
+    await screen.findByTestId("space-peek-engagement");
+    expect(screen.getByTestId("space-peek-vote-up")).toBeDisabled();
+    expect(screen.queryByTestId("space-peek-reactions")).not.toBeInTheDocument();
+  });
+});
