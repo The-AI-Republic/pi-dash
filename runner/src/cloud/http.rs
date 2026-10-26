@@ -1928,7 +1928,17 @@ pub struct CreateRunnerRequest<'a> {
     pub host_label: &'a str,
     pub name: Option<&'a str>,
     pub pod: Option<&'a str>,
+    /// `Runner.provisioning` on the cloud. `None` (every user-created
+    /// runner) lets the cloud default to [`PROVISIONING_MANUAL`]; the
+    /// desktop app's `__managed enroll` sends
+    /// [`PROVISIONING_DESKTOP_BUNDLED`].
+    pub provisioning: Option<&'a str>,
 }
+
+/// Stored values of the cloud's `RunnerProvisioning` enum
+/// (`apps/api/pi_dash/runner/models.py`).
+pub const PROVISIONING_MANUAL: &str = "manual";
+pub const PROVISIONING_DESKTOP_BUNDLED: &str = "desktop_bundled";
 
 /// Public helper to create a runner with the user-scoped CLI `APIToken`.
 ///
@@ -1941,23 +1951,10 @@ pub async fn create_runner(
     req: CreateRunnerRequest<'_>,
 ) -> Result<EnrollResponse, TransportError> {
     let url = format!("{}/api/v1/runner/runners/", transport.cloud_url());
-    let mut body = serde_json::json!({
-        "project": req.project,
-        "dev_machine_id": req.dev_machine_id,
-        "host_label": req.host_label,
-    });
-    if let Some(fp) = crate::util::machine_fingerprint::machine_fingerprint() {
-        body["machine_fingerprint"] = Json::String(fp);
-    }
-    if let Some(ws) = req.workspace_slug {
-        body["workspace_slug"] = Json::String(ws.to_string());
-    }
-    if let Some(n) = req.name {
-        body["name"] = Json::String(n.to_string());
-    }
-    if let Some(p) = req.pod {
-        body["pod"] = Json::String(p.to_string());
-    }
+    let body = create_runner_body(
+        &req,
+        crate::util::machine_fingerprint::machine_fingerprint(),
+    );
     let resp = transport
         .http()
         .post(&url)
@@ -1974,6 +1971,31 @@ pub async fn create_runner(
     resp.json::<EnrollResponse>()
         .await
         .map_err(|e| TransportError::Protocol(format!("create_runner body: {e}")))
+}
+
+/// JSON body of `POST /api/v1/runner/runners/`.
+fn create_runner_body(req: &CreateRunnerRequest<'_>, machine_fingerprint: Option<String>) -> Json {
+    let mut body = serde_json::json!({
+        "project": req.project,
+        "dev_machine_id": req.dev_machine_id,
+        "host_label": req.host_label,
+    });
+    if let Some(fp) = machine_fingerprint {
+        body["machine_fingerprint"] = Json::String(fp);
+    }
+    if let Some(ws) = req.workspace_slug {
+        body["workspace_slug"] = Json::String(ws.to_string());
+    }
+    if let Some(n) = req.name {
+        body["name"] = Json::String(n.to_string());
+    }
+    if let Some(p) = req.pod {
+        body["pod"] = Json::String(p.to_string());
+    }
+    if let Some(p) = req.provisioning {
+        body["provisioning"] = Json::String(p.to_string());
+    }
+    body
 }
 
 pub async fn enroll_runner(
@@ -2306,6 +2328,31 @@ pub struct EnrollResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_runner_body_carries_provisioning_only_when_set() {
+        let machine = Uuid::from_u128(7);
+        let mut req = CreateRunnerRequest {
+            api_token: "mt_x",
+            dev_machine_id: &machine,
+            workspace_slug: Some("acme"),
+            project: "PROJ",
+            host_label: "host",
+            name: Some("r1"),
+            pod: None,
+            provisioning: None,
+        };
+        let body = create_runner_body(&req, Some("ab".repeat(32)));
+        assert!(body.get("provisioning").is_none(), "{body}");
+        assert_eq!(body["machine_fingerprint"], "ab".repeat(32));
+        assert!(body.get("pod").is_none());
+
+        req.provisioning = Some(PROVISIONING_DESKTOP_BUNDLED);
+        let body = create_runner_body(&req, None);
+        assert_eq!(body["provisioning"], "desktop_bundled");
+        assert!(body.get("machine_fingerprint").is_none());
+        assert_eq!(PROVISIONING_MANUAL, "manual");
+    }
 
     #[test]
     fn dev_machine_merged_409_carries_the_survivor() {

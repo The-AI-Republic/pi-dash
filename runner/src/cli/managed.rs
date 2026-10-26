@@ -26,7 +26,9 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use crate::cli::runner_ops::{self, ApplyEnrollOptions};
-use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner};
+use crate::cloud::http::{
+    CreateRunnerRequest, PROVISIONING_DESKTOP_BUNDLED, SharedHttpTransport, create_runner,
+};
 use crate::config::file;
 use crate::config::schema::AgentKind;
 use crate::util::paths::Paths;
@@ -50,7 +52,8 @@ pub enum ManagedCommand {
     /// Refresh host-owned paths for all projects before starting the daemon.
     Rebind(EnginePathsArgs),
     /// Move a legacy desktop-managed config's runners into this (default)
-    /// config. Prints `{"adopted": [names], "skipped": [names]}`.
+    /// config — only those of the workspace this config is signed in to.
+    /// Prints `{"adopted": [...], "skipped": [...], "fully_adopted": bool}`.
     Adopt(AdoptArgs),
 }
 
@@ -216,6 +219,7 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
             host_label: &host_label,
             name: Some(&name),
             pod: None,
+            provisioning: Some(PROVISIONING_DESKTOP_BUNDLED),
         },
     )
     .await
@@ -268,21 +272,29 @@ fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
 
 /// Adopt a legacy desktop-managed config. JSON on stdout either way; a
 /// failure is `{"error": "adopt_failed", "message": ...}` with exit 1.
+/// Success prints the [`AdoptReport`]:
+///
+/// ```json
+/// {"adopted": [{"name": "...", "workspace_id": "..."}],
+///  "skipped": [{"name": "...", "workspace_id": "...", "reason": "workspace_mismatch"}],
+///  "fully_adopted": false}
+/// ```
+///
+/// `workspace_id` is the runner's workspace as the config records it (its
+/// slug), or null when the legacy config doesn't say. The legacy config is
+/// never modified; the caller may delete it only when `fully_adopted`.
 async fn adopt(args: AdoptArgs, paths: &Paths) -> Result<()> {
     match adopt_runners(&args.from_config_dir, paths) {
         Ok(report) => {
             // Bring the adopted runners up in a daemon that is already
             // running; with no daemon (or one that must reload first) the
             // next start picks them up from config.toml.
-            for name in &report.adopted {
-                if let Err(e) = activate_if_running(paths, name).await {
-                    tracing::warn!(runner = %name, "adopted runner not activated: {e:#}");
+            for runner in &report.adopted {
+                if let Err(e) = activate_if_running(paths, &runner.name).await {
+                    tracing::warn!(runner = %runner.name, "adopted runner not activated: {e:#}");
                 }
             }
-            println!(
-                "{}",
-                serde_json::json!({ "adopted": report.adopted, "skipped": report.skipped })
-            );
+            println!("{}", serde_json::to_string(&report)?);
             Ok(())
         }
         Err(e) => {
@@ -295,18 +307,69 @@ async fn adopt(args: AdoptArgs, paths: &Paths) -> Result<()> {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+/// Why a legacy runner was not adopted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptSkipReason {
+    /// Already in the default config (same id or name) — nothing is lost.
+    AlreadyPresent,
+    /// The default config has no machine token: there is no credential the
+    /// runner could use.
+    NotSignedIn,
+    /// Registered in a workspace other than the one the default config's
+    /// machine token is for; it would fail to authenticate.
+    WorkspaceMismatch,
+    /// Neither side records a workspace to compare.
+    WorkspaceUnknown,
+    /// Registered against a different cloud.
+    CloudMismatch,
+    /// Would make the default config invalid (e.g. a working directory
+    /// already used by another runner).
+    InvalidConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AdoptedRunner {
+    pub name: String,
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkippedRunner {
+    pub name: String,
+    pub workspace_id: Option<String>,
+    pub reason: AdoptSkipReason,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AdoptReport {
-    pub adopted: Vec<String>,
-    pub skipped: Vec<String>,
+    pub adopted: Vec<AdoptedRunner>,
+    pub skipped: Vec<SkippedRunner>,
+    /// Nothing is left behind: every legacy runner was adopted now or is
+    /// already in the default config, so the legacy dir is safe to delete.
+    pub fully_adopted: bool,
+}
+
+impl AdoptReport {
+    fn finish(mut self) -> Self {
+        self.fully_adopted = self
+            .skipped
+            .iter()
+            .all(|s| s.reason == AdoptSkipReason::AlreadyPresent);
+        self
+    }
 }
 
 /// Merge the `[[runner]]` blocks (managed Codex fields included) of
-/// `<from_dir>/config.toml` into the default config. Runners already present
-/// (same id or name), registered against a different cloud, or that would
-/// make the config invalid are skipped. Never copies the legacy token or
-/// `dev_machine_id`: this host's own sign-in and identity stay authoritative.
-/// Idempotent — a second run skips everything the first adopted.
+/// `<from_dir>/config.toml` into the default config — only runners of the
+/// workspace the default config is signed in to, because its one
+/// `[cli].token` is a machine token for that workspace and every runner
+/// authenticates with it. Runners of other workspaces, of another cloud,
+/// already present (same id or name), or that would make the config invalid
+/// are skipped. A default config that isn't signed in adopts nothing. Never
+/// copies the legacy token or `dev_machine_id`, and never modifies the
+/// legacy config. Idempotent — a second run reports what the first adopted
+/// as `already_present`.
 pub fn adopt_runners(from_dir: &std::path::Path, paths: &Paths) -> Result<AdoptReport> {
     let same_dir = match (from_dir.canonicalize(), paths.config_dir.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -322,48 +385,86 @@ pub fn adopt_runners(from_dir: &std::path::Path, paths: &Paths) -> Result<AdoptR
         toml::from_str(&text).with_context(|| format!("parsing {legacy_path:?}"))?;
     let mut report = AdoptReport::default();
     if legacy.runners.is_empty() {
-        return Ok(report);
+        return Ok(report.finish());
     }
     let legacy_cloud = legacy.daemon.cloud_url.trim_end_matches('/').to_string();
-    let init_cloud = legacy_cloud.clone();
-    file::mutate_config_or_init(
-        paths,
-        move || {
-            Some(crate::config::schema::Config {
-                version: 2,
-                daemon: crate::config::schema::DaemonConfig {
-                    cloud_url: init_cloud,
-                    ..Default::default()
-                },
-                runners: vec![],
-                cli: None,
-            })
-        },
-        |cfg| {
-            let cloud_matches = cfg.daemon.cloud_url.trim_end_matches('/') == legacy_cloud;
-            for runner in legacy.runners {
-                let present = cfg
-                    .runners
-                    .iter()
-                    .any(|r| r.runner_id == runner.runner_id || r.name == runner.name);
-                if present || !cloud_matches {
-                    report.skipped.push(runner.name);
-                    continue;
+    let legacy_workspace = legacy.cli.as_ref().and_then(|c| c.workspace_slug.clone());
+    let workspace_of = |r: &crate::config::schema::RunnerConfig| {
+        r.workspace_slug
+            .clone()
+            .or_else(|| legacy_workspace.clone())
+    };
+    let skip_all = |report: &mut AdoptReport, reason| {
+        for runner in &legacy.runners {
+            report.skipped.push(SkippedRunner {
+                name: runner.name.clone(),
+                workspace_id: workspace_of(runner),
+                reason,
+            });
+        }
+    };
+
+    // No default config means not signed in: adopt nothing, write nothing.
+    if file::load_config_opt(paths)?.is_none() {
+        skip_all(&mut report, AdoptSkipReason::NotSignedIn);
+        return Ok(report.finish());
+    }
+    file::mutate_config(paths, |cfg| {
+        let signed_in_workspace = cfg
+            .cli
+            .as_ref()
+            .filter(|c| c.token.as_deref().is_some_and(|t| !t.is_empty()))
+            .map(|c| c.workspace_slug.clone());
+        let cloud_matches = cfg.daemon.cloud_url.trim_end_matches('/') == legacy_cloud;
+        for runner in &legacy.runners {
+            let workspace_id = workspace_of(runner);
+            let present = cfg
+                .runners
+                .iter()
+                .any(|r| r.runner_id == runner.runner_id || r.name == runner.name);
+            let reason = if present {
+                Some(AdoptSkipReason::AlreadyPresent)
+            } else {
+                match &signed_in_workspace {
+                    None => Some(AdoptSkipReason::NotSignedIn),
+                    Some(_) if !cloud_matches => Some(AdoptSkipReason::CloudMismatch),
+                    Some(Some(ws)) if workspace_id.as_deref() == Some(ws.as_str()) => None,
+                    Some(Some(_)) if workspace_id.is_some() => {
+                        Some(AdoptSkipReason::WorkspaceMismatch)
+                    }
+                    Some(_) => Some(AdoptSkipReason::WorkspaceUnknown),
                 }
-                let name = runner.name.clone();
-                cfg.runners.push(runner);
-                if let Err(e) = cfg.validate() {
-                    cfg.runners.pop();
-                    tracing::warn!(runner = %name, "not adopting runner: {e}");
-                    report.skipped.push(name);
-                } else {
-                    report.adopted.push(name);
+            };
+            let reason = reason.or_else(|| {
+                let mut adopted = runner.clone();
+                // Keep the binding explicit now that the runner lives in a
+                // config whose own workspace may change at the next sign-in.
+                adopted.workspace_slug = workspace_id.clone();
+                cfg.runners.push(adopted);
+                match cfg.validate() {
+                    Ok(()) => None,
+                    Err(e) => {
+                        cfg.runners.pop();
+                        tracing::warn!(runner = %runner.name, "not adopting runner: {e}");
+                        Some(AdoptSkipReason::InvalidConfig)
+                    }
                 }
+            });
+            match reason {
+                None => report.adopted.push(AdoptedRunner {
+                    name: runner.name.clone(),
+                    workspace_id,
+                }),
+                Some(reason) => report.skipped.push(SkippedRunner {
+                    name: runner.name.clone(),
+                    workspace_id,
+                    reason,
+                }),
             }
-            Ok(())
-        },
-    )?;
-    Ok(report)
+        }
+        Ok(())
+    })?;
+    Ok(report.finish())
 }
 
 /// A new project joins the already-running daemon instead of waiting for an

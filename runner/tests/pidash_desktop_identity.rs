@@ -41,6 +41,7 @@ fn assert_shape(v: &serde_json::Value) {
         "signed_in",
         "cloud_url",
         "user",
+        "user_unknown",
         "workspace_slug",
         "dev_machine_id",
         "changed_at",
@@ -96,6 +97,7 @@ fn auth_status_json_signed_in_and_signed_out() {
     assert_eq!(v["cloud_url"], "http://127.0.0.1:1");
     assert_eq!(v["user"]["id"], "1e6a7a56-0000-0000-0000-000000000001");
     assert_eq!(v["user"]["email"], "a@example.com");
+    assert_eq!(v["user_unknown"], false);
     assert_eq!(v["workspace_slug"], "acme");
     assert_eq!(v["dev_machine_id"], machine.to_string());
     assert_eq!(v["changed_at"], "2026-10-01T10:00:00Z");
@@ -113,8 +115,50 @@ fn auth_status_json_signed_in_and_signed_out() {
     let v = status_json(&paths);
     assert_eq!(v["signed_in"], false);
     assert!(v["user"].is_null());
+    assert_eq!(
+        v["user_unknown"], false,
+        "signed out is not an unknown user"
+    );
     let changed_at = v["changed_at"].as_str().unwrap();
     assert!(changed_at > "2026-10-01T10:00:00Z", "{changed_at}");
+}
+
+#[test]
+fn auth_status_json_flags_a_signed_in_user_it_cannot_identify() {
+    // Legacy config: a token but no recorded user, and the cloud can't be
+    // asked (nothing listens on port 1). `user` is null as when signed out;
+    // `user_unknown` tells the two apart.
+    let root = tempfile::tempdir().unwrap();
+    let paths = isolated_paths(root.path());
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "daemon": {"cloud_url": "http://127.0.0.1:1", "dev_machine_id": uuid::Uuid::new_v4()},
+        "cli": {"token": "mt_legacy", "workspace_slug": "acme"},
+        "runner": [runner_json(root.path(), "legacy", uuid::Uuid::new_v4())],
+    }))
+    .unwrap();
+    file::write_config(&paths, &cfg).unwrap();
+
+    let v = status_json(&paths);
+    assert_shape(&v);
+    assert_eq!(v["signed_in"], true);
+    assert!(v["user"].is_null());
+    assert_eq!(v["user_unknown"], true);
+
+    // Signing out parks the unattributed runners instead of leaving them
+    // for whoever signs in next.
+    let output = pidash(&paths)
+        .args(["auth", "logout", "--local-only", "--yes"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(file::load_config(&paths).unwrap().runners.is_empty());
+    let parked: Vec<String> = std::fs::read_dir(paths.parked_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(parked.len(), 1);
+    assert!(parked[0].starts_with("unknown-"), "{parked:?}");
 }
 
 #[test]
@@ -165,8 +209,14 @@ fn managed_adopt_merges_runners_once_without_identity() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
     let first = adopt();
-    assert_eq!(first["adopted"], serde_json::json!(["desktop-proj"]));
-    assert_eq!(first["skipped"], serde_json::json!(["kept"]));
+    assert_eq!(
+        first,
+        serde_json::json!({
+            "adopted": [{"name": "desktop-proj", "workspace_id": "acme"}],
+            "skipped": [{"name": "kept", "workspace_id": "acme", "reason": "already_present"}],
+            "fully_adopted": true,
+        })
+    );
 
     let merged = file::load_config(&paths).unwrap();
     assert_eq!(merged.runners.len(), 2);
@@ -187,10 +237,148 @@ fn managed_adopt_merges_runners_once_without_identity() {
 
     let second = adopt();
     assert_eq!(second["adopted"], serde_json::json!([]));
+    assert_eq!(second["fully_adopted"], true);
+    let reasons: Vec<_> = second["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["name"].as_str().unwrap(), s["reason"].as_str().unwrap()))
+        .collect();
     assert_eq!(
-        second["skipped"],
-        serde_json::json!(["kept", "desktop-proj"])
+        reasons,
+        vec![
+            ("kept", "already_present"),
+            ("desktop-proj", "already_present")
+        ]
     );
+}
+
+fn write_legacy(dir: &std::path::Path, workspace: &str, runners: Vec<serde_json::Value>) {
+    std::fs::create_dir_all(dir).unwrap();
+    let legacy: Config = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "daemon": {"cloud_url": "http://127.0.0.1:1", "dev_machine_id": uuid::Uuid::new_v4()},
+        "cli": {"token": "mt_legacy", "workspace_slug": workspace},
+        "runner": runners,
+    }))
+    .unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        toml::to_string_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+}
+
+fn adopt_json(paths: &Paths, dir: &std::path::Path) -> serde_json::Value {
+    let output = pidash(paths)
+        .args(["__managed", "adopt", "--from-config-dir"])
+        .arg(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn managed_adopt_only_takes_the_signed_in_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = isolated_paths(root.path());
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "daemon": {"cloud_url": "http://127.0.0.1:1", "dev_machine_id": uuid::Uuid::new_v4()},
+        "cli": {"token": "mt_own", "workspace_slug": "acme"},
+    }))
+    .unwrap();
+    file::write_config(&paths, &cfg).unwrap();
+
+    // A legacy dir from another workspace: its runners would fail to
+    // authenticate with acme's machine token.
+    let mut other = runner_json(root.path(), "desktop-beta", uuid::Uuid::new_v4());
+    other["workspace_slug"] = "beta".into();
+    let legacy_dir = root.path().join("managed").join("beta");
+    write_legacy(&legacy_dir, "beta", vec![other]);
+    let before = std::fs::read_to_string(legacy_dir.join("config.toml")).unwrap();
+
+    let v = adopt_json(&paths, &legacy_dir);
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "adopted": [],
+            "skipped": [{"name": "desktop-beta", "workspace_id": "beta", "reason": "workspace_mismatch"}],
+            "fully_adopted": false,
+        })
+    );
+    assert!(file::load_config(&paths).unwrap().runners.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(legacy_dir.join("config.toml")).unwrap(),
+        before,
+        "the legacy config is left untouched"
+    );
+
+    // A mixed dir: the matching runner moves, the other stays behind.
+    let mut mixed_other = runner_json(root.path(), "desktop-beta2", uuid::Uuid::new_v4());
+    mixed_other["workspace_slug"] = "beta".into();
+    let mixed_dir = root.path().join("managed").join("mixed");
+    write_legacy(
+        &mixed_dir,
+        "acme",
+        vec![
+            runner_json(root.path(), "desktop-acme", uuid::Uuid::new_v4()),
+            mixed_other,
+        ],
+    );
+    let v = adopt_json(&paths, &mixed_dir);
+    assert_eq!(
+        v["adopted"],
+        serde_json::json!([{"name": "desktop-acme", "workspace_id": "acme"}])
+    );
+    assert_eq!(v["skipped"][0]["reason"], "workspace_mismatch");
+    assert_eq!(v["fully_adopted"], false);
+}
+
+#[test]
+fn managed_adopt_takes_nothing_when_not_signed_in() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = isolated_paths(root.path());
+    let legacy_dir = root.path().join("managed").join("acme");
+    write_legacy(
+        &legacy_dir,
+        "acme",
+        vec![runner_json(
+            root.path(),
+            "desktop-acme",
+            uuid::Uuid::new_v4(),
+        )],
+    );
+
+    // No default config at all.
+    let v = adopt_json(&paths, &legacy_dir);
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "adopted": [],
+            "skipped": [{"name": "desktop-acme", "workspace_id": "acme", "reason": "not_signed_in"}],
+            "fully_adopted": false,
+        })
+    );
+    assert!(!paths.config_path().exists(), "no config is created");
+
+    // A signed-out default config.
+    let cfg: Config = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "daemon": {"cloud_url": "http://127.0.0.1:1"},
+        "cli": {"workspace_slug": "acme"},
+    }))
+    .unwrap();
+    file::write_config(&paths, &cfg).unwrap();
+    let v = adopt_json(&paths, &legacy_dir);
+    assert_eq!(v["skipped"][0]["reason"], "not_signed_in");
+    assert_eq!(v["fully_adopted"], false);
+    assert!(file::load_config(&paths).unwrap().runners.is_empty());
 }
 
 #[test]

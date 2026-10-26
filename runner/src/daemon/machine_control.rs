@@ -251,6 +251,7 @@ impl MachineControl {
                 host_label: &host_label,
                 name: (!cmd.name.is_empty()).then_some(cmd.name.as_str()),
                 pod: (!cmd.pod.is_empty()).then_some(cmd.pod.as_str()),
+                provisioning: None,
             },
         )
         .await
