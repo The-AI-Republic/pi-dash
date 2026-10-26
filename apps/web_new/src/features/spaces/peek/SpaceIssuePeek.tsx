@@ -114,10 +114,9 @@ export function SpaceIssuePeek({
   initialPresentation = "side",
   votesEnabled = false,
   reactionsEnabled = false,
-  search,
+  search = {},
   onRequireSignIn,
   commentsEnabled = false,
-  search = {},
 }: SpaceIssuePeekProps): React.ReactElement {
   const [presentation, setPresentation] = React.useState<SpacePeekPresentation>(initialPresentation);
   const client = spaceRuntime.client;

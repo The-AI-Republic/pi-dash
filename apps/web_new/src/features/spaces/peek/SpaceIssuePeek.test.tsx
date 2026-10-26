@@ -82,7 +82,6 @@ interface SetupOptions {
   baseUrl?: string;
   votesEnabled?: boolean;
   reactionsEnabled?: boolean;
-  search?: { board?: "kanban" | "list"; peekId?: string };
   onRequireSignIn?: () => void;
 }
 

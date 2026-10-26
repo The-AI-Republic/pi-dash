@@ -184,7 +184,6 @@ function ResolvedBoard({
           embedded={embedded}
           votesEnabled={settings.is_votes_enabled}
           reactionsEnabled={settings.is_reactions_enabled}
-          search={search}
           onRequireSignIn={requireSignIn}
         />
       )}
