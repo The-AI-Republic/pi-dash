@@ -1065,6 +1065,30 @@ async fn change_password(
         }
         _ => false,
     };
+    // Django's `check_password` setter (`common.py:74`,
+    // `base_user.py:111-123`): a correct old password on an outdated hash
+    // re-encodes with the default hasher at once — after the
+    // missing-field gates (`:52-71`) but before the zxcvbn gate
+    // (`:82-89`), so a weak-new 400 still persists the upgrade.
+    // `save(update_fields=["password"])` writes only that column (no
+    // `updated_at` bump). Autoset accounts never reach `check_password`
+    // (`:74` short-circuits), and on the success path the new-password
+    // save below overwrites this either way.
+    if !is_autoset && old_present && new_present && old_matches {
+        if let Field::Text(candidate) = &old {
+            if let Some(new_hash) = pidash_auth::password::rehash_if_outdated(candidate, &stored) {
+                if sqlx::query(r#"UPDATE "users" SET "password" = $1 WHERE "id" = $2"#)
+                    .bind(&new_hash)
+                    .bind(actor.id)
+                    .execute(&pool)
+                    .await
+                    .is_err()
+                {
+                    return server_error();
+                }
+            }
+        }
+    }
     let new_weak = new_text
         .as_deref()
         .map(pidash_services::auth_session::password::password_is_weak)
