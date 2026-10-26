@@ -4750,6 +4750,10 @@ struct ValidatedCreate {
     #[allow(dead_code)]
     sequence_id: Option<i32>,
     sort_order: Option<f64>,
+    // Validated then discarded: `Issue.save` clears `completed_at`
+    // whenever the state group is not completed, and this path always
+    // assigns the triage state.
+    #[allow(dead_code)]
     completed_at: Option<DateTime<Utc>>,
     archived_at: Option<chrono::NaiveDate>,
     is_draft: bool,
@@ -5794,7 +5798,9 @@ async fn insert_issue(
     .bind(validated.target_date)
     .bind(sequence_id)
     .bind(sort_order)
-    .bind(validated.completed_at)
+    // `Issue.save` clears `completed_at` for non-completed states; the
+    // state here is always triage, so the stored value is always NULL.
+    .bind(None::<DateTime<Utc>>)
     .bind(validated.archived_at)
     .bind(validated.is_draft)
     .bind(validated.external_source.clone())
