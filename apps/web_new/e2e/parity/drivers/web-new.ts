@@ -41551,4 +41551,345 @@ export class WebNewDriver implements ParityDriver {
   async aiWorkersSkeletonVisible(): Promise<boolean> {
     return (await this.page.getByTestId("project-settings-ai-workers-skeleton").count()) > 0;
   }
+
+  // --- Nested pages (D17, PAGE-084-090). Real selectors and real server
+  // --- reads; the oracle driver throws a D17 notice for every one.
+
+  /**
+   * Every nested-page row: tree lines and the flat search/filter/favourite
+   * results share the title link, so discovery assertions read both
+   * (PAGE-085/090).
+   */
+  private pagesNestedRows(): Locator {
+    return this.page.getByTestId("page-tree-item").or(this.page.getByTestId("page-row"));
+  }
+
+  private pagesNestedRow(title: string): Locator {
+    return this.pagesNestedRows()
+      .filter({ has: this.page.getByRole("link", { name: title, exact: true }) })
+      .first();
+  }
+
+  private async pagesNestedSettle(): Promise<void> {
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  private async pagesNestedWaitDiscovery(): Promise<void> {
+    // Discovery (and the archived tab) reads the whole forest on top of the
+    // collection; assertions may only run once that walk settles (PAGE-090).
+    await this.page
+      .locator('[data-testid="pages-list-screen"][data-discovery="ready"]')
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private async pagesNestedFilterPanel(): Promise<Locator> {
+    // The trigger toggles: reopening an open panel would close it, so an
+    // already-open panel is reused (PAGE-090 combines filters).
+    const panel = this.page.getByTestId("pages-filter-panel");
+    if ((await panel.count()) === 0) {
+      await this.page.getByRole("button", { name: "Filters", exact: true }).click();
+      await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    }
+    return panel;
+  }
+
+  private async pagesNestedWaitTrail(): Promise<void> {
+    // The detail renders the ancestor trail once its walk settles, so a
+    // pending read never flashes the restricted fallback (PAGE-086).
+    await this.page
+      .getByRole("navigation", { name: "Page path" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages`, { waitUntil: "domcontentloaded" });
+    await Promise.race([
+      this.page.getByTestId("pages-tree").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }),
+      this.page.getByTestId("pages-empty-state").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }),
+    ]);
+  }
+
+  async pagesNestedOpenArchivedList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages?type=archived`, {
+      waitUntil: "domcontentloaded",
+    });
+    await Promise.race([
+      this.page.getByTestId("pages-tree").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }),
+      this.page.getByTestId("pages-empty-state").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    await this.pagesNestedWaitDiscovery();
+  }
+
+  async pagesNestedOpenRow(title: string): Promise<void> {
+    await this.pagesNestedRows().getByRole("link", { name: title, exact: true }).click();
+    await this.page.getByTestId("page-detail-header").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedWaitDetail(): Promise<void> {
+    await this.page.getByTestId("page-detail-header").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedWaitToast(text: string): Promise<void> {
+    await this.page
+      .locator('[data-testid="toast-notification"]')
+      .filter({ hasText: text })
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedBack(): Promise<void> {
+    await this.page.goBack({ waitUntil: "domcontentloaded" });
+    await Promise.race([
+      this.page.getByTestId("pages-tree").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }),
+      this.page.getByTestId("pages-empty-state").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }),
+    ]);
+  }
+
+  async pagesNestedToastText(): Promise<string | null> {
+    return this.toastText();
+  }
+
+  async pagesNestedRowTitles(): Promise<string[]> {
+    const titles = await this.pagesNestedRows().evaluateAll((nodes) =>
+      nodes.map((node) => node.querySelector("a[aria-label]")?.getAttribute("aria-label") ?? "")
+    );
+    return titles.filter((title) => title !== "");
+  }
+
+  async pagesNestedChildCount(title: string): Promise<number | null> {
+    const row = this.pagesNestedRow(title);
+    if ((await row.count()) === 0) return null;
+    const badge = row.getByTestId("page-tree-count");
+    if ((await badge.count()) === 0) return null;
+    const text = (await badge.first().textContent()) ?? "";
+    const parsed = Number.parseInt(text.trim(), 10);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  async pagesNestedExpand(title: string): Promise<void> {
+    const row = this.pagesNestedRow(title);
+    await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    const before = await this.pagesNestedRows().count();
+    await row.getByRole("button", { name: `Expand sub-pages of ${title}` }).click();
+    // The children arrive on their own read, so the expansion only settles
+    // once the row count grows (PAGE-085).
+    await this.page.waitForFunction(
+      (expected: number) =>
+        document.querySelectorAll('[data-testid="page-tree-item"], [data-testid="page-row"]').length > expected,
+      before,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+  }
+
+  async pagesNestedCollapse(title: string): Promise<void> {
+    const row = this.pagesNestedRow(title);
+    await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByRole("button", { name: `Collapse sub-pages of ${title}` }).click();
+  }
+
+  async pagesNestedDepth(title: string): Promise<number | null> {
+    const row = this.pagesNestedRow(title);
+    if ((await row.count()) === 0) return null;
+    const depth = await row.getAttribute("data-depth");
+    const parsed = depth === null ? Number.NaN : Number.parseInt(depth, 10);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  async pagesNestedParentPath(title: string): Promise<string | null> {
+    const row = this.pagesNestedRow(title);
+    if ((await row.count()) === 0) return null;
+    const path = row.getByTestId("page-row-parent-path");
+    if ((await path.count()) === 0) return null;
+    return ((await path.first().textContent()) ?? "").trim();
+  }
+
+  async pagesNestedOpenPage(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.page.getByTestId("page-detail-header").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedBreadcrumbs(): Promise<string[]> {
+    await this.pagesNestedWaitTrail();
+    const trail = this.page.getByRole("navigation", { name: "Page path" });
+    return (await trail.first().getByRole("listitem").allTextContents())
+      .map((part) => part.trim().replace(/\s+/g, " "))
+      .filter((part) => part !== "");
+  }
+
+  async pagesNestedBreadcrumbLinked(label: string): Promise<boolean> {
+    await this.pagesNestedWaitTrail();
+    const trail = this.page.getByRole("navigation", { name: "Page path" });
+    return (await trail.getByRole("link", { name: label, exact: true }).count()) > 0;
+  }
+
+  async pagesNestedBreadcrumbClick(label: string): Promise<void> {
+    await this.pagesNestedWaitTrail();
+    await this.page
+      .getByRole("navigation", { name: "Page path" })
+      .getByRole("link", { name: label, exact: true })
+      .click();
+    await this.page.getByTestId("page-detail-header").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedOptionsOpen(): Promise<void> {
+    await this.page.getByRole("button", { name: "Page options" }).click();
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedOptionsItems(): Promise<string[]> {
+    const items = await this.page
+      .getByRole("menuitem")
+      .evaluateAll((nodes) => nodes.map((node) => (node.textContent ?? "").trim()));
+    return items.filter((item) => item !== "");
+  }
+
+  async pagesNestedOptionsPick(label: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: label, exact: true }).click();
+  }
+
+  async pagesNestedRowMenuOpen(title: string): Promise<void> {
+    await this.page.getByRole("button", { name: `Page actions for ${title}` }).click();
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedSearch(text: string): Promise<void> {
+    const open = this.page.getByRole("button", { name: "Open page search" });
+    if ((await open.count()) > 0) await open.click();
+    const box = this.page.getByPlaceholder("Search pages");
+    await box.fill(text);
+    await this.pagesNestedWaitDiscovery();
+  }
+
+  async pagesNestedSearchClear(): Promise<void> {
+    await this.page.getByRole("button", { name: "Clear page search" }).click();
+  }
+
+  async pagesNestedFavoritesFilter(): Promise<void> {
+    const panel = await this.pagesNestedFilterPanel();
+    await panel.getByRole("button", { name: "Favorites", exact: true }).click();
+    await this.pagesNestedWaitDiscovery();
+  }
+
+  async pagesNestedCreatorFilter(name: string): Promise<void> {
+    const panel = await this.pagesNestedFilterPanel();
+    // The option's accessible name repeats the member (avatar label plus
+    // text), so the match is a substring, never exact (PAGE-090).
+    await panel.getByRole("button", { name }).click();
+    await this.pagesNestedWaitDiscovery();
+  }
+
+  async pagesNestedFiltersClear(): Promise<void> {
+    const clear = this.page.getByRole("button", { name: "Clear all", exact: true });
+    if ((await clear.count()) > 0) await clear.click();
+  }
+
+  async pagesNestedMovePickerOpen(title: string): Promise<void> {
+    await this.pagesNestedRowMenuOpen(title);
+    await this.page.getByRole("menuitem", { name: "Move to…", exact: true }).click();
+    await this.page
+      .getByRole("dialog", { name: "Move page" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedMoveTargets(): Promise<string[]> {
+    await this.page
+      .getByTestId("page-move-listbox")
+      .and(this.page.locator('[data-ready="true"]'))
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const labels = await this.page
+      .getByRole("option")
+      .evaluateAll((nodes) => nodes.map((node) => (node.textContent ?? "").trim()));
+    return labels.filter((label) => label !== "");
+  }
+
+  async pagesNestedMoveSearch(text: string): Promise<void> {
+    await this.page.getByRole("searchbox", { name: "Search pages" }).fill(text);
+  }
+
+  async pagesNestedMovePick(label: string | null): Promise<void> {
+    const name = label === null ? /^Top level/ : new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
+    await this.page.getByRole("option", { name }).first().click();
+  }
+
+  async pagesNestedMoveRefusal(): Promise<string | null> {
+    const refusal = this.page.getByTestId("page-move-refusal");
+    if ((await refusal.count()) === 0) return null;
+    return ((await refusal.first().textContent()) ?? "").trim();
+  }
+
+  async pagesNestedMoveConfirm(): Promise<void> {
+    await this.page.getByRole("button", { name: "Move page", exact: true }).click();
+    await this.page
+      .getByRole("dialog", { name: "Move page" })
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedDragRow(fromTitle: string, ontoTitle: string | null): Promise<void> {
+    // Native HTML5 drag: dispatch dragstart on the source row and drop on
+    // the target row (or the tree container for the top level), with one
+    // DataTransfer shared between them.
+    const source = this.pagesNestedRow(fromTitle);
+    await source.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await source.evaluate((node, targetTitle) => {
+      const transfer = new DataTransfer();
+      node.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: transfer }));
+      const tree = node.closest('[data-testid="pages-tree"]');
+      const target =
+        targetTitle === null
+          ? tree
+          : [...(tree?.querySelectorAll('[data-testid="page-tree-item"]') ?? [])].find(
+              (row) => row.querySelector("a[aria-label]")?.getAttribute("aria-label") === targetTitle
+            );
+      target?.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      target?.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    }, ontoTitle);
+    await this.pagesNestedSettle();
+  }
+
+  async pagesNestedDeleteDialogOpen(title: string): Promise<void> {
+    await this.pagesNestedRowMenuOpen(title);
+    await this.page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+    await this.page
+      .getByRole("dialog", { name: "Delete page" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedDeleteDialogText(): Promise<string> {
+    const dialog = this.page.getByRole("dialog", { name: "Delete page" });
+    await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // A collapsed archived parent resolves its count on its own read; the
+    // text is only stable once that settles (PAGE-089).
+    await dialog
+      .getByTestId("page-delete-rehomed-loading")
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+    return ((await dialog.textContent()) ?? "").trim();
+  }
+
+  async pagesNestedDeleteConfirm(): Promise<void> {
+    const dialog = this.page.getByRole("dialog", { name: "Delete page" });
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pagesNestedPaletteFind(query: string): Promise<string[]> {
+    await this.page.keyboard.press("Control+k");
+    const box = this.page.getByRole("combobox");
+    await box.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // Step into the page picker, then filter it by the page name.
+    await box.fill("Open a page");
+    await this.page.waitForTimeout(300);
+    await box.press("Enter");
+    await this.page
+      .getByRole("listbox", { name: "Options" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await box.fill(query);
+    await this.page.waitForTimeout(300);
+    const rows = await this.page
+      .getByRole("option")
+      .evaluateAll((nodes) => nodes.map((node) => (node.textContent ?? "").trim()));
+    await this.page.keyboard.press("Escape");
+    return rows.filter((row) => row !== "");
+  }
 }

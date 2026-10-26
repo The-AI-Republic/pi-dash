@@ -94,6 +94,19 @@ export function sortPageRows(rows: readonly PageRow[], sort: PageSort): PageRow[
   return ordered;
 }
 
+/** Sort one sibling list by the active sort, keeping favourites first. */
+export function sortPageSiblings(rows: readonly PageRow[], sort: PageSort): PageRow[] {
+  const favourites = sortPageRows(
+    rows.filter((row) => row.is_favorite),
+    sort
+  );
+  const rest = sortPageRows(
+    rows.filter((row) => !row.is_favorite),
+    sort
+  );
+  return [...favourites, ...rest];
+}
+
 /** Title search: case-insensitive substring over the visible label. */
 export function matchesPageSearch(row: Pick<PageRow, "name">, query: string): boolean {
   const needle = query.trim().toLowerCase();

@@ -8,7 +8,7 @@
 // entry that writes the info pane.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { PageDetail } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +38,7 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { PAGES_PAGE_ID, PAGES_PROJECT_ID, makePageRow } from "../testing.js";
 import {
   PageDetailHeader,
+  PAGE_ANCESTOR_TRAIL_LABEL,
   PAGE_COPIED_LINK_LABEL,
   PAGE_COPY_LINK_LABEL,
   PAGE_CRUMB,
@@ -164,6 +165,59 @@ describe("PageDetailHeader", () => {
     fireEvent.click(screen.getByRole("button", { name: PAGE_COPIED_LINK_LABEL }));
     expect(onCopyLink).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("button", { name: PAGE_COPIED_LINK_LABEL })).toBeInTheDocument();
+  });
+
+  it("shows every ancestor top-down with each visible one linking to its page", () => {
+    renderHeader({
+      ancestors: [
+        { id: "top", name: "Handbook", visible: true },
+        { id: "middle", name: "Policies", visible: true },
+      ],
+    });
+    const trail = screen.getByLabelText(PAGE_ANCESTOR_TRAIL_LABEL);
+    const links = within(trail).getAllByRole("link");
+    expect(links.map((link) => link.textContent)).toEqual(["Handbook", "Policies"]);
+    expect(links[0]).toHaveAttribute("href", `/acme/projects/${PAGES_PROJECT_ID}/pages/top`);
+    expect(links[1]).toHaveAttribute("href", `/acme/projects/${PAGES_PROJECT_ID}/pages/middle`);
+  });
+
+  it("renders an invisible ancestor as the restricted fallback without a link", () => {
+    renderHeader({
+      ancestors: [
+        { id: "middle", name: "Restricted page", visible: false },
+        { id: "top", name: "Handbook", visible: true },
+      ],
+    });
+    const trail = screen.getByLabelText(PAGE_ANCESTOR_TRAIL_LABEL);
+    expect(within(trail).getByText("Restricted page")).toBeInTheDocument();
+    expect(within(trail).queryByRole("link", { name: "Restricted page" })).not.toBeInTheDocument();
+    expect(
+      within(trail)
+        .getAllByRole("link")
+        .map((link) => link.textContent)
+    ).toEqual(["Handbook"]);
+  });
+
+  it("omits the trail for a top-level page", () => {
+    renderHeader();
+    expect(screen.queryByLabelText(PAGE_ANCESTOR_TRAIL_LABEL)).not.toBeInTheDocument();
+  });
+
+  it("appends the sub-page entry after the history entry and runs it", async () => {
+    const onAddSubPage = vi.fn();
+    renderHeader({ onAddSubPage });
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
+    expect(items).toEqual([PAGE_HISTORY_ITEM, "Add sub-page"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Add sub-page" }));
+    expect(onAddSubPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the sub-page entry from a guest", async () => {
+    renderHeader();
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    expect(await screen.findByRole("menuitem", { name: PAGE_HISTORY_ITEM })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Add sub-page" })).not.toBeInTheDocument();
   });
 
   it("runs the history shortcut from the options menu", async () => {

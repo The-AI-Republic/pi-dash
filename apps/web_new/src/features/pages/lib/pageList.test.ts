@@ -28,6 +28,7 @@ import {
   parsePageListSearch,
   removePageFilter,
   selectPageCreators,
+  sortPageSiblings,
   sortPageRows,
   visiblePageRows,
   DEFAULT_PAGE_SORT,
@@ -176,6 +177,23 @@ describe("sortPageRows", () => {
   it("falls back to the modified label for an unknown key", () => {
     expect(pageSortKeyLabel("modified")).toBe("Date modified");
     expect(pageSortKeyLabel("bogus" as never)).toBe("Date modified");
+  });
+});
+
+describe("sortPageSiblings", () => {
+  it("keeps favourites first and sorts each group by the active sort", () => {
+    const rows = [
+      makePageRow({ id: "a", name: "Alpha" }),
+      makePageRow({ id: "b", name: "Beta", is_favorite: true }),
+      makePageRow({ id: "c", name: "Charlie" }),
+      makePageRow({ id: "d", name: "Delta", is_favorite: true }),
+    ];
+    expect(sortPageSiblings(rows, { key: "name", direction: "descending" }).map((row) => row.id)).toEqual([
+      "d",
+      "b",
+      "c",
+      "a",
+    ]);
   });
 });
 

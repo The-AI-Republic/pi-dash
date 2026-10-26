@@ -1206,6 +1206,23 @@ target:
   `parent_id` is the flat one, both emitted), plus `sub_pages_count`
   (visible, non-archived children the caller can see). Counts never
   include children the caller cannot see.
+- **Archived subtrees:** because `sub_pages_count` counts live children, a
+  cascaded archive leaves an archived parent reporting `0` even though its
+  shelved subtree still exists. The Archived tab must still reach that
+  subtree: an archived row keeps its expand control, `GET pages/?parent=<id>`
+  supplies the shelved children, and the count and delete confirmation use
+  the children actually loaded. A live row never gets an expand control
+  from this rule, and a page the caller cannot see is still absent from the
+  child read.
+  The same blindness hides an archived child under a *live* parent, which
+  also reports `0`. Discovery therefore probes every row with
+  `GET pages/?parent=<id>` rather than trusting the count: the Archived
+  tab, search, structured filters, favourites, the command palette and the
+  detail header's ancestor trail all walk the whole forest that way, seeded
+  from the one cached top-level collection read, so PAGE-020's single
+  top-level read still holds. Child reads are not collection reads. The
+  trail and the discovery surfaces render once their walk settles, so a
+  pending read never flashes the restricted fallback or a partial list.
 - **Detail:** a child page retrieves by id under the same visibility rule;
   the client no longer gets a "not found" for a page it can see.
 - **Create/update:** `parent` (id or null) is accepted on `POST` and
@@ -1290,7 +1307,10 @@ In order, the rows are exactly:
 - **PAGE-086 — breadcrumbs.** A child opens by URL or from the tree and
   its header shows breadcrumbs of every ancestor from the top, each
   clickable. An ancestor the caller cannot see renders as the literal
-  fallback `Restricted page` (pinned) with no link.
+  fallback `Restricted page` (pinned) with no link. An archived middle
+  ancestor under a live parent resolves through the same deep walk
+  (§11.7); the trail waits for the walk so it never shows the fallback
+  for an ancestor that is merely not loaded yet.
 - **PAGE-087 — move picker and drag.** **Move to…** in the overflow menu
   (owner or admin) and drag-and-drop in the tree put a page under another
   page or back to the top level, carrying its whole subtree. Refused with a
@@ -1299,8 +1319,11 @@ In order, the rows are exactly:
   page and its descendants.
 - **PAGE-088 — archive cascade and restore-to-top.** Archiving a page
   archives its descendants, and the whole subtree appears in the Archived
-  tab. Restoring a page whose parent is still archived detaches it to the
-  top level and says so in a notice.
+  tab; since an archived parent's `sub_pages_count` is 0, its subtree is
+  reached by expanding the archived row, and its visible count reflects the
+  shelved children once loaded. Restoring a page whose parent is still
+  archived detaches it to the top level and says so in a notice, including
+  when the parent exists only as a loaded child in the archived tree.
 - **PAGE-089 — delete re-homes children.** Deleting a page moves its
   children to the top level with their content intact; the delete
   confirmation states how many sub-pages will move. (The server already
@@ -1308,7 +1331,11 @@ In order, the rows are exactly:
 - **PAGE-090 — search across children.** Search, filters, favourites and
   the command palette find child pages as well as top-level ones; results
   show the parent path (the breadcrumb trail as a secondary line). This
-  needs the backend's search-including-children behaviour (§11.7).
+  needs the backend's search-including-children behaviour (§11.7). The
+  Archived tab is part of the same list, so discovery also reaches a
+  shelved child: the forest walk treats an archived row as potentially
+  expandable (its `sub_pages_count` is 0 even with a subtree), and the
+  palette reads the same forest without dropping archived rows.
 
 ### 12.3 web_new-only scenario convention (rows 084–090)
 

@@ -646,7 +646,9 @@ test(
 
       const collectionGets = async (): Promise<PagesGatingRequest[]> =>
         (await driver.pagesGatingLoggedRequests()).filter(
-          (entry) => entry.method === "GET" && /\/pages\/$/.test(entry.path)
+          // Child reads (`?parent=`) are the nested tree's own requests; the
+          // one-collection pin is about the top-level list read (D17).
+          (entry) => entry.method === "GET" && /\/pages\/$/.test(entry.path) && !entry.query.includes("parent=")
         );
 
       await driver.openEntry();

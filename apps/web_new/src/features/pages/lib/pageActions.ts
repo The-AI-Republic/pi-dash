@@ -13,6 +13,8 @@
 
 import type { MenuAction } from "@pidash/kit";
 
+import { PAGE_ACTION_ADD_SUB_PAGE, PAGE_ACTION_MOVE_TO } from "./pageNested.js";
+
 /** Labels pinned by the oracle. */
 export const PAGE_ACTION_OPEN_IN_NEW_TAB = "Open in new tab";
 export const PAGE_ACTION_COPY_LINK = "Copy link";
@@ -25,6 +27,8 @@ export const PAGE_ACTION_ARCHIVE = "Archive";
 export const PAGE_ACTION_RESTORE = "Restore";
 export const PAGE_ACTION_DELETE = "Delete";
 export const PAGE_ACTION_MOVE = "Move to project…";
+/** Nested (D17) entries; appended after the oracle-pinned prefix. */
+export { PAGE_ACTION_ADD_SUB_PAGE, PAGE_ACTION_MOVE_TO };
 
 /** Outcome notices for the two row writes the earlier slice owns. */
 export const PAGE_DUPLICATED_TITLE = "Page duplicated successfully.";
@@ -60,6 +64,10 @@ export interface PageRowCapabilities {
   restricted: boolean;
   /** Cross-project move is an edition flag; community builds carry none. */
   move: boolean;
+  /** Member and above may create a child page (PAGE-084). */
+  addSubPage?: boolean;
+  /** Owner or admin may reparent inside the project (PAGE-087). */
+  nestedMove?: boolean;
 }
 
 export interface PageRowHandlers {
@@ -71,6 +79,8 @@ export interface PageRowHandlers {
   toggleArchive: () => void;
   requestDelete: () => void;
   requestMove: () => void;
+  addSubPage?: () => void;
+  moveTo?: () => void;
 }
 
 /** Menu entries for one row, in the order the oracle pins them. */
@@ -103,6 +113,16 @@ export function pageRowActions(capabilities: PageRowCapabilities, handlers: Page
     if (capabilities.move) {
       entries.push({ label: PAGE_ACTION_MOVE, onSelect: handlers.requestMove });
     }
+  }
+  // Nested pages (D17) append after the pinned prefix so the oracle-backed
+  // order above never shifts. A member creates children; only an owner or
+  // admin reparents. The API refuses an archived parent, so the entry is
+  // absent on every shelved row even when the caller can create pages.
+  if (!capabilities.archived && capabilities.addSubPage && handlers.addSubPage !== undefined) {
+    entries.push({ label: PAGE_ACTION_ADD_SUB_PAGE, onSelect: handlers.addSubPage });
+  }
+  if (capabilities.nestedMove && handlers.moveTo !== undefined) {
+    entries.push({ label: PAGE_ACTION_MOVE_TO, onSelect: handlers.moveTo });
   }
   return entries;
 }

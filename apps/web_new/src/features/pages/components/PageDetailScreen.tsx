@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Pages detail shell (parity/specs/pages.md §4, §6.5–§6.9, PAGE-022–025,
-// 045–050, 079–080). One record read by URL id with visit tracking plus the
-// shared collection read that feeds the sibling switcher; the header
-// cluster, the not-found panel, the centered record spinner, the title and
-// body surfaces, the navigation pane with its live outline/statistics/
-// assets/attribution, and the version overlay. The editor, toolbar, header
-// menu entries and collaboration client mount here in later slices; this
-// shell owns their seams and the URL protocol they share.
+// 045–050, 079–080, 084/086). One record read by URL id with visit tracking
+// plus the shared collection read that feeds the sibling switcher; the
+// header cluster, the not-found panel, the centered record spinner, the
+// title and body surfaces, the navigation pane with its live outline/
+// statistics/assets/attribution, and the version overlay. The editor,
+// toolbar, header menu entries and collaboration client mount here in later
+// slices; this shell owns their seams and the URL protocol they share.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PageVersionDetail } from "@pidash/api-client";
@@ -25,8 +25,10 @@ import { usePaletteWorkspaceMembers } from "../../../shared/shell/contextual/ind
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { pageDetailQueryOptions, pageVersionQueryOptions, pageVersionsQueryOptions } from "../api/detailQueries.js";
 import { usePageMark, usePageRename } from "../api/detailMutations.js";
+import { useAddSubPage } from "../api/nestedMutations.js";
 import { pagesListQueryOptions } from "../api/queries.js";
 import { pageKeys } from "../api/keys.js";
+import { pageForestQueryOptions } from "../api/treeQueries.js";
 import { isPageBodyReady, markPageBodyReady } from "../lib/pageBodyCache.js";
 import {
   closeVersionSearch,
@@ -44,6 +46,8 @@ import {
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 import { applyPageRestore, PAGE_VERSION_RESTORE_FAILED, PAGE_VERSION_RESTORE_SUCCESS } from "../lib/pageRestore.js";
 import { snapshotBodyHtml } from "../lib/versionContent.js";
+import { pageAncestors } from "../lib/pageNested.js";
+import { quickCreateAccess } from "../lib/pageCreate.js";
 import { copyPageLink } from "../lib/share.js";
 import { usePageSyncStatus } from "../lib/pageSync.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
@@ -56,7 +60,7 @@ import { PageEditorSurface, PAGE_BODY_LABEL } from "./PageEditorSurface.js";
 import { PageHeadingPreview } from "./PageHeadingPreview.js";
 import { PageNavigationPane } from "./PageNavigationPane.js";
 import { PageVersionOverlay } from "./PageVersionOverlay.js";
-import { PAGE_UNTITLED } from "../lib/pageList.js";
+import { pageDetailHref, PAGE_UNTITLED } from "../lib/pageList.js";
 import { formattingBarVisible, readStickyToolbarFromWindow } from "../lib/pagePreferences.js";
 import { useLivePageDocument } from "../lib/pageDocumentLive.js";
 import { PAGE_CANVAS_MEASURE_PX, pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
@@ -102,6 +106,17 @@ export function PageDetailScreen({
 
   const listRow = pages.data?.find((row) => row.id === pageId);
   const page = record.data;
+  const hasAncestor = page !== undefined && (page.parent_id ?? page.parent) !== null;
+  // Breadcrumbs walk the whole visible forest: a middle ancestor is never in
+  // the top-level collection, and a parent the caller cannot see is absent
+  // entirely, which is exactly what the restricted fallback reads. The walk
+  // is deep because `sub_pages_count` hides an archived middle ancestor
+  // under a live parent (§11.7); it reuses the collection as its roots and
+  // shares the discovery cache entry.
+  const forest = useQuery({
+    ...pageForestQueryOptions(client, workspaceSlug, projectId, hasAncestor, { roots: pages.data, deep: true }),
+    enabled: hasAncestor && pages.isSuccess && project.isSuccess && project.data.page_view !== false,
+  });
   const role = roles.data?.[projectId] ?? null;
   const viewerId = me.data?.id ?? null;
 
@@ -167,6 +182,23 @@ export function PageDetailScreen({
   };
 
   const siblings = React.useMemo(() => pageSiblingOptions(pages.data ?? []), [pages.data]);
+  // The ancestor trail walks the same cached collection the sibling
+  // switcher uses (PAGE-086), plus the open record itself; an ancestor the
+  // caller never received renders as the restricted fallback.
+  const trailPool = React.useMemo(() => {
+    const visible = [...(forest.data?.rows ?? []), ...(pages.data ?? [])];
+    if (page === undefined) return visible;
+    return [page, ...visible.filter((row) => row.id !== page.id)];
+  }, [page, forest.data, pages.data]);
+  // The trail renders once the ancestor walk settles: a pending read must
+  // never flash the restricted fallback for an ancestor it simply has not
+  // loaded yet (PAGE-086).
+  const ancestorsReady = !hasAncestor || forest.isSuccess;
+  const ancestors = React.useMemo(
+    () => (page === undefined || !ancestorsReady ? [] : pageAncestors(trailPool, page.id)),
+    [trailPool, page, ancestorsReady]
+  );
+  const addSubPage = useAddSubPage(workspaceSlug, projectId);
 
   // The skeleton is a cold-load surface: one committed paint of the
   // placeholder, then the stored body, and never again for this page in
@@ -286,6 +318,7 @@ export function PageDetailScreen({
         projectLogo={(project.data?.logo_props ?? {}) as Record<string, unknown>}
         projectIdentifier={project.data?.identifier ?? ""}
         page={page}
+        ancestors={ancestors}
         siblings={siblings}
         syncStatus={syncStatus}
         showStar={isProjectAuthorized(role)}
@@ -296,6 +329,18 @@ export function PageDetailScreen({
         onOpenHistory={() => onSearchChange(historySearch(search))}
         onOpenPane={openPane}
         paneOpen={paneOpen}
+        {...(isProjectAuthorized(role) && !capabilities.isShelved
+          ? {
+              onAddSubPage: () => {
+                addSubPage.mutate(
+                  // The detail has no tab; use PAGE-007's open-tab default
+                  // rather than inheriting the source page's visibility.
+                  { parentId: page.id, access: quickCreateAccess("public") },
+                  { onSuccess: (created) => goTo(pageDetailHref(workspaceSlug, projectId, created.id)) }
+                );
+              },
+            }
+          : {})}
       />
       <div className="flex min-h-0 flex-1">
         <div data-testid="page-canvas-stage" className="relative flex min-h-0 min-w-0 flex-1">

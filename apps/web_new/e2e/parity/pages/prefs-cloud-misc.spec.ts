@@ -552,7 +552,18 @@ test(
         await driver.pagesPrefsOpenList(seed.workspaceSlug, projectId);
         expect(await driver.pagesNegListTabNames()).toEqual(["Public", "Private", "Archived"]);
         const items = await driver.pagesNegRowMenuItems(title);
-        expect(items).toEqual(["Open in new tab", "Copy link", "Make a copy", "Lock", "Make private", "Archive"]);
+        // The six-entry oracle prefix is pinned on both apps. D17 appends
+        // Add sub-page and Move to… on web_new only (PAGE-084/087), so the
+        // suffix is part of PAGE-083's expected order there.
+        expect(items.slice(0, 6)).toEqual([
+          "Open in new tab",
+          "Copy link",
+          "Make a copy",
+          "Lock",
+          "Make private",
+          "Archive",
+        ]);
+        expect(items.slice(6)).toEqual(driver.target === "web_new" ? ["Add sub-page", "Move to…"] : []);
         expect(items).toContain("Copy link");
         expect(items).toContain("Make a copy");
         expect(items.some((item) => /export/i.test(item))).toBe(false);

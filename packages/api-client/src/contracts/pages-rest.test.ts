@@ -27,6 +27,7 @@ import {
   unlockPage,
   updatePage,
   updatePageDescription,
+  PageNestedFields,
 } from "./pages.js";
 
 const WS = "acme";
@@ -114,7 +115,7 @@ describe("pages collection contracts", () => {
     const rows = await listPages(client, WS, PROJECT);
     expect(calls[0]?.method).toBe("GET");
     expect(calls[0]?.url).toBe(BASE);
-    expect(calls[0]?.query).toEqual({ parent: undefined, search: undefined });
+    expect(calls[0]?.query).toEqual({ parent: undefined, search: undefined, include_archived: undefined });
     expect(rows[0]?.name).toBe("Meeting notes");
     expect(rows[0]?.parent).toBeNull();
   });
@@ -122,7 +123,61 @@ describe("pages collection contracts", () => {
   it("passes parent and search for a children read", async () => {
     const { client, calls } = stubClient({ json: () => [] });
     await listPages(client, WS, PROJECT, { parent: PAGE, search: "budget" });
-    expect(calls[0]?.query).toEqual({ parent: PAGE, search: "budget" });
+    expect(calls[0]?.query).toEqual({ parent: PAGE, search: "budget", include_archived: undefined });
+  });
+
+  it("asks for shelved rows when the archived tab needs them", async () => {
+    const { client, calls } = stubClient({ json: () => [] });
+    await listPages(client, WS, PROJECT, { includeArchived: true });
+    expect(calls[0]?.query).toEqual({ parent: undefined, search: undefined, include_archived: true });
+  });
+
+  it("parses a top-level row that names its empty child set", async () => {
+    // The landed nested serializer emits both flat fields on every row, and
+    // a top-level page answers a zero count rather than omitting the key.
+    const { client } = stubClient({ json: () => [row({ parent: null, parent_id: null, sub_pages_count: 0 })] });
+    const rows = await listPages(client, WS, PROJECT);
+    expect(rows[0]?.parent_id).toBeNull();
+    expect(rows[0]?.sub_pages_count).toBe(0);
+    expect(PageNestedFields.parse({ parent: null, parent_id: null, sub_pages_count: 0 })).toEqual({
+      parent: null,
+      parent_id: null,
+      sub_pages_count: 0,
+    });
+  });
+
+  it("keeps the nested fields out of the contract when an older backend omits them", async () => {
+    // The pre-D17 serializer carries `parent` alone. Requiring the flat pair
+    // would reject every row of that backend, so the nested delta stays
+    // additive: parse succeeds, the flat fields are simply absent.
+    const { client } = stubClient({ json: () => [row({ parent: null })] });
+    const rows = await listPages(client, WS, PROJECT);
+    expect(rows[0]?.parent).toBeNull();
+    expect(rows[0]?.parent_id).toBeUndefined();
+    expect(rows[0]?.sub_pages_count).toBeUndefined();
+  });
+
+  it("rejects a nested count that is not a number", async () => {
+    const { client } = stubClient({ json: () => [row({ sub_pages_count: "two" })] });
+    await expect(listPages(client, WS, PROJECT)).rejects.toThrow();
+  });
+
+  it("creates a child page under its parent and reads the parent's children", async () => {
+    const { client, calls } = stubClient({
+      json: () => row({ parent: PAGE_ALT, parent_id: PAGE_ALT, description_html: "<p></p>" }),
+    });
+    const created = await createPage(client, WS, PROJECT, { name: "Child", parent: PAGE_ALT });
+    expect(calls[0]).toMatchObject({ method: "POST", json: { name: "Child", parent: PAGE_ALT } });
+    expect(created.parent_id).toBe(PAGE_ALT);
+  });
+
+  it("reparents with PATCH and detaches to the top level", async () => {
+    const { client, calls } = stubClient({ json: () => row({ parent: PAGE_ALT, parent_id: PAGE_ALT }) });
+    const moved = await updatePage(client, WS, PROJECT, PAGE, { parent: PAGE_ALT });
+    expect(calls[0]?.json).toEqual({ parent: PAGE_ALT });
+    expect(moved.parent_id).toBe(PAGE_ALT);
+    await updatePage(client, WS, PROJECT, PAGE, { parent: null });
+    expect(calls[1]?.json).toEqual({ parent: null });
   });
 
   it("parses the nested fields when the backend serves them", async () => {

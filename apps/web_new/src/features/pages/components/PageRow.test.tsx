@@ -233,6 +233,52 @@ describe("PageRow", () => {
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toContain("Move to project…");
   });
 
+  it("appends the nested entries after the pinned prefix and wires them", () => {
+    const onAddSubPage = vi.fn();
+    const onRequestNestedMove = vi.fn();
+    renderRow({ canManage: true, onAddSubPage, onRequestNestedMove });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+      "Make a copy",
+      "Lock",
+      "Make private",
+      "Archive",
+      "Add sub-page",
+      "Move to…",
+    ]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Add sub-page" }));
+    expect(onAddSubPage).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Move to…" }));
+    expect(onRequestNestedMove).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits Add sub-page on a shelved row", () => {
+    renderRow({
+      canManage: true,
+      page: makePageRow({ archived_at: "2026-10-01" }),
+      onAddSubPage: vi.fn(),
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    const items = screen.getAllByRole("menuitem").map((item) => item.textContent);
+    expect(items).not.toContain("Add sub-page");
+  });
+
+  it("shows the parent path as a secondary line for a discovery result", () => {
+    renderRow({ parentPath: "Handbook / Policies" });
+    expect(screen.getByTestId("page-row-parent-path")).toHaveTextContent("Handbook / Policies");
+    expect(screen.getByRole("link", { name: "Launch notes" })).toContainElement(
+      screen.getByTestId("page-row-parent-path")
+    );
+  });
+
+  it("omits the secondary line for a top-level page", () => {
+    renderRow();
+    expect(screen.queryByTestId("page-row-parent-path")).not.toBeInTheDocument();
+  });
+
   it("shows a lock indicator on a locked row only", () => {
     const { rerender } = render(rowElement({ page: makePageRow({ is_locked: true }) }));
     expect(screen.getByLabelText("Locked")).toBeInTheDocument();

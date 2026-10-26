@@ -35,6 +35,12 @@ export interface PageRowProps {
   canManage: boolean;
   /** Cross-project move is an edition flag; community builds carry none. */
   canMove: boolean;
+  /** Member and above: the nested menu entry that creates a child (PAGE-084). */
+  onAddSubPage?: (() => void) | undefined;
+  /** Owner or admin: the nested Move to… entry (PAGE-087). */
+  onRequestNestedMove?: (() => void) | undefined;
+  /** Breadcrumb trail shown as a secondary line for a nested result (PAGE-090). */
+  parentPath?: string | null | undefined;
   onOpenInNewTab: () => void;
   onCopyLink: () => void;
   onDuplicate: () => void;
@@ -106,6 +112,9 @@ export function PageRow({
   canDuplicate,
   canManage,
   canMove,
+  onAddSubPage,
+  onRequestNestedMove,
+  parentPath = null,
   onOpenInNewTab,
   onCopyLink,
   onDuplicate,
@@ -125,6 +134,8 @@ export function PageRow({
       locked: page.is_locked,
       restricted: page.access === 1,
       move: canMove,
+      addSubPage: onAddSubPage !== undefined,
+      nestedMove: onRequestNestedMove !== undefined,
     },
     {
       openInNewTab: onOpenInNewTab,
@@ -135,6 +146,8 @@ export function PageRow({
       toggleArchive: onToggleArchive,
       requestDelete: onRequestDelete,
       requestMove: onRequestMove,
+      ...(onAddSubPage === undefined ? {} : { addSubPage: onAddSubPage }),
+      ...(onRequestNestedMove === undefined ? {} : { moveTo: onRequestNestedMove }),
     }
   );
   const row = (
@@ -149,7 +162,14 @@ export function PageRow({
         className="flex min-w-0 flex-1 items-center gap-(--space-3) text-(--text)"
       >
         <PageMark page={page} />
-        <span className="text-body min-w-0 flex-1 truncate font-medium hover:underline">{title}</span>
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="text-body truncate font-medium hover:underline">{title}</span>
+          {parentPath === null ? null : (
+            <span data-testid="page-row-parent-path" className="text-meta truncate text-(--text-muted)">
+              {parentPath}
+            </span>
+          )}
+        </span>
         <Tooltip content={ownerName}>
           <span className="inline-flex">
             <Avatar

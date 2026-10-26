@@ -14035,6 +14035,12 @@ export interface ParityPageRecord {
   updatedAt: string;
   descriptionHtml: string;
   isLocked: boolean;
+  /** Parent page id when the nested surface (PDASHOSS01-270) is live. */
+  parentId?: string | null;
+  /** Visible child count when the nested surface (PDASHOSS01-270) is live. */
+  subPagesCount?: number;
+  /** Shelved timestamp, when the record carries one. */
+  archivedAt?: string | null;
 }
 
 /** Read a page's live description binary (Yjs state stream). */
@@ -14166,6 +14172,13 @@ export async function serverPageRecord(
     updatedAt: rec["updated_at"] as string,
     descriptionHtml: typeof rec["description_html"] === "string" ? rec["description_html"] : "",
     isLocked: rec["is_locked"] === true,
+    ...(rec["parent_id"] === undefined
+      ? {}
+      : { parentId: typeof rec["parent_id"] === "string" ? rec["parent_id"] : null }),
+    ...(typeof rec["sub_pages_count"] === "number" ? { subPagesCount: rec["sub_pages_count"] } : {}),
+    ...(rec["archived_at"] === undefined
+      ? {}
+      : { archivedAt: typeof rec["archived_at"] === "string" ? rec["archived_at"] : null }),
   };
 }
 
@@ -14850,6 +14863,48 @@ export async function serverListPages(
   return rows.map((row) => {
     const rec = row as Record<string, unknown>;
     if (typeof rec["id"] !== "string") throw new Error("[parity] page list carried a row without a string id.");
+    return {
+      id: rec["id"] as string,
+      name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
+      access: typeof rec["access"] === "number" ? (rec["access"] as number) : 0,
+      ownedBy: typeof rec["owned_by"] === "string" ? (rec["owned_by"] as string) : "",
+      isFavorite: rec["is_favorite"] === true,
+      archivedAt: typeof rec["archived_at"] === "string" ? (rec["archived_at"] as string) : null,
+      createdAt: typeof rec["created_at"] === "string" ? (rec["created_at"] as string) : "",
+      updatedAt: typeof rec["updated_at"] === "string" ? (rec["updated_at"] as string) : "",
+    };
+  });
+}
+
+/**
+ * List one parent's children (`?parent=<id>`), optionally including archived
+ * children. The top-level collection omits nested pages, so this is the only
+ * way a setup step can see the child it just created (PAGE-084/085).
+ */
+export async function serverListChildPages(
+  workspaceSlug: string,
+  projectId: string,
+  parentId: string,
+  sessionCookie: string,
+  includeArchived = false,
+  apiBase: string = apiBaseFromEnv()
+): Promise<PagesListServerRow[]> {
+  const params = new URLSearchParams({ parent: parentId });
+  if (includeArchived) params.set("include_archived", "true");
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/?${params.toString()}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) throw new Error(`[parity] page child list failed with HTTP ${res.status}.`);
+  const rows: unknown[] = Array.isArray(res.payload)
+    ? res.payload
+    : ((res.payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const rec = row as Record<string, unknown>;
+    if (typeof rec["id"] !== "string") throw new Error("[parity] page child list carried a row without a string id.");
     return {
       id: rec["id"] as string,
       name: typeof rec["name"] === "string" ? (rec["name"] as string) : "",
@@ -22174,4 +22229,32 @@ export async function listFavoriteGroup(
     ? res.payload
     : ((res.payload as { results?: unknown[] }).results ?? []);
   return rows as ParityFavorite[];
+}
+
+// --- Nested pages (NEWFRONT-850, PAGE-084-090). Appended; existing
+// --- helpers above are untouched per the shared parity contract. The
+// --- nested surface lands with PDASHOSS01-270; these write the same
+// --- `parent` field the spec sketch defines and the UI sends.
+
+/** Reparent one page to `parentId`, or to the top level with null. */
+export async function serverPatchPageParent(
+  workspaceSlug: string,
+  projectId: string,
+  pageId: string,
+  parentId: string | null,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await apiJson(
+    "PATCH",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/`,
+    sessionCookie,
+    { parent: parentId },
+    apiBase
+  );
+  if (res.status !== 200) {
+    throw new Error(
+      `[parity] page parent patch failed with HTTP ${res.status}: ${JSON.stringify(res.payload).slice(0, 300)}.`
+    );
+  }
 }

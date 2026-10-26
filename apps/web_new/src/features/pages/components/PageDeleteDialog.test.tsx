@@ -7,7 +7,7 @@
 // the confirm control holds a busy state while the write flies, and
 // cancelling only closes.
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -25,6 +25,7 @@ function renderDialog(overrides: Partial<PageDeleteDialogProps> = {}): {
       open
       onOpenChange={onOpenChange}
       pageName="Release checklist"
+      rehomedCount={0}
       pending={false}
       onConfirm={onConfirm}
       {...overrides}
@@ -46,6 +47,46 @@ describe("PageDeleteDialog", () => {
   it("names an untitled page with the fallback label", () => {
     renderDialog({ pageName: "   " });
     expect(screen.getByRole("dialog")).toHaveTextContent("Untitled");
+  });
+
+  it("states how many sub-pages move to the top level", () => {
+    renderDialog({ rehomedCount: 1 });
+    expect(screen.getByTestId("page-delete-rehomed")).toHaveTextContent("1 sub-page will move to the top level.");
+  });
+
+  it("keeps Delete disabled and names the pending read while the count is unknown", () => {
+    const { onConfirm } = renderDialog({ rehomedCount: undefined });
+    expect(screen.getByTestId("page-delete-rehomed-loading")).toHaveTextContent("Counting sub-pages…");
+    expect(screen.queryByTestId("page-delete-rehomed")).not.toBeInTheDocument();
+    const confirm = screen.getByRole("button", { name: "Delete" });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("pluralises the re-homed count and omits the line for a leaf", () => {
+    const view = render(
+      <PageDeleteDialog
+        open
+        onOpenChange={vi.fn()}
+        pageName="Handbook"
+        rehomedCount={4}
+        pending={false}
+        onConfirm={vi.fn()}
+      />
+    );
+    expect(screen.getByTestId("page-delete-rehomed")).toHaveTextContent("4 sub-pages will move to the top level.");
+    view.rerender(
+      <PageDeleteDialog
+        open
+        onOpenChange={vi.fn()}
+        pageName="Handbook"
+        rehomedCount={0}
+        pending={false}
+        onConfirm={vi.fn()}
+      />
+    );
+    expect(screen.queryByTestId("page-delete-rehomed")).not.toBeInTheDocument();
   });
 
   it("confirms the write and cancels to closed", async () => {
