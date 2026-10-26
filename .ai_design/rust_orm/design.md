@@ -236,9 +236,9 @@ the write itself.
 | ORM-09 | PIDASHCONV-1527 | OSS | write guard (ratchet) + allowlist + workflow | — |
 | ORM-10 | PIDASHCONV-1528 | OSS | Rust bug: GitHub/Google/Gitea OAuth signups skip `user_notification_preferences` | — |
 | ORM-11 | PIDASHCONV-1529 | overlay | overlay write guard (ratchet) | — |
-| ORM-12 | PIDASHCONV-1530 | overlay | move the overlay's issue/comment/relation/workpad/token writes onto `domain` | ORM-03, ORM-05, ORM-06, ORM-08 |
-| ORM-13 | PIDASHCONV-1531 | overlay | move the overlay's identity/workspace/member/instance writes onto `domain` | ORM-07, ORM-08 |
-| ORM-14 | PIDASHCONV-1532 | overlay | move the overlay's assistant writes onto `domain` | ORM-08 |
+| ORM-12 | PIDASHCONV-1530 | overlay | move the overlay's issue/comment/relation/workpad/token writes onto `domain` | ORM-03, ORM-05, ORM-06, ORM-08, ORM-11 |
+| ORM-13 | PIDASHCONV-1531 | overlay | move the overlay's identity/workspace/member/instance writes onto `domain` | ORM-07, ORM-08, ORM-11 |
+| ORM-14 | PIDASHCONV-1532 | overlay | move the overlay's assistant writes onto `domain` | ORM-08, ORM-11 |
 | ORM-15 | PIDASHCONV-1533 | both | gate: both allowlists empty, SQL constants de-publicised (§D8), all contract suites green on both binaries, README extension-surface section, Porting guide updated | all of the above |
 
 ## 9. Done (stage-8 ORM gate)
