@@ -201,3 +201,193 @@ test(
     }
   }
 );
+
+/** Synthetic child rows for the stubbed paged read (ISS-238). */
+function stubChildRows(
+  parentId: string,
+  projectId: string,
+  count: number,
+  sequenceStart: number,
+  subIssuesCount = 0
+): Record<string, unknown>[] {
+  const stamp = "2026-10-01T10:00:00Z";
+  return Array.from({ length: count }, (_, index) => ({
+    id: crypto.randomUUID(),
+    name: `Paged child ${sequenceStart + index}`,
+    state_id: null,
+    sort_order: sequenceStart + index,
+    completed_at: null,
+    estimate_point: null,
+    priority: "none",
+    start_date: null,
+    target_date: null,
+    sequence_id: sequenceStart + index,
+    project_id: projectId,
+    parent_id: parentId,
+    created_at: stamp,
+    updated_at: stamp,
+    created_by: null,
+    updated_by: null,
+    is_draft: false,
+    archived_at: null,
+    cycle_id: null,
+    link_count: 0,
+    attachment_count: 0,
+    sub_issues_count: subIssuesCount,
+    label_ids: [],
+    assignee_ids: [],
+    module_ids: [],
+    state_group: "unstarted",
+  }));
+}
+
+test(
+  specTitle(["ISS-238"], "sub-issue pagination with a per-parent Load more"),
+  { tag: specTags(["ISS-238"]) },
+  async ({ driver, seed }, testInfo) => {
+    // New-app-first: the OSS oracle reads every child in one unpaged
+    // answer, so the paged widget only exists on apps/web_new.
+    test.skip(testInfo.project.name !== "new", "sub-issue pagination pins the web_new UI only");
+    await signIn(driver, seed);
+    const session = await signInSession(seed.email, seed.password);
+    const ts = Date.now();
+    const parent = await ownIssue(seed, session, `Paged parent ${ts}`);
+    const smallParent = await ownIssue(seed, session, `Unpaged parent ${ts}`);
+    const smallChild = await ownIssue(seed, session, `Unpaged child ${ts}`);
+    const viewed: string[] = [];
+    try {
+      await patchIssue(seed.workspaceSlug, seed.projectId, smallChild.id, session, { parent_id: smallParent.id });
+      await test.step("a small parent paints every child with no control", async () => {
+        await driver.openIssueDetail(seed.workspaceSlug, smallParent.seq);
+        await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(smallParent.name);
+        await expect.poll(() => driver.widgetProgress("Sub-work items"), { timeout: 30_000 }).toBe("0/1 Done");
+        await driver.openWidgetSection("Sub-work items");
+        await expect
+          .poll(async () => (await driver.widgetRowNames("Sub-work items")).join("\n"), { timeout: 30_000 })
+          .toContain(smallChild.name);
+        expect(await driver.widgetLoadMorePresent("Sub-work items")).toBe(false);
+      });
+      const firstPage = stubChildRows(parent.id, seed.projectId, 50, 1000);
+      const secondPage = stubChildRows(parent.id, seed.projectId, 4, 2000);
+      // The first row is itself a parent, so its own cursor is separate
+      // from the section's.
+      const nestedParent = firstPage[0] as Record<string, unknown>;
+      nestedParent["sub_issues_count"] = 1;
+      const nestedName = String(nestedParent["name"]);
+      const nestedFirstPage = stubChildRows(String(nestedParent["id"]), seed.projectId, 2, 3000);
+      const nestedSecondPage = stubChildRows(String(nestedParent["id"]), seed.projectId, 2, 3002);
+      // The full set is 120 children with one completed; the pages carry
+      // the same full-set rollup (target per main#496).
+      const distribution = { completed: [crypto.randomUUID()], unstarted: firstPage.map((row) => row["id"]) };
+      await test.step("the first page stops at fifty rows and offers Load more", async () => {
+        await driver.page.route(
+          `**/api/workspaces/${seed.workspaceSlug}/projects/${seed.projectId}/issues/${parent.id}/sub-issues/**`,
+          async (route) => {
+            const url = new URL(route.request().url());
+            const cursor = url.searchParams.get("cursor");
+            viewed.push(url.search);
+            // The second page answers late so the widget's fetching state
+            // has a moment to render before the rows land.
+            if (cursor === "page-2") await new Promise((resolve) => setTimeout(resolve, 750));
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                sub_issues: cursor === "page-2" ? secondPage : firstPage,
+                state_distribution: distribution,
+                total_count: 120,
+                ...(cursor === "page-2"
+                  ? { next_cursor: "", next_page_results: false }
+                  : { next_cursor: "page-2", next_page_results: true }),
+              }),
+            });
+          }
+        );
+        await driver.openIssueDetail(seed.workspaceSlug, parent.seq);
+        await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(parent.name);
+        await expect.poll(() => driver.widgetProgress("Sub-work items"), { timeout: 30_000 }).toBe("1/120 Done");
+        await driver.openWidgetSection("Sub-work items");
+        await expect
+          .poll(async () => (await driver.widgetRowNames("Sub-work items")).length, { timeout: 30_000 })
+          .toBe(50);
+        expect(await driver.widgetLoadMorePresent("Sub-work items")).toBe(true);
+        expect(viewed[0]).toContain("per_page=50");
+        expect(viewed[0]).not.toContain("cursor=");
+      });
+      await test.step("Load more shows its fetching state, then appends the next cursor page", async () => {
+        // The control disables and swaps in its spinner while the next
+        // page is in flight, so the read has to land during the request.
+        const loading = driver.widgetLoadMore("Sub-work items");
+        try {
+          await expect.poll(() => driver.widgetLoadMoreFetching("Sub-work items"), { timeout: 5_000 }).toBe(true);
+        } finally {
+          await loading;
+        }
+        await expect
+          .poll(async () => (await driver.widgetRowNames("Sub-work items")).length, { timeout: 30_000 })
+          .toBe(54);
+        const names = (await driver.widgetRowNames("Sub-work items")).join("\n");
+        expect(names).toContain("Paged child 1000");
+        expect(names).toContain("Paged child 2003");
+        expect(viewed.some((search) => search.includes("cursor=page-2"))).toBe(true);
+      });
+      await test.step("a nested parent keeps its own cursor page", async () => {
+        // The row's own read is a separate collection: it starts at the
+        // same fifty-row cap with no cursor, appends only its own next
+        // page, and drops its control when the last one lands.
+        const nestedReads: string[] = [];
+        await driver.page.route(
+          `**/api/workspaces/${seed.workspaceSlug}/projects/${seed.projectId}/issues/${String(nestedParent["id"])}/sub-issues/**`,
+          async (route) => {
+            const url = new URL(route.request().url());
+            const cursor = url.searchParams.get("cursor");
+            nestedReads.push(url.search);
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                sub_issues: cursor === "nested-2" ? nestedSecondPage : nestedFirstPage,
+                state_distribution: {
+                  completed: [],
+                  unstarted: [...nestedFirstPage, ...nestedSecondPage].map((row) => row["id"]),
+                },
+                total_count: 4,
+                ...(cursor === "nested-2"
+                  ? { next_cursor: "", next_page_results: false }
+                  : { next_cursor: "nested-2", next_page_results: true }),
+              }),
+            });
+          }
+        );
+        await driver.expandWidgetRowChildren("Sub-work items", nestedName);
+        expect(nestedReads[0]).toContain("per_page=50");
+        expect(nestedReads[0]).not.toContain("cursor=");
+        expect(await driver.widgetRowLoadMorePresent("Sub-work items", nestedName)).toBe(true);
+        const before = (await driver.widgetRowNames("Sub-work items")).length;
+        await driver.widgetRowLoadMore("Sub-work items", nestedName);
+        await expect
+          .poll(async () => (await driver.widgetRowNames("Sub-work items")).length, { timeout: 30_000 })
+          .toBe(before + 2);
+        const names = (await driver.widgetRowNames("Sub-work items")).join("\n");
+        for (const child of ["Paged child 3000", "Paged child 3001", "Paged child 3002", "Paged child 3003"]) {
+          expect(names).toContain(child);
+        }
+        // The section's own rows did not change: only the nested cursor moved.
+        expect(names).toContain("Paged child 2003");
+        expect(nestedReads.some((search) => search.includes("cursor=nested-2"))).toBe(true);
+        await expect
+          .poll(() => driver.widgetRowLoadMorePresent("Sub-work items", nestedName), { timeout: 30_000 })
+          .toBe(false);
+      });
+      await test.step("the rollup keeps the full child set and the control hides", async () => {
+        expect(await driver.widgetProgress("Sub-work items")).toBe("1/120 Done");
+        await expect.poll(() => driver.widgetLoadMorePresent("Sub-work items"), { timeout: 30_000 }).toBe(false);
+      });
+    } finally {
+      await driver.page.unrouteAll({ behavior: "wait" }).catch(() => {});
+      await dropIssue(seed, session, smallChild.id);
+      await dropIssue(seed, session, smallParent.id);
+      await dropIssue(seed, session, parent.id);
+    }
+  }
+);

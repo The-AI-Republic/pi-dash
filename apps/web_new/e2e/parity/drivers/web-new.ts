@@ -3037,14 +3037,22 @@ export class WebNewDriver implements ParityDriver {
   async setDescription(_text: string): Promise<void> {
     return todo("setDescription");
   }
-  async sidebarProperty(_label: string): Promise<string | null> {
-    return todo("sidebarProperty");
+  async sidebarProperty(label: string): Promise<string | null> {
+    // Read the row's value half: the label span is the row's accessible
+    // name, not part of its value.
+    const row = this.propertyRow(label);
+    if ((await row.count()) === 0) return null;
+    const text = ((await row.first().innerText()) ?? "").trim().replace(/\s+/g, " ");
+    const rest = text.startsWith(label) ? text.slice(label.length).trim() : text;
+    return rest === "" ? null : rest;
   }
-  async sidebarRowPresent(_label: string): Promise<boolean> {
-    return todo("sidebarRowPresent");
+  async sidebarRowPresent(label: string): Promise<boolean> {
+    return (await this.propertyRow(label).count()) > 0;
   }
-  async sidebarRowHasControl(_label: string): Promise<boolean> {
-    return todo("sidebarRowHasControl");
+  async sidebarRowHasControl(label: string): Promise<boolean> {
+    const row = this.propertyRow(label);
+    if ((await row.count()) === 0) return false;
+    return (await row.first().getByRole("button").count()) > 0;
   }
   async pickState(_name: string): Promise<void> {
     return todo("pickState");
@@ -3119,7 +3127,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("seesDetailMissing");
   }
   async signedIn(): Promise<boolean> {
-    return todo("signedIn");
+    // The entry card is the only signed-out surface; a workspace shell,
+    // a settings page or a detail page all read as signed in.
+    if ((await this.authEmailField().count()) === 0) return true;
+    return !(await this.authEmailField().isVisible());
   }
   async openDescriptionHistory(): Promise<void> {
     return todo("openDescriptionHistory");
@@ -3341,22 +3352,40 @@ export class WebNewDriver implements ParityDriver {
       return out;
     });
   }
+  /** The sub-work-items section title; the only widget with its own disclosure. */
+  private static readonly SUB_ISSUES_WIDGET = "Sub-work items";
+
   private widgetSection(widget: string): Locator {
     return this.page.locator(`[data-widget-root="${widget}"]`).first();
   }
 
+  /**
+   * The named widget's disclosure. The sub-work-items section owns its
+   * header (a titled button with the gauge and rollup); the later
+   * widgets carry a shared header element. Both keep one section open.
+   */
   private widgetHeader(widget: string): Locator {
+    if (widget === WebNewDriver.SUB_ISSUES_WIDGET || widget === "Work items") {
+      return this.page.locator('[data-testid="sub-issues-collapsible"]').first();
+    }
     return this.page.locator(`[data-widget-header="${widget}"]`).first();
   }
 
   private widgetPanel(widget: string): Locator {
+    if (widget === WebNewDriver.SUB_ISSUES_WIDGET || widget === "Work items") {
+      return this.page.locator('[data-testid="sub-issues-section"]').first();
+    }
     return this.page.locator(`[data-widget-rows="${widget}"]`).first();
   }
 
   async widgetRowNames(widget: string): Promise<string[]> {
-    // Rows are the direct blocks of the panel; ignore the pending upload row
-    // only when it has not settled (callers look for the settled size text).
-    const rows = this.widgetPanel(widget).locator(":scope > [data-widget-row]");
+    // Sub-work items render one row block per child (nested children
+    // included); the attachment and code-review panels mark their direct
+    // rows instead.
+    const rows =
+      widget === WebNewDriver.SUB_ISSUES_WIDGET || widget === "Work items"
+        ? this.widgetPanel(widget).locator("[data-sub-issue-row]")
+        : this.widgetPanel(widget).locator(":scope > [data-widget-row]");
     const count = await rows.count();
     const out: string[] = [];
     for (let i = 0; i < count; i++) {
@@ -3372,8 +3401,12 @@ export class WebNewDriver implements ParityDriver {
     }
     return out;
   }
-  async widgetProgress(_widget: string): Promise<string | null> {
-    return todo("widgetProgress");
+  async widgetProgress(widget: string): Promise<string | null> {
+    const header = this.widgetHeader(widget);
+    if ((await header.count()) === 0) return null;
+    const text = ((await header.innerText().catch(() => "")) ?? "").trim();
+    const match = /(\d+\s*\/\s*\d+\s*Done)/.exec(text);
+    return match ? match[1].replace(/\s+/g, " ").replace(/\s*\/\s*/, "/") : null;
   }
   async widgetGroupNames(_widget: string): Promise<string[]> {
     return todo("widgetGroupNames");
@@ -3383,9 +3416,109 @@ export class WebNewDriver implements ParityDriver {
     await this.widgetHeader(widget).click({ timeout: WebNewDriver.WAIT_MS });
   }
   async widgetExpanded(widget: string): Promise<boolean> {
+    // The header's aria flag and the mounted panel agree; the panel is
+    // the proof because a collapsed parent unmounts it entirely.
     const header = this.widgetHeader(widget);
     if ((await header.count()) === 0) return false;
     return (await header.getAttribute("aria-expanded")) === "true";
+  }
+  /**
+   * The section's own Load more control. A nested parent keeps its own
+   * cursor control inside its rows, so the direct child of the section
+   * is the one this reads (ISS-238).
+   */
+  private widgetLoadMoreControl(widget: string): Locator {
+    // Nested parents draw their own control inside a row block, so the
+    // section-level one is the control with no row ancestor.
+    return this.widgetPanel(widget)
+      .locator('[data-testid="sub-issues-load-more"]:not([data-sub-issue-row] [data-testid="sub-issues-load-more"])')
+      .first();
+  }
+  /** Whether the section shows its per-parent Load more control. */
+  async widgetLoadMorePresent(widget: string): Promise<boolean> {
+    return this.isShown(this.widgetLoadMoreControl(widget));
+  }
+  /** Click the section's Load more control; ends after the next page lands. */
+  async widgetLoadMore(widget: string): Promise<void> {
+    const control = this.widgetLoadMoreControl(widget);
+    if ((await control.count()) === 0) throw new Error(`[parity] no load-more control in ${JSON.stringify(widget)}.`);
+    await control.click({ timeout: WebNewDriver.WAIT_MS });
+    // Settled means the row has left its fetching state; a second page may
+    // still leave the control in place, so the label is the signal.
+    await expect
+      .poll(async () => ((await control.innerText().catch(() => "")) ?? "").trim(), { timeout: WebNewDriver.WAIT_MS })
+      .not.toBe("Loading more…");
+  }
+  /**
+   * Whether the section's Load more control is mid-fetch: the control
+   * disables itself and swaps its label for a spinner labelled
+   * "Loading more sub-work items" while the next cursor page lands.
+   */
+  async widgetLoadMoreFetching(widget: string): Promise<boolean> {
+    const control = this.widgetLoadMoreControl(widget);
+    if ((await control.count()) === 0) return false;
+    const first = control.first();
+    if (await first.isDisabled()) return true;
+    return (await first.getByRole("status").count()) > 0;
+  }
+  /** One nested parent's row block, matched by the name it shows. */
+  private widgetNestedRow(widget: string, rowName: string): Locator {
+    // A nested parent's name also reads inside every ancestor block, so
+    // the innermost match is the row itself.
+    return this.widgetPanel(widget)
+      .locator("[data-sub-issue-row]")
+      .filter({ has: this.page.getByText(rowName, { exact: true }) })
+      .last();
+  }
+  /**
+   * The Load more control a nested parent draws under its own children.
+   * Nested rows carry no test id of their own, so the control is the last
+   * plain "Load more" button inside the row: its own follows every deeper
+   * row's control.
+   */
+  private widgetRowLoadMoreControl(widget: string, rowName: string): Locator {
+    return this.widgetNestedRow(widget, rowName)
+      .getByRole("button", { name: /^Load more$/ })
+      .last();
+  }
+  /**
+   * Expand a nested parent's children. Its first page fetches on the
+   * expansion, so this ends once a child row, the parent's own Load more
+   * control or an empty/error note has rendered.
+   */
+  async expandWidgetRowChildren(widget: string, rowName: string): Promise<void> {
+    const row = this.widgetNestedRow(widget, rowName);
+    if ((await row.count()) === 0)
+      throw new Error(`[parity] no row ${JSON.stringify(rowName)} in ${JSON.stringify(widget)}.`);
+    const toggle = row.getByRole("button", { name: /^Expand children of / }).first();
+    if ((await toggle.count()) === 0) throw new Error(`[parity] ${JSON.stringify(rowName)} has no expander.`);
+    await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(
+        async () => {
+          const children = await row.locator("[data-sub-issue-row]").count();
+          if (children > 0) return false;
+          if ((await this.widgetRowLoadMoreControl(widget, rowName).count()) > 0) return false;
+          const text = (await row.innerText().catch(() => "")) ?? "";
+          return text.includes("Loading children");
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(false);
+  }
+  /** Whether a nested parent shows its own Load more control. */
+  async widgetRowLoadMorePresent(widget: string, rowName: string): Promise<boolean> {
+    return this.isShown(this.widgetRowLoadMoreControl(widget, rowName));
+  }
+  /** Click a nested parent's Load more control; ends after the next page lands. */
+  async widgetRowLoadMore(widget: string, rowName: string): Promise<void> {
+    const control = this.widgetRowLoadMoreControl(widget, rowName);
+    if ((await control.count()) === 0)
+      throw new Error(`[parity] no nested load-more control under ${JSON.stringify(rowName)}.`);
+    await control.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(async () => ((await control.innerText().catch(() => "")) ?? "").trim(), { timeout: WebNewDriver.WAIT_MS })
+      .not.toBe("Loading more…");
   }
   async widgetHeaderControlCount(_widget: string): Promise<number> {
     return todo("widgetHeaderControlCount");
@@ -4169,28 +4302,81 @@ export class WebNewDriver implements ParityDriver {
   // --- the matching area lands in apps/web_new; the oracle driver above
   // --- stays untouched.
 
-  async propertyValueText(_label: string): Promise<string> {
-    return todo("propertyValueText");
+  async propertyValueText(label: string): Promise<string> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await trigger.innerText()) ?? "").trim().replace(/\s+/g, " ");
   }
 
-  async propertyOpenPicker(_label: string): Promise<void> {
-    return todo("propertyOpenPicker");
+  async propertyOpenPicker(label: string): Promise<void> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.waitForPickerOptions();
   }
 
-  async propertyOpenPickerByKeyboard(_label: string): Promise<void> {
-    return todo("propertyOpenPickerByKeyboard");
+  async propertyOpenPickerByKeyboard(label: string): Promise<void> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.focus({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Enter");
+    await this.waitForPickerOptions();
   }
 
-  async propertyPickerDisabled(_label: string): Promise<boolean> {
-    return todo("propertyPickerDisabled");
+  async propertyPickerDisabled(label: string): Promise<boolean> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return trigger.isDisabled();
   }
 
-  async propertyTriggerPresent(_label: string): Promise<boolean> {
-    return todo("propertyTriggerPresent");
+  async propertyTriggerPresent(label: string): Promise<boolean> {
+    return (await this.propertyTrigger(label).count()) > 0;
   }
 
   async pickerOpen(): Promise<boolean> {
-    return todo("pickerOpen");
+    return (await this.page.getByRole("listbox").count()) > 0;
+  }
+
+  /** The open picker's option list; the kit renders one popup per picker. */
+  private pickerListbox(): Locator {
+    return this.page.getByRole("listbox").last();
+  }
+
+  private pickerSearchField(): Locator {
+    return this.page.getByRole("combobox").last();
+  }
+
+  /**
+   * The open picker's popup. Loading, empty and error lines live inside
+   * it, so the gate never mistakes another surface's status for ours.
+   */
+  private pickerPopup(): Locator {
+    return this.page.getByRole("dialog").last();
+  }
+
+  /** Gate on the popup settling: options, the empty line, or a load error. */
+  private async waitForPickerOptions(): Promise<void> {
+    const popup = this.pickerPopup();
+    const settled = this.pickerListbox()
+      .getByRole("option")
+      .first()
+      .or(popup.getByRole("status"))
+      .or(popup.getByRole("alert"));
+    await settled.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /**
+   * One sidebar property row. The row names its label span and exposes
+   * the property as its accessible name (SidebarRow's labelled group);
+   * older rows without that name fall back to the label text.
+   */
+  private propertyRow(label: string): Locator {
+    return this.page.getByRole("group", { name: label, exact: true });
+  }
+
+  /** The row's control: the pod picker nests a button, the rest own one. */
+  private propertyTrigger(label: string): Locator {
+    return this.propertyRow(label).getByRole("button").first();
   }
 
   async pickerOptionTexts(): Promise<string[]> {
@@ -4214,25 +4400,37 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pickerHasSearch(): Promise<boolean> {
-    return todo("pickerHasSearch");
+    return (await this.pickerSearchField().count()) > 0;
   }
 
-  async pickerSearch(_query: string): Promise<void> {
-    return todo("pickerSearch");
+  async pickerSearch(query: string): Promise<void> {
+    const input = this.pickerSearchField();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await input.pressSequentially(query, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async pickerSearchValue(): Promise<string> {
-    return todo("pickerSearchValue");
+    return this.pickerSearchField().inputValue();
   }
 
   async pickerSearchFocused(): Promise<boolean> {
-    return todo("pickerSearchFocused");
+    // The kit moves focus into the search field on open.
+    const input = this.pickerSearchField();
+    if ((await input.count()) === 0) return false;
+    return input.evaluate((el) => el === document.activeElement);
   }
 
   async pickerPick(text: string): Promise<void> {
+    // The kit popup mounts a moment after the trigger click; wait for the
+    // option list before deciding the picker is the label list instead.
     const listbox = this.page.getByRole("listbox").last();
     if ((await listbox.count()) > 0) {
-      await listbox.getByRole("option", { name: text }).first().click({ timeout: 15_000 });
+      await listbox.getByRole("option", { name: text }).first().click({ timeout: 30_000 });
+      return;
+    }
+    await this.page.waitForTimeout(250);
+    if ((await this.page.getByRole("listbox").count()) > 0) {
+      await this.pickerListbox().getByRole("option", { name: text }).first().click({ timeout: 30_000 });
       return;
     }
     await this.page
@@ -4242,12 +4440,34 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: 15_000 });
   }
 
-  async pickerOptionDisabled(_text: string): Promise<boolean> {
-    return todo("pickerOptionDisabled");
+  async pickerOptionReason(text: string): Promise<string | null> {
+    // A kit option is its glyph, one content span, the selected tick and
+    // an optional trailing span (the reason, or the default badge). Text
+    // content reads both hidden glyphs and the painted trailing text; the
+    // last piece that is not the label itself is the reason.
+    const option = this.pickerListbox().getByRole("option", { name: text }).first();
+    if ((await option.count()) === 0) return null;
+    const parts = (await option.locator(":scope > span").allTextContents())
+      .map((part) => part.trim().replace(/\s+/g, " "))
+      .filter((part) => part !== "");
+    const last = parts[parts.length - 1] ?? "";
+    if (last === "" || last.startsWith(text)) return null;
+    return last;
+  }
+
+  async pickerOptionDisabled(text: string): Promise<boolean> {
+    const option = this.pickerListbox().getByRole("option", { name: text }).first();
+    await option.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // A disabled kit option carries the native disabled flag, so it is
+    // unreachable by pointer and announced as unavailable.
+    return option.isDisabled();
   }
 
   async pickerEmptyText(): Promise<string> {
-    return todo("pickerEmptyText");
+    if ((await this.pickerListbox().getByRole("option").count()) > 0) return "";
+    const empty = this.page.getByRole("status").last();
+    if ((await empty.count()) === 0) return "";
+    return ((await empty.innerText()) ?? "").trim();
   }
 
   async pickerPressEscape(): Promise<void> {
@@ -4255,7 +4475,19 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pickerClickOutside(): Promise<void> {
-    return todo("pickerClickOutside");
+    // Inside a dialog the backdrop covers the page, so the press lands on
+    // the empty top-left corner instead; either way it is outside every
+    // popup and on nothing that could change a value.
+    if ((await this.page.getByRole("dialog").count()) > 0) {
+      await this.page.mouse.click(4, 4);
+    } else {
+      await this.page.getByText("Properties", { exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page
+      .getByRole("listbox")
+      .first()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
   }
 
   async openArchivedIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
@@ -4295,8 +4527,76 @@ export class WebNewDriver implements ParityDriver {
     return todo("datePickerClear");
   }
 
-  async propertyRowPresent(_label: string): Promise<boolean> {
-    return todo("propertyRowPresent");
+  async propertyRowPresent(label: string): Promise<boolean> {
+    // Wait for the sidebar to hydrate: an unloaded DOM reads the same as
+    // a missing row.
+    const heading = this.page.getByText("Properties", { exact: true }).first();
+    await heading.waitFor({ timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+    return (await this.propertyRow(label).count()) > 0;
+  }
+
+  /** The inline API rejection the pod picker renders under its trigger. */
+  async propertyInlineError(label: string): Promise<string | null> {
+    const alert = this.propertyRow(label).getByRole("alert").first();
+    if ((await alert.count()) === 0) return null;
+    const text = ((await alert.innerText()) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  /**
+   * The advisory note under a property row's control. The pod picker
+   * prints its wait note as a paragraph between the combobox and the
+   * error alert; the row's value container owns it.
+   */
+  async propertyNote(label: string): Promise<string | null> {
+    const row = this.propertyRow(label);
+    if ((await row.count()) === 0) return null;
+    // The error alert is a paragraph too; the note is the one that is not.
+    const note = row.first().locator('p:not([role="alert"])').first();
+    if ((await note.count()) === 0) return null;
+    const text = ((await note.innerText()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
+  }
+
+  // --- Waiting-run banner (ISS-239/240). The banner heads the detail's
+  // --- main column while the active run waits behind its pinned runner.
+
+  /** Sections render null while nothing waits, so a missing section reads as absent. */
+  private waitingBanner(): Locator {
+    return this.page.getByRole("region", { name: "Waiting for runner" }).first();
+  }
+
+  async waitingBannerPresent(): Promise<boolean> {
+    return this.isShown(this.waitingBanner());
+  }
+
+  async waitingBannerText(): Promise<string | null> {
+    const banner = this.waitingBanner();
+    if ((await banner.count()) === 0) return null;
+    // The leading paragraph is the sentence; the action row follows it.
+    const sentence = banner.locator(":scope > p").first();
+    if ((await sentence.count()) === 0) return null;
+    const text = ((await sentence.innerText()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
+  }
+
+  async waitingBannerActions(): Promise<string[]> {
+    const banner = this.waitingBanner();
+    if ((await banner.count()) === 0) return [];
+    const labels = await banner.locator(":scope > div > button").allInnerTexts();
+    return labels.map((label) => label.trim().replace(/\s+/g, " ")).filter((label) => label !== "");
+  }
+
+  async waitingBannerActionDisabled(name: string): Promise<boolean> {
+    const control = this.waitingBanner().getByRole("button", { name, exact: true }).first();
+    if ((await control.count()) === 0) return true;
+    return control.isDisabled();
+  }
+
+  async waitingBannerAction(name: string): Promise<void> {
+    const control = this.waitingBanner().getByRole("button", { name, exact: true }).first();
+    if ((await control.count()) === 0) throw new Error(`[parity] no waiting banner action ${JSON.stringify(name)}.`);
+    await control.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   // --- Create-issue modal project picker (NEWFRONT-122, ISS-211). Stubs

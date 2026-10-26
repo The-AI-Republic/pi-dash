@@ -4448,6 +4448,48 @@ export class WebDriver implements ParityDriver {
     return match ? match[1].replace(/\s+/g, " ") : null;
   }
 
+  /** The section's Load more row: the content's last text button (ISS-238). */
+  private async widgetLoadMoreRow(widget: string): Promise<Locator | null> {
+    const content = await this.widgetContent(widget);
+    if (!content) return null;
+    const row = content.getByText("Load more", { exact: false }).first();
+    return (await row.count()) === 0 ? null : row;
+  }
+
+  async widgetLoadMorePresent(widget: string): Promise<boolean> {
+    return (await this.widgetLoadMoreRow(widget)) !== null;
+  }
+
+  async widgetLoadMore(widget: string): Promise<void> {
+    const row = await this.widgetLoadMoreRow(widget);
+    if (row === null) throw new Error(`[parity] no load-more row in ${JSON.stringify(widget)}.`);
+    const before = (await this.widgetRowNames(widget)).length;
+    await row.click({ timeout: WebDriver.OPEN_MS });
+    const deadline = Date.now() + WebDriver.OPEN_MS;
+    for (;;) {
+      const after = (await this.widgetRowNames(widget)).length;
+      if (after > before || !(await this.widgetLoadMorePresent(widget))) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] ${JSON.stringify(widget)} never loaded more rows.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async widgetLoadMoreFetching(widget: string): Promise<boolean> {
+    throw new Error(`[parity] widgetLoadMoreFetching(${widget}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
+  async expandWidgetRowChildren(widget: string, rowName: string): Promise<void> {
+    throw new Error(`[parity] expandWidgetRowChildren(${widget}, ${rowName}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
+  async widgetRowLoadMorePresent(widget: string, rowName: string): Promise<boolean> {
+    throw new Error(`[parity] widgetRowLoadMorePresent(${widget}, ${rowName}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
+  async widgetRowLoadMore(widget: string, rowName: string): Promise<void> {
+    throw new Error(`[parity] widgetRowLoadMore(${widget}, ${rowName}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
   async widgetGroupNames(widget: string): Promise<string[]> {
     const content = await this.widgetContent(widget);
     if (!content) return [];
@@ -7504,6 +7546,10 @@ export class WebDriver implements ParityDriver {
     await this.pickerListbox().getByRole("option", { name: text }).first().click({ timeout: 15_000 });
   }
 
+  async pickerOptionReason(text: string): Promise<string | null> {
+    throw new Error(`[parity] pickerOptionReason(${text}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
   async pickerOptionDisabled(text: string): Promise<boolean> {
     const option = this.pickerListbox().getByRole("option", { name: text }).first();
     await option.waitFor({ timeout: 15_000 });
@@ -7585,6 +7631,34 @@ export class WebDriver implements ParityDriver {
     const trigger = this.propertyTrigger(label);
     await trigger.hover({ timeout: 30_000 });
     await trigger.locator("svg").first().click({ timeout: 15_000 });
+  }
+
+  async waitingBannerPresent(): Promise<boolean> {
+    throw new Error("[parity] waitingBannerPresent has no oracle: the old UI gains it with PDASHOSS01-299.");
+  }
+
+  async waitingBannerText(): Promise<string | null> {
+    throw new Error("[parity] waitingBannerText has no oracle: the old UI gains it with PDASHOSS01-299.");
+  }
+
+  async waitingBannerActions(): Promise<string[]> {
+    throw new Error("[parity] waitingBannerActions has no oracle: the old UI gains it with PDASHOSS01-299.");
+  }
+
+  async waitingBannerActionDisabled(name: string): Promise<boolean> {
+    throw new Error(`[parity] waitingBannerActionDisabled(${name}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
+  async waitingBannerAction(name: string): Promise<void> {
+    throw new Error(`[parity] waitingBannerAction(${name}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
+  async propertyInlineError(label: string): Promise<string | null> {
+    throw new Error(`[parity] propertyInlineError(${label}) has no oracle: PDASHOSS01-299 owns it.`);
+  }
+
+  async propertyNote(label: string): Promise<string | null> {
+    throw new Error(`[parity] propertyNote(${label}) has no oracle: PDASHOSS01-299 owns it.`);
   }
 
   async propertyRowPresent(label: string): Promise<boolean> {
