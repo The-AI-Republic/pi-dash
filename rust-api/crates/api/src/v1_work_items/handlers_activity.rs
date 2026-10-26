@@ -1663,7 +1663,8 @@ async fn fetch_attachment(
 
 /// External-duplicate probe (`:2359-2378`): the `exists()` plus the
 /// `.first()` id in one round trip (same 409 outcome; the concurrent
-/// delete between the two Python queries is unobservable here).
+/// delete between the two Python queries is unobservable here). The
+/// `ORDER BY` mirrors `.first()` over the `-created_at` default ordering.
 async fn fetch_external_duplicate(
     pool: &PgPool,
     slug: &str,
@@ -1679,7 +1680,7 @@ async fn fetch_external_duplicate(
              AND fa."project_id" = $1 AND w."slug" = $2
              AND fa."external_source" = $3 AND fa."external_id" = $4
              AND fa."issue_id" = $5 AND fa."entity_type" = 'ISSUE_ATTACHMENT'
-           LIMIT 1"#,
+           ORDER BY fa."created_at" DESC LIMIT 1"#,
     )
     .bind(project_id)
     .bind(slug)
