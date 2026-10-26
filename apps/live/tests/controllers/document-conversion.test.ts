@@ -46,6 +46,75 @@ describe("convertHTMLDocumentToAllFormats", () => {
     expect(result.description_html).toContain('class="language-python"');
   });
 
+  it("keeps page body nodes with their identifiers (document)", () => {
+    const html =
+      '<p>see <entity-reference-component entity_name="issue" entity_identifier="ISS-2" ' +
+      'project_identifier="P" workspace_identifier="acme" project_id="p-1" data-label="Fix login">' +
+      "</entity-reference-component></p>" +
+      '<issue-embed-component id="emb-1" entity_identifier="ISS-2" project_identifier="P" ' +
+      'workspace_identifier="acme" entity_name="issue"></issue-embed-component>';
+    const result = convertHTMLDocumentToAllFormats({ document_html: html, variant: "document" });
+
+    expect(result.description_json).toMatchObject({
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "see " },
+            {
+              type: "entity-reference-component",
+              attrs: {
+                entity_name: "issue",
+                entity_identifier: "ISS-2",
+                project_identifier: "P",
+                workspace_identifier: "acme",
+                project_id: "p-1",
+                "data-label": "Fix login",
+              },
+            },
+          ],
+        },
+        {
+          type: "issue-embed-component",
+          attrs: {
+            id: "emb-1",
+            entity_identifier: "ISS-2",
+            project_identifier: "P",
+            workspace_identifier: "acme",
+            entity_name: "issue",
+          },
+        },
+      ],
+    });
+    for (const needle of [
+      "<entity-reference-component",
+      'data-label="Fix login"',
+      'project_id="p-1"',
+      "<issue-embed-component",
+      'id="emb-1"',
+    ]) {
+      expect(result.description_html).toContain(needle);
+    }
+    // The collaboration binary carries the nodes too: a client applying it renders both.
+    const synced = docHTML(docFromBinary(decode(result.description_binary)));
+    expect(synced).toContain("<entity-reference-component");
+    expect(synced).toContain('data-label="Fix login"');
+    expect(synced).toContain("<issue-embed-component");
+    expect(synced).toContain('id="emb-1"');
+  });
+
+  it("keeps a bare entity reference node with no attributes (document)", () => {
+    const result = convertHTMLDocumentToAllFormats({
+      document_html: "<p><entity-reference-component></entity-reference-component></p>",
+      variant: "document",
+    });
+
+    expect(result.description_json).toMatchObject({
+      content: [{ type: "paragraph", content: [{ type: "entity-reference-component" }] }],
+    });
+    expect(result.description_html).toContain("<entity-reference-component");
+  });
+
   it.each(["rich", "document"] as const)("without a base binary keeps the existing output (%s)", (variant) => {
     const result = convertHTMLDocumentToAllFormats({ document_html: V1_HTML, variant });
 

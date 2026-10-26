@@ -75,6 +75,9 @@ CUSTOM_TAGS = {
     "label",
     "input",
     "image-component",
+    # page body nodes (PAGE-040, PAGE-043): embeds and entity references
+    "issue-embed-component",
+    "entity-reference-component",
 }
 ALLOWED_TAGS = nh3.ALLOWED_TAGS | CUSTOM_TAGS
 
@@ -134,6 +137,24 @@ ATTRIBUTES = {
         "title",
     },
     "mention-component": {"id", "entity_identifier", "entity_name"},
+    # page body nodes (PAGE-040, PAGE-043): identifiers the stored elements use.
+    # data-label carries an entity reference's display text (the node has no
+    # text content), so it is allowlisted here rather than globally.
+    "issue-embed-component": {
+        "id",
+        "entity_identifier",
+        "project_identifier",
+        "workspace_identifier",
+        "entity_name",
+    },
+    "entity-reference-component": {
+        "entity_name",
+        "entity_identifier",
+        "project_identifier",
+        "workspace_identifier",
+        "project_id",
+        "data-label",
+    },
     "th": {
         "colspan",
         "rowspan",
