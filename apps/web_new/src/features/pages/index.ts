@@ -120,6 +120,8 @@ export {
   type PageSiblingSwitcherProps,
 } from "./components/PageSiblingSwitcher.js";
 export { PageSyncBadge, type PageSyncBadgeProps } from "./components/PageSyncBadge.js";
+export { PageOfflinePill } from "./components/PageOfflinePill.js";
+export { PageOversizedStrip, type PageOversizedStripProps } from "./components/PageOversizedStrip.js";
 export {
   PageMarkPicker,
   pageMarkColor,
@@ -295,6 +297,37 @@ export {
   usePageSyncStatus,
   type PageSyncStatus,
 } from "./lib/pageSync.js";
+export {
+  PAGE_OFFLINE_BEAT_MS,
+  PAGE_OFFLINE_LABEL,
+  useBrowserOnline,
+  usePageOfflineVisible,
+} from "./lib/pageOffline.js";
+export {
+  PAGE_CONTENT_TOO_LARGE,
+  dismissPageOversizedIncident,
+  reportPageContentTooLarge,
+  reportPageRealtimeError,
+  resetPageRealtimeErrors,
+  subscribePageRealtimeErrors,
+  usePageOversizedIncident,
+  type PageOversizedIncident,
+  type PageRealtimeError,
+  type PageRealtimeErrorPhase,
+} from "./lib/pageRealtimeErrors.js";
+export {
+  PAGE_BODY_SAVE_FAILED_TITLE,
+  PAGE_SAVE_EMPTY_HTML,
+  PAGE_SAVE_FALLBACK_INTERVAL_MS,
+  PAGE_SAVE_MANUAL_DEBOUNCE_MS,
+  pageBinaryToBase64,
+  savePageDescriptionFallback,
+  usePageSaveFallback,
+  type PageSaveFallbackControls,
+  type PageSaveFallbackInput,
+  type PageSaveFallbackResult,
+  type UsePageSaveFallbackOptions,
+} from "./lib/pageSaveFallback.js";
 export {
   childrenOf,
   descendantIds,

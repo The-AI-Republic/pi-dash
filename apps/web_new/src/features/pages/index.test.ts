@@ -83,4 +83,20 @@ describe("pages barrel", () => {
       "page-1",
     ]);
   });
+
+  it("exports the sync, offline, oversized and fallback surface (PAGE-061-064)", () => {
+    expect(pages.PAGE_OFFLINE_LABEL).toBe("Offline");
+    expect(typeof pages.useBrowserOnline).toBe("function");
+    expect(typeof pages.usePageOfflineVisible).toBe("function");
+    expect(typeof pages.PageOfflinePill).toBe("function");
+    expect(pages.PAGE_CONTENT_TOO_LARGE).toBe("content_too_large");
+    expect(typeof pages.reportPageRealtimeError).toBe("function");
+    expect(typeof pages.subscribePageRealtimeErrors).toBe("function");
+    expect(typeof pages.reportPageContentTooLarge).toBe("function");
+    expect(typeof pages.usePageOversizedIncident).toBe("function");
+    expect(typeof pages.PageOversizedStrip).toBe("function");
+    expect(typeof pages.savePageDescriptionFallback).toBe("function");
+    expect(typeof pages.usePageSaveFallback).toBe("function");
+    expect(typeof pages.pageBinaryToBase64).toBe("function");
+  });
 });

@@ -9,7 +9,7 @@
 // order.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { PageDetail } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -40,6 +40,7 @@ import { PAGES_PAGE_ID, PAGES_PROJECT_ID, makePageRow } from "../testing.js";
 import { PAGE_PREFERENCES_DEFAULTS } from "../lib/pagePreferences.js";
 import { PAGE_FULL_WIDTH_LABEL, PAGE_STICKY_TOOLBAR_LABEL } from "../lib/pageDisplayMenu.js";
 import { PAGE_COPY_MARKDOWN_LABEL, registerPageBodyActions, resetPageBodyActions } from "../lib/pageBodyActions.js";
+import { PAGE_OFFLINE_BEAT_MS } from "../lib/pageOffline.js";
 import {
   PageDetailHeader,
   PAGE_ANCESTOR_TRAIL_LABEL,
@@ -87,6 +88,7 @@ function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailH
         page={page}
         siblings={[{ id: "other", name: "Other page", logoProps: {} }]}
         syncStatus="lost"
+        editable
         showStar
         showLock
         canDuplicate
@@ -374,5 +376,67 @@ describe("PageDetailHeader display toggles", () => {
     const items = await screen.findAllByRole("menuitem");
     const labels = items.map((item) => item.textContent ?? "");
     expect(labels.some((label) => /font|typeface|typography|shortcut/i.test(label))).toBe(false);
+  });
+});
+
+describe("PageDetailHeader offline pill", () => {
+  const realOnLine = Object.getOwnPropertyDescriptor(window.navigator, "onLine");
+
+  function setBrowserOnline(online: boolean): void {
+    Object.defineProperty(window.navigator, "onLine", { value: online, configurable: true });
+    window.dispatchEvent(new Event(online ? "online" : "offline"));
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setBrowserOnline(true);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (realOnLine !== undefined) Object.defineProperty(window.navigator, "onLine", realOnLine);
+  });
+
+  it("shows the pill in place of the badge while offline on an editable page", () => {
+    renderHeader({ syncStatus: "lost" });
+    act(() => {
+      setBrowserOnline(false);
+    });
+    act(() => {
+      vi.advanceTimersByTime(PAGE_OFFLINE_BEAT_MS);
+    });
+    expect(screen.getByTestId("page-offline-pill")).toHaveTextContent("Offline");
+    expect(screen.queryByText("Connection lost")).not.toBeInTheDocument();
+  });
+
+  it("keeps the badge on a read-only page while offline", () => {
+    renderHeader({ editable: false, syncStatus: "lost" });
+    act(() => {
+      setBrowserOnline(false);
+    });
+    act(() => {
+      vi.advanceTimersByTime(PAGE_OFFLINE_BEAT_MS);
+    });
+    expect(screen.queryByTestId("page-offline-pill")).not.toBeInTheDocument();
+    expect(screen.getByText("Connection lost")).toBeInTheDocument();
+  });
+
+  it("brings the badge back shortly after reconnecting", () => {
+    renderHeader({ syncStatus: "syncing" });
+    act(() => {
+      setBrowserOnline(false);
+    });
+    act(() => {
+      vi.advanceTimersByTime(PAGE_OFFLINE_BEAT_MS);
+    });
+    expect(screen.getByTestId("page-offline-pill")).toBeInTheDocument();
+    act(() => {
+      setBrowserOnline(true);
+    });
+    act(() => {
+      vi.advanceTimersByTime(PAGE_OFFLINE_BEAT_MS);
+    });
+    expect(screen.queryByTestId("page-offline-pill")).not.toBeInTheDocument();
+    expect(screen.getByText("Syncing...")).toBeInTheDocument();
   });
 });
