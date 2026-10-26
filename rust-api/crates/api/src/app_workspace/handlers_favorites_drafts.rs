@@ -7272,6 +7272,23 @@ async fn draft_to_issue(
         }
     })?;
     tx.commit().await.map_err(|_| Denial::ServerError)?;
+    // Django's `post_save` fires inside `Issue.objects.create`, before the
+    // assignee/label `bulk_create`s, so the entry prompt sees empty m2m.
+    let prev = crate::issue_transition::capture_prior_state_pool(&pool, None)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    fire_after_save(
+        &state,
+        &pool,
+        user_id,
+        row.id,
+        prev,
+        row.state_id,
+        true,
+        Some(user_id),
+        utc_now_micros(),
+    )
+    .await?;
     // The m2m legs run post-commit in autocommit (each `bulk_create`
     // wrapped in its own `except IntegrityError: pass`).
     let assignees = filtered
@@ -7324,21 +7341,6 @@ async fn draft_to_issue(
         )
         .await?;
     }
-    let prev = crate::issue_transition::capture_prior_state_pool(&pool, None)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    fire_after_save(
-        &state,
-        &pool,
-        user_id,
-        row.id,
-        prev,
-        row.state_id,
-        true,
-        Some(user_id),
-        utc_now_micros(),
-    )
-    .await?;
     // `base_host` raises past the save (the issue persists on a
     // misconfigured host), so the origin resolves here, not up front.
     let origin = request_origin(&state)?;
