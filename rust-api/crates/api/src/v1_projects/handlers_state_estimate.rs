@@ -296,9 +296,9 @@ enum HandlerError {
     /// 404, `Http404("Project not found")` (unresolvable project identifier —
     ///   DRF propagates the args: `NotFound("Project not found")`).
     ProjectNotFound,
-    /// 400, `{"Detail": ...}` (`ParseError`: bad per_page/cursor/JSON).
+    /// 400, `{"detail": ...}` (`ParseError`: bad per_page/cursor/JSON).
     BadDetail(String),
-    /// 415, DRF `select_parser` (`{"Detail": ...}`): the state writes read
+    /// 415, DRF `select_parser` (`{"detail": ...}`): the state writes read
     /// `request.data` (PIDASHCONV-1391).
     UnsupportedMediaType(String),
     /// 400, serializer `errors` dict (already rendered).

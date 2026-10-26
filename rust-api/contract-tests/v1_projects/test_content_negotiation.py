@@ -144,7 +144,7 @@ def test_json_create_still_works(seed, conn):
 # blank value on a non-required field without ``allow_blank`` behaves as
 # absent, and a blank ``member`` fails like null (``RelatedField``
 # forces ``''`` to ``None``). A media type no parser accepts 415s with the
-# DRF ``{"Detail": ...}`` body (lowercase D, verified live — the base
+# DRF ``{"detail": ...}`` body (lowercase D, verified live — the base
 # ``handle_exception`` does not remap it). Empty bodies are ``{}``.
 # ---------------------------------------------------------------------------
 
@@ -458,7 +458,7 @@ def test_invite_create_blank_role_skipped(seed, conn):
 
 def test_invite_create_bad_multipart_exact(seed, conn):
     # A multipart body with no boundary is DRF's ``ParseError``, not a 415:
-    # the base ``handle_exception`` renders it as ``{"Detail": ...}``.
+    # the base ``handle_exception`` renders it as ``{"detail": ...}``.
     before = _count(conn, "workspace_member_invites", "workspace_id", seed["ws_a"]["id"])
     with http.client(seed["keys"][IKEY]) as c:
         r = c.post(
