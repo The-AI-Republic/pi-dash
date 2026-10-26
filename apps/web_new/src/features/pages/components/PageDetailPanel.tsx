@@ -10,7 +10,7 @@ import { Link } from "@tanstack/react-router";
 import { FileQuestion } from "lucide-react";
 import * as React from "react";
 
-import { pageTabHref } from "../lib/pageList.js";
+import { pageListHref } from "../lib/pageList.js";
 
 export const PAGE_NOT_FOUND_TITLE = "Page not found";
 export const PAGE_NOT_FOUND_BODY =
@@ -33,7 +33,7 @@ export function PageDetailPanel({ workspaceSlug, projectId }: PageDetailPanelPro
       <h2 className="text-h4-medium text-(--text)">{PAGE_NOT_FOUND_TITLE}</h2>
       <p className="text-body text-(--text-muted)">{PAGE_NOT_FOUND_BODY}</p>
       <Link
-        to={pageTabHref(workspaceSlug, projectId, "public")}
+        to={pageListHref(workspaceSlug, projectId)}
         className="text-body rounded-(--radius-control) px-(--space-3) py-(--space-2) text-(--accent) hover:underline"
       >
         {PAGE_NOT_FOUND_BACK}

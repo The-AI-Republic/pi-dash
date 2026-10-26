@@ -155,6 +155,21 @@ export default defineConfig(({ mode }) => {
                 changeOrigin: false,
               },
             }),
+        // Live collaboration socket in parity runs (NEWFRONT-851;
+        // production-shape parity with the stack Caddyfile's /live route
+        // and the deployed proxy's /live handler): the pages client dials
+        // its own origin at /live/collaboration, so forward it to the
+        // slot's live server. PARITY_LIVE_PORT is printed by parity-up.sh;
+        // unset leaves local dev untouched.
+        ...(process.env.PARITY_LIVE_PORT === undefined
+          ? {}
+          : {
+              "/live": {
+                target: `http://localhost:${process.env.PARITY_LIVE_PORT}`,
+                changeOrigin: false,
+                ws: true,
+              },
+            }),
       },
     },
     build: {

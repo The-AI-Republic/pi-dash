@@ -26,7 +26,7 @@ describe("PageDetailPanel", () => {
     expect(screen.getByText(PAGE_NOT_FOUND_BODY)).toBeInTheDocument();
     expect(PAGE_NOT_FOUND_BODY).toContain("permission");
     const back = screen.getByRole("link", { name: PAGE_NOT_FOUND_BACK });
-    expect(back).toHaveAttribute("href", "/acme/projects/project-1/pages?type=public");
+    expect(back).toHaveAttribute("href", "/acme/projects/project-1/pages/");
   });
 
   it("mounts no editable region", () => {
