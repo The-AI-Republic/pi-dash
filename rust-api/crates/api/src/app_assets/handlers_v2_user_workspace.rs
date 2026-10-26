@@ -109,6 +109,7 @@ use pidash_types::WorkspaceId;
 use super::guards;
 use super::quote_filename;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
 /// Register the six owned v2 paths. Sibling handler issues merge their own
 /// routers (project/bulk/check/duplicate/downloads, v1); merges keep both
@@ -503,12 +504,19 @@ fn workspace_asset_url(
     }
 }
 
-/// Parse a `<uuid:asset_id>` path segment: Django's converter 404s on
-/// garbage, so unparseable ids answer the resolver body (before auth —
-/// resolution precedes `initial()`).
+/// Parse a `<uuid:asset_id>` path segment: Django's converter routes only
+/// the canonical lowercase hyphenated spelling, so anything else answers
+/// the resolver body (before auth — resolution precedes `initial()`).
+/// Non-canonical spellings answer locally like garbage: no handler in this
+/// module carries proxy plumbing, and the prod `handler404` bytes are
+/// already pinned (PIDASHCONV-1215), so a proxy round-trip would add
+/// nothing (PIDASHCONV-1399).
 #[allow(clippy::result_large_err)]
 fn parse_asset_id(raw: &str) -> Result<Uuid, Response> {
-    raw.parse::<Uuid>().map_err(|_| page_not_found())
+    match classify_uuid_segment(raw) {
+        UuidSegment::Canonical(id) => Ok(id),
+        UuidSegment::NonCanonical | UuidSegment::Garbage => Err(page_not_found()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2479,6 +2487,20 @@ mod tests {
     fn bad_uuid_answers_resolver_404() {
         assert!(parse_asset_id("not-a-uuid").is_err());
         assert!(parse_asset_id("3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f").is_ok());
+    }
+
+    #[test]
+    fn noncanonical_uuid_answers_resolver_404() {
+        // Parseable but unroutable spellings (PIDASHCONV-1399): Django's
+        // `<uuid:>` converter rejects these before auth, like garbage.
+        for raw in [
+            "3F9A2C1E-9B1A-4D2E-8F3A-1A2B3C4D5E6F",
+            "3f9a2c1e9b1a4d2e8f3a1a2b3c4d5e6f",
+            "{3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f}",
+            "urn:uuid:3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f",
+        ] {
+            assert!(parse_asset_id(raw).is_err(), "{raw}");
+        }
     }
 
     #[test]

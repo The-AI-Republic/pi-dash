@@ -73,6 +73,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_services::app_assets::{queries_v1, shape};
 
 // ---------------------------------------------------------------------------
@@ -434,10 +435,12 @@ async fn workspace_get(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    // URL resolution precedes authentication in Django: a non-UUID
-    // segment 404s (`<uuid:workspace_id>` converter) even anonymously.
-    let Ok(workspace_id) = workspace_id_raw.parse::<Uuid>() else {
-        return page_not_found();
+    // URL resolution precedes authentication in Django: only the
+    // canonical spelling routes (`<uuid:workspace_id>` converter), so any
+    // other spelling 404s even anonymously (PIDASHCONV-1399).
+    let workspace_id = match classify_uuid_segment(&workspace_id_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_user(&state, extension).await {
         Ok(actor) => actor,
@@ -570,8 +573,10 @@ async fn workspace_delete(
     Path((workspace_id_raw, asset_key)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let Ok(workspace_id) = workspace_id_raw.parse::<Uuid>() else {
-        return page_not_found();
+    // Same canonical-spelling gate as get (PIDASHCONV-1399).
+    let workspace_id = match classify_uuid_segment(&workspace_id_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     if let Err(denial) = require_user(&state, extension).await {
         return denial.into_response();
@@ -585,8 +590,10 @@ async fn workspace_restore(
     Path((workspace_id_raw, asset_key)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let Ok(workspace_id) = workspace_id_raw.parse::<Uuid>() else {
-        return page_not_found();
+    // Same canonical-spelling gate as get (PIDASHCONV-1399).
+    let workspace_id = match classify_uuid_segment(&workspace_id_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     if let Err(denial) = require_user(&state, extension).await {
         return denial.into_response();
