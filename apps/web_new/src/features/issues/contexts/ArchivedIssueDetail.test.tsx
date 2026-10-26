@@ -266,7 +266,7 @@ describe("ArchivedIssueDetail", () => {
     expect(within(trail).getByText("WEB-7")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Old login form" })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
-    expect(document.title).toBe("Old login form");
+    expect(document.title).toBe("WEB-7 Old login form");
     const recordReads = reads.filter((url) => url.includes(`/issues/${ISSUE}/archive/`));
     expect(recordReads).toHaveLength(1);
   });
@@ -303,7 +303,7 @@ describe("ArchivedIssueDetail", () => {
 
   it("renders nothing until the project read resolves", async () => {
     renderDetail({ holdProject: true });
-    await waitFor(() => expect(document.title).toBe("Old login form"));
+    await waitFor(() => expect(document.title).toBe("Archived work item"));
     expect(screen.queryByTestId("archives-detail-frame")).not.toBeInTheDocument();
   });
 
@@ -350,7 +350,7 @@ describe("ArchivedIssueDetail", () => {
     fireEvent.click(screen.getByTestId("detail-menu-trigger"));
     fireEvent.click(menuEntry("Delete"));
     expect(await screen.findByRole("heading", { name: "Delete work item" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Delete", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Success!", expect.anything()));
     expect(writes).toContainEqual({
       url: expect.stringContaining(`/projects/${PROJECT}/issues/${ISSUE}/`),
@@ -373,7 +373,7 @@ describe("ArchivedIssueDetail", () => {
     );
   });
 
-  it("shows viewers only the copy-link entry (ARCH-012)", async () => {
+  it("shows viewers only the read entries (ARCH-012)", async () => {
     renderDetail({ projects: [projectRow({ member_role: 5 })] });
     await screen.findByTestId("archived-detail-banner");
     fireEvent.click(screen.getByTestId("detail-menu-trigger"));

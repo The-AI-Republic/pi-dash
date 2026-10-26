@@ -96,10 +96,13 @@ export function ArchivedIssueDetail({
   const project = useProjectRow(workspaceSlug, projectId);
   const record = detail.data ?? null;
   const identifier = project.data?.identifier ?? null;
-  useDocumentHead({ title: record === null ? "Archived work item" : record.name, robots: "noindex, nofollow" });
   // The short key needs the loaded record; until then the trail ends at
   // the archives section (the held-fetch probe reads the empty crumb).
   const crumb = record === null || identifier === null ? undefined : issueKeyOf(identifier, record.sequence_id);
+  // The address titles itself "<short key> <name>", like the live detail
+  // (parity/specs/archives.md §1.4); the key is absent until it loads.
+  const title = crumb === undefined || record === null ? "Archived work item" : `${crumb} ${record.name}`;
+  useDocumentHead({ title, robots: "noindex, nofollow" });
 
   return (
     <ArchivesDetailFrame
