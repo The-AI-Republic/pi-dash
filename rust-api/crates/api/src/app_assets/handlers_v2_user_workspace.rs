@@ -103,6 +103,7 @@ use uuid::Uuid;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::scope::TenantScope;
 use pidash_services::app_assets::queries_v2_user_workspace as q;
+use pidash_services::ops::users as user_save;
 use pidash_types::WorkspaceId;
 
 use super::guards;
@@ -561,7 +562,26 @@ async fn asset_delete(pool: &sqlx::PgPool, asset_id: &Uuid) -> Result<(), sqlx::
     Ok(())
 }
 
-/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`).
+/// `user_entity_save` user-row read: the previous link FK plus the
+/// `User.save()` input fields (`db/models/user.py:169-187`).
+type UserLinkRow = (
+    Option<Uuid>,
+    String,
+    String,
+    bool,
+    bool,
+    String,
+    Option<DateTime<Utc>>,
+);
+
+/// `user_entity_delete` user-row read: the `User.save()` input fields.
+type UserUnlinkRow = (String, String, bool, bool, String, Option<DateTime<Utc>>);
+
+/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the avatar /
+/// cover link plus the full `user.save()` column effects
+/// (`db/models/user.py:169-187`) — normalized email, filled display
+/// name, staff sync, token rotation when a token is in use, and the
+/// `auto_now` `updated_at` (PIDASHCONV-1397).
 #[allow(clippy::result_large_err)]
 async fn user_entity_save(
     pool: &sqlx::PgPool,
@@ -571,14 +591,18 @@ async fn user_entity_save(
 ) -> Result<(), Response> {
     match q::user_save_action(entity_type) {
         q::UserSaveAction::SetAvatar => {
-            // `User.objects.get(id=asset.user_id)` (miss raises → 404).
-            let prev: Option<(Option<Uuid>,)> =
-                sqlx::query_as(r#"SELECT "avatar_asset_id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            let Some((prev,)) = prev else {
+            // `User.objects.get(id=asset.user_id)` (miss raises → 404);
+            // the row also feeds `user.save()` below.
+            let row: Option<UserLinkRow> = sqlx::query_as(
+                r#"SELECT "avatar_asset_id", "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
+            )
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
+            let Some((prev, email, display_name, is_staff, is_superuser, token, token_updated_at)) =
+                row
+            else {
                 return Err(does_not_exist());
             };
             if let Some(prev_id) = prev {
@@ -587,11 +611,30 @@ async fn user_entity_save(
                     .map_err(|_| server_error())?;
             }
             // `user.avatar = ""` (empty string, not None — BUG ported).
+            let now = Utc::now();
+            let write = user_save::apply_user_save(
+                &user_save::UserSaveInput {
+                    email,
+                    display_name,
+                    is_staff,
+                    is_superuser,
+                    token,
+                    token_updated_at,
+                },
+                &user_save::new_user_token(),
+                now,
+            );
             sqlx::query(
-                r#"UPDATE "users" SET "avatar" = $1, "avatar_asset_id" = $2 WHERE "id" = $3"#,
+                r#"UPDATE "users" SET "avatar" = $1, "avatar_asset_id" = $2, "email" = $3, "display_name" = $4, "is_staff" = $5, "token" = $6, "token_updated_at" = $7, "updated_at" = $8 WHERE "id" = $9"#,
             )
             .bind("")
             .bind(asset_id)
+            .bind(&write.email)
+            .bind(&write.display_name)
+            .bind(write.is_staff)
+            .bind(&write.token)
+            .bind(write.token_updated_at)
+            .bind(now)
             .bind(owner_id)
             .execute(pool)
             .await
@@ -599,13 +642,16 @@ async fn user_entity_save(
             Ok(())
         }
         q::UserSaveAction::SetCover => {
-            let prev: Option<(Option<Uuid>,)> =
-                sqlx::query_as(r#"SELECT "cover_image_asset_id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            let Some((prev,)) = prev else {
+            let row: Option<UserLinkRow> = sqlx::query_as(
+                r#"SELECT "cover_image_asset_id", "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
+            )
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
+            let Some((prev, email, display_name, is_staff, is_superuser, token, token_updated_at)) =
+                row
+            else {
                 return Err(does_not_exist());
             };
             if let Some(prev_id) = prev {
@@ -614,10 +660,29 @@ async fn user_entity_save(
                     .map_err(|_| server_error())?;
             }
             // `user.cover_image = None` (asymmetry with avatar — ported).
+            let now = Utc::now();
+            let write = user_save::apply_user_save(
+                &user_save::UserSaveInput {
+                    email,
+                    display_name,
+                    is_staff,
+                    is_superuser,
+                    token,
+                    token_updated_at,
+                },
+                &user_save::new_user_token(),
+                now,
+            );
             sqlx::query(
-                r#"UPDATE "users" SET "cover_image" = NULL, "cover_image_asset_id" = $1 WHERE "id" = $2"#,
+                r#"UPDATE "users" SET "cover_image" = NULL, "cover_image_asset_id" = $1, "email" = $2, "display_name" = $3, "is_staff" = $4, "token" = $5, "token_updated_at" = $6, "updated_at" = $7 WHERE "id" = $8"#,
             )
             .bind(asset_id)
+            .bind(&write.email)
+            .bind(&write.display_name)
+            .bind(write.is_staff)
+            .bind(&write.token)
+            .bind(write.token_updated_at)
+            .bind(now)
             .bind(owner_id)
             .execute(pool)
             .await
@@ -629,7 +694,9 @@ async fn user_entity_save(
 }
 
 /// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`): clears the
-/// link FK only (the `avatar`/`cover_image` strings are untouched here).
+/// link FK only (the `avatar`/`cover_image` strings are untouched here),
+/// plus the full `user.save()` column effects
+/// (`db/models/user.py:169-187`) — see `user_entity_save` (PIDASHCONV-1397).
 #[allow(clippy::result_large_err)]
 async fn user_entity_delete(
     pool: &sqlx::PgPool,
@@ -638,33 +705,83 @@ async fn user_entity_delete(
 ) -> Result<(), Response> {
     match q::user_delete_action(entity_type) {
         q::UserDeleteAction::ClearAvatar => {
-            let row: Option<(Uuid,)> =
-                sqlx::query_as(r#"SELECT "id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            row.ok_or_else(does_not_exist)?;
-            sqlx::query(r#"UPDATE "users" SET "avatar_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(owner_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
+            let row: Option<UserUnlinkRow> = sqlx::query_as(
+                r#"SELECT "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
+            )
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
+            let Some((email, display_name, is_staff, is_superuser, token, token_updated_at)) = row
+            else {
+                return Err(does_not_exist());
+            };
+            let now = Utc::now();
+            let write = user_save::apply_user_save(
+                &user_save::UserSaveInput {
+                    email,
+                    display_name,
+                    is_staff,
+                    is_superuser,
+                    token,
+                    token_updated_at,
+                },
+                &user_save::new_user_token(),
+                now,
+            );
+            sqlx::query(
+                r#"UPDATE "users" SET "avatar_asset_id" = NULL, "email" = $1, "display_name" = $2, "is_staff" = $3, "token" = $4, "token_updated_at" = $5, "updated_at" = $6 WHERE "id" = $7"#,
+            )
+            .bind(&write.email)
+            .bind(&write.display_name)
+            .bind(write.is_staff)
+            .bind(&write.token)
+            .bind(write.token_updated_at)
+            .bind(now)
+            .bind(owner_id)
+            .execute(pool)
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::ClearCover => {
-            let row: Option<(Uuid,)> =
-                sqlx::query_as(r#"SELECT "id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            row.ok_or_else(does_not_exist)?;
-            sqlx::query(r#"UPDATE "users" SET "cover_image_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(owner_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
+            let row: Option<UserUnlinkRow> = sqlx::query_as(
+                r#"SELECT "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
+            )
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
+            let Some((email, display_name, is_staff, is_superuser, token, token_updated_at)) = row
+            else {
+                return Err(does_not_exist());
+            };
+            let now = Utc::now();
+            let write = user_save::apply_user_save(
+                &user_save::UserSaveInput {
+                    email,
+                    display_name,
+                    is_staff,
+                    is_superuser,
+                    token,
+                    token_updated_at,
+                },
+                &user_save::new_user_token(),
+                now,
+            );
+            sqlx::query(
+                r#"UPDATE "users" SET "cover_image_asset_id" = NULL, "email" = $1, "display_name" = $2, "is_staff" = $3, "token" = $4, "token_updated_at" = $5, "updated_at" = $6 WHERE "id" = $7"#,
+            )
+            .bind(&write.email)
+            .bind(&write.display_name)
+            .bind(write.is_staff)
+            .bind(&write.token)
+            .bind(write.token_updated_at)
+            .bind(now)
+            .bind(owner_id)
+            .execute(pool)
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::Noop => Ok(()),
