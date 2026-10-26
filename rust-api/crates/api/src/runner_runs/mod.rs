@@ -1045,11 +1045,16 @@ pub trait RunnerPorts: Send + Sync {
         run_id: uuid::Uuid,
     ) -> impl std::future::Future<Output = Result<pidash_db::tx::Transaction<'t>, PortError>> + Send;
     /// `complete_project_move_handoff(run_id)` (D-12, after the hooks
-    /// transaction commits, isolated).
+    /// transaction commits, isolated). `terminal_created_by` is the
+    /// ambient crum request user for the inline terminal effects.
+    /// Boxed: the handoff drains terminal effects inline, which can
+    /// recurse into this port, so the unboxed future type is cyclic
+    /// (E0391).
     fn complete_project_move_handoff(
         &self,
         run_id: uuid::Uuid,
-    ) -> impl std::future::Future<Output = Result<(), PortError>> + Send;
+        terminal_created_by: Option<uuid::Uuid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PortError>> + Send + '_>>;
     /// `get_agent_system_user()` (`orchestration/workpad.py:44-71`):
     /// the bot user id authoring pause/failure comments.
     fn agent_system_user_id(
@@ -1487,59 +1492,33 @@ impl RunnerPorts for LivePorts {
         Ok(tx)
     }
 
-    async fn complete_project_move_handoff(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
+    fn complete_project_move_handoff(
+        &self,
+        run_id: uuid::Uuid,
+        terminal_created_by: Option<uuid::Uuid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PortError>> + Send + '_>>
+    {
         // `complete_project_move_handoff(run_id)` (`service.py:644-732`):
-        // the D-12 live executor (own transaction, committed, then the
-        // handoff tx's own post-commit effects). Isolated in Python (the
-        // terminal transition already committed), so a failure is logged
-        // by the caller.
-        let settings = self.state.settings();
-        let cloud = settings.cloud_agent.clone();
-        let managed = settings.managed_runner.clone();
-        let replacement = pidash_jobs::orchestration::complete_project_move_handoff_live(
-            &self.pool,
-            &cloud,
-            &managed,
-            self.redis.as_ref(),
-            &settings.runner,
-            run_id,
-            self.state.toolsets().clone(),
-            self.state.assistant_seam().clone(),
-        )
-        .await
-        .map_err(|error| PortError::Transport(error.to_string()))?;
-        let Some(replacement_id) = replacement else {
-            return Ok(());
-        };
-        // `dispatch_after_commit` -> `dispatch_agent_run` -> for a
-        // runner-plane run `drain_pod_by_id(run.pod_id)`
-        // (`cloud_agent/dispatch.py:61-70`). The jobs executor runs the
-        // dispatch but returns only the run id, so re-read the decision's
-        // inputs: a replacement still QUEUED on a non-cloud executor is
-        // the `PodDrain` arm and must be matched now, not on a later poll.
-        let pending: Option<(String, String, Option<uuid::Uuid>)> = sqlx::query_as(
-            r#"SELECT "status", "executor_kind", "pod_id"
-               FROM "agent_run" WHERE "id" = $1"#,
-        )
-        .bind(replacement_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| PortError::Transport(error.to_string()))?;
-        let Some((status, executor_kind, pod_id)) = pending else {
-            return Ok(());
-        };
-        if status == "queued"
-            && executor_kind != pidash_types::dispatch::AgentExecutorKind::CloudAgent.value()
-        {
-            if let Some(pod_id) = pod_id {
-                crate::runner_enroll::teardown::drain_pod_by_id(&self.pool, &self.state, pod_id)
-                    .await
-                    .map_err(|()| {
-                        PortError::Transport("project move handoff pod drain failed".to_owned())
-                    })?;
-            }
-        }
-        Ok(())
+        // the api-crate twin (own transaction, committed, then the
+        // handoff tx's own post-commit effects: the terminal pairs —
+        // queued copy plus the inline apply under the crum user — then
+        // the pod drains). The jobs live executor only enqueues the
+        // terminal effects, so a replacement-run failure comment kept
+        // `created_by_id` NULL until the worker posted it
+        // (PIDASHCONV-1514). Isolated in Python (the terminal
+        // transition already committed), so a failure is logged by the
+        // caller.
+        Box::pin(async move {
+            crate::project_move_handoff::complete_project_move_handoff(
+                &self.pool,
+                &self.state,
+                run_id,
+                terminal_created_by,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|()| PortError::Transport("project move handoff failed".to_owned()))
+        })
     }
 
     async fn agent_system_user_id(&self) -> Result<uuid::Uuid, PortError> {

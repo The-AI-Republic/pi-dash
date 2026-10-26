@@ -1201,7 +1201,10 @@ pub async fn execute_terminal_effects(
         // After the hooks transaction (lock order), isolated: the
         // terminal transition already committed, so a handoff
         // failure must not strand capacity release.
-        if let Err(error) = ports.complete_project_move_handoff(run_id).await {
+        if let Err(error) = ports
+            .complete_project_move_handoff(run_id, created_by)
+            .await
+        {
             tracing::error!(
                 ?error,
                 run_id = %run_id,
@@ -1454,7 +1457,10 @@ pub async fn drain_lifecycle_effects(
                     .map_err(|_| server_error())?;
             }
             LifecycleEffect::CompleteProjectMoveHandoff { run_id } => {
-                if let Err(error) = ports.complete_project_move_handoff(run_id).await {
+                if let Err(error) = ports
+                    .complete_project_move_handoff(run_id, terminal_created_by)
+                    .await
+                {
                     tracing::error!(
                         ?error,
                         run_id = %run_id,
