@@ -23,31 +23,22 @@ import { SELECTION_ROW_ATTR } from "../bulk/useBulkSelection.js";
 import { RowContextMenu, RowMenuButton } from "../menus/RowQuickActions.js";
 import type { QuickActionContext } from "../menus/model.js";
 import { quickActionTarget, useQuickActions } from "../menus/useQuickActions.js";
-// The strip brings the property pickers. Its chunk request starts after the
-// rows commit, so the list chunk stays cheap to evaluate and rows paint
-// before the picker code arrives (desktop warm-start budget). Suspending the
-// rows on the chunk instead delayed first paint.
-type StripComponent = typeof import("./InlinePropertyStrip.js").InlinePropertyStrip;
-let stripRequest: Promise<{ default: StripComponent }> | null = null;
-let LoadedStrip: StripComponent | null = null;
-
-function loadStrip(): Promise<{ default: StripComponent }> {
-  stripRequest ??= import("./InlinePropertyStrip.js").then((module) => {
-    LoadedStrip = module.InlinePropertyStrip;
-    return { default: module.InlinePropertyStrip };
-  });
-  return stripRequest;
-}
+// The strip brings the property pickers. The route primes its chunk with
+// its own module, so it is usually resolved by first render and rows mount
+// full; when it is not, rows paint as shells and mount the strip on idle
+// (NEWFRONT-911). Suspending the rows on the chunk instead delayed first
+// paint.
+import { loadedInlineStrip, loadInlineStrip, type InlineStripComponent } from "./stripLazy.js";
 
 /** Strip once its chunk has loaded; rows paint without waiting for it. */
-function DeferredStrip(props: React.ComponentProps<StripComponent>) {
+function DeferredStrip(props: React.ComponentProps<InlineStripComponent>) {
   // Lazy initializer so a component function is stored, not invoked.
-  const [Strip, setStrip] = React.useState<StripComponent | null>(() => LoadedStrip);
+  const [Strip, setStrip] = React.useState<InlineStripComponent | null>(() => loadedInlineStrip());
   React.useEffect(() => {
     if (Strip !== null) return;
     let live = true;
     const mount = (): void => {
-      void loadStrip().then((module) => {
+      void loadInlineStrip().then((module) => {
         if (live) setStrip(() => module.default);
       });
     };
