@@ -375,7 +375,6 @@ describe("install dialog", () => {
   it("reads edit values from the findings group, not the recurrence Ends radios", async () => {
     const checked = fake({
       items: [fake({ text: "Create issues" })],
-      locate: (selector) => (selector === "xpath=ancestor::label[1]" ? fake({ text: "Create issues" }) : absent()),
     });
     const group = fake({ role: (role: string) => (role === "radio" ? checked : absent()) });
     const fields: Record<string, FakeLocator> = {
@@ -434,10 +433,7 @@ describe("install dialog", () => {
   it("leaves the edit outcome label blank when the checked radio cannot be read", async () => {
     const checked = fake({
       innerText: async () => Promise.reject(new Error("detached")),
-      locate: (selector) =>
-        selector === "xpath=ancestor::label[1]"
-          ? fake({ innerText: async () => Promise.reject(new Error("detached")) })
-          : absent(),
+      locate: () => absent(),
     });
     const group = fake({ role: (role: string) => (role === "radio" ? checked : absent()) });
     const fields: Record<string, FakeLocator> = {
@@ -476,6 +472,30 @@ describe("install dialog", () => {
         { label: "Create issues", checked: true },
         { label: "Apply fix", checked: false },
       ],
+      help: "Files an issue.",
+    });
+  });
+
+  it("falls back to the accessible name for an outcome radio with no text", async () => {
+    const group = fake({
+      role: (role) =>
+        role === "radio"
+          ? fake({
+              items: [
+                fake({
+                  checked: true,
+                  innerText: async () => "",
+                  getAttribute: async (name: string) => (name === "aria-label" ? "Apply fix" : null),
+                }),
+              ],
+            })
+          : absent(),
+      locate: () => fake({ text: "Files an issue." }),
+    });
+    const dialog = fake({ role: (role) => (role === "radiogroup" ? group : absent()) });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    await expect(new WebNewDriver(page).schedulerOutcomeState()).resolves.toEqual({
+      options: [{ label: "Apply fix", checked: true }],
       help: "Files an issue.",
     });
   });

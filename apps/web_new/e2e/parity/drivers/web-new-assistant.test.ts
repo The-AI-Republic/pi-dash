@@ -435,6 +435,35 @@ describe("assistant composer methods", () => {
     const blank = new WebNewDriver(pageOf({ locator: () => locator({ innerText: async () => "  \n " }) }));
     await expect(blank.assistantLastToast()).resolves.toBeNull();
   });
+
+  it("ignores a dismissed card that is still mounted while animating out", async () => {
+    // The kit closes a toast at zero height and removes it after the
+    // leave transition; until then its text still reads. A reader that
+    // takes the last node sees a toast nobody can see.
+    const cards = [
+      { visible: false, text: "Error!\nThe monthly quota is spent." },
+      { visible: true, text: "" },
+      { visible: true, text: "Error!\nThe assistant refused." },
+    ];
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="toast-notification"]'
+          ? locator({
+              count: async () => cards.length,
+              nth: (index: number) =>
+                locator({
+                  isVisible: async () => cards[index]?.visible ?? false,
+                  innerText: async () => cards[index]?.text ?? "",
+                }),
+            })
+          : locator(),
+    });
+
+    await expect(new WebNewDriver(page).assistantLastToast()).resolves.toEqual({
+      title: "Error!",
+      message: "The assistant refused.",
+    });
+  });
 });
 
 describe("assistant API spy and thread-create stubs", () => {
