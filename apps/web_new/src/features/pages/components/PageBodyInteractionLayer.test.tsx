@@ -14,10 +14,14 @@ import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 import { EMPTY_FORMATTING_STATE } from "../../../shared/editor/pageFormatting.js";
 import { PageBodyInteractionLayer } from "./PageBodyInteractionLayer.js";
 
-const api = vi.hoisted(() => ({ searchMentionPeople: vi.fn() }));
+const api = vi.hoisted(() => ({ searchMentionPeople: vi.fn(), searchEntityPreviews: vi.fn() }));
 vi.mock("@pidash/api-client", async (original) => {
   const actual = await original<typeof import("@pidash/api-client")>();
-  return { ...actual, searchMentionPeople: api.searchMentionPeople };
+  return {
+    ...actual,
+    searchMentionPeople: api.searchMentionPeople,
+    searchEntityPreviews: api.searchEntityPreviews,
+  };
 });
 vi.mock("../../../core/api/client.js", () => ({ getAppClient: () => ({ stub: true }) }));
 
@@ -33,6 +37,8 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     insertEmoji: vi.fn(),
     insertMention: vi.fn(),
     insertEmbed: vi.fn(),
+    insertEntityReference: vi.fn(),
+    insertText: vi.fn(),
     duplicateBlock: vi.fn(),
     deleteBlock: vi.fn(),
     setLink: vi.fn(),
@@ -71,6 +77,7 @@ function mount(overrides: Partial<React.ComponentProps<typeof PageBodyInteractio
 
 afterEach(() => {
   api.searchMentionPeople.mockReset();
+  api.searchEntityPreviews.mockReset();
 });
 
 describe("PageBodyInteractionLayer", () => {
@@ -91,6 +98,56 @@ describe("PageBodyInteractionLayer", () => {
     const { onPickImage } = mount({ getHandle: () => page });
     fireEvent.mouseDown(screen.getByRole("button", { name: "Image" }));
     expect(onPickImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the work-item picker from /embed and inserts the chosen embed", async () => {
+    api.searchEntityPreviews.mockResolvedValue({
+      issue: [
+        {
+          name: "Fix login",
+          id: "11111111-1111-4111-8111-111111111111",
+          sequence_id: 42,
+          project__identifier: "WEB",
+          project_id: "22222222-2222-4222-8222-222222222222",
+          priority: "medium",
+          state_id: "33333333-3333-4333-8333-333333333333",
+          type_id: null,
+        },
+      ],
+    });
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/embed");
+    const { onDocumentChange } = mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Embed work item" }));
+    expect(page.deleteBeforeCaret).toHaveBeenCalledWith(6);
+    const row = await screen.findByRole("button", { name: /WEB-42 Fix login/ });
+    fireEvent.mouseDown(row);
+    expect(page.insertEmbed).toHaveBeenCalledWith({
+      id: "11111111-1111-4111-8111-111111111111",
+      entity_identifier: "11111111-1111-4111-8111-111111111111",
+      project_identifier: "WEB",
+      workspace_identifier: "acme",
+      entity_name: "Fix login",
+    });
+    expect(onDocumentChange).toHaveBeenCalledWith("<p>html</p>");
+  });
+
+  it("opens the reference picker from /entity and inserts a normalised reference", async () => {
+    api.searchEntityPreviews.mockResolvedValue({});
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/entity");
+    mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Entity reference" }));
+    expect(page.insertEntityReference).not.toHaveBeenCalled();
+    expect(screen.getByText("No work items match.")).toBeInTheDocument();
+  });
+
+  it("runs the query-only inline commands from the palette", () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/under");
+    mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getAllByRole("button", { name: "Underline" })[1] as HTMLElement);
+    expect(page.applyCommand).toHaveBeenCalledWith("underline");
   });
 
   it("searches project-scoped people and inserts the chosen mention", async () => {

@@ -26,6 +26,8 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     insertEmoji: vi.fn(),
     insertMention: vi.fn(),
     insertEmbed: vi.fn(),
+    insertEntityReference: vi.fn(),
+    insertText: vi.fn(),
     duplicateBlock: vi.fn(),
     deleteBlock: vi.fn(),
     setLink: vi.fn(),

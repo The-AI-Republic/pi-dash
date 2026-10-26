@@ -17,6 +17,7 @@ import {
   type PageFormattingState,
 } from "../../../shared/editor/pageFormatting.js";
 import { emojiHtml, embedHtml, type PageCatalogBlockKind, type PageEmbedAttributes } from "./pageBlocks.js";
+import type { PageEntityReferenceAttributes } from "../../../shared/editor/pageBlockExtensions.js";
 
 /** The chain methods this adapter calls, by the command that calls them. */
 export interface PageEditorChain {
@@ -111,6 +112,10 @@ export interface PageEditorHandle {
   insertMention: (target: { id: string; name: string }) => void;
   /** Insert a work-item embed as an atomic block (PAGE-040). */
   insertEmbed: (attributes: PageEmbedAttributes) => void;
+  /** Insert a normalised entity reference inline (PAGE-043). */
+  insertEntityReference: (attributes: PageEntityReferenceAttributes) => void;
+  /** Insert plain text at the caret (the slash Mention command's trigger). */
+  insertText: (text: string) => void;
   /** Duplicate or delete the block that owns the caret (PAGE-037). */
   duplicateBlock: () => void;
   deleteBlock: () => void;
@@ -344,6 +349,10 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
         })
         .run(),
     insertEmbed: (attributes) => insertPageEmbed(editor, attributes),
+    insertEntityReference: (attributes) => insertPageEntityReference(editor, attributes),
+    insertText: (text) => {
+      editor.chain().focus().insertContent(text).run();
+    },
     duplicateBlock: () => duplicatePageBlock(editor),
     deleteBlock: () => deletePageBlock(editor),
     setLink: (href) => linkSelection(editor, href),
@@ -404,6 +413,11 @@ export function deletePageBlock(editor: PageEditorRef): void {
 /** Insert one slash-catalogue entry at the caret (PAGE-037). */
 export function runCatalogBlock(editor: PageEditorRef, block: PageCatalogBlockKind): void {
   switch (block) {
+    case "embed":
+    case "entity":
+      // These rows open their picker in the interaction layer; reaching
+      // the adapter without a choice is a no-op.
+      return;
     case "text":
       runBlockKind(editor, "paragraph");
       return;
@@ -464,6 +478,18 @@ export function insertPageEmoji(editor: PageEditorRef, glyph: string): void {
  */
 export function insertPageEmbed(editor: PageEditorRef, attributes: PageEmbedAttributes): void {
   editor.chain().focus().insertContent(embedHtml(attributes)).run();
+}
+
+/** Insert one stored entity reference inline at the caret (PAGE-043). */
+export function insertPageEntityReference(editor: PageEditorRef, attributes: PageEntityReferenceAttributes): void {
+  editor
+    .chain()
+    .focus()
+    .insertContent({
+      type: "pageEntityReference",
+      attrs: attributes,
+    })
+    .run();
 }
 
 /** Set the link on the current selection in place (PAGE-043). */

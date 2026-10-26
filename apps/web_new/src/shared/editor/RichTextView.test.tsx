@@ -2,11 +2,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RichTextView } from "./RichTextView.js";
+import { resetEntityPeek, subscribeEntityPeek } from "../shell/entityPeek.js";
+
+afterEach(() => {
+  resetEntityPeek();
+});
 
 describe("RichTextView", () => {
   it("renders stored markup under its label", () => {
@@ -107,5 +112,33 @@ describe("RichTextView", () => {
     expect(region.querySelector('[data-entity-preview][data-entity-identifier="ISS-2"]')).toHaveTextContent(
       "Fix login"
     );
+  });
+
+  it("activates an entity preview by click and keyboard for the shell peek (PAGE-043)", () => {
+    const seen = vi.fn();
+    const unsubscribe = subscribeEntityPeek(seen);
+    render(
+      <RichTextView
+        html={
+          '<p><entity-reference-component entity_name="issue" entity_identifier="ISS-2" project_identifier="P" workspace_identifier="acme" project_id="p-1" data-label="Fix login"></entity-reference-component></p>'
+        }
+        label="Body"
+      />
+    );
+    const preview = screen.getByRole("button", { name: "Fix login" });
+    fireEvent.click(preview);
+    expect(seen).toHaveBeenLastCalledWith({
+      entityName: "issue",
+      entityIdentifier: "ISS-2",
+      projectIdentifier: "P",
+      workspaceIdentifier: "acme",
+      projectId: "p-1",
+      label: "Fix login",
+    });
+    fireEvent.keyDown(preview, { key: "Enter" });
+    expect(seen).toHaveBeenCalledTimes(2);
+    fireEvent.keyDown(preview, { key: "Space" });
+    expect(seen).toHaveBeenCalledTimes(2);
+    unsubscribe();
   });
 });

@@ -31,6 +31,7 @@ import {
   type PageBlockMenuAction,
   type PageCatalogEntry,
 } from "../lib/pageBlocks.js";
+import type { PageEntityChoice } from "../lib/pageEmbeds.js";
 
 export const PAGE_SLASH_LABEL = "Insert block";
 export const PAGE_SLASH_PLACEHOLDER = "Search blocks";
@@ -42,6 +43,10 @@ export const PAGE_LINK_LABEL = "Link";
 export const PAGE_LINK_PLACEHOLDER = "Paste a link";
 export const PAGE_LINK_APPLY = "Apply link";
 export const PAGE_LINK_REMOVE = "Remove link";
+export const PAGE_EMBED_PICKER_LABEL = "Insert work item";
+export const PAGE_EMBED_PICKER_PLACEHOLDER = "Search work items";
+export const PAGE_EMBED_PICKER_EMPTY = "No work items match.";
+export const PAGE_ENTITY_PICKER_LABEL = "Insert entity reference";
 
 /** One mention suggestion, already mapped from the API shape. */
 export interface PageMentionPerson {
@@ -326,3 +331,66 @@ export function PageLinkBubble({ state }: { state: PageLinkState }): React.React
 /** The catalogue's media entry index, for tests asserting order. */
 export const PAGE_SLASH_MEDIA_LABELS = ["Image", "Callout", "Divider", "Emoji"] as const;
 export { PAGE_CATALOG_GROUPS };
+
+/** One entity-picker row, shown with its key and title. */
+export interface PageEntityPickerState {
+  query: string;
+  choices: readonly PageEntityChoice[];
+  onQueryChange: (query: string) => void;
+  onPick: (choice: PageEntityChoice) => void;
+  onDismiss: () => void;
+}
+
+/** The work-item picker behind `/embed` and `/entity` (PAGE-040/043). */
+export function PageEntityPicker({ state }: { state: PageEntityPickerState }): React.ReactElement {
+  return (
+    <div
+      data-testid="page-entity-picker"
+      aria-label={PAGE_EMBED_PICKER_LABEL}
+      className="shadow-popover z-20 flex w-80 flex-col rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-1)"
+    >
+      <label className="text-caption px-(--space-2) py-(--space-1) font-medium text-(--text-muted)">
+        {PAGE_EMBED_PICKER_LABEL}
+        <input
+          type="search"
+          aria-label={PAGE_EMBED_PICKER_PLACEHOLDER}
+          value={state.query}
+          onChange={(event) => state.onQueryChange(event.target.value)}
+          placeholder={PAGE_EMBED_PICKER_PLACEHOLDER}
+          className="text-body mt-(--space-1) w-full rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) py-(--space-1) text-(--text)"
+        />
+      </label>
+      {state.choices.length === 0 ? (
+        <p className="text-body px-(--space-2) py-(--space-2) text-(--text-muted)">{PAGE_EMBED_PICKER_EMPTY}</p>
+      ) : (
+        <ul className="flex flex-col gap-px">
+          {state.choices.map((choice, index) => (
+            <li key={`${choice.kind}-${choice.id}`}>
+              <button
+                id={`entity-picker-item-${index}`}
+                type="button"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  state.onPick(choice);
+                }}
+                className="text-body flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left text-(--text) hover:bg-(--subtle)"
+              >
+                <span className="font-medium">
+                  {choice.projectIdentifier}-{choice.sequenceId}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{choice.name}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button
+        type="button"
+        className="sr-only"
+        tabIndex={-1}
+        onClick={state.onDismiss}
+        aria-label="Dismiss work-item picker"
+      />
+    </div>
+  );
+}

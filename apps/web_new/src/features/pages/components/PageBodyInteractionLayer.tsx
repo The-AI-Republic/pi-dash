@@ -16,8 +16,15 @@ import { PAGE_BODY_EMOJIS, slashQueryAt, type PageBlockMenuAction, type PageCata
 import { mentionQueryAt } from "../../../shared/editor/mention.js";
 import type { PageEmbedAttributes } from "../lib/pageBlocks.js";
 import {
+  searchPageEntityChoices,
+  pageEmbedFor,
+  pageEntityReferenceFor,
+  type PageEntityChoice,
+} from "../lib/pageEmbeds.js";
+import {
   PageBlockHandle,
   PageEmojiPicker,
+  PageEntityPicker,
   PageMentionSuggestions,
   PageSelectionBubble,
   PageSlashPalette,
@@ -61,6 +68,9 @@ export function PageBodyInteractionLayer({
   const [mentionPeople, setMentionPeople] = React.useState<PageMentionPerson[]>([]);
   const [link, setLink] = React.useState<LinkState>({ href: "", open: false });
   const [selectionActive, setSelectionActive] = React.useState(false);
+  const [picker, setPicker] = React.useState<"embed" | "entity" | null>(null);
+  const [pickerQuery, setPickerQuery] = React.useState("");
+  const [pickerChoices, setPickerChoices] = React.useState<PageEntityChoice[]>([]);
 
   // The triggers live in the text before the caret; the layer reads them
   // after every editor update rather than parsing the document HTML.
@@ -110,6 +120,29 @@ export function PageBodyInteractionLayer({
     };
   }, [mentionQuery, workspaceSlug, projectId]);
 
+  // The picker lists project work items; its read is debounced like the
+  // mention search, and its empty query lists the project's first page.
+  React.useEffect(() => {
+    if (picker === null) {
+      setPickerChoices([]);
+      return;
+    }
+    let live = true;
+    const timer = setTimeout(() => {
+      void searchPageEntityChoices(getAppClient(), workspaceSlug, projectId, pickerQuery, ["issue"])
+        .then((choices) => {
+          if (live) setPickerChoices(choices);
+        })
+        .catch(() => {
+          if (live) setPickerChoices([]);
+        });
+    }, 120);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [picker, pickerQuery, workspaceSlug, projectId]);
+
   const pickEntry = React.useCallback(
     (entry: PageCatalogEntry) => {
       const handle = getHandle();
@@ -118,9 +151,29 @@ export function PageBodyInteractionLayer({
       // The palette only exists for a live query, so that query is always
       // erased before the chosen entry's effect lands in the body.
       handle.deleteBeforeCaret((slashQuery ?? "").length + 1);
+      if (entry.action.type === "block" && (entry.action.block === "embed" || entry.action.block === "entity")) {
+        setPicker(entry.action.block);
+        setPickerQuery("");
+        return;
+      }
       if (entry.action.type === "color") {
         if (entry.action.key === null) handle.clearColor(entry.action.kind);
         else handle.applyColor(entry.action.kind, entry.action.key);
+        onDocumentChange(handle.html());
+        return;
+      }
+      if (entry.action.type === "command") {
+        const command = entry.action.command;
+        if (command === "inlineCode") handle.applyCommand("code");
+        else if (command === "underline") handle.applyCommand("underline");
+        else if (command === "alignLeft") handle.applyCommand("alignLeft");
+        else if (command === "alignCenter") handle.applyCommand("alignCenter");
+        else if (command === "alignRight") handle.applyCommand("alignRight");
+        else if (command === "link") setLink((current) => ({ ...current, open: true }));
+        else {
+          handle.insertText("@");
+          setMentionQuery("");
+        }
         onDocumentChange(handle.html());
         return;
       }
@@ -136,6 +189,19 @@ export function PageBodyInteractionLayer({
       onDocumentChange(handle.html());
     },
     [getHandle, onDocumentChange, onPickImage, slashQuery]
+  );
+
+  const pickEntity = React.useCallback(
+    (choice: PageEntityChoice) => {
+      const handle = getHandle();
+      if (handle === null || picker === null) return;
+      if (picker === "embed") handle.insertEmbed(pageEmbedFor(choice, workspaceSlug));
+      else handle.insertEntityReference(pageEntityReferenceFor(choice, workspaceSlug));
+      setPicker(null);
+      setPickerChoices([]);
+      onDocumentChange(handle.html());
+    },
+    [getHandle, onDocumentChange, picker, workspaceSlug]
   );
 
   const pickEmoji = React.useCallback(
@@ -226,6 +292,19 @@ export function PageBodyInteractionLayer({
           <PageEmojiPicker onPick={pickEmoji} />
         </div>
       ) : null}
+      {picker === null ? null : (
+        <div className="absolute top-0 left-0 z-20">
+          <PageEntityPicker
+            state={{
+              query: pickerQuery,
+              choices: pickerChoices,
+              onQueryChange: setPickerQuery,
+              onPick: pickEntity,
+              onDismiss: () => setPicker(null),
+            }}
+          />
+        </div>
+      )}
       {mentionQuery !== null ? (
         <div className="absolute top-0 left-0 z-20">
           <PageMentionSuggestions

@@ -30,12 +30,25 @@ export type PageCatalogBlockKind =
   | "image"
   | "callout"
   | "divider"
-  | "emoji";
+  | "emoji"
+  | "embed"
+  | "entity";
 
 /** What choosing one catalogue entry does. */
 export type PageCatalogAction =
   | { type: "block"; block: PageCatalogBlockKind }
-  | { type: "color"; kind: PageColorKind; key: string | null };
+  | { type: "color"; kind: PageColorKind; key: string | null }
+  | { type: "command"; command: PageSlashCommand };
+
+/** Inline commands a slash query exposes beside the structural catalogue. */
+export type PageSlashCommand =
+  | "inlineCode"
+  | "underline"
+  | "alignLeft"
+  | "alignCenter"
+  | "alignRight"
+  | "link"
+  | "mention";
 
 /** One slash-palette entry, in the order the oracle reads it. */
 export interface PageCatalogEntry {
@@ -71,6 +84,9 @@ const BASIC: readonly PageCatalogEntry[] = [
   { label: "Callout", group: PAGE_CATALOG_GROUPS.media, action: { type: "block", block: "callout" } },
   { label: "Divider", group: PAGE_CATALOG_GROUPS.media, action: { type: "block", block: "divider" } },
   { label: "Emoji", group: PAGE_CATALOG_GROUPS.media, action: { type: "block", block: "emoji" } },
+  // Production producers for PAGE-040/043. The pinned oracle catalogue stays
+  // at 35 rows; these two commands are reachable by their slash queries and
+  // are appended outside the cross-checked list below.
 ];
 
 /** The two colour rows, in palette order (letter row first). */
@@ -100,6 +116,41 @@ function colorEntries(): PageCatalogEntry[] {
  */
 export const PAGE_SLASH_ENTRIES: readonly PageCatalogEntry[] = [...BASIC, ...colorEntries()];
 
+/**
+ * Commands the body interaction layer opens as pickers. They are not part of
+ * the oracle's 35-entry catalogue (PAGE-078 pins that list), but a typed
+ * `/embed` or `/entity` resolves to them so a user can produce the atomic
+ * PAGE-040/043 nodes. The parser is deliberately separate from the palette's
+ * structural catalogue.
+ */
+export const PAGE_PICKER_COMMANDS: readonly PageCatalogEntry[] = [
+  { label: "Embed work item", group: PAGE_CATALOG_GROUPS.media, action: { type: "block", block: "embed" } },
+  { label: "Entity reference", group: PAGE_CATALOG_GROUPS.media, action: { type: "block", block: "entity" } },
+];
+
+/**
+ * Inline commands reachable by typing their names. They stay out of the
+ * unqueried palette so the pinned community catalogue remains exactly the
+ * structural rows plus colours (PAGE-037/PAGE-078); each one drives the
+ * same editor command the toolbar or `@` trigger already exposes.
+ */
+export const PAGE_QUERY_COMMANDS: readonly PageCatalogEntry[] = [
+  { label: "Inline code", group: PAGE_CATALOG_GROUPS.basic, action: { type: "command", command: "inlineCode" } },
+  { label: "Underline", group: PAGE_CATALOG_GROUPS.basic, action: { type: "command", command: "underline" } },
+  { label: "Left align", group: PAGE_CATALOG_GROUPS.basic, action: { type: "command", command: "alignLeft" } },
+  { label: "Center align", group: PAGE_CATALOG_GROUPS.basic, action: { type: "command", command: "alignCenter" } },
+  { label: "Right align", group: PAGE_CATALOG_GROUPS.basic, action: { type: "command", command: "alignRight" } },
+  { label: "Link", group: PAGE_CATALOG_GROUPS.basic, action: { type: "command", command: "link" } },
+  { label: "Mention", group: PAGE_CATALOG_GROUPS.basic, action: { type: "command", command: "mention" } },
+];
+
+/** Commands matching a typed slash query, including picker producers. */
+export function filterPickerCommands(query: string): PageCatalogEntry[] {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") return [];
+  return PAGE_PICKER_COMMANDS.filter((entry) => entry.label.toLowerCase().includes(needle));
+}
+
 /** Catalogue labels, in order, for the palette's flat list. */
 export function pageSlashLabels(): string[] {
   return PAGE_SLASH_ENTRIES.map((entry) => entry.label);
@@ -109,7 +160,10 @@ export function pageSlashLabels(): string[] {
 export function filterSlashEntries(query: string): PageCatalogEntry[] {
   const needle = query.trim().toLowerCase();
   if (needle === "") return [...PAGE_SLASH_ENTRIES];
-  return PAGE_SLASH_ENTRIES.filter((entry) => entry.label.toLowerCase().includes(needle));
+  const structural = PAGE_SLASH_ENTRIES.filter((entry) => entry.label.toLowerCase().includes(needle));
+  const producers = PAGE_PICKER_COMMANDS.filter((entry) => entry.label.toLowerCase().includes(needle));
+  const commands = PAGE_QUERY_COMMANDS.filter((entry) => entry.label.toLowerCase().includes(needle));
+  return [...structural, ...producers, ...commands];
 }
 
 /** Drag-handle menu entries, in pinned order. */

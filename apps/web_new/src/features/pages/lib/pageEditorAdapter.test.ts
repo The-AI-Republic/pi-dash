@@ -16,6 +16,7 @@ import {
   duplicatePageBlock,
   insertPageEmoji,
   insertPageEmbed,
+  insertPageEntityReference,
   linkSelection,
   pageTextBeforeCaret,
   selectedPageText,
@@ -411,6 +412,21 @@ describe("page block catalogue commands", () => {
     expect(calls[0]).toBe("focus");
     expect(calls[1]).toContain("<issue-embed-component");
     expect(calls[1]).toContain('entity_identifier="ISS-1"');
+    expect(calls[2]).toBe("run");
+  });
+
+  it("inserts a normalised entity reference node", () => {
+    const { ref, calls } = editor();
+    insertPageEntityReference(ref, {
+      entity_name: "issue",
+      entity_identifier: "ISS-2",
+      project_identifier: "P",
+      workspace_identifier: "ws",
+      project_id: "p-1",
+      "data-label": "Fix login",
+    });
+    expect(calls[0]).toBe("focus");
+    expect(calls[1]).toBe("insertContent([object Object])");
     expect(calls[2]).toBe("run");
   });
 

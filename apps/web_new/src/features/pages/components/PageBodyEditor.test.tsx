@@ -252,46 +252,76 @@ describe("handlePagePaste", () => {
   it("claims stored markup and inserts only the rewritten form", async () => {
     const paste = vi.fn(async () => "<p>rewritten</p>");
     const insert = vi.fn();
-    expect(handlePagePaste(event({ html: "<p>original</p>" }), paste, insert)).toBe(true);
+    expect(handlePagePaste(event({ html: "<p>original</p>" }), paste, undefined, insert)).toBe(true);
     await vi.waitFor(() => expect(insert).toHaveBeenCalledWith("<p>rewritten</p>"));
   });
 
   it("claims stored markup even when the rewrite refuses it", async () => {
     const insert = vi.fn();
-    expect(handlePagePaste(event({ html: "<p>original</p>" }), async () => null, insert)).toBe(true);
+    expect(handlePagePaste(event({ html: "<p>original</p>" }), async () => null, undefined, insert)).toBe(true);
     await vi.waitFor(() => expect(insert).not.toHaveBeenCalled());
   });
 
   it("leaves stored markup to the editor without a rewrite", () => {
     const insert = vi.fn();
-    expect(handlePagePaste(event({ html: "<p>original</p>" }), undefined, insert)).toBe(false);
+    expect(handlePagePaste(event({ html: "<p>original</p>" }), undefined, undefined, insert)).toBe(false);
     expect(insert).not.toHaveBeenCalled();
   });
 
   it("turns Markdown text into blocks and claims it", async () => {
     const insert = vi.fn();
-    expect(handlePagePaste(event({ text: "# Pasted Heading\n\n- item one" }), undefined, insert)).toBe(true);
+    expect(handlePagePaste(event({ text: "# Pasted Heading\n\n- item one" }), undefined, undefined, insert)).toBe(true);
     await vi.waitFor(() => expect(insert).toHaveBeenCalled());
     expect(insert.mock.calls[0]?.[0]).toContain("<h1");
   });
 
   it("leaves plain text to the editor", () => {
     const insert = vi.fn();
-    expect(handlePagePaste(event({ text: "plain words" }), undefined, insert)).toBe(false);
+    expect(handlePagePaste(event({ text: "plain words" }), undefined, undefined, insert)).toBe(false);
     expect(insert).not.toHaveBeenCalled();
   });
 
   it("claims Markdown that converts to nothing without inserting", async () => {
     const insert = vi.fn();
-    expect(handlePagePaste(event({ text: "```" }), undefined, insert)).toBe(true);
+    expect(handlePagePaste(event({ text: "```" }), undefined, undefined, insert)).toBe(true);
     await vi.waitFor(() => expect(insert).not.toHaveBeenCalled());
   });
 
   it("ignores a paste with no clipboard data", () => {
     const insert = vi.fn();
     expect(
-      handlePagePaste({ clipboardData: null, preventDefault: vi.fn(), stopPropagation: vi.fn() }, undefined, insert)
+      handlePagePaste(
+        { clipboardData: null, preventDefault: vi.fn(), stopPropagation: vi.fn() },
+        undefined,
+        undefined,
+        insert
+      )
     ).toBe(false);
+  });
+
+  it("claims only recognised entity text and inserts the resolved markup", async () => {
+    const insert = vi.fn();
+    const pasteText = vi.fn(async () => "<p><entity-reference-component></entity-reference-component></p>");
+    const claims = vi.fn((text: string) => text === "WEB-42");
+    expect(handlePagePaste(event({ text: "WEB-42" }), undefined, pasteText, insert, claims)).toBe(true);
+    await vi.waitFor(() =>
+      expect(insert).toHaveBeenCalledWith("<p><entity-reference-component></entity-reference-component></p>")
+    );
+    expect(pasteText).toHaveBeenCalledWith("WEB-42");
+  });
+
+  it("returns an unknown entity key as escaped, line-preserving text", async () => {
+    const insert = vi.fn();
+    const pasteText = vi.fn(async () => null);
+    expect(handlePagePaste(event({ text: "WEB-99\n<b>" }), undefined, pasteText, insert, () => true)).toBe(true);
+    await vi.waitFor(() => expect(insert).toHaveBeenCalledWith("<p>WEB-99</p><p>&lt;b&gt;</p>"));
+  });
+
+  it("leaves ordinary prose to the editor even when a text resolver exists", () => {
+    const insert = vi.fn();
+    const pasteText = vi.fn(async () => null);
+    expect(handlePagePaste(event({ text: "just prose" }), undefined, pasteText, insert, () => false)).toBe(false);
+    expect(pasteText).not.toHaveBeenCalled();
   });
 });
 

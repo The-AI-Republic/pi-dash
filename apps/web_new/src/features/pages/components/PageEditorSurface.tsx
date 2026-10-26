@@ -29,6 +29,8 @@ import type { PageFontSize, PageFontStyle } from "../lib/pagePreferences.js";
 import { pageImageUploadFailure, uploadPageImage, type UploadedPageImage } from "../lib/pageMedia.js";
 import { isPageSaveGesture, pageKeyCommand } from "../lib/pageToolbar.js";
 import { clonePastedAssets, rewritePastedAssets } from "../lib/pageMedia.js";
+import { parseEntityAddress } from "../lib/entityReferences.js";
+import { entityReferenceHtml, pageEntityReferenceFor, resolvePastedEntity } from "../lib/pageEmbeds.js";
 import { pageBodyActionsFor, registerPageBodyActions } from "../lib/pageBodyActions.js";
 import { titleIsEmpty } from "../lib/pageTitle.js";
 import { PageBodyEditor, type PageEditorHandle } from "./PageBodyEditor.js";
@@ -190,6 +192,28 @@ export function PageEditorSurface({
     [workspaceSlug, projectId, pageId]
   );
 
+  // A pasted bare work-item key or browse address becomes an entity
+  // reference; the resolver only rewrites when the search returns the
+  // exact row, so an unknown key stays a normal link (PAGE-043).
+  const onPasteText = React.useCallback(
+    async (text: string): Promise<string | null> => {
+      const parsed = parseEntityAddress(text);
+      if (parsed === null) return null;
+      try {
+        const choice = await resolvePastedEntity(getAppClient(), workspaceSlug, projectId, parsed);
+        if (choice === null) return null;
+        return entityReferenceHtml(pageEntityReferenceFor(choice, workspaceSlug));
+      } catch {
+        return null;
+      }
+    },
+    [workspaceSlug, projectId]
+  );
+
+  // Only a recognised work-item key/address is claimed; ordinary prose and
+  // multi-line text keep the editor's native paste path (PAGE-043).
+  const claimsPasteText = React.useCallback((text: string) => parseEntityAddress(text) !== null, []);
+
   const run = React.useCallback((command: PageFormatCommand) => {
     handleRef.current?.applyCommand(command);
   }, []);
@@ -312,6 +336,8 @@ export function PageEditorSurface({
               placeholder={PAGE_BODY_PLACEHOLDER}
               handleKeyDown={handleKeyDown}
               onPasteHtml={onPasteHtml}
+              onPasteText={onPasteText}
+              claimsPasteText={claimsPasteText}
             />
             <PageBodyInteractionLayer
               workspaceSlug={workspaceSlug}

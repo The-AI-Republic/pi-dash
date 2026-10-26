@@ -68,6 +68,20 @@ describe("page slash catalogue", () => {
     ).toEqual(["Heading 1", "Heading 2"]);
     expect(filterSlashEntries("zzz")).toEqual([]);
   });
+
+  it("reaches inline, underline, alignment, link and mention commands by query without changing the pinned catalogue", () => {
+    expect(pageSlashLabels()).toHaveLength(35);
+    expect(filterSlashEntries("inline").map((entry) => entry.label)).toEqual(["Inline code"]);
+    expect(filterSlashEntries("under").map((entry) => entry.label)).toEqual(["Underline"]);
+    expect(filterSlashEntries("align").map((entry) => entry.label)).toEqual([
+      "Left align",
+      "Center align",
+      "Right align",
+    ]);
+    expect(filterSlashEntries("link").map((entry) => entry.label)).toEqual(["Link"]);
+    expect(filterSlashEntries("mention").map((entry) => entry.label)).toEqual(["Mention"]);
+    expect(filterSlashEntries("embed").map((entry) => entry.label)).toEqual(["Embed work item"]);
+  });
 });
 
 describe("page body markup fragments", () => {

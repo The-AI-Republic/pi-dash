@@ -15,6 +15,7 @@ import {
   PAGE_BUBBLE_COMMANDS,
   PageBlockHandle,
   PageEmojiPicker,
+  PageEntityPicker,
   PageMentionSuggestions,
   PageSelectionBubble,
   PageSlashPalette,
@@ -69,6 +70,50 @@ describe("PageEmojiPicker", () => {
     if (first === null) throw new Error("the picker has no entries");
     fireEvent.mouseDown(first);
     expect(onPick).toHaveBeenCalledWith(first.textContent);
+  });
+});
+
+describe("PageEntityPicker", () => {
+  it("renders the project key and title for each row and reports the pick", () => {
+    const onPick = vi.fn();
+    const onQueryChange = vi.fn();
+    render(
+      <PageEntityPicker
+        state={{
+          query: "fix",
+          choices: [
+            {
+              id: "iss-1",
+              name: "Fix login",
+              sequenceId: 42,
+              projectId: "p-1",
+              projectIdentifier: "WEB",
+              kind: "issue",
+              workspaceSlug: "acme",
+            },
+          ],
+          onQueryChange,
+          onPick,
+          onDismiss: vi.fn(),
+        }}
+      />
+    );
+    expect(screen.getByTestId("page-entity-picker")).toBeInTheDocument();
+    const row = screen.getByRole("button", { name: /WEB-42 Fix login/ });
+    fireEvent.mouseDown(row);
+    expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ id: "iss-1" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search work items" }), { target: { value: "ship" } });
+    expect(onQueryChange).toHaveBeenCalledWith("ship");
+  });
+
+  it("shows an empty state and a dismiss control", () => {
+    const onDismiss = vi.fn();
+    render(
+      <PageEntityPicker state={{ query: "zzz", choices: [], onQueryChange: vi.fn(), onPick: vi.fn(), onDismiss }} />
+    );
+    expect(screen.getByText("No work items match.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss work-item picker" }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 });
 

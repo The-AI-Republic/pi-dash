@@ -18,9 +18,11 @@ import {
   storedMentionOf,
   storedTextContent,
 } from "./sanitize.js";
+import { resetMentionDirectory, setMentionDirectory } from "./mentionDirectory.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  resetMentionDirectory();
 });
 
 describe("sanitizeHtml", () => {
@@ -163,6 +165,18 @@ describe("renderableHtml", () => {
     );
     expect(html).toContain('<a href="/acme/profile/u-1" data-mention-id="u-1" class="mention-chip">@Ada</a>');
     expect(html).not.toContain("mention-component");
+  });
+
+  it("repaints a mention with the directory's current name and current-user class (PAGE-041)", () => {
+    setMentionDirectory([{ id: "u-1", name: "Ada Lovelace" }], "u-1");
+    const html = renderableHtml(
+      '<p><mention-component id="u-1" entity_identifier="u-1" entity_name="user_mention" data-name="Ada"></mention-component></p>',
+      undefined,
+      "acme"
+    );
+    expect(html).toContain("mention-chip mention-chip-current");
+    expect(html).toContain('data-current-user="true"');
+    expect(html).toContain("@Ada Lovelace");
   });
 
   it("keeps other entity kinds as plain chips even with a workspace (CMT-020)", () => {

@@ -7,6 +7,9 @@
 // in their own dynamic loader so Tiptap and ProseMirror stay out of the
 // eager closure; each node changes only parse/render, never app data.
 
+import { requestEntityPeek } from "../shell/entityPeek.js";
+import { parseEntityPeekAttributes } from "./entityPeekAttributes.js";
+
 type Core = typeof import("@tiptap/core");
 type MergeAttributes = Core["mergeAttributes"];
 
@@ -21,6 +24,8 @@ export interface PageEntityReferenceAttributes {
   entity_identifier: string;
   project_identifier: string;
   workspace_identifier: string;
+  /** Actual project id, so the shell peek can select the right project. */
+  project_id?: string;
   "data-label": string;
 }
 
@@ -168,6 +173,7 @@ function createEntityReference(Node: Core["Node"], mergeAttributes: MergeAttribu
         entity_identifier: attribute("entity_identifier"),
         project_identifier: attribute("project_identifier"),
         workspace_identifier: attribute("workspace_identifier"),
+        project_id: attribute("project_id"),
         "data-label": attribute("data-label"),
       };
     },
@@ -196,6 +202,16 @@ function createEntityReference(Node: Core["Node"], mergeAttributes: MergeAttribu
         card.setAttribute("role", "link");
         card.setAttribute("tabindex", "0");
         card.textContent = label;
+        const open = (): void => {
+          const request = parseEntityPeekAttributes(node.attrs, label);
+          if (request !== null) requestEntityPeek(request);
+        };
+        card.addEventListener("click", open);
+        card.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          open();
+        });
         dom.append(card);
         return { dom };
       };

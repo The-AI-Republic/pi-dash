@@ -51,6 +51,10 @@ export interface PageBodyEditorProps {
    * refused (the caller has already reported why) and nothing is inserted.
    */
   onPasteHtml?: ((html: string) => Promise<string | null>) | undefined;
+  /** Rewrites a plain-text entity address into a preview node (PAGE-043). */
+  onPasteText?: ((text: string) => Promise<string | null>) | undefined;
+  /** Whether a plain-text paste is an entity address worth resolving. */
+  claimsPasteText?: ((text: string) => boolean) | undefined;
 }
 
 /** Tiptap's EditorContent takes its own editor type; this is ours. */
@@ -73,6 +77,8 @@ async function loadPageEditor(workspaceSlug: string): Promise<{ default: React.C
     placeholder,
     handleKeyDown,
     onPasteHtml,
+    onPasteText,
+    claimsPasteText,
   }: PageBodyEditorProps): React.ReactElement {
     const shownHtml = React.useMemo(() => prepareEditorHtml(initialHtml, resolveAsset), [initialHtml, resolveAsset]);
     const onChangeRef = React.useRef(onChange);
@@ -83,6 +89,10 @@ async function loadPageEditor(workspaceSlug: string): Promise<{ default: React.C
     keyRef.current = handleKeyDown;
     const pasteRef = React.useRef(onPasteHtml);
     pasteRef.current = onPasteHtml;
+    const textPasteRef = React.useRef(onPasteText);
+    textPasteRef.current = onPasteText;
+    const claimTextRef = React.useRef(claimsPasteText);
+    claimTextRef.current = claimsPasteText;
     const readyRef = React.useRef(onReady);
     readyRef.current = onReady;
     const lastStateRef = React.useRef<PageFormattingState | null>(null);
@@ -132,7 +142,13 @@ async function loadPageEditor(workspaceSlug: string): Promise<{ default: React.C
       if (editor === null) return;
       const dom = editor.view.dom;
       const onPaste = (event: ClipboardEvent): void => {
-        handlePagePaste(event, pasteRef.current, (html) => editor.commands.insertContent(html));
+        handlePagePaste(
+          event,
+          pasteRef.current,
+          textPasteRef.current,
+          (html) => editor.commands.insertContent(html),
+          claimTextRef.current
+        );
       };
       // Capture runs before the editor's own paste handler, and a handled
       // paste stops there: otherwise the original markup lands first and
@@ -173,7 +189,9 @@ export interface PagePasteEvent {
 export function handlePagePaste(
   event: PagePasteEvent,
   paste: ((html: string) => Promise<string | null>) | undefined,
-  insert: (html: string) => void
+  pasteText: ((text: string) => Promise<string | null>) | undefined,
+  insert: (html: string) => void,
+  claimsText?: ((text: string) => boolean) | undefined
 ): boolean {
   const html = event.clipboardData?.getData("text/html") ?? "";
   if (html !== "") {
@@ -186,11 +204,24 @@ export function handlePagePaste(
     return true;
   }
   const text = event.clipboardData?.getData("text/plain") ?? "";
-  if (!looksLikeMarkdown(text)) return false;
+  if (looksLikeMarkdown(text)) {
+    event.preventDefault();
+    event.stopPropagation();
+    void markdownToEditorHtml(text).then((markup) => {
+      if (markup !== "") insert(markup);
+    });
+    return true;
+  }
+  if (pasteText === undefined || claimsText === undefined || !claimsText(text)) return false;
   event.preventDefault();
   event.stopPropagation();
-  void markdownToEditorHtml(text).then((markup) => {
-    if (markup !== "") insert(markup);
+  void pasteText(text).then((markup) => {
+    if (markup !== null) insert(markup);
+    else {
+      // The resolver declined (an unknown key): put the original text back
+      // so a normal address is never swallowed.
+      insert(plainTextHtml(text));
+    }
   });
   return true;
 }
@@ -204,6 +235,18 @@ export function looksLikeMarkdown(text: string): boolean {
 async function markdownToEditorHtml(text: string): Promise<string> {
   const { markdownHtml } = await import("../../../shared/markdown/index.js");
   return markdownHtml(text);
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Plain text as paragraph markup, preserving line breaks. */
+function plainTextHtml(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => `<p>${escapeHtml(line)}</p>`)
+    .join("");
 }
 
 /** Text-only reading of stored HTML, for the empty placeholder. */

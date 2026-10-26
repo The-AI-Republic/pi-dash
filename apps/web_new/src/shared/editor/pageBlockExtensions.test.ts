@@ -7,9 +7,14 @@
 // must parse their stored elements and serialize them back unchanged.
 
 import type { AnyExtension } from "@tiptap/core";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { loadPageExtensions } from "./pageExtensions.js";
+import { resetEntityPeek, subscribeEntityPeek } from "../shell/entityPeek.js";
+
+afterEach(() => {
+  resetEntityPeek();
+});
 
 async function editorFor(html: string) {
   const { Editor } = await import("@tiptap/core");
@@ -79,6 +84,32 @@ describe("page block nodes", () => {
       expect(html).toContain('entity_identifier="ISS-2"');
     } finally {
       editor.destroy();
+    }
+  });
+
+  it("opens the shell peek from a preview card click and Enter (PAGE-043)", async () => {
+    const seen = vi.fn();
+    const unsubscribe = subscribeEntityPeek(seen);
+    const editor = await editorFor(
+      '<p><entity-reference-component entity_name="issue" entity_identifier="ISS-2" project_identifier="P" workspace_identifier="ws" project_id="p-1" data-label="Fix login"></entity-reference-component></p>'
+    );
+    try {
+      const card = editor.view.dom.querySelector('[role="link"]');
+      if (card === null) throw new Error("no entity preview card");
+      card.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(seen).toHaveBeenCalledWith({
+        entityName: "issue",
+        entityIdentifier: "ISS-2",
+        projectIdentifier: "P",
+        workspaceIdentifier: "ws",
+        projectId: "p-1",
+        label: "Fix login",
+      });
+      card.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      expect(seen).toHaveBeenCalledTimes(2);
+    } finally {
+      editor.destroy();
+      unsubscribe();
     }
   });
 

@@ -12,6 +12,7 @@
 import DOMPurify, { type UponSanitizeAttributeHook } from "dompurify";
 
 import { MENTION_CONTENT_TAGS, MENTION_ENTITY } from "./mention.js";
+import { isCurrentMentionUser, mentionNameFor } from "./mentionDirectory.js";
 
 /** Editor node elements stored bodies carry beside ordinary HTML. */
 export const STORED_CONTENT_TAGS = [
@@ -39,6 +40,7 @@ const STORED_CONTENT_ATTRIBUTES: Record<string, readonly string[]> = {
     "entity_identifier",
     "project_identifier",
     "workspace_identifier",
+    "project_id",
     "data-label",
   ],
   "callout-component": ["data-type"],
@@ -185,8 +187,10 @@ export function renderableHtml(
     const chip = document.createElement(href === null ? "span" : "a");
     if (href !== null) chip.setAttribute("href", href);
     chip.setAttribute("data-mention-id", mention.id);
-    chip.setAttribute("class", "mention-chip");
-    chip.textContent = `@${mentionDisplayName(mention)}`;
+    const current = isCurrentMentionUser(mention.entityIdentifier);
+    chip.setAttribute("class", current ? "mention-chip mention-chip-current" : "mention-chip");
+    if (current) chip.setAttribute("data-current-user", "true");
+    chip.textContent = `@${mentionNameFor(mention.entityIdentifier, mention.name) || mentionDisplayName(mention)}`;
     element.replaceWith(chip);
   }
   for (const element of Array.from(document.body.querySelectorAll("image-component"))) {
@@ -244,7 +248,13 @@ export function renderableHtml(
     preview.setAttribute("data-entity-preview", "");
     preview.setAttribute("role", "button");
     preview.setAttribute("tabindex", "0");
-    for (const name of ["entity_name", "entity_identifier", "project_identifier", "workspace_identifier"]) {
+    for (const name of [
+      "entity_name",
+      "entity_identifier",
+      "project_identifier",
+      "workspace_identifier",
+      "project_id",
+    ]) {
       const value = element.getAttribute(name);
       if (value !== null && value !== "") preview.setAttribute(`data-${name.replace(/_/g, "-")}`, value);
     }

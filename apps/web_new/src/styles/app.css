@@ -227,6 +227,13 @@
   .rich-text-content [data-background-color="purple"] {
     background-color: var(--page-color-purple-wash);
   }
+  /* The signed-in author's mention reads distinctly from everyone else's
+     while keeping the same chip shape (PAGE-041). */
+  .rich-text-content .mention-chip-current,
+  .mention-chip-current {
+    font-weight: 600;
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
 }
 
 /* Page display preferences (NEWFRONT-848, PAGE-072). The four stored

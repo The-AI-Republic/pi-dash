@@ -12,6 +12,7 @@
 // what the tests pin is exactly what the editor runs.
 
 import { MENTION_ENTITY, MENTION_TAG, mentionLabel } from "./mention.js";
+import { isCurrentMentionUser, mentionNameFor, subscribeMentionDirectory } from "./mentionDirectory.js";
 
 type TiptapCore = typeof import("@tiptap/core");
 type TiptapImage = typeof import("@tiptap/extension-image").default;
@@ -74,10 +75,21 @@ function createMentionNode(
             : null;
         const chip = document.createElement(href === null ? "span" : "a");
         if (href !== null) chip.setAttribute("href", href);
-        chip.className = "mention-chip";
-        chip.textContent = mentionLabel(attrs["data-name"], identifier);
+        const paint = (): void => {
+          const current = isCurrentMentionUser(identifier);
+          chip.className = current ? "mention-chip mention-chip-current" : "mention-chip";
+          if (current) chip.setAttribute("data-current-user", "true");
+          else chip.removeAttribute("data-current-user");
+          const name = mentionNameFor(identifier, attrs["data-name"]);
+          chip.textContent = name === "" ? mentionLabel(null, identifier) : `@${name}`;
+        };
+        paint();
+        const unsubscribe = subscribeMentionDirectory(paint);
         dom.append(chip);
-        return { dom };
+        return {
+          dom,
+          destroy: () => unsubscribe(),
+        };
       };
     },
     renderText({ node }) {
