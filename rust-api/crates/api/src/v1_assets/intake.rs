@@ -315,15 +315,21 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 /// `MultiPartParser` — `select_body_kind`) picks the parser by media type.
 /// The JSON branch serves the exact `application/json` in any case plus the
 /// `*/*`, `application/*` and `*/json` wildcards (`_MediaType.match`);
-/// form/multipart bodies become a last-wins field map (`QueryDict`);
-/// anything else is 415. Malformed JSON keeps the existing `ParseError` 400.
-fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Result<Value, Denial> {
+/// form/multipart bodies become a last-wins field map (`QueryDict`) carrying
+/// the file parts, so the update view can replay the immutable-`QueryDict`
+/// `.pop` 500 (`PIDASHCONV-1402`); anything else is 415. Malformed JSON keeps
+/// the existing `ParseError` 400.
+fn parse_json_body(
+    body: &[u8],
+    headers: &HeaderMap,
+    memory_limit: i64,
+) -> Result<form_body::ParsedBody, Denial> {
     // DRF's `_load_stream` leaves the stream `None` at content-length
     // zero and `_parse` returns the empty mapping without touching a
     // parser (`request.py`, DRF 3.15.2; same shape as the merged
     // precedents) — so emptiness is checked before the media type.
     if body.is_empty() {
-        return Ok(Value::Object(Map::new()));
+        return Ok(form_body::ParsedBody::json(Value::Object(Map::new())));
     }
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -331,15 +337,16 @@ fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Resul
         .unwrap_or("");
     match form_body::select_body_kind(content_type) {
         Some(BodyKind::Json) => serde_json::from_slice(body)
+            .map(form_body::ParsedBody::json)
             .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}"))),
         // QueryDict semantics: last value wins (`parse_form_body`).
         Some(BodyKind::Form) => match form_body::parse_form_body(body) {
-            Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+            Ok(pairs) => Ok(form_body::ParsedBody::form(pairs)),
             Err(_) => Err(Denial::ServerError),
         },
         Some(BodyKind::Multipart) => {
             match form_body::parse_multipart_body(content_type, body, memory_limit) {
-                Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+                Ok(pairs) => Ok(form_body::ParsedBody::form(pairs)),
                 Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
                 Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(Denial::ServerError),
             }
@@ -353,6 +360,46 @@ fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Resul
             Err(Denial::UnsupportedMediaType(raw.to_owned()))
         }
     }
+}
+
+/// True when the update view's `request.data.pop("issue", False)`
+/// (`views/intake.py:344`) raises `AttributeError` on an immutable
+/// `QueryDict` (`PIDASHCONV-1402`): DRF only copies the data (making it
+/// mutable) when files are present (`request.py`, `_load_data_and_files`),
+/// so a form/multipart body with no file parts pops immutable — and an
+/// empty body with a form content type is `QueryDict('')` (`_parse`),
+/// immutable too. Both are the generic 500. `intake_create` is unaffected
+/// because `QueryDict.get` never mutates.
+fn pops_immutable_querydict(
+    parsed: &form_body::ParsedBody,
+    body: &[u8],
+    headers: &HeaderMap,
+) -> bool {
+    if parsed.is_form() {
+        // File parts are the `_files` that trigger the mutable copy;
+        // without one the `QueryDict` stays immutable.
+        let has_files = parsed
+            .keys()
+            .iter()
+            .any(|key| matches!(parsed.field(key), form_body::BodyField::File(_)));
+        return !has_files;
+    }
+    if body.is_empty() {
+        // `_parse`'s empty branch checks the exact form media types
+        // (`is_form_media_type`), not the parser wildcards.
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let base = content_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        return base == "application/x-www-form-urlencoded" || base == "multipart/form-data";
+    }
+    false
 }
 
 /// Django `QueryDict.get`: the last value, or `None`. Axum's
@@ -10667,8 +10714,8 @@ async fn intake_create(
     body: Bytes,
 ) -> HandlerResult {
     let ctx = context(&state, &headers, &slug, &raw_project_id).await?;
-    let data = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
-    let Value::Object(data) = data else {
+    let parsed = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
+    let Value::Object(data) = parsed.value().clone() else {
         // `.get` on a non-dict (`None`, list, scalar) is the 500
         // `AttributeError`.
         return Err(Denial::ServerError);
@@ -10888,8 +10935,12 @@ async fn intake_update(
 
     // `request.data` is lazy — the first touch is the `pop` at `:344`,
     // AFTER every guard above, so malformed bodies lose to them.
-    let data = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
-    let Value::Object(mut data) = data else {
+    let parsed = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
+    if pops_immutable_querydict(&parsed, &body, &headers) {
+        // `.pop` on the immutable `QueryDict` is the `AttributeError` 500.
+        return Err(Denial::ServerError);
+    }
+    let Value::Object(mut data) = parsed.value().clone() else {
         // `.pop` on a non-dict (list → `TypeError`, else
         // `AttributeError`) is the 500.
         return Err(Denial::ServerError);
