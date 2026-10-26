@@ -135,6 +135,7 @@ mod tests {
                 token: Some(token.into()),
                 workspace_slug: Some("acme".into()),
                 default_project: None,
+                ..Default::default()
             }),
         }
     }

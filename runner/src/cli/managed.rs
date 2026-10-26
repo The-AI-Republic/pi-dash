@@ -49,6 +49,17 @@ pub enum ManagedCommand {
     ModelToken(ModelTokenArgs),
     /// Refresh host-owned paths for all projects before starting the daemon.
     Rebind(EnginePathsArgs),
+    /// Move a legacy desktop-managed config's runners into this (default)
+    /// config. Prints `{"adopted": [names], "skipped": [names]}`.
+    Adopt(AdoptArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct AdoptArgs {
+    /// The legacy per-workspace config directory (holding `config.toml`)
+    /// the desktop app used to run its own daemon from.
+    #[arg(long)]
+    pub from_config_dir: PathBuf,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -120,6 +131,7 @@ pub async fn run(args: ManagedArgs, paths: &Paths) -> Result<()> {
         ManagedCommand::Enroll(a) => enroll(a, paths).await,
         ManagedCommand::Remove(a) => remove(a, paths),
         ManagedCommand::Rebind(a) => set_engine_paths(paths, &a, None),
+        ManagedCommand::Adopt(a) => adopt(a, paths).await,
         ManagedCommand::ModelToken(a) => {
             let token = std::fs::read_to_string(&a.file)
                 .context("managed model credential unavailable; reconnect Pi Dash Desktop")?;
@@ -246,6 +258,106 @@ fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     file::write_config(paths, &cfg).context("rewriting config.toml")?;
     println!("{{\"ok\":true,\"removed\":{}}}", before - cfg.runners.len());
     Ok(())
+}
+
+/// Adopt a legacy desktop-managed config. JSON on stdout either way; a
+/// failure is `{"error": "adopt_failed", "message": ...}` with exit 1.
+async fn adopt(args: AdoptArgs, paths: &Paths) -> Result<()> {
+    match adopt_runners(&args.from_config_dir, paths) {
+        Ok(report) => {
+            // Bring the adopted runners up in a daemon that is already
+            // running; with no daemon (or one that must reload first) the
+            // next start picks them up from config.toml.
+            for name in &report.adopted {
+                if let Err(e) = activate_if_running(paths, name).await {
+                    tracing::warn!(runner = %name, "adopted runner not activated: {e:#}");
+                }
+            }
+            println!(
+                "{}",
+                serde_json::json!({ "adopted": report.adopted, "skipped": report.skipped })
+            );
+            Ok(())
+        }
+        Err(e) => {
+            println!(
+                "{}",
+                serde_json::json!({ "error": "adopt_failed", "message": format!("{e:#}") })
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AdoptReport {
+    pub adopted: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// Merge the `[[runner]]` blocks (managed Codex fields included) of
+/// `<from_dir>/config.toml` into the default config. Runners already present
+/// (same id or name), registered against a different cloud, or that would
+/// make the config invalid are skipped. Never copies the legacy token or
+/// `dev_machine_id`: this host's own sign-in and identity stay authoritative.
+/// Idempotent — a second run skips everything the first adopted.
+pub fn adopt_runners(from_dir: &std::path::Path, paths: &Paths) -> Result<AdoptReport> {
+    let same_dir = match (from_dir.canonicalize(), paths.config_dir.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if same_dir {
+        anyhow::bail!("{from_dir:?} is this host's own config directory");
+    }
+    let legacy_path = from_dir.join("config.toml");
+    let text = std::fs::read_to_string(&legacy_path)
+        .with_context(|| format!("reading {legacy_path:?}"))?;
+    let legacy: crate::config::schema::Config =
+        toml::from_str(&text).with_context(|| format!("parsing {legacy_path:?}"))?;
+    let mut report = AdoptReport::default();
+    if legacy.runners.is_empty() {
+        return Ok(report);
+    }
+    let legacy_cloud = legacy.daemon.cloud_url.trim_end_matches('/').to_string();
+    let init_cloud = legacy_cloud.clone();
+    file::mutate_config_or_init(
+        paths,
+        move || {
+            Some(crate::config::schema::Config {
+                version: 2,
+                daemon: crate::config::schema::DaemonConfig {
+                    cloud_url: init_cloud,
+                    ..Default::default()
+                },
+                runners: vec![],
+                cli: None,
+            })
+        },
+        |cfg| {
+            let cloud_matches = cfg.daemon.cloud_url.trim_end_matches('/') == legacy_cloud;
+            for runner in legacy.runners {
+                let present = cfg
+                    .runners
+                    .iter()
+                    .any(|r| r.runner_id == runner.runner_id || r.name == runner.name);
+                if present || !cloud_matches {
+                    report.skipped.push(runner.name);
+                    continue;
+                }
+                let name = runner.name.clone();
+                cfg.runners.push(runner);
+                if let Err(e) = cfg.validate() {
+                    cfg.runners.pop();
+                    tracing::warn!(runner = %name, "not adopting runner: {e}");
+                    report.skipped.push(name);
+                } else {
+                    report.adopted.push(name);
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(report)
 }
 
 /// A new project joins the already-running daemon instead of waiting for an

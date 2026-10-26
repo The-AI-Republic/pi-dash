@@ -52,6 +52,42 @@ pub struct CliSection {
     /// context files still take precedence for agent workflows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_project: Option<String>,
+
+    /// Cloud user this host is signed in as (`user.id` from the
+    /// machine-token exchange). Keys the parked-runner files under
+    /// `<config_dir>/parked/` so an account switch can set one user's
+    /// runners aside and bring another's back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+
+    /// Email of [`Self::user_id`], for display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_email: Option<String>,
+
+    /// `dhk_…` desktop handoff key minted by an interactive sign-in. Lets
+    /// the desktop app sign its webview in as the same user
+    /// (`pidash __desktop handoff`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_key: Option<String>,
+
+    /// When this host last signed in. With [`Self::signed_out_at`] it
+    /// lets the desktop app decide whose sign-in state is newer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in_at: Option<DateTime<Utc>>,
+
+    /// When this host last signed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_out_at: Option<DateTime<Utc>>,
+}
+
+impl CliSection {
+    /// The most recent sign-in or sign-out, whichever is later.
+    pub fn changed_at(&self) -> Option<DateTime<Utc>> {
+        match (self.signed_in_at, self.signed_out_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

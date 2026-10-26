@@ -189,7 +189,8 @@ pub fn remove_all(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Atomically write `bytes` to `path` with owner-only (0600) permissions.
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
     }

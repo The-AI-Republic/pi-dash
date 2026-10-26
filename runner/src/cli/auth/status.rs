@@ -5,15 +5,24 @@ use clap::Args as ClapArgs;
 use serde::Deserialize;
 use std::time::Duration;
 
+use crate::cli::auth::session;
 use crate::cli::runner_ops;
 use crate::config::file;
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
-pub struct Args {}
+pub struct Args {
+    /// Print machine-readable sign-in state (for the desktop app) instead of
+    /// checking the token against the cloud. Works signed out and with no
+    /// config at all.
+    #[arg(long)]
+    pub json: bool,
+}
 
 #[derive(Debug, Deserialize)]
 struct UserMe {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
@@ -22,7 +31,22 @@ struct UserMe {
     last_name: Option<String>,
 }
 
-pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
+pub async fn run(args: Args, paths: &Paths) -> Result<()> {
+    if args.json {
+        match status_json(paths).await {
+            Ok(v) => {
+                println!("{v}");
+                return Ok(());
+            }
+            Err(e) => {
+                println!(
+                    "{}",
+                    serde_json::json!({ "error": "status_failed", "message": format!("{e:#}") })
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     let token = runner_ops::load_cli_token(paths)?.ok_or_else(|| {
         anyhow::anyhow!(
             "not logged in — run `pidash auth login` to authenticate this host"
@@ -59,6 +83,7 @@ pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
         anyhow::bail!("/api/v1/users/me/ returned HTTP {status}: {body}");
     }
     let me: UserMe = resp.json().await.context("parsing /users/me/")?;
+    remember_user(paths, &me);
 
     println!("Logged in to {cloud_url}");
     if let Some(email) = me.email.as_deref() {
@@ -92,4 +117,105 @@ pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `auth status --json`: the sign-in state the desktop app syncs against.
+/// Local only, except for a one-off lookup of the user id on configs signed
+/// in before user ids were recorded.
+async fn status_json(paths: &Paths) -> Result<serde_json::Value> {
+    let mut cfg = file::load_config_opt(paths)?;
+    let signed_in = cfg
+        .as_ref()
+        .and_then(|c| c.cli.as_ref())
+        .and_then(|cli| cli.token.as_deref())
+        .is_some_and(|t| !t.is_empty());
+    let missing_user = cfg
+        .as_ref()
+        .and_then(|c| c.cli.as_ref())
+        .is_none_or(|cli| cli.user_id.is_none());
+    if signed_in && missing_user && backfill_user(paths).await {
+        cfg = file::load_config_opt(paths)?;
+    }
+    let cli = cfg.as_ref().and_then(|c| c.cli.clone()).unwrap_or_default();
+    let cloud_url = cfg
+        .as_ref()
+        .map(|c| c.daemon.cloud_url.clone())
+        .filter(|u| !u.is_empty());
+    let user = match (signed_in, cli.user_id.as_deref()) {
+        (true, Some(id)) => serde_json::json!({
+            "id": id,
+            "email": cli.user_email.clone().unwrap_or_default(),
+        }),
+        _ => serde_json::Value::Null,
+    };
+    let activity = session::daemon_activity(paths).await;
+    Ok(serde_json::json!({
+        "signed_in": signed_in,
+        "cloud_url": cloud_url,
+        "user": user,
+        "workspace_slug": cli.workspace_slug,
+        "dev_machine_id": cfg.as_ref().and_then(|c| c.daemon.dev_machine_id).map(|id| id.to_string()),
+        "changed_at": cli.changed_at().map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        "daemon_running": activity.running,
+        "active_runs": activity.active_runs,
+    }))
+}
+
+/// Look the signed-in user up once and record it (configs written before
+/// `[cli].user_id` existed). Best-effort with a short timeout; `true` when
+/// something was recorded.
+async fn backfill_user(paths: &Paths) -> bool {
+    let Ok(Some(cfg)) = file::load_config_opt(paths) else {
+        return false;
+    };
+    let Some(token) = cfg.cli.as_ref().and_then(|c| c.token.clone()) else {
+        return false;
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
+        return false;
+    };
+    let url = format!(
+        "{}/api/v1/users/me/",
+        cfg.daemon.cloud_url.trim_end_matches('/')
+    );
+    let Ok(resp) = client.get(&url).header("X-Api-Key", &token).send().await else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    let Ok(me) = resp.json::<UserMe>().await else {
+        return false;
+    };
+    remember_user(paths, &me)
+}
+
+/// Record the user `/users/me/` named, unless one is already recorded.
+fn remember_user(paths: &Paths, me: &UserMe) -> bool {
+    let Some(id) = me.id.clone().filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    let already_known = file::load_config_opt(paths)
+        .ok()
+        .flatten()
+        .and_then(|c| c.cli)
+        .is_some_and(|cli| cli.user_id.is_some());
+    if already_known {
+        return false;
+    }
+    let mut changed = false;
+    let _ = file::mutate_config(paths, |cfg| {
+        let mut cli = cfg.cli.take().unwrap_or_default();
+        if cli.user_id.is_none() && cli.token.is_some() {
+            cli.user_id = Some(id);
+            cli.user_email = me.email.clone();
+            changed = true;
+        }
+        cfg.cli = Some(cli);
+        Ok(())
+    });
+    changed
 }

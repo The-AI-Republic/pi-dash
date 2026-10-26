@@ -8,6 +8,7 @@ mod comment;
 pub mod config_cmd;
 pub mod connect;
 pub mod context;
+pub mod desktop;
 pub mod doctor;
 mod install;
 pub mod issue;
@@ -169,6 +170,11 @@ pub enum Command {
     /// configure a runner with `pidash runner add` instead.
     #[command(name = "__managed", hide = true)]
     Managed(managed::ManagedArgs),
+
+    /// Internal: sign-in sharing verbs driven by the Pi Dash desktop app
+    /// (`__desktop handoff`). Not a user-facing verb.
+    #[command(name = "__desktop", hide = true)]
+    Desktop(desktop::DesktopArgs),
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -210,6 +216,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::RunCmd(args) => run_crud(run_cmd::run(args, &paths).await),
         Command::Run(args) => run::run(args, &paths).await,
         Command::Managed(args) => managed::run(args, &paths).await,
+        Command::Desktop(args) => desktop::run(args, &paths).await,
     }
 }
 
@@ -227,6 +234,7 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 workspace: None,
                 force: false,
                 device_code_stdin: false,
+                yes: false,
             }),
         };
         return auth::run(args, paths).await;

@@ -67,6 +67,9 @@ axoupdater = { version = "0.10", default-features = false, features = [
     "tokio",
 ] }
 fs2 = "0.4"
+# SHA-256 for the machine fingerprint. Already in the tree via rustls, so
+# this adds no new crate.
+ring = "0.17"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["fs", "signal", "user", "hostname"] }

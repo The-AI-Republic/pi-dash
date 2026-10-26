@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use crate::cloud::http::{EnrollResponse, RunnerCredentials, write_runner_credentials};
 use crate::config::file;
 use crate::config::schema::{
-    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CliSection, CodexSection,
-    Config, CursorAgentSection, DaemonConfig, GrokSection, MuseCodeSection, OpenClawSection,
-    RunnerConfig, WorkspaceSection,
+    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, Config,
+    CursorAgentSection, DaemonConfig, GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig,
+    WorkspaceSection,
 };
 use crate::util::paths::Paths;
 use std::io::IsTerminal;
@@ -231,13 +231,11 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
     if cfg.daemon.cloud_url.is_empty() {
         cfg.daemon.cloud_url = cloud_url.to_string();
     }
-    let preserved_workspace = cfg.cli.as_ref().and_then(|c| c.workspace_slug.clone());
-    let preserved_default_project = cfg.cli.as_ref().and_then(|c| c.default_project.clone());
-    cfg.cli = Some(CliSection {
-        token: Some(token.to_string()),
-        workspace_slug: preserved_workspace,
-        default_project: preserved_default_project,
-    });
+    // Only the token changes; the workspace binding, default project and
+    // sign-in metadata carry over.
+    let mut cli = cfg.cli.take().unwrap_or_default();
+    cli.token = Some(token.to_string());
+    cfg.cli = Some(cli);
     file::write_config(paths, &cfg)?;
     Ok(())
 }
@@ -486,6 +484,13 @@ pub async fn apply_enroll_response(
         }
         is_first_runner = cfg.runners.is_empty();
         cfg.runners.push(new_runner_for_closure);
+        // The cloud resolves the dev machine by fingerprint and may answer
+        // with a different (surviving) record than the id we sent.
+        if let Some(id) = resp.dev_machine_id
+            && cfg.daemon.dev_machine_id != Some(id)
+        {
+            cfg.daemon.dev_machine_id = Some(id);
+        }
         Ok(())
     })
     .context("persisting [[runner]] block under config lock")?;
@@ -705,7 +710,34 @@ mod tests {
             protocol_version: 4,
             machine_token: None,
             machine_token_minted: false,
+            dev_machine_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn returned_dev_machine_id_replaces_the_local_one() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let local = ensure_dev_machine_id_after_login(&paths);
+        let survivor = Uuid::new_v4();
+        let mut resp = sample_response("r1");
+        resp.dev_machine_id = Some(survivor);
+        apply_enroll_response(
+            &paths,
+            &resp,
+            "https://x",
+            enroll_options(tmp.path().join("wd"), AgentKind::Codex),
+        )
+        .await
+        .unwrap();
+        let cfg = file::load_config(&paths).unwrap();
+        assert_ne!(local, survivor);
+        assert_eq!(cfg.daemon.dev_machine_id, Some(survivor));
+    }
+
+    fn ensure_dev_machine_id_after_login(paths: &Paths) -> Uuid {
+        write_cli_token(paths, "https://x", "mt_tok", false).unwrap();
+        ensure_dev_machine_id(paths).unwrap()
     }
 
     #[tokio::test]

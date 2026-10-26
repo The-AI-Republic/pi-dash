@@ -351,6 +351,7 @@ async fn ensure_cli_token(
             workspace: workspace.map(str::to_string),
             force: false,
             device_code_stdin: false,
+            yes: false,
         },
         paths,
     )
