@@ -1433,34 +1433,68 @@ struct ViewWrite {
 
 /// DRF field errors for `name`: required, non-blank, max 255. DRF renders
 /// `serializer.errors` as `{"name": [...]}` with `ErrorDetail` strings.
+/// `IssueViewSerializer` makes `name` a `CharField` with the default
+/// `trim_whitespace=True` (`app/serializers/view.py:56-69`): numbers coerce
+/// via `str()`, the value strips with Python `str.strip`, a blank
+/// remainder is `blank`, and `max_length` applies to the stripped value
+/// (`rest_framework/fields.py` `CharField.run_validation` /
+/// `to_internal_value`).
 fn validate_name(body: &Map<String, Value>, partial: bool) -> Result<Option<String>, Denial> {
-    match body.get("name") {
-        None if partial => Ok(None),
-        None => Err(Denial::Raw(
-            StatusCode::BAD_REQUEST,
-            r#"{"name":["This field is required."]}"#.to_owned(),
-        )),
-        Some(Value::Null) => Err(Denial::Raw(
-            StatusCode::BAD_REQUEST,
-            r#"{"name":["This field may not be null."]}"#.to_owned(),
-        )),
-        Some(Value::String(name)) if name.is_empty() => Err(Denial::Raw(
+    let raw = match body.get("name") {
+        None if partial => return Ok(None),
+        None => {
+            return Err(Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                r#"{"name":["This field is required."]}"#.to_owned(),
+            ));
+        }
+        Some(Value::Null) => {
+            return Err(Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                r#"{"name":["This field may not be null."]}"#.to_owned(),
+            ));
+        }
+        Some(Value::String(name)) => name.clone(),
+        Some(Value::Number(number)) => number.to_string(),
+        Some(_) => {
+            return Err(Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                r#"{"name":["Not a valid string."]}"#.to_owned(),
+            ));
+        }
+    };
+    let stripped = raw.trim_matches(is_py_strip_ws);
+    if stripped.is_empty() {
+        return Err(Denial::Raw(
             StatusCode::BAD_REQUEST,
             r#"{"name":["This field may not be blank."]}"#.to_owned(),
-        )),
-        Some(Value::String(name))
-            if name.chars().count()
-                > pidash_db::app_views_search::models::issue_view::NAME_MAX_LENGTH =>
-        {
-            Err(Denial::Raw(
-                StatusCode::BAD_REQUEST,
-                r#"{"name":["Ensure this field has no more than 255 characters."]}"#.to_owned(),
-            ))
-        }
-        Some(Value::String(name)) => Ok(Some(name.clone())),
-        Some(_) => Err(Denial::Raw(
+        ));
+    }
+    if stripped.chars().count() > pidash_db::app_views_search::models::issue_view::NAME_MAX_LENGTH {
+        return Err(Denial::Raw(
             StatusCode::BAD_REQUEST,
-            r#"{"name":["Not a valid string."]}"#.to_owned(),
+            r#"{"name":["Ensure this field has no more than 255 characters."]}"#.to_owned(),
+        ));
+    }
+    Ok(Some(stripped.to_owned()))
+}
+
+/// DRF `description` coercion (`TextField(blank=True)` becomes a
+/// `CharField` with `allow_blank=True` and no `max_length`): numbers
+/// coerce via `str()`, the value strips with Python `str.strip`, and a
+/// blank remainder stores as `""`. Shared by create and update so every
+/// write path matches Django (PIDASHCONV-1447).
+fn coerce_description(value: &Value) -> Result<String, Denial> {
+    match value {
+        Value::String(text) => Ok(text.trim_matches(is_py_strip_ws).to_owned()),
+        Value::Number(number) => Ok(number.to_string()),
+        Value::Null => Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            r#"{"description":["This field may not be null."]}"#.to_owned(),
+        )),
+        _ => Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            r#"{"description":["Not a valid string."]}"#.to_owned(),
         )),
     }
 }
@@ -1705,19 +1739,7 @@ async fn insert_view(
     ))?;
     let description = match &write.description {
         None => String::new(),
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Null) => {
-            return Err(Denial::Raw(
-                StatusCode::BAD_REQUEST,
-                r#"{"description":["This field may not be null."]}"#.to_owned(),
-            ));
-        }
-        Some(_) => {
-            return Err(Denial::Raw(
-                StatusCode::BAD_REQUEST,
-                r#"{"description":["Not a valid string."]}"#.to_owned(),
-            ));
-        }
+        Some(value) => coerce_description(value)?,
     };
     // `archived_at`: writable DRF `DateTimeField` (`null=True`), so a
     // missing or explicit-null value stores NULL; strings parse through
@@ -1860,24 +1882,9 @@ async fn apply_view_update(
         }
     }
     if let Some(description) = &write.description {
-        match description {
-            Value::String(text) => {
-                binds.push(text.clone());
-                sets.push(format!("description = ${}", binds.len() + 4));
-            }
-            Value::Null => {
-                return Err(Denial::Raw(
-                    StatusCode::BAD_REQUEST,
-                    r#"{"description":["This field may not be null."]}"#.to_owned(),
-                ));
-            }
-            _ => {
-                return Err(Denial::Raw(
-                    StatusCode::BAD_REQUEST,
-                    r#"{"description":["Not a valid string."]}"#.to_owned(),
-                ));
-            }
-        }
+        let text = coerce_description(description)?;
+        binds.push(text);
+        sets.push(format!("description = ${}", binds.len() + 4));
     }
     maybe_set!(write.filters, "filters");
     maybe_set!(write.display_filters, "display_filters");
@@ -3688,6 +3695,85 @@ mod pidashconv_1446_tests {
         assert!(!alias_nullable_only(
             "issue_assignee.assignee_id IS NULL AND issue_assignee.assignee_id IN ($3)",
             "issue_assignee"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_1447_tests {
+    use super::{coerce_description, validate_name, Denial};
+    use serde_json::{Map, Value};
+
+    fn body(name: Value) -> Map<String, Value> {
+        let mut body = Map::new();
+        body.insert("name".to_owned(), name);
+        body
+    }
+
+    fn raw_body(result: Result<Option<String>, Denial>) -> String {
+        match result {
+            Err(Denial::Raw(_, body)) => body,
+            other => panic!("expected a raw 400, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn name_trims_coerces_and_rejects_blank() {
+        // DRF `CharField` strips with Python `str.strip()`, which also
+        // removes U+001C-U+001F; `max_length` applies to the stripped
+        // value and numbers coerce via `str()` (PIDASHCONV-1447).
+        assert_eq!(
+            validate_name(&body(Value::String("  x  ".to_owned())), false).unwrap(),
+            Some("x".to_owned())
+        );
+        assert_eq!(
+            validate_name(&body(Value::from(123)), false).unwrap(),
+            Some("123".to_owned())
+        );
+        let padded = format!("{}\u{1c}", "y".repeat(255));
+        assert_eq!(
+            validate_name(&body(Value::String(padded)), false).unwrap(),
+            Some("y".repeat(255))
+        );
+        for blank in ["", "   ", "\u{1f}"] {
+            assert_eq!(
+                raw_body(validate_name(&body(Value::String(blank.to_owned())), false)),
+                r#"{"name":["This field may not be blank."]}"#,
+                "blank input {blank:?} must 400"
+            );
+        }
+        assert_eq!(
+            raw_body(validate_name(&body(Value::from("z".repeat(256))), false)),
+            r#"{"name":["Ensure this field has no more than 255 characters."]}"#
+        );
+        for invalid in [Value::Bool(true), Value::Null] {
+            let body = raw_body(validate_name(&body(invalid), false));
+            assert!(
+                body.contains("Not a valid string.") || body.contains("may not be null"),
+                "unexpected body {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn description_trims_and_coerces_with_blank_allowed() {
+        // `TextField(blank=True)`: a blank remainder stores as `""`.
+        assert_eq!(
+            coerce_description(&Value::String("notes\n".to_owned())).unwrap(),
+            "notes"
+        );
+        assert_eq!(
+            coerce_description(&Value::String("   ".to_owned())).unwrap(),
+            ""
+        );
+        assert_eq!(coerce_description(&Value::from(7)).unwrap(), "7");
+        assert!(matches!(
+            coerce_description(&Value::Bool(false)),
+            Err(Denial::Raw(_, _))
+        ));
+        assert!(matches!(
+            coerce_description(&Value::Null),
+            Err(Denial::Raw(_, _))
         ));
     }
 }
