@@ -59709,6 +59709,12 @@ export class WebDriver implements ParityDriver {
   async pagesNestedFavoritesFilter(): Promise<void> {
     return this.pagesNestedNotApplicable();
   }
+  async pagesNestedCreatorFilter(_name: string): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
+  async pagesNestedFiltersClear(): Promise<void> {
+    return this.pagesNestedNotApplicable();
+  }
   async pagesNestedMovePickerOpen(_title: string): Promise<void> {
     return this.pagesNestedNotApplicable();
   }

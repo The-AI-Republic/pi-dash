@@ -13650,6 +13650,10 @@ export interface CommentActivityTraffic {
   pagesNestedSearchClear(): Promise<void>;
   /** Turn on the Favorites filter from the filters panel. */
   pagesNestedFavoritesFilter(): Promise<void>;
+  /** Applies a structured Created-by filter, narrowed to one member (PAGE-090). */
+  pagesNestedCreatorFilter(name: string): Promise<void>;
+  /** Clears every applied structured filter (PAGE-090). */
+  pagesNestedFiltersClear(): Promise<void>;
   /** Open the within-project move picker for the row titled `title`. */
   pagesNestedMovePickerOpen(title: string): Promise<void>;
   /** Candidate labels the move picker offers, in display order. */

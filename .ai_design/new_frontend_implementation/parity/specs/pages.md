@@ -1206,6 +1206,14 @@ target:
   `parent_id` is the flat one, both emitted), plus `sub_pages_count`
   (visible, non-archived children the caller can see). Counts never
   include children the caller cannot see.
+- **Archived subtrees:** because `sub_pages_count` counts live children, a
+  cascaded archive leaves an archived parent reporting `0` even though its
+  shelved subtree still exists. The Archived tab must still reach that
+  subtree: an archived row keeps its expand control, `GET pages/?parent=<id>`
+  supplies the shelved children, and the count and delete confirmation use
+  the children actually loaded. A live row never gets an expand control
+  from this rule, and a page the caller cannot see is still absent from the
+  child read.
 - **Detail:** a child page retrieves by id under the same visibility rule;
   the client no longer gets a "not found" for a page it can see.
 - **Create/update:** `parent` (id or null) is accepted on `POST` and
@@ -1299,8 +1307,11 @@ In order, the rows are exactly:
   page and its descendants.
 - **PAGE-088 — archive cascade and restore-to-top.** Archiving a page
   archives its descendants, and the whole subtree appears in the Archived
-  tab. Restoring a page whose parent is still archived detaches it to the
-  top level and says so in a notice.
+  tab; since an archived parent's `sub_pages_count` is 0, its subtree is
+  reached by expanding the archived row, and its visible count reflects the
+  shelved children once loaded. Restoring a page whose parent is still
+  archived detaches it to the top level and says so in a notice, including
+  when the parent exists only as a loaded child in the archived tree.
 - **PAGE-089 — delete re-homes children.** Deleting a page moves its
   children to the top level with their content intact; the delete
   confirmation states how many sub-pages will move. (The server already

@@ -105,6 +105,12 @@ export interface PageSubtreeArchiveInput {
   pageId: string;
   /** The row as the list holds it; its parent decides the restore notice. */
   row: Pick<PageRowData, "parent" | "parent_id">;
+  /**
+   * Everything the caller has loaded for this subtree. A child that exists
+   * only below an expanded archived parent is absent from the top-level
+   * collection, so the caller passes the rows it actually read.
+   */
+  rows?: readonly PageRowData[] | undefined;
   archived: boolean;
 }
 
@@ -133,7 +139,7 @@ export function usePageSubtreeArchive(
       onChange?.(variables.archived);
       if (variables.archived) {
         notifySuccess(PAGE_ARCHIVED_TITLE);
-      } else if (restoreDetaches(rows, variables.row)) {
+      } else if (restoreDetaches(variables.rows ?? rows, variables.row)) {
         notifySuccess(PAGE_RESTORE_TO_TOP_TITLE);
       } else {
         notifySuccess(PAGE_RESTORED_TITLE);

@@ -213,8 +213,8 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
     );
   };
   const subtreeArchive = usePageSubtreeArchive(workspaceSlug, projectId, discoveryPool);
-  const archiveSubtree = (page: PageRowData, archived: boolean): void => {
-    subtreeArchive.mutate({ pageId: page.id, row: page, archived });
+  const archiveSubtree = (page: PageRowData, archived: boolean, rows: readonly PageRowData[] = discoveryPool): void => {
+    subtreeArchive.mutate({ pageId: page.id, row: page, rows, archived });
   };
   const [moveTarget, setMoveTarget] = React.useState<PageRowData | null>(null);
   const reparent = usePageReparent(workspaceSlug, projectId);

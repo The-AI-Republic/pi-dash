@@ -1029,7 +1029,7 @@ describe("PagesListScreen nested tree and discovery (D17, PAGE-084–090)", () =
     const parent = makePageRow({
       id: pageId(36),
       name: "Shelved handbook",
-      sub_pages_count: 1,
+      sub_pages_count: 0,
       archived_at: "2026-10-20",
     });
     const child = makePageRow({
@@ -1047,6 +1047,7 @@ describe("PagesListScreen nested tree and discovery (D17, PAGE-084–090)", () =
     expect(screen.queryByRole("link", { name: "Shelved policy" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Shelved handbook" }));
     expect(await screen.findByRole("link", { name: "Shelved policy" })).toBeInTheDocument();
+    expect(screen.getByTestId("page-tree-count")).toHaveTextContent("1");
   });
 
   it("includes a move target that the loaded forest does not contain", async () => {

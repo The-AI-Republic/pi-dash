@@ -202,6 +202,34 @@ describe("usePageSubtreeArchive", () => {
     expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_RESTORE_TO_TOP_TITLE);
   });
 
+  it("resolves a parent that exists only as a loaded archived child", async () => {
+    const client = newClient();
+    contracts.restorePage.mockResolvedValue(undefined);
+    const grandParent = makePageRow({ id: PARENT, archived_at: "2026-10-20T00:00:00Z" });
+    const middle = makePageRow({
+      id: "823e4567-e89b-12d3-a456-426614174003",
+      parent: PARENT,
+      parent_id: PARENT,
+      archived_at: "2026-10-20T00:00:00Z",
+    });
+    const grandChild = makePageRow({ id: PAGES_PAGE_ID, parent: middle.id, parent_id: middle.id });
+    // The top-level collection holds only the archived root; the middle
+    // parent arrives through an expanded archived child read.
+    const hook = renderHook(() => usePageSubtreeArchive(SLUG, PAGES_PROJECT_ID, [grandParent]), {
+      wrapper: wrapper(client),
+    });
+    await act(async () => {
+      hook.result.current.mutate({
+        pageId: grandChild.id,
+        row: grandChild,
+        rows: [grandParent, middle, grandChild],
+        archived: false,
+      });
+      await settle();
+    });
+    expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_RESTORE_TO_TOP_TITLE);
+  });
+
   it("uses the ordinary restore notice when the parent is live", async () => {
     const client = newClient();
     contracts.restorePage.mockResolvedValue(undefined);

@@ -41542,6 +41542,17 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByRole("button", { name: "Favorites", exact: true }).click();
   }
 
+  async pagesNestedCreatorFilter(name: string): Promise<void> {
+    await this.page.getByRole("button", { name: "Filters", exact: true }).click();
+    await this.page.getByTestId("pages-filter-panel").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("pages-filter-panel").getByRole("button", { name, exact: true }).click();
+  }
+
+  async pagesNestedFiltersClear(): Promise<void> {
+    const clear = this.page.getByRole("button", { name: "Clear all", exact: true });
+    if ((await clear.count()) > 0) await clear.click();
+  }
+
   async pagesNestedMovePickerOpen(title: string): Promise<void> {
     await this.pagesNestedRowMenuOpen(title);
     await this.page.getByRole("menuitem", { name: "Move to…", exact: true }).click();

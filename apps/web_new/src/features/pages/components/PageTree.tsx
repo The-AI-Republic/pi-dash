@@ -22,7 +22,6 @@ import type { PageCreatorOption, PageListTab, PageSort } from "../lib/pageList.j
 import { pageInTab, sortPageSiblings } from "../lib/pageList.js";
 import {
   flattenPageTree,
-  pageChildCount,
   pageMoveRefusal,
   pageMoveRefusalMessage,
   PAGE_MOVE_REFUSED_TITLE,
@@ -89,7 +88,7 @@ export interface PageTreeProps {
   onDuplicate: (page: PageRowData) => void;
   onMovePage: (page: PageRowData, targetId: string | null) => void;
   /** Overrides the row's own archive write so the subtree can be credited. */
-  onToggleArchive: (page: PageRowData, archived: boolean) => void;
+  onToggleArchive: (page: PageRowData, archived: boolean, pool: readonly PageRowData[]) => void;
   /** Opens the within-project move picker for this page. */
   onRequestMove: (page: PageRowData) => void;
 }
@@ -246,6 +245,13 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
         const title = pageDisplayTitle(page.name);
         const manage = viewerIsAdmin || (currentUserId !== null && page.owned_by === currentUserId);
         const rowCanDrag = canMove && manage;
+        // `sub_pages_count` counts a page's live children, so a cascaded
+        // archived parent reports zero even though it still has a shelved
+        // subtree (PAGE-088). The archived tab therefore keeps the expand
+        // control until that parent's lazy `?parent=` read settles; once it
+        // has, the loaded children decide. Live rows follow the count.
+        const archivedUnresolved = tab === "archived" && !activeChildren.has(page.id);
+        const expandable = entry.hasChildren || archivedUnresolved;
         return (
           <div
             key={page.id}
@@ -290,7 +296,7 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
                   <GripVertical size={14} strokeWidth={1.5} />
                 </span>
               ) : null}
-              {entry.hasChildren ? (
+              {expandable ? (
                 <button
                   type="button"
                   aria-label={expandLabel(title, entry.expanded)}
@@ -325,9 +331,9 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
                   canDuplicate={canDuplicate}
                   canManage={manage}
                   canMove={canMoveProject}
-                  rehomedCount={pageChildCount(page)}
+                  rehomedCount={entry.childCount}
                   onToggleArchive={(archived) => {
-                    onToggleArchive(page, archived);
+                    onToggleArchive(page, archived, movePool);
                   }}
                   onAddSubPage={
                     canDuplicate
@@ -354,13 +360,13 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
                   }}
                 />
               </div>
-              {pageChildCount(page) > 0 ? (
+              {entry.childCount > 0 ? (
                 <span
                   data-testid="page-tree-count"
                   className="text-meta mt-(--space-3) shrink-0 rounded-(--radius-control) bg-(--subtle) px-(--space-1) text-(--text-muted)"
-                  aria-label={childCountLabel(pageChildCount(page))}
+                  aria-label={childCountLabel(entry.childCount)}
                 >
-                  {pageChildCount(page)}
+                  {entry.childCount}
                 </span>
               ) : null}
             </div>

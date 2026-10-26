@@ -315,6 +315,51 @@ describe("PageTree", () => {
     expect(screen.queryByRole("link", { name: "Shelved policy" })).not.toBeInTheDocument();
   });
 
+  it("keeps the archived row expandable and counts the shelved children it loads", async () => {
+    const archivedParent = makePageRow({
+      id: PARENT,
+      name: "Shelved handbook",
+      sub_pages_count: 0,
+      archived_at: "2026-10-20",
+      owned_by: PAGES_USER_ID,
+    });
+    const archivedChild = makePageRow({
+      id: CHILD,
+      name: "Shelved policy",
+      parent: PARENT,
+      parent_id: PARENT,
+      archived_at: "2026-10-20",
+      owned_by: PAGES_USER_ID,
+    });
+    listPagesMock.mockResolvedValue([archivedChild]);
+    renderTree({ tab: "archived", rows: [archivedParent], pool: [archivedParent], includeArchivedChildren: true });
+    expect(screen.queryByTestId("page-tree-count")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Shelved handbook" }));
+    await screen.findByRole("link", { name: "Shelved policy" });
+    expect(screen.getByTestId("page-tree-count")).toHaveTextContent("1");
+    expect(listPagesMock).toHaveBeenCalledWith(expect.anything(), "acme", PAGES_PROJECT_ID, {
+      parent: PARENT,
+      includeArchived: true,
+    });
+  });
+
+  it("drops the expand control after an archived parent's read proves it empty", async () => {
+    const archivedLeaf = makePageRow({
+      id: PARENT,
+      name: "Shelved leaf",
+      sub_pages_count: 0,
+      archived_at: "2026-10-20",
+      owned_by: PAGES_USER_ID,
+    });
+    listPagesMock.mockResolvedValue([]);
+    renderTree({ tab: "archived", rows: [archivedLeaf], pool: [archivedLeaf], includeArchivedChildren: true });
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Shelved leaf" }));
+    await waitFor(() => expect(listPagesMock).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Collapse sub-pages of Shelved leaf" })).not.toBeInTheDocument()
+    );
+  });
+
   it("marks the container as a drop target while a legal drag passes over it", () => {
     const onMovePage = vi.fn();
     renderTree({ onMovePage });

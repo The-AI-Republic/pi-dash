@@ -14,6 +14,7 @@ import {
   serverCleanupProject,
   serverCreatePage,
   serverCreateProjectWithFlags,
+  serverDeletePage,
   serverEnsureProjectMember,
   serverFavoritePage,
   serverListChildPages,
@@ -86,9 +87,16 @@ function requireMentionMember(seed: ParitySeedFacts): { email: string; password:
  */
 async function requireNestedBackend(seed: ParitySeedFacts, projectId: string, session: string): Promise<boolean> {
   const probeId = await serverCreatePage(seed.workspaceSlug, projectId, session, `${tag("probe")} page`);
-  const record = await serverPageRecord(seed.workspaceSlug, projectId, probeId, session).catch(() => null);
-  if (record === null) return false;
-  return record.parentId !== undefined && record.subPagesCount !== undefined;
+  try {
+    const record = await serverPageRecord(seed.workspaceSlug, projectId, probeId, session).catch(() => null);
+    if (record === null) return false;
+    return record.parentId !== undefined && record.subPagesCount !== undefined;
+  } finally {
+    // The exact row assertions below must never see the probe. Deleting an
+    // archived-only page is the same two-step the UI performs, and a failed
+    // cleanup must not mask the detection result.
+    await serverDeletePage(seed.workspaceSlug, projectId, probeId, session).catch(() => {});
+  }
 }
 
 function titleOf(row: PagesListServerRow): string {
@@ -417,6 +425,22 @@ test(
       expect(await serverPageRequestStatus("PATCH", `${base}/pages/${topId}/`, session, { parent: shelvedId })).toBe(
         400
       );
+
+      // The visible UI refuses the same illegal drops with a clear notice,
+      // before any write reaches the server (PAGE-087).
+      await driver.pagesNestedOpenList(seed.workspaceSlug, projectId);
+      await driver.pagesNestedExpand(topName);
+      await driver.pagesNestedDragRow(topName, topName);
+      await driver.pagesNestedWaitToast("A page cannot be moved under itself.");
+      await driver.pagesNestedDragRow(topName, middleName);
+      await driver.pagesNestedWaitToast("A page cannot be moved under one of its own sub-pages.");
+
+      // An archived destination is refused too: once both pages are shelved,
+      // dragging one archived row onto another cannot nest it.
+      await serverArchivePage(seed.workspaceSlug, projectId, topId, session);
+      await driver.pagesNestedOpenArchivedList(seed.workspaceSlug, projectId);
+      await driver.pagesNestedDragRow(shelvedName, topName);
+      await driver.pagesNestedWaitToast("A page cannot be moved under an archived page.");
     } finally {
       await cleanupProject(seed, projectId, session);
     }
@@ -485,11 +509,13 @@ test(
       await driver.pagesNestedWaitToast("Page archived successfully.");
 
       expect((await serverPageRecord(seed.workspaceSlug, projectId, childId, session)).archivedAt).not.toBeNull();
-      // The whole subtree shows in the archived tab, parent above child.
+      // The whole subtree shows in the archived tab, parent above child. The
+      // contract count names live children only, so a cascaded archive has
+      // no count until the shelved subtree is read through the expand.
       await driver.pagesNestedOpenArchivedList(seed.workspaceSlug, projectId);
-      expect(await driver.pagesNestedChildCount(parentName)).toBe(1);
       await driver.pagesNestedExpand(parentName);
       expect(await driver.pagesNestedRowTitles()).toEqual([parentName, childName]);
+      expect(await driver.pagesNestedChildCount(parentName)).toBe(1);
       const archived = await serverListPages(seed.workspaceSlug, projectId, session, true);
       expect(archived.map(titleOf)).toEqual(expect.arrayContaining([parentName, childName]));
     } finally {
@@ -590,8 +616,15 @@ test(
       const parentName = `${tag("search")} handbook`;
       const childName = `${tag("search")} leave policy`;
       const otherName = `${tag("search")} payroll`;
+      const member = requireMentionMember(seed);
+      await setupRetry("add member", () =>
+        serverEnsureProjectMember(seed.workspaceSlug, projectId, member.email, session)
+      );
       const parentId = await serverCreatePage(seed.workspaceSlug, projectId, session, parentName);
-      const childId = await serverCreatePage(seed.workspaceSlug, projectId, session, childName);
+      // The child is owned by the second member so a Created-by filter can
+      // isolate it while the parent stays collapsed (PAGE-090 filters).
+      const memberSession = await signInSessionWithRetry(member.email, member.password);
+      const childId = await serverCreatePage(seed.workspaceSlug, projectId, memberSession, childName);
       await serverCreatePage(seed.workspaceSlug, projectId, session, otherName);
       await serverPatchPageParent(seed.workspaceSlug, projectId, childId, parentId, session);
 
@@ -610,6 +643,13 @@ test(
       await driver.pagesNestedFavoritesFilter();
       expect(await driver.pagesNestedRowTitles()).toEqual([childName]);
       expect(await driver.pagesNestedParentPath(childName)).toBe(parentName);
+
+      // A structured Created-by filter spans the tree too: the member's
+      // child appears outside its unexpanded parent with the parent path.
+      await driver.pagesNestedCreatorFilter(member.displayName);
+      expect(await driver.pagesNestedRowTitles()).toEqual([childName]);
+      expect(await driver.pagesNestedParentPath(childName)).toBe(parentName);
+      await driver.pagesNestedFiltersClear();
 
       // The palette jumps to a child and names its path.
       const palette = await driver.pagesNestedPaletteFind("leave");

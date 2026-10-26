@@ -81,6 +81,8 @@ export interface PageTreeEntry {
   page: PageRow;
   depth: number;
   hasChildren: boolean;
+  /** Direct children to name in the expand control and delete dialog. */
+  childCount: number;
   expanded: boolean;
   /** The children read for this parent is still in flight. */
   loading: boolean;
@@ -111,10 +113,16 @@ export function flattenPageTree(
     if (seen.has(page.id)) continue;
     const nextSeen = new Set(seen).add(page.id);
     const expanded = expansion.expanded.has(page.id);
+    const loaded = expansion.children.get(page.id)?.length ?? 0;
+    // `sub_pages_count` is the contract's visible, non-archived count. The
+    // archived tab loads its shelved subtree through `?parent=` reads, where
+    // that field is zero, so the loaded children supply its count instead.
+    const childCount = Math.max(pageChildCount(page), loaded);
     entries.push({
       page,
       depth,
-      hasChildren: pageChildCount(page) > 0 || (expansion.children.get(page.id)?.length ?? 0) > 0,
+      hasChildren: childCount > 0,
+      childCount,
       expanded,
       loading: expansion.pending.has(page.id),
     });

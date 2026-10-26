@@ -111,6 +111,21 @@ describe("flattenPageTree", () => {
     });
     expect(entries).toHaveLength(1);
     expect(entries[0]?.hasChildren).toBe(true);
+    expect(entries[0]?.childCount).toBe(1);
+  });
+
+  it("uses loaded archived children when the contract count is zero", () => {
+    // A cascaded archive makes sub_pages_count 0; the shelved child read is
+    // the only evidence that the subtree exists (PAGE-088/089).
+    const shelvedParent = page("Archive", null, { sub_pages_count: 0, archived_at: "2026-10-20" });
+    const shelvedChild = page("Shelved child", shelvedParent.id, { archived_at: "2026-10-20" });
+    const entries = flattenPageTree([shelvedParent], {
+      expanded: new Set([shelvedParent.id]),
+      children: new Map([[shelvedParent.id, [shelvedChild]]]),
+      pending: new Set(),
+    });
+    expect(entries[0]).toMatchObject({ hasChildren: true, childCount: 1, expanded: true });
+    expect(entries[1]?.page.id).toBe(shelvedChild.id);
   });
 
   it("reports a parent whose children read is in flight", () => {
