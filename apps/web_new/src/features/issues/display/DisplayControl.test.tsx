@@ -280,4 +280,30 @@ describe("DisplayControl", () => {
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatchObject({ groupBy: "state", layout: "list", orderBy: "sort_order" });
   });
+
+  it("keeps a supplied display untouched when the caller passes no change callback", async () => {
+    const user = userEvent.setup();
+    const changes: DisplayPrefs[] = [];
+    createAppClient("https://api.test", (() => {
+      throw new Error("unexpected network fetch for a local display without a writer");
+    }) as never);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <IssuesLoaderProvider>
+          <DisplayControl
+            workspaceSlug="acme"
+            entity={PROJECT_ENTITY}
+            offered={OFFERED}
+            hideCycle={false}
+            hideModule={false}
+            display={parseDisplayPrefs({ layout: "list", order_by: "sort_order" }, {})}
+          />
+        </IssuesLoaderProvider>
+      </QueryClientProvider>
+    );
+    const panel = await openPanel(user);
+    await user.click(within(panel).getByRole("button", { name: "States" }));
+    expect(changes).toHaveLength(0);
+    expect(within(panel).getByRole("button", { name: "States" })).toHaveAttribute("aria-pressed", "false");
+  });
 });
