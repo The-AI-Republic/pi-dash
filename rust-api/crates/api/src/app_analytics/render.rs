@@ -3122,20 +3122,23 @@ fn saved_statements(
     let plot_sql = if y_axis == "estimate" {
         // `SUM(CAST(estimate_point__value AS float))` grouped by
         // dimension (`analytics_plot.py:110-115`). The estimate table
-        // joins exactly once: through the dimension/segment when one of
-        // them already brings it, otherwise through the base join.
+        // joins exactly once: through the dimension when it already
+        // brings it, otherwise through the base join.
         let (_, estimate_join) = q::dimension_sql("estimate_point__value")?;
+        // The estimate segment's join is dropped first (the base join
+        // below covers it, like [`q::base_plot_estimate_sql`]), so the
+        // `already` check only sees joins that survive into the FROM.
+        let seg_join = if segment == Some("estimate_point__value") {
+            String::new()
+        } else {
+            seg_join
+        };
         let already = dim_join.contains(q::ESTIMATE_POINT_TABLE)
             || seg_join.contains(q::ESTIMATE_POINT_TABLE);
         let base_join = if already {
             String::new()
         } else {
             estimate_join
-        };
-        let seg_join = if segment == Some("estimate_point__value") {
-            String::new()
-        } else {
-            seg_join
         };
         let from = issue_from_states(
             &format!("{base_join}{dim_join}{seg_join}{link_joins}"),
@@ -4353,6 +4356,24 @@ mod tests {
             saved_statements("priority", "estimate", None, None, "").expect("known axes");
         assert!(plot.contains("SUM(CAST(\"estimate_points\".\"value\" AS DOUBLE PRECISION))"));
         assert_eq!(plot.matches("estimate_points").count(), 3);
+    }
+
+    #[test]
+    fn saved_estimate_segment_joins_estimate_table_once() {
+        // `?segment=estimate_point__value` (PIDASHCONV-1501): the
+        // segment join is dropped in favor of the base join, so the
+        // table still joins exactly once — zero joins 500s on the
+        // SELECT/SUM references to `"estimate_points"."value"`.
+        let (_, plot) = saved_statements(
+            "priority",
+            "estimate",
+            Some("estimate_point__value"),
+            Some("\"workspaces\".\"slug\" = $1"),
+            "",
+        )
+        .expect("known axes");
+        assert_eq!(plot.matches("JOIN \"estimate_points\"").count(), 1);
+        assert!(plot.contains("AS \"segment\""));
     }
 
     #[test]
