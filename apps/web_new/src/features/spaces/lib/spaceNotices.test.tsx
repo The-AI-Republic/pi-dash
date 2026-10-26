@@ -14,6 +14,7 @@ import {
   notifySpaceCommentDeleteFailure,
   notifySpaceCommentDeleteSuccess,
   notifySpaceCommentEditFailure,
+  notifySpaceCommentEditSuccess,
   notifySpaceCommentFailure,
   notifySpaceCopyFailure,
   notifySpaceCopySuccess,
@@ -61,6 +62,12 @@ describe("space notices", () => {
     notifySpaceCommentDeleteFailure();
     expect(await screen.findByText("Your edit could not be saved. Please try again.")).toBeInTheDocument();
     expect(await screen.findByText("The comment could not be deleted. Please try again.")).toBeInTheDocument();
+  });
+
+  it("confirms an edited comment without a body line", async () => {
+    renderHost();
+    notifySpaceCommentEditSuccess();
+    expect(await screen.findByText("Comment updated!")).toBeInTheDocument();
   });
 
   it("confirms a deleted comment without a body line", async () => {

@@ -56,6 +56,11 @@ describe("spaceMessage", () => {
     ).toEqual(["Urgent", "High", "Medium", "Low", "None"]);
   });
 
+  it("pins the oracle-visible comment menu entries (SPC-055)", () => {
+    expect(spaceMessage("comments.menuEdit")).toBe("Edit");
+    expect(spaceMessage("comments.menuDelete")).toBe("Delete");
+  });
+
   it("covers the whole key union", () => {
     const keys: readonly SpaceMessageKey[] = SPACE_MESSAGE_KEYS;
     expect(keys).toContain("theme.switchToDark");

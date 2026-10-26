@@ -74,19 +74,21 @@ function reply(status: number, body: unknown): Awaited<ReturnType<Transport>> {
 }
 
 interface SetupOptions {
-  comments?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
+  comments?: (url: string) => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
   issueId?: string;
   enabled?: boolean;
   embedded?: boolean;
   viewerId?: string | null;
   composer?: React.ReactNode;
+  reactionsEnabled?: boolean;
+  onRequireSignIn?: () => void;
 }
 
 function setup(options: SetupOptions = {}) {
   const requests: string[] = [];
   const transport: Transport = async (url) => {
     requests.push(url);
-    return await (options.comments?.() ?? reply(200, []));
+    return await (options.comments?.(url) ?? reply(200, []));
   };
   const client = createClient({ baseUrl: "https://api.test", transport });
   runtime.client = client;
@@ -102,6 +104,8 @@ function setup(options: SetupOptions = {}) {
         embedded={options.embedded}
         resolveAsset={(src) => src}
         composer={options.composer}
+        reactionsEnabled={options.reactionsEnabled}
+        onRequireSignIn={options.onRequireSignIn}
       />
     </QueryClientProvider>
   );
@@ -165,6 +169,68 @@ describe("SpaceCommentsSection gating", () => {
     setup();
     expect((await screen.findByTestId("space-comments")).className).not.toContain("issue-comments-section");
   });
+
+  it("hides the composer inside embeds even while signed in (SPC-053)", async () => {
+    setup({ embedded: true, composer: <button type="button">Write a comment</button> });
+    await screen.findByTestId("space-comments-empty");
+    expect(screen.queryByRole("button", { name: "Write a comment" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("space-comments-signin")).not.toBeInTheDocument();
+  });
+
+  it("threads reactions and sign-in into the rows (SPC-057)", async () => {
+    const user = userEvent.setup();
+    const onRequireSignIn = vi.fn();
+    setup({
+      viewerId: null,
+      reactionsEnabled: true,
+      onRequireSignIn,
+      comments: () =>
+        reply(200, [
+          comment({
+            comment_reactions: [
+              {
+                id: "723e4567-e89b-12d3-a456-426614174006",
+                actor: ADA,
+                comment: "123e4567-e89b-12d3-a456-426614174000",
+                reaction: "127881",
+                display_name: "Ada L",
+                deleted_at: null,
+                workspace: "423e4567-e89b-12d3-a456-426614174003",
+                project: "323e4567-e89b-12d3-a456-426614174002",
+                created_at: "2026-10-16T22:00:00Z",
+                updated_at: "2026-10-16T22:00:00Z",
+                created_by: null,
+                updated_by: null,
+              },
+            ],
+          }),
+        ]),
+    });
+    const pill = await screen.findByTestId("space-comment-reaction");
+    expect(pill).toHaveTextContent("1");
+    await user.click(pill);
+    await waitFor(() => expect(onRequireSignIn).toHaveBeenCalledTimes(1));
+  });
+
+  it("falls back to the default sign-in redirect without a handler (SPC-057)", async () => {
+    const user = userEvent.setup();
+    const assign = vi.fn();
+    const location = window.location;
+    Object.defineProperty(window, "location", { configurable: true, writable: true, value: { assign } });
+    try {
+      setup({
+        viewerId: null,
+        reactionsEnabled: true,
+        comments: () => reply(200, [comment()]),
+      });
+      await user.click(await screen.findByTestId("space-comment-reaction-add"));
+      await user.click(screen.getByRole("button", { name: "🎉" }));
+      await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+      expect(String(assign.mock.calls[0]?.[0])).toContain("/spaces/?next_path=");
+    } finally {
+      Object.defineProperty(window, "location", { configurable: true, writable: true, value: location });
+    }
+  });
 });
 
 describe("SpaceCommentsSection thread states", () => {
@@ -193,7 +259,9 @@ describe("SpaceCommentsSection thread states", () => {
     let attempts = 0;
     const user = userEvent.setup();
     setup({
-      comments: () => {
+      comments: (url) => {
+        // The row's viewer read is not a thread attempt.
+        if (!url.includes("/comments/")) return reply(401, { detail: "no session" });
         attempts += 1;
         return attempts === 1 ? reply(500, { detail: "down" }) : reply(200, [comment()]);
       },

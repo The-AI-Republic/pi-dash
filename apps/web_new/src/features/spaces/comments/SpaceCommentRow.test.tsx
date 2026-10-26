@@ -131,4 +131,63 @@ describe("SpaceCommentRow", () => {
     );
     expect(screen.getByText("A & B")).toBeInTheDocument();
   });
+
+  it("renders the owner menu and the reaction row on an ordinary row (SPC-055/057)", () => {
+    render(
+      <SpaceCommentRow
+        comment={comment()}
+        resolveAsset={(src) => src}
+        menu={<button type="button">Row menu</button>}
+        reactions={<div>Row reactions</div>}
+      />
+    );
+    expect(screen.getByRole("button", { name: "Row menu" })).toBeInTheDocument();
+    expect(screen.getByText("Row reactions")).toBeInTheDocument();
+    expect(screen.getByText("there", { selector: "strong" })).toBeInTheDocument();
+  });
+
+  it("keeps the menu on a folded row while the body and reactions hide until expanded (SPC-051)", async () => {
+    const user = userEvent.setup();
+    render(
+      <SpaceCommentRow
+        comment={comment({ labels: ["fold"] })}
+        resolveAsset={(src) => src}
+        menu={<button type="button">Row menu</button>}
+        reactions={<div>Row reactions</div>}
+      />
+    );
+    expect(screen.getByRole("button", { name: "Row menu" })).toBeInTheDocument();
+    expect(screen.queryByText("there", { selector: "strong" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Row reactions")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show moderated comment" }));
+    expect(screen.getByText("there", { selector: "strong" })).toBeInTheDocument();
+    expect(screen.getByText("Row reactions")).toBeInTheDocument();
+  });
+
+  it("swaps the speaker line and body for the edit form while editing (SPC-056)", () => {
+    render(
+      <SpaceCommentRow
+        comment={comment({ speaker_type: "agent", speaker_label: "Probe Agent" })}
+        resolveAsset={(src) => src}
+        editor={<div>Edit form</div>}
+        reactions={<div>Row reactions</div>}
+      />
+    );
+    expect(screen.getByText("Edit form")).toBeInTheDocument();
+    expect(screen.queryByText("there", { selector: "strong" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Probe Agent:")).not.toBeInTheDocument();
+    expect(screen.getByText("Row reactions")).toBeInTheDocument();
+  });
+
+  it("edits a folded row without its reactions while the body stays hidden (SPC-051/056)", () => {
+    render(
+      <SpaceCommentRow
+        comment={comment({ labels: ["fold"] })}
+        resolveAsset={(src) => src}
+        editor={<div>Edit form</div>}
+      />
+    );
+    expect(screen.getByText("Edit form")).toBeInTheDocument();
+    expect(screen.queryByText("there", { selector: "strong" })).not.toBeInTheDocument();
+  });
 });

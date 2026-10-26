@@ -4,7 +4,7 @@
 // Background-outcome notices (parity/specs/space.md SPC-017). One
 // helper per outcome the board reports: copy confirmations, failed
 // writes (comments, votes, reactions, edits, deletes, uploads) and the
-// delete confirmation. The space layout mounts the kit toast host; the
+// edit/delete confirmations. The space layout mounts the kit toast host; the
 // slices that own each write call these instead of wording their own,
 // so the texts stay stable under the message keys. Sign-out needs no
 // notice — its native form post navigates away — and a posted comment
@@ -41,6 +41,11 @@ export function notifySpaceReactionFailure(): void {
 /** A comment edit failed; the stored body is shown instead. */
 export function notifySpaceCommentEditFailure(): void {
   notifyError(spaceMessage("notice.commentEditFailure.title"), spaceMessage("notice.commentEditFailure.body"));
+}
+
+/** A comment edit landed. */
+export function notifySpaceCommentEditSuccess(): void {
+  notifySuccess(spaceMessage("notice.commentEditSuccess.title"));
 }
 
 /** A comment delete landed. */

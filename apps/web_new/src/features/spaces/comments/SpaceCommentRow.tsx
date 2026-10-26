@@ -1,11 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// One read-only public comment row (parity/specs/space.md §3.9,
-// SPC-050–052). Identity, bot suffix, relative age, optional own-line
-// speaker label, rich body and the folded branch. Mutation controls
-// (edit, delete, reactions, composer) belong to slice J2 and are
-// deliberately absent here: J2 can wrap this row without rewriting it.
+// One public comment row (parity/specs/space.md §3.9–3.10, SPC-050–057).
+// Identity, bot suffix, relative age, optional own-line speaker label,
+// rich body and the folded branch, with slots for slice J2's mutation
+// controls: the owner menu in the header, the edit form in place of the
+// body, and the reaction row below it. Folded rows keep the header and
+// the menu while the body and the reactions stay hidden until expanded.
 
 import { Avatar } from "@pidash/kit";
 import type { SpaceComment } from "@pidash/api-client";
@@ -20,6 +21,12 @@ export interface SpaceCommentRowProps {
   comment: SpaceComment;
   /** Resolve stored image asset ids through the public anchor route. */
   resolveAsset: (src: string) => string;
+  /** Owner-only menu, rendered at the end of the header row. */
+  menu?: React.ReactNode | undefined;
+  /** Reaction row, rendered below the body while it shows. */
+  reactions?: React.ReactNode | undefined;
+  /** Edit form, replacing the speaker line and body while editing. */
+  editor?: React.ReactNode | undefined;
 }
 
 /** Fold toggle text a visitor sees; the accessible name names the moderated comment. */
@@ -27,10 +34,17 @@ function foldLabel(expanded: boolean): string {
   return expanded ? spaceMessage("comments.collapse") : spaceMessage("comments.expand");
 }
 
-export function SpaceCommentRow({ comment, resolveAsset }: SpaceCommentRowProps): React.ReactElement {
+export function SpaceCommentRow({
+  comment,
+  resolveAsset,
+  menu,
+  reactions,
+  editor,
+}: SpaceCommentRowProps): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false);
   const folded = isSpaceCommentFolded(comment);
   const showBody = !folded || expanded;
+  const showAux = showBody || editor !== undefined;
   const author = spaceCommentAuthor(comment);
   const speaker = spaceCommentSpeakerLabel(comment);
   const age = useRelativeAge(comment.created_at);
@@ -64,8 +78,11 @@ export function SpaceCommentRow({ comment, resolveAsset }: SpaceCommentRowProps)
               {foldLabel(expanded)}
             </button>
           ) : null}
+          {menu ?? null}
         </div>
-        {showBody ? (
+        {editor !== undefined ? (
+          editor
+        ) : showBody ? (
           <div className="flex min-w-0 flex-col gap-(--space-1)">
             {speaker === null ? null : (
               <span className="text-meta font-medium text-(--text)">
@@ -76,6 +93,7 @@ export function SpaceCommentRow({ comment, resolveAsset }: SpaceCommentRowProps)
             <RichTextView html={bodyHtml} label={spaceMessage("comments.bodyLabel")} resolveAsset={resolveAsset} />
           </div>
         ) : null}
+        {showAux && reactions !== undefined ? reactions : null}
       </div>
     </div>
   );
