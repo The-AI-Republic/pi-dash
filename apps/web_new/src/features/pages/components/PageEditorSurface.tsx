@@ -319,53 +319,50 @@ export function PageEditorSurface({
           }
         />
       ) : null}
-      {/* The transient surfaces sit beside the body, never inside the
-          measured `.editor-container`: the pane reads that container's
-          blocks, so palette and mention rows must not lift the counts.
-          The wrapper gives them the editor's own box to position in. */}
-      <div className="relative">
-        <div
-          className={`editor-container text-size-${fontSize ?? "large-font"} text-face-${fontStyle ?? "sans-serif"}`}
-        >
-          {bodyPending ? (
-            <PageBodySkeleton />
-          ) : (
-            <React.Suspense
-              fallback={<RichTextView html={initialHtml} label={PAGE_BODY_LABEL} resolveAsset={resolveAsset} />}
-            >
-              {/* The editor instance belongs to one page: a navigation to a
-                  sibling page opens its own document, never the old one. */}
-              <PageBodyEditor
-                key={pageId}
-                initialHtml={initialHtml}
-                resolveAsset={resolveAsset}
-                workspaceSlug={workspaceSlug}
-                onChange={onChange}
-                onFormattingChange={setState}
-                onReady={onReady}
-                label={PAGE_BODY_LABEL}
-                placeholder={PAGE_BODY_PLACEHOLDER}
-                handleKeyDown={handleKeyDown}
-                onPasteHtml={onPasteHtml}
-                onPasteText={onPasteText}
-                claimsPasteText={claimsPasteText}
-              />
-            </React.Suspense>
-          )}
-        </div>
-        {bodyPending ? null : (
-          <React.Suspense fallback={null}>
-            <PageBodyInteractionLayer
+      <div className={`editor-container text-size-${fontSize ?? "large-font"} text-face-${fontStyle ?? "sans-serif"}`}>
+        {bodyPending ? (
+          <PageBodySkeleton />
+        ) : (
+          <React.Suspense
+            fallback={<RichTextView html={initialHtml} label={PAGE_BODY_LABEL} resolveAsset={resolveAsset} />}
+          >
+            {/* The editor instance belongs to one page: a navigation to a
+                sibling page opens its own document, never the old one. */}
+            <PageBodyEditor
+              key={pageId}
+              initialHtml={initialHtml}
+              resolveAsset={resolveAsset}
               workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              getHandle={() => handleRef.current}
-              html={bodyHtml}
-              onPickImage={openPageImagePicker}
-              onDocumentChange={setBodyHtml}
+              onChange={onChange}
+              onFormattingChange={setState}
+              onReady={onReady}
+              label={PAGE_BODY_LABEL}
+              placeholder={PAGE_BODY_PLACEHOLDER}
+              handleKeyDown={handleKeyDown}
+              onPasteHtml={onPasteHtml}
+              onPasteText={onPasteText}
+              claimsPasteText={claimsPasteText}
             />
           </React.Suspense>
         )}
       </div>
+      {/* The transient surfaces are a sibling of the body, never inside the
+          measured `.editor-container`: the pane counts that container's
+          blocks, so palette and mention rows must not lift the counts. They
+          are fixed-positioned from the caret, so no wrapper is needed — and
+          `.frame-renderer > .editor-container` stays the editor's own path. */}
+      {bodyPending ? null : (
+        <React.Suspense fallback={null}>
+          <PageBodyInteractionLayer
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            getHandle={() => handleRef.current}
+            html={bodyHtml}
+            onPickImage={openPageImagePicker}
+            onDocumentChange={setBodyHtml}
+          />
+        </React.Suspense>
+      )}
     </>
   );
 }
