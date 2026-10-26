@@ -22,14 +22,21 @@ type Listener = (pageId: string, status: PageSyncStatus) => void;
 
 const listeners = new Set<Listener>();
 
-/** The collaboration layer reports connection state through this seam. */
+/**
+ * The collaboration layer reports connection state through this seam:
+ * connecting, awaiting-sync and reconnecting all report `syncing`, a
+ * converged document reports `synced`, and the terminal disconnected
+ * state reports `lost` (spec §8.2, §8.4; PAGE-061, PAGE-066, PAGE-067).
+ */
 export function reportPageSync(pageId: string, status: PageSyncStatus): void {
   for (const listener of listeners) listener(pageId, status);
 }
 
 /**
  * Page-scoped status: a fresh page starts as `syncing`; with no live
- * connection reporting in, it settles to `lost` after the short beat.
+ * connection reporting in, it settles to `lost` after the short beat. A
+ * report stands: once the collaboration layer speaks for this page, the
+ * settle beat no longer clobbers the reported state.
  */
 export function usePageSyncStatus(pageId: string): PageSyncStatus {
   const [status, setStatus] = React.useState<PageSyncStatus>("syncing");
@@ -39,11 +46,16 @@ export function usePageSyncStatus(pageId: string): PageSyncStatus {
     setStatus("syncing");
   }
   React.useEffect(() => {
+    let reported = false;
     const onReport: Listener = (reportedPage, reportedStatus) => {
-      if (reportedPage === pageId) setStatus(reportedStatus);
+      if (reportedPage !== pageId) return;
+      reported = true;
+      setStatus(reportedStatus);
     };
     listeners.add(onReport);
-    const timer = setTimeout(() => setStatus("lost"), PAGE_SYNC_SETTLE_MS);
+    const timer = setTimeout(() => {
+      if (!reported) setStatus("lost");
+    }, PAGE_SYNC_SETTLE_MS);
     return () => {
       clearTimeout(timer);
       listeners.delete(onReport);

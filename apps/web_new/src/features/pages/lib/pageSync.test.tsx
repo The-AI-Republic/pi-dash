@@ -41,6 +41,17 @@ describe("usePageSyncStatus", () => {
     expect(result.current).toBe("synced");
   });
 
+  it("keeps a reported state once the settle beat passes (PAGE-061)", () => {
+    const { result } = renderHook(() => usePageSyncStatus("page-1"));
+    act(() => {
+      reportPageSync("page-1", "synced");
+    });
+    act(() => {
+      vi.advanceTimersByTime(PAGE_SYNC_SETTLE_MS);
+    });
+    expect(result.current).toBe("synced");
+  });
+
   it("resets to syncing when the address moves to another page", () => {
     const { result, rerender } = renderHook(({ pageId }) => usePageSyncStatus(pageId), {
       initialProps: { pageId: "page-1" },
