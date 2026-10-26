@@ -197,9 +197,9 @@ describe("modules slice-E drivers", () => {
 
   it("reads the newest toast newest-first", async () => {
     const { driver } = driverWith({
-      'css([data-testid="toast-notification"])': { count: 1 },
-      "testid(toast-title)": { text: "Success!" },
-      "testid(toast-description)": { text: "  Module updated\nsuccessfully. " },
+      'css([data-testid="toast-notification"])': { count: 2 },
+      'css([data-testid="toast-notification"]) nth(0)': { text: "Success!\n  Module updated\nsuccessfully. " },
+      'css([data-testid="toast-notification"]) nth(1)': { text: "Success!\nModule removed from favorites." },
     });
     await expect(driver.modulesLastToast()).resolves.toEqual({
       title: "Success!",
@@ -212,29 +212,36 @@ describe("modules slice-E drivers", () => {
     await expect(empty.driver.modulesLastToast()).resolves.toBeNull();
     const blank = driverWith({
       'css([data-testid="toast-notification"])': { count: 1 },
-      "testid(toast-title)": { text: "  " },
-      "testid(toast-description)": { text: "" },
+      'css([data-testid="toast-notification"]) nth(0)': { text: "  \n " },
     });
     await expect(blank.driver.modulesLastToast()).resolves.toBeNull();
   });
 
-  it("keeps a toast whose title is blank but whose message shows", async () => {
+  it("skips hidden and blank cards for the first toast with text", async () => {
     const { driver } = driverWith({
-      'css([data-testid="toast-notification"])': { count: 1 },
-      "testid(toast-title)": { text: "" },
-      "testid(toast-description)": { text: "Module added to favorites." },
+      'css([data-testid="toast-notification"])': { count: 3 },
+      'css([data-testid="toast-notification"]) nth(0)': { visible: false, text: "Success!\nStale notice." },
+      'css([data-testid="toast-notification"]) nth(1)': { text: "   " },
+      'css([data-testid="toast-notification"]) nth(2)': { text: "Success!\nModule added to favorites." },
     });
     await expect(driver.modulesLastToast()).resolves.toEqual({
-      title: "",
+      title: "Success!",
       message: "Module added to favorites.",
     });
+  });
+
+  it("reads a title-only card with a blank message", async () => {
+    const { driver } = driverWith({
+      'css([data-testid="toast-notification"])': { count: 1 },
+      'css([data-testid="toast-notification"]) nth(0)': { text: "  Saved  " },
+    });
+    await expect(driver.modulesLastToast()).resolves.toEqual({ title: "Saved", message: "" });
   });
 
   it("awaits a toast carrying the wanted text", async () => {
     const { driver } = driverWith({
       'css([data-testid="toast-notification"])': { count: 1 },
-      "testid(toast-title)": { text: "Success!" },
-      "testid(toast-description)": { text: "Module updated successfully." },
+      'css([data-testid="toast-notification"]) nth(0)': { text: "Success!\nModule updated successfully." },
     });
     await driver.modulesAwaitToast("Module updated successfully.");
   });
@@ -337,8 +344,7 @@ describe("modules slice-E drivers", () => {
   it("toggles the star, resolving once a toast shows", async () => {
     const { driver, page } = driverWith({
       'css([data-testid="toast-notification"])': { count: 1 },
-      "testid(toast-title)": { text: "Success!" },
-      "testid(toast-description)": { text: "Module added to favorites." },
+      'css([data-testid="toast-notification"]) nth(0)': { text: "Success!\nModule added to favorites." },
     });
     await driver.modulesToggleStar("Starred Module");
     expect(page.clicks).toHaveLength(1);

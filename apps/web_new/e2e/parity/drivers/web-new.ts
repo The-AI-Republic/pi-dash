@@ -19313,16 +19313,25 @@ export class WebNewDriver implements ParityDriver {
     await this.modulesDatesCalendar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesLastToast(): Promise<ModulesToast | null> {
-    // The kit renders newest-first inside the toast stack, so the first
-    // card is the latest notice; a blank card (mid-dismiss) reads as
-    // none, and the await poll retries past it.
+    // The kit renders newest-first inside the toast stack, and its cards
+    // carry no title/description testids, so the first visible card with
+    // text is the latest notice: its first line is the title and the rest
+    // is the message. A hidden card, a blank card (mid-dismiss), or a
+    // detached one reads as none, and the await poll retries past it.
     const cards = this.page.locator('[data-testid="toast-notification"]');
-    if ((await cards.count()) === 0) return null;
-    const newest = cards.first();
-    const title = (await newest.getByTestId("toast-title").first().innerText()).trim().replace(/\s+/g, " ");
-    const message = (await newest.getByTestId("toast-description").first().innerText()).trim().replace(/\s+/g, " ");
-    if (title === "" && message === "") return null;
-    return { title, message };
+    const total = await cards.count();
+    for (let index = 0; index < total; index += 1) {
+      const card = cards.nth(index);
+      if (!(await card.isVisible().catch(() => false))) continue;
+      const text = (await card.innerText().catch(() => "")).trim();
+      if (text === "") continue;
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+    }
+    return null;
   }
   async modulesAwaitToast(text: string): Promise<void> {
     await expect
