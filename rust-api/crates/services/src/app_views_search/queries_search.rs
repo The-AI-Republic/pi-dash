@@ -343,6 +343,18 @@ fn member_scope_arms(user: &str, slug: &str) -> Vec<String> {
     ]
 }
 
+/// Membership + tenancy scope for the entity-search `cycle`/`module`
+/// branches (`base.py:405-411,453-459,597-602,644-648`): member, `is_active`
+/// and slug only. Unlike the global sections, Django applies no
+/// `project__archived_at__isnull` here (PIDASHCONV-1450).
+fn entity_member_scope_arms(user: &str, slug: &str) -> Vec<String> {
+    vec![
+        "project_members.is_active".to_owned(),
+        format!("project_members.member_id = {user}"),
+        format!("workspaces.slug = {slug}"),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Global search sections (GlobalSearchEndpoint :54-253)
 // ---------------------------------------------------------------------------
@@ -870,8 +882,9 @@ pub const ENTITY_ISSUE_KEYS: &[&str] = &[
 ];
 
 /// `cycle` branch (`base.py:396-442,588-633`): `name` icontains, membership
-/// scope, project pin on the project branch, the `status` annotation,
-/// `-created_at`, `DISTINCT`, `values` + `[:count]`. `now` is the
+/// scope (no archived-project arm — Django filters archived only on the
+/// global sections), project pin on the project branch, the `status`
+/// annotation, `-created_at`, `DISTINCT`, `values` + `[:count]`. `now` is the
 /// `timezone.now()` value, bound four times (see [`cycle_status_case`]).
 pub fn entity_cycle(scope: &EntityScope<'_>, query: Option<&str>, now: &str) -> BuiltQuery {
     let mut builder = Builder::new();
@@ -885,7 +898,7 @@ pub fn entity_cycle(scope: &EntityScope<'_>, query: Option<&str>, now: &str) -> 
             wheres.push(arm);
         }
     }
-    wheres.extend(member_scope_arms(&user, &slug));
+    wheres.extend(entity_member_scope_arms(&user, &slug));
     if let Some(pid) = scope.project_id {
         let project = builder.uuid(pid);
         wheres.push(format!("cycles.project_id = {project}"));
@@ -925,7 +938,7 @@ pub fn entity_module(scope: &EntityScope<'_>, query: Option<&str>) -> BuiltQuery
             wheres.push(arm);
         }
     }
-    wheres.extend(member_scope_arms(&user, &slug));
+    wheres.extend(entity_member_scope_arms(&user, &slug));
     if let Some(pid) = scope.project_id {
         let project = builder.uuid(pid);
         wheres.push(format!("modules.project_id = {project}"));
@@ -1524,6 +1537,24 @@ mod tests {
         let built = entity_module(&entity_scope(None), Some("m"));
         assert!(built.sql.contains("modules.status"));
         assert!(!built.sql.contains("CASE"));
+    }
+
+    // PIDASHCONV-1450: the entity-search cycle/module branches carry no
+    // archived-project arm — Django filters member/is_active/slug only.
+    #[test]
+    fn entity_cycle_module_include_archived_projects() {
+        let now = "2026-09-29T20:00:00Z";
+        for built in [
+            entity_cycle(&entity_scope(Some(PID)), Some("acme"), now),
+            entity_cycle(&entity_scope(None), Some("acme"), now),
+            entity_module(&entity_scope(Some(PID)), Some("acme")),
+            entity_module(&entity_scope(None), Some("acme")),
+        ] {
+            assert!(!built.sql.contains("archived_at"));
+            assert!(built.sql.contains("project_members.is_active"));
+            assert!(built.sql.contains("project_members.member_id = $"));
+            assert!(built.sql.contains("workspaces.slug = $"));
+        }
     }
 
     #[test]
