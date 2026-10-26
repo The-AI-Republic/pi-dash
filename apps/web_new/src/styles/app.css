@@ -203,3 +203,36 @@
     background-color: var(--page-color-purple-wash);
   }
 }
+
+/* Page display preferences (NEWFRONT-848, PAGE-072). The four stored
+   choices live in local storage; these two utilities are the reflow they
+   drive. Type size sets the body's base scale and face swaps the family;
+   both reach the title (via .page-title-editor) and the body container so
+   one stored choice never leaves the two halves disagreeing. */
+@layer components {
+  .text-size-small-font {
+    font-size: 0.9rem;
+    line-height: 1.5rem;
+  }
+  .text-size-small-font .rich-text-content {
+    font-size: 0.9rem;
+    line-height: 1.5rem;
+  }
+  .text-size-large-font {
+    font-size: 1rem;
+    line-height: 1.75rem;
+  }
+  .text-face-serif,
+  .text-face-serif .rich-text-content {
+    font-family: Georgia, "Times New Roman", serif;
+  }
+  .text-face-sans-serif,
+  .text-face-sans-serif .rich-text-content {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  /* The full-width preference marks the bar's content row; the canvas
+     measure itself is applied inline from the same stored value. */
+  .page-toolbar-content.wide-layout {
+    width: 100%;
+  }
+}

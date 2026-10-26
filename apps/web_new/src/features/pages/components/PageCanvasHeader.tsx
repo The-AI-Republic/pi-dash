@@ -14,6 +14,8 @@ import { PAGE_MARK_AREA, PageMarkButton } from "./PageMarkButton.js";
 
 export interface PageCanvasHeaderProps {
   title: PageDetailTitleProps;
+  /** The page's stored type size, applied to the title (PAGE-072). */
+  fontSize?: string | undefined;
   /** Stored `logo_props` of the page. */
   logoProps: Record<string, unknown>;
   /** Read-only viewers get the mark as static art and no picker. */
@@ -26,6 +28,7 @@ export interface PageCanvasHeaderProps {
 
 export function PageCanvasHeader({
   title,
+  fontSize,
   logoProps,
   editable,
   titleEmpty,
@@ -37,7 +40,7 @@ export function PageCanvasHeader({
         <div className="flex h-12 items-end">
           <PageMarkButton logoProps={logoProps} editable={editable} titleEmpty={titleEmpty} onPick={onMarkPick} />
         </div>
-        <PageDetailTitle {...title} />
+        <PageDetailTitle {...title} {...(fontSize === undefined ? {} : { className: `text-size-${fontSize}` })} />
       </div>
     </div>
   );

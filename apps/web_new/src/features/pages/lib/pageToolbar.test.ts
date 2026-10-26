@@ -12,6 +12,7 @@ import {
   blockKindLabel,
   blockKindOption,
   controlActive,
+  isPageSaveGesture,
   PAGE_BLOCK_KINDS,
   PAGE_TOOLBAR_CONTROLS,
   PAGE_TOOLBAR_SHORTCUTS,
@@ -196,5 +197,23 @@ describe("typography", () => {
 describe("blockKindOption fallbacks", () => {
   it("returns the plain-text entry for an unknown block value", () => {
     expect(blockKindOption("heading9" as never)).toEqual({ value: "paragraph", label: "Text" });
+  });
+});
+
+describe("save gesture", () => {
+  function chord(overrides: Partial<Parameters<typeof isPageSaveGesture>[0]> = {}) {
+    return { key: "s", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...overrides };
+  }
+
+  it("accepts either platform modifier without Alt or Shift", () => {
+    expect(isPageSaveGesture(chord({ metaKey: true }))).toBe(true);
+    expect(isPageSaveGesture(chord({ ctrlKey: true, key: "S" }))).toBe(true);
+  });
+
+  it("ignores a bare S, a modified S and another key", () => {
+    expect(isPageSaveGesture(chord())).toBe(false);
+    expect(isPageSaveGesture(chord({ ctrlKey: true, shiftKey: true }))).toBe(false);
+    expect(isPageSaveGesture(chord({ metaKey: true, altKey: true }))).toBe(false);
+    expect(isPageSaveGesture(chord({ ctrlKey: true, key: "p" }))).toBe(false);
   });
 });

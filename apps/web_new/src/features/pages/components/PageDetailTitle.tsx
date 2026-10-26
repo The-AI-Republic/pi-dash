@@ -41,6 +41,8 @@ export interface PageDetailTitleProps {
   onJumpToBody?: (() => void) | undefined;
   /** The draft changed by typing (the canvas keeps the mark pinned). */
   onDraftChange?: ((name: string) => void) | undefined;
+  /** Extra class on the title shell: the page's stored type size (PAGE-072). */
+  className?: string | undefined;
 }
 
 export function PageDetailTitle(props: PageDetailTitleProps): React.ReactElement {
@@ -63,6 +65,7 @@ function TitleShell({
   onRename,
   onJumpToBody,
   onDraftChange,
+  className,
 }: PageDetailTitleProps): React.ReactElement {
   const [draft, setDraft] = React.useState(() => titleTextOf(name));
   const [focused, setFocused] = React.useState(false);
@@ -123,7 +126,10 @@ function TitleShell({
 
   React.useEffect(() => clearTimer, [clearTimer]);
 
-  const rootClass = "page-title-editor min-h-16 py-(--space-4)";
+  const rootClass =
+    className === undefined
+      ? "page-title-editor min-h-16 py-(--space-4)"
+      : `page-title-editor min-h-16 py-(--space-4) ${className}`;
   return (
     <div
       id={`${pageId}-title`}

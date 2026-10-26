@@ -26,7 +26,7 @@ import { RichTextView } from "../../../shared/editor/RichTextView.js";
 import { notifyError } from "../../../shared/shell/toaster.js";
 import { getPageBodyDraft, setPageBodyDraft } from "../lib/pageBodyDraft.js";
 import { pageImageUploadFailure, uploadPageImage, type UploadedPageImage } from "../lib/pageMedia.js";
-import { pageKeyCommand } from "../lib/pageToolbar.js";
+import { isPageSaveGesture, pageKeyCommand } from "../lib/pageToolbar.js";
 import { titleIsEmpty } from "../lib/pageTitle.js";
 import { PageBodyEditor, type PageEditorHandle } from "./PageBodyEditor.js";
 import { PageCanvasHeader } from "./PageCanvasHeader.js";
@@ -58,6 +58,17 @@ export interface PageEditorSurfaceProps {
   /** Whether the sticky bar renders (read-only pages never mount here). */
   showBar: boolean;
   /**
+   * Receive the standard save gesture. The save slice (PAGE-064) forces
+   * its manual fallback save here; the chord itself is always captured so
+   * the browser dialog never opens (PAGE-073).
+   */
+  onSave?: (() => void) | undefined;
+  /** The stored full-width preference: the bar content marks itself wide. */
+  fullWidth?: boolean | undefined;
+  /** The stored type size and typeface (PAGE-072); no switcher exists. */
+  fontSize?: string | undefined;
+  fontStyle?: string | undefined;
+  /**
    * The cold-document skeleton holds the body area until the page's
    * document is known (PAGE-079); the header and bar render throughout.
    */
@@ -85,6 +96,10 @@ export function PageEditorSurface({
   onRename,
   onMarkPick,
   showBar,
+  onSave,
+  fullWidth = false,
+  fontSize,
+  fontStyle,
   bodyPending = false,
   onHandle,
   uploadImage,
@@ -106,6 +121,8 @@ export function PageEditorSurface({
 
   const onHandleRef = React.useRef(onHandle);
   onHandleRef.current = onHandle;
+  const saveRef = React.useRef(onSave);
+  saveRef.current = onSave;
 
   const onReady = React.useCallback((handle: PageEditorHandle) => {
     handleRef.current = handle;
@@ -176,6 +193,13 @@ export function PageEditorSurface({
   );
 
   const handleKeyDown = React.useCallback((event: KeyboardEvent): boolean => {
+    // The standard save gesture belongs to the page: capturing it keeps
+    // the browser's save dialog closed whether or not a saver is mounted.
+    if (isPageSaveGesture(event)) {
+      event.preventDefault();
+      saveRef.current?.();
+      return true;
+    }
     // Only the chords the editor leaves unbound (the alignments) run
     // here: ProseMirror skips its own key handler once a chord is
     // claimed, and an editor-native command returns null, so no chord
@@ -199,6 +223,7 @@ export function PageEditorSurface({
           onJumpToBody: () => handleRef.current?.focusStart(),
         }}
         logoProps={logoProps}
+        fontSize={fontSize ?? "large-font"}
         editable
         titleEmpty={titleIsEmpty(titleDraft)}
         onMarkPick={onMarkPick}
@@ -208,6 +233,7 @@ export function PageEditorSurface({
           state={state}
           onCommand={run}
           onBlockKind={pickBlock}
+          wide={fullWidth}
           mediaControls={
             <>
               <PageTableButton onInsert={() => handleRef.current?.insertTable()} />
@@ -222,7 +248,7 @@ export function PageEditorSurface({
           }
         />
       ) : null}
-      <div className="editor-container">
+      <div className={`editor-container text-size-${fontSize ?? "large-font"} text-face-${fontStyle ?? "sans-serif"}`}>
         {bodyPending ? (
           <PageBodySkeleton />
         ) : (

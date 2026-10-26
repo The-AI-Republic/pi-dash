@@ -211,3 +211,23 @@ export function blockKindOption(kind: PageBlockKind | null): { value: PageBlockK
   if (kind === null) return PAGE_BLOCK_FALLBACK;
   return PAGE_BLOCK_KINDS.find((entry) => entry.value === kind) ?? PAGE_BLOCK_FALLBACK;
 }
+
+/**
+ * Whether a keyboard event is the platform's standard save gesture
+ * (Command on macOS, Control elsewhere; never with Alt or Shift). The
+ * page captures it so the browser's own save dialog never opens; the
+ * save slice (PAGE-064, NEWFRONT-846) subscribes through the same chord
+ * and forces its manual fallback save. With no saver mounted the typed
+ * draft simply stays local (spec §9.2, PAGE-073).
+ */
+export function isPageSaveGesture(input: {
+  key: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+}): boolean {
+  if (input.altKey || input.shiftKey) return false;
+  if (!input.metaKey && !input.ctrlKey) return false;
+  return input.key.toLowerCase() === "s";
+}

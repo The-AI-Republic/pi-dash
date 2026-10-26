@@ -18,7 +18,7 @@ function png(): File {
 
 describe("PageImageButton", () => {
   it("is one square icon tile named Image with a hidden image input", () => {
-    render(<PageImageButton onPick={vi.fn()} />);
+    const { container } = render(<PageImageButton onPick={vi.fn()} />);
     const button = screen.getByRole("button", { name: "Image" });
     expect(button).toHaveAttribute("data-testid", PAGE_IMAGE_TEST_ID);
     expect(button.className).toContain("size-7");
@@ -26,6 +26,9 @@ describe("PageImageButton", () => {
     const input = screen.getByTestId(PAGE_IMAGE_INPUT_TEST_ID);
     expect(input).toHaveAttribute("type", "file");
     expect(input).toHaveAttribute("accept", "image/*");
+    // PAGE-082: the picker sits outside the page surface, so the canvas
+    // carries no file-input affordance of its own.
+    expect(container.querySelector("input[type='file']")).toBeNull();
   });
 
   it("opens the picker on press without stealing the caret", () => {

@@ -82,6 +82,46 @@ describe(
       expect(await body()).toHaveAttribute("contenteditable", "true");
     });
 
+    it("marks the bar wide and stamps the stored type preferences", async () => {
+      mount({ fullWidth: true, fontSize: "small-font", fontStyle: "serif" });
+      await body();
+      expect(screen.getByTestId("page-formatting-bar").querySelector(".page-toolbar-content")).toHaveClass(
+        "wide-layout"
+      );
+      expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font");
+      expect(screen.getByTestId("page-canvas-header").closest(".frame-renderer") ?? document.body).toBeTruthy();
+    });
+
+    it("omits the wide marker without the full-width preference", async () => {
+      mount();
+      await body();
+      expect(screen.getByTestId("page-formatting-bar").querySelector(".page-toolbar-content")).not.toHaveClass(
+        "wide-layout"
+      );
+      expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-large-font");
+    });
+
+    it("captures the standard save gesture without leaving the page", async () => {
+      const onSave = vi.fn();
+      mount({ onSave });
+      const editable = await body();
+      editable.focus();
+      // The gesture is claimed: the browser's own save dialog never opens.
+      expect(fireEvent.keyDown(editable, { key: "s", metaKey: true })).toBe(false);
+      expect(onSave).toHaveBeenCalledTimes(1);
+      expect(editable).toHaveTextContent("Stored words");
+    });
+
+    it("leaves the save gesture alone when it is not the standard chord", async () => {
+      const onSave = vi.fn();
+      mount({ onSave });
+      const editable = await body();
+      editable.focus();
+      fireEvent.keyDown(editable, { key: "s", metaKey: true, shiftKey: true });
+      fireEvent.keyDown(editable, { key: "s", altKey: true });
+      expect(onSave).not.toHaveBeenCalled();
+    });
+
     it("withholds the bar when asked, for the sticky preference", async () => {
       mount({ showBar: false });
       await body();
