@@ -98,10 +98,11 @@ pub fn routes() -> Router<AppState> {
         .route(REVOKE_PATH, owned_post(post(post_revoke)))
 }
 
-/// A GET-owned path: the GET handler serves from Rust; HEAD rides
-/// axum's automatic GET handling (body stripped, like Django's GET-backed
-/// HEAD); every other method answers the local 405 past the auth gate,
-/// and only OPTIONS proxies for DRF's metadata.
+/// A GET-owned path: the GET handler serves from Rust; every other
+/// method answers the local 405 past the auth gate, and only OPTIONS
+/// proxies for DRF's metadata. HEAD is explicit: the view defines no
+/// `head`, so DRF 405s it — axum's automatic GET-backed HEAD would
+/// wrongly answer 200.
 fn owned_get(
     get_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -110,16 +111,18 @@ fn owned_get(
         .put(workspaces_method_not_allowed)
         .patch(workspaces_method_not_allowed)
         .delete(workspaces_method_not_allowed)
+        .head(workspaces_method_not_allowed)
         .trace(workspaces_method_not_allowed)
         .connect(workspaces_method_not_allowed)
         .options(crate::edge::proxy)
         .fallback(workspaces_method_not_allowed)
 }
 
-/// A POST-owned path: the POST handler serves from Rust; HEAD rides the
-/// GET arm (local 405, body stripped, like Django's empty 405); every
-/// other method answers the local 405 past the auth gate, and only
-/// OPTIONS proxies for DRF's metadata.
+/// A POST-owned path: the POST handler serves from Rust; every other
+/// method answers the local 405 past the auth gate, and only OPTIONS
+/// proxies for DRF's metadata. HEAD is explicit (DRF 405s it) so the
+/// denial keeps its body, which runserver sends on the wire — axum's
+/// automatic GET-backed HEAD would strip it.
 fn owned_post(
     post_handler: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
@@ -128,6 +131,7 @@ fn owned_post(
         .put(post_only_method_not_allowed)
         .patch(post_only_method_not_allowed)
         .delete(post_only_method_not_allowed)
+        .head(post_only_method_not_allowed)
         .trace(post_only_method_not_allowed)
         .connect(post_only_method_not_allowed)
         .options(crate::edge::proxy)
@@ -339,11 +343,13 @@ fn not_found(error: &str) -> Failure {
 // wrong-method denial (PIDASHCONV-1478)
 // ---------------------------------------------------------------------------
 
-/// DRF `default_response_headers` `Allow` for the GET-owned view
-/// (`views.py:160-166`; probed live).
-const ALLOW_WORKSPACES: &str = "GET, HEAD, OPTIONS";
-/// DRF `default_response_headers` `Allow` for the POST-owned views
-/// (probed live).
+/// DRF `default_response_headers` `Allow` for the GET-owned view:
+/// `WorkspaceListEndpoint` defines only `get` (`device.py:395`), so
+/// `_allowed_methods` is `GET, OPTIONS` (plus the inherited DRF
+/// `options`; there is no `head`).
+const ALLOW_WORKSPACES: &str = "GET, OPTIONS";
+/// DRF `default_response_headers` `Allow` for the POST-owned views,
+/// which define only `post` (`device.py:417,496`).
 const ALLOW_POST_ONLY: &str = "POST, OPTIONS";
 
 /// DRF `MethodNotAllowed` body for these views (compact JSON, probed
@@ -927,8 +933,9 @@ mod tests {
 
     #[test]
     fn method_not_allowed_body_and_allow_match_live_django() {
-        // Probed live (PIDASHCONV-1478): compact JSON, lowercase
-        // `detail`, view-specific `Allow`.
+        // DRF `exception_handler` (`{'Detail': ...}`) + compact
+        // `JSONRenderer`, and each view's `_allowed_methods`
+        // (PIDASHCONV-1478).
         assert_eq!(
             not_allowed_body("GET"),
             r#"{"detail":"Method \"GET\" not allowed."}"#
@@ -941,7 +948,7 @@ mod tests {
             not_allowed_body("DELETE"),
             r#"{"detail":"Method \"DELETE\" not allowed."}"#
         );
-        assert_eq!(ALLOW_WORKSPACES, "GET, HEAD, OPTIONS");
+        assert_eq!(ALLOW_WORKSPACES, "GET, OPTIONS");
         assert_eq!(ALLOW_POST_ONLY, "POST, OPTIONS");
     }
 
