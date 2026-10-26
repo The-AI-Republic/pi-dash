@@ -171,6 +171,28 @@ def test_create_search_mismatch_404s_but_row_exists(user_client, world, db):
     assert count == 1
 
 
+def test_create_in_archived_project_404s_but_rows_exist(member_client, world, db):
+    # An archived URL project makes the create re-read miss: get_queryset()
+    # filters projects__archived_at__isnull=True together with the active
+    # membership (page/base.py:92-96), so .get() raises DoesNotExist, which
+    # BaseViewSet.handle_exception maps to 404 — even though the pages row
+    # and the project_pages link were written and page_transaction published
+    # (page/base.py:141-149). Write-then-404, like the ?search= mismatch
+    # above (PIDASHCONV-1411).
+    db.execute("UPDATE projects SET archived_at = now() WHERE id=%s", (world["project"]["id"],))
+    name = f"Archived project {uuid.uuid4().hex[:8]}"
+    response = member_client.post(page_url(world), json={"name": name})
+    assert response.status_code == 404
+    assert response.json() == {"error": "The required object does not exist."}
+    page_id = db.fetchval("SELECT id FROM pages WHERE name=%s AND deleted_at IS NULL", (name,))
+    assert page_id is not None
+    links = db.fetchval(
+        "SELECT count(*) FROM project_pages WHERE page_id=%s AND project_id=%s AND deleted_at IS NULL",
+        (str(page_id), world["project"]["id"]),
+    )
+    assert links == 1
+
+
 def test_search_nul_rejected_on_list_and_retrieve(user_client, world):
     # DRF validates the raw ?search= value with CharField before splitting;
     # ProhibitNullCharactersValidator answers 400 with the bare message list
