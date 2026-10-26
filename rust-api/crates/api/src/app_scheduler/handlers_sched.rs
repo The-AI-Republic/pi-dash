@@ -73,6 +73,7 @@ use pidash_services::app_scheduler::{queries, shape};
 use super::gate::{self, Gate};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -827,8 +828,14 @@ pub async fn scheduler_detail(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(scheduler_id) = scheduler_raw.parse::<uuid::Uuid>() else {
-        return crate::edge::proxy(State(state), req).await;
+    let scheduler_id = match classify_uuid_segment(&scheduler_raw) {
+        UuidSegment::Canonical(id) => id,
+        // Django's `<uuid:>` converter routes only the canonical
+        // spelling; non-canonical and garbage proxy to its resolver
+        // 404 (PIDASHCONV-1475).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let gate = match gate::resolve_gate(&state, &Gate::WorkspaceAdmin, &slug, None, extension).await
     {
@@ -875,8 +882,14 @@ pub async fn scheduler_patch(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(scheduler_id) = scheduler_raw.parse::<uuid::Uuid>() else {
-        return crate::edge::proxy(State(state), req).await;
+    let scheduler_id = match classify_uuid_segment(&scheduler_raw) {
+        UuidSegment::Canonical(id) => id,
+        // Django's `<uuid:>` converter routes only the canonical
+        // spelling; non-canonical and garbage proxy to its resolver
+        // 404 (PIDASHCONV-1475).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let gate = match gate::resolve_gate(&state, &Gate::WorkspaceAdmin, &slug, None, extension).await
     {
@@ -1013,8 +1026,14 @@ pub async fn scheduler_delete(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(scheduler_id) = scheduler_raw.parse::<uuid::Uuid>() else {
-        return crate::edge::proxy(State(state), req).await;
+    let scheduler_id = match classify_uuid_segment(&scheduler_raw) {
+        UuidSegment::Canonical(id) => id,
+        // Django's `<uuid:>` converter routes only the canonical
+        // spelling; non-canonical and garbage proxy to its resolver
+        // 404 (PIDASHCONV-1475).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let gate = match gate::resolve_gate(&state, &Gate::WorkspaceAdmin, &slug, None, extension).await
     {
