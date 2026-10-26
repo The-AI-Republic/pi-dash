@@ -603,6 +603,23 @@ export class WebNewDriver implements ParityDriver {
   /** Every wait below is explicitly bounded; a bare wait would hang to the test timeout. */
   private static readonly WAIT_MS = 30_000;
 
+  // --- Pages navigation pane + versions (NEWFRONT-317, PAGE-045-054):
+  // --- the version-detail spy and the member-directory filter share the
+  // --- per-driver state below.
+
+  /** Version-detail requests the spy counted so far. */
+  private pagesPaneDetailSeen = 0;
+  /** What the spy answers next: pass through, stall, or fail. */
+  private pagesPaneDetailMode: "pass" | "stall" | "fail" = "pass";
+  /** Held version-detail requests, released by the test hook. */
+  private pagesPaneDetailGates: Array<() => void> = [];
+  /** Whether the version-detail route is installed. */
+  private pagesPaneDetailHooked = false;
+  /** A member id the directory answers omit, or null for the whole list. */
+  private pagesPaneOmittedMember: string | null = null;
+  /** Whether the member-list route is installed. */
+  private pagesPaneMemberHooked = false;
+
   // --- Archives shell (NEWFRONT-698, ARCH-001..003). Tab strip and
   // --- navigation, addresses, titles, badge, back control, skeleton
   // --- slot, traffic spy and priming. Other slices call these
@@ -22798,194 +22815,531 @@ export class WebNewDriver implements ParityDriver {
     return popup.url();
   }
 
-  // --- NEWFRONT-317 (pages navigation pane + versions, PAGE-045-054).
-  // --- Appended stubs; existing stubs above are untouched per the shared
-  // --- driver contract. The new app has no pages surface yet (Stage 0
-  // --- oracle convention: every method throws until the area lands).
+  // --- Pages navigation pane + versions (NEWFRONT-317, PAGE-045-054).
+  // --- The pane is a right-hand aside that stays mounted and slides by its
+  // --- own width; the new app marks its state on `data-open`, so width,
+  // --- tab order and the canvas reflow all read from the shipped surface.
 
-  async pagesPaneOpenDetail(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
-    return todo("pagesPaneOpenDetail");
+  /** The pane shell; it stays mounted while shut. */
+  private pagesPaneRoot(): Locator {
+    return this.page.getByTestId("page-navigation-pane");
+  }
+
+  /** The scrolling canvas column and the body container inside it. */
+  private pagesPaneCanvasScroll(): Locator {
+    return this.page.getByTestId("page-canvas-scroll");
+  }
+
+  private pagesPaneLiveBody(): Locator {
+    return this.page.locator("#page-content-container .frame-renderer > .editor-container").first();
+  }
+
+  private pagesPaneLiveEditor(): Locator {
+    return this.pagesPaneLiveBody().locator('[contenteditable="true"]').first();
+  }
+
+  private pagesPaneOverlay(): Locator {
+    return this.page.getByTestId("page-version-overlay");
+  }
+
+  private pagesPanePreviewButton(): Locator {
+    return this.page.getByTestId("page-heading-preview").getByRole("button", { name: "Open outline" });
+  }
+
+  private pagesPanePreviewCard(): Locator {
+    // The card is the preview container's direct child; the bars are divs
+    // inside the button before it in DOM order.
+    return this.page.getByTestId("page-heading-preview").locator(":scope > div").first();
+  }
+
+  private pagesPaneTimeline(): Locator {
+    return this.page.getByRole("region", { name: "Version history" });
+  }
+
+  private async pagesPaneWaitBody(): Promise<void> {
+    await this.page
+      .locator("#page-content-container .frame-renderer > .editor-container")
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private async pagesPaneWaitLiveEditor(): Promise<void> {
+    await this.pagesPaneLiveEditor().waitFor({ state: "visible", timeout: 90_000 });
+  }
+
+  async pagesPaneOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.pagesPaneWaitBody();
+    await this.pagesPaneWaitLiveEditor();
   }
 
   async pagesPaneOpenDetailQuery(
-    _workspaceSlug: string,
-    _projectId: string,
-    _pageId: string,
-    _query: string
+    workspaceSlug: string,
+    projectId: string,
+    pageId: string,
+    query: string
   ): Promise<void> {
-    return todo("pagesPaneOpenDetailQuery");
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}?${query}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.pagesPaneWaitBody();
+    await this.pagesPaneWaitLiveEditor();
   }
 
-  async pagesPaneOpenDetailReadOnly(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
-    return todo("pagesPaneOpenDetailReadOnly");
+  async pagesPaneOpenDetailReadOnly(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    // A locked or shelved page paints the stored body, never an editor.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.pagesPaneWaitBody();
   }
 
   async pagesPaneEditorText(): Promise<string> {
-    return todo("pagesPaneEditorText");
+    const editable = this.pagesPaneLiveEditor();
+    if ((await editable.count()) > 0) {
+      return ((await editable.innerText().catch(() => "")) ?? "").trim();
+    }
+    if ((await this.pagesPaneLiveBody().count()) === 0) return "";
+    return (
+      (await this.pagesPaneLiveBody()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
   async pagesPaneEditorClickEnd(): Promise<void> {
-    return todo("pagesPaneEditorClickEnd");
+    const editor = this.pagesPaneLiveEditor();
+    const paragraphs = editor.locator("p");
+    if ((await paragraphs.count()) > 0) {
+      await paragraphs.last().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.keyboard.press("End");
   }
 
-  async pagesPaneEditorType(_text: string): Promise<void> {
-    return todo("pagesPaneEditorType");
+  async pagesPaneEditorType(text: string): Promise<void> {
+    await this.page.keyboard.type(text);
   }
 
   async pagesPaneEditorPressEnter(): Promise<void> {
-    return todo("pagesPaneEditorPressEnter");
+    await this.page.keyboard.press("Enter");
   }
 
   async pagesPaneEditorScrollTop(): Promise<number> {
-    return todo("pagesPaneEditorScrollTop");
+    return this.pagesPaneCanvasScroll().evaluate((element) => element.scrollTop);
   }
 
-  async pagesPaneEditorPasteHtml(_html: string): Promise<void> {
-    return todo("pagesPaneEditorPasteHtml");
+  async pagesPaneEditorPasteHtml(html: string): Promise<void> {
+    // A synthetic paste carrying text/html exercises the editor's own
+    // handler (headings, images) without clipboard permissions.
+    await this.pagesPaneEditorClickEnd();
+    await this.pagesPaneLiveEditor().evaluate((element, markup) => {
+      const transfer = new DataTransfer();
+      transfer.setData("text/html", markup);
+      element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
+    }, html);
   }
 
-  async pagesPaneQueryParam(_key: string): Promise<string | null> {
-    return todo("pagesPaneQueryParam");
+  async pagesPaneQueryParam(key: string): Promise<string | null> {
+    return new URL(this.page.url()).searchParams.get(key);
   }
 
   async pagesPaneIsOpen(): Promise<boolean> {
-    return todo("pagesPaneIsOpen");
+    const pane = this.pagesPaneRoot();
+    if ((await pane.count()) === 0) return false;
+    return (await pane.first().getAttribute("data-open")) === "true";
   }
 
   async pagesPaneOpenViaToolbar(): Promise<void> {
-    return todo("pagesPaneOpenViaToolbar");
+    // The header toggle exists on every detail; the floating edge control
+    // replaces it when the sticky bar is absent. Either one opens the pane.
+    const header = this.page.getByTestId("page-pane-toggle");
+    const control =
+      (await header.count()) > 0 ? header.first() : this.page.getByTestId("page-floating-pane-toggle").first();
+    await control.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesPaneIsOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
   async pagesPaneClose(): Promise<void> {
-    return todo("pagesPaneClose");
+    await this.pagesPaneRoot()
+      .getByRole("button", { name: "Close navigation pane" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesPaneIsOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
   }
 
   async pagesPaneWidth(): Promise<number> {
-    return todo("pagesPaneWidth");
+    return this.pagesPaneRoot()
+      .first()
+      .evaluate((element) => element.getBoundingClientRect().width);
   }
 
   async pagesPaneTabNames(): Promise<string[]> {
-    return todo("pagesPaneTabNames");
+    if (!(await this.pagesPaneIsOpen())) return [];
+    const names = await this.pagesPaneRoot().getByRole("tab").allInnerTexts();
+    return names.map((name) => name.trim()).filter((name) => name !== "");
   }
 
   async pagesPaneActiveTab(): Promise<string | null> {
-    return todo("pagesPaneActiveTab");
+    return this.pagesPaneQueryParam("paneTab");
   }
 
-  async pagesPaneSelectTab(_name: string): Promise<void> {
-    return todo("pagesPaneSelectTab");
+  async pagesPaneSelectTab(name: string): Promise<void> {
+    const tab = this.pagesPaneRoot().getByRole("tab", { name, exact: true });
+    await tab.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => tab.getAttribute("aria-selected"), { timeout: WebNewDriver.WAIT_MS }).toBe("true");
   }
 
   async pagesPaneCanvasWidth(): Promise<number> {
-    return todo("pagesPaneCanvasWidth");
+    const box = await this.page.locator("#page-content-container").boundingBox();
+    if (box === null) throw new Error("[parity] page canvas container has no rendered box.");
+    return box.width;
   }
 
   async pagesPaneSlideTransition(): Promise<boolean> {
-    return todo("pagesPaneSlideTransition");
+    const duration = await this.pagesPaneRoot()
+      .first()
+      .evaluate((element) => getComputedStyle(element).transitionDuration);
+    return duration
+      .split(",")
+      .map((part) => Number.parseFloat(part.trim()))
+      .some((seconds) => Number.isFinite(seconds) && seconds > 0);
   }
 
   async pagesPanePreviewVisible(): Promise<boolean> {
-    return todo("pagesPanePreviewVisible");
+    const preview = this.pagesPanePreviewButton();
+    return (await preview.count()) > 0 && (await preview.first().isVisible());
   }
 
   async pagesPanePreviewBarCount(): Promise<number> {
-    return todo("pagesPanePreviewBarCount");
+    if ((await this.pagesPanePreviewButton().count()) === 0) return 0;
+    return this.pagesPanePreviewButton().first().locator('div[style*="width"]').count();
   }
 
   async pagesPanePreviewHover(): Promise<void> {
-    return todo("pagesPanePreviewHover");
+    await this.pagesPanePreviewButton().hover({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesPanePreviewCardVisible(): Promise<boolean> {
-    return todo("pagesPanePreviewCardVisible");
+    // The card hides with opacity (a sized box), so visibility lies; the
+    // computed opacity is the state signal.
+    const card = this.pagesPanePreviewCard();
+    if ((await card.count()) === 0) return false;
+    const opacity = await card
+      .first()
+      .evaluate((element) => getComputedStyle(element).opacity)
+      .catch(() => "0");
+    return Number.parseFloat(opacity) > 0;
   }
 
   async pagesPanePreviewCardHeadings(): Promise<string[]> {
-    return todo("pagesPanePreviewCardHeadings");
+    const card = this.pagesPanePreviewCard();
+    if ((await card.count()) === 0) return [];
+    const names = await card.first().getByRole("button").allInnerTexts();
+    return names.map((name) => name.trim()).filter((name) => name !== "");
   }
 
   async pagesPanePreviewOpen(): Promise<void> {
-    return todo("pagesPanePreviewOpen");
+    await this.pagesPanePreviewButton().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesPaneIsOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
   async pagesPaneOutlineHeadings(): Promise<PagesPaneOutlineHeading[]> {
-    return todo("pagesPaneOutlineHeadings");
+    const list = this.pagesPaneRoot().getByTestId("page-outline");
+    if ((await list.count()) === 0) return [];
+    const rows = await list
+      .first()
+      .locator("button")
+      .evaluateAll((nodes) =>
+        nodes.map((node) => ({
+          text: (node.textContent ?? "").trim(),
+          padding: Number.parseFloat(getComputedStyle(node).paddingLeft) || 0,
+        }))
+      );
+    // Levels share a 1:2:4 indentation ratio; ranking against the smallest
+    // keeps the reading honest under any root font size. Blank rows drop
+    // out first so an empty node never sets the baseline.
+    const kept = rows.filter((row) => row.text !== "");
+    const min = kept.reduce((least, row) => Math.min(least, row.padding), Number.POSITIVE_INFINITY);
+    return kept.map((row) => {
+      const ratio = min > 0 && Number.isFinite(row.padding) ? row.padding / min : Number.NaN;
+      const level: 1 | 2 | 3 | null =
+        Math.abs(ratio - 1) < 0.01 ? 1 : Math.abs(ratio - 2) < 0.01 ? 2 : Math.abs(ratio - 4) < 0.01 ? 3 : null;
+      return { level, text: row.text };
+    });
   }
 
-  async pagesPaneOutlineClick(_text: string): Promise<void> {
-    return todo("pagesPaneOutlineClick");
+  async pagesPaneOutlineClick(text: string): Promise<void> {
+    await this.pagesPaneRoot()
+      .getByRole("button", { name: text, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesPaneOutlineEmptyVisible(): Promise<boolean> {
-    return todo("pagesPaneOutlineEmptyVisible");
+    const empty = this.pagesPaneRoot().getByTestId("page-outline-empty");
+    return (await empty.count()) > 0 && (await empty.first().isVisible());
   }
 
   async pagesPaneAssetsRows(): Promise<PagesPaneAssetRow[]> {
-    return todo("pagesPaneAssetsRows");
+    const scopes = this.pagesPaneRoot().getByTestId("page-asset-row");
+    const total = await scopes.count();
+    const rows: PagesPaneAssetRow[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const row = scopes.nth(index);
+      const name = (
+        (await row
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (name === "") continue;
+      const thumbnail = row.locator("div");
+      let hasThumbnail = false;
+      if ((await thumbnail.count()) > 0) {
+        const background = await thumbnail
+          .first()
+          .evaluate((element) => getComputedStyle(element).backgroundImage)
+          .catch(() => "");
+        hasThumbnail = background.includes("url(");
+      }
+      rows.push({
+        name,
+        thumbnail: hasThumbnail,
+        viewHref: (await row.getAttribute("href")) ?? "",
+        downloadHref: (await row.locator("a[data-asset-download]").first().getAttribute("href")) ?? "",
+      });
+    }
+    return rows;
   }
 
-  async pagesPaneAssetsDownloadVisible(_name: string): Promise<boolean> {
-    return todo("pagesPaneAssetsDownloadVisible");
+  async pagesPaneAssetsDownloadVisible(name: string): Promise<boolean> {
+    const scopes = this.pagesPaneRoot().getByTestId("page-asset-row");
+    const total = await scopes.count();
+    for (let index = 0; index < total; index += 1) {
+      const row = scopes.nth(index);
+      const text = (
+        (await row
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== name) continue;
+      await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+      await row.hover({ timeout: WebNewDriver.WAIT_MS });
+      const download = row.locator("a[data-asset-download]");
+      if ((await download.count()) === 0) return false;
+      // The action hides with opacity and pointer-events rather than
+      // unmounting, so visibility alone would lie.
+      await expect
+        .poll(
+          async () =>
+            download
+              .first()
+              .evaluate((element) => {
+                const style = getComputedStyle(element);
+                return style.pointerEvents !== "none" && Number.parseFloat(style.opacity) > 0;
+              })
+              .catch(() => false),
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+        .toBe(true);
+      return true;
+    }
+    return false;
   }
 
   async pagesPaneAssetsEmptyVisible(): Promise<boolean> {
-    return todo("pagesPaneAssetsEmptyVisible");
+    const empty = this.pagesPaneRoot().getByTestId("page-assets-empty");
+    return (await empty.count()) > 0 && (await empty.first().isVisible());
   }
 
   async pagesPaneStats(): Promise<PagesPaneStats> {
-    return todo("pagesPaneStats");
+    const scope = this.pagesPaneRoot().getByTestId("page-document-stats");
+    const read = async (key: string): Promise<string> => {
+      const card = scope.locator(`[data-stat="${key}"] h6`).first();
+      return ((await card.innerText().catch(() => "")) ?? "").trim();
+    };
+    const words = Number.parseInt(await read("words"), 10);
+    const characters = Number.parseInt(await read("characters"), 10);
+    const paragraphs = Number.parseInt(await read("paragraphs"), 10);
+    if (!Number.isFinite(words) || !Number.isFinite(characters) || !Number.isFinite(paragraphs)) {
+      throw new Error("[parity] document statistics cards carried non-numeric counts.");
+    }
+    return { words, characters, paragraphs, readTime: await read("read-time") };
   }
 
   async pagesPaneActors(): Promise<PagesPaneActor[]> {
-    return todo("pagesPaneActors");
+    const scope = this.pagesPaneRoot().getByTestId("page-actors");
+    const rows = scope.locator(":scope > div");
+    const read = async (index: number, role: "edited" | "created"): Promise<PagesPaneActor> => {
+      const row = rows.nth(index);
+      const identity = row.locator("div").first();
+      const link = identity.getByRole("link").first();
+      return {
+        role,
+        name: ((await link.innerText().catch(() => "")) ?? "").trim(),
+        profileHref: (await link.getAttribute("href")) ?? "",
+        timeText: (
+          (await identity
+            .locator("span")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim(),
+      };
+    };
+    return [await read(0, "edited"), await read(1, "created")];
   }
 
   async pagesPaneVersionEntries(): Promise<PagesPaneVersionEntry[]> {
-    return todo("pagesPaneVersionEntries");
+    const list = this.pagesPaneTimeline().locator("ul").first();
+    const items = list.locator(":scope > li");
+    const total = await items.count();
+    const entries: PagesPaneVersionEntry[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const link = items.nth(index).getByRole("link").first();
+      if ((await link.count()) === 0) continue;
+      const id = await link.getAttribute("data-version-id");
+      const active = (await link.getAttribute("aria-current")) === "true";
+      const label = (
+        (await link
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const author =
+        id === null
+          ? ""
+          : (
+              (await link
+                .locator("span")
+                .first()
+                .innerText()
+                .catch(() => "")) ?? ""
+            ).trim();
+      entries.push({ id, label, author, active });
+    }
+    return entries;
   }
 
-  async pagesPaneSelectVersion(_versionId: string): Promise<void> {
-    return todo("pagesPaneSelectVersion");
+  async pagesPaneSelectVersion(versionId: string): Promise<void> {
+    await this.pagesPaneTimeline()
+      .locator(`a[data-version-id="${versionId}"]`)
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesPaneOverlayOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
   async pagesPaneSelectCurrentVersion(): Promise<void> {
-    return todo("pagesPaneSelectCurrentVersion");
+    await this.pagesPaneTimeline().locator("a:not([data-version-id])").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesPaneOverlayOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
   }
 
   async pagesPaneOverlayOpen(): Promise<boolean> {
-    return todo("pagesPaneOverlayOpen");
+    return (await this.pagesPaneOverlay().count()) > 0;
   }
 
   async pagesPaneOverlayHeader(): Promise<PagesPaneOverlayHeader> {
-    return todo("pagesPaneOverlayHeader");
+    const overlay = this.pagesPaneOverlay();
+    if ((await overlay.count()) === 0) return { title: "", viewOnly: false };
+    const title = (
+      (await overlay
+        .locator("h6")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const viewOnly =
+      (await overlay.getByText("View only", { exact: true }).count()) > 0 &&
+      (await overlay.getByText("View only", { exact: true }).first().isVisible());
+    return { title, viewOnly };
   }
 
   async pagesPaneOverlayText(): Promise<string> {
-    return todo("pagesPaneOverlayText");
+    const body = this.pagesPaneOverlay().getByRole("region", { name: "Version body" });
+    if ((await body.count()) === 0) return "";
+    return (
+      (await body
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
   async pagesPaneOverlaySkeletonVisible(): Promise<boolean> {
-    return todo("pagesPaneOverlaySkeletonVisible");
+    if (await this.pagesPaneOverlayErrorVisible()) return false;
+    const skeleton = this.pagesPaneOverlay().getByTestId("page-version-skeleton");
+    return (await skeleton.count()) > 0 && (await skeleton.first().isVisible());
+  }
+
+  /** Install the version-detail spy once; the mode flag steers each answer. */
+  private async pagesPaneDetailHook(): Promise<void> {
+    if (this.pagesPaneDetailHooked) return;
+    this.pagesPaneDetailHooked = true;
+    const detailOnly = /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/pages\/[^/]+\/versions\/[^/]+\/$/;
+    await this.page.route(detailOnly, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      this.pagesPaneDetailSeen += 1;
+      if (this.pagesPaneDetailMode === "fail") {
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "parity-forced-version-failure" }),
+        });
+        return;
+      }
+      if (this.pagesPaneDetailMode === "stall") {
+        await new Promise<void>((resolve) => {
+          this.pagesPaneDetailGates.push(resolve);
+        });
+      }
+      await route.fallback();
+    });
   }
 
   async pagesPaneOverlayStallDetail(): Promise<void> {
-    return todo("pagesPaneOverlayStallDetail");
+    this.pagesPaneDetailSeen = 0;
+    this.pagesPaneDetailMode = "stall";
+    await this.pagesPaneDetailHook();
   }
 
   async pagesPaneOverlayReleaseDetail(): Promise<void> {
-    return todo("pagesPaneOverlayReleaseDetail");
+    const gates = this.pagesPaneDetailGates;
+    this.pagesPaneDetailGates = [];
+    this.pagesPaneDetailMode = "pass";
+    gates.forEach((release) => release());
   }
 
   async pagesPaneRestoreVisible(): Promise<boolean> {
-    return todo("pagesPaneRestoreVisible");
+    if (!(await this.pagesPaneOverlayOpen()) || (await this.pagesPaneOverlayErrorVisible())) return false;
+    const restore = this.pagesPaneOverlay().getByRole("button", { name: "Restore", exact: true });
+    return (await restore.count()) > 0 && (await restore.first().isVisible());
   }
 
   async pagesPaneRestore(): Promise<void> {
-    return todo("pagesPaneRestore");
+    await this.pagesPaneOverlay()
+      .getByRole("button", { name: "Restore", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // Settle on whichever outcome the restore takes: the overlay closing
+    // (restored) or a notice landing (failed restores keep it open).
+    await expect
+      .poll(async () => !(await this.pagesPaneOverlayOpen()) || (await this.rulesLastToast()) !== null, {
+        timeout: 60_000,
+      })
+      .toBe(true);
   }
 
   async pagesPaneOverlayErrorVisible(): Promise<boolean> {
-    return todo("pagesPaneOverlayErrorVisible");
+    const error = this.pagesPaneOverlay().getByTestId("page-version-error");
+    return (await error.count()) > 0 && (await error.first().isVisible());
   }
 
   async pagesPaneOverlayErrorTexts(): Promise<{
@@ -22993,47 +23347,120 @@ export class WebNewDriver implements ParityDriver {
     body: string | null;
     retry: string | null;
   }> {
-    return todo("pagesPaneOverlayErrorTexts");
+    if (!(await this.pagesPaneOverlayErrorVisible())) return { heading: null, body: null, retry: null };
+    const panel = this.pagesPaneOverlay().getByTestId("page-version-error");
+    const heading = panel.locator("h2").first();
+    const body = panel.locator("p").first();
+    const retry = panel.getByRole("button").first();
+    return {
+      heading: ((await heading.innerText().catch(() => "")) ?? "").trim() || null,
+      body: (await body.count()) > 0 ? ((await body.innerText().catch(() => "")) ?? "").trim() || null : null,
+      retry: (await retry.count()) > 0 ? ((await retry.innerText().catch(() => "")) ?? "").trim() || null : null,
+    };
   }
 
   async pagesPaneOverlayRetry(): Promise<void> {
-    return todo("pagesPaneOverlayRetry");
+    await this.pagesPaneOverlay()
+      .getByTestId("page-version-error")
+      .getByRole("button")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesPaneFailVersionDetail(): Promise<void> {
-    return todo("pagesPaneFailVersionDetail");
+    this.pagesPaneDetailSeen = 0;
+    this.pagesPaneDetailMode = "fail";
+    await this.pagesPaneDetailHook();
   }
 
   async pagesPaneUnfailVersionDetail(): Promise<void> {
-    return todo("pagesPaneUnfailVersionDetail");
+    this.pagesPaneDetailMode = "pass";
   }
 
   async pagesPaneVersionDetailRequests(): Promise<number> {
-    return todo("pagesPaneVersionDetailRequests");
+    return this.pagesPaneDetailSeen;
   }
 
-  async pagesPaneEditorClickText(_text: string): Promise<void> {
-    return todo("pagesPaneEditorClickText");
+  async pagesPaneEditorClickText(text: string): Promise<void> {
+    await this.pagesPaneLiveBody().getByText(text).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesPaneEditorClear(): Promise<void> {
-    return todo("pagesPaneEditorClear");
+    await this.pagesPaneEditorClickEnd();
+    await this.page.keyboard.press("ControlOrMeta+a");
+    await this.page.keyboard.press("Backspace");
   }
 
   async pagesPaneEditorDeleteImage(): Promise<void> {
-    return todo("pagesPaneEditorDeleteImage");
+    // Select-all spares image nodes, so the removal clicks the block itself
+    // to select it before pressing Backspace, as a user would.
+    const image = this.pagesPaneLiveBody().locator("image-component").first();
+    const target = (await image.count()) > 0 ? image : this.pagesPaneLiveBody().locator("img").first();
+    await target.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Backspace");
   }
 
-  async pagesPaneOmitWorkspaceMember(_userId: string): Promise<void> {
-    return todo("pagesPaneOmitWorkspaceMember");
+  /** Install the member-list filter once; the omitted id steers each answer. */
+  private async pagesPaneMemberHook(): Promise<void> {
+    if (this.pagesPaneMemberHooked) return;
+    this.pagesPaneMemberHooked = true;
+    const omit = async (route: Route): Promise<void> => {
+      const omitted = this.pagesPaneOmittedMember;
+      if (route.request().method() !== "GET" || omitted === null) {
+        await route.fallback();
+        return;
+      }
+      const answer = await route.fetch();
+      let payload: unknown;
+      try {
+        payload = await answer.json();
+      } catch {
+        await route.fallback();
+        return;
+      }
+      const rows = Array.isArray(payload) ? payload : (payload as { results?: unknown[] }).results;
+      if (!Array.isArray(rows)) {
+        await route.fallback();
+        return;
+      }
+      const kept = rows.filter((row) => {
+        const record = row as { member?: { id?: unknown }; id?: unknown };
+        return record.member?.id !== omitted && record.id !== omitted;
+      });
+      const body = Array.isArray(payload) ? kept : { ...(payload as Record<string, unknown>), results: kept };
+      await route.fulfill({ status: answer.status(), contentType: "application/json", body: JSON.stringify(body) });
+    };
+    await this.page.route("**/api/workspaces/*/members/", omit);
+    await this.page.route("**/api/workspaces/*/projects/*/members/", omit);
+  }
+
+  async pagesPaneOmitWorkspaceMember(userId: string): Promise<void> {
+    // Stage the client-side condition a deactivated account produces (the
+    // directory lookup misses) without mutating shared seed membership.
+    this.pagesPaneOmittedMember = userId;
+    await this.pagesPaneMemberHook();
   }
 
   async pagesPaneRestoreWorkspaceMembers(): Promise<void> {
-    return todo("pagesPaneRestoreWorkspaceMembers");
+    this.pagesPaneOmittedMember = null;
   }
 
   async pagesPaneProfileRoundtrip(): Promise<void> {
-    return todo("pagesPaneProfileRoundtrip");
+    const identity = this.pagesPaneRoot().getByTestId("page-actors").locator(":scope > div").nth(1);
+    const link = identity.getByRole("link").first();
+    await this.page.evaluate(() => {
+      (window as unknown as Record<string, string>).__parityWarmMount = "alive";
+    });
+    await link.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL((url) => url.pathname.includes("/profile/"), { timeout: WebNewDriver.WAIT_MS });
+    await this.page.goBack();
+    await this.pagesPaneWaitLiveEditor();
+    const warm = await this.page
+      .evaluate(() => (window as unknown as Record<string, string>).__parityWarmMount)
+      .catch(() => undefined);
+    if (warm !== "alive") {
+      throw new Error("[parity] the profile roundtrip reloaded the page; the detail view remounted cold.");
+    }
   }
 
   // --- Estimates screen shell (NEWFRONT-321, EST-001-003, EST-026-028).
