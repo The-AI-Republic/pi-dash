@@ -18443,16 +18443,56 @@ export class WebNewDriver implements ParityDriver {
   // --- Archives cross-cutting (NEWFRONT-226, ARCH-026–032). Appended; the
   // --- stubs above are untouched per the shared driver contract.
   async archivesProjectConfirmLabel(): Promise<string> {
-    return todo("archivesProjectConfirmLabel");
+    // The confirm is the dialog's last button: the header close control
+    // sorts first in DOM order, the footer Cancel/confirm pair last.
+    const confirm = this.projectDialog().getByRole("button").last();
+    await confirm.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await confirm.innerText()) ?? "").trim();
   }
   async archivesProjectConfirmBusy(): Promise<boolean> {
-    return todo("archivesProjectConfirmBusy");
+    const confirm = this.projectDialog().getByRole("button").last();
+    if (!(await this.isShown(confirm))) return false;
+    const label = ((await confirm.innerText()) ?? "").trim();
+    // The kit button relabels (Archiving…/Restoring…) and disables while
+    // the write runs; either signal reads as busy, mirroring the oracle.
+    return /archiving|restoring/i.test(label) || !(await confirm.isEnabled());
   }
-  async archivesProjectDelayNextWrite(_ms: number): Promise<void> {
-    return todo("archivesProjectDelayNextWrite");
+  /** POST/DELETE .../projects/<id>/archive/: the project (un)archive write. */
+  private static archivesProjectWrite(url: string, method: string): boolean {
+    return (method === "POST" || method === "DELETE") && /\/projects\/[^/]+\/archive\/$/.test(url);
+  }
+  async archivesProjectDelayNextWrite(ms: number): Promise<void> {
+    // One-shot sleep ahead of the next project archive/restore write so
+    // the confirm's progress state is observable; reads and every other
+    // write pass through untouched.
+    let armed = true;
+    await this.page.route("**/projects/*/archive/", async (route) => {
+      const request = route.request();
+      if (armed && WebNewDriver.archivesProjectWrite(request.url(), request.method())) {
+        armed = false;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
   }
   async archivesProjectFailNextWrite(): Promise<void> {
-    return todo("archivesProjectFailNextWrite");
+    // One-shot 500 for the next project archive/restore write, mirroring
+    // the oracle driver's failure shape so both targets fail the same
+    // request the same way; reads and every other write pass through.
+    let armed = true;
+    await this.page.route("**/projects/*/archive/", async (route) => {
+      const request = route.request();
+      if (armed && WebNewDriver.archivesProjectWrite(request.url(), request.method())) {
+        armed = false;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity project archive failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
   }
   async archivesItemFailNextWrite(): Promise<void> {
     // One-shot abort of the next issue/cycle/module archive or restore
@@ -18737,12 +18777,37 @@ export class WebNewDriver implements ParityDriver {
     const input = this.archivesSearchInput();
     return (await input.inputValue().catch(() => "")) ?? "";
   }
-  async archivesRowDraggable(_name: string): Promise<boolean> {
-    return todo("archivesRowDraggable");
+  async archivesRowDraggable(name: string): Promise<boolean> {
+    // Scoped to the named row's own subtree: chrome outside the content
+    // may legitimately reorder, so a content-wide scan would false-positive.
+    const row = this.archivesContent().getByText(name).first();
+    if ((await row.count()) === 0) return false;
+    return row.evaluate((node) => {
+      const el = node as HTMLElement;
+      if (el.closest('[draggable="true"]') !== null) return true;
+      return el.querySelector('[draggable="true"]') !== null;
+    });
   }
 
-  async archivesDragReorders(_source: string, _target: string): Promise<boolean> {
-    return todo("archivesDragReorders");
+  async archivesDragReorders(source: string, target: string): Promise<boolean> {
+    // Behavioral drag probe: compares the rows' vertical order before and
+    // after a real drag-and-drop. Nothing in the archives area drops, so
+    // the order must not flip.
+    const content = this.archivesContent();
+    const src = content.getByText(source).first();
+    const dst = content.getByText(target).first();
+    await src.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dst.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const yOf = async (row: Locator): Promise<number> => (await row.boundingBox().catch(() => null))?.y ?? -1;
+    const srcBefore = await yOf(src);
+    const dstBefore = await yOf(dst);
+    await src.scrollIntoViewIfNeeded().catch(() => undefined);
+    await src.dragTo(dst, { timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForTimeout(2000);
+    const srcAfter = await yOf(src);
+    const dstAfter = await yOf(dst);
+    if (srcBefore < 0 || dstBefore < 0 || srcAfter < 0 || dstAfter < 0) return false;
+    return srcBefore < dstBefore !== srcAfter < dstAfter;
   }
 
   async archivesArmSkeletonObserver(): Promise<void> {
@@ -18757,10 +18822,14 @@ export class WebNewDriver implements ParityDriver {
       .catch(() => false);
   }
   async archivesExportControlVisible(): Promise<boolean> {
-    return todo("archivesExportControlVisible");
+    return this.isShown(
+      this.archivesContent()
+        .getByRole("button", { name: /export|download/i })
+        .first()
+    );
   }
-  async archivesPressKey(_key: string): Promise<void> {
-    return todo("archivesPressKey");
+  async archivesPressKey(key: string): Promise<void> {
+    await this.page.locator("body").press(key, { timeout: WebNewDriver.WAIT_MS });
   }
   async archivesRowPresent(name: string): Promise<boolean> {
     return this.isShown(this.archivesContent().getByText(name).first());
