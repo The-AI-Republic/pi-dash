@@ -100,6 +100,7 @@ use pidash_services::v1_projects::ser_workflow as ser;
 use pidash_types::{ProjectId, WorkspaceId};
 
 use super::perms::{decide, gate_for, V1ProjectsGate, V1Route, CLASS_DENIAL_BODY};
+use crate::license::AssetUrl;
 use crate::paginator::{self, Cursor, PageResponse};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
@@ -133,8 +134,9 @@ type UserLiteLookup = Option<(
     String,
     Option<Uuid>,
 )>;
-/// One `file_assets` row for `asset_url` rendering.
-type AssetLookup = Option<(String, Option<Uuid>, Option<Uuid>, Option<Uuid>)>;
+/// One `file_assets` row for [`file_asset_url`]: `entity_type` is nullable
+/// (`db/models/asset.py:54`), so a NULL row must decode — never 500.
+type AssetLookup = Option<(Option<String>, Option<Uuid>, Option<Uuid>, Option<Uuid>)>;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -1002,12 +1004,13 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
     else {
         return Ok(Value::Null);
     };
-    // `cover_image_url` (`db/models/project.py:176-184`): the asset URL when a
-    // cover asset exists (even when that URL is null); else the raw value when
-    // truthy; else null. A dangling asset FK raises (`DoesNotExist` → 404).
+    // `cover_image_url` (`db/models/project.py:176-185`): the asset URL when a
+    // cover asset exists — used verbatim, so an unmapped entity type renders
+    // null and a NULL-workspace attachment/description omits the key — else
+    // the raw value when truthy; else null.
     let cover_url = match cover_asset {
-        Some(aid) => asset_url_for(pool, aid).await?,
-        None => cover_image.clone().filter(|raw| !raw.is_empty()),
+        Some(aid) => file_asset_url(pool, &aid).await?,
+        None => AssetUrl::Present(cover_image.clone().filter(|raw| !raw.is_empty())),
     };
     let mut map = serde_json::Map::with_capacity(9);
     map.insert("id".to_owned(), Value::String(id.to_string()));
@@ -1033,10 +1036,14 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
         description.map(Value::String).unwrap_or(Value::Null),
     );
     map.insert("is_default".to_owned(), Value::Bool(is_default));
-    map.insert(
-        "cover_image_url".to_owned(),
-        cover_url.map(Value::String).unwrap_or(Value::Null),
-    );
+    // DRF `SkipField`: a read-only field whose source raises a plain
+    // `AttributeError` leaves its key out of the response entirely.
+    if let AssetUrl::Present(url) = cover_url {
+        map.insert(
+            "cover_image_url".to_owned(),
+            url.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
     Ok(Value::Object(map))
 }
 
@@ -1077,11 +1084,13 @@ async fn expand_user(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Value, Handl
         return Ok(Value::Null);
     };
     // `avatar_url` (`db/models/user.py:142-151`): the asset URL when an avatar
-    // asset exists (even when null); else the raw value when truthy; else null.
+    // asset exists — used verbatim, so an unmapped entity type renders null
+    // and a NULL-workspace attachment/description omits the key — else the
+    // raw value when truthy; else null.
     let avatar_url = match avatar_asset {
-        Some(aid) => asset_url_for(pool, aid).await?,
-        None if !avatar.is_empty() => Some(avatar.clone()),
-        None => None,
+        Some(aid) => file_asset_url(pool, &aid).await?,
+        None if !avatar.is_empty() => AssetUrl::Present(Some(avatar.clone())),
+        None => AssetUrl::Present(None),
     };
     let mut map = serde_json::Map::with_capacity(7);
     map.insert("id".to_owned(), Value::String(id.to_string()));
@@ -1092,22 +1101,29 @@ async fn expand_user(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Value, Handl
         email.map(Value::String).unwrap_or(Value::Null),
     );
     map.insert("avatar".to_owned(), Value::String(avatar));
-    map.insert(
-        "avatar_url".to_owned(),
-        avatar_url.map(Value::String).unwrap_or(Value::Null),
-    );
+    // DRF `SkipField`: a read-only field whose source raises a plain
+    // `AttributeError` leaves its key out of the response entirely.
+    if let AssetUrl::Present(url) = avatar_url {
+        map.insert(
+            "avatar_url".to_owned(),
+            url.map(Value::String).unwrap_or(Value::Null),
+        );
+    }
     map.insert("display_name".to_owned(), Value::String(display));
     Ok(Value::Object(map))
 }
 
-/// Shared `avatar_url` / `cover_image_url` rendering (`db/models/user.py:142-151`,
-/// `db/models/project.py:176-184` via `Asset.asset_url`, `db/models/asset.py:80-99`).
-/// A dangling asset FK raises `DoesNotExist`, which `handle_exception` maps to
-/// the 404 branch — hence [`HandlerError::NotFound`] here.
-async fn asset_url_for(
-    pool: &sqlx::PgPool,
-    asset_id: Uuid,
-) -> Result<Option<String>, HandlerError> {
+/// `FileAsset.asset_url` for one asset row, resolved unscoped (the forward-FK
+/// descriptor reads through `_base_manager`). The entity-type map lives once,
+/// in [`crate::license::file_asset_url`]: `Present(Some(url))` renders the
+/// URL, `Present(None)` renders JSON null (a NULL/unmapped `entity_type`, or
+/// a dangling asset FK — the descriptor's `RelatedObjectDoesNotExist` is
+/// caught as `ObjectDoesNotExist` by DRF's module-level `get_attribute` and
+/// reads as null), and `Skip` drops the key — the plain `AttributeError`
+/// from `None.slug` on an attachment/description asset with a NULL
+/// workspace, which DRF's `Field.get_attribute` (`fields.py:445-451`) turns
+/// into `SkipField` for a read-only field.
+async fn file_asset_url(pool: &sqlx::PgPool, asset_id: &Uuid) -> Result<AssetUrl, HandlerError> {
     let row: AssetLookup = sqlx::query_as(
         r#"SELECT entity_type, workspace_id, project_id, issue_id FROM file_assets WHERE id = $1"#,
     )
@@ -1116,49 +1132,25 @@ async fn asset_url_for(
     .await
     .map_err(|_| HandlerError::ServerError)?;
     let Some((entity_type, workspace_id, project_id, issue_id)) = row else {
-        return Err(HandlerError::NotFound);
+        return Ok(AssetUrl::Present(None));
     };
-    match entity_type.as_str() {
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
-            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
-        }
-        "ISSUE_ATTACHMENT" => {
-            let slug: Option<(String,)> = match workspace_id {
-                Some(ws) => sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
-                    .bind(ws)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| HandlerError::ServerError)?,
-                None => None,
-            };
-            match (slug, project_id, issue_id) {
-                (Some((slug,)), Some(pid), Some(iid)) => Ok(Some(format!(
-                    "/api/assets/v2/workspaces/{slug}/projects/{pid}/issues/{iid}/attachments/{asset_id}/"
-                ))),
-                _ => Ok(None),
-            }
-        }
-        "ISSUE_DESCRIPTION"
-        | "COMMENT_DESCRIPTION"
-        | "PAGE_DESCRIPTION"
-        | "DRAFT_ISSUE_DESCRIPTION" => {
-            let slug: Option<(String,)> = match workspace_id {
-                Some(ws) => sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
-                    .bind(ws)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| HandlerError::ServerError)?,
-                None => None,
-            };
-            match (slug, project_id) {
-                (Some((slug,)), Some(pid)) => Ok(Some(format!(
-                    "/api/assets/v2/workspaces/{slug}/projects/{pid}/{asset_id}/"
-                ))),
-                _ => Ok(None),
-            }
-        }
-        _ => Ok(None),
-    }
+    let workspace_slug: Option<String> = match workspace_id {
+        Some(ws) => sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
+            .bind(ws)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| HandlerError::ServerError)?
+            .map(|row: (String,)| row.0),
+        None => None,
+    };
+    Ok(crate::license::file_asset_url(
+        asset_id,
+        entity_type.as_deref(),
+        workspace_id.as_ref(),
+        project_id.as_ref(),
+        issue_id.as_ref(),
+        workspace_slug.as_deref(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
