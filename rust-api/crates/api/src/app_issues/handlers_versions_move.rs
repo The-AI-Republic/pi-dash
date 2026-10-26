@@ -1188,6 +1188,21 @@ async fn move_issue(
                 })?;
             }
             run_post_commit(&state, &pool, &moved.post_commit).await?;
+            // `github_signals.trigger_completion_comment`
+            // (`bgtasks/github_signals.py:44-75`): the move's save assigns
+            // the target default state, so a mirrored issue moved into a
+            // completed-group state enqueues the provider's
+            // `post_completion_comment` — before the orchestration
+            // receiver, as in Django. Best-effort: the move stands.
+            if prev != moved.issue.row.state_id {
+                crate::issue_transition::enqueue_completion_comment(
+                    &pool,
+                    &pk,
+                    prev.as_ref(),
+                    moved.issue.row.state_id.as_ref(),
+                )
+                .await;
+            }
             fire_after_move(
                 &state,
                 &pool,

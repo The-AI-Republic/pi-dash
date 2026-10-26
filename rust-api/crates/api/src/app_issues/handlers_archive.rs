@@ -1454,6 +1454,21 @@ pub async fn unarchive_issue(
         .execute(&context.pool)
         .await
         .map_err(|_| Denial::ServerError)?;
+    // `github_signals.trigger_completion_comment`
+    // (`bgtasks/github_signals.py:44-75`): the unarchive's `save()` runs
+    // the NULL-state default leg, so unarchiving a mirrored NULL-state
+    // issue whose default state is completed-group enqueues the
+    // provider's `post_completion_comment` — before the orchestration
+    // receiver, as in Django. Best-effort: the unarchive stands.
+    if prev != state_id {
+        crate::issue_transition::enqueue_completion_comment(
+            &context.pool,
+            &issue_id,
+            prev.as_ref(),
+            state_id.as_ref(),
+        )
+        .await;
+    }
     fire_after_save(
         &state,
         &context.pool,

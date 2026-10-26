@@ -7015,6 +7015,20 @@ async fn patch_issue_inner(
         Some(state) => state,
         None => current_state,
     };
+    // `github_signals.trigger_completion_comment`
+    // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored issue
+    // into a completed-group state enqueues the provider's
+    // `post_completion_comment` — before the orchestration receiver, as
+    // in Django. Best-effort: the save stands.
+    if prev_state_id != current_state_id {
+        crate::issue_transition::enqueue_completion_comment(
+            &pre.pool,
+            pk,
+            prev_state_id.as_ref(),
+            current_state_id.as_ref(),
+        )
+        .await;
+    }
     fire_after_save(
         state,
         &pre.pool,
@@ -7163,6 +7177,21 @@ async fn delete_issue_inner(
         .map(|_| ())
         .map_err(|error| save_error(&error, "write-delete"))?;
 
+    // `github_signals.trigger_completion_comment`
+    // (`bgtasks/github_signals.py:44-75`): the delete's full `save()` runs
+    // the NULL-state default leg, so deleting a mirrored NULL-state issue
+    // whose default state is completed-group enqueues the provider's
+    // `post_completion_comment` — before the orchestration receiver, as
+    // in Django. Best-effort: the delete stands.
+    if prev_state_id != current_state_id {
+        crate::issue_transition::enqueue_completion_comment(
+            &pre.pool,
+            pk,
+            prev_state_id.as_ref(),
+            current_state_id.as_ref(),
+        )
+        .await;
+    }
     // `issue.delete()` saves the row, so the orchestration receiver fires
     // (state unchanged on a plain delete → no transition; a state leg that
     // moves it fires). PIDASHCONV-1216.
