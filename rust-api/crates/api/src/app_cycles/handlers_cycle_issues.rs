@@ -390,8 +390,16 @@ fn gate_for_destroy() -> &'static gates::Gate {
 // List
 // ---------------------------------------------------------------------------
 
-/// `issue_on_results` flat field order (`utils/grouper.py:95-143`): the 22
-/// base keys plus the three array keys, with the m2m group swap applied.
+/// `issue_on_results` flat field order (`utils/grouper.py:95-143`) as Django
+/// emits it over the wire: `.values(*required_fields)` renders the concrete
+/// model fields first, then the `state__group` lookup, then the annotations
+/// in annotation order (`apply_annotations`, then the grouper's array
+/// subqueries) — not the `required_fields` argument order, which lists
+/// `cycle_id` / `sub_issues_count` after `parent_id` and `attachment_count`
+/// before `link_count` (pinned live). A canonical m2m group swaps its
+/// lookup into the join-lookup slot after `state__group` (group swap first,
+/// then the sub swap); the multi-grouper re-appends the replaced id-list
+/// keys last.
 fn flat_row_fields(group_by: Option<&str>, sub_group_by: Option<&str>) -> Vec<String> {
     let mut fields = vec![
         "id",
@@ -406,14 +414,10 @@ fn flat_row_fields(group_by: Option<&str>, sub_group_by: Option<&str>) -> Vec<St
         "sequence_id",
         "project_id",
         "parent_id",
-        "cycle_id",
-        "sub_issues_count",
         "created_at",
         "updated_at",
         "created_by",
         "updated_by",
-        "attachment_count",
-        "link_count",
         "is_draft",
         "archived_at",
         "state__group",
@@ -427,14 +431,26 @@ fn flat_row_fields(group_by: Option<&str>, sub_group_by: Option<&str>) -> Vec<St
         ("assignees__id", "assignee_ids"),
         ("issue_module__module_id", "module_ids"),
     ];
+    let mut lookups = Vec::new();
     for group in [group_by, sub_group_by].into_iter().flatten() {
         if let Some((_, array)) = mapper.iter().find(|(key, _)| *key == group) {
             if let Some(position) = arrays.iter().position(|name| name == array) {
                 arrays.remove(position);
-                arrays.push(group);
+                lookups.push(group.to_owned());
             }
         }
     }
+    fields.extend(lookups);
+    fields.extend(
+        [
+            "cycle_id",
+            "link_count",
+            "attachment_count",
+            "sub_issues_count",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
     fields.extend(arrays.into_iter().map(str::to_owned));
     fields
 }
@@ -513,47 +529,96 @@ const RELATION_JOINS: &[(&str, &str)] = &[
     ("issue_subscribers", "issue_subscribers"),
 ];
 
-/// True when every `"alias".` reference in the filter SQL is an `IS NULL` /
-/// `IS NOT NULL` test (the `__isnull` predicates take the LEFT join).
+/// True when the filter SQL references the relation `alias`, quoted
+/// (`"alias".`, complex filters and the group guards below) or unquoted
+/// (`alias.`, legacy predicates, which never quote the alias).
+fn alias_mentioned(where_sql: &str, alias: &str) -> bool {
+    if where_sql.contains(&format!("\"{alias}\".")) {
+        return true;
+    }
+    alias_unquoted_offsets(where_sql, alias).next().is_some()
+}
+
+/// Byte offsets of unquoted `alias.` references. The alias must start on
+/// an identifier boundary so a longer name never matches.
+fn alias_unquoted_offsets<'a>(where_sql: &'a str, alias: &str) -> impl Iterator<Item = usize> + 'a {
+    let needle = format!("{alias}.");
+    let mut offsets = Vec::new();
+    let mut base = 0;
+    while let Some(at) = where_sql[base..].find(&needle) {
+        let absolute = base + at;
+        let boundary = absolute == 0 || {
+            let prev = where_sql.as_bytes()[absolute - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'_'
+        };
+        if boundary {
+            offsets.push(absolute);
+        }
+        base = absolute + 1;
+    }
+    offsets.into_iter()
+}
+
+/// True when the identifier after an alias reference is followed by an
+/// `IS NULL` / `IS NOT NULL` test.
+fn is_null_test(after: &str) -> bool {
+    let ident_len = after
+        .chars()
+        .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
+        .map(|char| char.len_utf8())
+        .sum::<usize>();
+    let tail = after[ident_len..].trim_start();
+    tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")
+}
+
+/// True when every reference to `alias` in the filter SQL — quoted or
+/// unquoted — is an `IS NULL` / `IS NOT NULL` test (the `__isnull`
+/// predicates take the LEFT join).
 fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     let marker = format!("\"{alias}\".");
     let mut rest = where_sql;
     while let Some(start) = rest.find(&marker) {
-        let after = &rest[start + marker.len()..];
-        let ident_len = after
-            .chars()
-            .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
-            .map(|char| char.len_utf8())
-            .sum::<usize>();
-        let tail = after[ident_len..].trim_start();
-        if !(tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")) {
+        if !is_null_test(&rest[start + marker.len()..]) {
             return false;
         }
-        rest = &after[ident_len..];
+        rest = &rest[start + marker.len()..];
+    }
+    for absolute in alias_unquoted_offsets(where_sql, alias) {
+        if !is_null_test(&where_sql[absolute + alias.len() + 1..]) {
+            return false;
+        }
     }
     true
 }
 
-/// M2M group filters force an INNER join on that relation with the deleted
-/// guard (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`).
+/// M2M group keys force a join on that relation (`GROUP_FILTER_MAPPER` in
+/// `utils/grouper.py:41-49` for the canonical keys; the annotation-context
+/// join for the short aliases `labels` / `assignees`, which Django resolves
+/// to the same through-table columns with no deleted guard). The join is
+/// always LEFT — INNER is only for positive filter references.
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
-    let raw = match alias {
-        "issue_assignee" => "assignees__id",
-        "label_issue" => "labels__id",
-        "issue_module" => "issue_module__module_id",
+    let raws: &[&str] = match alias {
+        "issue_assignee" => &["assignees__id", "assignees"],
+        "label_issue" => &["labels__id", "labels"],
+        "issue_module" => &["issue_module__module_id"],
         _ => return false,
     };
-    group_by == Some(raw) || sub_group_by == Some(raw)
+    raws.iter()
+        .any(|raw| group_by == Some(*raw) || sub_group_by == Some(*raw))
 }
 
 /// The SQL expression a group field partitions by (D-26 `group_expression`
-/// over the shared `issue` / `state` aliases).
+/// over the shared `issue` / `state` aliases). Django resolves `group_by`
+/// as a raw ORM path, so the short aliases partition by the same columns
+/// as their canonical forms: `state` is the `state_id` FK column and
+/// `labels` / `assignees` resolve to the through-table columns with a
+/// plain annotation-context LEFT join (pinned from the generated SQL).
 fn group_expression(field: &str) -> Result<String, Denial> {
     Ok(match field {
-        "labels__id" => "label_issue.label_id".to_owned(),
-        "assignees__id" => "issue_assignee.assignee_id".to_owned(),
+        "labels__id" | "labels" => "label_issue.label_id".to_owned(),
+        "assignees__id" | "assignees" => "issue_assignee.assignee_id".to_owned(),
         "issue_module__module_id" => "issue_module.module_id".to_owned(),
-        "state_id" => "issue.state_id".to_owned(),
+        "state_id" | "state" => "issue.state_id".to_owned(),
         "priority" => "issue.priority".to_owned(),
         "cycle_id" => "(SELECT ci.cycle_id FROM cycle_issues ci WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1)".to_owned(),
         "project_id" => "issue.project_id".to_owned(),
@@ -680,33 +745,55 @@ fn cycle_filtered_set(
     if !legacy_sql_text.is_empty() {
         fragments.push(legacy_sql_text);
     }
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`. The
+    // predicate sits in WHERE over the LEFT join, so issues whose links
+    // are all soft-deleted drop out while linkless issues stay NULL (the
+    // short aliases carry no guard). Quoted so the nullable scan below
+    // sees the `IS NULL` test.
+    for key in [group_by, sub_group_by].into_iter().flatten() {
+        let alias = match key {
+            "labels__id" => "label_issue",
+            "assignees__id" => "issue_assignee",
+            "issue_module__module_id" => "issue_module",
+            _ => continue,
+        };
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
+    }
     let where_sql = fragments.join(" AND ");
     let mut joins = String::from(" JOIN cycle_issues AS bridge ON bridge.issue_id = issue.id");
     let mut referenced = vec!["bridge"];
     for (table, alias) in RELATION_JOINS {
-        let marker = format!("\"{alias}\".");
-        let mentioned = where_sql.contains(&marker);
+        let mentioned = alias_mentioned(&where_sql, alias);
         let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
-        let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-        let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
-        if used {
-            referenced.push(*alias);
+        // INNER only for positive filter references (Django's `filter()`
+        // join); group-forced and `__isnull`-only references take LEFT
+        // (Django's annotation join). Unreferenced relations are not
+        // joined at all — Django never scaffolds them, and an unreferenced
+        // LEFT JOIN fans the grouped window out (window functions evaluate
+        // before DISTINCT, so the duplicate row numbers survive it).
+        let inner = mentioned && !nullable_only;
+        if !(mentioned || group_join_alias(group_by, sub_group_by, alias)) {
+            continue;
         }
+        referenced.push(*alias);
         let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
         joins.push_str(&format!(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
         ));
     }
-    let intake_used = where_sql.contains("\"issue_intake\".");
-    joins.push_str(&format!(
-        " {} intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
-        if intake_used {
-            "INNER JOIN"
-        } else {
-            "LEFT JOIN"
-        }
-    ));
+    // The intake join exists only when a filter references it (the grouped
+    // totals splice their own copy when it does not — see below).
+    let intake_used = alias_mentioned(&where_sql, "issue_intake");
     if intake_used {
+        let kind = if alias_nullable_only(&where_sql, "issue_intake") {
+            "LEFT JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} intake_issues AS issue_intake ON issue_intake.issue_id = issue.id"
+        ));
         referenced.push("issue_intake");
     }
     let from_where = format!(
@@ -787,8 +874,7 @@ async fn cycle_issue_list(
     // extra fan-out); only a filter-driven `issue_cycle` join — one the
     // `WHERE` actually references, so Django has it too — wins over the
     // base (pinned live: Django reuses the filter's scope, not the
-    // base's). The unconditional scaffolding `LEFT JOIN` has no Django
-    // counterpart and must not win.
+    // base's).
     let order_spec = pidash_services::app_issues::ordering::order_sql(
         &params.order_by,
         "state.\"group\"",
@@ -806,11 +892,11 @@ async fn cycle_issue_list(
         false,
     )?;
     let direction = if key.descending { "DESC" } else { "ASC" };
-    // Total count over the pre-annotation set (the `deepcopy` at `:125`).
-    // The flat branch keeps the distinct-issue count; the grouped branch
-    // counts `queryset.count()` over the order-joined rows (pinned live:
-    // fan-out links count).
-    let total_sql = if group_by.is_some() && !key.joins.is_empty() {
+    // Total count: the flat branch counts the pre-annotation `deepcopy`
+    // (`:125`) distinctly; the grouped branch answers `queryset.count()`
+    // over the windowed joined rows (pinned live: fan-out links count,
+    // never distinct).
+    let total_sql = if group_by.is_some() {
         format!(
             "SELECT COUNT(*) {}",
             crate::app_issues::with_order_joins(&filtered.from_where, &key.joins)
@@ -908,6 +994,31 @@ async fn cycle_flat_response(
     ))
 }
 
+/// The grouped totals' `FROM` fragment: `count_filter` references
+/// `issue_intake`, so the totals query carries the intake LEFT join when
+/// no filter already joined it (Django adds the same demoted-LEFT join
+/// for the `Count(filter=...)`).
+fn totals_from_where(filtered: &FilteredSet) -> String {
+    if filtered.referenced.contains(&"issue_intake") {
+        return filtered.from_where.clone();
+    }
+    crate::app_issues::with_order_joins(
+        &filtered.from_where,
+        "LEFT JOIN intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
+    )
+}
+
+/// Map a kernel grouping failure: an undeclared group cell is Python's
+/// `KeyError` → 400 (`app/views/base.py:139-144`); a malformed row or
+/// seeded structure is a 500.
+fn group_denial(error: crate::paginator::GroupError) -> Denial {
+    use crate::paginator::GroupError as E;
+    match error {
+        E::UnknownGroup(_) => Denial::BadError("The required key does not exist.".to_owned()),
+        E::MissingId | E::MissingGroupField(_) | E::MalformedCells => Denial::ServerError,
+    }
+}
+
 /// `(group, filtered count)` pairs for the totals dict
 /// (`GroupedOffsetPaginator.__get_total_queryset`, `paginator.py:299-303`).
 async fn cycle_group_total_pairs(
@@ -918,7 +1029,7 @@ async fn cycle_group_total_pairs(
 ) -> Result<Vec<(String, i64)>, Denial> {
     let sql = format!(
         "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COUNT(DISTINCT issue.id) FILTER (WHERE {strip_and}) AS n {} GROUP BY 1",
-        filtered.from_where,
+        totals_from_where(filtered),
         strip_and = count_filter.strip_prefix("AND ").unwrap_or(count_filter),
     );
     let rows = bind_values(&sql, filtered.values.clone())?
@@ -944,7 +1055,7 @@ async fn cycle_sub_total_pairs(
 ) -> Result<Vec<(String, String, i64)>, Denial> {
     let sql = format!(
         "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COALESCE(({sub_expr})::text, 'None') AS sub, COUNT(DISTINCT issue.id) FILTER (WHERE {strip_and}) AS n {} GROUP BY 1, 2",
-        filtered.from_where,
+        totals_from_where(filtered),
         strip_and = count_filter.strip_prefix("AND ").unwrap_or(count_filter),
     );
     let rows = bind_values(&sql, filtered.values.clone())?
@@ -1034,7 +1145,18 @@ async fn cycle_grouped_response(
     let window = grouped_window(limit, cursor.offset, cursor.value, None).map_err(page_denial)?;
     let group_expr = group_expression(group_by)?;
     let selects = cycle_row_selects(skip_array_for(group_by));
-    let member_select = group_member_select(group_by);
+    // Both m2m member keys ride on the rows: Django's `.values()` carries
+    // the group and sub swaps, and the sub multi-grouper indexes the sub
+    // key directly. Short aliases select nothing — their rows lack the key
+    // and the groupers read them as `None`, like Django's `.get`.
+    let member_select = match &sub_group_by {
+        Some(sub) => format!(
+            "{}{}",
+            group_member_select(group_by),
+            group_member_select(sub)
+        ),
+        None => group_member_select(group_by).to_owned(),
+    };
     let sub_expr = match &sub_group_by {
         Some(sub) => Some(group_expression(sub)?),
         None => None,
@@ -1044,10 +1166,11 @@ async fn cycle_grouped_response(
         None => group_expr.clone(),
     };
     // The cycle-name traversal join rides on the row query (scoped to the
-    // filtered `bridge`, so no extra fan-out here).
+    // filtered `bridge`, so no extra fan-out here). No DISTINCT: Django
+    // windows the plain joined rows, so fan-out links all count.
     let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
-        "SELECT * FROM (SELECT DISTINCT {selects}{member_select}, ({key_expr}) AS __order_key,
+        "SELECT * FROM (SELECT {selects}{member_select}, ({key_expr}) AS __order_key,
          ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY ({key_expr}) {direction} NULLS LAST, issue.created_at DESC) AS __rn
          {row_where}) __w
          WHERE __w.__rn > {offset} AND __w.__rn <= {stop}
@@ -1113,10 +1236,10 @@ async fn cycle_grouped_response(
                 &sub_group_by.clone().unwrap_or_default(),
                 cells,
             )
-            .map_err(|_| Denial::ServerError)?
+            .map_err(group_denial)?
         }
         None => process_grouped_results(&shaped, group_by, &group_fields, &totals)
-            .map_err(|_| Denial::ServerError)?,
+            .map_err(group_denial)?,
     };
     let results_json = serde_json::to_string(&results_value).map_err(|_| Denial::ServerError)?;
     let top_group = group_totals
@@ -1783,27 +1906,34 @@ mod tests {
                 "sequence_id",
                 "project_id",
                 "parent_id",
-                "cycle_id",
-                "sub_issues_count",
                 "created_at",
                 "updated_at",
                 "created_by",
                 "updated_by",
-                "attachment_count",
-                "link_count",
                 "is_draft",
                 "archived_at",
                 "state__group",
+                "cycle_id",
+                "link_count",
+                "attachment_count",
+                "sub_issues_count",
                 "assignee_ids",
                 "label_ids",
                 "module_ids",
             ]
         );
-        // M2M group swap: the grouped array leaves, the raw key joins.
+        // M2M group swap: the grouped array leaves, the raw lookup joins
+        // the join-lookup slot after `state__group`.
         let grouped = flat_row_fields(Some("assignees__id"), None);
         assert!(!grouped.contains(&"assignee_ids".to_owned()));
         assert!(grouped.contains(&"assignees__id".to_owned()));
         assert_eq!(grouped.len(), names.len());
+        let names: Vec<&str> = grouped.iter().map(String::as_str).collect();
+        let at = names
+            .iter()
+            .position(|name| *name == "state__group")
+            .expect("lookup slot");
+        assert_eq!(names[at + 1], "assignees__id");
     }
 
     #[test]
@@ -1886,6 +2016,9 @@ mod tests {
             "assignees__id",
             "issue_module__module_id",
             "state_id",
+            "state",
+            "labels",
+            "assignees",
             "priority",
             "cycle_id",
             "project_id",
@@ -1897,6 +2030,113 @@ mod tests {
             group_expression(field).expect("groupable");
         }
         assert!(group_expression("bogus").is_err());
+    }
+
+    #[test]
+    fn flat_row_fields_follow_the_wire_order() {
+        // The m2m swaps land in the join-lookup slot after `state__group`,
+        // group swap first; the replaced arrays stay out (the multi-grouper
+        // re-appends them last at placement time).
+        let swapped = flat_row_fields(Some("labels__id"), Some("assignees__id"));
+        let tail = &swapped[18..];
+        assert_eq!(
+            tail,
+            [
+                "state__group",
+                "labels__id",
+                "assignees__id",
+                "cycle_id",
+                "link_count",
+                "attachment_count",
+                "sub_issues_count",
+                "module_ids",
+            ]
+        );
+        // Short aliases swap nothing.
+        assert_eq!(
+            flat_row_fields(Some("labels"), Some("state")),
+            flat_row_fields(None, None)
+        );
+    }
+
+    #[test]
+    fn group_guards_filter_canonical_m2m_joins_only() {
+        // `GROUP_FILTER_MAPPER`: canonical m2m keys add the deleted guard
+        // over a LEFT join; short aliases join unguarded.
+        let guarded = cycle_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &empty_query(),
+            Some("labels__id"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        assert!(
+            guarded
+                .from_where
+                .contains("\"label_issue\".\"deleted_at\" IS NULL"),
+            "canonical guard missing: {}",
+            guarded.from_where
+        );
+        assert!(
+            guarded.from_where.contains(
+                "LEFT JOIN issue_labels AS label_issue ON label_issue.issue_id = issue.id"
+            ),
+            "canonical join must be LEFT: {}",
+            guarded.from_where
+        );
+        let short = cycle_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &empty_query(),
+            Some("labels"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        assert!(
+            !short
+                .from_where
+                .contains("\"label_issue\".\"deleted_at\" IS NULL"),
+            "short alias must be unguarded: {}",
+            short.from_where
+        );
+        assert!(
+            short.from_where.contains(
+                "LEFT JOIN issue_labels AS label_issue ON label_issue.issue_id = issue.id"
+            ),
+            "short join must be LEFT: {}",
+            short.from_where
+        );
+        // Unreferenced relations are not joined at all.
+        let plain = cycle_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &empty_query(),
+            Some("priority"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        for needle in [
+            "AS label_issue",
+            "AS issue_assignee",
+            "AS issue_module",
+            "AS issue_intake",
+        ] {
+            assert!(
+                !plain.from_where.contains(needle),
+                "unreferenced {needle} must be absent: {}",
+                plain.from_where
+            );
+        }
     }
 
     #[test]
