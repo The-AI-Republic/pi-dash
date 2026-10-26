@@ -35,6 +35,13 @@ def clean_db(db):
     # projects: both carry a project FK that reset() deletes later.
     with db.connect() as conn:
         with conn.cursor() as cur:
+            # Asset rows are referenced by logo/avatar FKs and carry
+            # workspace/user FKs of their own, so neither reset() nor a
+            # bare delete can clear them: null the links first, then wipe
+            # (PIDASHCONV-1374 seeds soft-deleted logo/avatar assets).
+            cur.execute("UPDATE workspaces SET logo_asset_id = NULL")
+            cur.execute("UPDATE users SET avatar_asset_id = NULL")
+            cur.execute("DELETE FROM file_assets")
             for table in (
                 "issue_sequences",
                 "issue_assignees",
