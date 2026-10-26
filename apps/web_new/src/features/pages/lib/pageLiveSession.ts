@@ -48,8 +48,10 @@ export interface PageLiveSession {
   getCacheEmpty(): boolean | null;
   getFallback(): PageLiveFallbackState;
   subscribe(listener: () => void): () => void;
-  /** Fast-forward a pending retry (connectivity or focus regained). */
+  /** Fast-forward a pending retry (focus regained). */
   nudge(): void;
+  /** Force a fresh dial with a new handshake (connectivity regained). */
+  reconnect(): void;
   start(): void;
   destroy(): void;
 }
@@ -258,6 +260,18 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
       clearRetry();
       dial();
     },
+    reconnect: () => {
+      if (destroyed || !started) return;
+      // A regained connection always earns a fresh handshake: the
+      // credentials may have changed while the socket idled, so even a
+      // healthy-looking socket is redialled rather than trusted (the
+      // handshake re-validates the session cookie, PAGE-068).
+      retriesUsed = 0;
+      if (stage.kind === "disconnected") transition({ type: "reset" });
+      if (stage.kind === "initial") transition({ type: "start" });
+      else transition({ type: "dropped", attempt: 1 });
+      dial();
+    },
     start: () => {
       if (started) return;
       started = true;
@@ -440,14 +454,15 @@ export function usePageLiveSession(options: UsePageLiveSessionOptions): PageLive
   React.useEffect(() => {
     if (!enabled || userId === null) return;
     const nudge = (): void => sessionRef.current?.nudge();
+    const reconnect = (): void => sessionRef.current?.reconnect();
     const visible = (): void => {
       if (document.visibilityState === "visible") nudge();
     };
-    window.addEventListener("online", nudge);
+    window.addEventListener("online", reconnect);
     window.addEventListener("focus", nudge);
     document.addEventListener("visibilitychange", visible);
     return () => {
-      window.removeEventListener("online", nudge);
+      window.removeEventListener("online", reconnect);
       window.removeEventListener("focus", nudge);
       document.removeEventListener("visibilitychange", visible);
     };

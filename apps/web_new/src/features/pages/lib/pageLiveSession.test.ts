@@ -568,6 +568,52 @@ describe("createPageLiveSession", () => {
     expect(harness.connect).toHaveBeenCalledTimes(1);
   });
 
+  it("redials a healthy session on reconnect with a fresh budget", () => {
+    const harness = fakeHarness();
+    const session = startSession(harness);
+    harness.open();
+    harness.synced();
+    session.reconnect();
+    expect(session.getStage()).toEqual({ kind: "reconnecting", attempt: 1 });
+    expect(sync.reportPageSync).toHaveBeenLastCalledWith(PAGE_ID, "syncing");
+    expect(harness.connect).toHaveBeenCalledTimes(2);
+    expect(harness.disconnect).toHaveBeenCalledTimes(2);
+    // The forced redial resets the retry budget: the next drop counts
+    // from one again.
+    harness.close(1006);
+    expect(session.getStage()).toEqual({ kind: "reconnecting", attempt: 1 });
+  });
+
+  it("redials a terminal session on reconnect", () => {
+    const harness = fakeHarness();
+    const session = startSession(harness);
+    harness.open();
+    harness.synced();
+    harness.authFailed();
+    expect(session.getStage().kind).toBe("disconnected");
+    session.reconnect();
+    expect(session.getStage()).toEqual({ kind: "connecting" });
+    expect(harness.connect).toHaveBeenCalledTimes(2);
+    harness.open();
+    harness.synced();
+    expect(session.getStage()).toEqual({ kind: "synced" });
+  });
+
+  it("ignores a reconnect off a session", () => {
+    const harness = fakeHarness();
+    const session = createPageLiveSession({
+      pageId: PAGE_ID,
+      backend: harness.backend,
+      fetchBinary: harness.fetchBinary,
+    });
+    session.reconnect();
+    expect(harness.connect).not.toHaveBeenCalled();
+    session.start();
+    session.destroy();
+    session.reconnect();
+    expect(harness.connect).toHaveBeenCalledTimes(1);
+  });
+
   it("tears everything down on destroy", () => {
     const harness = fakeHarness();
     const session = startSession(harness);
