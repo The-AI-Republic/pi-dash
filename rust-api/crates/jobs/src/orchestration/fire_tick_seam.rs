@@ -606,6 +606,7 @@ where
             ))
             .bind(activity.actor_id)
             .bind(activity.epoch_secs)
+            .bind(activity.created_by)
             .execute(&mut **self.dispatch_tx().inner())
             .await
             .map_err(db)?;
@@ -923,7 +924,8 @@ where
 /// Open the insertion transaction, run
 /// [`wait_ticker`][pidash_services::orchestration::dispatch::wait_ticker],
 /// commit, then emit the agent-wait line. `epoch_secs` is `time.time()`
-/// for the activity row.
+/// for the activity row; `created_by` is the crum user for it (the HTTP
+/// caller).
 #[allow(clippy::too_many_arguments)]
 pub async fn wait_ticker<C, H, P>(
     pool: &PgPool,
@@ -934,6 +936,7 @@ pub async fn wait_ticker<C, H, P>(
     issue_id: Uuid,
     run_id: Option<Uuid>,
     actor: Option<Uuid>,
+    created_by: Option<Uuid>,
 ) -> Result<DispatchOutcome<WaitOutcome>, DispatchJobsError>
 where
     C: AdmissionCache,
@@ -951,6 +954,7 @@ where
         now,
         jitter_secs,
         epoch_secs,
+        created_by,
     )
     .await?;
     let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
@@ -2750,6 +2754,7 @@ mod tests {
             graph.issue,
             Some(run),
             Some(graph.user),
+            Some(graph.user),
         )
         .await
         .expect("wait");
@@ -2757,9 +2762,19 @@ mod tests {
         assert_eq!(out.outcome.reason, "waited");
         let ticker = ticker_json(&pool, graph.issue).await;
         assert_eq!(ticker["waited"], json!(1));
-        let row: (String, String, String, String, String, Uuid, f64) = sqlx::query_as(
-            "SELECT verb, field, old_value, new_value, comment, actor_id, epoch \
-             FROM issue_activities WHERE issue_id = $1",
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Uuid,
+            f64,
+            Option<Uuid>,
+            Option<Uuid>,
+        ) = sqlx::query_as(
+            "SELECT verb, field, old_value, new_value, comment, actor_id, epoch, \
+             created_by_id, updated_by_id FROM issue_activities WHERE issue_id = $1",
         )
         .bind(graph.issue)
         .fetch_one(&pool)
@@ -2772,6 +2787,8 @@ mod tests {
         assert_eq!(row.4, format!("Waited on a blocker (1 of 10); run {run}"));
         assert_eq!(row.5, graph.user);
         assert_eq!(row.6, 1_780_000_000.0);
+        assert_eq!(row.7, Some(graph.user));
+        assert_eq!(row.8, None);
     }
 
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]

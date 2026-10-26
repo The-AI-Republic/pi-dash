@@ -214,9 +214,10 @@ pub const COMMENT_DESCRIPTION_UPDATE_SQL: &str =
 /// list with the Django-side defaults. `$1` now, `$2` now, `$3` id, `$4`
 /// project, `$5` workspace, `$6` issue, `$7` pool (`old_value`), `$8`
 /// waited (`new_value`), `$9` comment ([`wait_activity_comment`]), `$10`
-/// actor (or the system user; `created_by_id` stays NULL — the fixture
-/// pins no audit column), `$11` epoch (`time.time()`).
-pub const WAIT_ACTIVITY_INSERT_SQL: &str = "INSERT INTO issue_activities (created_at, updated_at, id, project_id, workspace_id, issue_id, old_value, new_value, comment, actor_id, epoch, created_by_id, updated_by_id, deleted_at, verb, field, attachments, issue_comment_id, old_identifier, new_identifier) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL, NULL, 'updated', 'agent_wait', '{}', NULL, NULL, NULL)";
+/// actor (or the system user), `$11` epoch (`time.time()`), `$12`
+/// creator (the crum user `BaseModel.save` stamps on a Django create;
+/// `updated_by_id` stays NULL as there).
+pub const WAIT_ACTIVITY_INSERT_SQL: &str = "INSERT INTO issue_activities (created_at, updated_at, id, project_id, workspace_id, issue_id, old_value, new_value, comment, actor_id, epoch, created_by_id, updated_by_id, deleted_at, verb, field, attachments, issue_comment_id, old_identifier, new_identifier) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, NULL, 'updated', 'agent_wait', '{}', NULL, NULL, NULL)";
 
 /// Wait write without re-arm (`:792-793, :816`):
 /// `save(update_fields=["waited", "updated_at"])`. `$1` waited, `$2`
@@ -548,7 +549,9 @@ pub struct NewIssueComment {
     pub comment_stripped: String,
 }
 
-/// One wait activity ([`WAIT_ACTIVITY_INSERT_SQL`]).
+/// One wait activity ([`WAIT_ACTIVITY_INSERT_SQL`]). `created_by` is
+/// the crum user `BaseModel.save` stamps on a Django create (`None`
+/// where the caller has no request user).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewWaitActivity {
     pub id: Uuid,
@@ -560,6 +563,7 @@ pub struct NewWaitActivity {
     pub waited: i32,
     pub run_id: Option<Uuid>,
     pub actor_id: Uuid,
+    pub created_by: Option<Uuid>,
     pub epoch_secs: f64,
 }
 
@@ -1809,7 +1813,9 @@ pub async fn re_tick_ticker<S: DispatchSeam>(
 }
 
 /// Buy back one tick so an agent can yield without spending budget
-/// (`wait_ticker`, `:766-827`, PDASHOSS01-204).
+/// (`wait_ticker`, `:766-827`, PDASHOSS01-204). `created_by` is the
+/// crum user for the activity row (the HTTP caller; `None` where the
+/// caller has no request user).
 #[allow(clippy::too_many_arguments)]
 pub async fn wait_ticker<S: DispatchSeam>(
     seam: &mut S,
@@ -1819,6 +1825,7 @@ pub async fn wait_ticker<S: DispatchSeam>(
     now: DateTime<Utc>,
     jitter_secs: f64,
     epoch_secs: f64,
+    created_by: Option<Uuid>,
 ) -> Result<WaitOutcome, DispatchError> {
     let mut ticker = seam.lock_ticker_for_issue(issue_id).await?;
     let Some(row) = ticker.as_mut() else {
@@ -1893,6 +1900,7 @@ pub async fn wait_ticker<S: DispatchSeam>(
         waited: row.waited,
         run_id,
         actor_id,
+        created_by,
         epoch_secs,
     })
     .await?;
@@ -4119,6 +4127,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4138,6 +4147,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4156,6 +4166,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4180,6 +4191,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4209,6 +4221,7 @@ mod tests {
             fx["comment"].as_str().unwrap()
         );
         assert_eq!(activity.actor_id, uid(0x41));
+        assert_eq!(activity.created_by, Some(uid(0x41)));
         assert_eq!(activity.epoch_secs, EPOCH);
         assert_eq!(out.logs.len(), 1);
         assert_eq!(out.logs[0].level, "INFO");
@@ -4237,6 +4250,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4261,6 +4275,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4291,6 +4306,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4305,12 +4321,13 @@ mod tests {
         // W9: no actor — the system bot owns the activity; no run —
         // no suffix.
         let mut seam = wait_case();
-        let out = wait_ticker(&mut seam, uid(0x01), None, None, now(), JITTER, EPOCH)
+        let out = wait_ticker(&mut seam, uid(0x01), None, None, now(), JITTER, EPOCH, None)
             .await
             .expect("wait");
         assert!(out.applied);
         let activity = seam.activities.last().expect("activity written");
         assert_eq!(activity.actor_id, uid(0x99));
+        assert_eq!(activity.created_by, None);
         assert_eq!(
             wait_activity_comment(activity.pool, activity.waited, activity.run_id.as_ref()),
             fixture(WAIT)["cases"]["W9_activity_no_run"]["activity"]["comment"]
@@ -4330,6 +4347,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
