@@ -2144,9 +2144,12 @@ pub async fn access_page(
     // against `PositiveSmallIntegerField.get_prep_value`: `1.5` → `1`,
     // `"1"` → `1`). JSON `null` is not an `int()` input: the prep returns
     // `None` and the UPDATE hits the NOT NULL column → `IntegrityError` →
-    // 400 invalid-payload. Anything else `int()` rejects fails at prep or
-    // at the SMALLINT column — both 500. The value binds as `i32` so an
-    // out-of-range integer is rejected by the column itself, exactly
+    // 400 invalid-payload. Anything else `int()` rejects fails at prep
+    // (500); a coerced in-range value can still fail at the column — a
+    // negative trips `CHECK ("access" >= 0)` → `IntegrityError` → 400 —
+    // so the UPDATE error maps through `db_write_denial` exactly like
+    // the create path. The value binds as `i32` so an out-of-range
+    // integer is rejected by the column itself (22003 → 500), exactly
     // like Django's save.
     let effective = match access_assign(raw) {
         AccessAssign::Value(value) => value,
@@ -2155,7 +2158,7 @@ pub async fn access_page(
         }
         AccessAssign::Rejected => return Denial::ServerError.into_response(),
     };
-    if sqlx::query(
+    let updated = sqlx::query(
         r#"UPDATE pages SET access = $1, description_stripped = $2,
            updated_at = now(), updated_by_id = $3 WHERE id = $4"#,
     )
@@ -2164,10 +2167,9 @@ pub async fn access_page(
     .bind(gate.user_id)
     .bind(page_id)
     .execute(pool)
-    .await
-    .is_err()
-    {
-        return Denial::ServerError.into_response();
+    .await;
+    if let Err(error) = updated {
+        return db_write_denial(&error);
     }
     StatusCode::NO_CONTENT.into_response()
 }
