@@ -20,7 +20,11 @@ lands in the ticking state, its ticker row is armed, and exactly one
 ``state_transition`` entry run exists for it. The negative case seeds a
 ``Backlog`` default (with a non-default ticking state present, so the
 tool demonstrably resolves the default): the issue is created, and no
-ticker, run, or comment appears.
+ticker, run, or comment appears. Two more cases pin the fire's
+post-commit shape: an online idle runner takes the entry run straight
+to ``assigned`` (the inline pod drain, PIDASHCONV-1494), and a
+runnerless pod bounces the issue back to Backlog with the
+no-eligible-runner notice and a dormant ticker.
 
 Needs a worker on both backends (the scheduler run executes there).
 Backend selection follows
@@ -298,8 +302,16 @@ def _seed_default_pod(seeder, workspace_id: str, project_id: str, owner_id: str)
     return {"id": pod_id}
 
 
-def _seed_runner(seeder, owner_id: str, workspace_id: str, pod_id: str) -> dict:
-    """A user-owned runner in the pod (offline is eligible for preflight)."""
+def _seed_runner(
+    seeder, owner_id: str, workspace_id: str, pod_id: str, *, online: bool = False
+) -> dict:
+    """A user-owned runner in the pod (offline is eligible for preflight).
+
+    ``online=True`` seeds the drain-test shape
+    (``orchestration/test_dispatch_drain.py::_fresh_runner``): a fresh
+    heartbeat plus an active session row, so the inline pod drain
+    assigns the entry run and the Assign enqueue hits the live stream.
+    """
     runner_id = str(uuid.uuid4())
     name = f"ct1493-runner-{uuid.uuid4().hex[:6]}"
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -317,6 +329,20 @@ def _seed_runner(seeder, owner_id: str, workspace_id: str, pod_id: str) -> dict:
         (runner_id, name, owner_id, workspace_id, pod_id, now, now),
     )
     seeder.track.add("runner", runner_id)
+    if online:
+        seeder.db.execute(
+            "UPDATE runner SET last_heartbeat_at = now(), status = 'online'"
+            " WHERE id = %s",
+            (runner_id,),
+        )
+        session_id = str(uuid.uuid4())
+        seeder.db.execute(
+            "INSERT INTO runner_session (id, runner_id, protocol_version,"
+            " created_at, last_seen_at, revoked_at, revoked_reason)"
+            " VALUES (%s,%s,4,now(),now(),NULL,'')",
+            (session_id, runner_id),
+        )
+        seeder.track.add("runner_session", session_id)
     return {"id": runner_id}
 
 
@@ -437,6 +463,8 @@ def _track_side_effects(seeder, db, run_id: str, issue_id: str):
         seeder.track.add("issue_agent_ticker", row["id"])
     for row in _entry_runs(db, issue_id):
         seeder.track.add("agent_run", row["id"])
+    for row in _comment_rows(db, issue_id):
+        seeder.track.add("issue_comments", row["id"])
     for row in db.fetchall(
         "SELECT id FROM agent_run_tool_call WHERE agent_run_id = %s "
         "OR agent_run_id IN (SELECT id FROM agent_run WHERE work_item_id = %s)",
@@ -612,5 +640,156 @@ def test_create_tool_in_backlog_default_creates_neither(db, broker, seeder, worl
         assert _ticker_rows(db, issue["id"]) == []
         assert _entry_runs(db, issue["id"]) == []
         assert _comment_rows(db, issue["id"]) == []
+    finally:
+        stub.stop()
+
+
+def test_create_tool_with_online_runner_assigns_entry_run(db, broker, seeder, world):
+    """The fire drains the pod: an online runner takes the entry run.
+
+    Same ticking-default drive, but the pod's runner is online and
+    idle (the ``test_dispatch_drain`` shape). Django's dispatch drains
+    the pod inline (``cloud_agent/dispatch.py:61-70``), so the entry
+    run must land ``assigned`` on that runner — not sit ``queued``.
+    A fire that drops the ``PodDrain`` decision leaves it queued
+    (PIDASHCONV-1494).
+    """
+    owner, ws, project = world["owner"], world["workspace"], world["project"]
+    _seed_ticking_project(seeder, project["id"])
+    ticking = seeder.create_state(
+        ws["id"], project["id"], name=TICKING_STATE, group=TICKING_GROUP
+    )
+    seeder.db.execute(
+        'UPDATE states SET "default" = true WHERE id = %s', (ticking["id"],)
+    )
+    pod = _seed_default_pod(seeder, ws["id"], project["id"], owner["id"])
+    runner = _seed_runner(seeder, owner["id"], ws["id"], pod["id"], online=True)
+    binding = _seed_scheduler_binding(seeder, ws["id"], project["id"], owner["id"])
+
+    title = f"Scheduler-filed {uuid.uuid4().hex[:8]}"
+    stub = _CreateStub(title)
+    base = stub.start()
+    try:
+        _seed_llm_config(seeder, owner["id"], base)
+        run = _seed_scheduler_run(seeder, world, binding["id"], pod["id"])
+
+        _publish(broker, run["id"])
+        after = wait_for_run(db, run["id"], status=COMPLETED, timeout=RUN_TIMEOUT)
+        assert after["status"] == COMPLETED, (
+            f"run ended {after['status']}/{after['error_code']}: {after['error']}"
+        )
+
+        ledger = _create_ledger_rows(db, run["id"])
+        assert [row["status"] for row in ledger] == ["succeeded"], (
+            f"the create tool must run exactly once: {ledger!r}; "
+            f"stub saw {stub.create_emitted} create emission(s) "
+            f"in {len(stub.requests)} request(s): {stub.requests!r}"
+        )
+
+        issue = _issue_by_name(db, project["id"], title)
+        assert issue is not None, "the tool call must create the issue"
+        assert str(issue["state_id"]) == str(ticking["id"]), (
+            "the issue must land in the ticking default state (no bounce move)"
+        )
+        _track_side_effects(seeder, db, run["id"], issue["id"])
+
+        tickers = _ticker_rows(db, issue["id"])
+        assert len(tickers) == 1, "the entered-bucket fire arms exactly one ticker"
+        assert tickers[0]["enabled"] is True
+
+        def _runs_present():
+            rows = _entry_runs(db, issue["id"])
+            return rows or None
+
+        runs = wait_for(
+            _runs_present, timeout=EFFECT_TIMEOUT, what="entry run created"
+        )
+        assert len(runs) == 1, "the immediate dispatch creates exactly one entry run"
+        entry = runs[0]
+        # The drain pin: the idle online runner is offered the run
+        # straight away (the fire awaits the drain before the tool
+        # returns, so no settle sleep is needed).
+        assert entry["status"] == "assigned", entry
+        assert str(entry["runner_id"]) == str(runner["id"]), entry
+        assert str(entry["owner_id"]) == str(owner["id"]), entry
+        assert entry["assigned_at"] is not None
+        assert entry["trigger"] == "state_transition"
+        assert entry["executor_kind"] == "local_runner"
+        assert str(entry["pod_id"]) == str(pod["id"])
+        assert str(entry["work_item_id"]) == str(issue["id"])
+        assert _comment_rows(db, issue["id"]) == []
+    finally:
+        stub.stop()
+
+
+def test_create_tool_in_ticking_default_without_runner_bounces_to_backlog(
+    db, broker, seeder, world
+):
+    """A runnerless pod bounces the scheduler-filed issue to Backlog.
+
+    Ticking default, but the default pod has no runner, so the fire's
+    preflight is ineligible
+    (``orchestration/test_signal_dispatch.py::test_enter_bucket_bounces_to_backlog_when_pod_has_no_runner``):
+    the issue moves to the project's Backlog state, one
+    no-eligible-runner notice is posted, the ticker lands dormant
+    (disabled, ``left_ticking_state``, no next run), and no entry run
+    is created. A fire that holds the reconcile write in-transaction
+    across the bounce commits an armed ticker instead.
+    """
+    owner, ws, project = world["owner"], world["workspace"], world["project"]
+    _seed_ticking_project(seeder, project["id"])
+    ticking = seeder.create_state(
+        ws["id"], project["id"], name=TICKING_STATE, group=TICKING_GROUP
+    )
+    seeder.db.execute(
+        'UPDATE states SET "default" = true WHERE id = %s', (ticking["id"],)
+    )
+    backlog = seeder.create_state(
+        ws["id"], project["id"], name="Backlog", group="backlog"
+    )
+    # No runner is seeded: the bare pod makes the fire's preflight
+    # ineligible, which is what the bounce pins.
+    pod = _seed_default_pod(seeder, ws["id"], project["id"], owner["id"])
+    binding = _seed_scheduler_binding(seeder, ws["id"], project["id"], owner["id"])
+
+    title = f"Scheduler-filed {uuid.uuid4().hex[:8]}"
+    stub = _CreateStub(title)
+    base = stub.start()
+    try:
+        _seed_llm_config(seeder, owner["id"], base)
+        run = _seed_scheduler_run(seeder, world, binding["id"], pod["id"])
+
+        _publish(broker, run["id"])
+        after = wait_for_run(db, run["id"], status=COMPLETED, timeout=RUN_TIMEOUT)
+        assert after["status"] == COMPLETED, (
+            f"run ended {after['status']}/{after['error_code']}: {after['error']}"
+        )
+
+        ledger = _create_ledger_rows(db, run["id"])
+        assert [row["status"] for row in ledger] == ["succeeded"], (
+            f"the create tool must run exactly once: {ledger!r}; "
+            f"stub saw {stub.create_emitted} create emission(s) "
+            f"in {len(stub.requests)} request(s): {stub.requests!r}"
+        )
+
+        issue = _issue_by_name(db, project["id"], title)
+        assert issue is not None, "the tool call must create the issue"
+        assert str(issue["state_id"]) == str(backlog["id"]), (
+            "the bounce must move the issue to the Backlog state"
+        )
+        _track_side_effects(seeder, db, run["id"], issue["id"])
+
+        tickers = _ticker_rows(db, issue["id"])
+        assert len(tickers) == 1, "the bounce leaves exactly one (dormant) ticker"
+        ticker = tickers[0]
+        assert ticker["enabled"] is False
+        assert ticker["disarm_reason"] == "left_ticking_state"
+        assert ticker["next_run_at"] is None
+
+        comments = _comment_rows(db, issue["id"])
+        assert len(comments) == 1, "the bounce posts exactly one notice"
+        assert "no eligible runner" in comments[0]["comment_html"]
+
+        assert _entry_runs(db, issue["id"]) == []
     finally:
         stub.stop()

@@ -368,7 +368,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // registers also own).
     let runner_seams = std::sync::Arc::new(runner_seams::RunnerSeams::new(
         ctx.pools.primary().clone(),
-        redis,
+        redis.clone(),
         &ctx.settings,
         std::sync::Arc::new(NoExtraToolsets),
         ctx.assistant_seam.clone(),
@@ -408,6 +408,8 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
                 ctx.settings.secret_key.clone(),
             ),
             toolsets: std::sync::Arc::new(NoExtraToolsets),
+            redis: redis.clone(),
+            runner: ctx.settings.runner.clone(),
         },
         keys: model_runtime::keys::KeyResolver::from_env(
             ctx.settings.assistant.key_cache_ttl_secs,
