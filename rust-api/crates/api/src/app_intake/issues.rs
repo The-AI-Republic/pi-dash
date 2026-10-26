@@ -2063,10 +2063,17 @@ pub async fn validate_intake_fields(
 /// `updated_by` stamping, then the accepted-status TRIAGE-to-default
 /// issue transition (a full `Issue.save`, so `updated_at` /
 /// `description_stripped` / `completed_at` recompute there too).
+///
+/// `pre_save_issue` is the issue row fetched before either branch saved:
+/// Django's transition saves the cached pre-save `intake_issue.issue`
+/// whole, clobbering the issue-half writes from the same request (the
+/// stale-save bug, PORTED BUGS PB-2036 — the same clobber the v1 port
+/// models in `apply_triage_transition`).
 pub async fn apply_intake_update(
     pool: &PgPool,
     bridge: &IntakeIssueRow,
     validated: &ValidatedIntake,
+    pre_save_issue: &IssueRow,
     default_state_id: Option<Uuid>,
     actor_id: &Uuid,
     now: DateTime<Utc>,
@@ -2098,28 +2105,58 @@ pub async fn apply_intake_update(
 
     // The accepted-status transition (`intake.py:73-82`): only when the
     // validated status is accepted (the caller checked TRIAGE + default
-    // presence in `validate()`).
+    // presence in `validate()`). The full-row rewrite IS the clobber:
+    // every pre-save column is written back, so issue-half writes from
+    // this request vanish — exactly Django's stale `issue.save()`.
     if let Some(state_id) = default_state_id {
         let transition_now = Utc::now();
-        let group: Option<(Option<String>,)> =
-            sqlx::query_as(r#"SELECT "group" FROM states WHERE id = $1"#)
-                .bind(state_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|_| Denial::ServerError)?;
-        let completed_at = match group {
-            Some((Some(group),)) if group == "completed" => Some(transition_now),
-            _ => None,
-        };
-        sqlx::query(
-            r#"UPDATE issues SET state_id = $1, completed_at = $2,
-                 updated_at = $3, updated_by_id = $4 WHERE id = $5"#,
+        let saved = issue_save_columns(
+            pool,
+            &pre_save_issue.project_id,
+            &pre_save_issue.description_html,
+            Some(state_id),
+            pre_save_issue.completed_at,
+            transition_now,
         )
+        .await?;
+        sqlx::query(
+            r#"UPDATE issues SET name = $2, description_html = $3, description_json = $4,
+                 description_stripped = $5, priority = $6, complexity_score = $7,
+                 start_date = $8, target_date = $9, point = $10, sort_order = $11,
+                 completed_at = $12, archived_at = $13, is_draft = $14,
+                 external_source = $15, external_id = $16, sequence_id = $17,
+                 state_id = $18, parent_id = $19, estimate_point_id = $20, type_id = $21,
+                 assigned_pod_id = $22, agent_executor = $23, git_work_branch = $24,
+                 created_via = $25, updated_at = $26, updated_by_id = $27
+               WHERE id = $1"#,
+        )
+        .bind(pre_save_issue.id)
+        .bind(&pre_save_issue.name)
+        .bind(&pre_save_issue.description_html)
+        .bind(&pre_save_issue.description_json)
+        .bind(saved.description_stripped)
+        .bind(&pre_save_issue.priority)
+        .bind(pre_save_issue.complexity_score)
+        .bind(pre_save_issue.start_date)
+        .bind(pre_save_issue.target_date)
+        .bind(pre_save_issue.point)
+        .bind(pre_save_issue.sort_order)
+        .bind(saved.completed_at)
+        .bind(pre_save_issue.archived_at)
+        .bind(pre_save_issue.is_draft)
+        .bind(&pre_save_issue.external_source)
+        .bind(&pre_save_issue.external_id)
+        .bind(pre_save_issue.sequence_id)
         .bind(state_id)
-        .bind(completed_at)
-        .bind(transition_now)
+        .bind(pre_save_issue.parent_id)
+        .bind(pre_save_issue.estimate_point_id)
+        .bind(pre_save_issue.type_id)
+        .bind(pre_save_issue.assigned_pod_id)
+        .bind(&pre_save_issue.agent_executor)
+        .bind(&pre_save_issue.git_work_branch)
+        .bind(&pre_save_issue.created_via)
+        .bind(saved.updated_at)
         .bind(actor_id)
-        .bind(bridge.issue_id)
         .execute(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
@@ -3077,6 +3114,10 @@ pub async fn partial_update(
     let mut intake_validated: Option<ValidatedIntake> = None;
     let mut intake_current_dump: Option<String> = None;
     let mut accept_state: Option<Uuid> = None;
+    // The pre-save issue snapshot for the accept transition's stale
+    // full-row rewrite (`intake.py:70-82` saves the cached pre-save
+    // `intake_issue.issue` whole). Fetched before either branch saves.
+    let mut accept_presave: Option<IssueRow> = None;
     if guards::intake_fields_writable(&membership.as_guard()) {
         let bridge_issue =
             match fetch_issue_annotated(pool, &bridge.issue_id, &tenant.project_id, &slug).await {
@@ -3125,6 +3166,7 @@ pub async fn partial_update(
             Err(response) => return response,
         }
         intake_validated = Some(validated);
+        accept_presave = Some(bridge_issue);
     }
 
     // Both serializers valid: save the issue branch first (`:430-456`).
@@ -3184,11 +3226,21 @@ pub async fn partial_update(
     }
 
     // Then the intake branch (`:457-471`).
-    if let (Some(validated), Some(current)) =
-        (intake_validated.as_ref(), intake_current_dump.as_ref())
-    {
-        if let Err(denial) =
-            apply_intake_update(pool, &bridge, validated, accept_state, &actor.id, now).await
+    if let (Some(validated), Some(current), Some(presave)) = (
+        intake_validated.as_ref(),
+        intake_current_dump.as_ref(),
+        accept_presave.as_ref(),
+    ) {
+        if let Err(denial) = apply_intake_update(
+            pool,
+            &bridge,
+            validated,
+            presave,
+            accept_state,
+            &actor.id,
+            now,
+        )
+        .await
         {
             return denial.into_response();
         }

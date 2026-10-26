@@ -224,6 +224,39 @@ def test_patch_accept_moves_to_default_state(make_tenant):
     assert again.json()["issue"]["state_id"] == default_id
 
 
+def test_patch_accept_clobbers_issue_half_writes(make_tenant):
+    """PIDASHCONV-1440: accept-with-edits keeps the PRE-save issue fields.
+
+    Django's `IntakeIssueSerializer.update()` re-saves the cached pre-save
+    issue row whole (a full `issue.save()`), so issue-half writes from the
+    same request vanish and the old values win (PORTED BUGS PB-2036). The
+    Rust port must do the same full-row rewrite from the pre-save snapshot.
+
+    Uses a fresh tenant: flipping the shared admin tenant's state to
+    default would break test_patch_accept_without_default_400."""
+    tenant = make_tenant()
+    urls = intake_urls(tenant)
+    tenant["_database"].execute(
+        'UPDATE states SET "default" = true WHERE project_id = %s',
+        (tenant["project"]["id"],),
+    )
+    created = create_intake_issue(
+        tenant["client"], urls["intake_issues"], name="Accept keeps old"
+    )
+    issue_id = created["issue"]["id"]
+    response = tenant["client"].patch(
+        f"{urls['intake_issues']}{issue_id}/",
+        json={"status": 1, "issue": {"name": "new"}},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == 1
+    assert body["issue"]["name"] == "Accept keeps old"
+    again = tenant["client"].get(f"{urls['intake_issues']}{issue_id}/")
+    assert again.status_code == 200, again.text
+    assert again.json()["issue"]["name"] == "Accept keeps old"
+
+
 def test_patch_triage_duplicate_rejected(admin):
     """`duplicate_to` is an auto FK field, so it binds the triage-hiding
     default manager: another triage intake issue is not a valid target."""
