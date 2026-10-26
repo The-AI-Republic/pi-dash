@@ -1605,6 +1605,10 @@ pub(crate) async fn fetch_estimate_type(
 /// Shared `FROM/WHERE` for the distribution queries: live module bridges
 /// of this project/workspace under the `IssueManager` base
 /// (`base.py:431-436,493-498,539-544,592-597`).
+/// Ported bug (PB-2035, PB-0102 class): the M2M joins carry no
+/// `deleted_at` guard, because Django groups through the `assignees` /
+/// `labels` relations whose ORM joins never filter soft-deleted through
+/// rows — removed assignees/labels still distribute.
 fn distribution_from_where(assignee_join: bool, label_join: bool) -> String {
     let mut sql = String::from(
         "FROM issues \
@@ -1617,16 +1621,13 @@ fn distribution_from_where(assignee_join: bool, label_join: bool) -> String {
     if assignee_join {
         sql.push_str(
             "LEFT JOIN issue_assignees ON issue_assignees.issue_id = issues.id \
-             AND issue_assignees.deleted_at IS NULL \
              LEFT JOIN users AS assignees ON assignees.id = issue_assignees.assignee_id ",
         );
     }
     if label_join {
         sql.push_str(
             "LEFT JOIN issue_labels ON issue_labels.issue_id = issues.id \
-             AND issue_labels.deleted_at IS NULL \
-             LEFT JOIN labels ON labels.id = issue_labels.label_id \
-             AND labels.deleted_at IS NULL ",
+             LEFT JOIN labels ON labels.id = issue_labels.label_id ",
         );
     }
     sql.push_str("WHERE ");

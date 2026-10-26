@@ -263,6 +263,173 @@ def test_list_fields_branch_shape(api, seed, tenant_a, project_a, auth_a):
     assert {k: entry[k] for k in plain_entry} == plain_entry
 
 
+def test_distribution_keeps_soft_deleted_bridges(api, seed, db, tenant_a,
+                                               project_a, auth_a):
+    """Removed assignees/labels stay in the distributions (PIDASHCONV-1424).
+
+    Django groups through the ``Issue.assignees`` / ``Issue.labels`` M2M
+    fields (``app/views/module/base.py``), whose joins never apply the
+    soft-delete manager — so a reassigned user and a swapped label keep
+    their rows, even when the label row itself is soft-deleted
+    (PB-0102 class, already ported for cycles). The Rust port filtered
+    the bridges (and the label row) out of ``distribution``,
+    ``estimate_distribution`` and the archived detail.
+    """
+    ws = tenant_a["workspace"]["id"]
+    slug = tenant_a["workspace"]["slug"]
+    user_a = tenant_a["user"]["id"]
+    user_b = seed.user()["id"]
+    seed.member(ws, user_b, role=20)
+    seed.project_member(project_a, ws, user_b, role=20)
+    est = estimate(db, project_a, ws)
+    ep = estimate_point(db, est["id"], project_a, ws, value="3")
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "update projects set estimate_id=%s where id=%s",
+                (est["id"], project_a),
+            )
+        mid = seed.module(ws, project_a, name="CT1424 dist")
+        iid = seed.issue(ws, project_a, name="CT1424 issue")
+        with db.cursor() as cur:
+            cur.execute(
+                "update issues set estimate_point_id=%s where id=%s",
+                (ep["id"], iid),
+            )
+        seed.module_issue(ws, project_a, mid, iid)
+        seed.issue_assignee(ws, project_a, iid, user_a)
+        lab1 = seed.label(ws, project_a, name="ct1424-old")
+        seed.issue_label(ws, project_a, iid, lab1)
+        lab2 = seed.label(ws, project_a, name="ct1424-new")
+        issue_url = (
+            f"/api/workspaces/{slug}/projects/{project_a}/issues/{iid}/"
+        )
+        r = api.patch(
+            issue_url, headers=auth_a,
+            json={"assignee_ids": [user_b], "label_ids": [lab2]},
+        )
+        assert r.status_code == 204, r.text
+        assert r.content == b""
+        with db.cursor() as cur:
+            cur.execute(
+                "update labels set deleted_at=now() where id=%s", (lab1,)
+            )
+            cur.execute(
+                "select display_name from users where id=%s", (user_a,)
+            )
+            disp_a = cur.fetchone()[0]
+            cur.execute(
+                "select display_name from users where id=%s", (user_b,)
+            )
+            disp_b = cur.fetchone()[0]
+
+        want_assign = {
+            user_a: {
+                "first_name": "Contract", "last_name": "Test",
+                "assignee_id": user_a, "display_name": disp_a,
+                "avatar_url": "", "total_issues": 1,
+                "completed_issues": 0, "pending_issues": 1,
+            },
+            user_b: {
+                "first_name": "Contract", "last_name": "Test",
+                "assignee_id": user_b, "display_name": disp_b,
+                "avatar_url": "", "total_issues": 1,
+                "completed_issues": 0, "pending_issues": 1,
+            },
+        }
+        want_assign_est = {}
+        for uid, row in want_assign.items():
+            est_row = {
+                k: row[k] for k in (
+                    "first_name", "last_name", "assignee_id",
+                    "display_name", "avatar_url",
+                )
+            }
+            est_row.update(
+                total_estimates=3.0, completed_estimates=None,
+                pending_estimates=3.0,
+            )
+            want_assign_est[uid] = est_row
+        want_labels = {
+            lab1: {
+                "label_name": "ct1424-old", "color": "#ffffff",
+                "label_id": lab1, "total_issues": 1,
+                "completed_issues": 0, "pending_issues": 1,
+            },
+            lab2: {
+                "label_name": "ct1424-new", "color": "#ffffff",
+                "label_id": lab2, "total_issues": 1,
+                "completed_issues": 0, "pending_issues": 1,
+            },
+        }
+        want_labels_est = {
+            lid: {
+                "label_name": row["label_name"], "color": row["color"],
+                "label_id": lid, "total_estimates": 3.0,
+                "completed_estimates": None, "pending_estimates": 3.0,
+            }
+            for lid, row in want_labels.items()
+        }
+
+        r = api.get(module_url(tenant_a, project_a, mid), headers=auth_a)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        got = {row["assignee_id"]: row for row in body["distribution"]["assignees"]}
+        assert got == want_assign, body["distribution"]["assignees"]
+        got = {row["label_id"]: row for row in body["distribution"]["labels"]}
+        assert got == want_labels, body["distribution"]["labels"]
+        got = {row["assignee_id"]: row
+               for row in body["estimate_distribution"]["assignees"]}
+        assert got == want_assign_est, body["estimate_distribution"]["assignees"]
+        got = {row["label_id"]: row
+               for row in body["estimate_distribution"]["labels"]}
+        assert got == want_labels_est, body["estimate_distribution"]["labels"]
+
+        r = api.patch(
+            module_url(tenant_a, project_a, mid), headers=auth_a,
+            json={"status": "completed"},
+        )
+        assert r.status_code == 200, r.text
+        r = api.post(
+            f"{module_url(tenant_a, project_a, mid)}archive/", headers=auth_a,
+        )
+        assert r.status_code == 200, r.text
+        arch_url = (
+            f"/api/workspaces/{slug}/projects/{project_a}/archived-modules/{mid}/"
+        )
+        r = api.get(arch_url, headers=auth_a)
+        assert r.status_code == 200, r.text
+        arch = r.json()
+        got = {row["assignee_id"]: row for row in arch["distribution"]["assignees"]}
+        assert got == want_assign, arch["distribution"]["assignees"]
+        got = {row["label_id"]: row for row in arch["distribution"]["labels"]}
+        assert got == want_labels, arch["distribution"]["labels"]
+        got = {row["assignee_id"]: row
+               for row in arch["estimate_distribution"]["assignees"]}
+        assert got == want_assign_est, arch["estimate_distribution"]["assignees"]
+        got = {row["label_id"]: row
+               for row in arch["estimate_distribution"]["labels"]}
+        assert got == want_labels_est, arch["estimate_distribution"]["labels"]
+    finally:
+        with db.cursor() as cur:
+            cur.execute(
+                "update issues set estimate_point_id=null"
+                " where project_id=%s",
+                (project_a,),
+            )
+            cur.execute(
+                "update projects set estimate_id=null where id=%s",
+                (project_a,),
+            )
+            cur.execute(
+                "delete from estimate_points where project_id=%s",
+                (project_a,),
+            )
+            cur.execute(
+                "delete from estimates where project_id=%s", (project_a,),
+            )
+
+
 def test_list_no_fields_shape(api, seed, tenant_a, project_a, auth_a):
     """Absent, empty, and comma-only `fields` all fall through to the
     annotated `.values()` row: 28 keys in SHARED_ROW_ORDER, no

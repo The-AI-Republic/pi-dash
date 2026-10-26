@@ -516,7 +516,9 @@ async fn archived_list(
 
 /// Label estimate-distribution over the archive queryset
 /// (`archive.py:386-391`): identical to the main label estimate query
-/// except the ported bug — no `module_issues.deleted_at IS NULL` filter.
+/// except the ported bugs — no `module_issues.deleted_at IS NULL` filter,
+/// and no `deleted_at` guard on the label M2M joins (PB-2035, PB-0102
+/// class: Django groups through the relations unfiltered).
 async fn fetch_archive_label_estimate(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -542,9 +544,7 @@ async fn fetch_archive_label_estimate(
            JOIN module_issues ON module_issues.issue_id = issues.id
            LEFT JOIN estimate_points ON estimate_points.id = issues.estimate_point_id
            LEFT JOIN issue_labels ON issue_labels.issue_id = issues.id
-           AND issue_labels.deleted_at IS NULL
            LEFT JOIN labels ON labels.id = issue_labels.label_id
-           AND labels.deleted_at IS NULL
            WHERE {} AND workspaces.slug = $1 AND issues.project_id = $2
            AND module_issues.module_id = $3
            GROUP BY labels.name, labels.color, labels.id
