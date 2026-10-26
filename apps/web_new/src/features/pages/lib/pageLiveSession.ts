@@ -171,7 +171,9 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
   const handleDrop = (kind: PageLiveCloseKind): void => {
     if (destroyed || stage.kind === "disconnected") return;
     clearConnect();
-    if (kind === "auth") {
+    if (kind === "auth" || kind === "force") {
+      // A rejected handshake and a forced close never redial: the server
+      // already decided this socket is over (PAGE-068, PAGE-069).
       clearRetry();
       enterFailed(kind);
       return;
@@ -191,6 +193,9 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
   };
 
   const handleOpen = (): void => {
+    // A socket that opens proves the network is back: past drops stop
+    // counting against the retry budget (PAGE-067).
+    retriesUsed = 0;
     clearConnect();
     transition({ type: "opened" });
   };
@@ -213,6 +218,9 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
     // A clean sync re-arms failure notices: a recurring failure after a
     // recovery toasts again instead of staying suppressed.
     lastNotice = "";
+    // Converged documents restart the retry budget with them, so a long
+    // healthy session never exhausts on old drops (PAGE-067).
+    retriesUsed = 0;
     transition({ type: "synced" });
   };
 

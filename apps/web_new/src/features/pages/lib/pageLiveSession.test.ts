@@ -333,17 +333,54 @@ describe("createPageLiveSession", () => {
     expect(session.getFallback()).toBe("done");
   });
 
-  it("names a forced exhaustion after the force-close family", async () => {
+  it("ends a force close immediately without another dial", async () => {
     const harness = fakeHarness();
     const session = startSession(harness);
-    for (let attempt = 1; attempt <= 8; attempt += 1) {
-      harness.close(4001);
-      vi.advanceTimersByTime(attempt < 4 ? 1000 * 2 ** (attempt - 1) : 10_000);
-    }
+    harness.open();
+    harness.synced();
     harness.close(4001);
     expect(session.getStage()).toEqual({ kind: "disconnected", reason: "force-close" });
+    expect(sync.reportPageSync).toHaveBeenLastCalledWith(PAGE_ID, "lost");
+    // The server already unloaded the document: a repeat close stays
+    // terminal and no redial re-loads it.
+    harness.close(4000);
+    vi.advanceTimersByTime(120_000);
+    expect(harness.connect).toHaveBeenCalledTimes(1);
     await flush();
+    expect(harness.fetchBinary).toHaveBeenCalledTimes(1);
     expect(session.getFallback()).toBe("done");
+  });
+
+  it("resets the retry budget on every clean sync", () => {
+    const harness = fakeHarness();
+    const session = startSession(harness);
+    harness.open();
+    harness.synced();
+    // Ten recovered drops never accumulate: each sync restarts the count.
+    for (let cycle = 0; cycle < 10; cycle += 1) {
+      harness.close(1006);
+      expect(session.getStage()).toEqual({ kind: "reconnecting", attempt: 1 });
+      vi.advanceTimersByTime(1000);
+      harness.open();
+      harness.synced();
+      expect(session.getStage()).toEqual({ kind: "synced" });
+    }
+    harness.close(1006);
+    expect(session.getStage()).toEqual({ kind: "reconnecting", attempt: 1 });
+    expect(harness.connect).toHaveBeenCalledTimes(11);
+  });
+
+  it("resets the retry budget when the socket opens", () => {
+    const harness = fakeHarness();
+    const session = startSession(harness);
+    harness.open();
+    harness.synced();
+    harness.close(1006);
+    expect(session.getStage()).toEqual({ kind: "reconnecting", attempt: 1 });
+    vi.advanceTimersByTime(1000);
+    harness.open();
+    harness.close(1006);
+    expect(session.getStage()).toEqual({ kind: "reconnecting", attempt: 1 });
   });
 
   it("ignores a stale close once terminal", async () => {
