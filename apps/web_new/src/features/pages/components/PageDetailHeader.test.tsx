@@ -214,7 +214,9 @@ describe("PageDetailHeader", () => {
     renderHeader({ onAddSubPage });
     fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
     const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
-    expect(items).toEqual([PAGE_HISTORY_ITEM, "Add sub-page"]);
+    // The display toggles lead the menu (PAGE-072), then the history
+    // entry, then the nested-pages action appended by PAGE-084.
+    expect(items).toEqual(["Full width", "Sticky toolbar", PAGE_HISTORY_ITEM, "Add sub-page"]);
     fireEvent.click(screen.getByRole("menuitem", { name: "Add sub-page" }));
     expect(onAddSubPage).toHaveBeenCalledTimes(1);
   });
