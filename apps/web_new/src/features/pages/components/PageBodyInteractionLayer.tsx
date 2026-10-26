@@ -13,6 +13,7 @@ import { searchMentionPeople } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
 import type { PageEditorHandle, PageHoveredBlock, PageTextRange } from "../lib/pageEditorAdapter.js";
+import { readFormattingBarBottom, resolveSelectionBubbleTop } from "../lib/pageBubblePlacement.js";
 import { pageAssistantBelowHtml } from "../lib/pageAssistant.js";
 import { PAGE_BODY_EMOJIS, slashQueryAt, type PageBlockMenuAction, type PageCatalogEntry } from "../lib/pageBlocks.js";
 import { mentionQueryAt } from "../../../shared/editor/mention.js";
@@ -32,6 +33,7 @@ import {
   PageSlashPalette,
   type PageMentionPerson,
 } from "./PageBodyControls.js";
+import { PAGE_TOOLBAR_ID } from "./PageFormattingBar.js";
 import { PageAssistantHandle, PageAssistantMenu } from "./PageAssistantMenu.js";
 
 export const PAGE_BODY_INTERACTION_LABEL = "Page body actions";
@@ -457,8 +459,15 @@ export function PageBodyInteractionLayer({
       {selectionActive || link.open ? (
         <div
           ref={bubbleRef}
+          data-testid="page-selection-bubble"
           className="pointer-events-auto fixed z-30"
-          style={{ top: Math.max(0, anchor.top - 48), left: anchor.left }}
+          // The bubble flips below the caret while its default above-caret
+          // slot would cover the sticky bar (PAGE-029); the bar's rect is
+          // read fresh on every render, so pref toggles and mounts move it.
+          style={{
+            top: resolveSelectionBubbleTop(anchor.top, readFormattingBarBottom(PAGE_TOOLBAR_ID)),
+            left: anchor.left,
+          }}
         >
           <PageSelectionBubble
             link={{ ...link, onApply: applyLink, onRemove: removeLink }}

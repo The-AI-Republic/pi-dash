@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 import { EMPTY_FORMATTING_STATE } from "../../../shared/editor/pageFormatting.js";
 import { PageBodyInteractionLayer } from "./PageBodyInteractionLayer.js";
+import { PAGE_TOOLBAR_ID } from "./PageFormattingBar.js";
 
 const api = vi.hoisted(() => ({ searchMentionPeople: vi.fn(), searchEntityPreviews: vi.fn() }));
 vi.mock("@pidash/api-client", async (original) => {
@@ -89,6 +90,15 @@ function mount(overrides: Partial<React.ComponentProps<typeof PageBodyInteractio
     />
   );
   return { ...view, page, onDocumentChange, onPickImage };
+}
+
+/** A stub sticky bar with the given bottom edge; the caller removes it. */
+function mountBar(bottom: number): HTMLElement {
+  const bar = document.createElement("div");
+  bar.id = PAGE_TOOLBAR_ID;
+  document.body.appendChild(bar);
+  vi.spyOn(bar, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, bottom));
+  return bar;
 }
 
 afterEach(() => {
@@ -351,6 +361,39 @@ describe("PageBodyInteractionLayer", () => {
     const palette = screen.getByTestId("page-slash-palette").parentElement;
     expect(palette?.style.top).toBe("204px");
     expect(palette?.style.left).toBe("24px");
+  });
+
+  it("flips the selection bubble below the caret when the bar covers the above slot (PAGE-029)", () => {
+    const bar = mountBar(56);
+    try {
+      const page = handle();
+      (page.caretAnchor as ReturnType<typeof vi.fn>).mockReturnValue({ top: 70, left: 100 });
+      mount({ getHandle: () => page });
+      // Above-caret would land at 22px, inside the 56px bar: the bubble
+      // drops below the caret instead of covering the bar's buttons.
+      expect(screen.getByTestId("page-selection-bubble").style.top).toBe("94px");
+    } finally {
+      bar.remove();
+    }
+  });
+
+  it("keeps the selection bubble above the caret while it clears the bar (PAGE-029)", () => {
+    const bar = mountBar(56);
+    try {
+      const page = handle();
+      (page.caretAnchor as ReturnType<typeof vi.fn>).mockReturnValue({ top: 300, left: 100 });
+      mount({ getHandle: () => page });
+      expect(screen.getByTestId("page-selection-bubble").style.top).toBe("252px");
+    } finally {
+      bar.remove();
+    }
+  });
+
+  it("keeps the historical bubble slot when no formatting bar is mounted (PAGE-029)", () => {
+    const page = handle();
+    (page.caretAnchor as ReturnType<typeof vi.fn>).mockReturnValue({ top: 70, left: 100 });
+    mount({ getHandle: () => page });
+    expect(screen.getByTestId("page-selection-bubble").style.top).toBe("22px");
   });
 
   it("clears one colour kind and applies the other before reporting the edit", () => {
