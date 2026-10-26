@@ -66,6 +66,15 @@ test(
     await driver.clickEmptyStateCreate();
     await expect.poll(() => driver.isCreateProjectDialogVisible(), POLL).toBe(true);
 
+    if (driver.target === "web_new") {
+      // TARGET (main#503/main#523, NEWFRONT-606): the dialog shows the
+      // AI-context placeholder and offers no cover input at all.
+      await test.step("the dialog carries the AI-context placeholder and no cover input", async () => {
+        expect(await driver.createFormDescriptionPlaceholder()).toBe("Project Context (Will be shown to AI agents)");
+        expect(await driver.createFormCoverVisible()).toBe(false);
+      });
+    }
+
     await test.step("the identifier derives live until hand-edited", async () => {
       await driver.fillCreateProjectName("Lifecycle Forge");
       const derived = await driver.createProjectShortCodeValue();

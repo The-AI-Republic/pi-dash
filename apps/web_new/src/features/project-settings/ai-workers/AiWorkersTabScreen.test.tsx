@@ -107,7 +107,7 @@ function projectRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function setup(detail: Record<string, unknown>, patchStatus = 200, patchHang = false) {
+function setup(detail: Record<string, unknown>, patchStatus = 200, patchHang = false, dropSavedField = false) {
   const calls: Array<{ method: string; body: string }> = [];
   let current = detail;
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
@@ -118,7 +118,11 @@ function setup(detail: Record<string, unknown>, patchStatus = 200, patchHang = f
       calls.push({ method, body: init.body ?? "" });
       if (patchHang) await new Promise(() => {});
       const payload = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
-      if (patchStatus === 200) current = { ...current, ...payload };
+      if (patchStatus === 200) {
+        // A dropped field still ships fresh write stamps, so the reseed
+        // is a new row identity like the real backend answers.
+        current = dropSavedField ? { ...current, updated_at: "2026-03-04T05:06:07Z" } : { ...current, ...payload };
+      }
       return jsonResponse(url, patchStatus, patchStatus === 200 ? current : {});
     }
     return jsonResponse(url, 404, {});
@@ -170,6 +174,23 @@ describe("ProjectSettingsAiWorkersTab", () => {
           ?.dedicated_runner_lost_action
       ).toBe("fall_back")
     );
+  });
+
+  it("keeps the saved pick when the PATCH response drops the field", async () => {
+    // The backend answers 200 without storing the rule (PDASHOSS01-297/304),
+    // so the reseed reads back the default; the draft must hold (PSET-064).
+    const user = userEvent.setup();
+    setup(projectRow(), 200, false, true);
+    await screen.findByText("Fail the run and move the issue to Backlog");
+    await user.click(screen.getByRole("button", { name: /Fail the run and move the issue to Backlog/ }));
+    await user.click(await screen.findByRole("option", { name: "Fall back to the pod" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(notify.success).toHaveBeenCalledWith(LOST_RUNNER_RULE_SAVED_TITLE, LOST_RUNNER_RULE_SAVED_MESSAGE)
+    );
+    expect(screen.getByRole("button", { name: /Fall back to the pod/ })).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText("Fail the run and move the issue to Backlog")).not.toBeInTheDocument();
   });
 
   it("renders the member form inert without a save control", async () => {

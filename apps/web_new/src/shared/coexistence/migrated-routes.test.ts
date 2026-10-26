@@ -177,15 +177,10 @@ describe("bundled list", () => {
     ]) {
       expect(isMigratedPath(path), path).toBe(true);
     }
-    // Sections the area does not own stay on the old app: project settings
-    // land with their own gate, and the profile legacy forwards plus any
-    // unknown section have no web_new page at this address.
-    for (const path of [
-      "/acme/settings/projects/1",
-      "/acme/settings/api-tokens",
-      "/acme/settings/account",
-      "/acme/settings/unknown",
-    ]) {
+    // Project settings moved with their own area gate (NEWFRONT-606); the
+    // profile legacy forwards plus any unknown section have no web_new page
+    // at this address.
+    for (const path of ["/acme/settings/api-tokens", "/acme/settings/account", "/acme/settings/unknown"]) {
       expect(isMigratedPath(path), path).toBe(false);
     }
     expect(resolveLinkKind("/acme/settings/members")).toBe("router");
@@ -265,8 +260,8 @@ describe("parity with the Caddy generator", () => {
     "/acme/browse/ACME-1/x",
     "/acme/browse",
     // Workspace settings (WSET area gate). The six sections and the whole
-    // webhook detail subtree move; project settings stay on the old app
-    // until their own gate, and so do the profile-owned legacy forwards.
+    // webhook detail subtree move; project settings moved with their own
+    // gate (NEWFRONT-606); the profile-owned legacy forwards stay.
     "/acme/settings",
     "/acme/settings/",
     "/acme/settings/members",
@@ -278,6 +273,7 @@ describe("parity with the Caddy generator", () => {
     "/acme/settings/webhooks/1/x",
     "/acme/settings/projects/1",
     "/acme/settings/projects",
+    "/acme/settings/projects/1/labels",
     "/acme/settings/api-tokens",
     "/acme/settings/account",
     "/acme/settings/unknown",

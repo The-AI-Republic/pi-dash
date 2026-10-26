@@ -254,15 +254,26 @@ test(
     );
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
-      await driver.projectAutomationsDelayDetailsFetch(4_000);
+      // The hold must outlast a cold mount: on a loaded shared runner the
+      // document plus bundle can take several seconds before the tab's
+      // first read fires, and the sample loop starts as soon as navigation
+      // begins. Ten seconds leaves the loader visible well past mount while
+      // still settling on the rows once the read lands.
+      await driver.projectAutomationsDelayDetailsFetch(10_000);
       const opened = driver.projectAutomationsOpenTab(seed.workspaceSlug, projectId);
       let sawLoader = false;
-      for (let sample = 0; sample < 20 && !sawLoader; sample++) {
+      for (let sample = 0; sample < 50 && !sawLoader; sample++) {
         sawLoader = await driver.projectAutomationsLoaderVisible();
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
       await opened;
-      expect(sawLoader).toBe(false);
+      if (driver.target === "web_new") {
+        // Intended (NEWFRONT-397, NEWFRONT-606): the skeleton shows while
+        // the held retrieve is in flight, then yields to the rows.
+        expect(sawLoader).toBe(true);
+      } else {
+        expect(sawLoader).toBe(false);
+      }
       expect(await driver.projectAutomationsLoaderVisible()).toBe(false);
       expect(await driver.projectAutomationsArchiveOn()).toBe(false);
     } finally {

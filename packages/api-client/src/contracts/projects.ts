@@ -9,6 +9,7 @@
 // (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
+import { isApiError } from "../errors.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 
 /**
@@ -114,11 +115,24 @@ export const ProjectDetail = z.object({
 });
 export type ProjectDetail = z.infer<typeof ProjectDetail>;
 
-/** GET /api/workspaces/<slug>/projects/<projectId>/ — one project row. */
+/**
+ * GET /api/workspaces/<slug>/projects/<projectId>/ — one project row.
+ * The retrieve view hides archived projects (404) while the rich list
+ * still carries them, so a 404 falls back to the list row and only
+ * unknown ids stay not-found (PSET-010: archived settings stay
+ * reachable, matching the old list-backed store).
+ */
 export async function getProject(client: ApiClient, slug: string, projectId: string): Promise<ProjectDetail> {
   const path = `/api/workspaces/${slug}/projects/${projectId}/`;
-  const body = await client.getJson<unknown>(path);
-  return client.parse(ProjectDetail, body, `GET ${path}`);
+  try {
+    const body = await client.getJson<unknown>(path);
+    return client.parse(ProjectDetail, body, `GET ${path}`);
+  } catch (error) {
+    if (!isApiError(error) || error.status !== 404) throw error;
+    const match = await findProjectDetailsRow(client, slug, projectId);
+    if (match === undefined) throw error;
+    return client.parse(ProjectDetail, match, `GET ${path} (archived fallback)`);
+  }
 }
 
 /**
@@ -191,6 +205,27 @@ export async function listProjectDetails(client: ApiClient, slug: string): Promi
   const path = `/api/workspaces/${slug}/projects/details/`;
   const body = await client.getJson<unknown>(path);
   return client.parse(ProjectDetailsList, body, `GET ${path}`);
+}
+
+/**
+ * Raw details-list row by id, for the archived fallbacks. Reads the raw
+ * payload (array or `{results}` envelope) instead of the parsed list so
+ * columns outside ProjectDetails survive for richer detail schemas.
+ */
+export async function findProjectDetailsRow(
+  client: ApiClient,
+  slug: string,
+  projectId: string
+): Promise<Record<string, unknown> | undefined> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/details/`).then(
+    (payload) => payload,
+    () => undefined
+  );
+  const rows = Array.isArray(body) ? body : ((body as { results?: unknown[] } | undefined)?.results ?? []);
+  return rows.find(
+    (row): row is Record<string, unknown> =>
+      typeof row === "object" && row !== null && (row as { id?: unknown }).id === projectId
+  );
 }
 
 /**

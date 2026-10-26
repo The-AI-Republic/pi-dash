@@ -7,7 +7,6 @@ import {
   DELAY_PRESETS,
   delayLabel,
   isDelayEnabled,
-  isMonthRangeError,
   MAX_DELAY_MONTHS,
   MIN_DELAY_MONTHS,
   parseDelayInput,
@@ -23,14 +22,12 @@ describe("delayLabel", () => {
     expect(delayLabel(12)).toBe("12 months");
   });
 });
-
 describe("isDelayEnabled", () => {
   it("treats zero as off and positive counts as on", () => {
     expect(isDelayEnabled(0)).toBe(false);
     expect(isDelayEnabled(1)).toBe(true);
   });
 });
-
 describe("DELAY_PRESETS", () => {
   it("offers the five fixed delays in ascending order", () => {
     expect([...DELAY_PRESETS]).toEqual([1, 3, 6, 9, 12]);
@@ -64,26 +61,5 @@ describe("parseDelayInput", () => {
     expect(parseDelayInput("2.5")).toBeNull();
     expect(parseDelayInput("-3")).toBeNull();
     expect(parseDelayInput("abc")).toBeNull();
-  });
-});
-
-describe("isMonthRangeError", () => {
-  it("explains empty and whole-number out-of-range values", () => {
-    expect(isMonthRangeError("")).toBe(true);
-    expect(isMonthRangeError("   ")).toBe(true);
-    expect(isMonthRangeError("0")).toBe(true);
-    expect(isMonthRangeError("13")).toBe(true);
-    expect(isMonthRangeError("-3")).toBe(true);
-  });
-
-  it("leaves in-range and fractional values unexplained", () => {
-    expect(isMonthRangeError("1")).toBe(false);
-    expect(isMonthRangeError("12")).toBe(false);
-    expect(isMonthRangeError("1e1")).toBe(false);
-    expect(isMonthRangeError("2.5")).toBe(false);
-  });
-
-  it("explains out-of-range numeric spellings", () => {
-    expect(isMonthRangeError("1e2")).toBe(true);
   });
 });

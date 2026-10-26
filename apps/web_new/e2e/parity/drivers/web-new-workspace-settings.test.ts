@@ -1124,7 +1124,9 @@ function signOutHarness(options: SignOutHarnessOptions) {
     getByRole: (role: string, query?: { name?: string }) =>
       role === "button" && query?.name === "Explore on my own"
         ? signOutLocator({ count: async () => (options.tourVisible ? 1 : 0) })
-        : signOutLocator(),
+        : role === "progressbar"
+          ? signOutLocator({ count: async () => 0 })
+          : signOutLocator(),
     getByText: () => signOutLocator({ count: async () => 0 }),
     getByTestId: () => signOutLocator(),
     getByPlaceholder: () => signOutLocator({ isVisible: async () => signedOut }),

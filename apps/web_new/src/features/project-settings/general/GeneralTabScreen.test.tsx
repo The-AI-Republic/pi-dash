@@ -23,6 +23,11 @@ import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/permi
 const harness = vi.hoisted(() => ({ role: 20 as number }));
 const notify = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useNavigate: () => vi.fn(),
+}));
+
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   notifySuccess: notify.success,
@@ -449,9 +454,24 @@ describe("PSET-006 save and validation", () => {
     fireEvent.change(field("Short code"), { target: { value: "new" } });
     await waitFor(() => expect(screen.getByText("Checking availability…")).toBeInTheDocument());
     save();
+    // The control reflects the whole submit, including the availability
+    // check: a stalled answer must not read as an at-rest form.
+    expect(await screen.findByRole("button", { name: "Updating" })).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(patchCalls(calls)).toHaveLength(0);
     expect(screen.getByTestId("project-settings-general")).toBeInTheDocument();
+  });
+
+  it("ignores a second submit while the availability check is in flight", async () => {
+    const { calls } = await renderLoaded({ identifierHang: true });
+    fireEvent.change(field("Short code"), { target: { value: "new" } });
+    await waitFor(() => expect(screen.getByText("Checking availability…")).toBeInTheDocument());
+    save();
+    await screen.findByRole("button", { name: "Updating" });
+    fireEvent.submit(screen.getByTestId("project-settings-general"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(patchCalls(calls)).toHaveLength(0);
+    expect(calls.filter((call) => call.url.includes("project-identifiers/"))).toHaveLength(1);
   });
 
   it("refuses a changed code whose availability check failed", async () => {

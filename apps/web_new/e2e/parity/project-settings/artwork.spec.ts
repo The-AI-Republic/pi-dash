@@ -83,6 +83,42 @@ test(
       session
     );
     try {
+      if (driver.target === "web_new") {
+        // TARGET (main#523, NEWFRONT-606): the new app renders no cover
+        // control at all — no banner, no picker, no gallery search. The
+        // save persists the emblem-only identity instead, and the cover
+        // stays empty server-side.
+        await test.step("no cover control renders", async () => {
+          await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+          await driver.settingsGeneralOpen(seed.workspaceSlug, projectId);
+          expect(await driver.settingsGeneralCoverVisible()).toBe(false);
+        });
+
+        await test.step("an emblem-only save persists with the cover untouched", async () => {
+          const before = String(
+            (await serverProjectRecord(seed.workspaceSlug, projectId, session))["cover_image_url"] ?? ""
+          );
+          await driver.settingsGeneralEmblemOpen();
+          expect(await driver.settingsGeneralEmblemPickerVisible()).toBe(true);
+          await driver.settingsGeneralEmblemPick("🚀");
+          await driver.settingsGeneralSave();
+          // The mark persists as decimal unified codepoints ("128640" for
+          // U+1F680), not the raw character.
+          const unified = [..."🚀"].map((part) => String(part.codePointAt(0))).join("-");
+          await expect
+            .poll(
+              async () =>
+                JSON.stringify((await serverProjectRecord(seed.workspaceSlug, projectId, session))["logo_props"] ?? ""),
+              { timeout: 30_000 }
+            )
+            .toContain(unified);
+          const after = String(
+            (await serverProjectRecord(seed.workspaceSlug, projectId, session))["cover_image_url"] ?? ""
+          );
+          expect(after).toBe(before);
+        });
+        return;
+      }
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.settingsGeneralOpen(seed.workspaceSlug, projectId);
       const before = String(
@@ -144,6 +180,24 @@ test(
       session
     );
     try {
+      if (driver.target === "web_new") {
+        // TARGET (main#523, NEWFRONT-606): with no cover control there is
+        // no cover upload to fail, so the same touch-and-save round-trips
+        // cleanly with a success notice.
+        await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+        await driver.settingsGeneralOpen(seed.workspaceSlug, projectId);
+        expect(await driver.settingsGeneralCoverVisible()).toBe(false);
+        const before = await serverProjectRecord(seed.workspaceSlug, projectId, session);
+        await driver.settingsGeneralFill("description", `${tag} touch`);
+        await driver.settingsGeneralSave();
+        await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).not.toBeNull();
+        expect((await driver.rulesLastToast())?.title ?? "").toBe("Success!");
+        expect(await driver.settingsGeneralFormVisible()).toBe(true);
+        const after = await serverProjectRecord(seed.workspaceSlug, projectId, session);
+        expect(String(after["description"] ?? "")).toBe(`${tag} touch`);
+        expect(String(after["cover_image_url"] ?? "")).toBe(String(before["cover_image_url"] ?? ""));
+        return;
+      }
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.settingsGeneralOpen(seed.workspaceSlug, projectId);
       const before = await serverProjectRecord(seed.workspaceSlug, projectId, session);

@@ -28,7 +28,9 @@
     "/{ws}/settings/exports",
     "/{ws}/settings/integrations",
     "/{ws}/settings/webhooks",
-    "/{ws}/settings/webhooks/*"
+    "/{ws}/settings/webhooks/*",
+    "/{ws}/settings/projects",
+    "/{ws}/settings/projects/*"
   ],
   "reservedTopLevel": [
     "404",

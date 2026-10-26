@@ -364,7 +364,7 @@ describe("useMoveLabel", () => {
     expect(notifyError).not.toHaveBeenCalled();
   });
 
-  it("rolls back silently when the save fails", async () => {
+  it("rolls back with a notice when the save fails", async () => {
     const labels = [row("a", "A", 10000)];
     contractMocks.updateLabel.mockRejectedValueOnce(new ApiError({ status: 500, code: "http", message: "Down" }));
     const queryClient = freshClient();
@@ -376,6 +376,6 @@ describe("useMoveLabel", () => {
       await expect(result.current.mutateAsync({ labelId: "a", parent: null, sortOrder: 5000 })).rejects.toThrow();
     });
     expect(queryClient.getQueryData<LabelList>(labelKeys.list(SLUG, PROJECT))).toEqual(labels);
-    expect(notifyError).not.toHaveBeenCalled();
+    expect(notifyError).toHaveBeenCalledWith(LABEL_UPDATE_FAILED_TITLE, "Down");
   });
 });

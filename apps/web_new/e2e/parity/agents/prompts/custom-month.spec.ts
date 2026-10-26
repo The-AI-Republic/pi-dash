@@ -39,15 +39,25 @@ test(
       expect(modal?.error).toBeNull();
     });
 
-    await test.step("empty, zero and over-range values are refused inline", async () => {
-      for (const value of ["", "0", "13"]) {
+    await test.step("native bounds refuse zero and thirteen, while empty input is explained", async () => {
+      // Test the bounds before the empty case: neither app clears the
+      // empty-field message on change, so a later bound check could read
+      // stale copy instead of proving the native refusal.
+      for (const value of ["0", "13"]) {
         await driver.automationsMonthFill(value);
         await driver.automationsMonthSubmit();
-        await expect
-          .poll(async () => (await driver.automationsMonthModal())?.error ?? "", { timeout: 30_000 })
-          .toBe(RANGE_ERROR);
-        expect(await driver.automationsMonthModal()).not.toBeNull();
+        const modal = await driver.automationsMonthModal();
+        expect(modal).not.toBeNull();
+        expect(modal?.inputValue).toBe(value);
+        expect(modal?.error).toBeNull();
       }
+
+      await driver.automationsMonthFill("");
+      await driver.automationsMonthSubmit();
+      await expect
+        .poll(async () => (await driver.automationsMonthModal())?.error ?? "", { timeout: 30_000 })
+        .toBe(RANGE_ERROR);
+      expect(await driver.automationsMonthModal()).not.toBeNull();
       expect((await serverProjectAutomations(workspaceSlug, project.id, ownerSession)).archive_in).toBe(1);
     });
 

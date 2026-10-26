@@ -200,9 +200,10 @@ describe("cadence", () => {
 });
 
 describe("shapeIdentifier", () => {
-  it("drops separators, uppercases and caps the length", () => {
+  it("drops separators and uppercases without truncating", () => {
     expect(shapeIdentifier("ab-12_cd")).toBe("AB12CD");
-    expect(shapeIdentifier("abcdefghijkl")).toBe("ABCDEFGHIJ");
+    // Over-long input stays intact so validation can flag it (PSET-006).
+    expect(shapeIdentifier("abcdefghijkl")).toBe("ABCDEFGHIJKL");
   });
 
   it("keeps non-Latin letters and digits", () => {

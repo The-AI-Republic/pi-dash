@@ -91,6 +91,21 @@ describe("estimates entry driver", () => {
     expect(waitFor).toHaveBeenCalledWith({ timeout: 60_000 });
   });
 
+  it("waits for the loader to clear after the heading paints", async () => {
+    // The heading renders at shell level beside the loader; opening
+    // settles only once the loader clears (NEWFRONT-606).
+    const loaderWait = vi.fn(async () => undefined);
+    const page = pageOf({
+      getByRole: () => locator({ first: () => locator() }),
+      locator: (selector: string) =>
+        String(selector).includes("Loading estimates")
+          ? locator({ first: () => locator({ waitFor: loaderWait }) })
+          : locator(),
+    });
+    await new WebNewDriver(page).estimatesOpenSettings("acme", "p1");
+    expect(loaderWait).toHaveBeenCalledWith({ state: "hidden", timeout: 60_000 });
+  });
+
   it("retries once and then fails when neither the screen nor the denial paints", async () => {
     const goto = vi.fn(async () => null);
     const waitFor = vi.fn(async () => {

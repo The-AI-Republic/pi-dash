@@ -69,6 +69,15 @@ const ADMIN_ITEMS = [
   "Schedulers",
 ];
 
+/**
+ * The new app additionally ships the new-app-first AI Workers tab last
+ * (PSET-064, NEWFRONT-387); members see it too (visibleTo member), so
+ * their sidebar gains both the entry and its Execution group.
+ */
+const ADMIN_ITEMS_NEW = [...ADMIN_ITEMS, "AI Workers"];
+const MEMBER_ITEMS_NEW = ["General", "Members", "States", "Labels", "AI Workers"];
+const MEMBER_GROUPS_NEW = ["General", "Work structure", "Execution"];
+
 /** Seeded guest identity (project guest, role 5); throws when the seed lacks it. */
 function requireGuest(seed: ParitySeedFacts): { email: string; password: string } {
   if (!seed.guestEmail || !seed.guestPassword)
@@ -118,7 +127,7 @@ test(
       // (bug: NEWFRONT-396, pinned by the next scenario).
       await driver.settingsShellOpen(seed.workspaceSlug, seed.projectId, "/");
       expect(await driver.settingsShellGroups()).toEqual(["General", "Features", "Work structure", "Execution"]);
-      expect(await driver.settingsShellItems()).toEqual(ADMIN_ITEMS);
+      expect(await driver.settingsShellItems()).toEqual(driver.target === "web_new" ? ADMIN_ITEMS_NEW : ADMIN_ITEMS);
       expect(await driver.settingsShellActiveItem()).toBe("General");
       const facts = await serverProjects(seed.workspaceSlug, session);
       expect(facts.some((row) => row.id === seed.projectId)).toBe(true);
@@ -129,9 +138,11 @@ test(
       expect(await driver.settingsShellPath()).toBe(
         `/${seed.workspaceSlug}/settings/projects/${seed.projectId}/members`
       );
-      expect(await driver.settingsShellActiveItem()).toBe("Members");
+      // The rail re-renders on the new pathname after the navigation settles;
+      // poll so a loaded shared runner cannot read the previous marker.
+      await expect.poll(() => driver.settingsShellActiveItem()).toBe("Members");
       await driver.settingsShellFollowItem("States");
-      expect(await driver.settingsShellActiveItem()).toBe("States");
+      await expect.poll(() => driver.settingsShellActiveItem()).toBe("States");
     });
 
     await test.step("narrow screens swap the sidebar for a drawer with the same tabs", async () => {
@@ -139,7 +150,7 @@ test(
         expect(await driver.settingsShellDrawerTriggerVisible()).toBe(true);
         await driver.settingsShellOpenDrawer();
         const drawer = await driver.settingsShellDrawerItems();
-        for (const item of ADMIN_ITEMS) expect(drawer).toContain(item);
+        for (const item of driver.target === "web_new" ? ADMIN_ITEMS_NEW : ADMIN_ITEMS) expect(drawer).toContain(item);
       } finally {
         await driver.settingsShellWideViewport();
       }
@@ -295,8 +306,12 @@ test(
       await test.step("members gain states and labels but not the admin tabs", async () => {
         await switchUser(driver, member.email, member.password, seed.workspaceSlug);
         await driver.settingsShellOpen(seed.workspaceSlug, seed.projectId, "");
-        expect(await driver.settingsShellGroups()).toEqual(["General", "Work structure"]);
-        expect(await driver.settingsShellItems()).toEqual(["General", "Members", "States", "Labels"]);
+        expect(await driver.settingsShellGroups()).toEqual(
+          driver.target === "web_new" ? MEMBER_GROUPS_NEW : ["General", "Work structure"]
+        );
+        expect(await driver.settingsShellItems()).toEqual(
+          driver.target === "web_new" ? MEMBER_ITEMS_NEW : ["General", "Members", "States", "Labels"]
+        );
         for (const href of ["/estimates", "/automations", "/schedulers", "/features/cycles"]) {
           await driver.settingsShellOpen(seed.workspaceSlug, seed.projectId, href);
           expect(await driver.settingsShellDeniedVisible()).toBe(true);
@@ -393,8 +408,8 @@ test(
 
     await test.step("every tab renders with no edition gate", async () => {
       await driver.settingsShellOpen(seed.workspaceSlug, seed.projectId, "");
-      expect(await driver.settingsShellItems()).toEqual(ADMIN_ITEMS);
-      for (const href of [
+      expect(await driver.settingsShellItems()).toEqual(driver.target === "web_new" ? ADMIN_ITEMS_NEW : ADMIN_ITEMS);
+      const hrefs = [
         "",
         "/members",
         "/states",
@@ -408,7 +423,10 @@ test(
         "/features/views",
         "/features/pages",
         "/features/intake",
-      ]) {
+      ];
+      // The new-app-first AI Workers tab joins the matrix on web_new only.
+      if (driver.target === "web_new") hrefs.push("/ai-workers");
+      for (const href of hrefs) {
         await driver.settingsShellOpen(seed.workspaceSlug, seed.projectId, href);
         expect(await driver.settingsShellDeniedVisible()).toBe(false);
         expect(await driver.settingsShellEditionGateVisible()).toBe(false);
