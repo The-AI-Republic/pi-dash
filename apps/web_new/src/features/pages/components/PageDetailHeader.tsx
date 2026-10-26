@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Detail breadcrumb and action strip (parity/specs/pages.md §4.3, §6.5,
-// §7, PAGE-024/045/055/056/057/058/059/060, PAGE-084/086). Project
-// context, the always-present path back to the collection, the ancestor
-// trail for a nested page, the searchable sibling switcher, the shelved
-// marker, the sync indicator and the action cluster: the navigation-pane
+// §7, §8.3, PAGE-024/045/055/056/057/058/059/060/062, PAGE-084/086).
+// Project context, the always-present path back to the collection, the
+// ancestor trail for a nested page, the searchable sibling switcher, the
+// shelved marker, the sync indicator with its offline pill and the action
+// cluster: the navigation-pane
 // toggle, favourite, lock, link copy, sub-page creation and the options
 // menu with its display toggles, hosted markup copy, history shortcut,
 // duplication, shelve/restore, visibility, delete and hosted export.
@@ -25,9 +26,11 @@ export { PAGE_HISTORY_ITEM } from "../lib/pageDetailMenu.js";
 import type { PagePreferences } from "../lib/pagePreferences.js";
 import { PageDetailFavoriteStar } from "./PageDetailFavoriteStar.js";
 import { PageDetailLockControl } from "./PageDetailLockControl.js";
+import { PageOfflinePill } from "./PageOfflinePill.js";
 import { PageSiblingSwitcher } from "./PageSiblingSwitcher.js";
 import { PageSyncBadge } from "./PageSyncBadge.js";
 import { getPageBodyActions, subscribePageBodyActions } from "../lib/pageBodyActions.js";
+import { usePageOfflineVisible } from "../lib/pageOffline.js";
 import type { PageSyncStatus } from "../lib/pageSync.js";
 
 export const PAGE_CRUMB = "Pages";
@@ -58,6 +61,8 @@ export interface PageDetailHeaderProps {
   ancestors?: readonly PageAncestor[];
   siblings: readonly PageSiblingOption[];
   syncStatus: PageSyncStatus;
+  /** The viewer may edit: the offline pill only ever shows for editors (PAGE-062). */
+  editable: boolean;
   showStar: boolean;
   /** The page's owner or a project admin may use the lock control (PAGE-058). */
   showLock: boolean;
@@ -96,6 +101,7 @@ export function PageDetailHeader({
   ancestors = [],
   siblings,
   syncStatus,
+  editable,
   showStar,
   showLock,
   canDuplicate,
@@ -116,6 +122,7 @@ export function PageDetailHeader({
 }: PageDetailHeaderProps): React.ReactElement {
   const navigate = useNavigate();
   const bodyActions = React.useSyncExternalStore(subscribePageBodyActions, getPageBodyActions, () => null);
+  const offlineVisible = usePageOfflineVisible(editable);
   const [copied, setCopied] = React.useState(false);
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   React.useEffect(
@@ -208,7 +215,7 @@ export function PageDetailHeader({
         </span>
       )}
       <span className="flex-1" aria-hidden="true" />
-      <PageSyncBadge status={syncStatus} />
+      {offlineVisible ? <PageOfflinePill /> : <PageSyncBadge status={syncStatus} />}
       <IconButton
         label={PAGE_PANE_TOGGLE_LABEL}
         aria-expanded={paneOpen}
