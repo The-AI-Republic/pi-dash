@@ -7,10 +7,11 @@
 // paste), the focus-only count, Enter leaving for the body, and the
 // read-only face that keeps the heading shape with its placeholder.
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 
 import {
   PageDetailTitle,
@@ -413,6 +414,69 @@ describe(
       fireEvent.keyDown(surfaceOf(), { key: "Enter" });
       expect(mounted.onRename).not.toHaveBeenCalled();
       expect(mounted.onJumpToBody).not.toHaveBeenCalled();
+    });
+  },
+  TITLE_TEST_TIMEOUT
+);
+
+describe(
+  "PageDetailTitle collaboration",
+  () => {
+    it("seeds the stored name into an empty shared field", async () => {
+      const doc = new Y.Doc();
+      await mount({ name: "Old", collab: { doc }, seedDocument: true });
+      await vi.waitFor(() => expect(headingOf()).toHaveTextContent("Old"));
+      const peer = new Y.Doc();
+      Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+      expect(peer.getXmlFragment("title").toString()).toBe('<heading level="1">Old</heading>');
+    });
+
+    it("waits for the server state before seeding", async () => {
+      const doc = new Y.Doc();
+      const collab = { doc };
+      const mounted = await mount({ name: "Old", collab });
+      expect(headingOf().textContent).toBe("");
+      expect(doc.getXmlFragment("title").toString()).not.toContain("Old");
+      mounted.rerender({ collab, seedDocument: true });
+      await vi.waitFor(() => expect(headingOf()).toHaveTextContent("Old"));
+      const peer = new Y.Doc();
+      Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+      expect(peer.getXmlFragment("title").toString()).toBe('<heading level="1">Old</heading>');
+    });
+
+    it("prefers the shared field over a stale stored name", async () => {
+      const doc = new Y.Doc();
+      const peer = new Y.Doc();
+      const heading = new Y.XmlElement("heading");
+      heading.insert(0, [new Y.XmlText("Shared")]);
+      peer.getXmlFragment("title").insert(0, [heading]);
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer));
+      await mount({ name: "Stale", collab: { doc }, seedDocument: true });
+      await vi.waitFor(() => expect(headingOf()).toHaveTextContent("Shared"));
+      expect(headingOf()).not.toHaveTextContent("Stale");
+    });
+
+    it("renders a remote title update", async () => {
+      const doc = new Y.Doc();
+      await mount({ name: "Old", collab: { doc }, seedDocument: true });
+      await vi.waitFor(() => expect(headingOf()).toHaveTextContent("Old"));
+      const peer = new Y.Doc();
+      Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+      const heading = peer.getXmlFragment("title").get(0) as Y.XmlElement;
+      const text = heading.get(0) as Y.XmlText;
+      await act(async () => {
+        text.delete(0, text.length);
+        text.insert(0, "Remote");
+      });
+      await act(async () => {
+        Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer));
+      });
+      await vi.waitFor(() => expect(headingOf()).toHaveTextContent("Remote"));
+    });
+
+    it("mounts the standalone field on an explicit null binding", async () => {
+      await mount({ name: "Old", collab: null });
+      expect(headingOf()).toHaveTextContent("Old");
     });
   },
   TITLE_TEST_TIMEOUT

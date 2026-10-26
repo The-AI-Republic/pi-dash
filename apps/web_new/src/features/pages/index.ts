@@ -298,6 +298,15 @@ export {
   type PageSyncStatus,
 } from "./lib/pageSync.js";
 export {
+  fetchPageLiveFallbackBinary,
+  usePageLiveSession,
+  usePageReadOnlySyncReport,
+  type PageLiveFallbackState,
+  type PageLiveMount,
+  type UsePageLiveSessionOptions,
+} from "./lib/pageLiveSession.js";
+export { PageLiveLoader } from "./components/PageLiveLoader.js";
+export {
   PAGE_OFFLINE_BEAT_MS,
   PAGE_OFFLINE_LABEL,
   useBrowserOnline,

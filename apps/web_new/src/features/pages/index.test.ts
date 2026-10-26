@@ -99,4 +99,11 @@ describe("pages barrel", () => {
     expect(typeof pages.usePageSaveFallback).toBe("function");
     expect(typeof pages.pageBinaryToBase64).toBe("function");
   });
+
+  it("exports the collaboration session surface (PAGE-065-067)", () => {
+    expect(typeof pages.usePageLiveSession).toBe("function");
+    expect(typeof pages.usePageReadOnlySyncReport).toBe("function");
+    expect(typeof pages.fetchPageLiveFallbackBinary).toBe("function");
+    expect(typeof pages.PageLiveLoader).toBe("function");
+  });
 });

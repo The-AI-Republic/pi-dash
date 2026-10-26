@@ -23,6 +23,7 @@ import {
 } from "../lib/pageEditorAdapter.js";
 import { loadPageExtensions } from "../../../shared/editor/pageExtensions.js";
 import { prepareEditorHtml } from "../../../shared/editor/sanitize.js";
+import { PAGE_LIVE_BODY_FIELD, type PageLiveDocBinding } from "../lib/pageLiveBackend.js";
 
 export type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 
@@ -55,16 +56,29 @@ export interface PageBodyEditorProps {
   onPasteText?: ((text: string) => Promise<string | null>) | undefined;
   /** Whether a plain-text paste is an entity address worth resolving. */
   claimsPasteText?: ((text: string) => boolean) | undefined;
+  /** The live document to bind (PAGE-065); absent keeps the standalone editor. */
+  collab?: PageLiveDocBinding | null | undefined;
+  /** Seed empty shared fields from the stored markup once the server state is known. */
+  seedDocument?: boolean | undefined;
 }
 
 /** Tiptap's EditorContent takes its own editor type; this is ours. */
 type TiptapEditor = Parameters<typeof import("@tiptap/react").EditorContent>[0]["editor"];
 
-/** Load the page editor: the Tiptap chunk plus the page extension set. */
-async function loadPageEditor(workspaceSlug: string): Promise<{ default: React.ComponentType<PageBodyEditorProps> }> {
-  const [{ EditorContent, useEditor }, extensions] = await Promise.all([
+/**
+ * Load the page editor: the Tiptap chunk plus the page extension set.
+ * The live variant also loads the collaboration binding and drops the
+ * standalone undo history (collaborative editing has no undo); the
+ * document it binds arrives per mount through the collab prop.
+ */
+async function loadPageEditor(
+  workspaceSlug: string,
+  collaborative: boolean
+): Promise<{ default: React.ComponentType<PageBodyEditorProps> }> {
+  const [{ EditorContent, useEditor }, extensions, collaboration] = await Promise.all([
     import("@tiptap/react"),
-    loadPageExtensions(workspaceSlug),
+    loadPageExtensions(workspaceSlug, collaborative ? { history: false } : {}),
+    collaborative ? import("@tiptap/extension-collaboration") : Promise.resolve(null),
   ]);
 
   function EditorBody({
@@ -79,6 +93,8 @@ async function loadPageEditor(workspaceSlug: string): Promise<{ default: React.C
     onPasteHtml,
     onPasteText,
     claimsPasteText,
+    collab,
+    seedDocument,
   }: PageBodyEditorProps): React.ReactElement {
     const shownHtml = React.useMemo(() => prepareEditorHtml(initialHtml, resolveAsset), [initialHtml, resolveAsset]);
     const onChangeRef = React.useRef(onChange);
@@ -97,10 +113,25 @@ async function loadPageEditor(workspaceSlug: string): Promise<{ default: React.C
     readyRef.current = onReady;
     const lastStateRef = React.useRef<PageFormattingState | null>(null);
     const [empty, setEmpty] = React.useState(() => plainTextOf(shownHtml) === "");
+    // The live variant mounts only with a binding (the outer component
+    // keys the variant on the prop), so the cast below cannot fail.
+    const boundExtensions = React.useMemo(
+      () =>
+        collaboration === null
+          ? extensions
+          : [
+              ...extensions,
+              collaboration.Collaboration.configure({
+                document: (collab as PageLiveDocBinding).doc as import("yjs").Doc,
+                field: PAGE_LIVE_BODY_FIELD,
+              }),
+            ],
+      [collab]
+    );
 
     const editor = useEditor(
       {
-        extensions,
+        extensions: boundExtensions,
         content: shownHtml,
         editable: true,
         // The instance is created from the mount effect, never during
@@ -127,8 +158,20 @@ async function loadPageEditor(workspaceSlug: string): Promise<{ default: React.C
           formattingRef.current(next);
         },
       },
-      [extensions]
+      [boundExtensions]
     );
+
+    // The binding renders the shared field over the initial markup,
+    // so an editor the server left empty is seeded from stored markup
+    // once the server state is known (PAGE-065). An editor showing
+    // shared content — or the operator's own first keystrokes — is
+    // never seeded over. Layout timing: the seed lands before the
+    // first paint, never as an empty flash.
+    React.useLayoutEffect(() => {
+      if (editor === null || collaboration === null || seedDocument !== true) return;
+      if (!pageDocumentEmpty(editor as unknown as PageEditorRef)) return;
+      editor.commands.setContent(shownHtml);
+    }, [editor, seedDocument, shownHtml]);
 
     React.useEffect(() => {
       if (editor !== null) readyRef.current(pageEditorHandle(editor as unknown as PageEditorRef));
@@ -260,17 +303,24 @@ function plainTextOf(html: string): string {
  */
 const PAGE_EDITORS = new Map<string, React.LazyExoticComponent<React.ComponentType<PageBodyEditorProps>>>();
 
-/** One lazy editor per workspace: the extension set owns its mention links. */
-function pageEditorFor(workspaceSlug: string): React.LazyExoticComponent<React.ComponentType<PageBodyEditorProps>> {
-  let editor = PAGE_EDITORS.get(workspaceSlug);
+/**
+ * One lazy editor per workspace and mode: the extension set owns its
+ * mention links, and the live variant owns the collaboration binding.
+ */
+function pageEditorFor(
+  workspaceSlug: string,
+  collaborative: boolean
+): React.LazyExoticComponent<React.ComponentType<PageBodyEditorProps>> {
+  const key = collaborative ? `${workspaceSlug}:live` : workspaceSlug;
+  let editor = PAGE_EDITORS.get(key);
   if (editor === undefined) {
-    editor = React.lazy(() => loadPageEditor(workspaceSlug));
-    PAGE_EDITORS.set(workspaceSlug, editor);
+    editor = React.lazy(() => loadPageEditor(workspaceSlug, collaborative));
+    PAGE_EDITORS.set(key, editor);
   }
   return editor;
 }
 
-export function PageBodyEditor({ workspaceSlug = "", ...props }: PageBodyEditorProps): React.ReactElement {
-  const Editor = pageEditorFor(workspaceSlug);
-  return <Editor {...props} />;
+export function PageBodyEditor({ workspaceSlug = "", collab, ...props }: PageBodyEditorProps): React.ReactElement {
+  const Editor = pageEditorFor(workspaceSlug, collab !== null && collab !== undefined);
+  return <Editor collab={collab} {...props} />;
 }

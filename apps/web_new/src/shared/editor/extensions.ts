@@ -187,7 +187,7 @@ export async function loadStoredImageExtension() {
 }
 
 /** Description editing: paragraphs, headings, lists, code, links. */
-export async function loadDescriptionExtensions(options: { horizontalRule?: boolean } = {}) {
+export async function loadDescriptionExtensions(options: { horizontalRule?: boolean; history?: boolean } = {}) {
   const [{ default: StarterKit }, { default: Link }] = await Promise.all([
     import("@tiptap/starter-kit"),
     import("@tiptap/extension-link"),
@@ -196,9 +196,13 @@ export async function loadDescriptionExtensions(options: { horizontalRule?: bool
   // navigating away mid-edit. Serialized links keep the extension's
   // default target/rel (pinned in compat.test.ts). The page set supplies
   // its own stored-form divider node (PAGE-037), so it turns StarterKit's
-  // `<hr>` rule off.
+  // `<hr>` rule off. A collaborative page editor (PAGE-065) turns the
+  // undo history off too: collaborative editing has no undo.
   return [
-    StarterKit.configure(options.horizontalRule === false ? { horizontalRule: false } : {}),
+    StarterKit.configure({
+      ...(options.horizontalRule === false ? { horizontalRule: false } : null),
+      ...(options.history === false ? { history: false } : null),
+    }),
     Link.configure({ openOnClick: false }),
   ];
 }

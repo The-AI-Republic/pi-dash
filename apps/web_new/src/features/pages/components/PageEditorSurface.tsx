@@ -34,6 +34,7 @@ import { parseEntityAddress } from "../lib/entityReferences.js";
 import { entityReferenceHtml, pageEntityReferenceFor, resolvePastedEntity } from "../lib/pageEmbeds.js";
 import { pageBodyActionsFor, registerPageBodyActions } from "../lib/pageBodyActions.js";
 import { titleIsEmpty } from "../lib/pageTitle.js";
+import type { PageLiveDocBinding } from "../lib/pageLiveBackend.js";
 import { PageBodyEditor, type PageEditorHandle } from "./PageBodyEditor.js";
 import { PageCanvasHeader } from "./PageCanvasHeader.js";
 import { PageColorButton } from "./PageColorButton.js";
@@ -95,6 +96,13 @@ export interface PageEditorSurfaceProps {
    */
   uploadImage?: ((file: File) => Promise<UploadedPageImage>) | undefined;
   /**
+   * The live document the editors bind (PAGE-065). Absent the session
+   * has not produced one and both editors stand alone on stored content.
+   */
+  collab?: PageLiveDocBinding | null | undefined;
+  /** Seed empty shared fields from stored content once the server state is known. */
+  seedDocument?: boolean | undefined;
+  /**
    * The assistant handle may mount in the interaction layer: the cloud
    * flag, edit permission and a configured model all hold (PAGE-075).
    */
@@ -126,6 +134,8 @@ export function PageEditorSurface({
   bodyPending = false,
   onHandle,
   uploadImage,
+  collab,
+  seedDocument,
   assistantReady = false,
 }: PageEditorSurfaceProps): React.ReactElement {
   const handleRef = React.useRef<PageEditorHandle | null>(null);
@@ -302,6 +312,8 @@ export function PageEditorSurface({
           onRename,
           onDraftChange: setTitleDraft,
           onJumpToBody: () => handleRef.current?.focusStart(),
+          collab,
+          seedDocument,
         }}
         logoProps={logoProps}
         fontSize={fontSize ?? "large-font"}
@@ -354,6 +366,8 @@ export function PageEditorSurface({
               onPasteHtml={onPasteHtml}
               onPasteText={onPasteText}
               claimsPasteText={claimsPasteText}
+              collab={collab}
+              seedDocument={seedDocument}
             />
           </React.Suspense>
         )}

@@ -13,6 +13,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import type { PageDetail, PageRow } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 
 const router = vi.hoisted(() => ({ navigate: vi.fn() }));
 
@@ -65,6 +66,15 @@ vi.mock("../../issues/peek/ResolvingIssuePeek.js", () => ({
       </button>
     );
   },
+}));
+
+// The session hook is stubbed: its own suite walks the machine, while the
+// screen suite only switches on the mount it mirrors. Null is the default
+// every pre-existing test renders with — the standalone surface.
+const live = vi.hoisted(() => ({ mount: null as null | Record<string, unknown>, snapshot: vi.fn() }));
+vi.mock("../lib/pageLiveSession.js", () => ({
+  usePageLiveSession: () => live.mount,
+  usePageReadOnlySyncReport: live.snapshot,
 }));
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -366,6 +376,8 @@ afterEach(() => {
   vi.mocked(applyPageRestore).mockClear();
   vi.mocked(notifySuccess).mockClear();
   vi.mocked(notifyError).mockClear();
+  live.mount = null;
+  live.snapshot.mockClear();
   window.localStorage.clear();
 });
 
@@ -1610,5 +1622,64 @@ describe("PageDetailScreen assistant gate (PAGE-075)", () => {
     renderScreen();
     await screen.findByRole("heading", { name: "Page not found" });
     expect(screen.queryByTestId("page-assistant-mount")).not.toBeInTheDocument();
+  });
+});
+
+describe("PageDetailScreen collaboration mount (PAGE-065-067)", () => {
+  function sharedDoc(title: string, body: string): Y.Doc {
+    const peer = new Y.Doc();
+    const heading = new Y.XmlElement("heading");
+    heading.setAttribute("level", "1");
+    heading.insert(0, [new Y.XmlText(title)]);
+    peer.getXmlFragment("title").insert(0, [heading]);
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText(body)]);
+    peer.getXmlFragment("default").insert(0, [paragraph]);
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer));
+    return doc;
+  }
+
+  it("holds the sync loader while the live document is unknown", async () => {
+    live.mount = { liveReady: false, docHandle: null, seedDocument: false };
+    renderScreen();
+    expect(await screen.findByTestId("page-live-loader")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Page title" })).not.toBeInTheDocument();
+  });
+
+  it("binds the live editors once the document is known", async () => {
+    live.mount = { liveReady: true, docHandle: sharedDoc("Shared name", "Shared body"), seedDocument: true };
+    renderScreen();
+    // Re-query the live node inside the retry (NEWFRONT-909): the lazy
+    // title swaps its fallback for the editor under load.
+    await waitFor(() => {
+      expect(screen.getByRole("textbox", { name: "Page title" }).querySelector("h1")).toHaveTextContent("Shared name");
+    });
+    expect(await screen.findByText("Shared body")).toBeInTheDocument();
+    expect(screen.queryByTestId("page-live-loader")).not.toBeInTheDocument();
+  });
+
+  it("stands the editors alone when the session degrades", async () => {
+    live.mount = { liveReady: true, docHandle: null, seedDocument: false };
+    renderScreen();
+    await waitFor(() => {
+      expect(screen.getByRole("textbox", { name: "Page title" }).querySelector("h1")).toHaveTextContent("Launch notes");
+    });
+    expect(await screen.findByText("Draft body")).toBeInTheDocument();
+    expect(screen.queryByTestId("page-live-loader")).not.toBeInTheDocument();
+  });
+
+  it("reports the snapshot contract on the read-only side only", async () => {
+    renderScreen();
+    await screen.findByTestId("page-detail-screen");
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(live.snapshot).toHaveBeenCalledWith(harness.pageId, false);
+    cleanup();
+    live.snapshot.mockClear();
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByTestId("page-detail-screen");
+    await screen.findByText("Draft body");
+    expect(live.snapshot).toHaveBeenCalledWith(harness.pageId, true);
   });
 });
