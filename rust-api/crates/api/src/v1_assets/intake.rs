@@ -9767,17 +9767,19 @@ async fn fetch_default_state(
     .map_err(|_| Denial::ServerError)
 }
 
-/// `Issue.save()`'s `state is None` resolution (`db/models/issue.py`),
-/// which filters `~Q(is_triage=True)` — NOT the manager's group
-/// exclusion — with NO workspace scope: the default first, else the
-/// first row, both in sequence order.
+/// `Issue.save()`'s `state is None` resolution (`db/models/issue.py`):
+/// `State.objects` (whose manager excludes `group = 'triage'`) filtered
+/// by `~Q(is_triage=True)` — the auto-created Triage row carries
+/// `is_triage = FALSE`, so both conditions are needed — with NO
+/// workspace scope: the default first, else the first row, both in
+/// sequence order.
 async fn resolve_save_state(
     pool: &sqlx::PgPool,
     project_id: &Uuid,
 ) -> Result<Option<Uuid>, Denial> {
     let default: Option<Uuid> = sqlx::query_scalar(
         r#"SELECT "id" FROM "states" WHERE "project_id" = $1
-           AND "deleted_at" IS NULL AND "is_triage" = FALSE AND "default" = TRUE
+           AND "deleted_at" IS NULL AND "group" <> 'triage' AND "is_triage" = FALSE AND "default" = TRUE
            ORDER BY "sequence" LIMIT 1"#,
     )
     .bind(project_id)
@@ -9789,7 +9791,7 @@ async fn resolve_save_state(
     }
     sqlx::query_scalar(
         r#"SELECT "id" FROM "states" WHERE "project_id" = $1
-           AND "deleted_at" IS NULL AND "is_triage" = FALSE
+           AND "deleted_at" IS NULL AND "group" <> 'triage' AND "is_triage" = FALSE
            ORDER BY "sequence" LIMIT 1"#,
     )
     .bind(project_id)
@@ -9861,10 +9863,11 @@ fn is_integrity_error(error: &sqlx::Error) -> bool {
 
 /// Apply an issue-half patch: link replacement, `updated_at` stamp,
 /// column writes, then `Issue.save()` (not adding): `state is None`
-/// resolution, `completed_at` recompute (overwriting any validated
-/// value whenever a state is set), `description_stripped` recompute
-/// (`""` → `None` on this path), audit stamp. Returns the post-save
-/// row.
+/// resolution (which leaves `completed_at` alone — an explicitly
+/// supplied value sticks, an absent one keeps the stored value),
+/// otherwise `completed_at` recompute (overwriting any validated value
+/// whenever a state is set), `description_stripped` recompute (`""` →
+/// `None` on this path), audit stamp. Returns the post-save row.
 async fn save_issue_patch(
     pool: &sqlx::PgPool,
     issue: &IssueRow,
@@ -9892,11 +9895,14 @@ async fn save_issue_patch(
     let now_save = cycle_mod::micros_now();
 
     let mut state_id = patch.state.unwrap_or(issue.state_id);
-    if patch.state == Some(None) {
+    // `Issue.save`'s `state is None` branch resolves the state but never
+    // recomputes `completed_at` (that is only the `else` branch).
+    let state_was_null = patch.state == Some(None);
+    if state_was_null {
         state_id = resolve_save_state(pool, &issue.project_id).await?;
     }
     let completed_at = match state_id {
-        Some(id) => {
+        Some(id) if !state_was_null => {
             let group = fetch_state_group(pool, &id).await?;
             if group == "completed" {
                 Some(now_save)
@@ -9904,7 +9910,7 @@ async fn save_issue_patch(
                 None
             }
         }
-        None => patch.completed_at.unwrap_or(issue.completed_at),
+        _ => patch.completed_at.unwrap_or(issue.completed_at),
     };
     let html = patch
         .description_html
