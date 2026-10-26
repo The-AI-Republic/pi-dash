@@ -2808,7 +2808,9 @@ fn legacy_filters(
         // Error bodies are already exact (`{"error": "Please provide
         // valid detail"}` for unparseable UUIDs, 500 for unknown
         // lookups — Django's `FieldError` generic 500); propagate.
-        let fragment = crate::app_issues::legacy_sql(binder, name, value)?;
+        // UTC keeps this slice's current truncation; its own actor-zone
+        // fix follows the app_issues pattern separately.
+        let fragment = crate::app_issues::legacy_sql(binder, name, value, &chrono_tz::UTC)?;
         parts.push(remap_legacy(&fragment));
     }
     if parts.is_empty() {

@@ -945,10 +945,16 @@ use pidash_db::issue_filters::FilterValue;
 /// list applies the same `issue_filters(params, "GET")` stack over the
 /// same `issue` alias — referenced, never re-ported. Visibility only; no
 /// behavior change.
+/// `timezone` is the truncation zone for the `__date` terms: Django's
+/// `__date` lookup is `TruncDate`, whose `get_tzname()` returns the
+/// `TimezoneMixin`-activated actor zone. Callers whose slice still
+/// truncates in UTC pass `chrono_tz::UTC` until their own actor-zone
+/// fix lands (identical wherever the session zone is UTC).
 pub(crate) fn legacy_sql(
     binder: &mut Binder,
     name: &str,
     value: &FilterValue,
+    timezone: &Tz,
 ) -> Result<String, Denial> {
     // `__isnull` flags.
     if let Some(path) = name.strip_suffix("__isnull") {
@@ -1014,10 +1020,11 @@ pub(crate) fn legacy_sql(
             }
             Ok(format!("{column} IN ({})", holders.join(",")))
         }
-        FilterValue::Text(text) => legacy_text_sql(binder, name, text),
+        FilterValue::Text(text) => legacy_text_sql(binder, name, text, timezone),
         FilterValue::Flag(_) => Err(Denial::ServerError),
         FilterValue::Day(day) => {
-            let (column, operator) = day_comparison(name).ok_or(Denial::ServerError)?;
+            let (column, operator) =
+                day_comparison(binder, name, timezone).ok_or(Denial::ServerError)?;
             let holder = binder.bind_string(day.to_string());
             Ok(format!("{column} {operator} {holder}::date"))
         }
@@ -1079,14 +1086,30 @@ fn strings_in_column(name: &str) -> Option<&'static str> {
     })
 }
 
+/// A `__date` term truncated in `timezone`: `(issue.<column> AT TIME
+/// ZONE $N)::date` with the zone bound as a parameter (it comes from a
+/// parsed `Tz`, so it is a valid IANA name either way). Django's
+/// `__date` lookup is `TruncDate`, whose `get_tzname()` returns the
+/// `TimezoneMixin`-activated actor zone.
+fn zoned_date_column(binder: &mut Binder, column: &str, timezone: &Tz) -> String {
+    let holder = binder.bind_string(timezone.name().to_owned());
+    format!("(issue.{column} AT TIME ZONE {holder})::date")
+}
+
 /// `(column, operator)` for `Day` predicates (`__gte` / `__lte`).
-fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
+/// The `__date` terms truncate in `timezone`; `start_date` /
+/// `target_date` are plain date columns and need no truncation.
+fn day_comparison(
+    binder: &mut Binder,
+    name: &str,
+    timezone: &Tz,
+) -> Option<(String, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
-        "created_at__date" => "issue.created_at::date",
-        "completed_at__date" => "issue.completed_at::date",
-        "start_date" => "issue.start_date",
-        "target_date" => "issue.target_date",
+        "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+        "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
+        "start_date" => "issue.start_date".to_owned(),
+        "target_date" => "issue.target_date".to_owned(),
         _ => return None,
     };
     let operator = match operator {
@@ -1099,8 +1122,14 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
 
 /// Text predicates: `name__icontains`, explicit date bounds
 /// (`__gte`/`__lte` on a `__date` term or plain date term), and the
-/// single-value `__contains` form.
-fn legacy_text_sql(binder: &mut Binder, name: &str, text: &str) -> Result<String, Denial> {
+/// single-value `__contains` form. The `__date` terms truncate in
+/// `timezone` (Django `TruncDate` under the activated actor zone).
+fn legacy_text_sql(
+    binder: &mut Binder,
+    name: &str,
+    text: &str,
+    timezone: &Tz,
+) -> Result<String, Denial> {
     if name == "name__icontains" {
         // Django `icontains`: LIKE with `\`, `%`, `_` escaped.
         let escaped = text
@@ -1121,10 +1150,10 @@ fn legacy_text_sql(binder: &mut Binder, name: &str, text: &str) -> Result<String
             _ => return Err(Denial::ServerError),
         };
         let column = match term {
-            "created_at__date" => "issue.created_at::date",
-            "completed_at__date" => "issue.completed_at::date",
-            "start_date" => "issue.start_date",
-            "target_date" => "issue.target_date",
+            "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+            "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
+            "start_date" => "issue.start_date".to_owned(),
+            "target_date" => "issue.target_date".to_owned(),
             _ => return Err(Denial::ServerError),
         };
         // Explicit bounds must parse as dates: Django's `get_prep_value`
@@ -1469,7 +1498,9 @@ pub fn filtered_set(
     }
     // Legacy filters. Relative dates resolve against the UTC date, exactly
     // like `timezone.now().date()` in `issue_filters.py` (`now()` is always
-    // UTC; the request tz activation only affects `localtime()`).
+    // UTC; the request tz activation only affects `localtime()`). The
+    // `__date` truncations use the gate's actor zone instead (Django's
+    // `TruncDate` under the `TimezoneMixin`-activated user zone).
     let mut legacy_sql_text = String::new();
     if layers.legacy {
         let flat: HashMap<String, String> = query
@@ -1480,7 +1511,7 @@ pub fn filtered_set(
         let legacy = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
             .map_err(|_| Denial::ServerError)?;
         for (name, value) in legacy.predicates() {
-            let fragment = legacy_sql(&mut binder, name, value)?;
+            let fragment = legacy_sql(&mut binder, name, value, &gate.timezone)?;
             if legacy_sql_text.is_empty() {
                 legacy_sql_text = fragment;
             } else {
@@ -3432,10 +3463,22 @@ mod tests {
     #[test]
     fn legacy_isnull_and_in_predicates() {
         let mut binder = Binder::new();
-        let sql = legacy_sql(&mut binder, "labels__isnull", &FilterValue::Flag(true)).expect("sql");
+        let sql = legacy_sql(
+            &mut binder,
+            "labels__isnull",
+            &FilterValue::Flag(true),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
         assert_eq!(sql, "label_issue.label_id IS NULL");
         let id = uuid::Uuid::nil();
-        let sql = legacy_sql(&mut binder, "state__in", &FilterValue::Uuids(vec![id])).expect("sql");
+        let sql = legacy_sql(
+            &mut binder,
+            "state__in",
+            &FilterValue::Uuids(vec![id]),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
         assert!(sql.starts_with("issue.state_id IN ($"));
     }
 
@@ -3446,9 +3489,50 @@ mod tests {
             &mut binder,
             "logged_by__in",
             &FilterValue::Uuids(vec![uuid::Uuid::nil()]),
+            &chrono_tz::UTC,
         )
         .unwrap_err();
         assert!(matches!(denial, Denial::ServerError));
+    }
+
+    #[test]
+    fn legacy_date_terms_truncate_in_the_actor_zone() {
+        // Django's `__date` lookup is `TruncDate` in the activated actor
+        // zone; the zone rides as a bound parameter, never interpolated.
+        let mut binder = Binder::new();
+        let tokyo: Tz = "Asia/Tokyo".parse().expect("tz");
+        let sql = legacy_sql(
+            &mut binder,
+            "created_at__date__gte",
+            &FilterValue::Text("2026-01-02".to_owned()),
+            &tokyo,
+        )
+        .expect("sql");
+        assert_eq!(sql, "(issue.created_at AT TIME ZONE $1)::date >= $2::date");
+        assert_eq!(binder.values().len(), 2);
+        // Plain date columns truncate nothing and bind no zone.
+        let mut binder = Binder::new();
+        let sql = legacy_sql(
+            &mut binder,
+            "start_date__lte",
+            &FilterValue::Text("2026-01-02".to_owned()),
+            &tokyo,
+        )
+        .expect("sql");
+        assert_eq!(sql, "issue.start_date <= $1::date");
+        // The single-value `__contains` form LIKEs the zoned date text.
+        let mut binder = Binder::new();
+        let sql = legacy_sql(
+            &mut binder,
+            "created_at__date__contains",
+            &FilterValue::Text("2026-01-02".to_owned()),
+            &tokyo,
+        )
+        .expect("sql");
+        assert_eq!(
+            sql,
+            "(issue.created_at AT TIME ZONE $1)::date::text LIKE $3"
+        );
     }
 
     #[test]
