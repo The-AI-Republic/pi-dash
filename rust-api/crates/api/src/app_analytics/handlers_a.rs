@@ -69,8 +69,9 @@
 
 use std::collections::HashMap;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::NaiveDate;
@@ -1809,9 +1810,35 @@ fn empty_query_dict() -> Value {
 // Viewset handlers
 // ---------------------------------------------------------------------------
 
-fn parse_pk(raw: &str) -> Result<Uuid, Denial> {
-    // `get_object()` filters `pk=<raw>`: garbage is a `ValidationError`.
-    Uuid::parse_str(raw).map_err(|_| Denial::BadValidation)
+/// Rebuild the inbound request and proxy it to Django (non-canonical
+/// `<uuid:pk>` spellings: routing precedes auth, so Django's resolver 404
+/// answers before any 401 — the `v1_cycles_modules` precedent).
+async fn proxy_through(
+    state: AppState,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::from(body))
+        .expect("rebuild proxy request");
+    *req.headers_mut() = headers;
+    crate::edge::proxy(State(state), req).await
+}
+
+/// Parse the `<uuid:pk>` segment (`app/urls/analytic.py:36`): only a
+/// canonically-spelled segment parses — every other spelling (and any
+/// non-UUID) is a resolver miss the caller proxies to Django for its own
+/// 404, before auth. `Uuid::parse_str` alone would also accept
+/// uppercase, simple, braced and `urn:uuid:` spellings Django never routes.
+fn parse_pk(raw: &str) -> Result<Uuid, ()> {
+    if !crate::uuid_path::is_canonical_uuid(raw) {
+        return Err(());
+    }
+    Uuid::parse_str(raw).map_err(|_| ())
 }
 
 /// Map a body-parse failure to DRF's `ParseError` shape. Blank input is
@@ -1979,8 +2006,14 @@ async fn create_view(
 async fn view_retrieve(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     Path((slug, pk)): Path<(String, String)>,
 ) -> Response {
+    let Ok(id) = parse_pk(&pk) else {
+        return proxy_through(state, method, uri, headers, Bytes::new()).await;
+    };
     let actor = match gated_actor(&state, extension, "GET", ANALYTIC_VIEW_DETAIL_PATH, &slug).await
     {
         Ok(actor) => actor,
@@ -1988,10 +2021,6 @@ async fn view_retrieve(
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    let id = match parse_pk(&pk) {
-        Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
     match fetch_view_detail(pool, &slug, &id).await {
@@ -2010,9 +2039,15 @@ async fn view_retrieve(
 async fn view_partial_update(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     Path((slug, pk)): Path<(String, String)>,
     body: axum::body::Bytes,
 ) -> Response {
+    let Ok(id) = parse_pk(&pk) else {
+        return proxy_through(state, method, uri, headers, body).await;
+    };
     let actor =
         match gated_actor(&state, extension, "PATCH", ANALYTIC_VIEW_DETAIL_PATH, &slug).await {
             Ok(actor) => actor,
@@ -2020,10 +2055,6 @@ async fn view_partial_update(
         };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    let id = match parse_pk(&pk) {
-        Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
     let fields = match parse_body(&body) {
@@ -2127,8 +2158,14 @@ pub(crate) async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &u
 async fn view_destroy(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     Path((slug, pk)): Path<(String, String)>,
 ) -> Response {
+    let Ok(id) = parse_pk(&pk) else {
+        return proxy_through(state, method, uri, headers, Bytes::new()).await;
+    };
     let actor = match gated_actor(
         &state,
         extension,
@@ -2143,10 +2180,6 @@ async fn view_destroy(
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    let id = match parse_pk(&pk) {
-        Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
     match destroy_view(pool, &actor, &slug, &id).await {
@@ -2505,9 +2538,21 @@ mod tests {
     }
 
     #[test]
-    fn bad_pk_is_a_validation_400() {
-        let denial = parse_pk("nope").expect_err("bad uuid");
-        assert!(matches!(denial, Denial::BadValidation));
+    fn parse_pk_rejects_every_non_canonical_spelling() {
+        // Django's `<uuid:pk>` converter routes only this spelling; the
+        // caller proxies every rejection for the resolver 404, before auth.
+        let canonical = "12345678-1234-1234-1234-1234567890ab";
+        assert!(parse_pk(canonical).is_ok());
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "not-a-uuid",
+            "",
+        ] {
+            assert!(parse_pk(raw).is_err(), "{raw}");
+        }
     }
 
     #[test]

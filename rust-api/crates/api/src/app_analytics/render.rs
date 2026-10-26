@@ -3188,14 +3188,17 @@ async fn get_saved_analytic(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, IssuesDenial> {
-    // Django's `<uuid:analytic_id>` converter rejects non-UUID segments
-    // at routing time (HTML 404, never reaching the view). Axum path
-    // captures match any segment, so non-UUID tails proxy to Django,
-    // reproducing its routing 404 in every `DEBUG` setting.
+    // Django's `<uuid:analytic_id>` converter routes only canonically
+    // spelled segments (lowercase hex, hyphenated) at routing time (HTML
+    // 404, never reaching the view). Axum path captures match any
+    // segment, so every other spelling proxies to Django, reproducing
+    // its routing 404 in every `DEBUG` setting (`Uuid::parse_str`
+    // alone would also accept uppercase, simple, braced and
+    // `urn:uuid:` spellings Django never routes).
     // Routing precedes auth, like the views-search detail routes.
     let view_id: uuid::Uuid = match analytic_id.parse() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if crate::uuid_path::is_canonical_uuid(&analytic_id) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     authed_gate(
         &state,
