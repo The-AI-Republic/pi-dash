@@ -438,8 +438,9 @@ impl CommentPlan {
 /// Bindings for the comment `INSERT`: the fetched ids plus the plan.
 /// `created_at`/`updated_at` each bind their own `now()` (two
 /// `pre_save` calls); `created_by/updated_by` bind the ambient
-/// request user, `None` on lifecycle paths (daemon endpoints and
-/// workers carry no `crum` user).
+/// request user on request-inline lifecycle drains (the runner owner
+/// on daemon endpoints, the requester on web paths), `None` on worker
+/// paths (workers carry no `crum` user).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommentInsert {
     pub comment_id: Uuid,
