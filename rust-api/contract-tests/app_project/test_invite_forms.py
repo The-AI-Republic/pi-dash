@@ -361,3 +361,20 @@ def test_join_text_plain_415_exact(world):
         content=b'{"email": "x"}', headers={"Content-Type": "text/plain"})
     assert resp.status_code == 415
     assert resp.text == '{"detail":"Unsupported media type \\"text/plain\\" in request."}'
+
+
+def test_join_obs_text_content_type_415_exact(world):
+    # PIDASHCONV-1537: a non-ASCII (obs-text) Content-Type is latin-1
+    # decoded and named verbatim in the 415 on both backends, byte for byte
+    # (DRF names request.content_type raw; UNICODE_JSON keeps the UTF-8 raw).
+    from _harness import seed as _seed
+    client, user, ws, project = world.full_stack()
+    inv = _seed.project_invite(world.conn, project["id"], ws["id"], email=user["email"])
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/join/{inv['id']}/",
+        content=b'{"email": "x"}',
+        headers=[(b"Content-Type", b"application/jso\xf1")])
+    assert resp.status_code == 415
+    assert resp.content == (
+        '{"detail":"Unsupported media type \\"application/jso\xf1\\" in request."}'
+    ).encode("utf-8")

@@ -685,18 +685,16 @@ async fn parse_body(
     if bytes.is_empty() {
         return Ok((Value::Object(Map::new()), false));
     }
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
+    // Latin-1, like `negotiate_body`'s read: obs-text bytes name verbatim
+    // in the 415 (PIDASHCONV-1537); `to_str().ok()` blanked them to "".
+    let content_type = crate::v1_cycles_modules::body::header_str(&parts.headers, "content-type");
     let mime = content_type.split(';').next().unwrap_or("").trim();
     if mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
         || mime.eq_ignore_ascii_case("multipart/form-data")
     {
         return parse_html_body(&parts.headers, &bytes, spec).map(|body| (body, true));
     }
-    if !matches_json_parser(content_type) {
+    if !matches_json_parser(&content_type) {
         // DRF `UnsupportedMediaType` (`detail`, lowercase; the media
         // type quotes are part of the message — live probe 2026-10-03).
         let message = format!("Unsupported media type \"{content_type}\" in request.");
