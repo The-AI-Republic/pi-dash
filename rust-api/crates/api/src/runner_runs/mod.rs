@@ -1546,57 +1546,23 @@ impl RunnerPorts for LivePorts {
         // `get_agent_system_user` (`orchestration/workpad.py:44-71`):
         // get-or-create on the unique username, refusing a
         // non-bot collision. Real: pause/failure comments need the row.
-        let row: Option<(uuid::Uuid, bool)> =
-            sqlx::query_as(r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#)
-                .bind(AGENT_USERNAME)
-                .fetch_optional(&self.pool)
+        // The shared seam owns the full `_meta`-order INSERT (every
+        // NOT NULL `users` column) plus the verbatim collision error;
+        // own transaction, since it issues `SAVEPOINT`s on the insert
+        // path (the jobs-side `RunnerSeams::agent_system_user` shape).
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| PortError::Transport(error.to_string()))?;
+        let (user, _) =
+            pidash_db::orchestration::workpad::get_agent_system_user(&mut tx, chrono::Utc::now())
                 .await
                 .map_err(|error| PortError::Transport(error.to_string()))?;
-        if let Some((id, is_bot)) = row {
-            if !is_bot {
-                return Err(PortError::Transport(format!(
-                    "User {AGENT_USERNAME:?} exists but is not a bot"
-                )));
-            }
-            return Ok(id);
-        }
-        let id = uuid::Uuid::new_v4();
-        let inserted: Result<Option<(uuid::Uuid,)>, sqlx::Error> = sqlx::query_as(
-            r#"INSERT INTO "users"
-               ("id", "username", "email", "first_name", "last_name", "is_bot", "password")
-               VALUES ($1, $2, $3, $4, $5, TRUE, $6)
-               ON CONFLICT ("username") DO NOTHING
-               RETURNING "id""#,
-        )
-        .bind(id)
-        .bind(AGENT_USERNAME)
-        .bind(AGENT_USER_EMAIL)
-        .bind(AGENT_USER_FIRST_NAME)
-        .bind(AGENT_USER_LAST_NAME)
-        .bind(unusable_password())
-        .fetch_optional(&self.pool)
-        .await;
-        match inserted {
-            Ok(Some((id,))) => Ok(id),
-            _ => {
-                // Lost the get-or-create race: re-read the winner.
-                let row: Option<(uuid::Uuid, bool)> =
-                    sqlx::query_as(r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#)
-                        .bind(AGENT_USERNAME)
-                        .fetch_optional(&self.pool)
-                        .await
-                        .map_err(|error| PortError::Transport(error.to_string()))?;
-                match row {
-                    Some((id, true)) => Ok(id),
-                    Some(_) => Err(PortError::Transport(format!(
-                        "User {AGENT_USERNAME:?} exists but is not a bot"
-                    ))),
-                    None => Err(PortError::Transport(
-                        "agent user missing after race".to_owned(),
-                    )),
-                }
-            }
-        }
+        tx.commit()
+            .await
+            .map_err(|error| PortError::Transport(error.to_string()))?;
+        Ok(user.id)
     }
 
     async fn dispatch_waiting(&self, workspace_id: uuid::Uuid) -> Result<(), PortError> {
@@ -1641,22 +1607,10 @@ impl RunnerPorts for LivePorts {
     }
 }
 
-/// Agent bot identity (`orchestration/workpad.py:29-32`).
-const AGENT_USERNAME: &str = "pi_dash_agent";
-const AGENT_USER_EMAIL: &str = "agent@example.com";
-const AGENT_USER_FIRST_NAME: &str = "Pi Dash";
-const AGENT_USER_LAST_NAME: &str = "Agent";
-
 /// `runner.apply_agent_run_terminal_effects` (`runner/tasks.py:333`).
 const TERMINAL_EFFECTS_TASK: &str = "runner.apply_agent_run_terminal_effects";
 /// `pi_dash.bgtasks.agent_ticker.fire_tick` (D-10 task name).
 const FIRE_TICK_TASK: &str = "pi_dash.bgtasks.agent_ticker.fire_tick";
-
-/// `User.set_unusable_password()`: an unmatchable hash (never a valid
-/// encoded hash, so no password validates against it).
-fn unusable_password() -> String {
-    format!("!{}", uuid::Uuid::new_v4().as_simple())
-}
 
 /// Enqueue one task message onto the Postgres-backed queue (`rust_job_queue`),
 /// the `auth_session::email` `publish_message` shape without the broker.
@@ -1823,11 +1777,7 @@ mod ports_tests {
     }
 
     #[test]
-    fn agent_identity_matches_workpad() {
-        assert_eq!(AGENT_USERNAME, "pi_dash_agent");
-        assert_eq!(AGENT_USER_EMAIL, "agent@example.com");
-        assert_eq!(AGENT_USER_FIRST_NAME, "Pi Dash");
-        assert_eq!(AGENT_USER_LAST_NAME, "Agent");
+    fn celery_task_names_match_python() {
         assert_eq!(
             TERMINAL_EFFECTS_TASK,
             "runner.apply_agent_run_terminal_effects"
