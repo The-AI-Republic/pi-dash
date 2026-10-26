@@ -3639,10 +3639,14 @@ async fn get_project_stats(
     }
     // `Project.objects.filter(workspace__slug)` is soft-delete scoped
     // (`SoftDeletionManager`); the fixture sketch omits the guard.
+    // Nothing clears `Project.Meta.ordering = ("-created_at",)`
+    // (`db/models/project.py:253`), so Django ends the statement in
+    // `ORDER BY "projects"."created_at" DESC` (PIDASHCONV-1454).
     let sql = format!(
         "SELECT {} FROM \"projects\" \
          INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE (\"workspaces\".\"slug\" = $1 AND \"projects\".\"deleted_at\" IS NULL{id_filter})",
+         WHERE (\"workspaces\".\"slug\" = $1 AND \"projects\".\"deleted_at\" IS NULL{id_filter}) \
+         ORDER BY \"projects\".\"created_at\" DESC",
         selects.join(", ")
     );
     let rows = fetch_json_rows(&pool, &sql, binder.values()).await?;
