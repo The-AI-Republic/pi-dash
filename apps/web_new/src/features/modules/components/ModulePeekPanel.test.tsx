@@ -143,7 +143,7 @@ describe("ModulePeekPanel", () => {
     expect(screen.getByTestId("modules-peek-skeleton")).toBeInTheDocument();
   });
 
-  it("fills the panel with the summary and the sidebar read-only", async () => {
+  it("fills the panel with the summary and lets an editor use the live sidebar", async () => {
     renderPanel();
     await waitFor(() => expect(screen.getByTestId("modules-peek-body")).toBeInTheDocument());
     expect(screen.getByRole("heading", { name: "Delivery" })).toBeInTheDocument();
@@ -151,14 +151,24 @@ describe("ModulePeekPanel", () => {
     expect(screen.getByTestId("modules-peek-summary")).toHaveTextContent("1/2 work items");
     const sidebar = screen.getByTestId("sidebar-stub");
     expect(sidebar).toHaveAttribute("data-module-id", MODULE);
-    expect(sidebar).toHaveAttribute("data-read-only", "true");
+    // The live twin follows the role exactly as the detail page does, so
+    // ARCH-025 can compare it with the locked archived panel.
+    expect(sidebar).toHaveAttribute("data-read-only", "false");
     expect(sidebar).toHaveAttribute("data-archived", "false");
-    // An editor's role still mounts the peek read-only.
     expect(sidebar).toHaveAttribute("data-can-edit", "true");
     expect(sidebar).toHaveAttribute("data-has-progress", "true");
     const progress = screen.getByTestId("progress-stub");
-    expect(progress).toHaveAttribute("data-read-only", "true");
+    expect(progress).toHaveAttribute("data-read-only", "false");
     expect(progress).toHaveAttribute("data-archived", "false");
+  });
+
+  it("mounts the live sidebar read-only for a viewer with no edit role", async () => {
+    rolesHarness.role = 5;
+    renderPanel();
+    await waitFor(() => expect(screen.getByTestId("modules-peek-body")).toBeInTheDocument());
+    expect(screen.getByTestId("sidebar-stub")).toHaveAttribute("data-can-edit", "false");
+    expect(screen.getByTestId("sidebar-stub")).toHaveAttribute("data-read-only", "false");
+    expect(screen.getByTestId("progress-stub")).toHaveAttribute("data-read-only", "false");
   });
 
   it("falls back to the list's name while the detail read lands", async () => {
@@ -177,6 +187,7 @@ describe("ModulePeekPanel", () => {
     expect(screen.getByTestId("sidebar-stub")).toHaveAttribute("data-archived", "true");
     expect(screen.getByTestId("sidebar-stub")).toHaveAttribute("data-read-only", "true");
     expect(screen.getByTestId("progress-stub")).toHaveAttribute("data-archived", "true");
+    expect(screen.getByTestId("progress-stub")).toHaveAttribute("data-read-only", "true");
   });
 
   it("reads the archived record read-only for a viewer with no role yet", async () => {

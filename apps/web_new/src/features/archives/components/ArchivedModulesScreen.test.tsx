@@ -440,7 +440,60 @@ describe("ArchivedModulesScreen", () => {
     expect(menuTitles()).toEqual(["Open in new tab", "Copy link"]);
   });
 
-  it("keeps the archived narrowing out of the live list's record", async () => {
+  it("reorders the rows from the sort control's direction and key", async () => {
+    renderScreen();
+    await screen.findAllByTestId("modules-row");
+    expect(rowNames()).toEqual(["Archived alpha", "Archived beta"]);
+
+    fireEvent.click(screen.getByTestId("modules-sort-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Descending" }));
+    await waitFor(() => expect(rowNames()).toEqual(["Archived beta", "Archived alpha"]));
+    expect(screen.getByTestId("modules-sort-label")).toHaveTextContent("Name");
+
+    // A second key orders by the field itself, not the name.
+    fireEvent.click(screen.getByTestId("modules-sort-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Progress" }));
+    await waitFor(() => expect(screen.getByTestId("modules-sort-label")).toHaveTextContent("Progress"));
+  });
+
+  it("marks the filters trigger only while a filter is applied, and clears the mark with the filter", async () => {
+    renderScreen();
+    await screen.findAllByTestId("modules-row");
+    expect(screen.queryByTestId("modules-filter-active")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("modules-filter-trigger"));
+    const startGroup = Array.from(screen.getAllByTestId("modules-filter-group")).find(
+      (group) => group.getAttribute("data-filter-group") === "Start date"
+    );
+    fireEvent.click(within(startGroup as HTMLElement).getByRole("checkbox", { name: "1 week from now" }));
+    // NEWFRONT-229's intended behavior: the trigger says a filter is on.
+    expect(screen.getByTestId("modules-filter-active")).toBeInTheDocument();
+
+    const chips = await screen.findByTestId("modules-filter-chips");
+    fireEvent.click(within(chips).getByRole("button", { name: /clear all/i }));
+    await waitFor(() => expect(screen.queryByTestId("modules-filter-active")).toBeNull());
+  });
+
+  it("keeps the archived search in memory and out of both display records", async () => {
+    renderScreen();
+    await screen.findAllByTestId("modules-row");
+
+    fireEvent.click(screen.getByTestId("modules-search").querySelector("button") as HTMLElement);
+    fireEvent.change(screen.getByTestId("modules-search-input"), { target: { value: "alpha" } });
+    await waitFor(() => expect(rowNames()).toEqual(["Archived alpha"]));
+    expect(screen.getByTestId("modules-search-input")).toHaveValue("alpha");
+
+    // The narrowed visit stays narrowed in memory; nothing about the
+    // search reaches storage (archives §5.2: never a storage key).
+    const stored = JSON.parse(globalThis.localStorage.getItem("archived_modules_display") ?? "{}") as Record<
+      string,
+      { query?: string }
+    >;
+    expect(stored[MODULES_PROJECT_ID]?.query ?? "").toBe("");
+    expect(globalThis.localStorage.getItem("modules_list_display")).toBeNull();
+  });
+
+  it("persists the archived ordering without the search beside it", async () => {
     renderScreen();
     await screen.findAllByTestId("modules-row");
 
@@ -448,11 +501,24 @@ describe("ArchivedModulesScreen", () => {
     fireEvent.change(screen.getByTestId("modules-search-input"), { target: { value: "alpha" } });
     await waitFor(() => expect(rowNames()).toEqual(["Archived alpha"]));
 
+    fireEvent.click(screen.getByTestId("modules-sort-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Descending" }));
+    await waitFor(() =>
+      expect(
+        (
+          JSON.parse(globalThis.localStorage.getItem("archived_modules_display") ?? "{}") as Record<
+            string,
+            { query?: string; sort?: { direction?: string } }
+          >
+        )[MODULES_PROJECT_ID]?.sort?.direction
+      ).toBe("descending")
+    );
     const stored = JSON.parse(globalThis.localStorage.getItem("archived_modules_display") ?? "{}") as Record<
       string,
       { query?: string }
     >;
-    expect(stored[MODULES_PROJECT_ID]?.query).toBe("alpha");
+    // The ordering write persists; the search beside it does not.
+    expect(stored[MODULES_PROJECT_ID]?.query).toBe("");
     expect(globalThis.localStorage.getItem("modules_list_display")).toBeNull();
   });
 });

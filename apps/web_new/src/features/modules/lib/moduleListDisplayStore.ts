@@ -30,9 +30,11 @@ import {
 export const MODULES_LIST_DISPLAY_STORAGE_KEY = "modules_list_display";
 
 /**
- * Browser record for the archived-modules screen's own search/sort/filters
- * (§13.3.1: narrowing one list never changes the other). Same encoding,
- * separate record.
+ * Browser record for the archived-modules screen's own ordering and
+ * filters (§13.3.1: narrowing one list never changes the other). Same
+ * encoding, separate record. The archived scope keeps its name search out
+ * of storage (archives §5.2/§8: in memory for the session only), so an
+ * entry here never carries a query.
  */
 export const ARCHIVED_MODULES_DISPLAY_STORAGE_KEY = "archived_modules_display";
 
@@ -145,8 +147,14 @@ type Listener = () => void;
  * One browser record and its live store. Each scope owns its listeners
  * and caches, so the live list and the archived screen share one
  * implementation without ever notifying each other's subscribers.
+ *
+ * `persistQuery` decides whether the name search travels with the record.
+ * The live list remembers it; the archived screen's search is a session
+ * field (archives §5.2), so its writes drop the query and a reload starts
+ * with an empty box.
  */
-function createDisplayScope(storageKey: string): ModuleDisplayScope {
+function createDisplayScope(storageKey: string, options: { persistQuery?: boolean } = {}): ModuleDisplayScope {
+  const persistQuery = options.persistQuery ?? true;
   const listeners = new Set<Listener>();
   /** The last written value per project; a refused write keeps this visit's choice. */
   const memory = new Map<string, ModuleListDisplay>();
@@ -168,7 +176,9 @@ function createDisplayScope(storageKey: string): ModuleDisplayScope {
   function readRecord(storage: StorageLike | undefined = defaultStorage()): ModuleListDisplayRecord {
     if (storage === undefined) return {};
     try {
-      return parseDisplayRecord(storage.getItem(storageKey));
+      const record = parseDisplayRecord(storage.getItem(storageKey));
+      if (persistQuery) return record;
+      return Object.fromEntries(Object.entries(record).map(([id, entry]) => [id, stored(entry)]));
     } catch {
       return {};
     }
@@ -186,7 +196,7 @@ function createDisplayScope(storageKey: string): ModuleDisplayScope {
     if (storage === undefined || projectId === "") return;
     const record = readRecord(storage);
     try {
-      storage.setItem(storageKey, JSON.stringify({ ...record, [projectId]: display }));
+      storage.setItem(storageKey, JSON.stringify({ ...record, [projectId]: stored(display) }));
     } catch {
       // A refused write keeps the in-memory choice for this visit.
     }
@@ -201,6 +211,15 @@ function createDisplayScope(storageKey: string): ModuleDisplayScope {
     const value = readProject(projectId, storage);
     readCache.set(projectId, value);
     return value;
+  }
+
+  /**
+   * The entry as this scope keeps it: the session-only query is dropped on
+   * both read and write, so a record left by an older build cannot bring a
+   * stale search box back after a reload.
+   */
+  function stored(display: ModuleListDisplay): ModuleListDisplay {
+    return persistQuery ? display : { ...display, query: "" };
   }
 
   function replace(projectId: string, next: ModuleListDisplay, storage: StorageLike | undefined): void {
@@ -242,8 +261,13 @@ function createDisplayScope(storageKey: string): ModuleDisplayScope {
 /** The active modules list's record (§13.3.1). */
 export const modulesListDisplayScope = createDisplayScope(MODULES_LIST_DISPLAY_STORAGE_KEY);
 
-/** The archived-modules screen's record, kept apart from the live list's. */
-export const archivedModulesDisplayScope = createDisplayScope(ARCHIVED_MODULES_DISPLAY_STORAGE_KEY);
+/**
+ * The archived-modules screen's record, kept apart from the live list's.
+ * Ordering and filters persist; the name search stays in memory.
+ */
+export const archivedModulesDisplayScope = createDisplayScope(ARCHIVED_MODULES_DISPLAY_STORAGE_KEY, {
+  persistQuery: false,
+});
 
 // ------------------------------------------------------- live list (scope 1)
 
@@ -283,5 +307,9 @@ export const currentArchivedProjectDisplay = archivedModulesDisplayScope.current
 /** Reset the archived-screen caches and subscribers (tests). */
 export const resetArchivedDisplayCache = archivedModulesDisplayScope.reset;
 
-/** The archived screen's own search, ordering and filters with setters. */
+/**
+ * The archived screen's own ordering and filters with setters, plus the
+ * session's name search: the setters of the archived scope. `setQuery`
+ * updates this visit only; the next write persists just the narrowing.
+ */
 export const useArchivedModuleDisplay = archivedModulesDisplayScope.useDisplay;

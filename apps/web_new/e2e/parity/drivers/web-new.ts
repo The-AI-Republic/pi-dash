@@ -17086,10 +17086,21 @@ export class WebNewDriver implements ParityDriver {
     return this.cycleRowNames();
   }
   async archivesModuleSortLabel(): Promise<string> {
-    return todo("archivesModuleSortLabel");
+    // The archived header mounts the shared ordering menu; its trigger
+    // names the active key, and reads empty when no list is mounted.
+    const label = this.page.getByTestId("modules-sort-label").first();
+    if ((await label.count()) === 0) return "";
+    return ((await label.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
-  async archivesSetModuleSort(_label: string): Promise<void> {
-    return todo("archivesSetModuleSort");
+  async archivesSetModuleSort(label: string): Promise<void> {
+    // One entry per key plus the two directions, all in the same menu;
+    // the label names exactly one of them.
+    const trigger = this.page.getByTestId("modules-sort-trigger").first();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const item = this.page.getByRole("menuitem", { name: label, exact: true }).first();
+    await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+    await item.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
   async archivesOpenModuleSearch(): Promise<void> {
     // The archived header mounts the live search control: a collapsed
@@ -17106,16 +17117,24 @@ export class WebNewDriver implements ParityDriver {
     );
   }
   async archivesModuleSearchVisible(): Promise<boolean> {
-    return todo("archivesModuleSearchVisible");
+    // Collapsed, the header shows only the magnifier; expanded, it shows
+    // the field carrying the query.
+    return this.isShown(this.page.getByTestId("modules-search-field").first());
   }
   async archivesTypeModuleSearch(text: string): Promise<void> {
     await this.archivedModulesSearchInput().fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
   async archivesModuleSearchText(): Promise<string> {
-    return todo("archivesModuleSearchText");
+    // The field is absent while the box is collapsed, which reads as an
+    // empty query — the same state the collapsed box filters by.
+    const field = this.archivedModulesSearchInput();
+    if ((await field.count()) === 0) return "";
+    return field.inputValue();
   }
   async archivesEscapeModuleSearch(): Promise<void> {
-    return todo("archivesEscapeModuleSearch");
+    // The box owns the Escape matrix: one press clears a filled field,
+    // the next collapses the empty one.
+    await this.archivedModulesSearchInput().press("Escape", { timeout: WebNewDriver.WAIT_MS });
   }
   async archivesClearModuleSearch(): Promise<void> {
     const box = this.page.getByTestId("modules-search-field").first();
@@ -17181,7 +17200,9 @@ export class WebNewDriver implements ParityDriver {
     await row.getByTestId("modules-filter-clear-all").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async archivesModuleFiltersActive(): Promise<boolean> {
-    return todo("archivesModuleFiltersActive");
+    // The trigger carries a dot only while a filter is applied
+    // (NEWFRONT-229 intended behavior).
+    return this.isShown(this.page.getByTestId("modules-filter-active").first());
   }
   async archivesCloseModuleFilters(): Promise<void> {
     if (await this.isShown(this.page.getByTestId("modules-filter-panel"))) {
@@ -17232,8 +17253,27 @@ export class WebNewDriver implements ParityDriver {
       { timeout: WebNewDriver.WAIT_MS }
     );
   }
-  async archivesModulesShowsSkeleton(_workspaceSlug: string, _projectId: string): Promise<boolean> {
-    return todo("archivesModulesShowsSkeleton");
+  async archivesModulesShowsSkeleton(workspaceSlug: string, projectId: string): Promise<boolean> {
+    // Arm the observer, hold only the archived-modules read, then enter
+    // the tab the way a viewer does: the screen paints its skeleton while
+    // that one read is still in flight and settles once it lands.
+    await this.archivesArmSkeletonObserver();
+    const holdsArchivedModulesRead = (url: URL): boolean => url.pathname.endsWith("/archived-modules/");
+    await this.page.route(holdsArchivedModulesRead, async (route) => {
+      if (route.request().method() === "GET") {
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+      }
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.archivesOpenLiveModules(workspaceSlug, projectId);
+      await this.archivesGoToProjectArchives(projectId);
+      await this.archivesSelectArchivesTab("Modules");
+      return await this.archivesSkeletonWasSeen();
+    } finally {
+      await this.page.unroute(holdsArchivedModulesRead).catch(() => undefined);
+      await this.archivesAwaitArchivedModulesSettled();
+    }
   }
   async archivesOpenModulePeek(name: string): Promise<void> {
     // An archived row opens its peek from the row body itself; pressing
@@ -17273,7 +17313,43 @@ export class WebNewDriver implements ParityDriver {
     await this.closeArchivedCyclePeek();
   }
   async archivesModulePeekReadOnly(): Promise<ArchivesPeekReadOnly> {
-    return todo("archivesModulePeekReadOnly");
+    // The panel mounts the module sidebar. The status control is the one
+    // button named for a lifecycle state; an enabled one opens its list,
+    // a locked (archived, or read-only role) one opens nothing. The Links
+    // disclosure carries the add action, but starts collapsed on an empty
+    // module, so expand it before reading whether the action is offered.
+    //
+    // With no peek open the name, the summary and the offer are absent
+    // while the lock holds, mirroring the cycle panel's reading.
+    const panel = this.modulesPeekPanel();
+    if (!(await this.isShown(panel))) {
+      return { name: null, statusLocked: true, addLinkOffered: false, summaryShown: false };
+    }
+    const name = await this.archivesModulePeekName();
+    const status = panel.locator(
+      'button[aria-label="Backlog"], button[aria-label="Planned"], button[aria-label="In Progress"], button[aria-label="Paused"], button[aria-label="Completed"], button[aria-label="Cancelled"]'
+    );
+    let statusLocked = true;
+    if ((await status.count()) > 0) {
+      const trigger = status.first();
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+      await this.page.waitForTimeout(300);
+      const options = await this.page.getByRole("option").count();
+      const menus = await this.page.locator('[role="menu"]:visible, [role="listbox"]:visible').count();
+      statusLocked = (await trigger.isDisabled()) || (options === 0 && menus === 0);
+      await this.page.keyboard.press("Escape").catch(() => undefined);
+    }
+    const noLinks = panel.getByTestId("modules-links-empty");
+    if ((await noLinks.count()) === 0) {
+      const toggle = panel.getByTestId("modules-links-toggle");
+      if (await this.isShown(toggle)) {
+        await toggle.click({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+        await noLinks.waitFor({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+      }
+    }
+    const addLinkOffered = await this.isShown(panel.getByTestId("modules-links-add").first());
+    const summaryShown = await this.isShown(panel.getByTestId("modules-peek-summary").first());
+    return { name, statusLocked, addLinkOffered, summaryShown };
   }
   async archivesCyclePeekReadOnly(): Promise<ArchivesPeekReadOnly> {
     // The archived peek carries a static status marker and no link
@@ -17287,15 +17363,49 @@ export class WebNewDriver implements ParityDriver {
     const summaryShown = await this.isShown(panel.getByTestId("archived-cycle-peek-summary"));
     return { name, statusLocked, addLinkOffered, summaryShown };
   }
-  async archivesLiveModuleMenuEntries(_name: string): Promise<ArchivesMenuEntry[]> {
-    return todo("archivesLiveModuleMenuEntries");
+  async archivesLiveModuleMenuEntries(name: string): Promise<ArchivesMenuEntry[]> {
+    // The live list's quick menu: the shared entries with their gating.
+    return this.archivesReadModuleMenuEntries(name);
   }
   async archivesChooseLiveModuleMenuEntry(name: string, title: string): Promise<void> {
     await this.modulesOpenRowMenu(name);
     await this.modulesMenuChoose(title);
   }
-  async archivesArchivedModuleMenuEntries(_name: string): Promise<ArchivesMenuEntry[]> {
-    return todo("archivesArchivedModuleMenuEntries");
+  async archivesArchivedModuleMenuEntries(name: string): Promise<ArchivesMenuEntry[]> {
+    // The archived screen mounts the same rows and the same menu, in
+    // archived mode: restore and the link actions, no edit or archive.
+    return this.archivesReadModuleMenuEntries(name);
+  }
+  /**
+   * Open one module row's quick menu, read every entry's title, gate and
+   * explanation line, then close it again. The row search spans the page
+   * because the live list and the archived screen mount the same rows
+   * under different shells.
+   */
+  private async archivesReadModuleMenuEntries(name: string): Promise<ArchivesMenuEntry[]> {
+    await this.modulesOpenRowMenu(name);
+    const items = this.page.locator('[role="menuitem"]:visible');
+    const total = await items.count();
+    const entries: ArchivesMenuEntry[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const item = items.nth(index);
+      // An entry without a secondary line carries no title element, so
+      // fall back to its own text as the shared reader does; an entry
+      // that detaches mid-read is skipped rather than guessed at.
+      const title = await this.modulesMenuItemTitle(item).catch(() => "");
+      if (title === "") continue;
+      const hint = item.locator("[data-menu-description]").first();
+      const description =
+        (await hint.count()) === 0 ? null : ((await hint.innerText().catch(() => "")) ?? "").trim() || null;
+      const disabled = (await item.getAttribute("data-disabled")) !== null;
+      entries.push({ title, disabled, description });
+    }
+    await this.page.keyboard.press("Escape");
+    await items
+      .first()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return entries;
   }
   async archivesChooseArchivedModuleMenuEntry(name: string, title: string): Promise<void> {
     await this.modulesOpenRowMenu(name);
