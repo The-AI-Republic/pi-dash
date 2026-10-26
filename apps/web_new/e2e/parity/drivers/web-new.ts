@@ -21817,17 +21817,30 @@ export class WebNewDriver implements ParityDriver {
     // NOT a settle signal: it shows transiently on every load until the
     // socket syncs, so racing it returns before the editors exist
     // (NEWFRONT-920). Offline callers whose editors never mount navigate
-    // directly and poll the loader instead (see collab-live PAGE-068).
-    await Promise.race([
-      this.pagesLiveTitleField()
-        .first()
-        .waitFor({ state: "visible", timeout: 60_000 })
-        .catch(() => undefined),
-      this.page
-        .locator('[data-testid="page-detail-title"][data-readonly="true"]')
-        .waitFor({ state: "visible", timeout: 60_000 })
-        .catch(() => undefined),
-    ]);
+    // directly and poll the loader instead (see collab-live PAGE-068). A
+    // load that mounts neither face within the budget is wedged (the
+    // record fetch or the socket stalled under box contention), so one
+    // reload unsticks it before the reads that follow.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) await this.page.reload({ waitUntil: "domcontentloaded" });
+      const mounted = await Promise.race([
+        this.pagesLiveTitleField()
+          .first()
+          .waitFor({ state: "visible", timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .locator('[data-testid="page-detail-title"][data-readonly="true"]')
+          .waitFor({ state: "visible", timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (mounted) return;
+    }
   }
 
   async pagesLiveSyncBadge(): Promise<string | null> {
