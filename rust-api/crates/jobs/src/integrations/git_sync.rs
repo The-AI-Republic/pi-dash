@@ -951,13 +951,17 @@ pub fn next_link(header: &str) -> Option<String> {
     None
 }
 
-impl GithubClient for ReqwestGithubClient {
-    /// `GithubClient(token=…)` / `GithubClient.for_installation(…)`
-    /// (`github_client.py:39-52`): empty tokens fail closed with
-    /// `Auth("empty token")`; installations mint via [`installation_token`].
-    fn connect(auth: &ClientAuth) -> Result<Self, GithubError> {
+impl ReqwestGithubClient {
+    /// `GithubClient(token=…, api_base=…)` (`github_client.py:39-44`):
+    /// production connects through [`GithubClient::connect`] with
+    /// [`GITHUB_API_BASE`]; tests pass a stub base. Redirects follow
+    /// `requests` (up to 10 hops; `requests` allows 30): GitHub answers
+    /// 301 (GET) or 307 (POST) for a renamed/transferred repo, and
+    /// `requests` follows with `Authorization` kept on same-host hops
+    /// (PIDASHCONV-1472).
+    fn connect_with_api_base(auth: &ClientAuth, api_base: &str) -> Result<Self, GithubError> {
         let http = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .map_err(|error| GithubError::Transport(error.to_string()))?;
         match auth {
@@ -968,7 +972,7 @@ impl GithubClient for ReqwestGithubClient {
                 Ok(Self {
                     http,
                     token: token.clone(),
-                    api_base: GITHUB_API_BASE.to_owned(),
+                    api_base: api_base.trim_end_matches('/').to_owned(),
                     timeout_secs: PROVIDER_TIMEOUT_SECS,
                 })
             }
@@ -977,11 +981,21 @@ impl GithubClient for ReqwestGithubClient {
                 Ok(Self {
                     http,
                     token,
-                    api_base: GITHUB_API_BASE.to_owned(),
+                    api_base: api_base.trim_end_matches('/').to_owned(),
                     timeout_secs: PROVIDER_TIMEOUT_SECS,
                 })
             }
         }
+    }
+}
+
+impl GithubClient for ReqwestGithubClient {
+    /// `GithubClient(token=…)` / `GithubClient.for_installation(…)`
+    /// (`github_client.py:39-52`): empty tokens fail closed with
+    /// `Auth("empty token")`; installations mint via [`installation_token`].
+    fn connect(auth: &ClientAuth) -> Result<Self, GithubError> {
+        let base = super::github_api_base_override().unwrap_or_else(|| GITHUB_API_BASE.to_owned());
+        Self::connect_with_api_base(auth, &base)
     }
 
     fn get_authenticated_user(&self) -> Result<Value, GithubError> {
@@ -3251,6 +3265,113 @@ mod tests {
             Some("https://api.test/p2".to_owned())
         );
         assert_eq!(next_link("not-a-link"), None);
+    }
+
+    // Rename redirects follow `requests` (`github_client.py:62-73`, no
+    // `allow_redirects` override): a renamed repo's 301 on the issues
+    // listing and 307 on the comment POST resolve to the new location,
+    // with `Authorization` kept and the POST body re-sent
+    // (PIDASHCONV-1472).
+    #[test]
+    fn transport_follows_rename_redirects() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+        let port = listener.local_addr().expect("addr").port();
+        let base = format!("http://127.0.0.1:{port}");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_server = seen.clone();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let mut stream = stream.expect("accepts");
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    if stream.read(&mut byte).expect("reads") == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
+                let head_text = String::from_utf8_lossy(&head).into_owned();
+                // Header names arrive lowercase on the wire (hyper
+                // normalizes them), so match case-insensitively.
+                let header = |name: &str| {
+                    head_text.lines().skip(1).find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        (key.trim().eq_ignore_ascii_case(name)).then(|| value.trim().to_owned())
+                    })
+                };
+                let content_length = header("content-length")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0u8; content_length];
+                stream.read_exact(&mut body).expect("reads body");
+                let auth = header("authorization").unwrap_or_default();
+                seen_server.lock().expect("locks").push((
+                    head_text.lines().next().unwrap_or("").to_owned(),
+                    auth,
+                    body,
+                ));
+                let (status, location, body) = if head_text.starts_with("GET /repos/old/r/issues") {
+                    (
+                        "301 Moved Permanently",
+                        Some(format!("{base}/repositories/1/issues?state=open")),
+                        "".to_owned(),
+                    )
+                } else if head_text.starts_with("GET /repositories/1/issues") {
+                    ("200 OK", None, r#"[{"number": 7}]"#.to_owned())
+                } else if head_text.starts_with("POST /repos/old/r/issues/7/comments") {
+                    (
+                        "307 Temporary Redirect",
+                        Some(format!("{base}/repositories/1/issues/7/comments")),
+                        "".to_owned(),
+                    )
+                } else if head_text.starts_with("POST /repositories/1/issues/7/comments") {
+                    ("201 Created", None, r#"{"id": 4242}"#.to_owned())
+                } else {
+                    ("404 Not Found", None, "no route".to_owned())
+                };
+                let mut response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                if let Some(target) = location {
+                    response.push_str(&format!("Location: {target}\r\n"));
+                }
+                response.push_str(&format!("\r\n{body}"));
+                stream.write_all(response.as_bytes()).expect("writes");
+            }
+        });
+
+        let client = ReqwestGithubClient::connect_with_api_base(
+            &ClientAuth::Token("t".to_owned()),
+            &format!("http://127.0.0.1:{port}"),
+        )
+        .expect("builds");
+        let issues = client
+            .list_all_open_issues("old", "r")
+            .expect("lists through 301");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["number"], json!(7));
+        let posted = client
+            .post_issue_comment("old", "r", 7, "done!")
+            .expect("posts through 307");
+        assert_eq!(posted["id"], json!(4242));
+        server.join().expect("server drains");
+
+        let hits = seen.lock().expect("locks");
+        assert_eq!(hits.len(), 4);
+        assert!(hits[0].0.starts_with("GET /repos/old/r/issues?"));
+        assert!(hits[1].0.starts_with("GET /repositories/1/issues?"));
+        assert!(hits[2].0.starts_with("POST /repos/old/r/issues/7/comments"));
+        assert!(hits[3]
+            .0
+            .starts_with("POST /repositories/1/issues/7/comments"));
+        for (_, auth, _) in hits.iter() {
+            assert_eq!(auth, "Bearer t");
+        }
+        assert_eq!(hits[3].2, br#"{"body":"done!"}"#.to_vec());
     }
 
     // Installation-token cache: a live entry short-circuits the mint

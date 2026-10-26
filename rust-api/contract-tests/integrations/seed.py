@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import random
 
 from cryptography.fernet import Fernet
 from psycopg.types.json import Jsonb
@@ -433,3 +434,196 @@ def git_issue_sync(
         ),
     )["id"]
     return scope.track("git_issue_syncs", str(row_id))
+
+
+# --- Legacy (github_sync_task) rows for the PIDASHCONV-1472 redirect tests.
+#
+# Column lists mirror _harness/seed.py's create_workspace_integration /
+# create_github_repo_sync / create_github_issue_sync; the legacy token has
+# no plaintext fallback (github_sync_task._resolve_token decrypts only),
+# so callers pass encrypt_token_for_worker() ciphertext.
+
+
+def ensure_github_integration(database_url: str) -> str:
+    """Get-or-create the shared ``integrations`` row (provider=github).
+
+    Never tracked: like _harness/seed.py's ensure_github_integration, the
+    shared row is left behind (deleting it would steal another suite's
+    row on a shared database).
+    """
+    row = db.fetchone(
+        database_url, "SELECT id FROM integrations WHERE provider = 'github'"
+    )
+    if row is not None:
+        return str(row["id"])
+    return db.fetchone(
+        database_url,
+        "INSERT INTO integrations (id, title, provider, network,"
+        " description, author, webhook_url, webhook_secret, redirect_url,"
+        " metadata, verified, created_at, updated_at)"
+        " VALUES (%s, 'GitHub', 'github', 2,"
+        " '{\"summary\": \"Mirror GitHub issues into Pi Dash projects.\"}',"
+        " '', '', '', '', '{}', true, now(), now()) RETURNING id",
+        (db.new_uuid(),),
+    )["id"]
+
+
+def legacy_api_token(
+    database_url: str, scope: Scope, *, user_id: str, workspace_id: str
+) -> str:
+    """Minimal ``api_tokens`` row for a workspace_integrations FK."""
+    return _insert(
+        database_url,
+        scope,
+        "api_tokens",
+        ["token", "label", "description", "is_active", "user_type", "user_id",
+         "workspace_id", "is_service", "allowed_rate_limit"],
+        (
+            f"pi_dash_api_{db.new_uuid().replace('-', '')}",
+            "redirect-probe",
+            "seeded for contract tests",
+            True,
+            0,
+            user_id,
+            workspace_id,
+            False,
+            "100000/min",
+        ),
+    )
+
+
+def legacy_workspace_integration(
+    database_url: str,
+    scope: Scope,
+    *,
+    workspace_id: str,
+    actor_id: str,
+    token_cipher: str,
+) -> str:
+    """``workspace_integrations`` row carrying the legacy credential."""
+    integration_id = ensure_github_integration(database_url)
+    token_id = legacy_api_token(
+        database_url, scope, user_id=actor_id, workspace_id=workspace_id
+    )
+    return _insert(
+        database_url,
+        scope,
+        "workspace_integrations",
+        ["metadata", "config", "actor_id", "api_token_id", "integration_id",
+         "workspace_id"],
+        (
+            Jsonb({}),
+            Jsonb(
+                {
+                    "auth_type": "pat",
+                    "token": token_cipher,
+                    "github_user_login": "redirect-octocat",
+                }
+            ),
+            actor_id,
+            token_id,
+            integration_id,
+            workspace_id,
+        ),
+    )
+
+
+def legacy_repository_sync(
+    database_url: str,
+    scope: Scope,
+    *,
+    workspace_id: str,
+    project_id: str,
+    actor_id: str,
+    wi_id: str,
+    owner: str,
+    name: str,
+    enabled: bool = True,
+) -> dict:
+    """Bound ``github_repositories`` + ``github_repository_syncs`` pair."""
+    repo_id = _insert(
+        database_url,
+        scope,
+        "github_repositories",
+        ["name", "url", "config", "repository_id", "owner", "project_id",
+         "workspace_id"],
+        (
+            name,
+            f"https://github.com/{owner}/{name}",
+            Jsonb({}),
+            random.randint(10_000_000, 99_999_999),
+            owner,
+            project_id,
+            workspace_id,
+        ),
+    )
+    sync_id = _insert(
+        database_url,
+        scope,
+        "github_repository_syncs",
+        ["credentials", "actor_id", "project_id", "repository_id",
+         "workspace_id", "workspace_integration_id", "is_sync_enabled",
+         "last_sync_error"],
+        (Jsonb({}), actor_id, project_id, repo_id, workspace_id, wi_id, enabled, ""),
+    )
+    return {"sync_id": sync_id, "repo_id": repo_id}
+
+
+def legacy_issue_sync(
+    database_url: str,
+    scope: Scope,
+    *,
+    sync_id: str,
+    issue_id: str,
+    project_id: str,
+    workspace_id: str,
+    repo_issue_id: int,
+) -> str:
+    """One ``github_issue_syncs`` row for legacy post_completion_comment."""
+    row_id = db.fetchone(
+        database_url,
+        "INSERT INTO github_issue_syncs (id, created_at, updated_at,"
+        " repository_sync_id, issue_id, project_id, workspace_id,"
+        " repo_issue_id, github_issue_id, issue_url, metadata)"
+        " VALUES (%s, now(), now(), %s, %s, %s, %s, %s, %s, %s, %s)"
+        " RETURNING id",
+        (
+            db.new_uuid(),
+            sync_id,
+            issue_id,
+            project_id,
+            workspace_id,
+            repo_issue_id,
+            random.randint(10_000_000, 99_999_999),
+            f"https://github.com/redirect-oldowner/redirect-oldrepo/issues/{repo_issue_id}",
+            Jsonb({}),
+        ),
+    )["id"]
+    return scope.track("github_issue_syncs", str(row_id))
+
+
+def cleanup_workspace_mirrors(database_url: str, workspace_id: str) -> None:
+    """Delete worker-mirrored rows of one (per-test unique) workspace.
+
+    Successful syncs create Issue / sync / comment rows the per-test Scope
+    never tracked; deleting them by workspace_id (reverse-FK order) runs
+    before Scope teardown, which then removes the seeded rows (chain,
+    bindings, sync triples) itself.
+    """
+    for table in (
+        "git_comment_syncs",
+        "github_comment_syncs",
+        "issue_comments",
+        "issue_sequences",
+        "git_issue_syncs",
+        "github_issue_syncs",
+        "issues",
+    ):
+        try:
+            db.execute(
+                database_url,
+                f"DELETE FROM {table} WHERE workspace_id = %s",
+                (workspace_id,),
+            )
+        except Exception:
+            pass
