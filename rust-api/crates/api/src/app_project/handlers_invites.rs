@@ -707,8 +707,7 @@ async fn parse_body(
     // first-match): normalize the header so axum's `Json` extractor takes
     // the same path — and renders the same rejection bytes — as a plain
     // `application/json` request.
-    let base = content_type.split(';').next().unwrap_or("").trim();
-    if !base.eq_ignore_ascii_case("application/json") {
+    if !mime.eq_ignore_ascii_case("application/json") {
         parts.headers.insert(
             header::CONTENT_TYPE,
             header::HeaderValue::from_static("application/json"),
