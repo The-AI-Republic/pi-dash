@@ -11,8 +11,11 @@ also deletes the underlying issue.
 """
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+
+from _harness import http
 
 from . import seed_d21
 
@@ -584,3 +587,48 @@ def test_intake_create_triage_state_resequenced_and_stamped(org):
     ).fetchone()
     assert sequence == 70000.0
     assert str(created_by_id) == org.admin["id"]
+
+
+def test_concurrent_creates_get_distinct_sequence_ids(org):
+    # PIDASHCONV-1406: ``Issue.save`` takes a per-project advisory lock and
+    # assigns ``MAX(sequence)+1`` inside one transaction
+    # (``db/models/issue.py:311-336``), so N concurrent v1 intake creates
+    # must yield N distinct ``sequence_id``s. The triage state is
+    # pre-seeded so every create takes the reuse path — the triage
+    # get-or-create race is separate Django behavior, out of scope here.
+    seed_d21.create_state(
+        org.conn,
+        workspace_id=org.workspace["id"],
+        project_id=org.project["id"],
+        name="Triage",
+        group="triage",
+    )
+    url = _base(org)
+    token = org.tokens["admin"]
+    count = 20
+
+    def _one(n):
+        with http.make_client() as client:
+            r = client.post(
+                url,
+                json={"issue": {"name": f"race idea {n}"}},
+                headers={"X-Api-Key": token},
+            )
+            assert r.status_code == 201, r.text[:200]
+            return r.json()["issue_detail"]["sequence_id"]
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        sequence_ids = list(pool.map(_one, range(count)))
+    assert len(set(sequence_ids)) == count, f"shared sequence_ids: {sorted(sequence_ids)}"
+    dupes = org.conn.execute(
+        "SELECT sequence_id, count(*) AS c FROM issues WHERE project_id = %s"
+        " GROUP BY 1 HAVING count(*) > 1",
+        (org.project["id"],),
+    ).fetchall()
+    assert dupes == []
+    orphans = org.conn.execute(
+        "SELECT i.id FROM issues i LEFT JOIN issue_sequences s ON s.issue_id = i.id"
+        " WHERE i.project_id = %s AND s.id IS NULL",
+        (org.project["id"],),
+    ).fetchall()
+    assert orphans == []
