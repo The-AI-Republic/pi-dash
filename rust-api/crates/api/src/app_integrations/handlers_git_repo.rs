@@ -1869,7 +1869,7 @@ async fn bind_transaction(
     project_base_branch: &str,
 ) -> Result<ProjectBinding, RepoDenial> {
     let mut tx = pool.begin().await.map_err(|_| RepoDenial::ServerError)?;
-    let repository_id = upsert_repository(&mut tx, parsed, remote)
+    let repository_id = upsert_repository(&mut tx, parsed, remote, user_id)
         .await
         .map_err(|_| RepoDenial::ServerError)?;
     let clone_auth_mode = if remote.is_private {
@@ -1920,12 +1920,16 @@ async fn bind_transaction(
     .map_err(|_| RepoDenial::ServerError)?;
     let binding_id = uuid::Uuid::new_v4();
     let metadata = serde_json::json!({"raw_url": raw_url});
+    // `GitRepositoryBinding.objects.create(..., created_by_id=actor,
+    // updated_by_id=actor)` (`services.py:329-340`): `BaseModel.save`
+    // overrides the passed `updated_by_id` back to NULL on create
+    // (`db/models/base.py:36-39`).
     sqlx::query(
         r#"INSERT INTO git_repository_bindings
              (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
               project_id, workspace_id, repository_id, provider_account_id, actor_id,
               is_sync_enabled, clone_auth_mode, last_synced_at, last_sync_error, metadata)
-           VALUES ($1, now(), now(), $2, $2, NULL,
+           VALUES ($1, now(), now(), $2, NULL, NULL,
                    $3, $4, $5, $6, $2,
                    FALSE, $7, NULL, '', $8)"#,
     )
@@ -1971,6 +1975,7 @@ async fn upsert_repository(
     ex: &mut sqlx::PgConnection,
     parsed: &ParsedRepository,
     remote: &RemoteRepository,
+    actor_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, sqlx::Error> {
     let host_url = parsed.host_url.trim_end_matches('/');
     let existing: Option<(uuid::Uuid,)> = if !remote.external_id.is_empty() {
@@ -2019,12 +2024,15 @@ async fn upsert_repository(
         return Ok(id);
     }
     let id = uuid::Uuid::new_v4();
+    // The `update_or_create` create branch stamps `created_by` with the
+    // request user and leaves `updated_by` NULL (`BaseModel.save`,
+    // `db/models/base.py:36-39`).
     sqlx::query(
         r#"INSERT INTO git_repositories
              (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
               provider, host_url, external_id, namespace, name, full_name, web_url,
               clone_url_http, clone_url_ssh, default_branch, is_private, metadata)
-           VALUES ($1, now(), now(), NULL, NULL, NULL,
+           VALUES ($1, now(), now(), $14, NULL, NULL,
                    $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
     )
     .bind(id)
@@ -2040,6 +2048,7 @@ async fn upsert_repository(
     .bind(&remote.default_branch)
     .bind(remote.is_private)
     .bind(&remote.metadata)
+    .bind(actor_id)
     .execute(&mut *ex)
     .await?;
     Ok(id)
@@ -2437,6 +2446,236 @@ mod tests {
         assert_eq!(account_rank(&account), 3);
         account.auth_type = "oauth".to_owned();
         assert_eq!(account_rank(&account), 4);
+    }
+
+    /// Live-kernel DB pool (PIDASHCONV-1083 convention): unset
+    /// DATABASE_URL (plain `cargo test`) skips these tests.
+    async fn kernel_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::PgPool::connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-kernel test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// Seed an active user + workspace + project + PAT account (column
+    /// lists mirror `_harness.db.Database.make_user/make_workspace` and
+    /// `Seeder.create_git_provider_account`). Tag-derived names keep
+    /// reruns collision-free.
+    async fn seed_kernel_world(
+        pool: &sqlx::PgPool,
+        tag: &str,
+    ) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid, String) {
+        let user_id = uuid::Uuid::new_v4();
+        let workspace_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let account_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let slug = format!("k1465-{tag}");
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("k1465-{tag}"))
+        .bind(format!("k1465-{tag}@example.test"))
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                "owner_id", "timezone", "background_color")
+               VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+        )
+        .bind(now)
+        .bind(workspace_id)
+        .bind(format!("kernel ws {tag}"))
+        .bind(&slug)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            r#"INSERT INTO "projects" ("created_at", "updated_at", "id", "name", "description", "network",
+                "identifier", "workspace_id", "cycle_view", "module_view",
+                "issue_views_view", "page_view", "intake_view", "archive_in",
+                "close_in", "logo_props", "is_time_tracking_enabled",
+                "is_issue_type_enabled", "guest_view_all_features", "timezone",
+                "members_can_edit_states", "repo_url", "base_branch",
+                "agent_default_interval_seconds", "agent_default_max_ticks",
+                "agent_ticking_enabled", "is_default",
+                "agent_review_default_interval_seconds",
+                "default_agent_executor",
+                "agent_test_default_interval_seconds")
+               VALUES ($1, $1, $2, $3, '', 0, $4, $5, true, true, true, true, true,
+                       365, 365, '{}', true, false, false, 'UTC', true, '', '',
+                       10800, 10, true, false, 10800, 'local_runner', 10800)"#,
+        )
+        .bind(now)
+        .bind(project_id)
+        .bind(format!("kernel proj {tag}"))
+        .bind(format!("K1465{}", &tag[..tag.len().min(6)]).to_uppercase())
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            r#"INSERT INTO "git_provider_accounts" ("id", "provider", "host_url", "auth_type",
+                "external_account_id", "external_account_login", "display_name",
+                "capabilities", "credential_config", "status", "verified_at",
+                "last_check_error", "metadata", "workspace_id", "created_at", "updated_at")
+               VALUES ($1, 'github', 'https://github.com', 'pat', $2,
+                'kernel-octocat', 'kernel-octocat', '{}', '{}', 'connected', now(), '',
+                '{}', $3, now(), now())"#,
+        )
+        .bind(account_id)
+        .bind(format!("kernel:{tag}"))
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed account");
+        (user_id, workspace_id, project_id, account_id, slug)
+    }
+
+    async fn cleanup_kernel_world(
+        pool: &sqlx::PgPool,
+        user_id: uuid::Uuid,
+        workspace_id: uuid::Uuid,
+        project_id: uuid::Uuid,
+    ) {
+        sqlx::query(r#"DELETE FROM "git_repository_bindings" WHERE "project_id" = $1"#)
+            .bind(project_id)
+            .execute(pool)
+            .await
+            .expect("cleanup bindings");
+        sqlx::query(r#"DELETE FROM "git_provider_accounts" WHERE "workspace_id" = $1"#)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("cleanup accounts");
+        sqlx::query(r#"DELETE FROM "git_repositories" WHERE "external_id" LIKE 'k1465-%'"#)
+            .execute(pool)
+            .await
+            .expect("cleanup repositories");
+        sqlx::query(r#"DELETE FROM "projects" WHERE "id" = $1"#)
+            .bind(project_id)
+            .execute(pool)
+            .await
+            .expect("cleanup project");
+        sqlx::query(r#"DELETE FROM "workspaces" WHERE "id" = $1"#)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("cleanup workspace");
+        sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("cleanup user");
+    }
+
+    /// PIDASHCONV-1465: `bind_transaction` must stamp `created_by` with
+    /// the request actor and leave `updated_by` NULL on create, exactly
+    /// like `BaseModel.save` (`db/models/base.py:36-39`) — including the
+    /// binding, where Django overrides the explicitly passed
+    /// `updated_by_id` back to NULL (`services.py:329-340`). The HTTP
+    /// bind path is sealed in tests (it GETs hardcoded
+    /// https://api.github.com URLs on both backends), so this drives the
+    /// transaction kernel directly with a fabricated remote — the
+    /// oauth_github kernel convention (PIDASHCONV-1083).
+    #[tokio::test]
+    async fn bind_transaction_stamps_audit_columns() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let (user_id, workspace_id, project_id, account_id, slug) =
+            seed_kernel_world(&pool, &tag[..8]).await;
+        let external_id = format!("k1465-{tag}");
+        let full_name = format!("kernel-octo-{tag}/kernel-repo");
+        let parsed = ParsedRepository {
+            provider: "github".to_owned(),
+            host_url: "https://github.com".to_owned(),
+            namespace: format!("kernel-octo-{tag}"),
+            name: "kernel-repo".to_owned(),
+            full_name: full_name.clone(),
+            clone_url: format!("https://github.com/{full_name}"),
+        };
+        let remote = RemoteRepository {
+            external_id: external_id.clone(),
+            namespace: format!("kernel-octo-{tag}"),
+            name: "kernel-repo".to_owned(),
+            full_name: full_name.clone(),
+            web_url: format!("https://github.com/{full_name}"),
+            clone_url_http: format!("https://github.com/{full_name}.git"),
+            clone_url_ssh: format!("git@github.com:{full_name}.git"),
+            default_branch: "main".to_owned(),
+            is_private: false,
+            metadata: serde_json::json!({}),
+        };
+        let account = ResolvableAccount {
+            id: account_id,
+            auth_type: "pat".to_owned(),
+            capabilities: serde_json::json!({}),
+            host_url: "https://github.com".to_owned(),
+            credential_config: serde_json::json!({}),
+        };
+        match bind_transaction(
+            &pool,
+            &slug,
+            &workspace_id,
+            &project_id,
+            &user_id,
+            &parsed,
+            &account,
+            &remote,
+            &format!("https://github.com/{full_name}"),
+            "",
+            "",
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(denial) => {
+                let (status, body) = denial.status_and_body();
+                panic!("bind failed: {status} {body}");
+            }
+        }
+        let repo_stamps: (Option<uuid::Uuid>, Option<uuid::Uuid>) = sqlx::query_as(
+            r#"SELECT "created_by_id", "updated_by_id" FROM "git_repositories" WHERE "external_id" = $1"#,
+        )
+        .bind(&external_id)
+        .fetch_one(&pool)
+        .await
+        .expect("repository row");
+        assert_eq!(repo_stamps.0, Some(user_id), "repository created_by");
+        assert_eq!(repo_stamps.1, None, "repository updated_by");
+        let binding_stamps: (Option<uuid::Uuid>, Option<uuid::Uuid>) = sqlx::query_as(
+            r#"SELECT "created_by_id", "updated_by_id" FROM "git_repository_bindings" WHERE "project_id" = $1"#,
+        )
+        .bind(project_id)
+        .fetch_one(&pool)
+        .await
+        .expect("binding row");
+        assert_eq!(binding_stamps.0, Some(user_id), "binding created_by");
+        assert_eq!(binding_stamps.1, None, "binding updated_by");
+        cleanup_kernel_world(&pool, user_id, workspace_id, project_id).await;
     }
 }
 
