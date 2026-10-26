@@ -36,3 +36,5 @@ redis = { version = "1", default-features = false, features = ["tokio-rustls-com
 futures-util = "0.3"
 mongodb = "3"
 tracing = "0.1"
+# NFKD for Django `slugify` parity (`state::slugify_name`, allow_unicode=False).
+unicode-normalization = "0.1"
