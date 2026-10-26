@@ -6,10 +6,13 @@
 //!
 //! - `GET archived-issues/` (`IssueArchiveViewSet.list`, `:106-219`):
 //!   the pilot-2 list machinery over the archive scope (non-epic,
-//!   archived, this project/slug) with the archive annotations.
+//!   archived, this project/slug) with the archive annotations. Guests
+//!   read it, scoped to their own issues without `guest_view_all_features`
+//!   (PDASHOSS01-323).
 //! - `GET issues/<pk>/archive/` (`retrieve`, `:221-255`): the 28-key
 //!   [`ISSUE_DETAIL_ARCHIVE_FIELDS`] detail (only `is_subscribed`
-//!   annotated).
+//!   annotated). Guests read their own; others answer [`GUEST_VIEW_BODY`]
+//!   without `guest_view_all_features` (PDASHOSS01-323).
 //! - `POST issues/<pk>/archive/` (`archive`, `:257-279`): the
 //!   completed/cancelled gate, `issue_activity` enqueue, then `save()`
 //!   with its recomputes.
@@ -123,6 +126,8 @@ pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.iss
 
 /// `archive()` state-gate body (`archive.py:262`).
 const ARCHIVE_STATE_MESSAGE: &str = "Can only archive completed or cancelled state group issue";
+/// The guest retrieve refusal (`archive.py` retrieve, PDASHOSS01-323).
+const GUEST_VIEW_BODY: &str = r#"{"error":"You are not allowed to view this issue"}"#;
 /// `BulkArchiveIssuesEndpoint` empty-list body (`archive.py:314`).
 const IDS_REQUIRED_MESSAGE: &str = "Issue IDs are required";
 /// `ERROR_CODES["INVALID_ARCHIVE_STATE_GROUP"]` (`utils/error_codes.py:7`).
@@ -145,7 +150,7 @@ const UNARCHIVE_UPDATE_SQL: &str = "UPDATE issues SET archived_at = NULL, comple
     updated_at = $2, description_stripped = $3, state_id = $4, updated_by_id = $5 WHERE id = $6";
 
 /// Session auth + `_rewrite_project_kwarg` + `@allow_permission([ADMIN,
-/// MEMBER])`, in Django's `initial()` order (rewrite, then the permission
+/// MEMBER])` (the writes; the reads use [`archive_read_context`]), in Django's `initial()` order (rewrite, then the permission
 /// checks, then `TimezoneMixin` activation). None of the archive endpoints
 /// checks project existence (`Project.objects.get` never runs here), so
 /// unlike [`super::resolve_gate`] there is no 404 for a missing project
@@ -160,7 +165,49 @@ async fn archive_context(
 ) -> Result<ArchiveContext, Denial> {
     let base = archive_base(state, slug, project_raw, extension).await?;
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
-    archive_tenant(base).await
+    archive_tenant(base, false).await
+}
+
+/// The two archive reads (`list`, `retrieve`): `@allow_permission([ADMIN,
+/// MEMBER, GUEST])` (the [`super::allow_project`] gate), then the view
+/// body's guest scoping (`is_scoped_guest`, PDASHOSS01-323).
+async fn archive_read_context(
+    state: &AppState,
+    slug: &str,
+    project_raw: &str,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Result<ArchiveContext, Denial> {
+    let base = archive_base(state, slug, project_raw, extension).await?;
+    super::allow_project(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    let guest_scoped =
+        scoped_guest(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    archive_tenant(base, guest_scoped).await
+}
+
+/// `is_scoped_guest`: an active, non-deleted role-5 membership on this
+/// project and slug whose project has `guest_view_all_features` off (the
+/// `project__` join carries no soft-delete filter, like Django's).
+async fn scoped_guest(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    let row: Option<(i32,)> = sqlx::query_as(
+        r#"SELECT 1 FROM project_members pm
+           JOIN workspaces w ON w.id = pm.workspace_id
+           JOIN projects p ON p.id = pm.project_id
+           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
+           AND pm.role = 5 AND pm.is_active AND pm.deleted_at IS NULL
+           AND NOT p.guest_view_all_features"#,
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
 }
 
 /// Session auth + rewrite without the role check, so the bulk endpoint
@@ -188,7 +235,7 @@ async fn archive_base(
 
 /// The tenant facts for an allowed request: the render timezone plus the
 /// workspace row (see [`workspace_id`]).
-async fn archive_tenant(base: ArchiveBase) -> Result<ArchiveContext, Denial> {
+async fn archive_tenant(base: ArchiveBase, guest_scoped: bool) -> Result<ArchiveContext, Denial> {
     let timezone = user_timezone(&base.pool, &base.user_id).await?;
     let workspace_id = workspace_id(&base.pool, &base.slug).await?;
     Ok(ArchiveContext {
@@ -198,7 +245,7 @@ async fn archive_tenant(base: ArchiveBase) -> Result<ArchiveContext, Denial> {
             timezone,
             workspace_id,
             project_id: base.project_id,
-            guest_scoped: false,
+            guest_scoped,
         },
         slug: base.slug,
     })
@@ -359,7 +406,7 @@ pub async fn archived_list(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
-    let context = archive_context(&state, &slug, &project_id, extension).await?;
+    let context = archive_read_context(&state, &slug, &project_id, extension).await?;
     // Main-list preamble order: the raw mismatch precedes `per_page`
     // parsing, and the parsed mismatch follows it.
     let multi = multi_map(&query);
@@ -473,6 +520,10 @@ fn archive_filtered_set(
     if !show_sub_issues {
         preamble.push_str(" AND issue.parent_id IS NULL");
     }
+    if gate.guest_scoped {
+        let user_holder = binder.bind_uuid(gate.user_id);
+        preamble.push_str(&format!(" AND issue.created_by_id = {user_holder}"));
+    }
     let mut fragments: Vec<String> = vec![preamble];
     let mut complex_sql = String::new();
     if let Some(cond) = complex_filter(query, &gate.timezone)? {
@@ -568,7 +619,7 @@ pub async fn archive_retrieve(
     let Ok(issue_id) = pk_raw.parse::<uuid::Uuid>() else {
         return Ok(crate::edge::proxy(State(state), req).await);
     };
-    let context = archive_context(&state, &slug, &project_raw, extension).await?;
+    let context = archive_read_context(&state, &slug, &project_raw, extension).await?;
     let expands: Option<Vec<String>> =
         super::expand::split_expand(query_last(&query, "expand").as_deref());
     let mut binder = Binder::new();
@@ -583,6 +634,11 @@ pub async fn archive_retrieve(
     let Some(row) = rows.into_iter().next() else {
         return Err(Denial::NotFound);
     };
+    if context.gate.guest_scoped
+        && anchor_opt_uuid(&row, "created_by_id")? != Some(context.gate.user_id)
+    {
+        return Ok(status_response(StatusCode::FORBIDDEN, GUEST_VIEW_BODY));
+    }
     let owned = DetailOwned::fetch(&context.pool, &row).await?;
     let input = owned.view();
     let view = issue_detail_to_representation(&input);
@@ -1775,7 +1831,7 @@ pub async fn bulk_archive(
         return Ok(status_response(StatusCode::FORBIDDEN, ENTITY_DENIED_BODY));
     }
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
-    let context = archive_tenant(base).await?;
+    let context = archive_tenant(base, false).await?;
     // `request.data` through the shared negotiator: empty (by the
     // Content-Length header, whatever the content-type) short-circuits
     // to `{}` — the required 400; an unsupported or missing content
@@ -2572,6 +2628,25 @@ mod tests {
         let filtered =
             archive_filtered_set(&gate, "ws", &query, None, None, false).expect("filtered");
         assert!(filtered.from_where.contains("issue.parent_id IS NULL"));
+    }
+
+    #[test]
+    fn filtered_set_scopes_guests_to_created_by() {
+        let mut gate = Gate {
+            user_id: uid(1),
+            timezone: chrono_tz::UTC,
+            workspace_id: uid(2),
+            project_id: uid(3),
+            guest_scoped: false,
+        };
+        let query = QueryMap::new();
+        let filtered =
+            archive_filtered_set(&gate, "ws", &query, None, None, true).expect("filtered");
+        assert!(!filtered.from_where.contains("issue.created_by_id"));
+        gate.guest_scoped = true;
+        let filtered =
+            archive_filtered_set(&gate, "ws", &query, None, None, true).expect("filtered");
+        assert!(filtered.from_where.contains("AND issue.created_by_id = $"));
     }
 
     /// FX-ISS-21 archive row: the save fires the receivers and they no-op

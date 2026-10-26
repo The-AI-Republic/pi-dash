@@ -36,10 +36,64 @@ def test_archived_list_shape(clients, seed):
     assert row["archived_at"] is not None
 
 
-def test_archived_list_guest_denied(clients, seed):
+def test_archived_reads_guest_allowed(clients, seed):
+    # PDASHOSS01-323: guests read the archives. IS has
+    # guest_view_all_features on, so they see admin-created I5 too.
     guest = clients["guest"]
-    ws, pid = seed["ws_slug"], seed["project"]
+    ws, pid, i5 = seed["ws_slug"], seed["project"], seed["issue5"]
     resp = guest.get(f"{_base(ws, pid)}/archived-issues/")
+    assert resp.status_code == 200, resp.text
+    assert i5 in {row["id"] for row in resp.json()["results"]}
+    resp = guest.get(f"{_base(ws, pid)}/issues/{i5}/archive/")
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()) == ARCHIVE_DETAIL_KEYS
+
+
+def test_archived_reads_guest_scoping_without_view_all(clients, seed,
+                                                       db_conn):
+    # IS2 has guest_view_all_features off: like the live list/detail,
+    # guests see only the archived issues they created.
+    admin, guest = clients["admin"], clients["guest"]
+    ws, p2, j1, j2 = (
+        seed["ws_slug"], seed["project2"], seed["j1"], seed["j2"])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET archived_at = CURRENT_DATE"
+            " WHERE id IN (%s, %s)", (j1, j2))
+    try:
+        resp = guest.get(f"{_base(ws, p2)}/archived-issues/")
+        assert resp.status_code == 200, resp.text
+        assert {row["id"] for row in resp.json()["results"]} == {j2}
+        assert resp.json()["total_count"] == 1
+        grouped = guest.get(
+            f"{_base(ws, p2)}/archived-issues/", params={"group_by": "priority"})
+        assert grouped.status_code == 200, grouped.text
+        assert grouped.json()["total_count"] == 1
+        resp = guest.get(f"{_base(ws, p2)}/issues/{j1}/archive/")
+        assert resp.status_code == 403
+        assert resp.json() == {
+            "error": "You are not allowed to view this issue"}
+        resp = guest.get(f"{_base(ws, p2)}/issues/{j2}/archive/")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["id"] == j2
+        # Admins stay unscoped.
+        body = admin.get(f"{_base(ws, p2)}/archived-issues/").json()
+        assert {row["id"] for row in body["results"]} == {j1, j2}
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET archived_at = NULL WHERE id IN (%s, %s)",
+                (j1, j2))
+
+
+def test_archive_writes_guest_denied(clients, seed):
+    guest = clients["guest"]
+    ws, pid, i3, i5 = (
+        seed["ws_slug"], seed["project"], seed["issue3"], seed["issue5"])
+    resp = guest.post(f"{_base(ws, pid)}/issues/{i3}/archive/")
+    assert resp.status_code == 403
+    assert resp.json() == FORBIDDEN
+    resp = guest.request("DELETE", f"{_base(ws, pid)}/issues/{i5}/archive/")
     assert resp.status_code == 403
     assert resp.json() == FORBIDDEN
 

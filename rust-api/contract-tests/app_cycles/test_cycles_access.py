@@ -5,12 +5,14 @@ The suite must fail when a permission class is deliberately removed: delete
 tests go red. Demonstrate that with a one-line local patch, then revert.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import httpx
 import pytest
 
 from _harness import env
 from _harness.seed import ADMIN, GUEST, MEMBER
-from .conftest import cycle_urls
+from .conftest import create_cycle_for, cycle_urls
 
 pytestmark = pytest.mark.contract
 
@@ -33,6 +35,28 @@ def test_guest_may_list_but_not_create(make_tenant):
     r = guest["client"].get(urls["cycles"])
     assert r.status_code == 200, r.text[:500]
     r = guest["client"].post(urls["cycles"], json={"name": "Guest cycle"})
+    assert r.status_code == 403, r.text[:500]
+    assert r.json() == FORBIDDEN
+
+
+def test_guest_may_read_archived_cycles_but_not_unarchive(make_tenant):
+    """PDASHOSS01-323: GUEST reads archived cycles (list + detail); the
+    archive/unarchive writes stay ADMIN/MEMBER."""
+    guest = make_tenant(role=GUEST)
+    urls = cycle_urls(guest)
+    now = datetime.now(timezone.utc)
+    archived = create_cycle_for(
+        guest, name="Archived for guest",
+        start_date=now - timedelta(days=30), end_date=now - timedelta(days=1),
+        archived_at=now,
+    )
+    r = guest["client"].get(urls["archived"])
+    assert r.status_code == 200, r.text[:500]
+    assert {row["id"] for row in r.json()} == {str(archived["id"])}
+    r = guest["client"].get(urls["archived_detail"](archived["id"]))
+    assert r.status_code == 200, r.text[:500]
+    assert r.json()["id"] == str(archived["id"])
+    r = guest["client"].delete(urls["archive"](archived["id"]))
     assert r.status_code == 403, r.text[:500]
     assert r.json() == FORBIDDEN
 
