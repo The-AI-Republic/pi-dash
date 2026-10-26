@@ -3397,8 +3397,17 @@ export class WebNewDriver implements ParityDriver {
   async removeLabel(_name: string): Promise<void> {
     return todo("removeLabel");
   }
-  async openPeek(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("openPeek");
+  async openPeek(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // The issues address carries the peek id, so a deep link auto-opens the
+    // same panel the in-page opener mounts (ISS-167). The route validates
+    // the param before the layout sees it.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues?peekIssueId=${issueId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.page
+      .getByTestId("issue-preview")
+      .first()
+      .waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
   }
   async peekOpen(): Promise<boolean> {
     // The peek hosts mount only while a selection is open; the profile
@@ -7948,15 +7957,28 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsPeekVisible(): Promise<boolean> {
-    return todo("layoutsPeekVisible");
+    // A closed peek strips its address, so the URL alone settles it; the
+    // panel check keeps a stale param from reading as open.
+    if (!this.page.url().includes("peekIssueId")) return false;
+    return this.isShown(this.page.getByTestId("issue-preview").first());
   }
 
   async layoutsPeekTitle(): Promise<string | null> {
-    return todo("layoutsPeekTitle");
+    const panel = this.page.getByTestId("issue-preview").first();
+    if (!(await this.isShown(panel))) return null;
+    const field = panel.getByLabel("Work item title").first();
+    if ((await field.count()) === 0) return null;
+    return ((await field.inputValue()) ?? "").trim() || null;
   }
 
   async layoutsPeekClose(): Promise<void> {
-    return todo("layoutsPeekClose");
+    await this.page.getByRole("button", { name: "Close preview", exact: true }).first().click({ timeout: 15_000 });
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if (!this.page.url().includes("peekIssueId")) return;
+      if (Date.now() >= deadline) throw new Error("[parity] peek panel never closed.");
+      await this.page.waitForTimeout(200);
+    }
   }
 
   async layoutsRowHasSubIssueToggle(_issueName: string): Promise<boolean> {
@@ -8091,116 +8113,389 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsSheetOpenSubIssueCount");
   }
 
+  /** The mounted calendar root, or null when another layout is showing. */
+  private layoutsCalRoot(): Locator {
+    return this.page.getByTestId("issues-calendar").first();
+  }
+
+  /** Every rendered day tile, including adjacent-month filler. */
+  private layoutsCalTiles(): Locator {
+    return this.layoutsCalRoot().locator("[data-calendar-day]");
+  }
+
+  /**
+   * The one in-month tile whose day number matches. Parity fixtures only
+   * use days strictly inside the month, so the in-month filter makes the
+   * day number unambiguous even though the grid also paints filler tiles
+   * with the same numbers.
+   */
+  private async layoutsCalTile(dayNumber: number): Promise<Locator> {
+    const tiles = this.layoutsCalTiles();
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      const count = await tiles.count();
+      for (let index = 0; index < count; index += 1) {
+        const tile = tiles.nth(index);
+        const inMonth = (await tile.getAttribute("data-in-month")) === "true";
+        const number = (await tile.getAttribute("data-calendar-day-number")) ?? "";
+        if (inMonth && number === String(dayNumber)) return tile;
+      }
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar has no in-month day ${dayNumber}.`);
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  /** The tile's block anchors, in render order. */
+  private layoutsCalBlocks(tile: Locator): Locator {
+    return tile.locator('a[id^="issue-"]');
+  }
+
+  /** One block's work-item name; the block's own anchor names the key. */
+  private layoutsCalBlockName(block: Locator): Locator {
+    return block.locator("div.truncate").first();
+  }
+
   async layoutsCalMode(): Promise<"month" | "week"> {
-    return todo("layoutsCalMode");
+    // A month grid paints more than ten tiles; a week row paints five or
+    // seven. Both render together once the window read settles.
+    const tiles = this.layoutsCalTiles();
+    await tiles.first().waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return (await tiles.count()) > 10 ? "month" : "week";
   }
 
   async layoutsCalTitle(): Promise<string> {
-    return todo("layoutsCalTitle");
+    const title = this.page.getByTestId("calendar-title").first();
+    await title.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return ((await title.innerText()) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  private async layoutsCalStepPrev(): Promise<void> {
+    const before = await this.layoutsCalTitle();
+    await this.layoutsCalRoot().getByRole("button", { name: "Previous", exact: true }).first().click();
+    await this.layoutsCalWaitForTitleChange(before, "prev");
+  }
+
+  private async layoutsCalStepNext(): Promise<void> {
+    const before = await this.layoutsCalTitle();
+    await this.layoutsCalRoot().getByRole("button", { name: "Next", exact: true }).first().click();
+    await this.layoutsCalWaitForTitleChange(before, "next");
+  }
+
+  private async layoutsCalWaitForTitleChange(before: string, direction: string): Promise<void> {
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalTitle()) !== before) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar ${direction} never moved the title.`);
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async layoutsCalPrev(): Promise<void> {
-    return todo("layoutsCalPrev");
+    await this.layoutsCalStepPrev();
   }
 
   async layoutsCalNext(): Promise<void> {
-    return todo("layoutsCalNext");
+    await this.layoutsCalStepNext();
   }
 
   async layoutsCalToday(): Promise<void> {
-    return todo("layoutsCalToday");
+    await this.layoutsCalRoot().getByRole("button", { name: "Today", exact: true }).first().click();
+  }
+
+  private async layoutsCalOpenMonthPicker(): Promise<Locator> {
+    await this.page.getByTestId("calendar-title").first().click();
+    const panel = this.page.getByTestId("calendar-month-picker").first();
+    await panel.waitFor({ state: "visible", timeout: 15_000 });
+    return panel;
+  }
+
+  private async layoutsCalCloseOverlay(): Promise<void> {
+    await this.page.keyboard.press("Escape");
   }
 
   async layoutsCalMonthPickerMonths(): Promise<string[]> {
-    return todo("layoutsCalMonthPickerMonths");
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const buttons = panel.getByTestId("calendar-picker-month");
+      const count = await buttons.count();
+      const months: string[] = [];
+      for (let index = 0; index < count; index += 1) months.push(((await buttons.nth(index).innerText()) ?? "").trim());
+      return months;
+    } finally {
+      await this.layoutsCalCloseOverlay();
+    }
   }
 
   async layoutsCalMonthPickerYear(): Promise<number> {
-    return todo("layoutsCalMonthPickerYear");
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const year = panel.getByTestId("calendar-picker-year").first();
+      await year.waitFor({ state: "visible", timeout: 15_000 });
+      return Number.parseInt(((await year.innerText()) ?? "").trim(), 10);
+    } finally {
+      await this.layoutsCalCloseOverlay();
+    }
   }
 
-  async layoutsCalMonthPickerYearStep(_direction: "prev" | "next"): Promise<void> {
-    return todo("layoutsCalMonthPickerYearStep");
+  async layoutsCalMonthPickerYearStep(direction: "prev" | "next"): Promise<void> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const year = panel.getByTestId("calendar-picker-year").first();
+      const before = ((await year.innerText()) ?? "").trim();
+      await panel
+        .getByRole("button", { name: direction === "prev" ? "Previous year" : "Next year", exact: true })
+        .first()
+        .click();
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        if (((await year.innerText()) ?? "").trim() !== before) return;
+        if (Date.now() >= deadline) throw new Error("[parity] calendar month picker year never stepped.");
+        await this.page.waitForTimeout(200);
+      }
+    } finally {
+      await this.layoutsCalCloseOverlay();
+    }
   }
 
-  async layoutsCalMonthPickerChoose(_month: string): Promise<void> {
-    return todo("layoutsCalMonthPickerChoose");
+  async layoutsCalMonthPickerChoose(month: string): Promise<void> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const before = await this.layoutsCalTitle();
+      await panel.getByTestId("calendar-picker-month").filter({ hasText: month }).first().click();
+      await this.layoutsCalWaitForTitleChange(before, "month picker");
+    } finally {
+      await this.layoutsCalCloseOverlay();
+    }
   }
 
   async layoutsCalMonthPickerEnabled(): Promise<boolean> {
-    return todo("layoutsCalMonthPickerEnabled");
+    const title = this.page.getByTestId("calendar-title").first();
+    await title.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return title.isEnabled();
   }
 
-  async layoutsCalSetMode(_mode: "month" | "week"): Promise<void> {
-    return todo("layoutsCalSetMode");
+  private async layoutsCalPickOption(name: string): Promise<void> {
+    await this.layoutsCalRoot()
+      .getByRole("button", { name: "Options", exact: true })
+      .first()
+      .click({ timeout: WEB_NEW_LAYOUTS_WAIT_MS })
+      .catch(async () => {
+        await this.page.getByLabel("Calendar options").first().click({ timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+      });
+    const option = this.page.getByRole("button", { name, exact: true }).first();
+    await option.waitFor({ state: "visible", timeout: 15_000 });
+    await option.click();
+  }
+
+  async layoutsCalSetMode(mode: "month" | "week"): Promise<void> {
+    await this.layoutsCalPickOption(mode === "month" ? "Month layout" : "Week layout");
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalMode()) === mode) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar never switched to ${mode} mode.`);
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async layoutsCalWeekendsVisible(): Promise<boolean> {
-    return todo("layoutsCalWeekendsVisible");
+    const cells = this.page.getByTestId("calendar-weekdays").locator("[data-calendar-weekday]");
+    await cells.first().waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    const count = await cells.count();
+    for (let index = 0; index < count; index += 1) {
+      if (((await cells.nth(index).innerText()) ?? "").trim() === "Sat") return true;
+    }
+    return false;
   }
 
-  async layoutsCalSetWeekends(_show: boolean): Promise<void> {
-    return todo("layoutsCalSetWeekends");
+  async layoutsCalSetWeekends(show: boolean): Promise<void> {
+    if ((await this.layoutsCalWeekendsVisible()) === show) return;
+    await this.layoutsCalPickOption("Show weekends");
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalWeekendsVisible()) === show) return;
+      if (Date.now() >= deadline) throw new Error("[parity] calendar weekends toggle never applied.");
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async layoutsCalColumnCount(): Promise<number> {
-    return todo("layoutsCalColumnCount");
+    const cells = this.page.getByTestId("calendar-weekdays").locator("[data-calendar-weekday]");
+    await cells.first().waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return cells.count();
   }
 
-  async layoutsCalDayIssueNames(_dayNumber: number): Promise<string[]> {
-    return todo("layoutsCalDayIssueNames");
+  async layoutsCalDayIssueNames(dayNumber: number): Promise<string[]> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    const blocks = this.layoutsCalBlocks(tile);
+    const count = await blocks.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      names.push(((await this.layoutsCalBlockName(blocks.nth(index)).innerText()) ?? "").trim());
+    }
+    return names;
   }
 
-  async layoutsCalDayIsToday(_dayNumber: number): Promise<boolean> {
-    return todo("layoutsCalDayIsToday");
+  async layoutsCalDayIsToday(dayNumber: number): Promise<boolean> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    return (await tile.getAttribute("data-today")) === "true";
   }
 
-  async layoutsCalDayHasLoadMore(_dayNumber: number): Promise<boolean> {
-    return todo("layoutsCalDayHasLoadMore");
+  async layoutsCalDayHasLoadMore(dayNumber: number): Promise<boolean> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    return (await tile.getByRole("button", { name: "Load more", exact: true }).count()) > 0;
   }
 
-  async layoutsCalDayLoadMore(_dayNumber: number): Promise<void> {
-    return todo("layoutsCalDayLoadMore");
+  async layoutsCalDayLoadMore(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.getByRole("button", { name: "Load more", exact: true }).first().click({ timeout: 15_000 });
   }
 
-  async layoutsCalDragBlock(_issueName: string, _toDayNumber: number): Promise<void> {
-    return todo("layoutsCalDragBlock");
+  /** Step a press across the board so pointer-driven drags register. */
+  private async layoutsCalPointerTravel(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+    const mouse = this.page.mouse;
+    await mouse.move(from.x, from.y);
+    await mouse.down();
+    const steps = 12;
+    for (let step = 1; step <= steps; step += 1) {
+      await mouse.move(from.x + ((to.x - from.x) * step) / steps, from.y + ((to.y - from.y) * step) / steps);
+    }
+    await mouse.up();
   }
 
-  async layoutsCalTileDrag(_fromDayNumber: number, _toDayNumber: number): Promise<void> {
-    return todo("layoutsCalTileDrag");
+  async layoutsCalDragBlock(issueName: string, toDayNumber: number): Promise<void> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await block.scrollIntoViewIfNeeded({ timeout: 15_000 });
+    const tile = await this.layoutsCalTile(toDayNumber);
+    await tile.scrollIntoViewIfNeeded({ timeout: 15_000 });
+    const from = await block.boundingBox();
+    const to = await tile.boundingBox();
+    if (from === null || to === null) throw new Error("[parity] calendar drag endpoints have no bounding box.");
+    await this.layoutsCalPointerTravel(
+      { x: from.x + from.width / 2, y: from.y + from.height / 2 },
+      { x: to.x + to.width / 2, y: to.y + to.height / 2 }
+    );
   }
 
-  async layoutsCalBlockText(_issueName: string): Promise<string> {
-    return todo("layoutsCalBlockText");
+  async layoutsCalTileDrag(fromDayNumber: number, toDayNumber: number): Promise<void> {
+    const from = await this.layoutsCalTile(fromDayNumber);
+    const to = await this.layoutsCalTile(toDayNumber);
+    const fromBox = await from.boundingBox();
+    const toBox = await to.boundingBox();
+    if (fromBox === null || toBox === null)
+      throw new Error("[parity] calendar tile drag endpoints have no bounding box.");
+    await this.layoutsCalPointerTravel(
+      { x: fromBox.x + fromBox.width / 2, y: fromBox.y + fromBox.height / 2 },
+      { x: toBox.x + toBox.width / 2, y: toBox.y + toBox.height / 2 }
+    );
   }
 
-  async layoutsCalBlockHoverPreview(_issueName: string): Promise<boolean> {
-    return todo("layoutsCalBlockHoverPreview");
+  async layoutsCalBlockText(issueName: string): Promise<string> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return ((await block.innerText()) ?? "").trim().replace(/\s+/g, " ");
   }
 
-  async layoutsCalBlockOpenPeek(_issueName: string): Promise<void> {
-    return todo("layoutsCalBlockOpenPeek");
+  async layoutsCalBlockHoverPreview(issueName: string): Promise<boolean> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await block.hover();
+    const card = block.getByRole("tooltip");
+    try {
+      await card.waitFor({ state: "visible", timeout: 15_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  async layoutsCalBlockQuickActions(_issueName: string): Promise<string[]> {
-    return todo("layoutsCalBlockQuickActions");
+  async layoutsCalBlockOpenPeek(issueName: string): Promise<void> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await block.click();
+    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), { timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await this.page
+      .getByTestId("issue-preview")
+      .first()
+      .waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
   }
 
-  async layoutsCalDayQuickAdd(_dayNumber: number, _title: string): Promise<void> {
-    return todo("layoutsCalDayQuickAdd");
+  private async layoutsReadOpenMenuItems(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const texts: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      texts.push(((await items.nth(index).innerText()) ?? "").trim().replace(/\s+/g, " "));
+    }
+    return texts;
   }
 
-  async layoutsCalDayAddMenu(_dayNumber: number): Promise<string[]> {
-    return todo("layoutsCalDayAddMenu");
+  async layoutsCalBlockQuickActions(issueName: string): Promise<string[]> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await block.hover();
+    await block.getByRole("button", { name: "Quick actions", exact: true }).first().click({ timeout: 15_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: 15_000 });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
-  async layoutsCalTapDay(_dayNumber: number): Promise<void> {
-    return todo("layoutsCalTapDay");
+  private async layoutsCalOpenDayAddMenu(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.hover();
+    await tile.getByText("Add work item", { exact: true }).first().click({ timeout: 15_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async layoutsCalDayQuickAdd(dayNumber: number, title: string): Promise<void> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    await this.page.getByRole("menuitem", { name: "Add work item", exact: true }).first().click();
+    const field = this.page.getByPlaceholder("Work item Title").first();
+    await field.waitFor({ state: "visible", timeout: 15_000 });
+    await field.fill(title);
+    await field.press("Enter");
+    await this.page.keyboard.press("Escape");
+  }
+
+  async layoutsCalDayAddMenu(dayNumber: number): Promise<string[]> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsCalDayAddExisting(dayNumber: number): Promise<void> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    await this.page.getByRole("menuitem", { name: "Add existing work item", exact: true }).first().click();
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if (await this.layoutsAddExistingModalVisible()) return;
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never opened from the calendar.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async layoutsCalTapDay(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.locator('div[role="button"]').first().click();
   }
 
   async layoutsCalDayDetailNames(): Promise<string[]> {
-    return todo("layoutsCalDayDetailNames");
+    const section = this.page.getByRole("region", { name: /^Issues on / }).first();
+    if ((await section.count()) === 0) return [];
+    const rows = section.locator("div.relative.flex.items-center");
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text = ((await rows.nth(index).locator("div.truncate").first().innerText()) ?? "").trim();
+      if (text !== "") names.push(text);
+    }
+    return [...new Set(names)];
   }
 
   async layoutsRowMenuItemDisabled(_issueName: string, _item: string): Promise<boolean> {
@@ -8490,8 +8785,11 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsMutationSpinnerVisible");
   }
 
-  async layoutsRowHighlighted(_issueName: string): Promise<boolean> {
-    return todo("layoutsRowHighlighted");
+  async layoutsRowHighlighted(issueName: string): Promise<boolean> {
+    // A fresh re-date marks its row with data-highlight; the row anchor is
+    // the same one both the list and the calendar paint.
+    const row = this.page.locator('[data-highlight="true"]', { hasText: issueName }).first();
+    return (await row.count()) > 0 && (await row.isVisible());
   }
 
   async layoutsTempRowVisible(): Promise<boolean> {
@@ -8524,10 +8822,6 @@ export class WebNewDriver implements ParityDriver {
 
   async layoutsSheetCellSetAssignee(_issueName: string, _memberName: string): Promise<void> {
     return todo("layoutsSheetCellSetAssignee");
-  }
-
-  async layoutsCalDayAddExisting(_dayNumber: number): Promise<void> {
-    return todo("layoutsCalDayAddExisting");
   }
 
   async layoutsAddExistingModalIssueNames(): Promise<string[]> {

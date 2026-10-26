@@ -90,11 +90,12 @@ export function CalendarGrid(props: CalendarGridProps): React.ReactElement {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="sticky top-0 z-10 bg-(--bg)">
-        <div className="flex h-11 border-b border-(--border)">
+        <div data-testid="calendar-weekdays" className="flex h-11 border-b border-(--border)">
           {labels.map((label) => (
             <div
               key={label}
               className="text-caption flex h-11 min-w-0 flex-1 items-center px-(--space-2) font-medium text-(--text-muted)"
+              data-calendar-weekday={label}
             >
               {label}
             </div>

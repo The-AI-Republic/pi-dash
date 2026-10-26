@@ -71,17 +71,23 @@ export function CalendarHeader({
           disabled={mode === "week"}
           aria-haspopup="dialog"
           aria-expanded={pickerOpen}
+          data-testid="calendar-title"
           onClick={() => setPickerOpen((open) => !open)}
         >
           {title}
         </button>
         {pickerOpen && mode === "month" ? (
-          <div className="shadow-popover absolute top-full left-0 z-30 mt-(--space-2) w-56 rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-4)">
+          <div
+            data-testid="calendar-month-picker"
+            className="shadow-popover absolute top-full left-0 z-30 mt-(--space-2) w-56 rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-4)"
+          >
             <div className="mb-(--space-3) flex items-center justify-between gap-(--space-2)">
               <IconButton label="Previous year" size="small" onClick={() => setPickerYearState((year) => year - 1)}>
                 <ChevronLeft size={14} strokeWidth={2} aria-hidden="true" />
               </IconButton>
-              <span className="text-11 font-medium text-(--text)">{pickerYearState}</span>
+              <span data-testid="calendar-picker-year" className="text-11 font-medium text-(--text)">
+                {pickerYearState}
+              </span>
               <IconButton label="Next year" size="small" onClick={() => setPickerYearState((year) => year + 1)}>
                 <ChevronRight size={14} strokeWidth={2} aria-hidden="true" />
               </IconButton>
@@ -91,6 +97,7 @@ export function CalendarHeader({
                 <button
                   key={month}
                   type="button"
+                  data-testid="calendar-picker-month"
                   aria-pressed={index === pickerMonth0 && pickerYearState === pickerYear}
                   onClick={() => {
                     onPickMonth(index, pickerYearState);
