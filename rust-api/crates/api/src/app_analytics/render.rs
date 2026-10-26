@@ -118,6 +118,7 @@
 //!   read-only for this layer).
 //!
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
@@ -125,7 +126,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use serde_json::{Map, Value};
 use sqlx::Row;
 
@@ -552,6 +553,11 @@ pub(crate) struct FilterCtx {
     pub(crate) window: Option<(DateTime<Utc>, DateTime<Utc>)>,
     /// Chart `(start, end)` dates on `created_at::date`.
     pub(crate) period: Option<(NaiveDate, NaiveDate)>,
+    /// The actor zone (`TimezoneMixin` activates it): every `__date`
+    /// truncation and month bucket in the advance statements converts
+    /// with it. The window/period bounds themselves stay UTC (Django
+    /// derives them from `timezone.now()`).
+    pub(crate) timezone: chrono_tz::Tz,
 }
 
 /// Parse one `?project_ids=` csv exactly like `get_analytics_filters`:
@@ -624,8 +630,13 @@ fn chart_period_range(
 impl FilterCtx {
     /// `initialize_workspace` + `get_analytics_filters` for one request:
     /// `kind` is `"analytics"` (`AdvanceAnalyticsEndpoint`) or `"chart"`
-    /// (stats + charts endpoints).
-    pub(crate) fn parse(params: &HashMap<String, String>, kind: &str, now: DateTime<Utc>) -> Self {
+    /// (stats + charts endpoints). `timezone` is the actor zone.
+    pub(crate) fn parse(
+        params: &HashMap<String, String>,
+        kind: &str,
+        now: DateTime<Utc>,
+        timezone: chrono_tz::Tz,
+    ) -> Self {
         let project_ids = parse_project_ids(params.get("project_ids").map(String::as_str));
         let date_filter = params.get("date_filter").map(String::as_str);
         let (window, period) = match kind {
@@ -636,7 +647,13 @@ impl FilterCtx {
             project_ids,
             window,
             period,
+            timezone,
         }
+    }
+
+    /// The actor zone as a quoted `AT TIME ZONE` literal.
+    pub(crate) fn zone_literal(&self) -> String {
+        q::sql_zone_literal(self.timezone.name())
     }
 
     /// The UUID coercion Django applies to every `id__in`/`project_id__in`
@@ -926,7 +943,7 @@ async fn advance_get(
 
     // `initialize_workspace(slug, type="analytics")` (advance.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "analytics", now);
+    let ctx = FilterCtx::parse(&params, "analytics", now, actor.timezone);
     let tab = params.get("tab").map(String::as_str).unwrap_or("overview");
 
     if tab == "overview" {
@@ -1171,7 +1188,7 @@ async fn stats_get(
 
     // `initialize_workspace(slug, type="chart")` (advance.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "chart", now);
+    let ctx = FilterCtx::parse(&params, "chart", now, actor.timezone);
     let chart_type = params
         .get("type")
         .map(String::as_str)
@@ -1239,7 +1256,7 @@ async fn charts_get(
 
     // `initialize_workspace(slug, type="chart")` (advance.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "chart", now);
+    let ctx = FilterCtx::parse(&params, "chart", now, actor.timezone);
     let chart_type = params.get("type").map(String::as_str).unwrap_or("projects");
 
     if chart_type == "projects" {
@@ -1276,14 +1293,14 @@ async fn project_chart(
 ) -> Result<String, Denial> {
     let period = ctx.period_ph();
     // `created_at__date` bounds apply per-table (`date_filter`,
-    // `advance.py:211-215`).
-    let date_pred = |table: &str| {
-        match period.as_ref() {
+    // `advance.py:211-215`), truncated in the actor zone.
+    let zone = ctx.zone_literal();
+    let date_pred = |table: &str| match period.as_ref() {
         Some((gte_ph, lte_ph)) => format!(
-            " AND \"{table}\".\"created_at\"::date >= {gte_ph} AND \"{table}\".\"created_at\"::date <= {lte_ph}"
+            " AND (\"{table}\".\"created_at\" AT TIME ZONE {zone})::date >= {gte_ph} \
+             AND (\"{table}\".\"created_at\" AT TIME ZONE {zone})::date <= {lte_ph}"
         ),
         None => String::new(),
-    }
     };
 
     // work_items: `issue_objects` + base, with dates.
@@ -1345,8 +1362,8 @@ async fn project_chart(
         Some((gte_ph, lte_ph)) => format!(
             "\"workspaces\".\"slug\" = $1 AND \"workspace_members\".\"is_active\" \
              AND \"workspace_members\".\"deleted_at\" IS NULL \
-             AND \"workspace_members\".\"created_at\"::date >= {gte_ph} \
-             AND \"workspace_members\".\"created_at\"::date <= {lte_ph}"
+             AND (\"workspace_members\".\"created_at\" AT TIME ZONE {zone})::date >= {gte_ph} \
+             AND (\"workspace_members\".\"created_at\" AT TIME ZONE {zone})::date <= {lte_ph}"
         ),
         None => "\"workspaces\".\"slug\" = $1 AND \"workspace_members\".\"is_active\" \
              AND \"workspace_members\".\"deleted_at\" IS NULL"
@@ -1448,9 +1465,12 @@ async fn work_item_completion_chart(
             .as_ref()
             .map(|(gte, lte)| (gte.as_str(), lte.as_str()))
     };
-    let shell = q::advance_completion_monthly_sql(&base, pph());
+    let shell = q::advance_completion_monthly_sql(&base, pph(), ctx.timezone.name());
     let sql = with_joins(shell, "issues", ISSUE_JOINS);
-    let rows: Vec<(DateTime<Utc>, i64, i64)> =
+    // The month bucket is a naive local timestamp (`date_trunc` over
+    // `AT TIME ZONE`); `%Y-%m-%d` keys the local month-start like Django's
+    // `stat["month"].strftime("%Y-%m-%d")` on the zoned `TruncMonth`.
+    let rows: Vec<(NaiveDateTime, i64, i64)> =
         bind_range!(sqlx::query_as(&sql), slug, user_id, ctx, RangeKind::Period)
             .fetch_all(pool)
             .await
@@ -1500,8 +1520,10 @@ enum KeyKind {
 /// manager scope (exactly like Django reuses its single join).
 struct Axis {
     joins: &'static str,
-    key_expr: &'static str,
-    name_expr: &'static str,
+    /// Owned only for the `CREATED_AT`/`COMPLETED_AT` axes, whose
+    /// `__date` truncation converts with the per-request actor zone.
+    key_expr: Cow<'static, str>,
+    name_expr: Cow<'static, str>,
     filter: &'static str,
     key_kind: KeyKind,
     /// Decode kind of the display-name column: `Text` everywhere except the
@@ -1513,22 +1535,25 @@ struct Axis {
 
 /// `get_x_axis_field()` (`build_chart.py:47-76`) + `x_axis_mapper`
 /// (`build_chart.py:20-34`). Lookup is case-sensitive (a plain dict `in`
-/// check, `build_chart.py:155`).
-fn axis_for(name: &str) -> Option<Axis> {
+/// check, `build_chart.py:155`). `zone` is the quoted `AT TIME ZONE`
+/// literal for the `CREATED_AT`/`COMPLETED_AT` axes (Django's
+/// `created_at__date` is `TruncDate`, which converts with the
+/// `TimezoneMixin`-activated zone).
+fn axis_for(name: &str, zone: &str) -> Option<Axis> {
     match name {
         // `("state__id", "state__name", None)` — shares the base states join.
         "STATES" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"state_id\"",
-            name_expr: "\"states\".\"name\"",
+            key_expr: Cow::Borrowed("\"issues\".\"state_id\""),
+            name_expr: Cow::Borrowed("\"states\".\"name\""),
             filter: "",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
         }),
         "STATE_GROUPS" => Some(Axis {
             joins: "",
-            key_expr: "\"states\".\"group\"",
-            name_expr: "\"states\".\"group\"",
+            key_expr: Cow::Borrowed("\"states\".\"group\""),
+            name_expr: Cow::Borrowed("\"states\".\"group\""),
             filter: "",
             key_kind: KeyKind::Text,
             name_kind: KeyKind::Text,
@@ -1537,8 +1562,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         "LABELS" => Some(Axis {
             joins: " LEFT OUTER JOIN \"issue_labels\" ON (\"issues\".\"id\" = \"issue_labels\".\"issue_id\") \
                      LEFT OUTER JOIN \"labels\" ON (\"issue_labels\".\"label_id\" = \"labels\".\"id\")",
-            key_expr: "\"issue_labels\".\"label_id\"",
-            name_expr: "\"labels\".\"name\"",
+            key_expr: Cow::Borrowed("\"issue_labels\".\"label_id\""),
+            name_expr: Cow::Borrowed("\"labels\".\"name\""),
             filter: " AND \"issue_labels\".\"deleted_at\" IS NULL",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
@@ -1547,8 +1572,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         "ASSIGNEES" => Some(Axis {
             joins: " LEFT OUTER JOIN \"issue_assignees\" ON (\"issues\".\"id\" = \"issue_assignees\".\"issue_id\") \
                      LEFT OUTER JOIN \"users\" AS \"ax_users\" ON (\"issue_assignees\".\"assignee_id\" = \"ax_users\".\"id\")",
-            key_expr: "\"issue_assignees\".\"assignee_id\"",
-            name_expr: "\"ax_users\".\"display_name\"",
+            key_expr: Cow::Borrowed("\"issue_assignees\".\"assignee_id\""),
+            name_expr: Cow::Borrowed("\"ax_users\".\"display_name\""),
             filter: " AND \"issue_assignees\".\"deleted_at\" IS NULL",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
@@ -1557,8 +1582,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         // key is the integer `key`, name the `value` text (`estimate.py`).
         "ESTIMATE_POINTS" => Some(Axis {
             joins: " LEFT OUTER JOIN \"estimate_points\" ON (\"issues\".\"estimate_point_id\" = \"estimate_points\".\"id\")",
-            key_expr: "\"estimate_points\".\"key\"",
-            name_expr: "\"estimate_points\".\"value\"",
+            key_expr: Cow::Borrowed("\"estimate_points\".\"key\""),
+            name_expr: Cow::Borrowed("\"estimate_points\".\"value\""),
             filter: "",
             key_kind: KeyKind::Int,
             name_kind: KeyKind::Text,
@@ -1567,8 +1592,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         "CYCLES" => Some(Axis {
             joins: " LEFT OUTER JOIN \"cycle_issues\" ON (\"issues\".\"id\" = \"cycle_issues\".\"issue_id\") \
                      LEFT OUTER JOIN \"cycles\" AS \"ax_cycles\" ON (\"cycle_issues\".\"cycle_id\" = \"ax_cycles\".\"id\")",
-            key_expr: "\"cycle_issues\".\"cycle_id\"",
-            name_expr: "\"ax_cycles\".\"name\"",
+            key_expr: Cow::Borrowed("\"cycle_issues\".\"cycle_id\""),
+            name_expr: Cow::Borrowed("\"ax_cycles\".\"name\""),
             filter: " AND \"cycle_issues\".\"deleted_at\" IS NULL",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
@@ -1577,48 +1602,56 @@ fn axis_for(name: &str) -> Option<Axis> {
         "MODULES" => Some(Axis {
             joins: " LEFT OUTER JOIN \"module_issues\" ON (\"issues\".\"id\" = \"module_issues\".\"issue_id\") \
                      LEFT OUTER JOIN \"modules\" AS \"ax_modules\" ON (\"module_issues\".\"module_id\" = \"ax_modules\".\"id\")",
-            key_expr: "\"module_issues\".\"module_id\"",
-            name_expr: "\"ax_modules\".\"name\"",
+            key_expr: Cow::Borrowed("\"module_issues\".\"module_id\""),
+            name_expr: Cow::Borrowed("\"ax_modules\".\"name\""),
             filter: " AND \"module_issues\".\"deleted_at\" IS NULL",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
         }),
         "PRIORITY" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"priority\"",
-            name_expr: "\"issues\".\"priority\"",
+            key_expr: Cow::Borrowed("\"issues\".\"priority\""),
+            name_expr: Cow::Borrowed("\"issues\".\"priority\""),
             filter: "",
             key_kind: KeyKind::Text,
             name_kind: KeyKind::Text,
         }),
         "START_DATE" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"start_date\"",
-            name_expr: "\"issues\".\"start_date\"",
+            key_expr: Cow::Borrowed("\"issues\".\"start_date\""),
+            name_expr: Cow::Borrowed("\"issues\".\"start_date\""),
             filter: "",
             key_kind: KeyKind::Date,
             name_kind: KeyKind::Date,
         }),
         "TARGET_DATE" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"target_date\"",
-            name_expr: "\"issues\".\"target_date\"",
+            key_expr: Cow::Borrowed("\"issues\".\"target_date\""),
+            name_expr: Cow::Borrowed("\"issues\".\"target_date\""),
             filter: "",
             key_kind: KeyKind::Date,
             name_kind: KeyKind::Date,
         }),
         "CREATED_AT" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"created_at\"::date",
-            name_expr: "\"issues\".\"created_at\"::date",
+            key_expr: Cow::Owned(format!(
+                "(\"issues\".\"created_at\" AT TIME ZONE {zone})::date"
+            )),
+            name_expr: Cow::Owned(format!(
+                "(\"issues\".\"created_at\" AT TIME ZONE {zone})::date"
+            )),
             filter: "",
             key_kind: KeyKind::Date,
             name_kind: KeyKind::Date,
         }),
         "COMPLETED_AT" => Some(Axis {
             joins: "",
-            key_expr: "\"issues\".\"completed_at\"::date",
-            name_expr: "\"issues\".\"completed_at\"::date",
+            key_expr: Cow::Owned(format!(
+                "(\"issues\".\"completed_at\" AT TIME ZONE {zone})::date"
+            )),
+            name_expr: Cow::Owned(format!(
+                "(\"issues\".\"completed_at\" AT TIME ZONE {zone})::date"
+            )),
             filter: "",
             key_kind: KeyKind::Date,
             name_kind: KeyKind::Date,
@@ -1629,8 +1662,8 @@ fn axis_for(name: &str) -> Option<Axis> {
         // alias 500s here on `specified more than once`.
         "CREATED_BY" => Some(Axis {
             joins: " LEFT OUTER JOIN \"users\" AS \"ax_created_users\" ON (\"issues\".\"created_by_id\" = \"ax_created_users\".\"id\")",
-            key_expr: "\"issues\".\"created_by_id\"",
-            name_expr: "\"ax_created_users\".\"display_name\"",
+            key_expr: Cow::Borrowed("\"issues\".\"created_by_id\""),
+            name_expr: Cow::Borrowed("\"ax_created_users\".\"display_name\""),
             filter: "",
             key_kind: KeyKind::Uuid,
             name_kind: KeyKind::Text,
@@ -1776,7 +1809,8 @@ pub(crate) async fn build_analytics_chart(
     extra_scope: &str,
 ) -> Result<String, Denial> {
     // `if x_axis not in x_axis_mapper: raise ValidationError(...)`.
-    let axis = axis_for(x_axis).ok_or_else(|| {
+    let zone = ctx.zone_literal();
+    let axis = axis_for(x_axis, &zone).ok_or_else(|| {
         Denial::Raw(
             StatusCode::BAD_REQUEST,
             invalid_axis_body(&format!("Invalid x_axis field: {x_axis}")),
@@ -1786,7 +1820,7 @@ pub(crate) async fn build_analytics_chart(
     // `?group_by=` is falsy in Python, so it takes the simple path, not the
     // 400 (`advance.py:323` passes the raw `GET.get`, `build_chart.py:158`).
     let group = match group_by {
-        Some(name) if !name.is_empty() => Some(axis_for(name).ok_or_else(|| {
+        Some(name) if !name.is_empty() => Some(axis_for(name, &zone).ok_or_else(|| {
             Denial::Raw(
                 StatusCode::BAD_REQUEST,
                 invalid_axis_body(&format!("Invalid group_by field: {name}")),
@@ -1799,7 +1833,8 @@ pub(crate) async fn build_analytics_chart(
     let period = ctx.period_ph();
     let date_pred = match period.as_ref() {
         Some((gte_ph, lte_ph)) => format!(
-            " AND \"issues\".\"created_at\"::date >= {gte_ph} AND \"issues\".\"created_at\"::date <= {lte_ph}"
+            " AND (\"issues\".\"created_at\" AT TIME ZONE {zone})::date >= {gte_ph} \
+             AND (\"issues\".\"created_at\" AT TIME ZONE {zone})::date <= {lte_ph}"
         ),
         None => String::new(),
     };
@@ -2083,7 +2118,7 @@ async fn project_advance_get(
 
     // `initialize_workspace(slug, type="analytics")` (project_analytics.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "analytics", now);
+    let ctx = FilterCtx::parse(&params, "analytics", now, actor.timezone);
     let branch = through_branch(&params)?;
     let body = project_overview_data(pool, &slug, &actor.id, &ctx, &project_id, branch).await?;
     Ok(json_response(StatusCode::OK, body))
@@ -2159,7 +2194,7 @@ async fn project_advance_stats_get(
 
     // `initialize_workspace(slug, type="chart")` (project_analytics.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "chart", now);
+    let ctx = FilterCtx::parse(&params, "chart", now, actor.timezone);
     let stats_type = params
         .get("type")
         .map(String::as_str)
@@ -2269,7 +2304,7 @@ async fn project_advance_charts_get(
 
     // `initialize_workspace(slug, type="chart")` (project_analytics.py:32-43).
     let now = Utc::now();
-    let ctx = FilterCtx::parse(&params, "chart", now);
+    let ctx = FilterCtx::parse(&params, "chart", now, actor.timezone);
     let chart_type = params.get("type").map(String::as_str).unwrap_or("projects");
 
     if chart_type == "custom-work-items" {
@@ -2405,9 +2440,10 @@ async fn project_completion_chart(
                     .as_ref()
                     .map(|(gte, lte)| (gte.as_str(), lte.as_str()))
             };
-            let shell = q::advance_completion_monthly_sql(&scope, pph());
+            let shell = q::advance_completion_monthly_sql(&scope, pph(), ctx.timezone.name());
             let sql = with_joins(shell, "issues", ISSUE_JOINS);
-            let rows: Vec<(DateTime<Utc>, i64, i64)> =
+            // Naive local month-start (see the workspace chart above).
+            let rows: Vec<(NaiveDateTime, i64, i64)> =
                 bind_range!(sqlx::query_as(&sql), slug, user_id, ctx, RangeKind::Period)
                     .fetch_all(pool)
                     .await
@@ -2454,12 +2490,16 @@ async fn project_completion_daily(
         cycle_like_joins(through_table),
         through_table,
     );
+    // `values("created_at__date")` truncates the through rows' own
+    // `created_at` in the actor zone (`project_analytics.py:226`).
+    let zone = ctx.zone_literal();
     let sql = format!(
-        "SELECT \"{t}\".\"created_at\"::date AS \"created_at__date\", \
+        "SELECT (\"{t}\".\"created_at\" AT TIME ZONE {zone})::date AS \"created_at__date\", \
          COUNT(\"{t}\".\"id\") AS \"created_count\", \
          COUNT(\"{t}\".\"id\") FILTER (WHERE \"states\".\"group\" = 'completed') AS \"completed_count\" \
          FROM \"{t}\"{joins} WHERE ({base} AND \"{t}\".\"{fk}\" = {lit}) \
-         GROUP BY \"{t}\".\"created_at\"::date ORDER BY \"{t}\".\"created_at\"::date",
+         GROUP BY (\"{t}\".\"created_at\" AT TIME ZONE {zone})::date \
+         ORDER BY (\"{t}\".\"created_at\" AT TIME ZONE {zone})::date",
         t = through_table,
         joins = joins,
         base = base,
@@ -2603,10 +2643,12 @@ fn json_value_response(status: StatusCode, value: &Value) -> Response {
 // ---------------------------------------------------------------------------
 
 /// The authenticated caller the handlers need: the email for the
-/// export acknowledgement (`str(request.user.email)`). Membership
+/// export acknowledgement (`str(request.user.email)`) and the actor
+/// zone for date buckets (`TimezoneMixin` activates it). Membership
 /// rows are consumed inside the gate; no handler re-scopes by user.
 struct Authed {
     email: Option<String>,
+    timezone: chrono_tz::Tz,
 }
 
 fn pool_owned(state: &AppState) -> Result<sqlx::PgPool, IssuesDenial> {
@@ -2671,7 +2713,10 @@ async fn authed_gate(
         is_workspace_admin: role == Some(ROLE_ADMIN),
     };
     match decide_gate(&row.gate, &tenant_context(slug), &facts) {
-        GateOutcome::Allow => Ok(Authed { email: actor.email }),
+        GateOutcome::Allow => Ok(Authed {
+            email: actor.email,
+            timezone: actor.timezone,
+        }),
         GateOutcome::Deny => Err(IssuesDenial::Forbidden),
         GateOutcome::Unauthenticated => Err(IssuesDenial::Unauthorized),
     }
@@ -3077,21 +3122,23 @@ fn regroup_plot(
 /// from [`q::dimension_sql`] (same `F(x_axis)` + join mapping the
 /// services layer pins); the scope (slug + manager + stored filters)
 /// composes here because only the handler owns the `FROM` joins.
+/// `zone` is the actor zone for date axes.
 fn saved_statements(
     x_axis: &str,
     y_axis: &str,
     segment: Option<&str>,
     stored: Option<&str>,
     link_joins: &str,
+    zone: &str,
 ) -> Option<(String, String)> {
-    let (dim_expr, dim_join) = q::dimension_sql(x_axis)?;
+    let (dim_expr, dim_join) = q::dimension_sql(x_axis, zone)?;
     let (seg_select, seg_outer, seg_group, seg_join) = match segment {
         Some(seg) if !seg.is_empty() => {
-            let (expr, join) = q::dimension_sql(seg)?;
+            let (expr, join) = q::dimension_sql(seg, zone)?;
             // Date segments render through the monthly `Concat`
             // (`analytics_plot.py:89-91`).
             let aliased = if q::is_date_axis(seg) {
-                q::month_dimension_expr(seg)
+                q::month_dimension_expr(seg, zone)
             } else {
                 expr
             };
@@ -3126,7 +3173,7 @@ fn saved_statements(
         // dimension (`analytics_plot.py:110-115`). The estimate table
         // joins exactly once: through the dimension when it already
         // brings it, otherwise through the base join.
-        let (_, estimate_join) = q::dimension_sql("estimate_point__value")?;
+        let (_, estimate_join) = q::dimension_sql("estimate_point__value", zone)?;
         // The estimate segment's join is dropped first (the base join
         // below covers it, like [`q::base_plot_estimate_sql`]), so the
         // `already` check only sees joins that survive into the FROM.
@@ -3200,7 +3247,7 @@ async fn get_saved_analytic(
         Ok(id) if crate::uuid_path::is_canonical_uuid(&analytic_id) => id,
         _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
-    authed_gate(
+    let authed = authed_gate(
         &state,
         &slug,
         "GET",
@@ -3267,9 +3314,15 @@ async fn get_saved_analytic(
     let segmented = segment.as_deref().is_some_and(|seg| !seg.is_empty());
     let mut binder = slugs_first(&slug);
     let stored = stored_filters(&stored_query.ok_or(IssuesDenial::ServerError)?, &mut binder)?;
-    let (count_sql, plot_sql) =
-        saved_statements(x_axis, y_axis, segment.as_deref(), stored.as_deref(), "")
-            .ok_or(IssuesDenial::ServerError)?;
+    let (count_sql, plot_sql) = saved_statements(
+        x_axis,
+        y_axis,
+        segment.as_deref(),
+        stored.as_deref(),
+        "",
+        authed.timezone.name(),
+    )
+    .ok_or(IssuesDenial::ServerError)?;
     let values = binder.values();
     let total = crate::app_issues::fetch_count(&pool, &count_sql, values.clone()).await?;
     let rows = fetch_json_rows(&pool, &plot_sql, values).await?;
@@ -3390,7 +3443,7 @@ async fn get_default_analytics(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<SessionHandle>>,
 ) -> Result<Response, IssuesDenial> {
-    authed_gate(
+    let authed = authed_gate(
         &state,
         &slug,
         "GET",
@@ -3426,12 +3479,17 @@ async fn get_default_analytics(
         "SELECT \"states\".\"group\" AS \"state_group\", COUNT(\"states\".\"group\") AS \"state_count\" \
          {from} WHERE ({open_scope}) GROUP BY \"states\".\"group\" ORDER BY \"state_group\" ASC"
     );
-    // Completed month-wise, current UTC year only (base.py:275-282).
+    // Completed month-wise, current UTC year only (`base.py:275-282`):
+    // `completed_at__year` + `ExtractMonth` both evaluate in the actor zone
+    // (the `__year` bounds are the local calendar year), while the year
+    // itself stays `timezone.now().year` (UTC).
     let year = chrono::Utc::now().year();
     let year_holder = binder.bind(sea_query::Value::Int(Some(year)));
+    let zone = q::sql_zone_literal(authed.timezone.name());
     let month_sql = format!(
-        "SELECT EXTRACT(MONTH FROM \"issues\".\"completed_at\")::INTEGER AS \"month\", COUNT(*) AS \"count\" \
-         {from} WHERE ({scope} AND EXTRACT(YEAR FROM \"issues\".\"completed_at\") = {year_holder}) \
+        "SELECT EXTRACT(MONTH FROM (\"issues\".\"completed_at\" AT TIME ZONE {zone}))::INTEGER AS \"month\", \
+         COUNT(*) AS \"count\" \
+         {from} WHERE ({scope} AND EXTRACT(YEAR FROM (\"issues\".\"completed_at\" AT TIME ZONE {zone})) = {year_holder}) \
          GROUP BY \"month\" ORDER BY \"month\" ASC"
     );
     // Top-5 creators (base.py:291-313): NULL creators excluded; avatar
@@ -3953,25 +4011,46 @@ mod tests {
             "COMPLETED_AT",
             "CREATED_BY",
         ] {
-            assert!(axis_for(name).is_some(), "{name}");
+            assert!(axis_for(name, "'UTC'").is_some(), "{name}");
         }
-        assert!(axis_for("priority").is_none());
-        assert!(axis_for("").is_none());
+        assert!(axis_for("priority", "'UTC'").is_none());
+        assert!(axis_for("", "'UTC'").is_none());
         // Deleted guards ride the axis scope (build_chart.py additional filters).
-        assert!(axis_for("LABELS").unwrap().filter.contains("issue_labels"));
-        assert!(axis_for("ASSIGNEES")
+        assert!(axis_for("LABELS", "'UTC'")
+            .unwrap()
+            .filter
+            .contains("issue_labels"));
+        assert!(axis_for("ASSIGNEES", "'UTC'")
             .unwrap()
             .filter
             .contains("issue_assignees"));
-        assert!(axis_for("CYCLES").unwrap().filter.contains("cycle_issues"));
-        assert!(axis_for("MODULES")
+        assert!(axis_for("CYCLES", "'UTC'")
+            .unwrap()
+            .filter
+            .contains("cycle_issues"));
+        assert!(axis_for("MODULES", "'UTC'")
             .unwrap()
             .filter
             .contains("module_issues"));
-        assert_eq!(axis_for("PRIORITY").unwrap().filter, "");
-        assert_eq!(axis_for("STATES").unwrap().key_kind, KeyKind::Uuid);
-        assert_eq!(axis_for("ESTIMATE_POINTS").unwrap().key_kind, KeyKind::Int);
-        assert_eq!(axis_for("START_DATE").unwrap().key_kind, KeyKind::Date);
+        assert_eq!(axis_for("PRIORITY", "'UTC'").unwrap().filter, "");
+        assert_eq!(axis_for("STATES", "'UTC'").unwrap().key_kind, KeyKind::Uuid);
+        assert_eq!(
+            axis_for("ESTIMATE_POINTS", "'UTC'").unwrap().key_kind,
+            KeyKind::Int
+        );
+        assert_eq!(
+            axis_for("START_DATE", "'UTC'").unwrap().key_kind,
+            KeyKind::Date
+        );
+        // The `__date` axes truncate in the actor zone; plain-date axes do not.
+        let created = axis_for("CREATED_AT", "'America/New_York'").unwrap();
+        assert!(created
+            .key_expr
+            .contains("(\"issues\".\"created_at\" AT TIME ZONE 'America/New_York')::date"));
+        assert!(!axis_for("START_DATE", "'America/New_York'")
+            .unwrap()
+            .key_expr
+            .contains("AT TIME ZONE"));
     }
 
     #[test]
@@ -4042,9 +4121,9 @@ mod tests {
 
     #[test]
     fn chart_joins_merge_repeated_axis_joins() {
-        let labels = axis_for("LABELS").unwrap();
-        let created_by = axis_for("CREATED_BY").unwrap();
-        let assignees = axis_for("ASSIGNEES").unwrap();
+        let labels = axis_for("LABELS", "'UTC'").unwrap();
+        let created_by = axis_for("CREATED_BY", "'UTC'").unwrap();
+        let assignees = axis_for("ASSIGNEES", "'UTC'").unwrap();
         // Self-grouping reuses the single Django join (a repeated alias is a
         // Postgres error where Django serves 200).
         let self_grouped = chart_joins(&labels, Some(&labels));
@@ -4071,6 +4150,7 @@ mod tests {
             project_ids: vec!["00000000-0000-0000-0000-000000000000".to_owned()],
             window: None,
             period: None,
+            timezone: chrono_tz::UTC,
         };
         assert!(good.checked_id_list().is_ok());
         assert!(good
@@ -4081,6 +4161,7 @@ mod tests {
             project_ids: Vec::new(),
             window: None,
             period: None,
+            timezone: chrono_tz::UTC,
         };
         assert_eq!(
             empty
@@ -4092,6 +4173,7 @@ mod tests {
             project_ids: vec!["nope".to_owned()],
             window: None,
             period: None,
+            timezone: chrono_tz::UTC,
         };
         assert!(matches!(bad.checked_id_list(), Err(Denial::InvalidDetail)));
     }
@@ -4285,6 +4367,7 @@ mod tests {
             Some("state__group"),
             Some("\"workspaces\".\"slug\" = $1"),
             "",
+            "UTC",
         )
         .expect("known axes");
         assert_eq!(plot.matches("JOIN \"states\"").count(), 1);
@@ -4302,6 +4385,7 @@ mod tests {
             None,
             Some("\"workspaces\".\"slug\" = $1"),
             "",
+            "UTC",
         )
         .expect("known axes");
         assert!(!count.contains("issue_labels"));
@@ -4349,6 +4433,7 @@ mod tests {
             None,
             Some("\"workspaces\".\"slug\" = $1"),
             "",
+            "UTC",
         )
         .expect("known axes");
         assert!(count.starts_with("SELECT COUNT(*)"));
@@ -4362,7 +4447,7 @@ mod tests {
     #[test]
     fn saved_estimate_plot_sums_cast_float_once() {
         let (_, plot) =
-            saved_statements("priority", "estimate", None, None, "").expect("known axes");
+            saved_statements("priority", "estimate", None, None, "", "UTC").expect("known axes");
         assert!(plot.contains("SUM(CAST(\"estimate_points\".\"value\" AS DOUBLE PRECISION))"));
         assert_eq!(plot.matches("estimate_points").count(), 3);
     }
@@ -4379,6 +4464,7 @@ mod tests {
             Some("estimate_point__value"),
             Some("\"workspaces\".\"slug\" = $1"),
             "",
+            "UTC",
         )
         .expect("known axes");
         assert_eq!(plot.matches("JOIN \"estimate_points\"").count(), 1);
@@ -4629,7 +4715,12 @@ mod tests {
 
     #[test]
     fn through_ids_subquery_carries_base_scope() {
-        let ctx = FilterCtx::parse(&HashMap::new(), "analytics", utc(2026, 9, 30));
+        let ctx = FilterCtx::parse(
+            &HashMap::new(),
+            "analytics",
+            utc(2026, 9, 30),
+            chrono_tz::UTC,
+        );
         let id = uuid::Uuid::parse_str("12345678-1234-1234-1234-1234567890ab").expect("uuid");
         let sub = through_ids_subquery(ThroughBranch::Cycle(id), &ctx).expect("subquery");
         // The id list selects through issue ids over the spliced joins (the

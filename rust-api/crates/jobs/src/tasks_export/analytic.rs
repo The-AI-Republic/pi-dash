@@ -692,10 +692,12 @@ pub fn plot_statement(
     segment: Option<&str>,
     fragment: &str,
 ) -> Result<String, String> {
+    // The export worker has no activated zone (`analytic_export_task` is a
+    // Celery task, no request), so Django buckets in `TIME_ZONE` (UTC).
     let built = if y_axis == "issue_count" {
-        q::base_plot_count_sql(x_axis, segment, fragment)
+        q::base_plot_count_sql(x_axis, segment, fragment, "UTC")
     } else {
-        q::base_plot_estimate_sql(x_axis, segment, fragment)
+        q::base_plot_estimate_sql(x_axis, segment, fragment, "UTC")
     };
     let statement = built.ok_or_else(|| "analytic_export_task: bad axis".to_owned())?;
     let joins = scope_joins(&statement, fragment, true);
@@ -1426,7 +1428,7 @@ mod tests {
         assert!(label_fragment.contains("\"issues\".\"deleted_at\" IS NULL"));
         // Scope legs: states for the manager scope, relation legs only
         // for referenced aliases.
-        let statement = q::base_plot_count_sql("priority", None, &fragment).expect("built");
+        let statement = q::base_plot_count_sql("priority", None, &fragment, "UTC").expect("built");
         let joins = scope_joins(&statement, &fragment, true);
         assert!(joins.contains("JOIN \"states\""));
         assert!(!joins.contains("issue_labels"));

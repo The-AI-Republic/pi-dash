@@ -560,14 +560,25 @@ fn strings_in_column(name: &str) -> Option<&'static str> {
     })
 }
 
+/// `__date`-truncated column for a timestamptz filter term: Django's `__date`
+/// lookup is `TruncDate`, which converts with the `TimezoneMixin`-activated
+/// user zone. Plain date columns need no conversion (same rule as
+/// [`queries::month_dimension_expr`]); `column` is the quoted ref.
+fn trunc_date_column(column: &str, timezone: &chrono_tz::Tz) -> String {
+    format!(
+        "({column} AT TIME ZONE {})::date",
+        queries::sql_zone_literal(timezone.name())
+    )
+}
+
 /// `(column, operator)` for `Day` predicates (`__gte` / `__lte`).
-fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
+fn day_comparison(name: &str, timezone: &chrono_tz::Tz) -> Option<(String, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
-        "created_at__date" => "\"issues\".\"created_at\"::date",
-        "completed_at__date" => "\"issues\".\"completed_at\"::date",
-        "start_date" => "\"issues\".\"start_date\"",
-        "target_date" => "\"issues\".\"target_date\"",
+        "created_at__date" => trunc_date_column("\"issues\".\"created_at\"", timezone),
+        "completed_at__date" => trunc_date_column("\"issues\".\"completed_at\"", timezone),
+        "start_date" => "\"issues\".\"start_date\"".to_owned(),
+        "target_date" => "\"issues\".\"target_date\"".to_owned(),
         _ => return None,
     };
     let operator = match operator {
@@ -581,12 +592,14 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
 /// Compile one `issue_filters(query_params, "GET")` predicate to SQL text
 /// (placeholders allocated from `binds`). Predicate names are Django ORM
 /// paths; unknown names are a `FieldError` in Python, a 500 here (same
-/// split as the pilot compiler).
+/// split as the pilot compiler). `timezone` is the actor zone for the
+/// `__date` terms (Django's `TruncDate` converts with it).
 #[allow(clippy::result_large_err)]
 pub fn filter_sql(
     binds: &mut Binds,
     name: &str,
     value: &pidash_db::issue_filters::FilterValue,
+    timezone: &chrono_tz::Tz,
 ) -> Result<String, Denial> {
     use pidash_db::issue_filters::FilterValue;
     if let Some(path) = name.strip_suffix("__isnull") {
@@ -642,10 +655,10 @@ pub fn filter_sql(
             }
             Ok(format!("{column} IN ({})", holders.join(",")))
         }
-        FilterValue::Text(text) => filter_text_sql(binds, name, text),
+        FilterValue::Text(text) => filter_text_sql(binds, name, text, timezone),
         FilterValue::Flag(_) => Err(Denial::ServerError),
         FilterValue::Day(day) => {
-            let (column, operator) = day_comparison(name).ok_or(Denial::ServerError)?;
+            let (column, operator) = day_comparison(name, timezone).ok_or(Denial::ServerError)?;
             let holder = binds.placeholder(BindVal::Text(day.to_string()));
             Ok(format!("{column} {operator} {holder}::date"))
         }
@@ -661,7 +674,12 @@ pub fn filter_sql(
 /// single-value `__contains` form. Bare `start_date`/`target_date` are
 /// Django exact lookups.
 #[allow(clippy::result_large_err)]
-fn filter_text_sql(binds: &mut Binds, name: &str, text: &str) -> Result<String, Denial> {
+fn filter_text_sql(
+    binds: &mut Binds,
+    name: &str,
+    text: &str,
+    timezone: &chrono_tz::Tz,
+) -> Result<String, Denial> {
     if name == "name__icontains" {
         // Django `icontains`: LIKE with `\`, `%`, `_` escaped.
         let escaped = text
@@ -694,10 +712,10 @@ fn filter_text_sql(binds: &mut Binds, name: &str, text: &str) -> Result<String, 
         _ => return Err(Denial::ServerError),
     };
     let column = match term {
-        "created_at__date" => "\"issues\".\"created_at\"::date",
-        "completed_at__date" => "\"issues\".\"completed_at\"::date",
-        "start_date" => "\"issues\".\"start_date\"",
-        "target_date" => "\"issues\".\"target_date\"",
+        "created_at__date" => trunc_date_column("\"issues\".\"created_at\"", timezone),
+        "completed_at__date" => trunc_date_column("\"issues\".\"completed_at\"", timezone),
+        "start_date" => "\"issues\".\"start_date\"".to_owned(),
+        "target_date" => "\"issues\".\"target_date\"".to_owned(),
         _ => return Err(Denial::ServerError),
     };
     // Explicit bounds must parse as dates: Django's `get_prep_value`
@@ -753,9 +771,14 @@ fn parse_datetime_param(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// Compile the request's `issue_filters(params, "GET")` predicates plus the
 /// scope into one `{filters}` fragment and its binds. `manager` selects the
 /// `IssueManager` scope (every analytics read) vs the plain soft-delete
-/// scope (the label-details bug branch, `base.py:83`).
+/// scope (the label-details bug branch, `base.py:83`). `timezone` is the
+/// actor zone for the `__date` terms (see [`filter_sql`]).
 #[allow(clippy::result_large_err)]
-pub fn scope_and_filters(query: &QueryMap, manager: bool) -> Result<(String, Binds), Denial> {
+pub fn scope_and_filters(
+    query: &QueryMap,
+    manager: bool,
+    timezone: &chrono_tz::Tz,
+) -> Result<(String, Binds), Denial> {
     let flat = flat_params(query);
     let today = chrono::Utc::now().date_naive();
     let compiled = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
@@ -768,7 +791,10 @@ pub fn scope_and_filters(query: &QueryMap, manager: bool) -> Result<(String, Bin
         "(\"issues\".\"deleted_at\" IS NULL)".to_owned()
     });
     for (name, value) in compiled.predicates() {
-        parts.push(format!("({})", filter_sql(&mut binds, name, value)?));
+        parts.push(format!(
+            "({})",
+            filter_sql(&mut binds, name, value, timezone)?
+        ));
     }
     Ok((parts.join(" AND "), binds))
 }
@@ -890,16 +916,22 @@ async fn analytics_get(
         Ok(actor) => actor,
         Err(denied) => return denied,
     };
-    let _ = actor;
-    match analytics_body(&state, &slug, &query).await {
+    match analytics_body(&state, &slug, &query, &actor.timezone).await {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(denial) => denial.into_response(),
     }
 }
 
 /// Build the analytics response body: validate, filter, count, plot, extras.
+/// `timezone` is the actor zone: Django's `TimezoneMixin` activates it, so
+/// the `__date` filters and the date-axis buckets convert with it.
 #[allow(clippy::result_large_err)]
-async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Result<String, Denial> {
+async fn analytics_body(
+    state: &AppState,
+    slug: &str,
+    query: &QueryMap,
+    timezone: &chrono_tz::Tz,
+) -> Result<String, Denial> {
     let pool = pool_of(state)?;
     let x_axis = query_last(query, "x_axis");
     let y_axis = query_last(query, "y_axis");
@@ -914,14 +946,15 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
 
     // Manager scope + GET predicates, once; the label branch recompiles
     // without the manager scope (B1).
-    let (fragment, binds) = scope_and_filters(query, true)?;
-    let (label_fragment, label_binds) = scope_and_filters(query, false)?;
+    let (fragment, binds) = scope_and_filters(query, true, timezone)?;
+    let (label_fragment, label_binds) = scope_and_filters(query, false, timezone)?;
 
     let total = fetch_count(pool, slug, &fragment, &binds).await?;
 
     let distribution = if y_axis == "issue_count" {
-        let sql = queries::base_plot_count_sql(&x_axis, segment.as_deref(), &fragment)
-            .ok_or(Denial::ServerError)?;
+        let sql =
+            queries::base_plot_count_sql(&x_axis, segment.as_deref(), &fragment, timezone.name())
+                .ok_or(Denial::ServerError)?;
         let sql = reuse_filter_joins(&sql, &fragment);
         let joins = scope_joins(&sql, &fragment, true);
         let rows = fetch_count_plot(
@@ -934,8 +967,13 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
         .await?;
         super::render::distribution_from_count_rows(rows, &x_axis, segment.is_some())
     } else {
-        let sql = queries::base_plot_estimate_sql(&x_axis, segment.as_deref(), &fragment)
-            .ok_or(Denial::ServerError)?;
+        let sql = queries::base_plot_estimate_sql(
+            &x_axis,
+            segment.as_deref(),
+            &fragment,
+            timezone.name(),
+        )
+        .ok_or(Denial::ServerError)?;
         let sql = reuse_filter_joins(&sql, &fragment);
         let joins = scope_joins(&sql, &fragment, true);
         let rows = fetch_estimate_plot(
@@ -2468,10 +2506,12 @@ mod tests {
 
     #[test]
     fn scope_and_filters_empty_params_is_manager_scope() {
-        let (fragment, binds) = scope_and_filters(&query_map(&[]), true).expect("scope");
+        let (fragment, binds) =
+            scope_and_filters(&query_map(&[]), true, &chrono_tz::UTC).expect("scope");
         assert!(fragment.contains(queries::ISSUE_OBJECTS_SCOPE));
         assert!(binds.values().is_empty());
-        let (fragment, _) = scope_and_filters(&query_map(&[]), false).expect("plain");
+        let (fragment, _) =
+            scope_and_filters(&query_map(&[]), false, &chrono_tz::UTC).expect("plain");
         assert!(fragment.contains("\"issues\".\"deleted_at\" IS NULL"));
         assert!(!fragment.contains("triage"));
     }
@@ -2484,6 +2524,7 @@ mod tests {
             &mut binds,
             "priority__in",
             &FilterValue::Strings(vec!["high".to_owned()]),
+            &chrono_tz::UTC,
         )
         .expect("priority");
         // `$1` is the workspace slug; the first filter bind is `$2`.
@@ -2492,9 +2533,21 @@ mod tests {
             &mut binds,
             "state__in",
             &FilterValue::Uuids(vec![Uuid::nil()]),
+            &chrono_tz::UTC,
         )
         .expect("state");
         assert_eq!(sql, "\"issues\".\"state_id\" IN ($3)");
+        // `__date` terms truncate in the actor zone.
+        let sql = filter_sql(
+            &mut binds,
+            "created_at__date__gte",
+            &FilterValue::Text("2026-10-01".to_owned()),
+            &chrono_tz::America::New_York,
+        )
+        .expect("date bound");
+        assert!(sql.contains(
+            "(\"issues\".\"created_at\" AT TIME ZONE 'America/New_York')::date >= $4::date"
+        ));
     }
 
     #[test]
@@ -2595,7 +2648,8 @@ mod tests {
     fn filtered_count_sql_composes_end_to_end() {
         // `?priority=high`: kernel → predicate → binds → joins → splice.
         let (fragment, binds) =
-            scope_and_filters(&query_map(&[("priority", "high")]), true).expect("scope");
+            scope_and_filters(&query_map(&[("priority", "high")]), true, &chrono_tz::UTC)
+                .expect("scope");
         assert!(fragment.contains("\"issues\".\"priority\" IN ($2)"));
         assert_eq!(binds.values().len(), 1);
         let sql = queries::base_count_sql(&fragment);
@@ -2615,8 +2669,12 @@ mod tests {
         // `?labels=<uuid>`: the value predicate joins INNER (Django's
         // `filter()` join), and the bind is the parsed UUID at `$2`.
         let id = Uuid::nil();
-        let (fragment, binds) =
-            scope_and_filters(&query_map(&[("labels", &id.to_string())]), true).expect("scope");
+        let (fragment, binds) = scope_and_filters(
+            &query_map(&[("labels", &id.to_string())]),
+            true,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
         assert!(fragment.contains("\"label_issue\".\"label_id\" IN ($2)"));
         let sql = queries::base_count_sql(&fragment);
         let joins = scope_joins(&sql, &fragment, true);
@@ -2632,9 +2690,13 @@ mod tests {
         // alias — one join, Django's. The scope skips the leg the
         // statement already carries (only the states leg is spliced in).
         let id = Uuid::nil();
-        let (fragment, _) =
-            scope_and_filters(&query_map(&[("labels", &id.to_string())]), true).expect("scope");
-        let sql = queries::base_plot_count_sql("labels__id", None, &fragment).expect("plot");
+        let (fragment, _) = scope_and_filters(
+            &query_map(&[("labels", &id.to_string())]),
+            true,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        let sql = queries::base_plot_count_sql("labels__id", None, &fragment, "UTC").expect("plot");
         assert!(sql.contains("LEFT OUTER JOIN \"issue_labels\""));
         let reused = reuse_filter_joins(&sql, &fragment);
         assert!(!reused.contains("LEFT OUTER JOIN \"issue_labels\""));
@@ -2651,8 +2713,9 @@ mod tests {
         // `?priority=high` + `x_axis=labels__id`: no `label_issue` ref in
         // the fragment, so the builder's fresh join is kept verbatim.
         let (fragment, _) =
-            scope_and_filters(&query_map(&[("priority", "high")]), true).expect("scope");
-        let sql = queries::base_plot_count_sql("labels__id", None, &fragment).expect("plot");
+            scope_and_filters(&query_map(&[("priority", "high")]), true, &chrono_tz::UTC)
+                .expect("scope");
+        let sql = queries::base_plot_count_sql("labels__id", None, &fragment, "UTC").expect("plot");
         assert_eq!(reuse_filter_joins(&sql, &fragment), sql);
     }
 
@@ -2670,9 +2733,10 @@ mod tests {
                 ("module", &id),
             ]),
             true,
+            &chrono_tz::UTC,
         )
         .expect("scope");
-        let sql = queries::base_plot_count_sql("priority", Some("assignees__id"), &fragment)
+        let sql = queries::base_plot_count_sql("priority", Some("assignees__id"), &fragment, "UTC")
             .expect("plot");
         let reused = reuse_filter_joins(&sql, &fragment);
         assert!(reused.contains("\"issue_assignee\".\"assignee_id\" AS \"segment\""));
