@@ -2188,19 +2188,23 @@ async fn inv_create_inner(
         Some(value) => validate_role_value(value, &mut errors),
     };
     // `validate()`: duplicate email in the workspace (`invite.py:53-60`).
-    if let Some(email) = email.as_deref() {
-        let duplicate: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM workspace_member_invites i
-               JOIN workspaces w ON w.id = i.workspace_id
-               WHERE i.email = $1 AND w.slug = $2 AND i.deleted_at IS NULL)",
-        )
-        .bind(email)
-        .bind(slug)
-        .fetch_one(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        if duplicate {
-            errors.non_field.push("Email already invited".into());
+    // DRF runs `to_internal_value` before `validate()`, so any field-level
+    // failure means this check never runs — skip it when errors exist.
+    if errors.is_empty() {
+        if let Some(email) = email.as_deref() {
+            let duplicate: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM workspace_member_invites i
+                   JOIN workspaces w ON w.id = i.workspace_id
+                   WHERE i.email = $1 AND w.slug = $2 AND i.deleted_at IS NULL)",
+            )
+            .bind(email)
+            .bind(slug)
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            if duplicate {
+                errors.non_field.push("Email already invited".into());
+            }
         }
     }
     if !errors.is_empty() {
