@@ -2496,7 +2496,7 @@ async fn workpad_patch_inner(
         return Err(Denial::ServerError);
     };
     let description_html = row_string(&row, "description_html")?;
-    let state_id: Option<Uuid> = row_uuid_opt(&row, "state_id")?;
+    let prev_state_id: Option<Uuid> = row_uuid_opt(&row, "state_id")?;
     let completed_at: Option<DateTime<Utc>> = row
         .try_get("completed_at")
         .map_err(|_| Denial::ServerError)?;
@@ -2508,7 +2508,7 @@ async fn workpad_patch_inner(
     let (state_id, completed_at) = resolve_workpad_state(
         &mut txn,
         &project_id,
-        state_id,
+        prev_state_id,
         state_group.as_deref(),
         completed_at,
     )
@@ -2533,6 +2533,22 @@ async fn workpad_patch_inner(
     txn.commit()
         .await
         .map_err(|error| db_error(error, "workpad-commit"))?;
+    // `github_signals.trigger_completion_comment`
+    // (`bgtasks/github_signals.py:44-75`): the workpad save runs the
+    // NULL-state default leg, so patching the workpad of a mirrored
+    // NULL-state issue whose default state is completed-group enqueues
+    // the provider's `post_completion_comment` — after commit, like the
+    // other post-commit completion enqueues. Best-effort: the write
+    // stands. (PIDASHCONV-1460.)
+    if prev_state_id != state_id {
+        crate::issue_transition::enqueue_completion_comment(
+            &pre.pool,
+            issue_id,
+            prev_state_id.as_ref(),
+            state_id.as_ref(),
+        )
+        .await;
+    }
     // The timestamp only — the body just came from the caller (`:3315-3320`).
     let mut out = Map::with_capacity(1);
     out.insert(

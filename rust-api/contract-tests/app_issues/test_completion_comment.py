@@ -414,6 +414,35 @@ def test_v1_delete_null_state_issue_with_completed_default_enqueues_comment(
         scope.cleanup()
 
 
+def test_v1_workpad_null_state_issue_with_completed_default_enqueues_comment(
+    db, seeder, settings
+):
+    world = _world(seeder)
+    _, done = _states(db, seeder, world, done_default=True)
+    issue = seeder.create_issue(
+        world["workspace"]["id"], world["project"]["id"], None
+    )
+    scope, sync_id = _sync(settings.database_url, world, issue["id"], {})
+    try:
+        with _v1_client(settings.base_url, seeder, world) as client:
+            _drain_broker()
+            baseline = _queue_baseline(db)
+            resp = client.patch(
+                f"/api/v1/workspaces/{world['workspace']['slug']}"
+                f"/projects/{world['project']['id']}/work-items/{issue['id']}/workpad/",
+                json={"body": "review-added workpad note"},
+            )
+            assert resp.status_code == 200, resp.text
+            moved = db.fetchone(
+                "SELECT state_id FROM issues WHERE id = %s",
+                (issue["id"],),
+            )
+            assert str(moved["state_id"]) == done["id"]
+            _assert_completion_enqueued(db, baseline, sync_id)
+    finally:
+        scope.cleanup()
+
+
 def test_app_patch_with_existing_completion_comment_enqueues_nothing(
     db, seeder, settings
 ):
