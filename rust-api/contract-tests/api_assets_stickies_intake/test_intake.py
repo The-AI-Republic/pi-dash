@@ -192,6 +192,36 @@ def test_intake_accept_without_default_state_400(org):
     }
 
 
+def test_intake_patch_parent_project_check_message(org):
+    """PIDASHCONV-1499: the issue-half parent check reports Django's exact
+    message. The endpoint runs ``IssueSerializer`` with an empty context, so
+    any parent passing the field-level gate (non-triage, non-archived,
+    non-draft) fails the object-level project check with this body."""
+    backlog = seed_d21.create_state(
+        org.conn, workspace_id=org.workspace["id"], project_id=org.project["id"],
+        name="Backlog", group="backlog",
+    )
+    parent_id = str(uuid.uuid4())
+    org.conn.execute(
+        """INSERT INTO issues (id, created_at, updated_at, name, description_json,
+               priority, sequence_id, project_id, state_id,
+               workspace_id, description_html, sort_order,
+               is_draft, git_work_branch, workpad, complexity_score)
+           VALUES (%s, now(), now(), 'parent', '{}', 'high', 901,
+               %s, %s, %s, '', 65536, false, '', '', 0)""",
+        (parent_id, org.project["id"], backlog["id"], org.workspace["id"]),
+    )
+    created = org.create_intake_issue(name="child")
+    r = org.request(
+        "PATCH", f"{_base(org)}{created['issue']}/", "admin",
+        json={"issue": {"parent": parent_id}},
+    )
+    assert r.status_code == 400
+    assert r.json() == {
+        "non_field_errors": ["Parent is not valid issue_id please pass a valid issue_id"]
+    }
+
+
 def test_intake_guest_non_creator_cannot_edit(org):
     created = org.create_intake_issue(name="guest target")
     r = org.request(
