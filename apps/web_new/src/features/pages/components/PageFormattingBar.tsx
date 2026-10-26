@@ -79,6 +79,8 @@ export interface PageFormattingBarProps {
    * bar's own markup identical before and after that slice.
    */
   mediaControls?: React.ReactNode;
+  /** The stored full-width preference marks the content row (PAGE-072). */
+  wide?: boolean | undefined;
 }
 
 export function PageFormattingBar({
@@ -86,6 +88,7 @@ export function PageFormattingBar({
   onCommand,
   onBlockKind,
   mediaControls,
+  wide = false,
 }: PageFormattingBarProps): React.ReactElement {
   return (
     <div
@@ -98,7 +101,7 @@ export function PageFormattingBar({
       className="sticky top-0 z-10 overflow-x-auto bg-(--bg)"
     >
       <div
-        className={`${PAGE_TOOLBAR_CONTENT_CLASS} flex min-h-13 items-center gap-(--space-1) border-b border-(--border) px-(--space-1) py-(--space-1)`}
+        className={`${PAGE_TOOLBAR_CONTENT_CLASS} flex min-h-13 items-center gap-(--space-1) border-b border-(--border) px-(--space-1) py-(--space-1)${wide ? " wide-layout" : ""}`}
       >
         <TypographySelector block={state.block} onPick={onBlockKind} />
         <span aria-hidden="true" className="mx-(--space-1) h-5 w-px shrink-0 bg-(--border)" />

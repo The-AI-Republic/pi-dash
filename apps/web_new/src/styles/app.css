@@ -203,3 +203,50 @@
     background-color: var(--page-color-purple-wash);
   }
 }
+
+/* Page display preferences (NEWFRONT-848, PAGE-072). The four stored
+   choices live in local storage; these two utilities are the reflow they
+   drive. Type size sets the body's base scale and face swaps the family;
+   both reach the title (via .page-title-editor) and the body container so
+   one stored choice never leaves the two halves disagreeing. */
+@layer components {
+  /* Both sizes move the same inherited type tokens: the title reads
+     --text-h1-* through its heading utility, the body reads --text-base-*
+     through .rich-text-content, and headings inside the body read the
+     other --text-h* values. Compact stays smaller than the default/large
+     choice on every one of them, so the stored choice reflows the whole
+     page rather than only one half. */
+  .text-size-large-font {
+    --text-base-size: 1rem;
+    --text-base-height: 1.75rem;
+    --text-h1-size: 1.75rem;
+    --text-h1-height: 2.25rem;
+    --text-h2-size: 1.5rem;
+    --text-h2-height: 2rem;
+    --text-h3-size: 1.375rem;
+    --text-h3-height: 1.75rem;
+  }
+  .text-size-small-font {
+    --text-base-size: 0.8rem;
+    --text-base-height: 1.2rem;
+    --text-h1-size: 1.4rem;
+    --text-h1-height: 1.8rem;
+    --text-h2-size: 1.2rem;
+    --text-h2-height: 1.6rem;
+    --text-h3-size: 1.1rem;
+    --text-h3-height: 1.4rem;
+  }
+  .text-face-serif,
+  .text-face-serif .rich-text-content {
+    font-family: Georgia, "Times New Roman", serif;
+  }
+  .text-face-sans-serif,
+  .text-face-sans-serif .rich-text-content {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  /* The full-width preference marks the bar's content row; the canvas
+     measure itself is applied inline from the same stored value. */
+  .page-toolbar-content.wide-layout {
+    width: 100%;
+  }
+}

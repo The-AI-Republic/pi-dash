@@ -6,9 +6,10 @@
 // always-present path back to the collection, the ancestor trail for a
 // nested page, the searchable sibling switcher, the sync indicator and the
 // action cluster: the navigation-pane toggle, favourite, link copy,
-// sub-page creation and the options menu whose history entry writes the
-// info pane. Later header slices add the remaining menu entries at the same
-// mount.
+// sub-page creation and the options menu. The two display toggles (full
+// width, sticky toolbar) write the page preference store (PAGE-072), and
+// the history entry writes the info pane. Later header slices add the
+// remaining menu entries at the same mount.
 
 import { Breadcrumbs, IconButton, Menu } from "@pidash/kit";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -20,6 +21,8 @@ import type { PageRow as PageRowData } from "@pidash/api-client";
 import { pageDetailHref, pageTabHref } from "../lib/pageList.js";
 import type { PageSiblingOption } from "../lib/pageDetail.js";
 import { PAGE_ACTION_ADD_SUB_PAGE, type PageAncestor } from "../lib/pageNested.js";
+import { pageDisplayMenuItems } from "../lib/pageDisplayMenu.js";
+import type { PagePreferences } from "../lib/pagePreferences.js";
 import { PageFavoriteStar } from "./PageFavoriteStar.js";
 import { PageSiblingSwitcher } from "./PageSiblingSwitcher.js";
 import { PageSyncBadge } from "./PageSyncBadge.js";
@@ -64,6 +67,10 @@ export interface PageDetailHeaderProps {
   paneOpen: boolean;
   /** Creates a child page and opens it; absent for guests (PAGE-084). */
   onAddSubPage?: (() => void) | undefined;
+  /** The local display preferences the options menu toggles read. */
+  preferences: PagePreferences;
+  /** Write one display preference (local only, PAGE-072). */
+  onPreferenceChange: (patch: Partial<PagePreferences>) => void;
 }
 
 export function PageDetailHeader({
@@ -83,6 +90,8 @@ export function PageDetailHeader({
   onOpenPane,
   paneOpen,
   onAddSubPage,
+  preferences,
+  onPreferenceChange,
 }: PageDetailHeaderProps): React.ReactElement {
   const navigate = useNavigate();
   const [copied, setCopied] = React.useState(false);
@@ -171,6 +180,7 @@ export function PageDetailHeader({
           </IconButton>
         }
         items={[
+          ...pageDisplayMenuItems(preferences, onPreferenceChange),
           { label: PAGE_HISTORY_ITEM, onSelect: onOpenHistory },
           ...(onAddSubPage === undefined ? [] : [{ label: PAGE_ACTION_ADD_SUB_PAGE, onSelect: onAddSubPage }]),
         ]}

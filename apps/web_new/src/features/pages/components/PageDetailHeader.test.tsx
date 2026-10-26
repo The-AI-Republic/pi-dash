@@ -36,6 +36,8 @@ vi.mock("../../../shared/shell/toaster.js", () => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { PAGES_PAGE_ID, PAGES_PROJECT_ID, makePageRow } from "../testing.js";
+import { PAGE_PREFERENCES_DEFAULTS } from "../lib/pagePreferences.js";
+import { PAGE_FULL_WIDTH_LABEL, PAGE_STICKY_TOOLBAR_LABEL } from "../lib/pageDisplayMenu.js";
 import {
   PageDetailHeader,
   PAGE_ANCESTOR_TRAIL_LABEL,
@@ -57,9 +59,11 @@ function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailH
   onOpenHistory: ReturnType<typeof vi.fn>;
   onOpenPane: ReturnType<typeof vi.fn>;
   onSelectSibling: ReturnType<typeof vi.fn>;
+  onPreferenceChange: ReturnType<typeof vi.fn>;
 } {
   const onCopyLink = vi.fn();
   const onOpenHistory = vi.fn();
+  const onPreferenceChange = vi.fn();
   const onOpenPane = vi.fn();
   const onSelectSibling = vi.fn();
   render(
@@ -79,11 +83,13 @@ function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailH
         onOpenHistory={onOpenHistory}
         onOpenPane={onOpenPane}
         paneOpen={false}
+        preferences={PAGE_PREFERENCES_DEFAULTS}
+        onPreferenceChange={onPreferenceChange}
         {...overrides}
       />
     </QueryClientProvider>
   );
-  return { onCopyLink, onOpenHistory, onOpenPane, onSelectSibling };
+  return { onCopyLink, onOpenHistory, onOpenPane, onSelectSibling, onPreferenceChange };
 }
 
 beforeEach(() => {
@@ -208,7 +214,9 @@ describe("PageDetailHeader", () => {
     renderHeader({ onAddSubPage });
     fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
     const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
-    expect(items).toEqual([PAGE_HISTORY_ITEM, "Add sub-page"]);
+    // The display toggles lead the menu (PAGE-072), then the history
+    // entry, then the nested-pages action appended by PAGE-084.
+    expect(items).toEqual(["Full width", "Sticky toolbar", PAGE_HISTORY_ITEM, "Add sub-page"]);
     fireEvent.click(screen.getByRole("menuitem", { name: "Add sub-page" }));
     expect(onAddSubPage).toHaveBeenCalledTimes(1);
   });
@@ -225,5 +233,30 @@ describe("PageDetailHeader", () => {
     fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
     fireEvent.click(await screen.findByRole("menuitem", { name: PAGE_HISTORY_ITEM }));
     expect(onOpenHistory).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("PageDetailHeader display toggles", () => {
+  it("leads the options menu with the two display rows and writes one preference", async () => {
+    const { onPreferenceChange } = renderHeader();
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.slice(0, 2).map((item) => item.textContent)).toEqual([
+      PAGE_FULL_WIDTH_LABEL,
+      PAGE_STICKY_TOOLBAR_LABEL,
+    ]);
+    fireEvent.click(screen.getByRole("menuitem", { name: PAGE_FULL_WIDTH_LABEL }));
+    expect(onPreferenceChange).toHaveBeenCalledWith({ full_width: true });
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: PAGE_STICKY_TOOLBAR_LABEL }));
+    expect(onPreferenceChange).toHaveBeenCalledWith({ sticky_toolbar: false });
+  });
+
+  it("offers no typeface, size or shortcut row", async () => {
+    renderHeader();
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    const items = await screen.findAllByRole("menuitem");
+    const labels = items.map((item) => item.textContent ?? "");
+    expect(labels.some((label) => /font|typeface|typography|shortcut/i.test(label))).toBe(false);
   });
 });

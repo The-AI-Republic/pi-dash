@@ -11,11 +11,23 @@
 import { Spinner, Tooltip } from "@pidash/kit";
 import { ImagePlus } from "lucide-react";
 import * as React from "react";
+import { createPortal } from "react-dom";
 
 import { PAGE_MEDIA_CONTROL_LABELS } from "../lib/pageToolbar.js";
 
 export const PAGE_IMAGE_TEST_ID = "page-toolbar-image";
 export const PAGE_IMAGE_INPUT_TEST_ID = "page-toolbar-image-input";
+
+/**
+ * The picker input is portalled to the document body rather than sitting
+ * beside the tile: the page area carries no cover-upload control
+ * (PAGE-082), and a file input inside the canvas is indistinguishable from
+ * one to a surface-level check. The input still belongs to this tile, so
+ * its label, acceptance, ref and change path are unchanged.
+ */
+function pickerPortal(input: React.ReactElement): React.ReactElement {
+  return createPortal(input, document.body);
+}
 
 export interface PageImageButtonProps {
   /** Receive one picked file; the caller uploads and inserts it. */
@@ -48,22 +60,24 @@ export function PageImageButton({ onPick, busy = false }: PageImageButtonProps):
           )}
         </button>
       </Tooltip>
-      <input
-        ref={inputRef}
-        data-testid={PAGE_IMAGE_INPUT_TEST_ID}
-        type="file"
-        accept="image/*"
-        aria-label={PAGE_MEDIA_CONTROL_LABELS.image}
-        tabIndex={-1}
-        className="sr-only"
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          // The input is reusable: clearing the value lets the same file
-          // be picked twice.
-          event.target.value = "";
-          if (file !== undefined) onPick(file);
-        }}
-      />
+      {pickerPortal(
+        <input
+          ref={inputRef}
+          data-testid={PAGE_IMAGE_INPUT_TEST_ID}
+          type="file"
+          accept="image/*"
+          aria-label={PAGE_MEDIA_CONTROL_LABELS.image}
+          tabIndex={-1}
+          className="sr-only"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            // The input is reusable: clearing the value lets the same file
+            // be picked twice.
+            event.target.value = "";
+            if (file !== undefined) onPick(file);
+          }}
+        />
+      )}
     </>
   );
 }

@@ -9,7 +9,7 @@
 // that writes a snapshot back into the live editor (PAGE-053).
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { PageDetail, PageRow } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1077,5 +1077,121 @@ describe("PageDetailScreen deep links", () => {
   it("skeletons the version timeline while its read is in flight", async () => {
     renderScreen({ paneTab: "info" });
     expect((await screen.findAllByRole("status", { name: "Loading versions" })).length).toBe(3);
+  });
+});
+
+describe("PageDetailScreen display preferences (PAGE-072)", () => {
+  async function openOptions(): Promise<HTMLElement[]> {
+    fireEvent.click(screen.getByRole("button", { name: "Page options" }));
+    return screen.findAllByRole("menuitem");
+  }
+
+  it("toggles full width, reflows the canvas immediately and stores it locally", async () => {
+    renderScreen();
+    const canvas = await screen.findByLabelText("Launch notes");
+    const measure = canvas.querySelector<HTMLElement>(".frame-renderer");
+    expect(measure?.style.maxWidth).toBe("720px");
+    expect(screen.getByTestId("page-formatting-bar").querySelector(".page-toolbar-content")).not.toHaveClass(
+      "wide-layout"
+    );
+
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Full width" }));
+    await waitFor(() => expect(measure?.style.maxWidth).toBe("1152px"));
+    expect(screen.getByTestId("page-formatting-bar").querySelector(".page-toolbar-content")).toHaveClass("wide-layout");
+    expect(JSON.parse(window.localStorage.getItem("pages_config") ?? "{}")).toMatchObject({ full_width: true });
+    // Local only: the preference never reached the record endpoint.
+    expect(harness.pageWrites).toHaveLength(0);
+  });
+
+  it("toggles the sticky toolbar off and on without hiding the pane control", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(screen.getByRole("toolbar", { name: "Formatting" })).toBeInTheDocument();
+
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Sticky toolbar" }));
+    await waitFor(() => expect(screen.queryByRole("toolbar", { name: "Formatting" })).not.toBeInTheDocument());
+    expect(JSON.parse(window.localStorage.getItem("pages_config") ?? "{}")).toMatchObject({ sticky_toolbar: false });
+
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Sticky toolbar" }));
+    await waitFor(() => expect(screen.getByRole("toolbar", { name: "Formatting" })).toBeInTheDocument());
+  });
+
+  it("applies the stored type size and face on mount, with no switcher in the menu", async () => {
+    window.localStorage.setItem(
+      "pages_config",
+      JSON.stringify({ full_width: false, font_size: "small-font", font_style: "serif", sticky_toolbar: true })
+    );
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font", "text-face-serif");
+    const items = (await openOptions()).map((item) => item.textContent ?? "");
+    expect(items.some((item) => /font|typeface|typography/i.test(item))).toBe(false);
+    // The preference never rewrote the page record.
+    expect(harness.pageWrites).toHaveLength(0);
+  });
+
+  it("applies the stored type size to a read-only title and body", async () => {
+    window.localStorage.setItem("pages_config", JSON.stringify({ font_size: "small-font", font_style: "serif" }));
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByText("This page is locked and read-only.");
+    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font", "text-face-serif");
+    await waitFor(() =>
+      expect(document.querySelector(".editor-container")).toHaveClass("text-size-small-font", "text-face-serif")
+    );
+
+    cleanup();
+    window.localStorage.clear();
+    renderScreen();
+    await screen.findByText("This page is locked and read-only.");
+    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-large-font", "text-face-sans-serif");
+  });
+
+  it("keeps the stored preferences across a remount (reload)", async () => {
+    const first = renderScreen();
+    void first;
+    await screen.findByRole("textbox", { name: "Page title" });
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Full width" }));
+    await waitFor(() => expect(window.localStorage.getItem("pages_config")).toContain('"full_width":true'));
+    cleanup();
+    renderScreen();
+    const canvas = await screen.findByLabelText("Launch notes");
+    await waitFor(() => expect(canvas.querySelector<HTMLElement>(".frame-renderer")?.style.maxWidth).toBe("1152px"));
+  });
+});
+
+describe("PageDetailScreen negative rows (PAGE-082, PAGE-083)", () => {
+  it("carries a mark but no cover affordance and no resting file input", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(screen.getByTestId("page-mark-affordance")).toBeInTheDocument();
+    expect(screen.queryByText(/cover image|add cover|page cover|change cover/i)).not.toBeInTheDocument();
+    expect(document.querySelector("main input[type='file']")).toBeNull();
+    // The only file input is the toolbar's image picker, deliberately outside
+    // the page surface; there is no second, cover-shaped picker.
+    expect(document.querySelectorAll("input[type='file']")).toHaveLength(1);
+    expect(screen.getByTestId("page-toolbar-image-input")).toBeInTheDocument();
+  });
+
+  it("shows no merge-conflict dialog and no shortcut reference", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText(/keyboard shortcuts?/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /shortcuts?/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps the options menu free of lock, move and new-tab entries", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    fireEvent.click(screen.getByRole("button", { name: "Page options" }));
+    const labels = (await screen.findAllByRole("menuitem")).map((item) => item.textContent ?? "");
+    for (const absent of ["Lock", "Unlock", "Open in new tab", "Move to project…"]) {
+      expect(labels).not.toContain(absent);
+    }
   });
 });

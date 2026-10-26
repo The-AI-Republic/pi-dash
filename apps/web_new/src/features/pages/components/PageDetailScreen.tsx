@@ -61,9 +61,9 @@ import { PageHeadingPreview } from "./PageHeadingPreview.js";
 import { PageNavigationPane } from "./PageNavigationPane.js";
 import { PageVersionOverlay } from "./PageVersionOverlay.js";
 import { pageDetailHref, PAGE_UNTITLED } from "../lib/pageList.js";
-import { formattingBarVisible, readStickyToolbarFromWindow } from "../lib/pagePreferences.js";
+import { formattingBarVisible, pageCanvasWidth, usePagePreferences } from "../lib/pagePreferences.js";
 import { useLivePageDocument } from "../lib/pageDocumentLive.js";
-import { PAGE_CANVAS_MEASURE_PX, pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
+import { pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
 
 export interface PageDetailScreenProps {
   workspaceSlug: string;
@@ -217,14 +217,14 @@ export function PageDetailScreen({
     return () => cancelAnimationFrame(frame);
   }, [body, bodyReady, pageId]);
 
-  // The sticky preference is read once on mount (spec §9.1): the page
-  // shell is remounted by navigation, so a stored change is picked up on
-  // the next visit without a live subscription this slice does not own.
-  const [stickyToolbar, setStickyToolbar] = React.useState(readStickyToolbarFromWindow);
-  React.useEffect(() => {
-    setStickyToolbar(readStickyToolbarFromWindow());
-  }, [pageId]);
-  const showBar = capabilities !== null && formattingBarVisible({ editable: capabilities.canEdit, stickyToolbar });
+  // The four display preferences are local (spec §9.1, PAGE-072): the
+  // store is read on mount and on every page switch, and a change here
+  // reflows this canvas immediately. None of it reaches the record.
+  const { preferences, setPreference } = usePagePreferences(pageId);
+  const showBar =
+    capabilities !== null &&
+    formattingBarVisible({ editable: capabilities.canEdit, stickyToolbar: preferences.sticky_toolbar });
+  const canvasWidth = pageCanvasWidth({ fullWidth: preferences.full_width, paneOpen });
   const resolveAsset = React.useCallback(
     (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId }),
     [workspaceSlug, projectId]
@@ -329,6 +329,8 @@ export function PageDetailScreen({
         onOpenHistory={() => onSearchChange(historySearch(search))}
         onOpenPane={openPane}
         paneOpen={paneOpen}
+        preferences={preferences}
+        onPreferenceChange={setPreference}
         {...(isProjectAuthorized(role) && !capabilities.isShelved
           ? {
               onAddSubPage: () => {
@@ -359,7 +361,7 @@ export function PageDetailScreen({
             >
               <div
                 className="frame-renderer mx-auto w-full px-(--space-8) transition-[max-width] duration-(--motion-duration) ease-(--motion-easing)"
-                style={{ maxWidth: paneOpen ? PAGE_CANVAS_MEASURE_PX.wide : PAGE_CANVAS_MEASURE_PX.readable }}
+                style={{ maxWidth: canvasWidth }}
               >
                 {capabilities.isShelved || capabilities.isLocked ? (
                   <p className="text-caption mb-(--space-4) text-(--text-muted)">
@@ -379,6 +381,9 @@ export function PageDetailScreen({
                     onRename={saveName}
                     onMarkPick={saveMark}
                     showBar={showBar}
+                    fullWidth={preferences.full_width}
+                    fontSize={preferences.font_size}
+                    fontStyle={preferences.font_style}
                     bodyPending={!bodyReady}
                     onHandle={onEditorHandle}
                   />
@@ -386,13 +391,17 @@ export function PageDetailScreen({
                   <>
                     <PageCanvasHeader
                       title={{ pageId: page.id, name: page.name, editable: false }}
+                      fontSize={preferences.font_size}
+                      fontStyle={preferences.font_style}
                       logoProps={page.logo_props as Record<string, unknown>}
                       editable={false}
                       titleEmpty={page.name.trim() === ""}
                       onMarkPick={saveMark}
                     />
                     {bodyReady ? (
-                      <div className="editor-container">
+                      <div
+                        className={`editor-container text-size-${preferences.font_size} text-face-${preferences.font_style}`}
+                      >
                         <RichTextView
                           html={page.description_html}
                           label={PAGE_BODY_LABEL}
