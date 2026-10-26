@@ -3,11 +3,15 @@
 Page writes (create / update) require the live document service: without it
 they fail with 503 and nothing is written. That 503 shape is asserted here
 as the contract; reads and archive actions run against SQL-seeded pages.
+The create tests below run a stub live server (``LiveDocStub``) so the
+insert path itself is exercised; the stub is up only inside those tests.
 """
 
 import uuid
 
 import pytest
+
+from _harness.sinks import LiveDocStub
 
 from .conftest import ENVELOPE_KEYS
 
@@ -247,3 +251,56 @@ def test_page_create_deleted_project_invalid_body_is_400(api, world, db):
     _soft_delete_project(db, world["project"]["id"])
     response = api.post(page_url(world), json={})
     assert response.status_code == 400, response.text
+
+
+def _conversion_hits(stub):
+    """POSTs the backend made to the stub live server during the create."""
+    return [hit for hit in stub.snapshot() if hit["method"] == "POST"]
+
+
+def test_page_create_without_parent(api, world, db):
+    """Create with no parent stores a null parent (PIDASHCONV-1503)."""
+    with LiveDocStub() as stub:
+        response = api.post(page_url(world), json={"name": "Top page"})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert set(body) == PAGE_DETAIL_KEYS, f"keys changed: {sorted(set(body) ^ PAGE_DETAIL_KEYS)}"
+    assert body["name"] == "Top page"
+    assert body["parent"] is None
+    assert body["owned_by"] == world["owner"]["id"]
+    assert api.get(page_url(world, body["id"])).json()["parent"] is None
+    assert (
+        db.fetchval("SELECT parent_id FROM pages WHERE id=%s", (body["id"],))
+        is None
+    )
+    hits = _conversion_hits(stub)
+    assert hits, "page create must convert through the live server"
+    assert hits[0]["path"] == "/live/convert-document/"
+    assert hits[0]["json"]["variant"] == "document"
+
+
+def test_page_create_with_parent(api, world, seeder, db):
+    """Create with a parent stores it (PIDASHCONV-1503: it was never written)."""
+    parent = seeder.create_page(
+        world["workspace"]["id"], world["owner"]["id"], name="Parent"
+    )
+    seeder.link_page_to_project(
+        parent["id"], world["project"]["id"], world["workspace"]["id"]
+    )
+    with LiveDocStub() as stub:
+        response = api.post(
+            page_url(world), json={"name": "Child", "parent": parent["id"]}
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert set(body) == PAGE_DETAIL_KEYS, f"keys changed: {sorted(set(body) ^ PAGE_DETAIL_KEYS)}"
+    assert body["parent"] == parent["id"]
+    assert api.get(page_url(world, body["id"])).json()["parent"] == parent["id"]
+    assert (
+        str(db.fetchval("SELECT parent_id FROM pages WHERE id=%s", (body["id"],)))
+        == parent["id"]
+    )
+    hits = _conversion_hits(stub)
+    assert hits, "page create must convert through the live server"
+    assert hits[0]["path"] == "/live/convert-document/"
+    assert hits[0]["json"]["variant"] == "document"
