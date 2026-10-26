@@ -12894,6 +12894,19 @@ export class WebNewDriver implements ParityDriver {
     // unknown runners, so the unavailable state settles here too.
     await this.runnerChatHistoryPanel().waitFor({ timeout: WebNewDriver.WAIT_MS });
     await this.runnerChatComposerBox().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    if (sessionId === undefined) return;
+    // The composer is live as soon as the page mounts, before the
+    // requested conversation has been found in the history read. Typing
+    // in that window sends into whatever thread the page currently has
+    // (or a fresh one), so wait for the requested row to be active.
+    // Bounded, and it does not assert: the unknown-session scenarios
+    // legitimately never see the row and must still open the page.
+    const active = this.runnerChatHistoryPanel().locator('nav button[aria-current="true"]');
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      if ((await active.count()) > 0) return;
+      await this.page.waitForTimeout(100);
+    }
   }
 
   async runnerChatContactNames(): Promise<string[]> {
