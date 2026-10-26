@@ -602,7 +602,10 @@ pub async fn insert_comment(
     insert: &lifecycle_kernel::CommentInsert,
 ) -> Result<(), sqlx::Error> {
     let empty_json = Value::Object(Default::default());
-    let empty_list = Value::Array(Vec::new());
+    // `attachments` / `labels` are Postgres `varchar[]` (`ArrayField`,
+    // `db/models/issue.py:563-566`), not jsonb: bind typed empty
+    // arrays (the v1 social comment insert's binding).
+    let empty_list: Vec<String> = Vec::new();
     sqlx::query(&lifecycle_kernel::comment_insert_sql())
         .bind(Utc::now())
         .bind(Utc::now())
