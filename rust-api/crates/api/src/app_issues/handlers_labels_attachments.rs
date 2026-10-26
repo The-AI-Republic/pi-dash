@@ -2744,6 +2744,11 @@ pub async fn bulk_create_labels(
     // `bulk_create(..., batch_size=50, ignore_conflicts=True)`: one
     // multi-row `INSERT ... ON CONFLICT DO NOTHING` per batch (Django
     // emits the arbiter-less form, which needs no partial-index match).
+    // Django wraps ALL batches in one `transaction.atomic`, so a failing
+    // later batch rolls back the earlier ones: run every batch on one
+    // transaction. Dropping `tx` uncommitted on any early `return` below
+    // rolls back, preserving the all-or-nothing semantics.
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
     for batch in rows.chunks(50) {
         let mut sql = String::from(
             "INSERT INTO labels (id, created_at, updated_at, created_by_id, updated_by_id, workspace_id, project_id, parent_id, name, description, color, sort_order, external_source, external_id) VALUES ",
@@ -2780,13 +2785,14 @@ pub async fn bulk_create_labels(
         // A `NULL` name/description trips `NOT NULL` for its batch (the
         // whole batch fails, like the single Django statement); unique
         // conflicts are swallowed per row by `DO NOTHING`.
-        if let Err(error) = insert.execute(&pool).await {
+        if let Err(error) = insert.execute(&mut *tx).await {
             if is_integrity_violation(&error) {
                 return Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY));
             }
             return Err(Denial::ServerError);
         }
     }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
 
     // `LabelSerializer(labels, many=True)` over the constructed rows:
     // every input echoes with its pre-assigned id, `sort_order` the field
