@@ -8,6 +8,7 @@ export { spaceKeys } from "./keys.js";
 export {
   readSpaceViewer,
   resolveLegacySpaceAnchor,
+  spaceCommentsQueryOptions,
   spaceInstanceQueryOptions,
   spaceIssueDetailQueryOptions,
   spaceIssuesQueryOptions,

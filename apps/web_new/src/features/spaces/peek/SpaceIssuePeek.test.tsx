@@ -22,6 +22,7 @@ import { ApiError, createClient, type ApiClient } from "@pidash/api-client";
 
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { STATES, TODO_ID } from "../layouts/testFixtures.js";
+import type { SpaceBoardSearch } from "../lib/address.js";
 import { isGoneError, SpaceIssuePeek } from "./SpaceIssuePeek.js";
 
 const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
@@ -67,9 +68,13 @@ function reply(status: number, body: unknown): Awaited<ReturnType<Transport>> {
 
 interface SetupOptions {
   body?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
+  comments?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
   issueId?: string;
   states?: typeof STATES;
   embedded?: boolean;
+  commentsEnabled?: boolean;
+  search?: SpaceBoardSearch;
+  viewer?: "signed-in" | "anonymous";
   /** Keep nodes already in body (the focus-origin scenario). */
   preserveBody?: boolean;
   /** Cached list row the board already had for this issue. */
@@ -83,8 +88,35 @@ interface SetupOptions {
 
 function setup(options: SetupOptions = {}) {
   const transport: Transport = async (url) => {
+    if (url.includes("/comments/")) {
+      return await (options.comments?.() ?? reply(200, []));
+    }
     if (url.includes("/issues/")) {
       return await (options.body?.() ?? reply(200, detail()));
+    }
+    if (url.endsWith("/users/me/")) {
+      return options.viewer === "signed-in"
+        ? reply(200, {
+            id: "523e4567-e89b-12d3-a456-426614174004",
+            email: "ada@example.com",
+            username: "ada",
+            first_name: "Ada",
+            last_name: "Lovelace",
+            display_name: "Ada Lovelace",
+            avatar: "",
+            avatar_url: null,
+            cover_image: null,
+            cover_image_url: null,
+            date_joined: "2026-01-01T00:00:00Z",
+            user_timezone: "UTC",
+            is_active: true,
+            is_bot: false,
+            is_email_verified: true,
+            is_password_autoset: false,
+            last_login_medium: "password",
+            last_login_time: null,
+          })
+        : reply(401, { detail: "no session" });
     }
     throw new Error(`unexpected request ${url}`);
   };
@@ -109,6 +141,7 @@ function setup(options: SetupOptions = {}) {
         embedded={options.embedded}
         votesEnabled={options.votesEnabled}
         reactionsEnabled={options.reactionsEnabled}
+        commentsEnabled={options.commentsEnabled}
         search={options.search}
         onRequireSignIn={options.onRequireSignIn}
       />
@@ -116,6 +149,29 @@ function setup(options: SetupOptions = {}) {
   );
   return { onClose, onInvalid, ...view };
 }
+
+describe("public comments wiring", () => {
+  it("passes the publisher flag and current position into the thread (SPC-049)", async () => {
+    setup({ commentsEnabled: true, search: { board: "kanban", peekId: ISSUE_ID, state: [TODO_ID] } });
+    expect(await screen.findByTestId("space-comments")).toBeInTheDocument();
+    expect(await screen.findByTestId("space-comments-signin")).toHaveAttribute(
+      "href",
+      `/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3D${ISSUE_ID}%26state%3D${TODO_ID}`
+    );
+  });
+
+  it("keeps the thread hidden when the publisher disables comments", async () => {
+    setup();
+    await screen.findByTestId("space-peek-key");
+    expect(screen.queryByTestId("space-comments")).not.toBeInTheDocument();
+  });
+
+  it("does not invite a signed-in viewer to sign in again", async () => {
+    setup({ commentsEnabled: true, viewer: "signed-in" });
+    expect(await screen.findByTestId("space-comments")).toBeInTheDocument();
+    expect(screen.queryByTestId("space-comments-signin")).not.toBeInTheDocument();
+  });
+});
 
 /** jsdom has no clipboard; install the two members each scenario needs. */
 function stubClipboard(permission: "granted" | "denied" | "unsupported") {

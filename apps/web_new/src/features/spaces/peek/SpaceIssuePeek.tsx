@@ -24,14 +24,15 @@ import { useQuery } from "@tanstack/react-query";
 import { RichTextView, hasStoredDescriptionContent } from "../../../shared/editor/index.js";
 import { PeekPanel } from "../../../shared/shell/PeekPanel.js";
 import { spaceRuntime } from "../api/client.js";
-import { spaceIssueDetailQueryOptions } from "../api/queries.js";
+import { spaceIssueDetailQueryOptions, spaceViewerQueryOptions } from "../api/queries.js";
+import type { SpaceBoardSearch } from "../lib/address.js";
 import { useClipboardWritePermission } from "../lib/clipboard.js";
 import { isSpaceIssueId } from "../lib/peek.js";
 import { notifySpaceCopyFailure, notifySpaceCopySuccess } from "../lib/spaceNotices.js";
 import { spaceMessage } from "../lib/spaceMessages.js";
 import { issueKey } from "../components/BoardShell.js";
 import { SpaceIssueEngagement } from "../engagement/SpaceIssueEngagement.js";
-import type { SpaceBoardSearch } from "../lib/address.js";
+import { SpaceCommentsSection } from "../comments/SpaceCommentsSection.js";
 import { SpaceOverlayProperties } from "./SpaceOverlayProperties.js";
 import { SpacePeekModeSwitch, type SpacePeekPresentation } from "./SpacePeekModeSwitch.js";
 
@@ -61,6 +62,8 @@ export interface SpaceIssuePeekProps {
   search?: SpaceBoardSearch | undefined;
   /** Anonymous activations leave here; without one the page navigates. */
   onRequireSignIn?: (() => void) | undefined;
+  /** Publisher flag for the comments section (SPC-049). */
+  commentsEnabled?: boolean | undefined;
 }
 
 /** Status code of a detail refusal that means "not this board's issue". */
@@ -113,11 +116,14 @@ export function SpaceIssuePeek({
   reactionsEnabled = false,
   search,
   onRequireSignIn,
+  commentsEnabled = false,
+  search = {},
 }: SpaceIssuePeekProps): React.ReactElement {
   const [presentation, setPresentation] = React.useState<SpacePeekPresentation>(initialPresentation);
   const client = spaceRuntime.client;
   const clipboardAllowed = useClipboardWritePermission();
   const detail = useQuery(spaceIssueDetailQueryOptions(client, anchor, issueId));
+  const viewer = useQuery(spaceViewerQueryOptions(client));
   const resolveAsset = usePublicAssetResolver(anchor, client.baseUrl);
   useRestoreOrigin();
 
@@ -214,6 +220,7 @@ export function SpaceIssuePeek({
           reactionsEnabled={reactionsEnabled}
           embedded={embedded}
           onRequireSignIn={onRequireSignIn}
+          comments={{ anchor, issueId, search, enabled: commentsEnabled, embedded, viewerId: viewer.data?.id ?? null }}
         />
       )}
     </PeekPanel>
@@ -232,6 +239,7 @@ function SpaceIssuePeekBody({
   reactionsEnabled,
   embedded,
   onRequireSignIn,
+  comments,
 }: {
   anchor: string;
   search: SpaceBoardSearch | undefined;
@@ -243,6 +251,14 @@ function SpaceIssuePeekBody({
   reactionsEnabled: boolean;
   embedded: boolean;
   onRequireSignIn: (() => void) | undefined;
+  comments: {
+    anchor: string;
+    issueId: string;
+    search: SpaceBoardSearch;
+    enabled: boolean;
+    embedded: boolean;
+    viewerId: string | null;
+  };
 }): React.ReactElement {
   const hasDescription = hasStoredDescriptionContent(issue.description_html);
   return (
@@ -276,6 +292,15 @@ function SpaceIssuePeekBody({
           <SpaceOverlayProperties issue={issue} states={states} />
         </aside>
       ) : null}
+      <SpaceCommentsSection
+        anchor={comments.anchor}
+        issueId={comments.issueId}
+        search={comments.search}
+        enabled={comments.enabled}
+        viewerId={comments.viewerId}
+        embedded={comments.embedded}
+        resolveAsset={resolveAsset}
+      />
     </div>
   );
 }

@@ -88,6 +88,16 @@ export const SPACE_MESSAGE_KEYS = [
   "engagement.you",
   "engagement.noVotes",
   "engagement.chooseReaction",
+  "comments.heading",
+  "comments.empty",
+  "comments.loading",
+  "comments.loadFailure",
+  "comments.retry",
+  "comments.commented",
+  "comments.expand",
+  "comments.collapse",
+  "comments.bodyLabel",
+  "comments.signInInvitation",
 ] as const;
 
 export type SpaceMessageKey = (typeof SPACE_MESSAGE_KEYS)[number];
@@ -175,6 +185,18 @@ const ENGLISH: Record<SpaceMessageKey, string> = {
   "engagement.you": "you",
   "engagement.noVotes": "No votes yet",
   "engagement.chooseReaction": "Choose a reaction",
+  // Public comment thread (SPC-049–052). The oracle recognises the thread
+  // by its test id and roles, not by any sentence in this catalog.
+  "comments.heading": "Comments",
+  "comments.empty": "No comments yet.",
+  "comments.loading": "Loading comments",
+  "comments.loadFailure": "Comments could not be loaded.",
+  "comments.retry": "Try again",
+  "comments.commented": "commented",
+  "comments.expand": "Show moderated comment",
+  "comments.collapse": "Hide moderated comment",
+  "comments.bodyLabel": "Comment body",
+  "comments.signInInvitation": "Sign in to join the conversation",
 };
 
 /** A locale pack: translated entries for a subset of the stable keys. */
