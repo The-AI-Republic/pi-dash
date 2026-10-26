@@ -861,6 +861,29 @@ pub fn encode_password(password: &str, salt: &str) -> String {
     crate::license::handlers_auth_forms::encode_password(password, salt, 600_000)
 }
 
+/// `post_save` receiver `create_user_notification` (`user.py:307-320`):
+/// a preferences row on every non-bot create (all five flags true).
+/// Same insert as the email/magic/gitlab signup paths.
+async fn insert_notification_prefs(
+    pool: &sqlx::PgPool,
+    now: chrono::DateTime<chrono::Utc>,
+    user_id: &uuid::Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
+         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
+         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
+         \"issue_completed\") \
+         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// New-user row (`base.py:299-328` + `User.save()` side effects,
 /// `user.py:167-187`): every NOT NULL `users` column is supplied —
 /// Django field defaults apply client-side, so the INSERT carries them
@@ -909,6 +932,9 @@ pub async fn insert_user(
     .bind(password_hash)
     .execute(pool)
     .await?;
+    // `post_save` fires on the first `save()` (`user.py:307`), before the
+    // profile/avatar writes the caller runs next — same as email/magic.
+    insert_notification_prefs(pool, now, &id).await?;
     Ok(())
 }
 
