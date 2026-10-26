@@ -443,3 +443,83 @@ def test_view_issues_datetimes_render_utc_z(api, seed, db, secret):
     # (db/models/issue.py:95-104), so a listed row always has a null
     # ``archived_at`` — the other three fields carry the zone coverage.
     assert drf(archived_at) is None and entry["archived_at"] is None, entry["archived_at"]
+
+
+def test_global_create_trims_name_and_description(api, seed, tenant_a, auth_a):
+    """DRF ``CharField(trim_whitespace=True)`` stores the stripped value;
+    ``max_length`` applies to it, so a 255-char name with trailing spaces
+    still passes (PIDASHCONV-1447)."""
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": "  x  ", "description": "notes\n", "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "x", body["name"]
+        assert body["description"] == "notes", body["description"]
+        g = api.get(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+        assert g.status_code == 200, g.text
+        assert g.json()["name"] == "x"
+        assert g.json()["description"] == "notes"
+    finally:
+        api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": "y" * 255 + "   ", "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "y" * 255, body["name"][:260]
+    finally:
+        api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+
+
+def test_global_create_blank_name_rejected(api, seed, tenant_a, auth_a):
+    """A name blank after stripping is 400, not a blank-looking row
+    (PIDASHCONV-1447)."""
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": "   ", "filters": {}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["This field may not be blank."]}
+
+
+def test_global_create_numeric_name_coerced(api, seed, tenant_a, auth_a):
+    """DRF coerces int/float via ``str()``; booleans stay invalid
+    (PIDASHCONV-1447)."""
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": 123, "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "123", body["name"]
+    finally:
+        api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": True, "filters": {}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["Not a valid string."]}
+
+
+def test_global_patch_trims_description(api, seed, tenant_a, auth_a):
+    """PATCH trims the description the same way create does
+    (PIDASHCONV-1447)."""
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"], name="G-trim"
+    )
+    r = api.patch(
+        f"{_global_url(tenant_a)}{view_id}/", headers=auth_a,
+        json={"description": "d\n"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["description"] == "d", r.json()["description"]
+    g = api.get(f"{_global_url(tenant_a)}{view_id}/", headers=auth_a)
+    assert g.status_code == 200, g.text
+    assert g.json()["description"] == "d"
