@@ -21,7 +21,11 @@ type TiptapImage = typeof import("@tiptap/extension-image").default;
  * Built inside the lazy loaders because the boundary check allows
  * Tiptap only through import().
  */
-function createMentionNode(Node: TiptapCore["Node"], mergeAttributes: TiptapCore["mergeAttributes"]) {
+function createMentionNode(
+  Node: TiptapCore["Node"],
+  mergeAttributes: TiptapCore["mergeAttributes"],
+  workspaceSlug = ""
+) {
   return Node.create({
     name: "mention",
     group: "inline",
@@ -51,16 +55,27 @@ function createMentionNode(Node: TiptapCore["Node"], mergeAttributes: TiptapCore
         const attrs = node.attrs as {
           "data-name"?: string | null;
           entity_identifier?: string | null;
+          entity_name?: string | null;
           id?: string | null;
         };
         const dom = document.createElement(MENTION_TAG);
         dom.setAttribute("contenteditable", "false");
+        // The live editor carries the same class the read surface uses so
+        // a page's mention is one observable component wherever it renders
+        // (PAGE-041).
+        dom.className = "mention-component";
         for (const [name, value] of Object.entries(attrs)) {
           if (typeof value === "string" && value !== "") dom.setAttribute(name, value);
         }
-        const chip = document.createElement("span");
+        const identifier = attrs.entity_identifier ?? attrs.id;
+        const href =
+          workspaceSlug !== "" && (attrs.entity_name ?? MENTION_ENTITY) === MENTION_ENTITY && identifier
+            ? `/${workspaceSlug}/profile/${encodeURIComponent(identifier)}`
+            : null;
+        const chip = document.createElement(href === null ? "span" : "a");
+        if (href !== null) chip.setAttribute("href", href);
         chip.className = "mention-chip";
-        chip.textContent = mentionLabel(attrs["data-name"], attrs.entity_identifier ?? attrs.id);
+        chip.textContent = mentionLabel(attrs["data-name"], identifier);
         dom.append(chip);
         return { dom };
       };
@@ -177,13 +192,18 @@ export async function loadDescriptionExtensions() {
  * upload control and mentions through its lookup, so this set only has
  * to parse and serialize what those controls insert.
  */
+export async function loadMentionExtension(workspaceSlug = "") {
+  const [{ Node, mergeAttributes }] = await Promise.all([import("@tiptap/core")]);
+  return createMentionNode(Node, mergeAttributes, workspaceSlug);
+}
+
 export async function loadIssueDescriptionExtensions() {
-  const [{ default: Image }, { Node, mergeAttributes }, base] = await Promise.all([
+  const [{ default: Image }, base, mention] = await Promise.all([
     import("@tiptap/extension-image"),
-    import("@tiptap/core"),
     loadDescriptionExtensions(),
+    loadMentionExtension(),
   ]);
-  return [...base, createStoredImageNode(Image), createMentionNode(Node, mergeAttributes)];
+  return [...base, createStoredImageNode(Image), mention];
 }
 
 /**

@@ -14,7 +14,15 @@ import DOMPurify, { type UponSanitizeAttributeHook } from "dompurify";
 import { MENTION_CONTENT_TAGS, MENTION_ENTITY } from "./mention.js";
 
 /** Editor node elements stored bodies carry beside ordinary HTML. */
-export const STORED_CONTENT_TAGS = ["mention-component", "image-component", "label", "input"] as const;
+export const STORED_CONTENT_TAGS = [
+  "mention-component",
+  "image-component",
+  "label",
+  "input",
+  "issue-embed-component",
+  "entity-reference-component",
+  "callout-component",
+] as const;
 
 /**
  * Attributes the stored-body contract keeps on the editor nodes
@@ -23,6 +31,17 @@ export const STORED_CONTENT_TAGS = ["mention-component", "image-component", "lab
  */
 const STORED_CONTENT_ATTRIBUTES: Record<string, readonly string[]> = {
   "mention-component": ["id", "entity_identifier", "entity_name", "data-name"],
+  // Work-item embeds keep every identifier the document stores (PAGE-040).
+  "issue-embed-component": ["id", "entity_identifier", "project_identifier", "workspace_identifier", "entity_name"],
+  // Entity references resolve through the shell peek (PAGE-043).
+  "entity-reference-component": [
+    "entity_name",
+    "entity_identifier",
+    "project_identifier",
+    "workspace_identifier",
+    "data-label",
+  ],
+  "callout-component": ["data-type"],
   "image-component": [
     "id",
     "src",
@@ -42,7 +61,8 @@ const STORED_CONTENT_ATTRIBUTES: Record<string, readonly string[]> = {
   th: ["colspan", "rowspan", "data-colwidth"],
   // Letter and wash marks (PAGE-036): the stored palette key paints the
   // span and is what a later edit reads back.
-  span: ["data-text-color", "data-background-color"],
+  // Letter/wash keys and the inline body emoji marker (PAGE-036, PAGE-042).
+  span: ["data-text-color", "data-background-color", "data-type"],
   label: ["class", "for"],
   input: ["type", "checked", "disabled"],
 };
@@ -183,6 +203,53 @@ export function renderableHtml(
       if (value !== null && value !== "") image.setAttribute(name, value);
     }
     element.replaceWith(image);
+  }
+  for (const element of Array.from(document.body.querySelectorAll("callout-component"))) {
+    // A callout is a container in storage; the read surface paints it as a
+    // distinct aside while keeping its child blocks intact (PAGE-037).
+    const aside = document.createElement("aside");
+    aside.setAttribute("data-type", "callout");
+    aside.setAttribute("class", "page-callout");
+    aside.append(...Array.from(element.childNodes));
+    element.replaceWith(aside);
+  }
+  for (const element of Array.from(document.body.querySelectorAll("issue-embed-component"))) {
+    // Community never fetches the referenced work item: it shows the
+    // upgrade prompt where a licensed resolver would paint the card
+    // (PAGE-040, §13.4). Identifiers remain data attributes for that slot.
+    const card = document.createElement("div");
+    card.setAttribute("class", "page-embed-upgrade");
+    for (const name of ["id", "entity_identifier", "project_identifier", "workspace_identifier", "entity_name"]) {
+      const value = element.getAttribute(name);
+      if (value !== null && value !== "") card.setAttribute(`data-${name.replace(/_/g, "-")}`, value);
+    }
+    const title = document.createElement("p");
+    title.textContent = "Work-item embeds are a Pro feature";
+    const body = document.createElement("p");
+    body.textContent = "Upgrade to show live work items inside a page.";
+    const link = document.createElement("a");
+    link.setAttribute("href", "https://airepublic.com/pricing");
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noreferrer");
+    link.textContent = "Upgrade";
+    card.append(title, body, link);
+    element.replaceWith(card);
+  }
+  for (const element of Array.from(document.body.querySelectorAll("entity-reference-component"))) {
+    // A recognised entity paints as a preview card; its identifiers stay on
+    // the node so the shell can open the matching peek (PAGE-043, §13.2).
+    const label = element.getAttribute("data-label") ?? element.getAttribute("entity_identifier") ?? "";
+    const preview = document.createElement("span");
+    preview.setAttribute("class", "page-entity-preview");
+    preview.setAttribute("data-entity-preview", "");
+    preview.setAttribute("role", "button");
+    preview.setAttribute("tabindex", "0");
+    for (const name of ["entity_name", "entity_identifier", "project_identifier", "workspace_identifier"]) {
+      const value = element.getAttribute(name);
+      if (value !== null && value !== "") preview.setAttribute(`data-${name.replace(/_/g, "-")}`, value);
+    }
+    preview.textContent = label;
+    element.replaceWith(preview);
   }
   return document.body.innerHTML;
 }

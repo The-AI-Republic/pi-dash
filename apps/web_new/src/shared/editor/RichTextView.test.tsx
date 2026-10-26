@@ -88,4 +88,24 @@ describe("RichTextView", () => {
       "/api/assets/v2/workspaces/acme/projects/p-1/35e8b958-6ee5-43ce-ae56-fb0e776f421e/"
     );
   });
+
+  it("renders stored callouts, embeds and entity previews (PAGE-037/040/043)", () => {
+    render(
+      <RichTextView
+        html={
+          '<callout-component data-type="callout"><p>Heads up</p></callout-component>' +
+          '<issue-embed-component id="emb-1" entity_identifier="ISS-1" entity_name="Embedded"></issue-embed-component>' +
+          '<entity-reference-component entity_name="issue" entity_identifier="ISS-2" data-label="Fix login"></entity-reference-component>'
+        }
+        label="Body"
+      />
+    );
+    const region = screen.getByRole("region", { name: "Body" });
+    expect(region.querySelector('aside[data-type="callout"]')).toHaveTextContent("Heads up");
+    expect(region.querySelector(".page-embed-upgrade")).toHaveTextContent("Pro feature");
+    expect(region.querySelector(".page-embed-upgrade a")?.getAttribute("href")).toContain("pricing");
+    expect(region.querySelector('[data-entity-preview][data-entity-identifier="ISS-2"]')).toHaveTextContent(
+      "Fix login"
+    );
+  });
 });

@@ -11,7 +11,7 @@ import type { AnyExtension } from "@tiptap/core";
 import { describe, expect, it } from "vitest";
 
 import { MENTION_ENTITY, MENTION_TAG, mentionAttributes } from "./mention.js";
-import { loadIssueDescriptionExtensions } from "./extensions.js";
+import { loadIssueDescriptionExtensions, loadMentionExtension } from "./extensions.js";
 
 type LoadedNode = Awaited<ReturnType<typeof loadIssueDescriptionExtensions>>[number];
 
@@ -60,6 +60,35 @@ describe("MentionNode", () => {
     expect(rendered.dom.tagName.toLowerCase()).toBe(MENTION_TAG);
     expect(rendered.dom.textContent).toBe("@Ada");
     expect(rendered.dom.getAttribute("entity_identifier")).toBe("u-1");
+  });
+
+  it("links an editing chip to the member profile when the workspace is known (PAGE-041)", async () => {
+    const node = await loadMentionExtension("acme");
+    const view = node.config.addNodeView?.call({ options: {}, editor: {} } as never);
+    if (typeof view !== "function") throw new Error("the mention node has no view");
+    const rendered = view({
+      node: { attrs: mentionAttributes({ id: "u-1", name: "Ada" }) },
+      editor: {},
+      getPos: () => 0,
+      view: {},
+    } as never) as unknown as { dom: HTMLElement };
+    expect(rendered.dom).toHaveClass("mention-component");
+    expect(rendered.dom.querySelector("a")).toHaveAttribute("href", "/acme/profile/u-1");
+    expect(rendered.dom.textContent).toBe("@Ada");
+  });
+
+  it("keeps a plain chip without a workspace or for another entity kind", async () => {
+    const node = await loadMentionExtension("");
+    const view = node.config.addNodeView?.call({ options: {}, editor: {} } as never);
+    if (typeof view !== "function") throw new Error("the mention node has no view");
+    const rendered = view({
+      node: { attrs: mentionAttributes({ id: "u-1", name: "Ada" }) },
+      editor: {},
+      getPos: () => 0,
+      view: {},
+    } as never) as unknown as { dom: HTMLElement };
+    expect(rendered.dom.querySelector("a")).toBeNull();
+    expect(rendered.dom.className).toBe("mention-component");
   });
 
   it("falls back to the identifier in the chip on older bodies", async () => {

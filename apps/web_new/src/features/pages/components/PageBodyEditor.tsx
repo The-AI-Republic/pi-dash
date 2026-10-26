@@ -39,18 +39,29 @@ export interface PageBodyEditorProps {
   onReady: (handle: PageEditorHandle) => void;
   /** Accessible name of the editing region. */
   label: string;
+  /** Workspace slug: mention chips link to member profiles (PAGE-041). */
+  workspaceSlug?: string | undefined;
   /** Placeholder shown while the document is empty. */
   placeholder?: string | undefined;
   /** Handles the editor's own keyboard conveniences. */
   handleKeyDown?: ((event: KeyboardEvent) => boolean) | undefined;
+  /**
+   * Rewrites pasted markup before it lands (PAGE-039). A picture from
+   * another page is cloned first; a null answer means the paste is
+   * refused (the caller has already reported why) and nothing is inserted.
+   */
+  onPasteHtml?: ((html: string) => Promise<string | null>) | undefined;
 }
 
 /** Tiptap's EditorContent takes its own editor type; this is ours. */
 type TiptapEditor = Parameters<typeof import("@tiptap/react").EditorContent>[0]["editor"];
 
 /** Load the page editor: the Tiptap chunk plus the page extension set. */
-async function loadPageEditor(): Promise<{ default: React.ComponentType<PageBodyEditorProps> }> {
-  const [{ EditorContent, useEditor }, extensions] = await Promise.all([import("@tiptap/react"), loadPageExtensions()]);
+async function loadPageEditor(workspaceSlug: string): Promise<{ default: React.ComponentType<PageBodyEditorProps> }> {
+  const [{ EditorContent, useEditor }, extensions] = await Promise.all([
+    import("@tiptap/react"),
+    loadPageExtensions(workspaceSlug),
+  ]);
 
   function EditorBody({
     initialHtml,
@@ -61,6 +72,7 @@ async function loadPageEditor(): Promise<{ default: React.ComponentType<PageBody
     label,
     placeholder,
     handleKeyDown,
+    onPasteHtml,
   }: PageBodyEditorProps): React.ReactElement {
     const shownHtml = React.useMemo(() => prepareEditorHtml(initialHtml, resolveAsset), [initialHtml, resolveAsset]);
     const onChangeRef = React.useRef(onChange);
@@ -69,6 +81,8 @@ async function loadPageEditor(): Promise<{ default: React.ComponentType<PageBody
     formattingRef.current = onFormattingChange;
     const keyRef = React.useRef(handleKeyDown);
     keyRef.current = handleKeyDown;
+    const pasteRef = React.useRef(onPasteHtml);
+    pasteRef.current = onPasteHtml;
     const readyRef = React.useRef(onReady);
     readyRef.current = onReady;
     const lastStateRef = React.useRef<PageFormattingState | null>(null);
@@ -110,6 +124,23 @@ async function loadPageEditor(): Promise<{ default: React.ComponentType<PageBody
       if (editor !== null) readyRef.current(pageEditorHandle(editor as unknown as PageEditorRef));
     }, [editor]);
 
+    // A paste carrying stored markup may point at a picture owned by
+    // another page. The handler rewrites it first, then inserts the result
+    // as an ordinary document edit (PAGE-039). Text-only pastes keep the
+    // editor's native Markdown handling.
+    React.useEffect(() => {
+      if (editor === null) return;
+      const dom = editor.view.dom;
+      const onPaste = (event: ClipboardEvent): void => {
+        handlePagePaste(event, pasteRef.current, (html) => editor.commands.insertContent(html));
+      };
+      // Capture runs before the editor's own paste handler, and a handled
+      // paste stops there: otherwise the original markup lands first and
+      // the rewritten clone is inserted a second time (PAGE-039).
+      dom.addEventListener("paste", onPaste, true);
+      return () => dom.removeEventListener("paste", onPaste, true);
+    }, [editor]);
+
     if (editor === null) return <div aria-hidden="true" className="relative" />;
     return (
       <div className="relative">
@@ -126,6 +157,55 @@ async function loadPageEditor(): Promise<{ default: React.ComponentType<PageBody
   return { default: EditorBody };
 }
 
+/** The clipboard flavours a page paste reads (a browser ClipboardEvent). */
+export interface PagePasteEvent {
+  clipboardData?: { getData: (type: string) => string } | null | undefined;
+  preventDefault: () => void;
+  stopPropagation: () => void;
+}
+
+/**
+ * Decide one paste (PAGE-037, PAGE-039). Stored markup goes through the
+ * caller's rewrite first; Markdown text becomes blocks; anything else is
+ * left to the editor's native paste. A handled paste is claimed
+ * synchronously so the editor never inserts the unrewritten form.
+ */
+export function handlePagePaste(
+  event: PagePasteEvent,
+  paste: ((html: string) => Promise<string | null>) | undefined,
+  insert: (html: string) => void
+): boolean {
+  const html = event.clipboardData?.getData("text/html") ?? "";
+  if (html !== "") {
+    if (paste === undefined) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    void paste(html).then((rewritten) => {
+      if (rewritten !== null) insert(rewritten);
+    });
+    return true;
+  }
+  const text = event.clipboardData?.getData("text/plain") ?? "";
+  if (!looksLikeMarkdown(text)) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  void markdownToEditorHtml(text).then((markup) => {
+    if (markup !== "") insert(markup);
+  });
+  return true;
+}
+
+/** Whether a plain-text paste carries Markdown structure worth parsing. */
+export function looksLikeMarkdown(text: string): boolean {
+  return /^#{1,6} |^[-*+] |^\d+\. |^> |^```|\*\*|__|\[[^\]]+\]\([^)]+\)/m.test(text);
+}
+
+/** Render pasted Markdown to stored editor markup, never to raw HTML. */
+async function markdownToEditorHtml(text: string): Promise<string> {
+  const { markdownHtml } = await import("../../../shared/markdown/index.js");
+  return markdownHtml(text);
+}
+
 /** Text-only reading of stored HTML, for the empty placeholder. */
 function plainTextOf(html: string): string {
   return html.replace(/<[^>]*>/g, "").trim();
@@ -135,4 +215,19 @@ function plainTextOf(html: string): string {
  * The page's lazy body editor. Suspends while the editor chunk loads, so
  * callers render it under Suspense with the read-only body as fallback.
  */
-export const PageBodyEditor = /* #__PURE__ */ React.lazy(loadPageEditor);
+const PAGE_EDITORS = new Map<string, React.LazyExoticComponent<React.ComponentType<PageBodyEditorProps>>>();
+
+/** One lazy editor per workspace: the extension set owns its mention links. */
+function pageEditorFor(workspaceSlug: string): React.LazyExoticComponent<React.ComponentType<PageBodyEditorProps>> {
+  let editor = PAGE_EDITORS.get(workspaceSlug);
+  if (editor === undefined) {
+    editor = React.lazy(() => loadPageEditor(workspaceSlug));
+    PAGE_EDITORS.set(workspaceSlug, editor);
+  }
+  return editor;
+}
+
+export function PageBodyEditor({ workspaceSlug = "", ...props }: PageBodyEditorProps): React.ReactElement {
+  const Editor = pageEditorFor(workspaceSlug);
+  return <Editor {...props} />;
+}

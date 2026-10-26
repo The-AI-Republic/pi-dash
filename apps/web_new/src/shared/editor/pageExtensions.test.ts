@@ -78,9 +78,10 @@ describe("page extension set", () => {
   it("adds underline, alignment, checkable lists, tables, colour and images to the description core", async () => {
     const base = (await loadDescriptionExtensions()) as unknown as AnyExtension[];
     const page = await loadPageExtensions();
-    // Four page marks/blocks, four table nodes, one colour mark and one
-    // stored-image node.
-    expect(page).toHaveLength(base.length + 10);
+    // Four page marks/blocks, four table nodes, one colour mark, one
+    // stored-image node, one mention and the four block nodes (callout,
+    // emoji, embed, entity reference).
+    expect(page).toHaveLength(base.length + 15);
     const names = page.map((extension) => extension.name);
     expect(names).toContain("underline");
     expect(names).toContain("textAlign");
@@ -92,6 +93,11 @@ describe("page extension set", () => {
     expect(names).toContain("tableHeader");
     expect(names).toContain("pageColor");
     expect(names).toContain("image");
+    expect(names).toContain("mention");
+    expect(names).toContain("pageCallout");
+    expect(names).toContain("pageEmoji");
+    expect(names).toContain("pageEmbed");
+    expect(names).toContain("pageEntityReference");
     expect(names).toContain("starterKit");
   });
 

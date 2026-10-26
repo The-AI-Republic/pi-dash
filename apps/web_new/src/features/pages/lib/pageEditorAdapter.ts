@@ -16,6 +16,7 @@ import {
   type PageFormatCommand,
   type PageFormattingState,
 } from "../../../shared/editor/pageFormatting.js";
+import { emojiHtml, embedHtml, type PageCatalogBlockKind, type PageEmbedAttributes } from "./pageBlocks.js";
 
 /** The chain methods this adapter calls, by the command that calls them. */
 export interface PageEditorChain {
@@ -41,6 +42,14 @@ export interface PageEditorChain {
   unsetMark: (name: string) => PageEditorChain;
   /** Insert one node or HTML string at the caret (PAGE-034). */
   insertContent: (content: unknown) => PageEditorChain;
+  /** Add the next block after the caret without joining it (PAGE-037). */
+  insertContentAt: (position: number | "end", content: unknown) => PageEditorChain;
+  /** Delete one document range (drag-handle Delete). */
+  deleteRange: (range: { from: number; to: number }) => PageEditorChain;
+  /** Set or replace the link mark on the selection (PAGE-043). */
+  setLink: (attributes: { href: string }) => PageEditorChain;
+  /** Remove the link mark (PAGE-043). */
+  unsetLink: () => PageEditorChain;
   run: () => boolean;
 }
 
@@ -63,9 +72,19 @@ export interface PageEditorRef {
   getAttributes?: (name: string) => Record<string, unknown>;
   state: {
     selection: {
+      from?: number;
+      to?: number;
       $from: {
+        depth?: number;
         parent: { type: { name: string }; attrs: Record<string, unknown>; textContent: string };
+        start?: () => number;
+        parentOffset?: number;
+        before?: (depth: number) => number;
+        after?: (depth: number) => number;
+        node?: (depth: number) => { nodeSize: number; toJSON: () => unknown };
+        textBetween?: (from: number, to: number, block?: string, leaf?: string) => string;
       };
+      $to?: { parentOffset?: number };
     };
   };
 }
@@ -84,6 +103,35 @@ export interface PageEditorHandle {
   insertImage: (src: string, storedSrc: string) => void;
   /** Restyle the block under the caret as the given typography entry. */
   applyBlockKind: (kind: PageBlockKind) => void;
+  /** Run one slash-catalogue entry (PAGE-037). */
+  applyCatalogBlock: (block: PageCatalogBlockKind) => void;
+  /** Insert an inline body emoji at the caret (PAGE-042). */
+  insertEmoji: (glyph: string) => void;
+  /** Insert a person mention at the caret, replacing a live @query (PAGE-041). */
+  insertMention: (target: { id: string; name: string }) => void;
+  /** Insert a work-item embed as an atomic block (PAGE-040). */
+  insertEmbed: (attributes: PageEmbedAttributes) => void;
+  /** Duplicate or delete the block that owns the caret (PAGE-037). */
+  duplicateBlock: () => void;
+  deleteBlock: () => void;
+  /** Set the link on the selection in place (PAGE-043). */
+  setLink: (href: string) => void;
+  /** Remove the link mark from the selection (PAGE-043). */
+  unsetLink: () => void;
+  /** The live document HTML, for the copy-markup entry (PAGE-044). */
+  html: () => string;
+  /** The link mark's address under the caret, or null (PAGE-043). */
+  linkHref: () => string | null;
+  /** Whether the editor currently has a non-empty text selection (PAGE-037). */
+  hasSelection: () => boolean;
+  /** Text between the block start and the caret, for slash/@ queries. */
+  textBeforeCaret: () => string;
+  /** Delete the typed slash/@ trigger immediately before the caret. */
+  deleteBeforeCaret: (length: number) => void;
+  /** The selected text, for the link bubble prefill. */
+  selectedText: () => string;
+  /** Collapse the caret to the end of the document. */
+  focusEnd: () => void;
   /** Put the caret at the very start of the body (title Enter, PAGE-026). */
   focusStart: () => void;
   /** The formatting state right now, for a bar that mounted after it. */
@@ -284,8 +332,176 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
     applyColor: (kind, key) => applyPageColor(editor, kind, key),
     clearColor: (kind) => clearPageColor(editor, kind),
     insertImage: (src, storedSrc) => runInsertImage(editor, src, storedSrc),
+    applyCatalogBlock: (block) => runCatalogBlock(editor, block),
+    insertEmoji: (glyph) => insertPageEmoji(editor, glyph),
+    insertMention: (target) =>
+      editor
+        .chain()
+        .focus()
+        .insertContent({
+          type: "mention",
+          attrs: { id: target.id, entity_identifier: target.id, entity_name: "user_mention", "data-name": target.name },
+        })
+        .run(),
+    insertEmbed: (attributes) => insertPageEmbed(editor, attributes),
+    duplicateBlock: () => duplicatePageBlock(editor),
+    deleteBlock: () => deletePageBlock(editor),
+    setLink: (href) => linkSelection(editor, href),
+    unsetLink: () => unlinkSelection(editor),
+    html: () => editor.getHTML(),
+    linkHref: () => {
+      if (!editor.isActive("link") || editor.getAttributes === undefined) return null;
+      const href = editor.getAttributes("link")["href"];
+      return typeof href === "string" && href !== "" ? href : null;
+    },
+    hasSelection: () => {
+      const { from, to } = editor.state.selection;
+      return from !== undefined && to !== undefined && to > from;
+    },
+    textBeforeCaret: () => pageTextBeforeCaret(editor),
+    deleteBeforeCaret: (length) => deleteContentBeforeCaret(editor, length),
+    selectedText: () => selectedPageText(editor),
+    focusEnd: () => editor.commands.focus("end"),
     focusStart: () => editor.commands.focus(PAGE_BODY_START),
     readState: () => editorFormattingState(editor),
     replaceBody: (html) => replacePageBody(editor, html),
   };
+}
+
+/** One top-level block around the caret: its document range and JSON. */
+export interface PageCaretBlock {
+  from: number;
+  to: number;
+  json: unknown;
+}
+
+/**
+ * The top-level block the caret sits in. Depth 1 is the document's own
+ * child list, so a paragraph inside a callout resolves at its outer
+ * container when the selection is deeper than one level.
+ */
+export function caretBlockRange(editor: PageEditorRef): PageCaretBlock | null {
+  const { $from } = editor.state.selection;
+  const depth = $from.depth ?? 0;
+  if (depth < 1 || $from.before === undefined || $from.after === undefined || $from.node === undefined) return null;
+  return { from: $from.before(1), to: $from.after(1), json: $from.node(1).toJSON() };
+}
+
+/** Duplicate the block under the caret, immediately after itself. */
+export function duplicatePageBlock(editor: PageEditorRef): void {
+  const block = caretBlockRange(editor);
+  if (block === null) return;
+  editor.chain().focus().insertContentAt(block.to, block.json).run();
+}
+
+/** Remove the block under the caret (never the surrounding document). */
+export function deletePageBlock(editor: PageEditorRef): void {
+  const block = caretBlockRange(editor);
+  if (block === null) return;
+  editor.chain().focus().deleteRange({ from: block.from, to: block.to }).run();
+}
+
+/** Insert one slash-catalogue entry at the caret (PAGE-037). */
+export function runCatalogBlock(editor: PageEditorRef, block: PageCatalogBlockKind): void {
+  switch (block) {
+    case "text":
+      runBlockKind(editor, "paragraph");
+      return;
+    case "heading1":
+    case "heading2":
+    case "heading3":
+    case "heading4":
+    case "heading5":
+    case "heading6":
+      runBlockKind(editor, block);
+      return;
+    case "numbered":
+      runPageCommand(editor, "orderedList");
+      return;
+    case "bulleted":
+      runPageCommand(editor, "bulletList");
+      return;
+    case "todo":
+      runPageCommand(editor, "taskList");
+      return;
+    case "table":
+      insertPageTable(editor);
+      return;
+    case "quote":
+      runPageCommand(editor, "blockquote");
+      return;
+    case "code":
+      editor.chain().focus().insertContent({ type: "codeBlock" }).run();
+      return;
+    case "callout":
+      editor
+        .chain()
+        .focus()
+        .insertContent({ type: "pageCallout", content: [{ type: "paragraph" }] })
+        .run();
+      return;
+    case "divider":
+      editor.chain().focus().insertContent({ type: "horizontalRule" }).run();
+      return;
+    case "emoji":
+      // The palette row opens the inline picker instead of inserting a
+      // block; the surface handles this sentinel before reaching here.
+      return;
+    case "image":
+      return;
+  }
+}
+
+/** Insert one body emoji inline at the caret (PAGE-042). */
+export function insertPageEmoji(editor: PageEditorRef, glyph: string): void {
+  editor.chain().focus().insertContent(emojiHtml(glyph)).run();
+}
+
+/**
+ * Insert a fresh asset picture, cloning a foreign asset first when the
+ * source belongs to another page (PAGE-039). The clone result is the new
+ * stored id; the caller supplies the served address.
+ */
+export function insertPageEmbed(editor: PageEditorRef, attributes: PageEmbedAttributes): void {
+  editor.chain().focus().insertContent(embedHtml(attributes)).run();
+}
+
+/** Set the link on the current selection in place (PAGE-043). */
+export function linkSelection(editor: PageEditorRef, href: string): void {
+  editor.chain().focus().setLink({ href }).run();
+}
+
+/** Remove the link mark from the selection (PAGE-043). */
+export function unlinkSelection(editor: PageEditorRef): void {
+  editor.chain().focus().unsetLink().run();
+}
+
+/** The selected text, or the text block under the caret (link prefill). */
+export function selectedPageText(editor: PageEditorRef): string {
+  const { $from } = editor.state.selection;
+  const selection = editor.state.selection;
+  if (selection.from !== undefined && selection.to !== undefined && selection.to > selection.from) {
+    const textBetween = $from.textBetween;
+    if (textBetween !== undefined) return textBetween(selection.from, selection.to, " ");
+  }
+  return $from.parent.textContent ?? "";
+}
+
+/** Delete `length` characters immediately before the caret. */
+export function deleteContentBeforeCaret(editor: PageEditorRef, length: number): void {
+  const { $from } = editor.state.selection;
+  if (length <= 0 || $from.start === undefined || $from.parentOffset === undefined) return;
+  const caret = $from.start() + $from.parentOffset;
+  editor
+    .chain()
+    .focus()
+    .deleteRange({ from: caret - length, to: caret })
+    .run();
+}
+
+/** Text before the caret in its own block, for slash and @ queries. */
+export function pageTextBeforeCaret(editor: PageEditorRef): string {
+  const { $from } = editor.state.selection;
+  if ($from.textBetween === undefined || $from.parentOffset === undefined) return "";
+  return $from.textBetween(0, $from.parentOffset, undefined, "\ufffc");
 }

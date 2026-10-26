@@ -14,7 +14,8 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getPageBodyDraft, resetPageBodyDrafts, setPageBodyDraft } from "../lib/pageBodyDraft.js";
-import { PageEditorSurface, PAGE_BODY_LABEL, PAGE_BODY_PLACEHOLDER } from "./PageEditorSurface.js";
+import { getPageBodyActions, resetPageBodyActions } from "../lib/pageBodyActions.js";
+import { openPageImagePicker, PageEditorSurface, PAGE_BODY_LABEL, PAGE_BODY_PLACEHOLDER } from "./PageEditorSurface.js";
 
 const EDITOR_TEST_TIMEOUT = 30_000;
 
@@ -26,10 +27,14 @@ vi.mock("../../../shared/shell/toaster.js", () => ({
 const appClient = vi.hoisted(() => ({ getAppClient: vi.fn(() => ({ kind: "app-client" })) }));
 vi.mock("../../../core/api/client.js", () => ({ getAppClient: appClient.getAppClient }));
 
-const pageAssets = vi.hoisted(() => ({ uploadPageAsset: vi.fn() }));
+const pageAssets = vi.hoisted(() => ({ uploadPageAsset: vi.fn(), duplicatePageAsset: vi.fn() }));
 vi.mock("@pidash/api-client", async (original) => {
   const actual = await original<typeof import("@pidash/api-client")>();
-  return { ...actual, uploadPageAsset: pageAssets.uploadPageAsset };
+  return {
+    ...actual,
+    uploadPageAsset: pageAssets.uploadPageAsset,
+    duplicatePageAsset: pageAssets.duplicatePageAsset,
+  };
 });
 
 function mount(props: Partial<React.ComponentProps<typeof PageEditorSurface>> = {}): ReturnType<typeof render> {
@@ -65,11 +70,22 @@ async function body(): Promise<HTMLElement> {
   return editable;
 }
 
+/** Dispatch a stored-markup paste the editor's capture handler reads. */
+function clipboardPaste(target: HTMLElement, html: string): void {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { getData: (type: string) => (type === "text/html" ? html : "") },
+  });
+  target.dispatchEvent(event);
+}
+
 afterEach(() => {
   resetPageBodyDrafts();
+  resetPageBodyActions();
   toaster.notifyError.mockReset();
   appClient.getAppClient.mockClear();
   pageAssets.uploadPageAsset.mockReset();
+  pageAssets.duplicatePageAsset.mockReset();
 });
 
 describe(
@@ -365,6 +381,9 @@ describe(
       const editable = await body();
       const user = userEvent.setup();
       await user.dblClick(within(editable).getByText("Stored words"));
+      // The mark must own a text selection before the colour command runs;
+      // a click in the popover tears down a selection that has not landed.
+      await vi.waitFor(() => expect(window.getSelection()?.toString().trim()).not.toBe(""));
       fireEvent.click(screen.getByRole("button", { name: "Color" }));
       fireEvent.click(await screen.findByRole("button", { name: "Letter color Pink" }));
       await vi.waitFor(() => expect(editable.querySelector('[data-text-color="pink"]')).not.toBeNull());
@@ -383,6 +402,49 @@ describe(
         const row = await screen.findByTestId(`page-color-row-${kind}`);
         expect(within(row).getAllByRole("button")).toHaveLength(9);
       }
+    });
+    it("clones a foreign pasted asset before it lands", async () => {
+      pageAssets.duplicatePageAsset.mockResolvedValue({ asset_id: "asset-cloned" });
+      mount();
+      const editable = await body();
+      clipboardPaste(editable, '<image-component data-stored-src="asset-foreign"></image-component>');
+
+      await vi.waitFor(() => expect(pageAssets.duplicatePageAsset).toHaveBeenCalledTimes(1));
+      const call = pageAssets.duplicatePageAsset.mock.calls[0] as unknown[];
+      expect(call[1]).toBe("acme");
+      expect(call[2]).toBe("project-1");
+      expect(call[3]).toBe("asset-foreign");
+      expect(call[4]).toBe("page-1");
+      await vi.waitFor(() =>
+        expect(editable.querySelector("image-component")?.getAttribute("data-stored-src")).toBe("asset-cloned")
+      );
+    });
+
+    it("opens the surface's own picker from another entry", () => {
+      mount();
+      const input = screen.getByTestId("page-toolbar-image-input") as HTMLInputElement;
+      const click = vi.spyOn(input, "click").mockImplementation(() => undefined);
+      openPageImagePicker();
+      expect(click).toHaveBeenCalledTimes(1);
+    });
+
+    it("publishes the copy entry before the editor handle exists", async () => {
+      mount();
+      await vi.waitFor(() => expect(getPageBodyActions()).not.toBeNull());
+      const writeText = vi.fn(async () => undefined);
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      await getPageBodyActions()?.copyMarkdown();
+      expect(writeText).toHaveBeenCalledWith("Stored words\n");
+      vi.unstubAllGlobals();
+    });
+
+    it("reports a refused clone instead of pasting the foreign asset", async () => {
+      pageAssets.duplicatePageAsset.mockRejectedValue(new Error("Clone refused."));
+      mount();
+      const editable = await body();
+      clipboardPaste(editable, '<image-component data-stored-src="asset-foreign"></image-component>');
+      await vi.waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Clone refused."));
+      expect(editable.querySelector("image-component")).toBeNull();
     });
   },
   EDITOR_TEST_TIMEOUT

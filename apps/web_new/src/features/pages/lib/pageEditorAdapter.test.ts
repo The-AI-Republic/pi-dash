@@ -11,6 +11,16 @@ import { describe, expect, it } from "vitest";
 import {
   applyPageColor,
   caretBlockOf,
+  deleteContentBeforeCaret,
+  deletePageBlock,
+  duplicatePageBlock,
+  insertPageEmoji,
+  insertPageEmbed,
+  linkSelection,
+  pageTextBeforeCaret,
+  selectedPageText,
+  runCatalogBlock,
+  unlinkSelection,
   clearPageColor,
   editorFormattingState,
   insertPageTable,
@@ -202,6 +212,50 @@ describe("pageEditorHandle", () => {
     expect(pageEditorHandle(ref).replaceBody("<p>From the snapshot</p>")).toBe(false);
   });
 
+  it("forwards catalogue blocks, emoji, mentions, embeds and blocks through the handle", () => {
+    const { ref, calls } = editor();
+    const handle = pageEditorHandle(ref);
+    handle.applyCatalogBlock("code");
+    handle.insertEmoji("🎉");
+    handle.insertMention({ id: "u-1", name: "Ada" });
+    handle.insertEmbed({
+      id: "a",
+      entity_identifier: "ISS-1",
+      project_identifier: "P",
+      workspace_identifier: "ws",
+      entity_name: "Named",
+    });
+    handle.duplicateBlock();
+    handle.deleteBlock();
+    expect(calls.some((call) => call.startsWith("insertContent("))).toBe(true);
+    expect(calls).toContain("run");
+  });
+
+  it("forwards link writes, the body HTML and the caret jumps", () => {
+    const { ref, calls, focused } = editor();
+    const handle = pageEditorHandle(ref);
+    handle.setLink("https://example.com");
+    handle.unsetLink();
+    expect(handle.html()).toBe("<p></p>");
+    handle.focusEnd();
+    handle.deleteBeforeCaret(2);
+    handle.selectedText();
+    expect(focused).toEqual(["end"]);
+    expect(calls).toContain("setLink([object Object])");
+    expect(calls).toContain("unsetLink");
+  });
+
+  it("reports a selection only when the range is non-empty", () => {
+    const base = editor();
+    const empty = pageEditorHandle(base.ref);
+    expect(empty.hasSelection()).toBe(false);
+    const selected = {
+      ...base.ref,
+      state: { selection: { from: 2, to: 5, $from: base.ref.state.selection.$from } },
+    };
+    expect(pageEditorHandle(selected).hasSelection()).toBe(true);
+  });
+
   it("reads the live formatting state", () => {
     const { ref } = editor({ active: ["italic"] });
     expect(pageEditorHandle(ref).readState()).toMatchObject({ italic: true });
@@ -289,5 +343,250 @@ describe("colour commands", () => {
     const { ref, calls } = editor();
     applyPageColor(ref, "text", "gray");
     expect(calls).toEqual(["focus", `setMark(${PAGE_COLOR_MARK}, [object Object])`, "run"]);
+  });
+});
+
+describe("page block catalogue commands", () => {
+  it("restyles typography entries through the block path", () => {
+    const { ref, calls } = editor();
+    runCatalogBlock(ref, "heading3");
+    expect(calls).toEqual(["focus", "toggleHeading(3)", "run"]);
+    const text = editor();
+    runCatalogBlock(text.ref, "text");
+    expect(text.calls).toEqual(["focus", "setParagraph", "run"]);
+  });
+
+  it.each([
+    ["numbered", "toggleOrderedList"],
+    ["bulleted", "toggleBulletList"],
+    ["todo", "toggleTaskList"],
+    ["quote", "toggleBlockquote"],
+  ] as const)("runs %s through its own command", (block, command) => {
+    const { ref, calls } = editor();
+    runCatalogBlock(ref, block);
+    expect(calls).toEqual(["focus", command, "run"]);
+  });
+
+  it("inserts a table, a fenced code block, a callout and a divider", () => {
+    const table = editor();
+    runCatalogBlock(table.ref, "table");
+    expect(table.calls).toEqual(["focus", "insertPageTable([object Object])", "run"]);
+
+    const code = editor();
+    runCatalogBlock(code.ref, "code");
+    expect(code.calls).toEqual(["focus", "insertContent([object Object])", "run"]);
+
+    const callout = editor();
+    runCatalogBlock(callout.ref, "callout");
+    expect(callout.calls).toEqual(["focus", "insertContent([object Object])", "run"]);
+
+    const divider = editor();
+    runCatalogBlock(divider.ref, "divider");
+    expect(divider.calls[1]).toBe("insertContent([object Object])");
+  });
+
+  it("leaves the image and emoji entries to the interaction layer", () => {
+    for (const block of ["image", "emoji"] as const) {
+      const { ref, calls } = editor();
+      runCatalogBlock(ref, block);
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it("inserts a body emoji as marked inline markup", () => {
+    const { ref, calls } = editor();
+    insertPageEmoji(ref, "🎉");
+    expect(calls).toEqual(["focus", 'insertContent(<span data-type="emoji">🎉</span>)', "run"]);
+  });
+
+  it("inserts an embed as the stored element", () => {
+    const { ref, calls } = editor();
+    insertPageEmbed(ref, {
+      id: "a",
+      entity_identifier: "ISS-1",
+      project_identifier: "P",
+      workspace_identifier: "ws",
+      entity_name: "Named",
+    });
+    expect(calls[0]).toBe("focus");
+    expect(calls[1]).toContain("<issue-embed-component");
+    expect(calls[1]).toContain('entity_identifier="ISS-1"');
+    expect(calls[2]).toBe("run");
+  });
+
+  it("sets and removes a link on the selection", () => {
+    const link = editor();
+    linkSelection(link.ref, "https://example.com");
+    expect(link.calls).toEqual(["focus", "setLink([object Object])", "run"]);
+    const unlink = editor();
+    unlinkSelection(unlink.ref);
+    expect(unlink.calls).toEqual(["focus", "unsetLink", "run"]);
+  });
+
+  it("deletes the typed trigger immediately before the caret", () => {
+    const { ref, calls } = editorAt({ from: 6, parentOffset: 4, start: 2 });
+    deleteContentBeforeCaret(ref, 3);
+    expect(calls).toEqual(["focus", "deleteRange([object Object])", "run"]);
+  });
+});
+
+/** An editor whose caret sits at a known document position. */
+function editorAt(selection: { from: number; start: number; parentOffset: number }): {
+  ref: PageEditorRef;
+  calls: string[];
+} {
+  const base = editor();
+  const ref: PageEditorRef = {
+    ...base.ref,
+    state: {
+      selection: {
+        from: selection.from,
+        to: selection.from,
+        $from: {
+          parent: { type: { name: "paragraph" }, attrs: {}, textContent: "abcd" },
+          start: () => selection.start,
+          parentOffset: selection.parentOffset,
+        },
+      },
+    },
+  };
+  return { ref, calls: base.calls };
+}
+
+describe("block duplication and deletion", () => {
+  it("duplicates the top-level block after itself", () => {
+    const { ref, calls } = editorBlock();
+    duplicatePageBlock(ref);
+    expect(calls).toEqual(["focus", "insertContentAt(12, [object Object])", "run"]);
+  });
+
+  it("deletes the top-level block's range", () => {
+    const { ref, calls } = editorBlock();
+    deletePageBlock(ref);
+    expect(calls).toEqual(["focus", "deleteRange([object Object])", "run"]);
+  });
+
+  it("declines when the caret is not inside a block", () => {
+    const { ref, calls } = editor();
+    duplicatePageBlock(ref);
+    deletePageBlock(ref);
+    expect(calls).toEqual([]);
+  });
+});
+
+function editorBlock(): { ref: PageEditorRef; calls: string[] } {
+  const base = editor();
+  const ref: PageEditorRef = {
+    ...base.ref,
+    state: {
+      selection: {
+        $from: {
+          depth: 1,
+          parent: { type: { name: "paragraph" }, attrs: {}, textContent: "block" },
+          before: () => 4,
+          after: () => 12,
+          node: () => ({ nodeSize: 8, toJSON: () => ({ type: "paragraph" }) }),
+        },
+      },
+    },
+  };
+  return { ref, calls: base.calls };
+}
+
+describe("selection read fallbacks", () => {
+  it("falls back to an empty block text when the block has none", () => {
+    const base = editor();
+    const ref: PageEditorRef = {
+      ...base.ref,
+      state: {
+        selection: {
+          from: 1,
+          to: 1,
+          $from: { parent: { type: { name: "paragraph" }, attrs: {}, textContent: "" } },
+        },
+      },
+    };
+    expect(selectedPageText(ref)).toBe("");
+  });
+
+  it("falls back when a selection has no textBetween probe", () => {
+    const base = editor();
+    const ref: PageEditorRef = {
+      ...base.ref,
+      state: {
+        selection: {
+          from: 2,
+          to: 4,
+          $from: { parent: { type: { name: "paragraph" }, attrs: {}, textContent: "whole" } },
+        },
+      },
+    };
+    expect(selectedPageText(ref)).toBe("whole");
+  });
+});
+
+describe("link and selection reads", () => {
+  it("reads the link address from the active mark", () => {
+    const { ref } = editor({ active: ["link"], markAttrs: { href: "https://example.com" } });
+    expect(pageEditorHandle(ref).linkHref()).toBe("https://example.com");
+  });
+
+  it("answers null without a link mark or without attribute support", () => {
+    expect(pageEditorHandle(editor().ref).linkHref()).toBeNull();
+    const { ref } = editor({ active: ["link"] });
+    expect(pageEditorHandle(ref).linkHref()).toBeNull();
+    const { ref: withEmpty } = editor({ active: ["link"], markAttrs: { href: "" } });
+    expect(pageEditorHandle(withEmpty).linkHref()).toBeNull();
+  });
+
+  it("reads only the selected range for the prefill", () => {
+    const base = editor();
+    const ref: PageEditorRef = {
+      ...base.ref,
+      state: {
+        selection: {
+          from: 2,
+          to: 5,
+          $from: {
+            parent: { type: { name: "paragraph" }, attrs: {}, textContent: "abcdef" },
+            textBetween: () => "bcd",
+          },
+        },
+      },
+    };
+    expect(selectedPageText(ref)).toBe("bcd");
+  });
+
+  it("falls back to the caret's block text when nothing is selected", () => {
+    const base = editor();
+    const ref: PageEditorRef = {
+      ...base.ref,
+      state: {
+        selection: {
+          from: 2,
+          to: 2,
+          $from: { parent: { type: { name: "paragraph" }, attrs: {}, textContent: "block text" } },
+        },
+      },
+    };
+    expect(selectedPageText(ref)).toBe("block text");
+  });
+
+  it("reads text before the caret and an empty string without a range", () => {
+    const base = editor();
+    const ref: PageEditorRef = {
+      ...base.ref,
+      state: {
+        selection: {
+          $from: {
+            parent: { type: { name: "paragraph" }, attrs: {}, textContent: "ab/cd" },
+            parentOffset: 5,
+            textBetween: () => "ab/cd",
+          },
+        },
+      },
+    };
+    expect(pageTextBeforeCaret(ref)).toBe("ab/cd");
+    expect(pageTextBeforeCaret(editor().ref)).toBe("");
   });
 });

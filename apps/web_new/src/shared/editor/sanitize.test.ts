@@ -196,6 +196,35 @@ describe("renderableHtml", () => {
     expect(html).not.toContain("image-component");
   });
 
+  it("paints a stored callout as a distinct block with its content", () => {
+    const html = renderableHtml('<callout-component data-type="callout"><p>notice</p></callout-component>');
+    expect(html).toContain('<aside data-type="callout" class="page-callout"><p>notice</p></aside>');
+    expect(html).not.toContain("callout-component");
+  });
+
+  it("renders a work-item embed as the community upgrade card", () => {
+    const html = renderableHtml(
+      '<issue-embed-component id="emb-1" entity_identifier="ISS-1" project_identifier="P" workspace_identifier="ws" entity_name="Embedded"></issue-embed-component>'
+    );
+    expect(html).toContain('class="page-embed-upgrade"');
+    expect(html).toContain('data-entity-identifier="ISS-1"');
+    expect(html).toContain('data-project-identifier="P"');
+    expect(html).toContain('data-workspace-identifier="ws"');
+    expect(html).toContain("Work-item embeds are a Pro feature");
+    expect(html).toContain('<a href="https://airepublic.com/pricing" target="_blank" rel="noreferrer">Upgrade</a>');
+  });
+
+  it("renders an entity reference as a preview card with peek identifiers", () => {
+    const html = renderableHtml(
+      '<entity-reference-component entity_name="issue" entity_identifier="ISS-2" project_identifier="P" workspace_identifier="ws" data-label="Fix login"></entity-reference-component>'
+    );
+    expect(html).toContain('class="page-entity-preview"');
+    expect(html).toContain('data-entity-preview=""');
+    expect(html).toContain('data-entity-identifier="ISS-2"');
+    expect(html).toContain("Fix login");
+    expect(html).not.toContain("entity-reference-component");
+  });
+
   it("drops an image component with no source", () => {
     expect(renderableHtml("<p>a<image-component></image-component></p>")).toBe("<p>a</p>");
   });
@@ -375,5 +404,20 @@ describe("hasStoredDescriptionContent", () => {
   it("reports no content where no DOM parser exists", () => {
     vi.stubGlobal("DOMParser", undefined);
     expect(hasStoredDescriptionContent('<p><img src="/a.png"></p>')).toBe(false);
+  });
+
+  it("falls back to the identifier when an entity reference has no label", () => {
+    const html = renderableHtml(
+      '<entity-reference-component entity_name="issue" entity_identifier="ISS-3"></entity-reference-component>'
+    );
+    expect(html).toContain("ISS-3");
+  });
+});
+
+describe("entity preview without any label", () => {
+  it("paints an entity reference with an empty label rather than dropping it", () => {
+    const html = renderableHtml('<entity-reference-component entity_name="issue"></entity-reference-component>');
+    expect(html).toContain('class="page-entity-preview"');
+    expect(html).toContain('data-entity-name="issue"');
   });
 });

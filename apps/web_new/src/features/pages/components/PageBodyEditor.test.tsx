@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 import type { PageFormattingState } from "../../../shared/editor/index.js";
-import { PageBodyEditor } from "./PageBodyEditor.js";
+import { handlePagePaste, looksLikeMarkdown, PageBodyEditor } from "./PageBodyEditor.js";
 
 const LOAD_TIMEOUT = { timeout: 10_000 };
 const EDITOR_TEST_TIMEOUT = 30_000;
@@ -63,6 +63,18 @@ async function handleOf(mounted: Mounted): Promise<PageEditorHandle> {
 function formattingOf(mounted: Mounted): PageFormattingState | undefined {
   const calls = mounted.onFormattingChange.mock.calls;
   return calls[calls.length - 1]?.[0];
+}
+
+/** Dispatch a clipboard paste with the flavours the editor reads. */
+function paste(target: HTMLElement, data: { html?: string; text?: string }): Event {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: {
+      getData: (type: string) => (type === "text/html" ? (data.html ?? "") : (data.text ?? "")),
+    },
+  });
+  target.dispatchEvent(event);
+  return event;
 }
 
 afterEach(() => {
@@ -188,6 +200,118 @@ describe(
       const editable = await surface();
       expect(editable.parentElement?.textContent ?? "").not.toContain("Start writing");
     });
+
+    it("routes a stored-markup paste through the caller's rewrite", async () => {
+      const onPasteHtml = vi.fn(async (html: string) => html.replace("foreign", "cloned"));
+      mount({ onPasteHtml });
+      const editable = await surface();
+      paste(editable, { html: "<p>foreign</p>" });
+      await vi.waitFor(() => expect(onPasteHtml).toHaveBeenCalledWith("<p>foreign</p>"));
+      await vi.waitFor(() => expect(editable).toHaveTextContent("cloned"));
+    });
+
+    it("keeps the paste out of the body when the caller refuses it", async () => {
+      const onPasteHtml = vi.fn(async () => null);
+      const mounted = mount({ onPasteHtml });
+      const editable = await surface();
+      paste(editable, { html: "<p>foreign</p>" });
+      await vi.waitFor(() => expect(onPasteHtml).toHaveBeenCalledTimes(1));
+      expect(editable).toHaveTextContent("Stored words");
+      expect(mounted.onChange).not.toHaveBeenCalled();
+    });
   },
   EDITOR_TEST_TIMEOUT
 );
+
+describe("looksLikeMarkdown", () => {
+  it("recognises every structural flavour", () => {
+    for (const text of [
+      "# heading",
+      "- item",
+      "1. item",
+      "> quote",
+      "```js",
+      "**bold**",
+      "__bold__",
+      "[site](https://example.com)",
+    ]) {
+      expect(looksLikeMarkdown(text)).toBe(true);
+    }
+  });
+
+  it("leaves prose alone", () => {
+    expect(looksLikeMarkdown("plain words")).toBe(false);
+  });
+});
+
+describe("handlePagePaste", () => {
+  function event(data: { html?: string; text?: string }): ReturnType<typeof fakeEvent> {
+    return fakeEvent(data);
+  }
+
+  it("claims stored markup and inserts only the rewritten form", async () => {
+    const paste = vi.fn(async () => "<p>rewritten</p>");
+    const insert = vi.fn();
+    expect(handlePagePaste(event({ html: "<p>original</p>" }), paste, insert)).toBe(true);
+    await vi.waitFor(() => expect(insert).toHaveBeenCalledWith("<p>rewritten</p>"));
+  });
+
+  it("claims stored markup even when the rewrite refuses it", async () => {
+    const insert = vi.fn();
+    expect(handlePagePaste(event({ html: "<p>original</p>" }), async () => null, insert)).toBe(true);
+    await vi.waitFor(() => expect(insert).not.toHaveBeenCalled());
+  });
+
+  it("leaves stored markup to the editor without a rewrite", () => {
+    const insert = vi.fn();
+    expect(handlePagePaste(event({ html: "<p>original</p>" }), undefined, insert)).toBe(false);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("turns Markdown text into blocks and claims it", async () => {
+    const insert = vi.fn();
+    expect(handlePagePaste(event({ text: "# Pasted Heading\n\n- item one" }), undefined, insert)).toBe(true);
+    await vi.waitFor(() => expect(insert).toHaveBeenCalled());
+    expect(insert.mock.calls[0]?.[0]).toContain("<h1");
+  });
+
+  it("leaves plain text to the editor", () => {
+    const insert = vi.fn();
+    expect(handlePagePaste(event({ text: "plain words" }), undefined, insert)).toBe(false);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("claims Markdown that converts to nothing without inserting", async () => {
+    const insert = vi.fn();
+    expect(handlePagePaste(event({ text: "```" }), undefined, insert)).toBe(true);
+    await vi.waitFor(() => expect(insert).not.toHaveBeenCalled());
+  });
+
+  it("ignores a paste with no clipboard data", () => {
+    const insert = vi.fn();
+    expect(
+      handlePagePaste({ clipboardData: null, preventDefault: vi.fn(), stopPropagation: vi.fn() }, undefined, insert)
+    ).toBe(false);
+  });
+});
+
+function fakeEvent(data: { html?: string; text?: string }): {
+  clipboardData: { getData: (type: string) => string };
+  preventDefault: () => void;
+  stopPropagation: () => void;
+  defaultPrevented: boolean;
+} {
+  let prevented = false;
+  return {
+    clipboardData: {
+      getData: (type: string) => (type === "text/html" ? (data.html ?? "") : (data.text ?? "")),
+    },
+    preventDefault: () => {
+      prevented = true;
+    },
+    stopPropagation: vi.fn(),
+    get defaultPrevented() {
+      return prevented;
+    },
+  };
+}

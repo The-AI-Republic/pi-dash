@@ -38,6 +38,7 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { PAGES_PAGE_ID, PAGES_PROJECT_ID, makePageRow } from "../testing.js";
 import { PAGE_PREFERENCES_DEFAULTS } from "../lib/pagePreferences.js";
 import { PAGE_FULL_WIDTH_LABEL, PAGE_STICKY_TOOLBAR_LABEL } from "../lib/pageDisplayMenu.js";
+import { PAGE_COPY_MARKDOWN_LABEL, registerPageBodyActions, resetPageBodyActions } from "../lib/pageBodyActions.js";
 import {
   PageDetailHeader,
   PAGE_ANCESTOR_TRAIL_LABEL,
@@ -99,6 +100,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetAppClient();
+  resetPageBodyActions();
 });
 
 describe("PageDetailHeader", () => {
@@ -233,6 +235,19 @@ describe("PageDetailHeader", () => {
     fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
     fireEvent.click(await screen.findByRole("menuitem", { name: PAGE_HISTORY_ITEM }));
     expect(onOpenHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds the live editor's copy-markdown entry after registration (PAGE-044)", async () => {
+    renderHeader();
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    expect(screen.queryByRole("menuitem", { name: PAGE_COPY_MARKDOWN_LABEL })).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    const copyMarkdown = vi.fn(async () => undefined);
+    registerPageBodyActions({ copyMarkdownLabel: PAGE_COPY_MARKDOWN_LABEL, copyMarkdown });
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: PAGE_COPY_MARKDOWN_LABEL }));
+    expect(copyMarkdown).toHaveBeenCalledTimes(1);
   });
 });
 
