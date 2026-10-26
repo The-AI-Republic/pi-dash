@@ -6449,68 +6449,197 @@ export class WebNewDriver implements ParityDriver {
     return todo("isDisplayPropertyActive");
   }
 
+  /** The condition row, present only while the builder shows it. */
+  private richRow(): Locator {
+    return this.page.getByTestId("rich-filter-row");
+  }
+
+  /** Every condition's own remove control, in row order. */
+  private richRemoveControls(): Locator {
+    return this.richRow().getByRole("button", { name: "Remove filter" });
+  }
+
   async toggleRichFilterRow(): Promise<void> {
-    return todo("toggleRichFilterRow");
+    await this.page.getByTestId("rich-filter-toggle").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async isRichFilterRowVisible(): Promise<boolean> {
-    return todo("isRichFilterRowVisible");
+    const row = this.richRow();
+    if ((await row.count()) === 0) return false;
+    return row.first().isVisible();
   }
 
   async richFilterRowText(): Promise<string> {
-    return todo("richFilterRowText");
+    const row = this.richRow();
+    if ((await row.count()) === 0) return "";
+    return ((await row.first().innerText()) ?? "").trim();
   }
 
-  async addRichCondition(_property: string): Promise<void> {
-    return todo("addRichCondition");
+  /**
+   * The row's trailing field picker. Reading a condition's pill again would
+   * mix the two add entries up, so the picker trigger keeps its own label.
+   */
+  private richAddControl(): Locator {
+    return this.richRow().getByRole("button", { name: "Add filter", exact: true }).last();
   }
 
-  async pickRichValues(_values: string[]): Promise<void> {
-    return todo("pickRichValues");
+  private async openRichFieldPicker(): Promise<void> {
+    await this.richAddControl().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async pickRichValuesContaining(_values: string[]): Promise<void> {
-    return todo("pickRichValuesContaining");
+  /** The picker closes on selection for a single choice; re-click otherwise. */
+  private async closeRichFieldPicker(): Promise<void> {
+    if ((await this.page.getByRole("option").count()) === 0) return;
+    await this.richAddControl().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async addRichCondition(property: string): Promise<void> {
+    const before = await this.richConditionCount();
+    await this.openRichFieldPicker();
+    await this.page.getByRole("option", { name: property, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    // Picking a property commits a condition; a value slot may pop open
+    // behind the picker, which is expected rather than a failure.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    while ((await this.richConditionCount()) <= before) {
+      if (Date.now() > deadline) throw new Error(`[parity] picking ${property} added no condition.`);
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async listRichPickerOptions(): Promise<string[]> {
-    return todo("listRichPickerOptions");
+    await this.openRichFieldPicker();
+    const names = await this.page.getByRole("option").allTextContents();
+    await this.closeRichFieldPicker();
+    return names.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  /**
+   * Value options are the section's semantic checkboxes and radios. Scope
+   * to the value sections so another open panel's controls cannot leak in.
+   */
+  private richValueChoices(): Locator {
+    const sections = this.page.locator('[data-testid^="rich-section-"]');
+    return sections.getByRole("checkbox").or(sections.getByRole("radio"));
   }
 
   async richValueOptions(): Promise<string[]> {
-    return todo("richValueOptions");
+    const names = await this.richValueChoices().allTextContents();
+    return names.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  /** Click the last condition's value trigger to open or shut its slot. */
+  private async toggleRichValueSlot(): Promise<void> {
+    await this.richRow().getByTestId("rich-value-trigger").last().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private async closeRichValueSlot(): Promise<void> {
+    if ((await this.richValueChoices().count()) === 0) return;
+    await this.toggleRichValueSlot();
+  }
+
+  /** A value slot opens by itself for a new condition; reopen a shut one. */
+  private async ensureRichValueSlotOpen(): Promise<void> {
+    if ((await this.richValueChoices().count()) > 0) return;
+    await this.toggleRichValueSlot();
+    await this.richValueChoices().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pickRichValues(values: string[]): Promise<void> {
+    await this.ensureRichValueSlotOpen();
+    for (const value of values) {
+      await this.richValueChoices()
+        .filter({ hasText: new RegExp(`^\\s*${value}\\s*$`) })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.closeRichValueSlot();
+  }
+
+  async pickRichValuesContaining(values: string[]): Promise<void> {
+    await this.ensureRichValueSlotOpen();
+    for (const value of values) {
+      await this.richValueChoices().filter({ hasText: value }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.closeRichValueSlot();
+  }
+
+  /**
+   * The lone condition's controls, in render order: property picker,
+   * operator combobox, value slot, remove. The value slot keeps a testid
+   * and the remove control an accessible name, so the two name-less
+   * buttons with text are the property and operator entries.
+   */
+  private async singleConditionOperator(): Promise<Locator> {
+    const pill = this.richRow().getByTestId("rich-condition").first();
+    const buttons = await pill.getByRole("button").all();
+    const named: Locator[] = [];
+    for (const button of buttons) {
+      if ((await button.getAttribute("aria-label")) !== null) continue;
+      if ((await button.getAttribute("data-testid")) === "rich-value-trigger") continue;
+      const text = ((await button.innerText().catch(() => "")) ?? "").trim();
+      if (text === "") continue;
+      named.push(button);
+    }
+    const operator = named[1];
+    if (operator === undefined) throw new Error("[parity] condition operator control not found.");
+    return operator;
   }
 
   async richOperatorOptions(): Promise<string[]> {
-    return todo("richOperatorOptions");
+    const operator = await this.singleConditionOperator();
+    await operator.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const names = await this.page.getByRole("option").allTextContents();
+    await (await this.singleConditionOperator()).click({ timeout: WebNewDriver.WAIT_MS });
+    return names.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
-  async pickRichOperator(_option: string): Promise<void> {
-    return todo("pickRichOperator");
+  async pickRichOperator(option: string): Promise<void> {
+    await (await this.singleConditionOperator()).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: option, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async isSingleRichOperatorLocked(): Promise<boolean> {
-    return todo("isSingleRichOperatorLocked");
+    return (await this.singleConditionOperator()).isDisabled();
+  }
+
+  private richCalendar(): Locator {
+    return this.page.locator('[data-testid="rich-date-calendar"], [data-testid="rich-range-calendar"]');
   }
 
   async isRichCalendarOpen(): Promise<boolean> {
-    return todo("isRichCalendarOpen");
+    const calendar = this.richCalendar();
+    if ((await calendar.count()) === 0) return false;
+    return calendar.first().isVisible();
   }
 
-  async pickRichDay(_day: string): Promise<void> {
-    return todo("pickRichDay");
+  async pickRichDay(day: string): Promise<void> {
+    // A fresh date condition opens its calendar by itself; a slot a
+    // previous pick shut has to be reopened through its value trigger.
+    if (!(await this.isRichCalendarOpen())) {
+      await this.toggleRichValueSlot();
+      await this.richCalendar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    }
+    // Cells carry the day number as text and the ISO date as data-day; the
+    // out-of-month repeats are excluded so "15" resolves once.
+    const cell = this.page
+      .locator('button[data-day][data-in-month="true"]')
+      .filter({ hasText: new RegExp(`^\\s*${day}\\s*$`) })
+      .first();
+    await cell.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async richConditionCount(): Promise<number> {
-    return todo("richConditionCount");
+    return this.richRemoveControls().count();
   }
 
-  async removeRichCondition(_index: number): Promise<void> {
-    return todo("removeRichCondition");
+  async removeRichCondition(index: number): Promise<void> {
+    await this.richRemoveControls().nth(index).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async clearRichFilters(): Promise<void> {
-    return todo("clearRichFilters");
+    await this.richRow().getByTestId("rich-clear-all").click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async openProjectView(_workspaceSlug: string, _projectId: string, _viewId: string): Promise<void> {
