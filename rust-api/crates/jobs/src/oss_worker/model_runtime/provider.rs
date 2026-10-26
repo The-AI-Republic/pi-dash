@@ -608,6 +608,19 @@ pub fn tool_result_text(content: &Value) -> String {
     }
 }
 
+/// Render one tool-return value for an OpenAI tool message
+/// (`model_response_str`, `messages.py:1243-1250`): empty data — an
+/// empty list or null — renders as `""` (`_unwrap_data`,
+/// `messages.py:1179-1187`, returns None for it), anything else
+/// through `tool_result_text`.
+pub fn openai_tool_result_text(content: &Value) -> String {
+    match content {
+        Value::Array(items) if items.is_empty() => String::new(),
+        Value::Null => String::new(),
+        other => tool_result_text(other),
+    }
+}
+
 /// Render retry feedback (`RetryPromptPart.model_response`,
 /// `messages.py:1445-1467`): str content reads verbatim with a tool
 /// name, `Validation feedback:\n`-prefixed without one; error lists
@@ -712,7 +725,7 @@ pub fn openai_request_body(
                                 ("tool_call_id".to_owned(), Value::String(call_id.to_owned())),
                                 (
                                     "content".to_owned(),
-                                    Value::String(tool_result_text(content)),
+                                    Value::String(openai_tool_result_text(content)),
                                 ),
                             ])));
                         }
@@ -2495,5 +2508,33 @@ mod tests {
         assert!(mixed.get("reasoning_content").is_none());
         let empty: Vec<ResponsePart> = Vec::new();
         assert!(openai_assistant_message(&empty).is_none());
+    }
+
+    #[test]
+    fn openai_empty_tool_result_is_empty_string() {
+        // `_unwrap_data` (`messages.py:1179-1187`) returns None for
+        // empty data, so `model_response_str` (`messages.py:1243-1250`)
+        // renders an empty list or null as `''` — not `"[]"`/`"null"`.
+        // Non-empty lists still render as compact JSON.
+        for (content, expected) in [
+            (Value::Array(Vec::new()), ""),
+            (Value::Null, ""),
+            (serde_json::json!([{"id": "1"}]), r#"[{"id":"1"}]"#),
+        ] {
+            let history = vec![HistoryMessage::Request {
+                parts: vec![RequestPart::ToolReturn {
+                    name: "pidash_search_project_issues".to_owned(),
+                    content,
+                    call_id: "call_1".to_owned(),
+                }],
+            }];
+            let body = openai_request_body("gpt-4o-mini", "", &history, &[], 0);
+            assert_eq!(
+                body["messages"],
+                serde_json::json!([
+                    {"role": "tool", "tool_call_id": "call_1", "content": expected},
+                ])
+            );
+        }
     }
 }
