@@ -10380,12 +10380,17 @@ async fn default_pod_for_project(
 }
 
 /// `Issue.objects.create(...)` (`views/intake.py:186-194` +
-/// `Issue.save()` adding branch): the advisory lock (a no-op under
-/// autocommit — ported as the same statement), `sequence_id` from the
-/// `issue_sequences` counter (`max+1`, falsy → 1) with its new
-/// `IssueSequence` row, `sort_order = max(project, state) +
-/// 10000` when siblings exist, pod defaulting, tag stripping (as-is —
-/// no `or None` on this path), workspace from the project, crum audit.
+/// `Issue.save()` adding branch): the transaction-scoped advisory lock
+/// is taken first, then `sequence_id` from the `issue_sequences`
+/// counter (`max+1`, falsy → 1) with its new `IssueSequence` row and
+/// `sort_order = max(project, state) + 10000` when siblings exist — all
+/// on one transaction (`db/models/issue.py:311-336`), so concurrent
+/// creates serialize per project. The lock must live on the
+/// transaction: taken on the pool it would drop as soon as its own
+/// autocommit statement ends (PIDASHCONV-1406). Pod defaulting stays
+/// outside: Django resolves `assigned_pod` before `atomic()`
+/// (`issue.py:277-284`). Tag stripping as-is (no `or None` on this
+/// path), workspace from the project, crum audit.
 #[allow(clippy::too_many_arguments)]
 async fn insert_issue(
     pool: &sqlx::PgPool,
@@ -10397,16 +10402,18 @@ async fn insert_issue(
     triage_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<IssueRow, Denial> {
+    let pod_id = default_pod_for_project(pool, &project.id).await?;
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(advisory_key(&project.id))
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| Denial::ServerError)?;
     let last_sequence: Option<Option<i64>> = sqlx::query_scalar(
         r#"SELECT MAX("sequence") FROM "issue_sequences" WHERE "project_id" = $1 AND "deleted_at" IS NULL"#,
     )
     .bind(project.id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|_| Denial::ServerError)?;
     // `last_sequence + 1 if last_sequence else 1`: `0` and `None` both
@@ -10425,12 +10432,11 @@ async fn insert_issue(
     )
     .bind(project.id)
     .bind(triage_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|_| Denial::ServerError)?
     .flatten();
     let sort_order = max_sort.map_or(65535.0, |max| max + 10000.0);
-    let pod_id = default_pod_for_project(pool, &project.id).await?;
     // `Issue.save()` adding branch: falsy html → NULL, else the strip
     // result as-is (even `""` — no `or None` on this path).
     let stripped: Option<String> = if description_html.is_empty() {
@@ -10469,7 +10475,7 @@ async fn insert_issue(
     .bind(sequence_id)
     .bind(sort_order)
     .bind(pod_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|_| Denial::ServerError)?;
 
@@ -10488,9 +10494,14 @@ async fn insert_issue(
     .bind(i64::from(sequence_id))
     .bind(project.id)
     .bind(project.workspace_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|_| Denial::ServerError)?;
+    // The intake-bridge insert and the activity enqueue in the caller
+    // run after this commit: Django's view is not atomic beyond
+    // `Issue.save`, so they stay outside this transaction
+    // (`views/intake.py:200-207`).
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
 
     Ok(IssueRow {
         id,
