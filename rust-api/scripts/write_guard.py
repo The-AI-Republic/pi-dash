@@ -74,7 +74,7 @@ RE_QUERY_ANY_CTOR = re.compile(r"Query::\w+\s*\(\s*\)")
 RE_TABLE_CALL = re.compile(r"\.(into_table|table|from_table)\s*\(")
 RE_CFG_TEST = re.compile(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 RE_ATTR = re.compile(r"#\[(?:[^\[\]]|\[[^\]]*\])*\]")
-RE_MOD = re.compile(r"\bmod\s+([A-Za-z_]\w*)\s*([;{])")
+RE_MOD = re.compile(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*([;{])")
 RE_STR_CONST = re.compile(
     r"(?:pub(?:\s*\([^)]*\))?\s+)?const\s+([A-Z][A-Z0-9_]*|TABLE)"
     r"\s*:\s*&(?:'\w+\s+)?str\s*=\s*\"([^\"]+)\"\s*;")
