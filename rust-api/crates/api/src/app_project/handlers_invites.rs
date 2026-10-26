@@ -3891,6 +3891,7 @@ async fn board_partial_update(
     // all of this: `""` runs `to_internal_value` there.
     let mut data = data.clone();
     let mut view_props_json_failed = false;
+    let mut view_props_decoded_null = false;
     if from_form {
         for key in ["entity_identifier", "deleted_at", "created_by", "intake"] {
             if matches!(data.get(key), Some(Value::String(text)) if text.is_empty()) {
@@ -3899,6 +3900,7 @@ async fn board_partial_update(
         }
         if let Some(Value::String(text)) = data.remove("view_props") {
             match serde_json::from_str(&text) {
+                Ok(Value::Null) => view_props_decoded_null = true,
                 Ok(parsed) => {
                     data.insert("view_props".to_owned(), parsed);
                 }
@@ -3960,6 +3962,13 @@ async fn board_partial_update(
     }
     if view_props_json_failed {
         errors.push("view_props", "Value must be valid JSON.".to_owned());
+    } else if view_props_decoded_null {
+        // HTML `view_props=null` decodes to None after
+        // `validate_empty_values` ran (the `JSONString` is non-empty, so
+        // the null check never fires): it validates, then dies at save
+        // with the not-null `IntegrityError` 400. The NULL set below
+        // reproduces that write; sibling field errors still win first.
+        sets.push(("view_props", PatchValue::Null));
     } else if let Some(value) = data.get("view_props") {
         if value.is_null() {
             errors.push("view_props", "This field may not be null.".to_owned());

@@ -298,6 +298,40 @@ def test_board_patch_form_view_props_invalid(world, db):
                                                 "spreadsheet": True}
 
 
+def test_board_patch_form_view_props_null_400(world, db):
+    # HTML `view_props=null` decodes to None *after* `validate_empty_values`
+    # ran (the `JSONString` is non-empty, so the null check never fires):
+    # it validates, then dies at save with the not-null 400 (review probe).
+    client, _, ws, project = world.full_stack()
+    base = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/project-deploy-boards/"
+    board_id = client.post(base, json={}).json()["id"]
+    resp = client.patch(f"{base}{board_id}/", content="view_props=null", headers=FORM)
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "The payload is not valid"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT view_props FROM deploy_boards WHERE id=%s", (board_id,))
+        assert cur.fetchone()["view_props"] == {"list": True, "kanban": True,
+                                                "calendar": True, "gantt": True,
+                                                "spreadsheet": True}
+
+
+def test_board_patch_form_view_props_null_yields_to_field_errors(world, db):
+    # A decoded null contributes no field error of its own: sibling field
+    # errors render alone and no write runs (review probe).
+    client, _, ws, project = world.full_stack()
+    base = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/project-deploy-boards/"
+    board_id = client.post(base, json={}).json()["id"]
+    resp = client.patch(f"{base}{board_id}/",
+                        content="view_props=null&intake=garbage", headers=FORM)
+    assert resp.status_code == 400
+    assert resp.json() == {"intake": ["“garbage” is not a valid UUID."]}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT view_props FROM deploy_boards WHERE id=%s", (board_id,))
+        assert cur.fetchone()["view_props"] == {"list": True, "kanban": True,
+                                                "calendar": True, "gantt": True,
+                                                "spreadsheet": True}
+
+
 def test_board_patch_form_normal_values(world, db):
     client, _, ws, project = world.full_stack()
     base = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/project-deploy-boards/"
