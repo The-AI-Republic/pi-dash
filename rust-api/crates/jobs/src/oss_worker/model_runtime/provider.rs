@@ -1061,8 +1061,9 @@ fn anthropic_wire_tool(tool: &WireTool) -> Value {
 pub enum ProviderError {
     /// `APIStatusError` → `ModelHTTPError(status_code, model_name,
     /// body)`: an HTTP error status after retries. `body_text` is
-    /// the raw text; `body_json` the parsed body when the payload is
-    /// JSON (the SDK's `e.body` reads parsed-JSON-or-text).
+    /// the stripped text; `body_json` the parsed body when the
+    /// payload is JSON (the SDK's `e.body` reads
+    /// parsed-JSON-or-text).
     Http {
         status: u16,
         body_text: String,
@@ -1094,9 +1095,21 @@ impl ProviderError {
             } => {
                 // `f'status_code: {s}, model_name: {m}, body: {body}'`
                 // with the body Python-`repr`'d (a parsed dict) or raw
-                // (text).
+                // (text). On the OpenAI lane the SDK unwraps the
+                // envelope first (`data = body.get("error", body) if
+                // is_mapping(body) else body`, `_make_status_error`
+                // in `openai/_client.py`); the Anthropic SDK has no
+                // such unwrap, so that lane keeps the full body.
                 let body = match body_json {
-                    Some(json) => py_repr(json),
+                    Some(json) => {
+                        let shown = match (lane, json) {
+                            (Lane::OpenAICompatible { .. }, Value::Object(map)) => {
+                                map.get("error").unwrap_or(json)
+                            }
+                            _ => json,
+                        };
+                        py_repr(shown)
+                    }
                     None => body_text.clone(),
                 };
                 format!(
@@ -1612,6 +1625,16 @@ pub async fn complete(
     }
 }
 
+/// The error-status body split (`_make_status_error_from_response`,
+/// `openai/_base_client.py:407-427`, identical in the Anthropic
+/// SDK): strip the text first, then parse-or-keep, so both the
+/// JSON and the text slots carry the stripped form.
+fn parse_error_body(bytes: &[u8]) -> (String, Option<Value>) {
+    let text = String::from_utf8_lossy(bytes).trim().to_owned();
+    let json = serde_json::from_str::<Value>(&text).ok();
+    (text, json)
+}
+
 /// POST with the stainless retry loop (`openai/_base_client.py:990-1060`,
 /// async mirror at 1610-1660; identical in the Anthropic SDK):
 /// timeouts and connection errors retry while attempts remain, else
@@ -1672,8 +1695,7 @@ async fn post_with_retries(
                     retries_taken += 1;
                     continue;
                 }
-                let body_text = String::from_utf8_lossy(&bytes).into_owned();
-                let body_json = serde_json::from_slice::<Value>(&bytes).ok();
+                let (body_text, body_json) = parse_error_body(&bytes);
                 return Err(ProviderError::Http {
                     status,
                     body_text,
@@ -2243,25 +2265,72 @@ mod tests {
             base_url: "https://t/v1".to_owned(),
             api_key: "k".to_owned(),
         };
+        let wrapped: Value = serde_json::from_str(
+            r#"{"error":{"message":"bad key","type":"invalid_request_error","code":null}}"#,
+        )
+        .unwrap();
         let error = ProviderError::Http {
             status: 400,
             body_text: String::new(),
-            body_json: Some(
-                serde_json::from_str::<Value>(
-                    r#"{"error":{"message":"bad key","type":"invalid_request_error","code":null}}"#,
-                )
-                .unwrap(),
-            ),
+            body_json: Some(wrapped.clone()),
+        };
+        // The OpenAI lane unwraps `body["error"]` (`_make_status_error`).
+        assert_eq!(
+            error.message(&lane),
+            "status_code: 400, model_name: gpt-4o-mini, body: {'message': 'bad key', 'type': 'invalid_request_error', 'code': None}"
+        );
+        // The Anthropic lane keeps the full body (no SDK unwrap).
+        let anthropic = Lane::Anthropic {
+            model: "claude-test".to_owned(),
+            api_key: "k".to_owned(),
+        };
+        let error = ProviderError::Http {
+            status: 400,
+            body_text: String::new(),
+            body_json: Some(wrapped),
+        };
+        assert_eq!(
+            error.message(&anthropic),
+            "status_code: 400, model_name: claude-test, body: {'error': {'message': 'bad key', 'type': 'invalid_request_error', 'code': None}}"
+        );
+        // Objects without an `error` key and non-object bodies repr whole.
+        let error = ProviderError::Http {
+            status: 400,
+            body_text: String::new(),
+            body_json: Some(serde_json::from_str(r#"{"message":"nope"}"#).unwrap()),
         };
         assert_eq!(
             error.message(&lane),
-            "status_code: 400, model_name: gpt-4o-mini, body: {'error': {'message': 'bad key', 'type': 'invalid_request_error', 'code': None}}"
+            "status_code: 400, model_name: gpt-4o-mini, body: {'message': 'nope'}"
+        );
+        let error = ProviderError::Http {
+            status: 400,
+            body_text: String::new(),
+            body_json: Some(serde_json::from_str(r#"["oops"]"#).unwrap()),
+        };
+        assert_eq!(
+            error.message(&lane),
+            "status_code: 400, model_name: gpt-4o-mini, body: ['oops']"
         );
         assert_eq!(ProviderError::Timeout.message(&lane), "Request timed out.");
         assert_eq!(
             ProviderError::Connection.message(&lane),
             "Connection error."
         );
+    }
+
+    #[test]
+    fn error_body_strips_before_parsing() {
+        // `err_text = response.text.strip()`, then parse-or-keep.
+        let (text, json) = parse_error_body(b"upstream exploded\n\n");
+        assert_eq!(text, "upstream exploded");
+        assert_eq!(json, None);
+        let (text, json) = parse_error_body(b"  {\"a\": 1}  \n");
+        assert_eq!(text, "{\"a\": 1}");
+        assert_eq!(json, Some(serde_json::from_str(r#"{"a": 1}"#).unwrap()));
+        let (text, json) = parse_error_body(b"");
+        assert_eq!(text, "");
+        assert_eq!(json, None);
     }
 
     #[test]
