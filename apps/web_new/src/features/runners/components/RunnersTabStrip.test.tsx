@@ -12,8 +12,17 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
   return {
     ...original,
-    Link: (props: { to?: string; children?: React.ReactNode; "aria-current"?: "page" }) => (
-      <a href={props.to} aria-current={props["aria-current"]}>
+    Link: (props: {
+      to?: string;
+      children?: React.ReactNode;
+      "aria-current"?: "page";
+      activeOptions?: { exact?: boolean };
+    }) => (
+      <a
+        href={props.to}
+        aria-current={props["aria-current"]}
+        data-exact={props.activeOptions?.exact === true ? "true" : undefined}
+      >
         {props.children}
       </a>
     ),
@@ -71,6 +80,14 @@ describe("RunnersTabStrip", () => {
   it("keeps the overview unselected on a child route", () => {
     render(<RunnersTabStrip scope={workspace} pathname="/acme/runners/detail/r-1" />);
     expect(screen.getAllByRole("link").map((link) => link.getAttribute("aria-current"))).toEqual([null, null, null]);
+  });
+
+  it("matches the overview and approvals links exactly (NEWFRONT-557)", () => {
+    // The router marks fuzzy-active links aria-current="page" itself,
+    // which would re-mark the overview link on every child route; runs
+    // keeps the fuzzy default so a run detail still selects it.
+    render(<RunnersTabStrip scope={workspace} pathname="/acme/runners/runs" />);
+    expect(screen.getAllByRole("link").map((link) => link.getAttribute("data-exact"))).toEqual(["true", null, "true"]);
   });
 
   it("declares the tab vocabulary once", () => {

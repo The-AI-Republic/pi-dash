@@ -13,6 +13,23 @@ import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 import { projectKeys } from "../api/keys.js";
 import { ROW_LINK_COPIED_TITLE, SidebarProjectRow, type SidebarProjectRowProps } from "./SidebarProjectRow.js";
 
+// The project runner sub-nav is a migrated route since the runners area
+// gate, so its entry renders as a router Link. This suite asserts the
+// navigation intent, not TanStack's own navigation: stand the Link in as a
+// plain anchor. (Same treatment as the workspace-scoped entries in
+// NEWFRONT-528.)
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+    const { to, children, ...rest } = props;
+    return (
+      <a href={to} {...rest}>
+        {children}
+      </a>
+    );
+  },
+}));
+
 vi.mock("../../../shared/shell/toaster.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/toaster.js")>();
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };

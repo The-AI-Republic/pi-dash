@@ -352,14 +352,14 @@ describe("runnersModalCopy and runnersCancelModal", () => {
 
     await driver.runnersCancelModal();
 
-    expect(cancel.click).toHaveBeenCalled();
+    expect(cancel.click).toHaveBeenCalledWith({ force: true });
   });
 
-  it("does not assert a disabled cancel: the app leaves it inert, not disabled", async () => {
+  it("forces the click past aria-disabled: the app guard decides (NEWFRONT-557)", async () => {
     // Mid-flight dismissal checks click Cancel and expect the dialog to
-    // stay. The kit button stays enabled so the click resolves and the
-    // handler ignores it; a disabled control would make the driver click
-    // time out instead.
+    // stay. The confirm's Cancel carries aria-disabled while pending
+    // (inert, never unmounted); Playwright treats that as unactionable,
+    // so the driver forces the click and the app's own guard ignores it.
     const cancel = stubLocator({ isDisabled: vi.fn(async () => false) });
     const dialog = stubLocator({ getByRole: vi.fn(() => cancel) });
     const page = pageStub({ getByRole: vi.fn(() => stubLocator({ first: () => dialog })) });
@@ -368,7 +368,7 @@ describe("runnersModalCopy and runnersCancelModal", () => {
     await driver.runnersCancelModal();
 
     await expect(cancel.isDisabled()).resolves.toBe(false);
-    expect(cancel.click).toHaveBeenCalled();
+    expect(cancel.click).toHaveBeenCalledWith({ force: true });
   });
 });
 
@@ -642,6 +642,29 @@ describe("runner chat shell (NEWFRONT-549)", () => {
     });
     const driver = new WebNewDriver(pageStub({ getByTestId: vi.fn(() => header) }));
     await expect(driver.runnerChatHeader()).resolves.toMatchObject({ secondary: "" });
+  });
+
+  it("bounds the optional header reads so an unknown runner cannot hang the test (NEWFRONT-557)", async () => {
+    // Real innerText on an absent element waits out the action budget
+    // instead of rejecting; the secondary line and the badge are absent
+    // while the runner is unknown, so both reads carry a short timeout.
+    const secondaryText = vi.fn(async () => {
+      throw new Error("detached");
+    });
+    const badgeText = vi.fn(async () => {
+      throw new Error("detached");
+    });
+    const header = stubLocator({
+      getByTestId: vi.fn((id: string) => {
+        if (id === "runner-chat-name") return stubLocator({ innerText: vi.fn(async () => "Runner") });
+        if (id === "runner-chat-secondary") return stubLocator({ innerText: secondaryText });
+        return stubLocator({ innerText: badgeText });
+      }),
+    });
+    const driver = new WebNewDriver(pageStub({ getByTestId: vi.fn(() => header) }));
+    await expect(driver.runnerChatHeader()).resolves.toEqual({ name: "Runner", secondary: "", badge: "" });
+    expect(secondaryText).toHaveBeenCalledWith({ timeout: expect.any(Number) });
+    expect(badgeText).toHaveBeenCalledWith({ timeout: expect.any(Number) });
   });
 
   it("reports the empty history line", async () => {
@@ -1170,7 +1193,9 @@ describe("pod driver methods (NEWFRONT-542, RUN-012–015)", () => {
     expect(name.fill).toHaveBeenCalledWith("beefy");
     expect(description.fill).toHaveBeenCalledWith("the big boxes");
     expect(submit.click).toHaveBeenCalled();
-    expect(submit.waitFor).toHaveBeenCalledWith({ state: "hidden", timeout: expect.any(Number) });
+    // The closed wait keys on the dialog itself (NEWFRONT-557): the delete
+    // confirm has no form submit, and the open modal hides the tiles.
+    expect(dialog.waitFor).toHaveBeenCalledWith({ state: "hidden", timeout: expect.any(Number) });
   });
 
   it("leaves the description alone and waits for the toast on a refused create", async () => {
@@ -1973,6 +1998,21 @@ describe("dev machines and runner detail (NEWFRONT-555, RUN-037–043)", () => {
     expect(page.keyboard.press).toHaveBeenCalledWith("Escape");
   });
 
+  it("forces the modal cancel past aria-disabled: the app guard decides (NEWFRONT-557)", async () => {
+    // In-flight dismissal checks click Cancel and expect the modal to
+    // stay. The modal's Cancel carries aria-disabled while pending
+    // (inert, never unmounted); Playwright treats that as unactionable,
+    // so the driver forces the click and the app's own guard ignores it.
+    const click = vi.fn(async () => undefined);
+    const cancel = stubLocator({ click });
+    const dialog = stubLocator({
+      getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 1), first: () => cancel })),
+    });
+    const page = pageStub({ locator: vi.fn(() => stubLocator({ filter: vi.fn(() => dialog) })) });
+    await new WebNewDriver(page).devMachinesModalCancel();
+    expect(click).toHaveBeenCalledWith({ force: true });
+  });
+
   it("stubs, delays, counts and fails machine reads", async () => {
     const page = pageStub();
     const driver = new WebNewDriver(page);
@@ -2341,5 +2381,171 @@ describe("issue dispatch and re-tick (NEWFRONT-547, RUN-046/RUN-048)", () => {
     } finally {
       now.mockRestore();
     }
+  });
+});
+
+describe("desktop runtime + gate reads (NEWFRONT-557)", () => {
+  it("opens the runners area and settles on the rail", async () => {
+    const rail = stubLocator();
+    const page = pageStub({ getByTestId: vi.fn(() => rail) });
+    await new WebNewDriver(page).desktopRuntimeOpenRunners("acme");
+    expect(page.goto).toHaveBeenCalledWith("/acme/runners");
+    expect(page.waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
+    expect(page.getByTestId).toHaveBeenCalledWith("runners-rail");
+    expect(rail.waitFor).toHaveBeenCalledWith({ timeout: 60_000 });
+  });
+
+  it("reads rail section headers trimmed", async () => {
+    const headers = stubLocator({ count: vi.fn(async () => 2), innerText: vi.fn(async () => " Built-in ") });
+    const rail = stubLocator({ locator: vi.fn(() => headers) });
+    const page = pageStub({ getByTestId: vi.fn(() => rail) });
+    await expect(new WebNewDriver(page).desktopRuntimeRailSectionHeaders()).resolves.toEqual(["Built-in", "Built-in"]);
+    expect(rail.locator).toHaveBeenCalledWith("div.uppercase");
+  });
+
+  it("tolerates a header whose text read fails", async () => {
+    const headers = stubLocator({
+      count: vi.fn(async () => 1),
+      innerText: vi.fn(async () => Promise.reject(new Error("gone"))),
+    });
+    const rail = stubLocator({ locator: vi.fn(() => headers) });
+    const page = pageStub({ getByTestId: vi.fn(() => rail) });
+    await expect(new WebNewDriver(page).desktopRuntimeRailSectionHeaders()).resolves.toEqual([""]);
+  });
+
+  it("collects rail chat links with their names", async () => {
+    const links = stubLocator({
+      count: vi.fn(async () => 1),
+      innerText: vi.fn(async () => " alpha "),
+      getAttribute: vi.fn(async () => "/acme/runners/chat/r-1"),
+    });
+    const rail = stubLocator({ locator: vi.fn(() => links) });
+    const page = pageStub({ getByTestId: vi.fn(() => rail) });
+    await expect(new WebNewDriver(page).desktopRuntimeRailChatLinks()).resolves.toEqual([
+      { name: "alpha", href: "/acme/runners/chat/r-1" },
+    ]);
+    expect(rail.locator).toHaveBeenCalledWith('a[href*="/chat/"]');
+  });
+
+  it("opens a chat through the chat opener, with and without a session", async () => {
+    const page = pageStub();
+    const driver = new WebNewDriver(page);
+    await driver.desktopRuntimeOpenChat("acme", "r-1", "s-9");
+    expect(page.goto).toHaveBeenCalledWith("/acme/runners/chat/r-1?sessionId=s-9");
+    await driver.desktopRuntimeOpenChat("acme", "r-1");
+    expect(page.goto).toHaveBeenLastCalledWith("/acme/runners/chat/r-1");
+    expect(page.getByTestId).toHaveBeenCalledWith("runner-chat");
+    expect(page.getByTestId).toHaveBeenCalledWith("runner-chat-composer");
+  });
+
+  it("reports the approval prompt and mode control from their roles", async () => {
+    const role = vi.fn(() => stubLocator({ count: vi.fn(async () => 1) }));
+    const page = pageStub({ getByRole: role });
+    const driver = new WebNewDriver(page);
+    await expect(driver.desktopRuntimeApprovalPromptVisible()).resolves.toBe(true);
+    await expect(driver.desktopRuntimeApprovalModeVisible()).resolves.toBe(true);
+    expect(role).toHaveBeenCalledWith("alertdialog", { name: "Approval requested" });
+    expect(role).toHaveBeenCalledWith("group", { name: "Approval mode" });
+    const absent = pageStub({ getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
+    await expect(new WebNewDriver(absent).desktopRuntimeApprovalPromptVisible()).resolves.toBe(false);
+    await expect(new WebNewDriver(absent).desktopRuntimeApprovalModeVisible()).resolves.toBe(false);
+  });
+
+  it("reports the runtime banner only when the notice is shown", async () => {
+    const shown = stubLocator({ count: vi.fn(async () => 1), isVisible: vi.fn(async () => true) });
+    const page = pageStub({ getByTestId: vi.fn(() => shown) });
+    await expect(new WebNewDriver(page).desktopRuntimeRuntimeBannerVisible()).resolves.toBe(true);
+    const hidden = stubLocator({ count: vi.fn(async () => 1), isVisible: vi.fn(async () => false) });
+    await expect(
+      new WebNewDriver(pageStub({ getByTestId: vi.fn(() => hidden) })).desktopRuntimeRuntimeBannerVisible()
+    ).resolves.toBe(false);
+    const absent = stubLocator({ count: vi.fn(async () => 0) });
+    await expect(
+      new WebNewDriver(pageStub({ getByTestId: vi.fn(() => absent) })).desktopRuntimeRuntimeBannerVisible()
+    ).resolves.toBe(false);
+  });
+
+  it("reads the native bridge flag from the page", async () => {
+    const page = pageStub({ evaluate: vi.fn(async () => true) });
+    await expect(new WebNewDriver(page).desktopRuntimeIsTauriPresent()).resolves.toBe(true);
+  });
+
+  // The transcript reader runs its extraction inside a page evaluate; the
+  // stub hands the callback a minimal DOM-shaped column.
+  function bubbleColumn(children: Array<{ role: string | null; text: string }>) {
+    const element = {
+      children: children.map(({ role, text }) => ({
+        querySelector: () => ({ getAttribute: () => role, innerText: text }),
+      })),
+    };
+    return stubLocator({
+      count: vi.fn(async () => 1),
+      evaluate: vi.fn(async (fn: (node: unknown) => unknown) => fn(element)),
+    });
+  }
+
+  it("reads transcript bubbles with roles, skipping blanks", async () => {
+    const column = bubbleColumn([
+      { role: "user", text: "hello" },
+      { role: "assistant", text: "  " },
+    ]);
+    const page = pageStub({ getByTestId: vi.fn(() => stubLocator({ locator: vi.fn(() => column) })) });
+    await expect(new WebNewDriver(page).desktopRuntimeChatBubbles()).resolves.toEqual([
+      { role: "user", text: "hello" },
+    ]);
+  });
+
+  it("reads no bubbles without a list and defaults a missing role", async () => {
+    const absent = pageStub({ getByTestId: vi.fn(() => stubLocator({ locator: vi.fn(() => stubLocator()) })) });
+    await expect(new WebNewDriver(absent).desktopRuntimeChatBubbles()).resolves.toEqual([]);
+    const column = bubbleColumn([{ role: null, text: "note" }]);
+    const page = pageStub({ getByTestId: vi.fn(() => stubLocator({ locator: vi.fn(() => column) })) });
+    await expect(new WebNewDriver(page).desktopRuntimeChatBubbles()).resolves.toEqual([
+      { role: "status", text: "note" },
+    ]);
+  });
+
+  it("reads storage keys from the page", async () => {
+    const page = pageStub({ evaluate: vi.fn(async () => ({ local: ["a"], session: [] })) });
+    await expect(new WebNewDriver(page).desktopRuntimeStorageKeys()).resolves.toEqual({
+      local: ["a"],
+      session: [],
+    });
+  });
+
+  it("logs watched request URLs and forgets them on stop", async () => {
+    const handlers: Array<(request: { url(): string }) => void> = [];
+    const page = pageStub({
+      on: vi.fn((_event: string, handler: (request: { url(): string }) => void) => {
+        handlers.push(handler);
+      }),
+      off: vi.fn((_event: string, handler: (request: { url(): string }) => void) => {
+        const at = handlers.indexOf(handler);
+        if (at !== -1) handlers.splice(at, 1);
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.desktopRuntimeStartRequestSpy();
+    expect(page.on).toHaveBeenCalledWith("request", expect.any(Function));
+    handlers[0]!({ url: () => "http://x/api/runners/chat/sessions/" });
+    await expect(driver.desktopRuntimeSpyUrls()).resolves.toEqual(["http://x/api/runners/chat/sessions/"]);
+    await driver.desktopRuntimeStopRequestSpy();
+    expect(page.off).toHaveBeenCalledWith("request", expect.any(Function));
+    expect(handlers).toHaveLength(0);
+  });
+
+  it("reads the detail title field and null when absent", async () => {
+    const title = stubLocator({ count: vi.fn(async () => 1), inputValue: vi.fn(async () => "Parity probe") });
+    const page = pageStub({ getByLabel: vi.fn(() => title) });
+    await expect(new WebNewDriver(page).issueDetailTitle()).resolves.toBe("Parity probe");
+    expect(page.getByLabel).toHaveBeenCalledWith("Title");
+    const missing = pageStub({ getByLabel: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
+    await expect(new WebNewDriver(missing).issueDetailTitle()).resolves.toBeNull();
+  });
+
+  it("reads a sidebar property minus its label", async () => {
+    const row = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "State\nTodo") });
+    const page = pageStub({ getByRole: vi.fn(() => row) });
+    await expect(new WebNewDriver(page).sidebarProperty("State")).resolves.toBe("Todo");
   });
 });

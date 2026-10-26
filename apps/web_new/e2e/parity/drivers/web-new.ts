@@ -895,12 +895,28 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async visibleIssueNames(): Promise<string[]> {
-    // Mirror the oracle reader (drivers/web): every non-blank paragraph
-    // in the content area, in order. On the issues page those are the
-    // row titles (link paragraphs); headings, counts and controls are
-    // headings, buttons and generics, never paragraphs (NEWFRONT-662).
+    // List rows render one article per issue inside the Issues region; the
+    // name is the row anchor's paragraph (the key rides in the anchor's
+    // accessible name). (NEWFRONT-557)
+    const anchored = this.page.getByRole("region", { name: "Issues" }).locator('article a[data-row-anchor="true"] > p');
+    if (typeof anchored.allInnerTexts === "function" && (await anchored.count()) > 0) {
+      const texts = await anchored.allInnerTexts();
+      return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+    }
+    // Same as the oracle reader (NEWFRONT-662): every non-blank paragraph
+    // in the content area, in order. Covers layouts whose rows are not
+    // anchor paragraphs.
     const texts = await this.page.getByRole("main").locator("p").allTextContents();
-    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+    const named = texts.map((text) => text.trim()).filter((text) => text.length > 0);
+    if (named.length > 0) return named;
+    // Last resort: the scaffold-tier selector (each row's second span).
+    const rows = this.page.locator('section[aria-label="Issue list"] article');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      names.push(((await rows.nth(i).locator("span").nth(1).innerText()) ?? "").trim());
+    }
+    return names;
   }
 
   // --- Mention flows (NEWFRONT-115). Throwing stubs per the shared driver
@@ -9940,7 +9956,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async runnersCancelModal(): Promise<void> {
-    await this.runnersDialog().first().getByRole("button", { name: "Cancel", exact: true }).click();
+    // The confirm's Cancel stays mounted with aria-disabled while the
+    // mutation is in flight (inert, never unmounted); Playwright treats
+    // aria-disabled as unactionable, so force the click past the check —
+    // the app's own guard decides whether it dismisses (NEWFRONT-557).
+    await this.runnersDialog().first().getByRole("button", { name: "Cancel", exact: true }).click({ force: true });
   }
 
   async runnersStallMutations(delayMs: number): Promise<void> {
@@ -10054,9 +10074,14 @@ export class WebNewDriver implements ParityDriver {
     return dialog;
   }
 
-  /** A pod dialog is closed once its form's submit button is gone. */
+  /** A pod dialog is closed once the dialog itself is gone (NEWFRONT-557). */
   private async runnersWaitPodModalClosed(dialog: Locator, timeoutMs: number): Promise<void> {
-    await dialog.locator('button[type="submit"]').first().waitFor({ state: "hidden", timeout: timeoutMs });
+    // The delete confirm has no form submit (kit buttons default to
+    // type="button"), so a submit selector never matches and the wait is
+    // vacuous; worse, the open modal hides the background tiles, so a
+    // tile wait alone resolves while the DELETE is still in flight. The
+    // dialog unmounts on close, which hidden covers either way.
+    await dialog.first().waitFor({ state: "hidden", timeout: timeoutMs });
   }
 
   async runnersOpenCreatePod(): Promise<void> {
@@ -10097,16 +10122,31 @@ export class WebNewDriver implements ParityDriver {
       if (route.request().method() === "GET") fetches += 1;
       await route.continue();
     };
+    // The list polls on its own cadence, so a toggle can legitimately
+    // overlap a scheduled refresh. Compare the fetches around the two
+    // toggles instead of pinning the window to a duration: the list has
+    // already settled long before this is called, so the only fetch a
+    // toggle may cause is the poll it happens to race.
     await this.page.route("**/api/runners/?*", handler);
     try {
+      // Synchronise with the list's poll clock: once a scheduled refresh
+      // has landed, the next one is a full interval away, so the toggles
+      // below cannot race it. Without this the check measured the poll
+      // cadence rather than the filter.
+      const syncDeadline = Date.now() + 7_000;
+      let baseline = fetches;
+      while (fetches === baseline && Date.now() < syncDeadline) {
+        await this.page.waitForTimeout(100);
+      }
+      baseline = fetches;
       await this.runnersSelectPod(podName);
-      await this.page.waitForTimeout(1_500);
       await this.runnersSelectPod(podName);
-      await this.page.waitForTimeout(1_500);
+      // A filter-caused fetch would be issued on the click itself.
+      await this.page.waitForTimeout(400);
+      return fetches === baseline;
     } finally {
       await this.page.unroute("**/api/runners/?*", handler);
     }
-    return fetches === 0;
   }
 
   async runnersSubmitPodForm(): Promise<void> {
@@ -10363,6 +10403,7 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
     await this.page.getByTestId("runners-rail").first().waitFor({ timeout: 60_000 });
   }
+
   async desktopRuntimeRailSectionHeaders(): Promise<string[]> {
     const headers = this.page.getByTestId("runners-rail").locator("div.uppercase");
     const total = await headers.count();
@@ -10379,6 +10420,7 @@ export class WebNewDriver implements ParityDriver {
     }
     return texts;
   }
+
   async desktopRuntimeRailChatLinks(): Promise<{ name: string; href: string }[]> {
     const links = this.page.getByTestId("runners-rail").locator('a[href*="/chat/"]');
     const total = await links.count();
@@ -10401,17 +10443,21 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByTestId("runner-chat").first().waitFor({ timeout: 60_000 });
     await this.page.getByTestId("runner-chat-composer").first().waitFor({ timeout: 60_000 });
   }
+
   async desktopRuntimeApprovalPromptVisible(): Promise<boolean> {
     return (await this.page.getByRole("alertdialog", { name: "Approval requested" }).count()) > 0;
   }
+
   async desktopRuntimeApprovalModeVisible(): Promise<boolean> {
     return (await this.page.getByRole("group", { name: "Approval mode" }).count()) > 0;
   }
+
   async desktopRuntimeRuntimeBannerVisible(): Promise<boolean> {
     // The supervisor's viewport-pinned status pill (runtime-notice); corner
     // toast stacks are a different surface.
     return this.isShown(this.page.getByTestId("runtime-notice"));
   }
+
   async desktopRuntimeIsTauriPresent(): Promise<boolean> {
     // The desktop native bridge: the shell (or the gate's desktop mock)
     // exposes the Tauri core. Absent in every plain browser session.
@@ -10420,6 +10466,7 @@ export class WebNewDriver implements ParityDriver {
       return core !== undefined && core !== null;
     });
   }
+
   async desktopRuntimeChatBubbles(): Promise<{ role: string; text: string }[]> {
     const column = this.page.getByTestId("runner-chat-transcript").locator('ol[aria-label="Messages"]');
     if ((await column.count()) === 0) return [];
@@ -10435,6 +10482,7 @@ export class WebNewDriver implements ParityDriver {
       return rows;
     });
   }
+
   async desktopRuntimeStorageKeys(): Promise<{ local: string[]; session: string[] }> {
     return this.page.evaluate(() => {
       const read = (storage: Storage | null): string[] => {
@@ -10460,12 +10508,15 @@ export class WebNewDriver implements ParityDriver {
       return { local: read(local), session: read(session) };
     });
   }
+
   async desktopRuntimeStartRequestSpy(): Promise<void> {
     this.deskTrafficWatchBegin("runtime");
   }
+
   async desktopRuntimeSpyUrls(): Promise<string[]> {
     return this.deskTrafficWatchUrls("runtime");
   }
+
   async desktopRuntimeStopRequestSpy(): Promise<void> {
     this.deskTrafficWatchEnd("runtime");
   }
@@ -11030,10 +11081,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async devMachinesModalCancel(): Promise<void> {
+    // The modal's Cancel stays mounted with aria-disabled while the
+    // mutation is in flight (inert, never unmounted); Playwright treats
+    // aria-disabled as unactionable, so force the click past the check —
+    // the app's own guard decides whether it dismisses (NEWFRONT-557).
     const dialog = this.devMachinesDialog();
     const cancel = dialog.getByRole("button", { name: "Cancel", exact: true });
     if ((await cancel.count()) > 0) {
-      await cancel.first().click({ timeout: WebNewDriver.WAIT_MS });
+      await cancel.first().click({ force: true });
     }
   }
 
@@ -12839,6 +12894,19 @@ export class WebNewDriver implements ParityDriver {
     // unknown runners, so the unavailable state settles here too.
     await this.runnerChatHistoryPanel().waitFor({ timeout: WebNewDriver.WAIT_MS });
     await this.runnerChatComposerBox().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    if (sessionId === undefined) return;
+    // The composer is live as soon as the page mounts, before the
+    // requested conversation has been found in the history read. Typing
+    // in that window sends into whatever thread the page currently has
+    // (or a fresh one), so wait for the requested row to be active.
+    // Bounded, and it does not assert: the unknown-session scenarios
+    // legitimately never see the row and must still open the page.
+    const active = this.runnerChatHistoryPanel().locator('nav button[aria-current="true"]');
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      if ((await active.count()) > 0) return;
+      await this.page.waitForTimeout(100);
+    }
   }
 
   async runnerChatContactNames(): Promise<string[]> {
@@ -12865,9 +12933,12 @@ export class WebNewDriver implements ParityDriver {
   async runnerChatHeader(): Promise<{ name: string; secondary: string; badge: string }> {
     const header = this.page.getByTestId("runner-chat-header");
     const name = (await header.getByTestId("runner-chat-name").innerText()).trim();
+    // The secondary line and the badge are absent while the runner is
+    // unknown; a bare innerText would wait out the test budget instead
+    // of rejecting, so both reads settle on a short window (NEWFRONT-557).
     const secondary = await header
       .getByTestId("runner-chat-secondary")
-      .innerText()
+      .innerText({ timeout: 2_000 })
       .then(
         (text) => text.trim(),
         () => ""
@@ -12877,7 +12948,7 @@ export class WebNewDriver implements ParityDriver {
       (await header
         .getByTestId("runner-status-badge")
         .first()
-        .innerText()
+        .innerText({ timeout: 2_000 })
         .catch(() => "")) ?? ""
     ).trim();
     return { name, secondary, badge };
@@ -14104,13 +14175,14 @@ export class WebNewDriver implements ParityDriver {
 
   /** Shut the picker's popup without closing the dialog. */
   private async addRunnerShutPicker(): Promise<void> {
-    if ((await this.page.getByRole("option").count()) === 0) return;
+    // Only a visibly open listbox eats the Escape: a stale hidden option
+    // would let it fall through to the dialog and close the whole modal
+    // mid-form (NEWFRONT-557).
+    const first = this.page.getByRole("option").first();
+    if ((await first.count()) === 0) return;
+    if (!(await first.isVisible().catch(() => false))) return;
     await this.page.keyboard.press("Escape");
-    await this.page
-      .getByRole("option")
-      .first()
-      .waitFor({ state: "detached", timeout: 5_000 })
-      .catch(() => undefined);
+    await first.waitFor({ state: "detached", timeout: 5_000 }).catch(() => undefined);
   }
 
   /** Open a picker and wait for its option list to render. */
@@ -14133,6 +14205,15 @@ export class WebNewDriver implements ParityDriver {
     const option = this.page.getByRole("option", { name: optionName, exact: true });
     await option.waitFor({ timeout: WebNewDriver.WAIT_MS });
     await option.click({ timeout: WebNewDriver.WAIT_MS });
+    // The selection closes the listbox; wait for it rather than Escaping
+    // straight away — an Escape during the close transition falls through
+    // to the dialog and kills the whole modal (NEWFRONT-557). The shut
+    // stays as a backstop for a click that genuinely missed.
+    await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
     await this.addRunnerShutPicker();
   }
 
@@ -14396,8 +14477,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   /** The shell selector's buttons (`aria-pressed` marks the active one). */
+  private addRunnerShellGroup(): Locator {
+    return this.addRunnerDialog().getByRole("group", { name: "Shell", exact: true });
+  }
+
   private addRunnerShellStrip(): Locator {
-    return this.addRunnerDialog().getByRole("group", { name: "Shell", exact: true }).getByRole("button");
+    return this.addRunnerShellGroup().getByRole("button");
   }
 
   async addRunnerShellOptions(): Promise<string[]> {
@@ -14406,7 +14491,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async addRunnerActiveShell(): Promise<string | null> {
-    const pressed = this.addRunnerShellStrip().locator('button[aria-pressed="true"]').first();
+    // The pressed read scopes to the group: the strip itself is the
+    // buttons, so a descendant search inside them never matches
+    // (NEWFRONT-557).
+    const pressed = this.addRunnerShellGroup().locator('button[aria-pressed="true"]').first();
     if ((await pressed.count()) === 0) return null;
     return (((await pressed.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
   }

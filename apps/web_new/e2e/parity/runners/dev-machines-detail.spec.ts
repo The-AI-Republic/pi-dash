@@ -183,11 +183,14 @@ test(
       });
 
       await test.step("a slow list renders the loading state, then recovers", async () => {
-        await driver.devMachinesDelayListOnce(5000);
-        const opened = driver.devMachinesOpen(seed.workspaceSlug);
-        await expect.poll(() => driver.devMachinesLoadingVisible(), { timeout: 10_000 }).toBe(true);
-        await opened;
-        await expect.poll(() => driver.devMachinesRowByName(label), { timeout: 15_000 }).not.toBeNull();
+        // Hold the list long enough that the assertion below observes the
+        // loading row regardless of how long the dev server needs to mount
+        // the route: the table has to be on screen first, and only then can
+        // its unsettled body be read.
+        await driver.devMachinesDelayListOnce(20_000);
+        await driver.devMachinesOpen(seed.workspaceSlug);
+        await expect.poll(() => driver.devMachinesLoadingVisible(), { timeout: 15_000 }).toBe(true);
+        await expect.poll(() => driver.devMachinesRowByName(label), { timeout: 30_000 }).not.toBeNull();
       });
 
       await test.step("a failed list renders the error state, then recovers", async () => {

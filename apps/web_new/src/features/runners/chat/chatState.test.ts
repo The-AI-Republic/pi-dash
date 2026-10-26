@@ -96,8 +96,9 @@ describe("composerBlockReason", () => {
   it("names the runner state that stops chat", () => {
     expect(composerBlockReason(runner({ status: "offline" }), session())).toBe(COMPOSER_OFFLINE);
     expect(composerBlockReason(runner({ status: "revoked" }), session())).toBe(COMPOSER_REVOKED);
-    // A row that never enrolled reads offline.
-    expect(composerBlockReason(runner({ status: "online", enrolled_at: null }), null)).toBe(COMPOSER_OFFLINE);
+    // No enrolment gate: the old chat gates on raw server status, so a
+    // live row composes whatever enrolled_at says (NEWFRONT-557).
+    expect(composerBlockReason(runner({ status: "online", enrolled_at: null }), null)).toBeNull();
   });
 
   it("blocks a closed session and an in-flight turn", () => {
@@ -360,8 +361,8 @@ describe("chatHeaderSummary", () => {
     expect(chatHeaderSummary(unnamedPod, null).secondary).toBe("online");
   });
 
-  it("carries the display status, treating a never-enrolled row as offline", () => {
+  it("carries the display status, with no enrolment gate (NEWFRONT-557)", () => {
     expect(chatHeaderSummary(runner({ status: "busy" }), null)).toMatchObject({ name: "alpha", status: "busy" });
-    expect(chatHeaderSummary(runner({ enrolled_at: null }), null).status).toBe("offline");
+    expect(chatHeaderSummary(runner({ enrolled_at: null }), null).status).toBe("online");
   });
 });

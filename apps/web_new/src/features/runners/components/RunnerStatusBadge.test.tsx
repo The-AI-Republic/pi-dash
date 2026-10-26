@@ -51,8 +51,9 @@ describe("RunnerStatusDot", () => {
 });
 
 describe("runnerStatusOf", () => {
-  it("reads a never-enrolled row as offline", () => {
-    expect(runnerStatusOf({ status: "online", enrolled_at: null })).toBe("offline");
-    expect(runnerStatusOf({ status: "busy", enrolled_at: "2024-01-01T00:00:00Z" })).toBe("busy");
+  it("reports the server status with no enrolment gate (NEWFRONT-557)", () => {
+    expect(runnerStatusOf({ status: "online" })).toBe("online");
+    expect(runnerStatusOf({ status: "busy" })).toBe("busy");
+    expect(runnerStatusOf({ status: "offline" })).toBe("offline");
   });
 });

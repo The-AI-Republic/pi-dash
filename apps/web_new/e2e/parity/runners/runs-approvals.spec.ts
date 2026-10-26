@@ -554,12 +554,22 @@ test(
     const marker = `parity-queue-${Date.now()}`;
     const pod = await ownPod(seed.projectId, session, "queue");
     const emptyProject = await ownProject(authed, seed.workspaceSlug, "queue");
-    const kinds: Array<[string, string]> = [
-      ["command_execution", "The runner wants to run a shell command"],
-      ["file_change", "The runner wants to modify a file"],
-      ["network_access", "The runner wants to make a network call"],
-      ["other", "The runner is requesting approval"],
-    ];
+    // Each app keeps its own approval copy (NEWFRONT-557, same treatment
+    // as the runs labels in NEWFRONT-545).
+    const newKinds: Record<string, string> = {
+      command_execution: "Run a shell command",
+      file_change: "Change a file",
+      network_access: "Reach the network",
+      other: "Needs your approval",
+    };
+    const oldKinds: Record<string, string> = {
+      command_execution: "The runner wants to run a shell command",
+      file_change: "The runner wants to modify a file",
+      network_access: "The runner wants to make a network call",
+      other: "The runner is requesting approval",
+    };
+    const kindLabels = driver.target === "web_new" ? newKinds : oldKinds;
+    const kinds: Array<[string, string]> = Object.entries(kindLabels);
     const runIds = await runsCreateFixtures(
       seed.workspaceSlug,
       seed.email,
@@ -595,7 +605,7 @@ test(
             expect(card?.reason).toBeNull();
           }
           if (kind === "command_execution") {
-            expect(card?.expiry).toMatch(/expires /);
+            expect(card?.expiry).toMatch(driver.target === "web_new" ? /Ends / : /expires /);
           } else {
             expect(card?.expiry).toBeNull();
           }
@@ -672,15 +682,18 @@ test(
       const acceptId = approvalFor(`${marker} accept`);
       const declineId = approvalFor(`${marker} decline`);
       await driver.openApprovals(seed.workspaceSlug);
+      // Each app keeps its own failure copy (NEWFRONT-557, same treatment
+      // as the runs labels in NEWFRONT-545).
+      const failedToast = driver.target === "web_new" ? /couldn't save the decision/i : /failed to record decision/i;
       await test.step("Accept-once 500s: toast, card stays, approval stays pending", async () => {
-        expect(await decideToast(`${marker} accept`, "accept")).toMatch(/failed to record decision/i);
+        expect(await decideToast(`${marker} accept`, "accept")).toMatch(failedToast);
         const cards = await driver.approvalsCards();
         expect(cards.some((card) => card.payload.includes(`${marker} accept`))).toBe(true);
         expect((await runsApprovalStatus(acceptId)).status).toBe("pending");
         expect(await runsStoredStatus(runIds[0] as string)).toBe("awaiting_approval");
       });
       await test.step("Decline 500s: toast, card stays, approval stays pending", async () => {
-        expect(await decideToast(`${marker} decline`, "decline")).toMatch(/failed to record decision/i);
+        expect(await decideToast(`${marker} decline`, "decline")).toMatch(failedToast);
         const cards = await driver.approvalsCards();
         expect(cards.some((card) => card.payload.includes(`${marker} decline`))).toBe(true);
         expect((await runsApprovalStatus(declineId)).status).toBe("pending");
@@ -737,7 +750,10 @@ test(
       await watch;
       const cards = await driver.approvalsCards();
       expect(cards.some((card) => card.payload.includes(marker))).toBe(true);
-      expect(refusalToast).toMatch(/failed to record decision/i);
+      // Each app keeps its own failure copy (NEWFRONT-557).
+      expect(refusalToast).toMatch(
+        driver.target === "web_new" ? /couldn't save the decision/i : /failed to record decision/i
+      );
       expect((await runsApprovalStatus(row["id"])).status).toBe("pending");
     } finally {
       await runsDeleteRuns(runIds);
@@ -768,13 +784,17 @@ test(
       // started ⟺ exactly one run attached, failed ⟺ zero runs.
       const dispatch = await driver.issueRunAiDispatch();
       const attached = (await recentRuns(session)).filter((row) => row["work_item"] === issue.id);
-      // web_new writes its own dispatch copy; the old app keeps its wording.
-      const started = driver.target === "web_new" ? /run started/i : /agent run started/i;
-      const failed = driver.target === "web_new" ? /couldn't start the run/i : /failed to start agent run/i;
-      if (dispatch.toast !== null && started.test(dispatch.toast)) {
+      // Each app keeps its own dispatch copy (NEWFRONT-557); the new app
+      // names the queued outcome, which still attaches exactly one run.
+      const startedToast = driver.target === "web_new" ? /run started/i : /agent run started/i;
+      const queuedToast = driver.target === "web_new" ? /run queued/i : /agent run queued/i;
+      const failedToast = driver.target === "web_new" ? /couldn't start the run/i : /failed to start agent run/i;
+      if (dispatch.toast !== null && startedToast.test(dispatch.toast)) {
+        expect(attached).toHaveLength(1);
+      } else if (dispatch.toast !== null && queuedToast.test(dispatch.toast)) {
         expect(attached).toHaveLength(1);
       } else {
-        expect(dispatch.toast).toMatch(failed);
+        expect(dispatch.toast).toMatch(failedToast);
         expect(attached).toHaveLength(0);
       }
       expect(await runsIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toBe(pinBefore);
