@@ -216,7 +216,7 @@ def test_enroll_refuses_a_workspace_you_are_not_in(desktop_client):
 
 
 @override_settings(**MANAGED_SETTINGS)
-def test_same_desktop_has_distinct_machine_identity_per_workspace(desktop_client, workspace, create_user):
+def test_same_desktop_shares_one_machine_identity_across_workspaces(desktop_client, workspace, create_user):
     from pi_dash.db.models import Workspace, WorkspaceMember
 
     second = Workspace.objects.create(name="Other workspace", slug="other-workspace", owner=create_user)
@@ -228,8 +228,33 @@ def test_same_desktop_has_distinct_machine_identity_per_workspace(desktop_client
     second_body = desktop_client.post(
         url, {"workspace_slug": second.slug, "host_label": "desktop-test"}, content_type="application/json"
     ).json()
-    assert first_body["dev_machine_id"] != second_body["dev_machine_id"]
+    # One record per computer; the workspace boundary lives on the tokens.
+    assert first_body["dev_machine_id"] == second_body["dev_machine_id"]
     assert MachineToken.objects.filter(revoked_at__isnull=True, dev_machine__host_label="desktop-test").count() == 2
+
+
+@override_settings(**MANAGED_SETTINGS)
+def test_enroll_with_fingerprint_joins_the_cli_machine(desktop_client, workspace, create_user):
+    fingerprint = "a" * 64
+    cli_machine = DevMachine.objects.create(owner=create_user, host_label="laptop", fingerprint=fingerprint)
+    resp = desktop_client.post(
+        reverse("runner:desktop-enroll"),
+        {"workspace_slug": workspace.slug, "host_label": "laptop", "machine_fingerprint": fingerprint},
+        content_type="application/json",
+    )
+    assert resp.status_code == 201, resp.json()
+    assert resp.json()["dev_machine_id"] == str(cli_machine.id)
+
+
+@override_settings(**MANAGED_SETTINGS)
+def test_enroll_rejects_a_malformed_fingerprint(desktop_client, workspace):
+    resp = desktop_client.post(
+        reverse("runner:desktop-enroll"),
+        {"workspace_slug": workspace.slug, "host_label": "laptop", "machine_fingerprint": "zz"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_machine_fingerprint"
 
 
 @override_settings(**MANAGED_SETTINGS)

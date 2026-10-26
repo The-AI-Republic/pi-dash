@@ -140,6 +140,9 @@ def delete_dev_machine(machine: DevMachine, *, purge_local: bool) -> None:
         # delete alone would leave them orphaned) and then the machine row,
         # which cascades any MachineSession rows.
         Runner.objects.filter(dev_machine_id=machine_pk).delete()
+        # Records merged into this one are tombstones of the same computer;
+        # drop them too so they don't resurface (``merged_into`` is SET_NULL).
+        DevMachine.objects.filter(merged_into_id=machine_pk).delete()
         DevMachine.objects.filter(pk=machine_pk).delete()
 
 

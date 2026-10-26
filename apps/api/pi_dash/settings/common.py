@@ -99,6 +99,9 @@ REST_FRAMEWORK = {
         # endpoint creates a DB row each call, so a flood would otherwise
         # be a free table-pollution vector.
         "auth_device_start": "20/minute",
+        # Desktop sign-in handoff code mint (``/auth/desktop-handoff/``). One
+        # call per desktop sign-in; the cap blunts key brute-forcing.
+        "auth_desktop_handoff": "10/minute",
         # AI assistant: the only platform-compute brake in the BYOK-only MVP.
         "assistant_message": "30/hour",
         "assistant_llm_test": "6/minute",
@@ -544,6 +547,9 @@ MANAGED_RUNNER_GRACEFUL_STOP_SECS = int(get_config("MANAGED_RUNNER_GRACEFUL_STOP
 MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS = int(get_config("MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS", 300))
 # Minimum desktop app version allowed to enroll; empty disables the check.
 DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER = get_config("DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER", "") or ""
+# Where the desktop app redeems a sign-in handoff code (absolute path on the
+# API host). Deployments that serve their own redeem route override it.
+DESKTOP_HANDOFF_REDEEM_PATH = get_config("DESKTOP_HANDOFF_REDEEM_PATH") or "/api/v1/auth/desktop-handoff/redeem/"
 
 # In-house Cloud Agent executor. It runs in the existing Celery deployment;
 # all identity and capacity state is durable in the database.

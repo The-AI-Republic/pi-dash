@@ -21,6 +21,7 @@ import logging
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
@@ -29,9 +30,16 @@ from rest_framework.views import APIView
 from pi_dash.managed_runner.permissions import IsDesktopSession
 from pi_dash.runner.models import DevMachine, MachineToken, Runner, RunnerProvisioning, RunnerStatus
 from pi_dash.runner.services import tokens
+from pi_dash.runner.services.dev_machines import (
+    InvalidMachineFingerprint,
+    parse_machine_fingerprint,
+    resolve_dev_machine,
+)
 from pi_dash.runner.services.permissions import is_workspace_member
 
 logger = logging.getLogger(__name__)
+
+_DESKTOP_TOKEN_LABEL_PREFIX = "desktop: "
 
 
 def _version_is_allowed(reported: str) -> bool:
@@ -65,9 +73,11 @@ def _version_is_allowed(reported: str) -> bool:
 class DesktopEnrollEndpoint(APIView):
     """``POST``/``DELETE /api/v1/runner/dev-machines/desktop-enroll/``.
 
-    ``POST`` is idempotent per (user, workspace): calling it again rotates the
-    machine token onto the same ``DevMachine`` rather than accumulating rows,
-    which is what makes "sign out, sign back in" cheap.
+    ``POST`` resolves the computer's one ``DevMachine`` (by
+    ``machine_fingerprint`` when sent) and rotates the workspace's machine
+    token onto it rather than accumulating rows, which is what makes "sign
+    out, sign back in" cheap. Kept for older desktop builds; current ones
+    drive the shared ``pidash`` daemon instead.
 
     ``DELETE`` revokes the token and marks the machine's bundled runners
     offline; the rows survive so the next sign-in on this machine reuses them
@@ -83,6 +93,10 @@ class DesktopEnrollEndpoint(APIView):
         workspace_slug = (request.data.get("workspace_slug") or "").strip()
         host_label = (request.data.get("host_label") or "").strip()[:255]
         app_version = (request.data.get("app_version") or "").strip()[:32]
+        try:
+            fingerprint = parse_machine_fingerprint(request.data.get("machine_fingerprint"))
+        except InvalidMachineFingerprint:
+            return Response({"error": "invalid_machine_fingerprint"}, status=status.HTTP_400_BAD_REQUEST)
 
         if not workspace_slug:
             return Response({"error": "workspace_slug is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -105,29 +119,16 @@ class DesktopEnrollEndpoint(APIView):
             return Response({"error": "workspace_not_found"}, status=status.HTTP_404_NOT_FOUND)
 
         with transaction.atomic():
-            dev_machine = (
-                DevMachine.objects.select_for_update()
-                .filter(
-                    owner=request.user,
-                    host_label=host_label,
-                    provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
-                    revoked_at__isnull=True,
-                    machine_tokens__workspace=workspace,
-                )
-                .order_by("-created_at")
-                .first()
+            # The shared resolution rule: one record per computer, keyed on
+            # the fingerprint. Builds that send none fall back to the
+            # owner's desktop-provisioned record with the same host label.
+            dev_machine = resolve_dev_machine(
+                user=request.user,
+                dev_machine_id=None,
+                host_label=host_label,
+                fingerprint=fingerprint,
+                provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
             )
-            if dev_machine is None:
-                dev_machine = DevMachine.objects.create(
-                    owner=request.user,
-                    host_label=host_label,
-                    label=host_label[:128],
-                    provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
-                    last_seen_at=timezone.now(),
-                )
-            else:
-                dev_machine.last_seen_at = timezone.now()
-                dev_machine.save(update_fields=["last_seen_at", "updated_at"])
 
             # One live token per (machine, workspace): rotating rather than
             # appending means a lost laptop is revoked by one row, not N.
@@ -144,7 +145,7 @@ class DesktopEnrollEndpoint(APIView):
                 host_label=host_label,
                 token_hash=minted.hashed,
                 token_fingerprint=minted.fingerprint,
-                label=f"desktop: {host_label[:88]}",
+                label=f"{_DESKTOP_TOKEN_LABEL_PREFIX}{host_label[:88]}",
                 is_service=True,
             )
 
@@ -167,10 +168,22 @@ class DesktopEnrollEndpoint(APIView):
 
     def delete(self, request):
         host_label = (request.data.get("host_label") or request.query_params.get("host_label") or "").strip()[:255]
+        # Desktop enrollment may now resolve to the computer's shared record
+        # (also used by a hand-installed CLI), so only the tokens this
+        # endpoint minted (``desktop:`` label) are revoked, never the CLI's.
+        desktop_tokens = MachineToken.objects.filter(
+            user=request.user,
+            label__startswith=_DESKTOP_TOKEN_LABEL_PREFIX,
+            revoked_at__isnull=True,
+            dev_machine__isnull=False,
+        )
         machines = DevMachine.objects.filter(
             owner=request.user,
-            provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
             revoked_at__isnull=True,
+            merged_into__isnull=True,
+        ).filter(
+            Q(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+            | Q(id__in=desktop_tokens.values_list("dev_machine_id", flat=True))
         )
         if host_label:
             machines = machines.filter(host_label=host_label)
@@ -180,9 +193,7 @@ class DesktopEnrollEndpoint(APIView):
             return Response(status=status.HTTP_204_NO_CONTENT)
 
         with transaction.atomic():
-            MachineToken.objects.filter(dev_machine_id__in=machine_ids, revoked_at__isnull=True).update(
-                revoked_at=timezone.now()
-            )
+            desktop_tokens.filter(dev_machine_id__in=machine_ids).update(revoked_at=timezone.now())
             # The runner rows stay: they carry the pod binding the next
             # sign-in reuses. Marking them OFFLINE is what stops dispatch.
             Runner.objects.filter(

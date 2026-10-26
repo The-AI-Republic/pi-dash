@@ -40,7 +40,7 @@ from pi_dash.runner.services.machine_outbox import MachineOfflineError
 from pi_dash.runner.services.permissions import is_workspace_member
 from pi_dash.runner.services.pubsub import send_to_machine
 from pi_dash.runner.views.enrollment import _RUNNER_NAME_RE
-from pi_dash.runner.views.machine_sessions import _auth_dev_machine
+from pi_dash.runner.views.machine_sessions import _auth_dev_machine, dev_machine_mismatch_response
 from pi_dash.runner.views.runners import (
     _machine_is_in_workspace_scope,
     _request_workspace_id,
@@ -228,10 +228,7 @@ class MachineCommandResultEndpoint(APIView):
     def post(self, request, dev_machine_id, request_id):
         machine = _auth_dev_machine(request, dev_machine_id)
         if machine is None:
-            return Response(
-                {"error": "dev_machine_mismatch"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            return dev_machine_mismatch_response(request, dev_machine_id)
 
         # The pending marker binds request_id → target machine. Only the
         # machine the command was issued FOR may report its result — a
