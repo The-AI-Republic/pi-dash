@@ -622,6 +622,9 @@ export class WebNewDriver implements ParityDriver {
   /** A detail body's first paint can trail the record by the socket schedule. */
   private static readonly DETAIL_SETTLE_MS = 120_000;
 
+  /** How long one body-paint poll waits before reading the column again. */
+  private static readonly PAINT_STEP_MS = 250;
+
   // --- Archives shell (NEWFRONT-698, ARCH-001..003). Tab strip and
   // --- navigation, addresses, titles, badge, back control, skeleton
   // --- slot, traffic spy and priming. Other slices call these
@@ -25293,7 +25296,14 @@ export class WebNewDriver implements ParityDriver {
    */
   private pagesGatingRoutes = new Map<
     string,
-    { matches: (raw: string) => boolean; mode: "pass" | "stall" | "fail"; gates: Array<() => void>; armed: boolean }
+    {
+      matches: (raw: string) => boolean;
+      /** The request methods this family speaks for; everything else passes. */
+      methods: readonly string[];
+      mode: "pass" | "stall" | "fail";
+      gates: Array<() => void>;
+      armed: boolean;
+    }
   >();
 
   /** The record read a detail stall holds; null while none is armed. */
@@ -25393,11 +25403,11 @@ export class WebNewDriver implements ParityDriver {
       .poll(
         async () => {
           const variant = await this.pagesGatingListVariant();
-          return variant === "loading" || variant === "unknown" ? "pending" : variant;
+          return variant === "loading" || variant === "unknown" ? "settling" : variant;
         },
         { timeout: 60_000 }
       )
-      .not.toBe("pending");
+      .not.toBe("settling");
     await this.pagesGatingStableRowTitles().catch(() => []);
   }
 
@@ -25485,7 +25495,7 @@ export class WebNewDriver implements ParityDriver {
     return items.map((item) => item.trim().replace(/\s+/g, " ")).filter((item) => item !== "");
   }
 
-  private async pagesGatingRowMenuItems(title: string): Promise<string[]> {
+  async pagesGatingRowMenuItems(title: string): Promise<string[]> {
     const row = this.pagesGatingRow(title);
     await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     return this.pagesGatingMenuItems(row.getByRole("button", { name: `Page actions for ${title}`, exact: true }));
@@ -25589,25 +25599,27 @@ export class WebNewDriver implements ParityDriver {
    * disarm runs, and then falls back to the network; a failing family
    * answers 5xx instead, and a passing one always falls back. A family is
    * routed exactly once per context, so a hold can never be abandoned on a
-   * handler Playwright has already dropped.
+   * handler Playwright has already dropped. `methods` scopes the family to
+   * the verbs it is about: a stalled list read never holds the create that
+   * shares its address, and a failing create never 500s a collection read.
    */
   private async pagesGatingArmRoute(
     name: string,
     matches: (raw: string) => boolean,
-    mode: "stall" | "fail"
+    mode: "stall" | "fail",
+    methods: readonly string[]
   ): Promise<void> {
     const existing = this.pagesGatingRoutes.get(name);
     if (existing !== undefined) {
       existing.mode = mode;
       return;
     }
-    const family = { matches, mode, gates: [] as Array<() => void>, armed: true };
+    const family = { matches, methods, mode, gates: [] as Array<() => void>, armed: true };
     this.pagesGatingRoutes.set(name, family);
     await this.page.route(
       (url: URL) => family.matches(url.href) && url.href.includes("/api/"),
       async (route: Route) => {
-        const method = route.request().method();
-        if (method !== "GET" && method !== "POST") {
+        if (!family.methods.includes(route.request().method())) {
           await route.fallback();
           return;
         }
@@ -25640,7 +25652,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesGatingStallListFetch(): Promise<void> {
-    await this.pagesGatingArmRoute("list", (raw) => this.pagesGatingIsCollection(raw), "stall");
+    await this.pagesGatingArmRoute("list", (raw) => this.pagesGatingIsCollection(raw), "stall", ["GET"]);
   }
 
   async pagesGatingReleaseListFetch(): Promise<void> {
@@ -25648,7 +25660,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesGatingFailListFetch(): Promise<void> {
-    await this.pagesGatingArmRoute("list", (raw) => this.pagesGatingIsCollection(raw), "fail");
+    await this.pagesGatingArmRoute("list", (raw) => this.pagesGatingIsCollection(raw), "fail", ["GET"]);
   }
 
   async pagesGatingUnfailListFetch(): Promise<void> {
@@ -25656,7 +25668,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesGatingFailListCreates(): Promise<void> {
-    await this.pagesGatingArmRoute("create", (raw) => this.pagesGatingIsCollection(raw), "fail");
+    await this.pagesGatingArmRoute("create", (raw) => this.pagesGatingIsCollection(raw), "fail", ["POST"]);
   }
 
   async pagesGatingUnfailListCreates(): Promise<void> {
@@ -25676,7 +25688,11 @@ export class WebNewDriver implements ParityDriver {
     const handler = (request: { url(): string; method(): string }): void => {
       const raw = request.url();
       if (!raw.includes("/api/workspaces/")) return;
-      if (!raw.includes("/pages")) return;
+      // The dedicated collection endpoints name the crowd, not the route:
+      // `favorite-pages` and `archived-pages` carry no `/pages` segment, so
+      // they need their own names to be seen (PAGE-020 pins that the plain
+      // collection answers without either being called).
+      if (!raw.includes("/pages") && !raw.includes("favorite-pages") && !raw.includes("archived-pages")) return;
       const [path, query] = raw.split("?", 2);
       this.pagesGatingSpyLog.push({ method: request.method(), path: path ?? raw, query: query ?? "" });
     };
@@ -25794,13 +25810,21 @@ export class WebNewDriver implements ParityDriver {
     // The editor's own options-menu entries register from a mount effect
     // one commit after the column paints; a read taken in that gap would
     // see a menu missing the body-owned entry (PAGE-044).
-    if (shell !== null) {
-      await expect
-        .poll(async () => (await body.innerText().catch(() => null)) !== null, { timeout: WebNewDriver.WAIT_MS })
-        .toBe(true)
-        .catch(() => undefined);
-    }
+    if (shell !== null) await this.pagesGatingEditorPainted(body);
     return "editor";
+  }
+
+  /**
+   * Wait, in bounded steps, until the painted column answers a body read.
+   * The budget is counted in steps, not wall clock, so the wait can never
+   * outlive one step window on a slow host.
+   */
+  private async pagesGatingEditorPainted(body: Locator): Promise<void> {
+    const steps = Math.ceil(WebNewDriver.WAIT_MS / WebNewDriver.PAINT_STEP_MS);
+    for (let step = 0; step < steps; step++) {
+      if ((await body.innerText().catch(() => null)) !== null) return;
+      await this.page.waitForTimeout(WebNewDriver.PAINT_STEP_MS);
+    }
   }
 
   async pagesGatingDetailSpinnerVisible(): Promise<boolean> {
@@ -25825,7 +25849,8 @@ export class WebNewDriver implements ParityDriver {
         const target = this.pagesGatingDetailTarget;
         return target !== null && this.pagesGatingIsDetail(raw, target);
       },
-      "stall"
+      "stall",
+      ["GET"]
     );
   }
 
@@ -25994,7 +26019,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesGatingStallVersionDetail(): Promise<void> {
-    await this.pagesGatingArmRoute("version", (raw) => this.pagesGatingIsVersionDetail(raw), "stall");
+    await this.pagesGatingArmRoute("version", (raw) => this.pagesGatingIsVersionDetail(raw), "stall", ["GET"]);
   }
 
   async pagesGatingReleaseVersionDetail(): Promise<void> {

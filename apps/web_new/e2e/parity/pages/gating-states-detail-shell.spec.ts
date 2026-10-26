@@ -155,8 +155,9 @@ const D17_ROW_SUFFIX = ["Add sub-page", "Move to…"];
 /**
  * The same two entries follow their own gates, which the oracle rows it
  * shares a menu with never had to express: `Add sub-page` needs member and
- * up, `Move to…` needs the page's owner or an admin (PAGE-084/087), and an
- * archived page takes neither because a shelved page cannot parent.
+ * up, `Move to…` needs the page's owner or an admin (PAGE-084/087). An
+ * archived page takes only `Move to…`: a shelved page cannot parent a
+ * sub-page, so the tree entry never appears there.
  */
 const D17_ROW_MEMBER_SUFFIX = ["Add sub-page"];
 const D17_ROW_ARCHIVED_SUFFIX = ["Move to…"];
