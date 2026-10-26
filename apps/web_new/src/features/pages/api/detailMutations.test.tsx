@@ -168,3 +168,20 @@ describe("usePageMark", () => {
     expect(client.getQueryData(pageKeys.list("acme", PAGES_PROJECT_ID))).toBeUndefined();
   });
 });
+
+describe("record writes stay outside the description path (PAGE-064)", () => {
+  it("title and mark saves patch the record endpoint only", async () => {
+    const { wrapper } = harness();
+    const rename = renderHook(() => usePageRename("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID), { wrapper });
+    rename.result.current.mutate("Renamed");
+    await waitFor(() => expect(rename.result.current.isSuccess).toBe(true));
+    const mark = renderHook(() => usePageMark("acme", PAGES_PROJECT_ID, PAGES_PAGE_ID), { wrapper });
+    mark.result.current.mutate({ in_use: "emoji", emoji: { value: "128640" } });
+    await waitFor(() => expect(mark.result.current.isSuccess).toBe(true));
+    expect(patches).toHaveLength(2);
+    for (const patch of patches) {
+      expect(patch.url).toContain(`/pages/${PAGES_PAGE_ID}/`);
+      expect(patch.url).not.toContain("/description/");
+    }
+  });
+});
