@@ -11,7 +11,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("./toaster.js", () => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
 
 import { platform } from "../../core/platform/index.js";
-import { copyLinkWithToast, copyShareAddress, copyWorkItemLink, shareableAddress, workItemPath } from "./shareLink.js";
+import {
+  copyLinkWithToast,
+  copyShareAddress,
+  copyWorkItemLink,
+  openShareAddress,
+  shareableAddress,
+  workItemPath,
+} from "./shareLink.js";
 import { notifyError, notifySuccess } from "./toaster.js";
 
 afterEach(() => {
@@ -30,6 +37,19 @@ describe("share link helper", () => {
     const shareableUrl = vi.spyOn(platform, "shareableUrl").mockReturnValue("https://app.example.test/acme/");
     expect(shareableAddress("/acme/")).toBe("https://app.example.test/acme/");
     expect(shareableUrl).toHaveBeenCalledWith("/acme/");
+  });
+
+  it("opens the shareable address through the active platform", async () => {
+    vi.spyOn(platform, "shareableUrl").mockReturnValue("https://app.example.test/acme/");
+    const openExternal = vi.spyOn(platform, "openExternal").mockResolvedValue(undefined);
+    await expect(openShareAddress("/acme/")).resolves.toBeUndefined();
+    expect(openExternal).toHaveBeenCalledWith("https://app.example.test/acme/");
+  });
+
+  it("propagates a refused open", async () => {
+    vi.spyOn(platform, "shareableUrl").mockReturnValue("https://app.example.test/acme/");
+    vi.spyOn(platform, "openExternal").mockRejectedValue(new Error("blocked"));
+    await expect(openShareAddress("/acme/")).rejects.toThrow("blocked");
   });
 
   it("writes the address through the clipboard", async () => {
