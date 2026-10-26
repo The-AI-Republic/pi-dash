@@ -201,3 +201,39 @@ def test_archived_list_state_id_in_filter(clients, seed):
     )
     assert resp.status_code == 200, resp.text
     assert i5 not in {row["id"] for row in resp.json()["results"]}
+
+
+def test_archived_grouped_rows_match_ungrouped_shape(clients, seed):
+    # PIDASHCONV-1510: Django renders grouped rows through the same
+    # issue_on_results dicts as the flat list: sort_order is a JSON
+    # number and datetimes end with Z.
+    admin = clients["admin"]
+    ws, pid, i5 = seed["ws_slug"], seed["project"], seed["issue5"]
+    flat = next(
+        r for r in admin.get(
+            f"{_base(ws, pid)}/archived-issues/").json()["results"]
+        if r["id"] == i5)
+    resp = admin.get(
+        f"{_base(ws, pid)}/archived-issues/",
+        params={"group_by": "priority"},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["results"]["high"]["results"]
+    row = next(r for r in rows if r["id"] == i5)
+    assert isinstance(row["sort_order"], float), row["sort_order"]
+    assert row["sort_order"] == flat["sort_order"]
+    assert row["created_at"] == flat["created_at"]
+    assert row["updated_at"] == flat["updated_at"]
+    assert row["created_at"].endswith("Z"), row["created_at"]
+    assert row["updated_at"].endswith("Z"), row["updated_at"]
+    sub = admin.get(
+        f"{_base(ws, pid)}/archived-issues/",
+        params={"group_by": "priority", "sub_group_by": "state_id"},
+    )
+    assert sub.status_code == 200, sub.text
+    cell = sub.json()["results"]["high"]["results"][seed["state_done"]]
+    srow = next(r for r in cell["results"] if r["id"] == i5)
+    assert isinstance(srow["sort_order"], float), srow["sort_order"]
+    assert srow["sort_order"] == flat["sort_order"]
+    assert srow["created_at"] == flat["created_at"]
+    assert srow["updated_at"] == flat["updated_at"]
