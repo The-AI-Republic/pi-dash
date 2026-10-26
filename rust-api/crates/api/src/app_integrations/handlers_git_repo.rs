@@ -92,7 +92,6 @@ use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use chrono::SecondsFormat;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -449,11 +448,14 @@ fn repository_json(repo: &BoundRepository) -> serde_json::Map<String, serde_json
 
 /// Render an aware datetime the way `Model.__getattribute__` +
 /// DRF renders `last_synced_at.isoformat()` / `verified_at.isoformat()`:
-/// the stored instant with its offset, microseconds only when nonzero.
+/// the stored instant with its offset, exactly six fraction digits
+/// when microseconds are nonzero, none when zero (chrono `AutoSi`
+/// trims trailing zeros, so this shares
+/// [`crate::assistant::common::py_iso`], PIDASHCONV-1464).
 /// (`serialize_binding` deliberately bypasses `TimezoneMixin`: no zone
 /// shift happens on this path.)
 fn isoformat(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.to_rfc3339_opts(SecondsFormat::AutoSi, false)
+    crate::assistant::common::py_iso(dt)
 }
 
 /// `serialize_binding` (`services.py:280-294`), key order as declared.
@@ -2061,6 +2063,25 @@ mod tests {
 
     fn gitlab_hosts() -> Vec<String> {
         gitlab_allowed_hosts(&[])
+    }
+
+    #[test]
+    fn isoformat_matches_python_isoformat() {
+        // Whole seconds render no fraction; trailing-zero micros keep
+        // six digits; nanosecond in-memory values truncate to
+        // microseconds (PIDASHCONV-1464).
+        let whole = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05+00:00")
+            .expect("parses")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(isoformat(&whole), "2026-10-22T10:00:05+00:00");
+        let trailing = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.12+00:00")
+            .expect("parses")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(isoformat(&trailing), "2026-10-22T10:00:05.120000+00:00");
+        let nanos = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.123456789+00:00")
+            .expect("parses")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(isoformat(&nanos), "2026-10-22T10:00:05.123456+00:00");
     }
 
     /// FX-GIT-02 `parse_repository_url` executed vectors
