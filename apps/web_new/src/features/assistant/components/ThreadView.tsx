@@ -77,9 +77,7 @@ export function ThreadView({ workspaceSlug, threadId, state, configured }: Threa
   // a moment after the scroll above. Keep the tail in view while the
   // scrollport keeps growing, but stop once the reader scrolls away: their
   // position wins from then on (AGT-047).
-  React.useEffect(() => {
-    followTailWhileGrowing(bodyRef.current, tailRef.current);
-  }, []);
+  React.useEffect(() => followTailWhileGrowing(bodyRef.current, tailRef.current), []);
 
   const submit = (content: string): void => {
     setDraft("");

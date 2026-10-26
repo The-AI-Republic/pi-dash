@@ -160,12 +160,12 @@ function renderThread(options: HarnessOptions = {}) {
     context: { queryClient },
     history: createMemoryHistory({ initialEntries: ["/acme"] }),
   });
-  render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
     </QueryClientProvider>
   );
-  return { sent, cancels, router, queryClient };
+  return { sent, cancels, router, queryClient, unmount: rendered.unmount };
 }
 
 function emit(event: Record<string, unknown>): void {
@@ -394,6 +394,19 @@ describe("ThreadView transcript", () => {
       expect(() => followTailWhileGrowing(document.createElement("div"), document.createElement("div"))).not.toThrow();
     } finally {
       vi.stubGlobal("MutationObserver", original);
+    }
+  });
+
+  it("disconnects the tail watch when the transcript unmounts", async () => {
+    const disconnect = vi.spyOn(MutationObserver.prototype, "disconnect");
+    try {
+      const { unmount } = renderThread({ messages: [row()] });
+      await screen.findByTestId("assistant-transcript");
+      disconnect.mockClear();
+      unmount();
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      disconnect.mockRestore();
     }
   });
 });
