@@ -177,12 +177,13 @@ function ResolvedBoard({
           projectIdentifier={identifier}
           states={states.data}
           seed={peekSeed(issues.data, search.peekId)}
+          commentsEnabled={settings.is_comments_enabled}
+          search={search}
           onClose={peekNav.close}
           onInvalid={peekNav.invalid}
           embedded={embedded}
           votesEnabled={settings.is_votes_enabled}
           reactionsEnabled={settings.is_reactions_enabled}
-          search={search}
           onRequireSignIn={requireSignIn}
         />
       )}

@@ -10,6 +10,7 @@ import {
   spaceGroupQueryOptions,
   spaceInstanceQueryOptions,
   spaceIssueDetailQueryOptions,
+  spaceCommentsQueryOptions,
   spaceIssuesQueryOptions,
   spaceLabelsQueryOptions,
   spaceMetaQueryOptions,
@@ -65,6 +66,7 @@ describe("space query options", () => {
       spaceSettingsQueryOptions(client, "anchor-1"),
       spaceIssuesQueryOptions(client, "anchor-1"),
       spaceIssueDetailQueryOptions(client, "anchor-1", UUID),
+      spaceCommentsQueryOptions(client, "anchor-1", UUID),
       spaceGroupQueryOptions(client, "anchor-1", {}, UUID, "50:1:0"),
       spaceStatesQueryOptions(client, "anchor-1"),
       spaceLabelsQueryOptions(client, "anchor-1"),
@@ -123,6 +125,31 @@ describe("space query options", () => {
     expect(new URL(urls[0] ?? "", "https://api.test").pathname).toBe(`/api/public/anchor/anchor-1/issues/${UUID}/`);
     expect(spaceIssueDetailQueryOptions(client, "anchor-1", "SPC-42").enabled).toBe(false);
     expect(spaceIssueDetailQueryOptions(client, "bad anchor", UUID).enabled).toBe(false);
+  });
+
+  it("reads the public comment thread, gated on the anchor and issue uuid (SPC-049/050)", async () => {
+    const urls: string[] = [];
+    const client = clientWith(async (url) => {
+      urls.push(url);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: () => Promise.resolve(JSON.stringify([])),
+      };
+    });
+    const options = spaceCommentsQueryOptions(client, "anchor-1", UUID);
+    expect(options.queryKey).toEqual(["spaces", "anchor", "anchor-1", "comments", UUID]);
+    expect(options.enabled).toBe(true);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    await expect(options.queryFn!({} as never)).resolves.toEqual([]);
+    expect(new URL(urls[0] ?? "", "https://api.test").pathname).toBe(
+      `/api/public/anchor/anchor-1/issues/${UUID}/comments/`
+    );
+    expect(spaceCommentsQueryOptions(client, "anchor-1", "SPC-42").enabled).toBe(false);
+    expect(spaceCommentsQueryOptions(client, "bad anchor", UUID).enabled).toBe(false);
   });
 
   it("reads labels once per visit through the public anchor endpoint (SPC-028)", async () => {

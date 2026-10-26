@@ -14,6 +14,7 @@ import {
   getSpaceBoardMeta,
   getSpaceBoardSettings,
   listSpaceBoardIssues,
+  listSpaceComments,
   listSpaceBoardLabels,
   listSpaceBoardStates,
   resolveSpaceBoardAnchor,
@@ -25,6 +26,7 @@ import {
   type SpaceBoardMeta,
   type SpaceBoardSettings,
   type SpaceBoardState,
+  type SpaceComment,
 } from "@pidash/api-client";
 
 import { isValidAnchor, type SpaceBoardFilters } from "../lib/address.js";
@@ -69,6 +71,23 @@ export function spaceSettingsQueryOptions(client: ApiClient, anchor: string) {
     queryKey: spaceKeys.settings(anchor),
     queryFn: () => getSpaceBoardSettings(client, anchor),
     enabled: isValidAnchor(anchor),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  });
+}
+
+/**
+ * The open issue's public comment thread (SPC-049/050). The endpoint
+ * already filters to EXTERNAL comments and orders by creation; the section
+ * stays behind the publisher's comments flag at the component level. Gated
+ * on a uuid so a malformed peek address never becomes a request.
+ */
+export function spaceCommentsQueryOptions(client: ApiClient, anchor: string, issueId: string) {
+  return queryOptions({
+    queryKey: spaceKeys.comments(anchor, issueId),
+    queryFn: () => listSpaceComments(client, anchor, issueId),
+    enabled: isValidAnchor(anchor) && isSpaceIssueId(issueId),
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: false,
@@ -203,4 +222,5 @@ export type {
   SpaceBoardMeta,
   SpaceBoardSettings,
   SpaceBoardState,
+  SpaceComment,
 };
