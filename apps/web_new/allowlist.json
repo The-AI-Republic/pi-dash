@@ -2,12 +2,14 @@
   "$comment": "Runtime dependency allowlist for the new trees. Adding a runtime dependency needs review: explain in the PR why an existing choice does not work, and its gzipped size (Stack and dependencies).",
   "web_new": [
     "@expo-google-fonts/inter",
+    "@hocuspocus/provider",
     "@pidash/api-client",
     "@pidash/kit",
     "@react-pdf/renderer",
     "@tanstack/react-query",
     "@tanstack/react-router",
     "@tiptap/core",
+    "@tiptap/extension-collaboration",
     "@tiptap/extension-image",
     "@tiptap/extension-link",
     "@tiptap/extension-task-item",
@@ -23,6 +25,8 @@
     "react",
     "react-dom",
     "recharts",
+    "y-indexeddb",
+    "yjs",
     "zod",
     "zustand"
   ],

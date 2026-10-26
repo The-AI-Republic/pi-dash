@@ -22,7 +22,10 @@ type AnyExtension = import("@tiptap/core").AnyExtension;
  * array because the description loader's inferred pair is narrower than
  * what a page adds.
  */
-export async function loadPageExtensions(workspaceSlug = ""): Promise<AnyExtension[]> {
+export async function loadPageExtensions(
+  workspaceSlug = "",
+  options: { history?: boolean } = {}
+): Promise<AnyExtension[]> {
   const [
     { default: Underline },
     { default: TextAlign },
@@ -39,7 +42,10 @@ export async function loadPageExtensions(workspaceSlug = ""): Promise<AnyExtensi
     import("@tiptap/extension-text-align"),
     import("@tiptap/extension-task-list"),
     import("@tiptap/extension-task-item"),
-    loadDescriptionExtensions({ horizontalRule: false }),
+    loadDescriptionExtensions({
+      horizontalRule: false,
+      ...(options.history === undefined ? {} : { history: options.history }),
+    }),
     loadPageTableExtensions(),
     loadPageColorMark(),
     loadStoredImageExtension(),

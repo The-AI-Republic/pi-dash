@@ -12,6 +12,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 
 import { getPageBodyDraft, resetPageBodyDrafts, setPageBodyDraft } from "../lib/pageBodyDraft.js";
 import { getPageBodyActions, resetPageBodyActions } from "../lib/pageBodyActions.js";
@@ -583,5 +584,40 @@ describe("PageEditorSurface oversized strip", () => {
       reportPageContentTooLarge("page-2");
     });
     expect(screen.queryByTestId("page-oversized-strip")).not.toBeInTheDocument();
+  });
+});
+
+describe("PageEditorSurface collaboration", () => {
+  function sharedDoc(title: string, body: string): Y.Doc {
+    const peer = new Y.Doc();
+    const heading = new Y.XmlElement("heading");
+    heading.setAttribute("level", "1");
+    heading.insert(0, [new Y.XmlText(title)]);
+    peer.getXmlFragment("title").insert(0, [heading]);
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText(body)]);
+    peer.getXmlFragment("default").insert(0, [paragraph]);
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer));
+    return doc;
+  }
+
+  function titleHeading(): HTMLElement {
+    const heading = screen.getByTestId("page-detail-title").querySelector("h1");
+    if (heading === null) throw new Error("the title field never mounted");
+    return heading;
+  }
+
+  it("binds the title and the body to the shared document", async () => {
+    mount({ collab: { doc: sharedDoc("Shared name", "Shared body") }, seedDocument: true });
+    await vi.waitFor(() => expect(titleHeading()).toHaveTextContent("Shared name"));
+    expect(await body()).toHaveTextContent("Shared body");
+  });
+
+  it("seeds empty shared fields from the stored page", async () => {
+    const doc = new Y.Doc();
+    mount({ collab: { doc }, seedDocument: true });
+    await vi.waitFor(() => expect(titleHeading()).toHaveTextContent("Launch notes"));
+    expect(await body()).toHaveTextContent("Stored words");
   });
 });

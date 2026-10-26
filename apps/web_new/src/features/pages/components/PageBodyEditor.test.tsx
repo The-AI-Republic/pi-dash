@@ -9,6 +9,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 
 import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 import type { PageFormattingState } from "../../../shared/editor/index.js";
@@ -21,6 +22,7 @@ interface Mounted {
   onChange: ReturnType<typeof vi.fn>;
   onFormattingChange: ReturnType<typeof vi.fn>;
   handles: PageEditorHandle[];
+  rerender: (props: Partial<React.ComponentProps<typeof PageBodyEditor>>) => void;
 }
 
 function mount(
@@ -30,7 +32,7 @@ function mount(
   const onChange = vi.fn();
   const onFormattingChange = vi.fn<(state: PageFormattingState) => void>();
   const handles: PageEditorHandle[] = [];
-  render(
+  const element = (extra: Partial<React.ComponentProps<typeof PageBodyEditor>> = {}) => (
     <React.Suspense fallback={fallback}>
       <PageBodyEditor
         initialHtml="<p>Stored words</p>"
@@ -39,10 +41,12 @@ function mount(
         onReady={(handle) => handles.push(handle)}
         label="Page body"
         {...props}
+        {...extra}
       />
     </React.Suspense>
   );
-  return { onChange, onFormattingChange, handles };
+  const view = render(element());
+  return { onChange, onFormattingChange, handles, rerender: (extra) => view.rerender(element(extra)) };
 }
 
 async function surface(label = "Page body"): Promise<HTMLElement> {
@@ -218,6 +222,131 @@ describe(
       await vi.waitFor(() => expect(onPasteHtml).toHaveBeenCalledTimes(1));
       expect(editable).toHaveTextContent("Stored words");
       expect(mounted.onChange).not.toHaveBeenCalled();
+    });
+
+    it("mounts the standalone editor on an explicit null binding", async () => {
+      mount({ collab: null });
+      expect(await surface()).toHaveTextContent("Stored words");
+    });
+  },
+  EDITOR_TEST_TIMEOUT
+);
+
+describe(
+  "PageBodyEditor collaboration",
+  () => {
+    it("seeds the stored markup into an empty shared field", async () => {
+      const doc = new Y.Doc();
+      const mounted = mount({ collab: { doc }, seedDocument: true });
+      expect(await surface()).toHaveTextContent("Stored words");
+      await vi.waitFor(() => expect(doc.getXmlFragment("default").length).toBeGreaterThan(0));
+      const peer = new Y.Doc();
+      Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+      expect(peer.getXmlFragment("default").toString()).toBe("<paragraph>Stored words</paragraph>");
+      // The seed restores stored content, so it reports nothing to save.
+      expect(mounted.onChange).not.toHaveBeenCalled();
+    });
+
+    it("waits for the server state before seeding", async () => {
+      const doc = new Y.Doc();
+      const mounted = mount({ collab: { doc } });
+      const editable = await surface();
+      expect(editable.textContent).toBe("");
+      expect(doc.getXmlFragment("default").length).toBe(0);
+      mounted.rerender({ seedDocument: true });
+      await vi.waitFor(() => expect(editable).toHaveTextContent("Stored words"));
+      expect(doc.getXmlFragment("default").length).toBeGreaterThan(0);
+    });
+
+    it("renders remote updates and reports the merged body", async () => {
+      const doc = new Y.Doc();
+      const mounted = mount({ collab: { doc }, seedDocument: true });
+      await surface();
+      await vi.waitFor(() => expect(doc.getXmlFragment("default").length).toBeGreaterThan(0));
+      const peer = new Y.Doc();
+      Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+      const paragraph = peer.getXmlFragment("default").get(0) as Y.XmlElement;
+      const text = paragraph.get(0) as Y.XmlText;
+      await act(async () => {
+        text.insert(text.length, " plus remote");
+      });
+      await act(async () => {
+        Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer));
+      });
+      const editable = await surface();
+      await vi.waitFor(() => expect(editable).toHaveTextContent("plus remote"));
+      await vi.waitFor(() => expect(mounted.onChange).toHaveBeenCalled());
+      const last = mounted.onChange.mock.calls[mounted.onChange.mock.calls.length - 1]?.[0] as string;
+      expect(last).toContain("Stored words plus remote");
+    });
+
+    it("converges two editors bound to one document", async () => {
+      const doc = new Y.Doc();
+      const collab = { doc };
+      const first = mount({ collab, seedDocument: true, label: "First body" });
+      await surface("First body");
+      await vi.waitFor(() => expect(doc.getXmlFragment("default").length).toBeGreaterThan(0));
+      const second = mount({ collab, seedDocument: true, label: "Second body" });
+      const two = await surface("Second body");
+      expect(two).toHaveTextContent("Stored words");
+      const one = await handleOf(first);
+      await act(async () => {
+        one.applyBlockKind("heading2");
+      });
+      await vi.waitFor(() => expect(second.onChange).toHaveBeenCalled());
+      const seen = second.onChange.mock.calls[second.onChange.mock.calls.length - 1]?.[0] as string;
+      expect(seen).toContain("<h2");
+      expect(two.textContent).toContain("Stored words");
+      const other = await handleOf(second);
+      await act(async () => {
+        other.applyBlockKind("paragraph");
+      });
+      await vi.waitFor(() => {
+        const calls = first.onChange.mock.calls;
+        const latest = calls[calls.length - 1]?.[0] as string;
+        expect(latest).toContain("<p>");
+      });
+    });
+
+    it("converges two documents through exchanged updates", async () => {
+      const docA = new Y.Doc();
+      const first = mount({ collab: { doc: docA }, seedDocument: true, label: "Peer A" });
+      await surface("Peer A");
+      await vi.waitFor(() => expect(docA.getXmlFragment("default").length).toBeGreaterThan(0));
+      const docB = new Y.Doc();
+      Y.applyUpdate(docB, Y.encodeStateAsUpdate(docA));
+      const second = mount({
+        initialHtml: "<p>Stale seed</p>",
+        collab: { doc: docB },
+        seedDocument: true,
+        label: "Peer B",
+      });
+      const editableB = await surface("Peer B");
+      expect(editableB).toHaveTextContent("Stored words");
+      expect(editableB).not.toHaveTextContent("Stale seed");
+      const handleA = await handleOf(first);
+      await act(async () => {
+        handleA.applyBlockKind("heading2");
+      });
+      await act(async () => {
+        Y.applyUpdate(docB, Y.encodeStateAsUpdate(docA));
+      });
+      await vi.waitFor(() => expect(second.onChange).toHaveBeenCalled());
+      const seenByB = second.onChange.mock.calls[second.onChange.mock.calls.length - 1]?.[0] as string;
+      expect(seenByB).toContain("<h2");
+      const handleB = await handleOf(second);
+      await act(async () => {
+        handleB.applyBlockKind("paragraph");
+      });
+      await act(async () => {
+        Y.applyUpdate(docA, Y.encodeStateAsUpdate(docB));
+      });
+      await vi.waitFor(() => {
+        const calls = first.onChange.mock.calls;
+        const latest = calls[calls.length - 1]?.[0] as string;
+        expect(latest).toContain("<p>");
+        expect(latest).toContain("Stored words");
+      });
     });
   },
   EDITOR_TEST_TIMEOUT

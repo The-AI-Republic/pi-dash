@@ -40,12 +40,14 @@
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
+    "@hocuspocus/provider": "2.15.2",
     "@pidash/api-client": "workspace:*",
     "@pidash/kit": "workspace:*",
     "@react-pdf/renderer": "^4.9.0",
     "@tanstack/react-query": "^5.90.0",
     "@tanstack/react-router": "^1.130.0",
     "@tiptap/core": "catalog:",
+    "@tiptap/extension-collaboration": "^2.22.3",
     "@tiptap/extension-image": "^2.22.3",
     "@tiptap/extension-link": "^2.22.3",
     "@tiptap/extension-task-item": "^2.22.3",
@@ -61,6 +63,8 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "recharts": "^3.10.1",
+    "y-indexeddb": "^9.0.12",
+    "yjs": "^13.6.20",
     "zod": "^4.6.5",
     "zustand": "^5.0.0"
   },

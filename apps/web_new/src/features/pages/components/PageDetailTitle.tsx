@@ -14,6 +14,7 @@
 
 import * as React from "react";
 
+import { PAGE_LIVE_TITLE_FIELD, type PageLiveDocBinding } from "../lib/pageLiveBackend.js";
 import {
   PAGE_TITLE_MAX_LENGTH,
   PAGE_TITLE_PLACEHOLDER,
@@ -43,6 +44,10 @@ export interface PageDetailTitleProps {
   onDraftChange?: ((name: string) => void) | undefined;
   /** Extra class on the title shell: the page's stored type size (PAGE-072). */
   className?: string | undefined;
+  /** The live document to bind (PAGE-065); absent keeps the standalone editor. */
+  collab?: PageLiveDocBinding | null | undefined;
+  /** Seed an empty shared field from the stored name once the server state is known. */
+  seedDocument?: boolean | undefined;
 }
 
 export function PageDetailTitle(props: PageDetailTitleProps): React.ReactElement {
@@ -66,6 +71,8 @@ function TitleShell({
   onJumpToBody,
   onDraftChange,
   className,
+  collab,
+  seedDocument,
 }: PageDetailTitleProps): React.ReactElement {
   const [draft, setDraft] = React.useState(() => titleTextOf(name));
   const [focused, setFocused] = React.useState(false);
@@ -130,6 +137,7 @@ function TitleShell({
     className === undefined
       ? "page-title-editor min-h-16 py-(--space-4)"
       : `page-title-editor min-h-16 py-(--space-4) ${className}`;
+  const Field = collab !== null && collab !== undefined ? LazyTitleFieldLive : LazyTitleField;
   return (
     <div
       id={`${pageId}-title`}
@@ -138,7 +146,7 @@ function TitleShell({
       className={rootClass}
     >
       <React.Suspense fallback={<TitleHeading value={draft} editable={editable} />}>
-        <LazyTitleField
+        <Field
           pageId={pageId}
           value={draft}
           editable={editable}
@@ -146,6 +154,9 @@ function TitleShell({
           onCommit={editable ? commit : undefined}
           onFocusChange={editable ? setFocused : undefined}
           onJumpToBody={editable ? () => jumpRef.current?.() : undefined}
+          collab={collab}
+          seedDocument={seedDocument}
+          seedValue={name}
         />
       </React.Suspense>
       {editable && focused ? (
@@ -199,6 +210,16 @@ export interface TitleFieldProps {
   onFocusChange?: ((focused: boolean) => void) | undefined;
   /** Editable fields only: a read-only title never hands the caret on. */
   onJumpToBody?: (() => void) | undefined;
+  /** The live document the live variant binds; the standalone field ignores it. */
+  collab?: PageLiveDocBinding | null | undefined;
+  /** Seed an empty shared field from the stored name once the server state is known. */
+  seedDocument?: boolean | undefined;
+  /**
+   * The stored name the live variant seeds from. The record name, never
+   * the draft: by the time the seed gate opens, the draft already
+   * follows the shared field. The standalone field ignores it.
+   */
+  seedValue: string;
 }
 
 /** The heading node the title's editor holds: one level-one heading. */
@@ -225,14 +246,16 @@ type TitlePackages = {
   EditorContent: typeof import("@tiptap/react").EditorContent;
   useEditor: typeof import("@tiptap/react").useEditor;
   extensions: import("@tiptap/core").AnyExtension[];
+  collaboration: typeof import("@tiptap/extension-collaboration") | null;
 };
 
 /**
  * The title chunk: Tiptap, the single-heading document, the placeholder
- * and the shape guard. React.lazy caches this factory's result, so the
+ * and the shape guard, plus the collaboration binding for the live
+ * variant. React.lazy caches this factory's result, so each variant's
  * chunk is loaded and its extensions built exactly once per session.
  */
-async function loadTitlePackages(): Promise<TitlePackages> {
+async function loadTitlePackages(collaborative: boolean): Promise<TitlePackages> {
   return (async () => {
     const [
       { EditorContent, useEditor },
@@ -240,12 +263,14 @@ async function loadTitlePackages(): Promise<TitlePackages> {
       { Extension },
       { Plugin, PluginKey, TextSelection },
       { Decoration, DecorationSet },
+      collaboration,
     ] = await Promise.all([
       import("@tiptap/react"),
       import("@tiptap/starter-kit"),
       import("@tiptap/core"),
       import("@tiptap/pm/state"),
       import("@tiptap/pm/view"),
+      collaborative ? import("@tiptap/extension-collaboration") : Promise.resolve(null),
     ]);
     type NodeType = import("@tiptap/pm/model").NodeType;
     // One heading, nothing else: the rest of the description kit stays
@@ -332,7 +357,7 @@ async function loadTitlePackages(): Promise<TitlePackages> {
       placeholder,
       shape,
     ] as unknown as import("@tiptap/core").AnyExtension[];
-    return { EditorContent, useEditor, extensions };
+    return { EditorContent, useEditor, extensions, collaboration };
   })();
 }
 
@@ -372,9 +397,9 @@ export function titleShapeOf(
   return { text, caret: inText };
 }
 
-const LazyTitleField = /* #__PURE__ */ React.lazy(async () => {
-  const { EditorContent, useEditor, extensions } = await loadTitlePackages();
-
+function titleFieldModule({ EditorContent, useEditor, extensions, collaboration }: TitlePackages): {
+  default: React.ComponentType<TitleFieldProps>;
+} {
   function TitleField({
     pageId,
     value,
@@ -383,6 +408,9 @@ const LazyTitleField = /* #__PURE__ */ React.lazy(async () => {
     onCommit,
     onFocusChange,
     onJumpToBody,
+    collab,
+    seedDocument,
+    seedValue,
   }: TitleFieldProps): React.ReactElement {
     const valueRef = React.useRef(value);
     valueRef.current = value;
@@ -395,10 +423,25 @@ const LazyTitleField = /* #__PURE__ */ React.lazy(async () => {
     const jumpRef = React.useRef(onJumpToBody);
     jumpRef.current = onJumpToBody;
     const [empty, setEmpty] = React.useState(() => titleIsEmpty(value));
+    // The live variant mounts only with a binding (the shell keys the
+    // variant on the prop), so the cast below cannot fail.
+    const boundExtensions = React.useMemo(
+      () =>
+        collaboration === null
+          ? extensions
+          : [
+              ...extensions,
+              collaboration.Collaboration.configure({
+                document: (collab as PageLiveDocBinding).doc as import("yjs").Doc,
+                field: PAGE_LIVE_TITLE_FIELD,
+              }),
+            ],
+      [collab]
+    );
 
     const editor = useEditor(
       {
-        extensions,
+        extensions: boundExtensions,
         content: titleDocument(value),
         immediatelyRender: false,
         editorProps: {
@@ -437,8 +480,21 @@ const LazyTitleField = /* #__PURE__ */ React.lazy(async () => {
           commitRef.current?.(valueRef.current);
         },
       },
-      [extensions]
+      [boundExtensions]
     );
+
+    // The binding renders the shared field over the initial heading,
+    // so a field the server left empty is seeded from the stored name
+    // once the server state is known (PAGE-065) — from the record, not
+    // the draft, which already follows the shared field by now. A field
+    // showing shared content — or the operator's own first keystrokes —
+    // is never seeded over. Layout timing: the seed lands before the
+    // first paint, never as an empty flash.
+    React.useLayoutEffect(() => {
+      if (editor === null || collaboration === null || seedDocument !== true) return;
+      if (!titleIsEmpty(titleTextBetween(editor.state.doc))) return;
+      editor.commands.setContent(titleDocument(seedValue));
+    }, [editor, seedDocument, seedValue]);
 
     React.useEffect(() => {
       editor?.setEditable(editable);
@@ -463,4 +519,8 @@ const LazyTitleField = /* #__PURE__ */ React.lazy(async () => {
   }
 
   return { default: TitleField };
-});
+}
+
+const LazyTitleField = /* #__PURE__ */ React.lazy(() => loadTitlePackages(false).then(titleFieldModule));
+
+const LazyTitleFieldLive = /* #__PURE__ */ React.lazy(() => loadTitlePackages(true).then(titleFieldModule));

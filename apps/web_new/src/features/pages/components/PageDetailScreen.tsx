@@ -62,11 +62,13 @@ import { quickCreateAccess } from "../lib/pageCreate.js";
 import { copyPageLink } from "../lib/share.js";
 import { pageAssistantReady } from "../lib/pageAssistant.js";
 import { usePageSyncStatus } from "../lib/pageSync.js";
+import { usePageLiveSession, usePageReadOnlySyncReport } from "../lib/pageLiveSession.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
 import { PageDeleteDialog } from "./PageDeleteDialog.js";
 import { PageDetailPanel } from "./PageDetailPanel.js";
 import { PageDetailHeader } from "./PageDetailHeader.js";
 import { PageFloatingPaneToggle } from "./PageFloatingPaneToggle.js";
+import { PageLiveLoader } from "./PageLiveLoader.js";
 import { PageCanvasHeader } from "./PageCanvasHeader.js";
 import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
 import { PageEditorSurface, PAGE_BODY_LABEL } from "./PageEditorSurface.js";
@@ -205,6 +207,25 @@ export function PageDetailScreen({
   });
 
   const syncStatus = usePageSyncStatus(pageId);
+  // One collaboration session per editable page (PAGE-065–067): the
+  // mount below mirrors the document the live editors bind. Read-only
+  // pages keep their stored snapshot and report converged instead.
+  const liveMount = usePageLiveSession({
+    workspaceSlug,
+    projectId,
+    pageId,
+    user: me.data === undefined ? null : { id: me.data.id, name: me.data.display_name },
+    enabled: (capabilities?.canEdit ?? false) && page !== undefined,
+  });
+  usePageReadOnlySyncReport(pageId, page !== undefined && capabilities !== null && !capabilities.canEdit);
+  // The binding is stable per document: a fresh object every render
+  // would rebuild the editors' extensions and drop the caret.
+  const liveDocHandle = liveMount?.docHandle ?? null;
+  const liveDoc = React.useMemo(() => (liveDocHandle === null ? null : { doc: liveDocHandle }), [liveDocHandle]);
+  // With no session (signed out) or a known document the surface
+  // renders; the loader holds the canvas only while the document is
+  // still unknown (PAGE-067).
+  const liveReady = liveMount === null || liveMount.liveReady;
   const rename = usePageRename(workspaceSlug, projectId, pageId);
   const mark = usePageMark(workspaceSlug, projectId, pageId);
   // One save path for the header's mark, on editable and read-only pages
@@ -491,24 +512,30 @@ export function PageDetailScreen({
                   </p>
                 ) : null}
                 {capabilities.canEdit ? (
-                  <PageEditorSurface
-                    pageId={page.id}
-                    workspaceSlug={workspaceSlug}
-                    projectId={projectId}
-                    name={page.name}
-                    descriptionHtml={page.description_html}
-                    logoProps={page.logo_props as Record<string, unknown>}
-                    onRename={saveName}
-                    onMarkPick={saveMark}
-                    showBar={showBar}
-                    onSave={saveFallback.requestManualSave}
-                    fullWidth={preferences.full_width}
-                    fontSize={preferences.font_size}
-                    fontStyle={preferences.font_style}
-                    bodyPending={!bodyReady}
-                    onHandle={onEditorHandle}
-                    assistantReady={assistantReady}
-                  />
+                  liveReady ? (
+                    <PageEditorSurface
+                      pageId={page.id}
+                      workspaceSlug={workspaceSlug}
+                      projectId={projectId}
+                      name={page.name}
+                      descriptionHtml={page.description_html}
+                      logoProps={page.logo_props as Record<string, unknown>}
+                      onRename={saveName}
+                      onMarkPick={saveMark}
+                      showBar={showBar}
+                      onSave={saveFallback.requestManualSave}
+                      fullWidth={preferences.full_width}
+                      fontSize={preferences.font_size}
+                      fontStyle={preferences.font_style}
+                      bodyPending={!bodyReady}
+                      onHandle={onEditorHandle}
+                      collab={liveDoc}
+                      seedDocument={liveMount?.seedDocument ?? false}
+                      assistantReady={assistantReady}
+                    />
+                  ) : (
+                    <PageLiveLoader />
+                  )
                 ) : (
                   <>
                     <PageCanvasHeader

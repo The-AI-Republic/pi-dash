@@ -101,6 +101,15 @@ describe("page extension set", () => {
     expect(names).toContain("starterKit");
   });
 
+  it("keeps the undo history by default and drops it for collaborative editing", async () => {
+    const findStarterKit = (extensions: Array<{ name: string; options?: unknown }>) =>
+      extensions.find((extension) => extension.name === "starterKit");
+    const standalone = await loadPageExtensions();
+    expect((findStarterKit(standalone)?.options as { history?: unknown } | undefined)?.history).not.toBe(false);
+    const collaborative = await loadPageExtensions("", { history: false });
+    expect((findStarterKit(collaborative)?.options as { history?: unknown } | undefined)?.history).toBe(false);
+  });
+
   it.each(FIXTURES.map((fixture) => [fixture.name, fixture] as const))(
     "%s survives parse and serialize",
     async (_name, fixture) => {
