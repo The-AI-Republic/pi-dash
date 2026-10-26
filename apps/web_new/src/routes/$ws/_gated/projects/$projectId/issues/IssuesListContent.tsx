@@ -48,10 +48,7 @@ import { canEditInProject } from "../../../../../../shared/shell/contextual/inde
 // The list layout is a separate chunk so the route stays inside the
 // initial-JS budget (Quality gates). `beforeLoad` awaits it with the data,
 // so the component mounts once instead of suspending after commit.
-import { LazyIssueFilters, preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
-// Start the filter chunk with the route module so the first layout render
-// does not suspend and mount the layout twice (NEWFRONT-619).
-preloadIssueFilters();
+import { resolvedIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
 // Deep import: the issues barrel is eager through this route, so a
 // feature barrel here would pin every project-only module into the
 // first-route chain (NEWFRONT-871, size gate).
@@ -80,9 +77,6 @@ const LazyWorkItemCreateDialog = React.lazy(() =>
 // The timeline is only rendered when the stored layout selects it. Its
 // boundary module would otherwise join the route's initial closure even
 // though the list first paint never mounts it (Quality gates).
-/** The clear entry stays inert while the filter row is still loading. */
-const NOOP = (): void => {};
-
 const LazyGanttTimeline = React.lazy(() =>
   import("../../../../../../features/issues/gantt/GanttTimeline.js").then((module) => ({
     default: module.GanttTimeline,
@@ -207,14 +201,14 @@ export function IssuesListContent({
   // row during this visit. The layout root sends a zero total to
   // `emptyState` and a filtered page to `noMatchState`; both show the card
   // this rule picks, and the entries follow the project standing.
-  const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => {
+  const renderWithFilters = (richFilter: RichFilterBuilderParts): React.ReactElement => {
     const emptyState = (
       <ProjectIssuesEmptyState
-        hasCompleteCondition={richFilter?.hasCompleteCondition ?? false}
-        addedThisVisit={richFilter?.addedThisVisit ?? false}
+        hasCompleteCondition={richFilter.hasCompleteCondition}
+        addedThisVisit={richFilter.addedThisVisit}
         visibleCount={issues.total_count}
         canAct={canEdit}
-        onClear={richFilter === null ? NOOP : richFilter.clearFilters}
+        onClear={richFilter.clearFilters}
         onCreate={() => {
           setCreateOpen(true);
         }}
@@ -329,8 +323,8 @@ export function IssuesListContent({
           </>
         }
         displayControl={display}
-        filterControl={richFilter?.control}
-        filterRow={richFilter?.row}
+        filterControl={richFilter.control}
+        filterRow={richFilter.row}
         analyticsControl={analytics}
       />
     );
@@ -347,20 +341,23 @@ export function IssuesListContent({
       />
     </React.Suspense>
   ) : null;
+  // The chunk is already resolved by `beforeLoad`; rendering the component
+  // directly keeps the first commit the screen itself, with no Suspense
+  // fallback to discard and remount (NEWFRONT-911, as NEWFRONT-906 for the
+  // screen).
+  const IssueFilters = resolvedIssueFilters();
   return (
     <>
-      <React.Suspense fallback={renderWithFilters(null)}>
-        <LazyIssueFilters
-          workspaceSlug={workspaceSlug}
-          projectId={projectId}
-          entity={{ scope: "project", projectId: projectId }}
-          hideCycle={!project.cycle_view}
-          hideModule={!project.module_view}
-          viewsEnabled={project.issue_views_view}
-        >
-          {renderWithFilters}
-        </LazyIssueFilters>
-      </React.Suspense>
+      <IssueFilters
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        entity={{ scope: "project", projectId: projectId }}
+        hideCycle={!project.cycle_view}
+        hideModule={!project.module_view}
+        viewsEnabled={project.issue_views_view}
+      >
+        {renderWithFilters}
+      </IssueFilters>
       {createDialog}
     </>
   );

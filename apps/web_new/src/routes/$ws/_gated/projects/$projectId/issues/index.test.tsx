@@ -26,6 +26,7 @@ import {
 } from "../../../../../../features/issues/index.js";
 import { listPageQueryOptions } from "../../../../../../features/issues/list/pages.js";
 import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
+import { loadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
 import { loadProjectEmptyState } from "../../../../../../features/issues/emptyStates/lazy.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
@@ -521,10 +522,11 @@ afterEach(() => {
 });
 
 describe("project issues screen", () => {
-  // The route awaits the list layout chunk in beforeLoad; these tests render
-  // the component directly, so resolve the same chunk first.
+  // The route awaits the list layout, empty state and filter chunks in
+  // beforeLoad; these tests render the component directly, so resolve the
+  // same chunks first.
   beforeAll(async () => {
-    await Promise.all([loadListLayout(), loadProjectEmptyState()]);
+    await Promise.all([loadListLayout(), loadProjectEmptyState(), loadIssueFilters()]);
   });
 
   it("composes the layout root with the project title and its rows", async () => {

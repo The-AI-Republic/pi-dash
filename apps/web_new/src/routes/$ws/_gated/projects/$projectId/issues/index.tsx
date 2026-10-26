@@ -20,17 +20,21 @@ import { loadProjectEmptyState } from "../../../../../../features/issues/emptySt
 import { loadIssueListLeaves, primeIssueListLeaves } from "../../../../../../features/issues/components/lazyLeaves.js";
 import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { loadKanbanLayout } from "../../../../../../features/issues/kanban/lazy.js";
-import { preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
+import { loadIssueFilters, preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
+import { primeInlineStrip } from "../../../../../../features/issues/list/stripLazy.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { loadIssuesListContent, resolvedIssuesListContent } from "./lazy.js";
 import { peekSearchFor, stripPeekParams, type PeekRequest } from "../../../../../../features/issues/peek/peekUrl.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/api/queries.js";
 
-// Start the leaf and filter chunks with the route module, beside its data
-// reads, so the first layout render does not suspend and mount twice
-// (NEWFRONT-619, NEWFRONT-669).
+// Start the leaf, filter and strip chunks with the route module, beside its
+// data reads, so the first layout render does not suspend and mount twice
+// (NEWFRONT-619, NEWFRONT-669). The strip is primed but not awaited: rows
+// mount it on idle when the prime loses the race, and awaiting it here
+// would hold first paint for the picker chunk (NEWFRONT-911).
 primeIssueListLeaves();
 preloadIssueFilters();
+primeInlineStrip();
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
@@ -53,12 +57,15 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
       );
       // Start the screen with the data and await the same leaves it uses, so
       // the first commit is the screen rather than an intermediate skeleton.
+      // The filters chunk rides along: rendering the resolved component
+      // keeps the late retry out of the scroll window (NEWFRONT-911).
       await Promise.all([
         loadIssuesListContent(),
         loadIssueListLeaves(),
         loadListLayout(),
         loadProjectEmptyState(),
         loadKanbanLayout(),
+        loadIssueFilters(),
       ]);
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them
