@@ -25,6 +25,7 @@
     "NEWFRONT-606": { "reason": "project-settings area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
     "NEWFRONT-557": { "reason": "runners area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
     "NEWFRONT-658": { "reason": "issues area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
+    "NEWFRONT-609": { "reason": "agents area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
     "NEWFRONT-334": { "reason": "module guest reads backend", "paths": ["^apps/api/pi_dash/app/views/module/", "^apps/api/pi_dash/tests/"] },
     "NEWFRONT-880": { "reason": "keep oxfmt off parity specs", "paths": ["^\\.prettierignore$"] },
     "NEWFRONT-672": { "reason": "ISS-206 cloud worklog backend", "paths": ["^apps/api/pi_dash/db/models/worklog\\.py$", "^apps/api/pi_dash/db/models/__init__\\.py$", "^apps/api/pi_dash/db/migrations/01(69|7[0-9])_[A-Za-z0-9_]+\\.py$", "^apps/api/pi_dash/app/serializers/worklog\\.py$", "^apps/api/pi_dash/app/serializers/__init__\\.py$", "^apps/api/pi_dash/app/views/issue/worklog\\.py$", "^apps/api/pi_dash/app/urls/issue\\.py$", "^apps/api/pi_dash/bgtasks/issue_activities_task\\.py$", "^apps/api/pi_dash/tests/contract/app/test_issue_worklogs\\.py$"] }
