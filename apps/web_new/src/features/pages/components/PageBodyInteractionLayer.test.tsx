@@ -295,6 +295,16 @@ describe("PageBodyInteractionLayer", () => {
     expect(screen.queryByTestId("page-emoji-picker")).not.toBeInTheDocument();
   });
 
+  it("closes the emoji picker from its own dismiss control (PAGE-042)", () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/emoji");
+    mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Emoji" }));
+    expect(screen.getByTestId("page-emoji-picker")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss emoji picker" }));
+    expect(screen.queryByTestId("page-emoji-picker")).not.toBeInTheDocument();
+  });
+
   it("dismisses the slash palette and the emoji picker with Escape (PAGE-037/042)", () => {
     const page = handle();
     (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/head");

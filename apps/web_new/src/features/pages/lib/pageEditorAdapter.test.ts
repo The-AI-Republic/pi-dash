@@ -230,6 +230,7 @@ describe("pageEditorHandle", () => {
     });
     handle.duplicateBlock();
     handle.deleteBlock();
+    handle.moveBlock({ from: 0, to: 12, json: "block" }, "down");
     expect(calls.some((call) => call.startsWith("insertContent("))).toBe(true);
     expect(calls).toContain("run");
   });

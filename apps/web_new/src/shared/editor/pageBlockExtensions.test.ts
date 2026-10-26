@@ -31,6 +31,22 @@ describe("page block nodes", () => {
     expect(names).toContain("mention");
   });
 
+  it("round-trips a divider in the stored div form, never an hr (PAGE-037)", async () => {
+    const editor = await editorFor('<p>above</p><div data-type="horizontalRule"><div></div></div><p>below</p>');
+    try {
+      const html = editor.getHTML();
+      expect(html).toContain('<div data-type="horizontalRule"');
+      expect(html).not.toContain("<hr");
+      let found = false;
+      editor.state.doc.descendants((node) => {
+        if (node.type.name === "horizontalRule") found = true;
+      });
+      expect(found).toBe(true);
+    } finally {
+      editor.destroy();
+    }
+  });
+
   it("round-trips a callout in the allowlisted stored form", async () => {
     const editor = await editorFor('<div data-block-type="callout-component"><p>notice</p></div>');
     try {
