@@ -40,6 +40,7 @@ use sqlx::Row;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
 use pidash_services::app_views_search::{permissions, queries_views};
 
@@ -2139,8 +2140,10 @@ async fn workspace_retrieve(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    // Routing first (Django's `<uuid:pk>` 404 precedes auth).
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2203,7 +2206,10 @@ async fn workspace_patch(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2247,7 +2253,10 @@ async fn workspace_put(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2291,7 +2300,10 @@ async fn workspace_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2507,7 +2519,10 @@ async fn project_retrieve(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2600,7 +2615,10 @@ async fn project_patch(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2643,7 +2661,10 @@ async fn project_put(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2693,7 +2714,10 @@ async fn project_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2881,7 +2905,10 @@ async fn favorite_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if view_id.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:view_id>` 404 precedes auth): only
+    // the canonical spelling is served; any other spelling proxies to
+    // Django for its own resolver 404.
+    if !matches!(classify_uuid_segment(&view_id), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
