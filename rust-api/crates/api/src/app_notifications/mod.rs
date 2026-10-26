@@ -125,6 +125,7 @@ use crate::middleware::SessionHandle;
 use crate::paginator::{self, Cursor, PageError, PageResponse};
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
 // ---------------------------------------------------------------------------
 // Wire constants (all verified live against Django, 2026-09-30)
@@ -1312,14 +1313,19 @@ async fn fetch_one(
     }
 }
 
-/// Parse a UUID path segment. Django's `<uuid:pk>` converter leaves
-/// the route unmatched for garbage, so the request must fall through
-/// to Django (its `unread/` + `mark-all-read/` literals and its own
-/// 404 live there) — hence the proxy, not a Rust 404. The parse runs
+/// Classify a `<uuid:pk>` path segment the way Django's converter
+/// routes it: only the canonical lowercase hyphenated spelling serves
+/// locally. Parseable-but-non-canonical spellings (uppercase, simple,
+/// braced, `urn:uuid:`) and garbage both fall through to Django (its
+/// `unread/` + `mark-all-read/` literals and its own resolver 404 live
+/// there) — hence the proxy, not a Rust 404. The classification runs
 /// *before* auth: Django answers its routing 404 without
 /// authenticating.
 fn parse_pk(raw: &str) -> Option<Uuid> {
-    raw.parse::<Uuid>().ok()
+    match classify_uuid_segment(raw) {
+        UuidSegment::Canonical(id) => Some(id),
+        UuidSegment::NonCanonical | UuidSegment::Garbage => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
