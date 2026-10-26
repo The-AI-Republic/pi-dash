@@ -996,6 +996,29 @@ pub fn get_display_name(email: &str) -> String {
         .collect()
 }
 
+/// `post_save` receiver `create_user_notification` (`user.py:307-320`):
+/// a preferences row on every non-bot create (all five flags true).
+/// Same insert as the email/magic/gitlab signup paths.
+async fn insert_notification_prefs(
+    pool: &sqlx::PgPool,
+    now: chrono::DateTime<chrono::Utc>,
+    user_id: &uuid::Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
+         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
+         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
+         \"issue_completed\") \
+         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// New-user row (`adapter/base.py:300-328` + `User.save()` side effects
 /// `user.py:167-187`): `User(email, username=uuid4hex)`,
 /// `set_password(uuid4hex)` + autoset/verified flags, names (each `""`
@@ -1082,6 +1105,11 @@ pub async fn create_user(
     .execute(pool)
     .await
     .map_err(|_| CallbackError::Internal)?;
+    // `post_save` fires on the first `save()` (`user.py:307`), before the
+    // profile/avatar writes the caller runs next — same as email/magic.
+    insert_notification_prefs(pool, now, &id)
+        .await
+        .map_err(|_| CallbackError::Internal)?;
     Ok(UserRow {
         id,
         password,
@@ -2887,6 +2915,11 @@ mod tests {
                 .await
                 .unwrap_or_default();
         for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "user_notification_preferences" WHERE "user_id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
             sqlx::query(r#"DELETE FROM "workspace_members" WHERE "member_id" = $1"#)
                 .bind(user_id)
                 .execute(pool)
@@ -2922,6 +2955,72 @@ mod tests {
             .await
             .ok();
         }
+    }
+
+    /// `create_user` inserts the notification-preferences row
+    /// (`create_user_notification` post_save, `user.py:307-320`): one
+    /// row, all five flags true, NULL audit/scope columns, live.
+    /// PIDASHCONV-1528: the google signup skipped it. `create_user` has
+    /// a single caller — the new-user branch of `authenticate_google` —
+    /// so driving it here pins the real signup wiring (the HTTP
+    /// success path is sealed: hardcoded
+    /// `https://oauth2.googleapis.com` URLs on both backends).
+    #[tokio::test]
+    async fn google_kernel_signup_creates_notification_prefs() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go1528-{tag}@example.test");
+        let now = chrono::Utc::now();
+        let outcome = create_user(&pool, &email, "Kernel", "User", now).await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let user_id: Option<uuid::Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(&email)
+                .fetch_optional(&pool)
+                .await
+                .expect("read user");
+        let flags: Vec<(bool, bool, bool, bool, bool)> = if let Some(id) = user_id {
+            sqlx::query_as(
+                r#"SELECT "property_change", "state_change", "comment", "mention", "issue_completed"
+                   FROM "user_notification_preferences" WHERE "user_id" = $1"#,
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .expect("read prefs")
+        } else {
+            Vec::new()
+        };
+        let live_unscoped: i64 = if let Some(id) = user_id {
+            sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM "user_notification_preferences"
+                   WHERE "user_id" = $1 AND "deleted_at" IS NULL AND "workspace_id" IS NULL
+                     AND "project_id" IS NULL AND "created_by_id" IS NULL
+                     AND "updated_by_id" IS NULL"#,
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read prefs scope")
+        } else {
+            0
+        };
+        cleanup_kernel_world(&pool, &email, &[]).await;
+
+        let row = outcome.expect("create_user succeeds");
+        assert_eq!(row.email.as_deref(), Some(email.as_str()));
+        user_id.expect("user row created");
+        assert_eq!(flags.len(), 1, "exactly one prefs row");
+        let (property_change, state_change, comment, mention, issue_completed) = flags[0];
+        assert!(property_change, "property_change defaults true");
+        assert!(state_change, "state_change defaults true");
+        assert!(comment, "comment defaults true");
+        assert!(mention, "mention defaults true");
+        assert!(issue_completed, "issue_completed defaults true");
+        assert_eq!(live_unscoped, 1, "prefs row is live with NULL audit/scope");
     }
 
     /// Consumed workspace invites soft-delete: the accepted row survives
