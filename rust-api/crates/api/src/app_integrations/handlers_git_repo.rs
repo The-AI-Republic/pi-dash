@@ -1283,16 +1283,53 @@ fn quote_path_segment(value: &str) -> String {
     out
 }
 
+/// `PIDASH_GITHUB_API_BASE` override for the bind-path GitHub fetch
+/// (PIDASHCONV-1513): contract tests point a redirect stub here. `None`
+/// when unset or empty, which is the production state — Django has no
+/// equivalent knob (its contract leg reaches the stub through an HTTPS
+/// MITM proxy instead), so behavior with the variable unset is exactly
+/// `GithubClient(token=…)` against `https://api.github.com`. Twin of the
+/// jobs-crate override (PIDASHCONV-1472).
+fn github_api_base_override() -> Option<String> {
+    std::env::var("PIDASH_GITHUB_API_BASE")
+        .ok()
+        .map(|value| value.trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Bind-path GitHub client: follows redirects like
+/// `GithubClient._request` (`requests.request` follows by default), so a
+/// renamed/transferred repo resolves through GitHub's 301
+/// (PIDASHCONV-1513). `limited(10)` per the PIDASHCONV-1472 precedent.
+fn github_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+}
+
+/// Bind-path GitLab client: never follows, mirroring `GitLabClient`
+/// (`allow_redirects=False`, `gitlab.py:104`); a 3xx surfaces so
+/// `fetch_gitlab_repository` fails closed.
+fn gitlab_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+}
+
 /// `GithubClient.get_repo` (`github_client.py:116-123`): one
 /// `GET /repos/{owner}/{repo}` with the client headers and the
-/// 401/403/404 mapping (`_request`, `:62-76`).
+/// 401/403/404 mapping (`_request`, `:62-76`). `api_base` is
+/// `https://api.github.com` in production, the redirect stub under test.
 async fn fetch_github_repository(
     http: &reqwest::Client,
+    api_base: &str,
     token: &str,
     namespace: &str,
     name: &str,
 ) -> Result<RemoteRepository, ProviderError> {
-    let url = format!("https://api.github.com/repos/{namespace}/{name}");
+    let url = format!("{api_base}/repos/{namespace}/{name}");
     let response = http
         .get(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -1549,7 +1586,9 @@ async fn fetch_remote_repository(
     match parsed.provider.as_str() {
         "github" => {
             let token = github_token(&credential, keyring)?;
-            fetch_github_repository(http, &token, &parsed.namespace, &parsed.name).await
+            let api_base =
+                github_api_base_override().unwrap_or_else(|| "https://api.github.com".to_owned());
+            fetch_github_repository(http, &api_base, &token, &parsed.namespace, &parsed.name).await
         }
         _ => {
             let host_url = credential
@@ -1695,11 +1734,15 @@ async fn post_bind(
     // Resolve the provider account (`resolve_provider_account_repository`,
     // `services.py:153-200`), then fetch the remote.
     let keyring = pidash_db::config::encryption::Keyring::from_secret(&state.settings().secret_key);
-    let http = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
+    // The provider fetch client is per provider (PIDASHCONV-1513): GitHub
+    // follows rename redirects like `GithubClient`, while GitLab never
+    // follows (`GitLabClient` `allow_redirects=False`). One shared
+    // `Policy::none()` client broke renamed-repo binds.
+    let http = match parsed.provider.as_str() {
+        "github" => github_client(),
+        _ => gitlab_client(),
+    };
+    let http = match http {
         Ok(http) => http,
         Err(_) => return RepoDenial::ServerError.into_response(),
     };
@@ -2697,6 +2740,170 @@ mod tests {
         assert_eq!(binding_stamps.0, Some(user_id), "binding created_by");
         assert_eq!(binding_stamps.1, None, "binding updated_by");
         cleanup_kernel_world(&pool, user_id, workspace_id, project_id).await;
+    }
+
+    /// The redirect stub's net: base URL, hit log, server thread.
+    type RedirectStubNet = (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        std::thread::JoinHandle<()>,
+    );
+
+    /// Minimal redirect stub for the bind-path client tests (PIDASHCONV-1472
+    /// shape): matches the request line by prefix, answers the mapped
+    /// status + optional same-host `Location` + body, and records
+    /// `(request_line, authorization)` per hit (bounded by `take` hits or
+    /// a deadline, so a broken client fails the assertions instead of
+    /// hanging the suite).
+    fn spawn_redirect_stub(
+        routes: Vec<(
+            &'static str,
+            &'static str,
+            Option<&'static str>,
+            &'static str,
+        )>,
+        take: usize,
+    ) -> RedirectStubNet {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        let base = format!("http://127.0.0.1:{port}");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_server = seen.clone();
+        let base_server = base.clone();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut handled = 0;
+            while handled < take && std::time::Instant::now() < deadline {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(err) => panic!("accepts: {err}"),
+                };
+                stream.set_nonblocking(false).expect("blocking");
+                let mut stream = stream;
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    if stream.read(&mut byte).expect("reads") == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
+                let head_text = String::from_utf8_lossy(&head).into_owned();
+                // Header names arrive lowercase on the wire (hyper
+                // normalizes them), so match case-insensitively.
+                let auth = head_text
+                    .lines()
+                    .skip(1)
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.trim()
+                            .eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_owned())
+                    })
+                    .unwrap_or_default();
+                seen_server
+                    .lock()
+                    .expect("locks")
+                    .push((head_text.lines().next().unwrap_or("").to_owned(), auth));
+                let (_, status, location, body) = routes
+                    .iter()
+                    .find(|(prefix, _, _, _)| head_text.starts_with(prefix))
+                    .map(|route| (route.0, route.1, route.2, route.3))
+                    .unwrap_or(("", "404 Not Found", None, "no route"));
+                let mut response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                if let Some(target) = location {
+                    response.push_str(&format!("Location: {base_server}{target}\r\n"));
+                }
+                response.push_str(&format!("\r\n{body}"));
+                stream.write_all(response.as_bytes()).expect("writes");
+                handled += 1;
+            }
+        });
+        (base, seen, server)
+    }
+
+    // Rename redirects follow `requests` (`github_client.py:62-73`, no
+    // `allow_redirects` override): the bind-path GitHub client resolves a
+    // renamed repo's 301 to the new location with `Authorization` kept,
+    // and the fetch returns the renamed metadata (PIDASHCONV-1513).
+    #[tokio::test]
+    async fn github_client_follows_rename_redirect() {
+        let payload = r#"{"id":987654321,"name":"bind-newrepo","full_name":"bind-newowner/bind-newrepo","owner":{"login":"bind-newowner"},"html_url":"https://github.com/bind-newowner/bind-newrepo","clone_url":"https://github.com/bind-newowner/bind-newrepo.git","ssh_url":"git@github.com:bind-newowner/bind-newrepo.git","default_branch":"main","private":false}"#;
+        let (base, seen, server) = spawn_redirect_stub(
+            vec![
+                (
+                    "GET /repos/bind-oldowner/bind-oldrepo",
+                    "301 Moved Permanently",
+                    Some("/repositories/987654321"),
+                    "",
+                ),
+                ("GET /repositories/987654321", "200 OK", None, payload),
+            ],
+            2,
+        );
+        let http = github_client().expect("builds");
+        let remote =
+            match fetch_github_repository(&http, &base, "t", "bind-oldowner", "bind-oldrepo").await
+            {
+                Ok(remote) => remote,
+                Err(_) => panic!("follows the 301"),
+            };
+        assert_eq!(remote.external_id, "987654321");
+        assert_eq!(remote.namespace, "bind-newowner");
+        assert_eq!(remote.name, "bind-newrepo");
+        assert_eq!(remote.full_name, "bind-newowner/bind-newrepo");
+        server.join().expect("server drains");
+        let hits = seen.lock().expect("locks");
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0]
+            .0
+            .starts_with("GET /repos/bind-oldowner/bind-oldrepo"));
+        assert!(hits[1].0.starts_with("GET /repositories/987654321"));
+        for (_, auth) in hits.iter() {
+            assert_eq!(auth, "Bearer t");
+        }
+    }
+
+    // `GitLabClient` never follows (`allow_redirects=False`,
+    // `gitlab.py:104`): the bind-path GitLab client surfaces the 301 so
+    // the fetch fails closed with the Django error (PIDASHCONV-1513).
+    #[tokio::test]
+    async fn gitlab_client_surfaces_redirect_fail_closed() {
+        let (base, seen, server) = spawn_redirect_stub(
+            vec![(
+                "GET /api/v4/projects/g%2Fp",
+                "301 Moved Permanently",
+                Some("/api/v4/projects/12345"),
+                "",
+            )],
+            1,
+        );
+        let http = gitlab_client().expect("builds");
+        let err = fetch_gitlab_repository(&http, "t", &base, "g/p")
+            .await
+            .expect_err("must not follow");
+        let message = match err {
+            ProviderError::Permission(message) => message,
+            ProviderError::Auth(_) => panic!("expected Permission, got Auth"),
+            ProviderError::NotFound(_) => panic!("expected Permission, got NotFound"),
+            ProviderError::Other(message) => panic!("expected Permission, got Other({message})"),
+        };
+        assert_eq!(message, "GitLab API redirects are not followed");
+        server.join().expect("server drains");
+        let hits = seen.lock().expect("locks");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].0.starts_with("GET /api/v4/projects/g%2Fp"));
     }
 }
 
