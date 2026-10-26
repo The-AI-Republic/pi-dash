@@ -10,6 +10,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { PageDetailScreen } from "../../../../../../features/pages/components/PageDetailScreen.js";
+import { loadPageExportRegistration } from "../../../../../../features/pages-export/lib/loadPageExportRegistration.js";
 import { parsePageDetailSearch, type PageDetailSearch } from "../../../../../../features/pages/lib/pageDetail.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/pages/$pageId")({
@@ -22,10 +23,12 @@ function PageDetailComponent(): React.ReactElement {
   const search = Route.useSearch();
   const navigate = useNavigate();
   // The export chunk registers its dialog into the detail seam on import,
-  // so the load starts from the route body and the dialog stays out of
-  // the initial bundle (PAGE-074, NEWFRONT-846).
+  // so the load starts from the route body and the dialog stays out of the
+  // initial bundle (PAGE-074, NEWFRONT-846). The helper consumes a failed
+  // chunk load; otherwise closing a worker mid-fetch would leave an
+  // unhandled rejection in the suite.
   React.useEffect(() => {
-    void import("../../../../../../features/pages-export/register.js");
+    void loadPageExportRegistration(() => import("../../../../../../features/pages-export/register.js"));
   }, []);
   return (
     <PageDetailScreen

@@ -8,10 +8,15 @@
 
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const router = vi.hoisted(() => ({ navigate: vi.fn(), search: {} as Record<string, unknown> }));
 const screenSpy = vi.hoisted(() => ({ render: vi.fn() }));
+const exportRegistration = vi.hoisted(() => ({ load: vi.fn(async () => true) }));
+
+vi.mock("../../../../../../features/pages-export/lib/loadPageExportRegistration.js", () => ({
+  loadPageExportRegistration: exportRegistration.load,
+}));
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (options: unknown) => ({
@@ -35,6 +40,10 @@ vi.mock("../../../../../../features/pages/components/PageDetailScreen.js", () =>
 
 import { Route } from "./$pageId.js";
 
+beforeEach(() => {
+  exportRegistration.load.mockClear();
+});
+
 describe("page detail route", () => {
   it("parses only the two supported deep-link keys", () => {
     const validate = Route.options.validateSearch as unknown as (input: Record<string, unknown>) => unknown;
@@ -42,6 +51,13 @@ describe("page detail route", () => {
     expect(validate({ paneTab: "info", version: "v1", type: "private" })).toEqual({ paneTab: "info", version: "v1" });
     expect(validate({ paneTab: "sideways" })).toEqual({});
     expect(validate({ paneTab: "assets" })).toEqual({ paneTab: "assets" });
+  });
+
+  it("requests the export registration chunk on mount", () => {
+    const Component = Route.options.component;
+    if (!Component) throw new Error("missing component");
+    render(<Component />);
+    expect(exportRegistration.load).toHaveBeenCalledTimes(1);
   });
 
   it("passes the params and parsed search to the screen", () => {
