@@ -823,20 +823,23 @@ async fn module_issue_list(
         sub_group_by,
         &timezone,
     )?;
-    // `order_issue_queryset` (`:112-117`), default `created_at`. The
-    // module list annotates the plain `Func(Count)` form (empty counts
+    // `order_issue_queryset` (`:112-117`), default `created_at`
+    // (`request.GET.get("order_by", "created_at")` at `:112`): unlike the
+    // cycle/project lists, an absent `order_by` sorts oldest-first, so the
+    // shared `-created_at` default in `params.rs` must not apply here.
+    // The module list annotates the plain `Func(Count)` form (empty counts
     // render `0`), so its count keys order `0`-style. A filter that
     // referenced the cycle bridge lends its join to the cycle-name
     // traversal (Django reuses it, scope included, instead of joining
     // again); otherwise the traversal joins fresh.
-    let order_spec = pidash_services::app_issues::ordering::order_sql(
-        &params.order_by,
-        "state.\"group\"",
-        |name| format!("min_{}", name.replace("__", "_")),
-    );
+    let order_by = query_last(&query, "order_by").unwrap_or_else(|| "created_at".to_owned());
+    let order_spec =
+        pidash_services::app_issues::ordering::order_sql(&order_by, "state.\"group\"", |name| {
+            format!("min_{}", name.replace("__", "_"))
+        });
     let cycle_bridge =
         crate::app_issues::has_issue_cycle_join(&filtered.from_where).then_some("issue_cycle");
-    let key = order_key(&order_spec.out_param, &params.order_by, cycle_bridge, false)?;
+    let key = order_key(&order_spec.out_param, &order_by, cycle_bridge, false)?;
     let direction = if key.descending { "DESC" } else { "ASC" };
     // Total count over the pre-annotation set (the `deepcopy` at `:107`).
     // The flat branch keeps the distinct-issue count; the grouped branch
