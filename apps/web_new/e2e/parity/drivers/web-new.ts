@@ -10122,16 +10122,31 @@ export class WebNewDriver implements ParityDriver {
       if (route.request().method() === "GET") fetches += 1;
       await route.continue();
     };
+    // The list polls on its own cadence, so a toggle can legitimately
+    // overlap a scheduled refresh. Compare the fetches around the two
+    // toggles instead of pinning the window to a duration: the list has
+    // already settled long before this is called, so the only fetch a
+    // toggle may cause is the poll it happens to race.
     await this.page.route("**/api/runners/?*", handler);
     try {
+      // Synchronise with the list's poll clock: once a scheduled refresh
+      // has landed, the next one is a full interval away, so the toggles
+      // below cannot race it. Without this the check measured the poll
+      // cadence rather than the filter.
+      const syncDeadline = Date.now() + 7_000;
+      let baseline = fetches;
+      while (fetches === baseline && Date.now() < syncDeadline) {
+        await this.page.waitForTimeout(100);
+      }
+      baseline = fetches;
       await this.runnersSelectPod(podName);
-      await this.page.waitForTimeout(1_500);
       await this.runnersSelectPod(podName);
-      await this.page.waitForTimeout(1_500);
+      // A filter-caused fetch would be issued on the click itself.
+      await this.page.waitForTimeout(400);
+      return fetches === baseline;
     } finally {
       await this.page.unroute("**/api/runners/?*", handler);
     }
-    return fetches === 0;
   }
 
   async runnersSubmitPodForm(): Promise<void> {

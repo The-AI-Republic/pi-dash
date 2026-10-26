@@ -189,6 +189,7 @@ export function AgentStatusPanel({ workspaceSlug, issue, refresh }: AgentStatusP
             size="small"
             disabled={reTicking}
             loading={reTicking}
+            data-testid="issue-re-tick"
             onClick={() => void reTick(issue.id)}
           >
             <span className="flex items-center gap-(--space-1)">

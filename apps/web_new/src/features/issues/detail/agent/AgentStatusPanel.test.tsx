@@ -254,6 +254,11 @@ describe("re-tick", () => {
     expect(harness.reTick).toHaveBeenCalledWith(ISSUE_ID);
   });
 
+  it("carries the issue-surface test id the runners gate clicks", () => {
+    renderPanel(issueFixture({ agent_status: statusFixture({ ticker: tickerFixture({ can_re_tick: true }) }) }));
+    expect(screen.getByTestId("issue-re-tick")).toBe(screen.getByRole("button", { name: "Re-tick" }));
+  });
+
   it("hides while the server offers no refill and disables while asking", () => {
     const { rerender } = renderPanel(issueFixture({ agent_status: statusFixture({ ticker: tickerFixture() }) }));
     expect(screen.queryByRole("button", { name: "Re-tick" })).toBeNull();
