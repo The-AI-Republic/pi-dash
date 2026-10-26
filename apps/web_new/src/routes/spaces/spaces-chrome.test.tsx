@@ -16,6 +16,7 @@ import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { routeTree } from "../../routeTree.gen.js";
 
 const UUID = "11111111-1111-4111-8111-111111111111";
+const ISSUE_UUID = "22222222-2222-4222-8222-222222222222";
 
 function reply(status: number, body: unknown): Awaited<ReturnType<Transport>> {
   return {
@@ -129,6 +130,33 @@ function renderChrome(
   const transport: Transport = async (url) => {
     if (url.includes("/api/instances/")) return reply(200, instance);
     if (url.includes("/settings/")) return reply(200, settings);
+    if (new RegExp(`/issues/${ISSUE_UUID}/`).test(url)) {
+      return reply(200, {
+        id: ISSUE_UUID,
+        name: "Open issue",
+        state_id: null,
+        sort_order: 1,
+        estimate_point: null,
+        priority: null,
+        start_date: null,
+        target_date: null,
+        sequence_id: 1,
+        project_id: UUID,
+        parent_id: null,
+        created_by: null,
+        state__group: null,
+        cycle_id: null,
+        assignee_ids: [],
+        label_ids: [],
+        module_ids: [],
+        vote_items: [],
+        reaction_items: [],
+        description_json: null,
+        description_html: "",
+        description_stripped: "",
+        description_binary: null,
+      });
+    }
     if (url.includes("/issues/")) {
       return reply(200, {
         grouped_by: "state_id",
@@ -168,12 +196,12 @@ afterEach(() => {
 
 describe("spaces chrome", () => {
   it("mounts the navbar chrome, toast host and badge on a settled board", async () => {
-    renderChrome("/spaces/issues/anchor-1/?board=kanban&peekId=issue-1", () => reply(200, settings));
+    renderChrome(`/spaces/issues/anchor-1/?board=kanban&peekId=${ISSUE_UUID}`, () => reply(200, settings));
     await waitFor(() => expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board"));
     expect(screen.getByTestId("space-theme-switch")).toBeInTheDocument();
     expect(screen.getByTestId("space-navbar-signin")).toHaveAttribute(
       "href",
-      "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3Dissue-1"
+      `/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3D${ISSUE_UUID}`
     );
     await waitFor(() => expect(screen.getByTestId("space-board-empty")).toBeInTheDocument());
     expect(screen.getByTestId("space-product-badge")).toHaveAttribute("href", "https://airepublic.com");

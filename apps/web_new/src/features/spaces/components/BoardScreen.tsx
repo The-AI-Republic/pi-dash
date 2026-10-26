@@ -13,7 +13,8 @@
 // the tags settle before content is announced.
 
 import { useQuery } from "@tanstack/react-query";
-import type { SpaceBoardIssuePage, SpaceBoardSettings } from "@pidash/api-client";
+import { useNavigate } from "@tanstack/react-router";
+import type { SpaceBoardIssue, SpaceBoardIssuePage, SpaceBoardSettings } from "@pidash/api-client";
 import * as React from "react";
 
 import { spaceRuntime } from "../api/client.js";
@@ -38,6 +39,8 @@ import {
   type SpaceBoardSearch,
   type SpaceLayout,
 } from "../lib/address.js";
+import { SpaceIssuePeek } from "../peek/SpaceIssuePeek.js";
+import { spacePeekCloseHref, spacePeekOpenHref } from "../lib/peek.js";
 import { BoardLoading, BoardNavbar } from "./BoardShell.js";
 import { SpaceAccountSlot } from "./SpaceAccountSlot.js";
 import { SpaceProductBadge } from "./SpaceProductBadge.js";
@@ -128,6 +131,7 @@ function ResolvedBoard({
   const labels = useQuery(spaceLabelsQueryOptions(spaceRuntime.client, anchor));
   const { offered, active, select } = useSettledSpaceLayout(anchor, search, settings.view_props);
   const filterNav = useSpaceFilterNav(anchor, search, filters);
+  const peekNav = useSpacePeekNav(anchor, search);
   const identifier = settings.project_details?.identifier ?? "";
   return (
     <div data-testid="space-board">
@@ -143,6 +147,17 @@ function ResolvedBoard({
         )}
         <SpaceThemeSwitch />
       </BoardNavbar>
+      {search.peekId === undefined ? null : (
+        <SpaceIssuePeek
+          anchor={anchor}
+          issueId={search.peekId}
+          projectIdentifier={identifier}
+          states={states.data}
+          seed={peekSeed(issues.data, search.peekId)}
+          onClose={peekNav.close}
+          onInvalid={peekNav.invalid}
+        />
+      )}
       {issues.isError || states.isError || labels.isError ? (
         <SpaceBoardError />
       ) : issues.data === undefined || states.data === undefined || labels.data === undefined ? (
@@ -167,6 +182,7 @@ function ResolvedBoard({
             projectIdentifier={identifier}
             votesEnabled={settings.is_votes_enabled}
             reactionsEnabled={settings.is_reactions_enabled}
+            openIssue={peekNav.open}
           />
           <SpaceProductBadge />
         </>
@@ -186,6 +202,7 @@ function BoardContent({
   projectIdentifier,
   votesEnabled,
   reactionsEnabled,
+  openIssue,
 }: {
   anchor: string;
   layout: SpaceLayout;
@@ -197,6 +214,7 @@ function BoardContent({
   projectIdentifier: string;
   votesEnabled: boolean;
   reactionsEnabled: boolean;
+  openIssue: (issueId: string) => void;
 }): React.ReactElement {
   return (
     <BoardLayouts
@@ -209,9 +227,55 @@ function BoardContent({
       projectIdentifier={projectIdentifier}
       labels={labels}
       openIssueId={search.peekId}
+      onOpenIssue={(issue) => openIssue(issue.id)}
       issueHref={(issue) => spaceIssueHref(anchor, search, issue.id)}
       votesEnabled={votesEnabled}
       reactionsEnabled={reactionsEnabled}
     />
   );
+}
+
+/**
+ * The list row already loaded for the open issue, if any (SPC-046). Its
+ * key and title seed the overlay header while the detail fetch is still
+ * resolving; nothing else is taken from it.
+ */
+export function peekSeed(
+  page: SpaceBoardIssuePage | undefined,
+  peekId: string | undefined
+): Pick<SpaceBoardIssue, "name" | "sequence_id"> | undefined {
+  if (page === undefined || peekId === undefined) return undefined;
+  for (const bucket of Object.values(page.results)) {
+    const row = bucket.results.find((issue) => issue.id === peekId);
+    if (row !== undefined) return { name: row.name, sequence_id: row.sequence_id };
+  }
+  return undefined;
+}
+
+/**
+ * The overlay's address round trip (SPC-030/040/042). Opening pushes one
+ * entry naming the issue over the current board position; closing and an
+ * unusable id both replace the address without peekId, so view and filters
+ * survive and Back does not replay the overlay.
+ */
+export interface SpacePeekNav {
+  open: (issueId: string) => void;
+  close: () => void;
+  invalid: () => void;
+}
+
+export function useSpacePeekNav(anchor: string, search: SpaceBoardSearch): SpacePeekNav {
+  const navigate = useNavigate();
+  const navigateRef = React.useRef(navigate);
+  navigateRef.current = navigate;
+  const open = React.useCallback(
+    (issueId: string) => {
+      void navigateRef.current({ href: spacePeekOpenHref(anchor, search, issueId) });
+    },
+    [anchor, search]
+  );
+  const dismiss = React.useCallback(() => {
+    void navigateRef.current({ href: spacePeekCloseHref(anchor, search), replace: true });
+  }, [anchor, search]);
+  return { open, close: dismiss, invalid: dismiss };
 }

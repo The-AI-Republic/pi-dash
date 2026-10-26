@@ -23,6 +23,7 @@ vi.mock("../lib/spaceEmbed.js", () => ({ useSpaceEmbedded: () => embed.framed })
 
 import { createClient } from "@pidash/api-client";
 
+import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import type { SpaceBoardSearch } from "../lib/address.js";
 import { SPACE_HEAD_DESCRIPTION_FALLBACK, SPACE_HEAD_TITLE_FALLBACK } from "../lib/boardHead.js";
 import { BoardScreen, boardFiltersOf } from "./BoardScreen.js";
@@ -102,6 +103,7 @@ interface Routes {
   issues?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
   states?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
   labels?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
+  detail?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
 }
 
 function renderBoard(routes: Routes = {}, anchor = ANCHOR, search: SpaceBoardSearch = {}): string[] {
@@ -109,6 +111,16 @@ function renderBoard(routes: Routes = {}, anchor = ANCHOR, search: SpaceBoardSea
   const transport: Transport = async (url) => {
     requests.push(url);
     if (url.includes("/settings/")) return await (routes.settings?.() ?? reply(200, settings));
+    if (/\/issues\/[0-9a-f-]{36}\//i.test(url)) {
+      return await (routes.detail?.() ??
+        reply(200, {
+          ...issue,
+          description_json: null,
+          description_html: "<p>Detail words</p>",
+          description_stripped: "Detail words",
+          description_binary: null,
+        }));
+    }
     if (url.includes("/issues/")) {
       return await (routes.issues?.() ??
         reply(200, {
@@ -125,6 +137,7 @@ function renderBoard(routes: Routes = {}, anchor = ANCHOR, search: SpaceBoardSea
   };
   runtime.client = createClient({ baseUrl: "https://api.test", transport });
   runtime.queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
   render(
     <QueryClientProvider client={runtime.queryClient as QueryClient}>
       <BoardScreen anchor={anchor} search={search} />
@@ -463,5 +476,109 @@ describe("boardFiltersOf", () => {
     const state = "22222222-2222-4222-8222-222222222222";
     const raw = { state: `${state},nope`, priority: "high,unset" } as unknown as SpaceBoardSearch;
     expect(boardFiltersOf(raw)).toEqual({ state: [state], priority: ["high"] });
+  });
+});
+
+describe("space overlay address round trip (SPC-030/040/042)", () => {
+  it("opens an issue from its title link over the current board position", async () => {
+    const user = userEvent.setup();
+    renderBoard({}, ANCHOR, { board: "list", priority: ["high"], peekId: ISSUE_ID });
+    const link = await screen.findByRole("link", { name: "Anonymous visitors can read this" });
+    await user.click(link);
+    expect(navigation.navigate).toHaveBeenCalledWith({
+      href: `/spaces/issues/${ANCHOR}/?board=list&peekId=${ISSUE_ID}&priority=high`,
+    });
+    expect(await screen.findByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+  });
+
+  it("mounts the overlay already open from an address parameter (SPC-040)", async () => {
+    renderBoard({}, ANCHOR, { board: "list", peekId: ISSUE_ID });
+    expect(await screen.findByTestId("space-peek")).toHaveAttribute("role", "dialog");
+    expect(await screen.findByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+    expect(await screen.findByTestId("space-board-issue")).toHaveAttribute("data-selected", "true");
+    expect(navigation.navigate).not.toHaveBeenCalled();
+  });
+
+  it("mounts the overlay and fetches detail while the board data still loads (SPC-040/046)", async () => {
+    let releaseDetail = (): void => {};
+    const detailGate = new Promise<void>((resolve) => (releaseDetail = resolve));
+    const requests = renderBoard(
+      {
+        issues: () => new Promise(() => undefined),
+        states: () => new Promise(() => undefined),
+        labels: () => new Promise(() => undefined),
+        detail: async () => {
+          await detailGate;
+          return reply(200, {
+            ...issue,
+            description_json: null,
+            description_html: "<p>Detail words</p>",
+            description_stripped: "Detail words",
+            description_binary: null,
+          });
+        },
+      },
+      ANCHOR,
+      { board: "list", priority: ["high"], peekId: ISSUE_ID }
+    );
+    expect(await screen.findByTestId("space-peek-skeleton")).toBeInTheDocument();
+    expect(await screen.findByTestId("space-board-loading")).toBeInTheDocument();
+    expect(requests.some((url) => url.includes(`/issues/${ISSUE_ID}/`))).toBe(true);
+    releaseDetail();
+    expect(await screen.findByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+    expect(screen.getByTestId("space-board-loading")).toBeInTheDocument();
+  });
+
+  it("holds the state row pending instead of printing Empty while states load (SPC-043/046)", async () => {
+    let releaseStates = (): void => {};
+    const statesGate = new Promise<void>((resolve) => (releaseStates = resolve));
+    renderBoard(
+      {
+        states: async () => {
+          await statesGate;
+          return reply(200, states);
+        },
+      },
+      ANCHOR,
+      { board: "list", peekId: ISSUE_ID }
+    );
+    expect(await screen.findByTestId("space-peek-key")).toHaveTextContent("SPC-7");
+    const stateRow = screen.getByTestId("space-peek-properties").querySelector('[data-property="state"]');
+    expect(screen.getByTestId("space-peek-state-pending")).toBeInTheDocument();
+    expect(stateRow).not.toHaveTextContent("Empty");
+    releaseStates();
+    await waitFor(() => {
+      expect(screen.queryByTestId("space-peek-state-pending")).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId("space-peek-properties").querySelector('[data-property="state"]')).toHaveTextContent(
+      "Todo"
+    );
+  });
+
+  it("closes by dropping peekId while keeping view and filters (SPC-042)", async () => {
+    const user = userEvent.setup();
+    renderBoard({}, ANCHOR, { board: "list", priority: ["high"], peekId: ISSUE_ID });
+    await screen.findByTestId("space-peek-key");
+    await user.click(screen.getByRole("button", { name: "Close preview" }));
+    // The route component here holds a static search; remounting with the
+    // rewritten address is the router's job, so the assertion is the write.
+    expect(navigation.navigate).toHaveBeenCalledWith({
+      href: `/spaces/issues/${ANCHOR}/?board=list&priority=high`,
+      replace: true,
+    });
+  });
+
+  it("drops an unusable peekId instead of showing the overlay forever (SPC-040)", async () => {
+    renderBoard({ detail: () => reply(404, { detail: "missing" }) }, ANCHOR, {
+      board: "list",
+      peekId: ISSUE_ID,
+    });
+    await waitFor(() => {
+      expect(navigation.navigate).toHaveBeenCalledWith({
+        href: `/spaces/issues/${ANCHOR}/?board=list`,
+        replace: true,
+      });
+    });
+    expect(screen.getByTestId("space-board")).toBeInTheDocument();
   });
 });

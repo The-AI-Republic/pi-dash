@@ -8,7 +8,7 @@ import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { FULL_SCREEN_PORTAL_ID } from "./document.js";
-import { PeekPanel } from "./PeekPanel.js";
+import { focusableWithin, PeekPanel, trapTabTarget } from "./PeekPanel.js";
 
 function setup(props?: Partial<React.ComponentProps<typeof PeekPanel>>) {
   const onClose = vi.fn();
@@ -137,6 +137,121 @@ describe("PeekPanel", () => {
     expect(screen.queryByRole("heading")).not.toBeInTheDocument();
     expect(screen.getByText("Loading body")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close preview" })).toBeInTheDocument();
+  });
+
+  it("traps focus when the caller opts in and leaves the docked peek alone", () => {
+    const plain = setup();
+    expect(screen.getByTestId("issue-preview")).not.toHaveAttribute("tabindex");
+    plain.unmount();
+    setup({ trapFocus: true, role: "dialog", label: "Public issue" });
+    const panel = screen.getByTestId("issue-preview");
+    expect(panel).toHaveAttribute("tabindex", "-1");
+    expect(panel).toHaveAttribute("aria-modal", "true");
+    expect(panel).toContainElement(document.activeElement as HTMLElement);
+  });
+
+  it("wraps Tab and keeps Shift+Tab inside a trapping panel", () => {
+    setup({ trapFocus: true, role: "dialog", children: <button type="button">Action</button> });
+    const panel = screen.getByTestId("issue-preview");
+    const buttons = screen.getAllByRole("button");
+    buttons[buttons.length - 1]?.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(buttons[0]);
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(buttons[buttons.length - 1]);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(buttons[0]);
+    (document.activeElement as HTMLElement).blur();
+    panel.focus();
+    expect(document.activeElement).toBe(panel);
+    fireEvent.keyDown(document, { key: "Enter" });
+    expect(document.activeElement).toBe(panel);
+  });
+
+  it("does nothing for a trapping panel with no portal root", () => {
+    document.body.innerHTML = "";
+    render(<PeekPanel title="Hidden" titleLabel="Work item title" onClose={vi.fn()} trapFocus />);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+  });
+
+  it("leaves Tab alone while focus cycles inside the panel", () => {
+    setup({ trapFocus: true, role: "dialog", children: <button type="button">Action</button> });
+    const buttons = screen.getAllByRole("button");
+    const first = buttons[0];
+    if (first === undefined) throw new Error("missing first control");
+    first.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+  });
+
+  it("keeps Shift+Tab alone in the middle of a trapping panel", () => {
+    setup({ trapFocus: true, role: "dialog", children: <button type="button">Action</button> });
+    const buttons = screen.getAllByRole("button");
+    const middle = buttons[1];
+    if (middle === undefined) throw new Error("missing middle control");
+    middle.focus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(middle);
+  });
+
+  it("holds focus on the panel when every control is hidden", () => {
+    setup({ trapFocus: true, role: "dialog", children: <button type="button">Action</button> });
+    const panel = screen.getByTestId("issue-preview");
+    for (const node of panel.querySelectorAll("button, input")) node.setAttribute("hidden", "");
+    panel.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(panel);
+  });
+
+  it("does not steal focus when it is already inside the panel at mount", () => {
+    const { rerender } = setup({ titleAsHeading: true });
+    screen.getByRole("button", { name: "Close preview" }).focus();
+    rerender(
+      <PeekPanel
+        title="Parity first issue"
+        titleLabel="Work item title"
+        titleAsHeading
+        onClose={vi.fn()}
+        trapFocus
+        role="dialog"
+      />
+    );
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close preview" }));
+  });
+
+  it("scrolls a body under the header when the caller opts in (SPC-043)", () => {
+    for (const layout of ["side", "modal", "full"] as const) {
+      const view = setup({ layout, scrollBody: true, children: <p>Long body</p> });
+      const panel = screen.getByTestId("issue-preview");
+      const body = screen.getByTestId("peek-body");
+      expect(panel.className).toContain("overflow-hidden");
+      expect(body.className).toContain("overflow-y-auto");
+      expect(body).toContainElement(screen.getByText("Long body"));
+      expect(body).not.toContainElement(screen.getByRole("button", { name: "Close preview" }));
+      expect(body).not.toContainElement(screen.getByRole("textbox", { name: "Work item title" }));
+      view.unmount();
+    }
+  });
+
+  it("keeps the single scroll region unless the caller opts in", () => {
+    setup({ layout: "modal", children: <p>Long body</p> });
+    expect(screen.queryByTestId("peek-body")).not.toBeInTheDocument();
+    const panel = screen.getByTestId("issue-preview");
+    expect(panel.className).toContain("overflow-y-auto");
+    expect(panel).toContainElement(screen.getByText("Long body"));
+  });
+
+  it("holds the title's place with a skeleton before a name is known (SPC-046)", () => {
+    setup({ title: "", titleSkeleton: true, titleAsHeading: true });
+    expect(screen.getByTestId("peek-title-skeleton")).toBeInTheDocument();
+    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
+  });
+
+  it("hides the title block outright for an error body", () => {
+    setup({ title: "", hideTitle: true });
+    expect(screen.queryByTestId("peek-title-skeleton")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 
   it("centers the modal layout behind a backdrop", () => {
@@ -273,6 +388,47 @@ describe("PeekPanel", () => {
   });
 });
 
+describe("focus trap helpers", () => {
+  it("reads tabbables in document order and skips hidden subtrees", () => {
+    const root = document.createElement("div");
+    root.innerHTML =
+      '<button id="a">A</button><div hidden><button id="b">B</button></div><a id="c" href="#x">C</a><button id="d" disabled>D</button>';
+    document.body.appendChild(root);
+    expect(focusableWithin(root).map((node) => node.id)).toEqual(["a", "c"]);
+    expect(focusableWithin(null)).toEqual([]);
+    root.remove();
+  });
+
+  it("wraps forward, backward and from outside the cycle", () => {
+    const root = document.createElement("div");
+    root.innerHTML = '<button id="a">A</button><button id="b">B</button>';
+    document.body.appendChild(root);
+    const [first, last] = focusableWithin(root);
+    if (first === undefined || last === undefined) throw new Error("missing controls");
+    expect(trapTabTarget(root, last, false)).toBe(first);
+    expect(trapTabTarget(root, first, true)).toBe(last);
+    expect(trapTabTarget(root, null, true)).toBe(last);
+    expect(trapTabTarget(root, document.body, false)).toBeNull();
+    expect(trapTabTarget(root, first, false)).toBeNull();
+    expect(trapTabTarget(root, root, false)).toBe(first);
+    root.innerHTML = "";
+    expect(trapTabTarget(root, null, false)).toBe("self");
+    root.remove();
+  });
+
+  it("treats a single control as both ends of the cycle", () => {
+    const root = document.createElement("div");
+    root.innerHTML = '<button id="only">Only</button>';
+    document.body.appendChild(root);
+    const [only] = focusableWithin(root);
+    if (only === undefined) throw new Error("missing control");
+    expect(trapTabTarget(root, only, false)).toBe(only);
+    expect(trapTabTarget(root, only, true)).toBe(only);
+    expect(trapTabTarget(root, null, true)).toBe(only);
+    root.remove();
+  });
+});
+
 describe("peek guards", () => {
   it("blocks Escape on editable focus and open pickers", async () => {
     const { peekEscapeBlocked } = await import("./PeekPanel.js");
@@ -304,6 +460,22 @@ describe("peek guards", () => {
     } finally {
       delete (document as unknown as Record<string, unknown>).activeElement;
     }
+  });
+
+  it("ignores the caller's own dialog role while a picker inside it still guards", async () => {
+    const { peekEscapeBlocked, peekOutsideBlocked } = await import("./PeekPanel.js");
+    const { unmount } = setup({ role: "dialog" });
+    const panel = screen.getByTestId("issue-preview");
+    expect(panel).toHaveAttribute("role", "dialog");
+    expect(peekEscapeBlocked(panel)).toBe(false);
+    expect(peekOutsideBlocked(document.body, panel)).toBe(false);
+    const menu = document.createElement("div");
+    menu.setAttribute("role", "menu");
+    panel.appendChild(menu);
+    expect(peekEscapeBlocked(panel)).toBe(true);
+    menu.remove();
+    expect(peekEscapeBlocked(panel)).toBe(false);
+    unmount();
   });
 
   it("reports non-elements and selects as they are", async () => {

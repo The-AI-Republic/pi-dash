@@ -10,6 +10,7 @@ import { queryOptions } from "@tanstack/react-query";
 import {
   getInstanceBootstrapForStartup,
   getMe,
+  getSpaceBoardIssue,
   getSpaceBoardMeta,
   getSpaceBoardSettings,
   listSpaceBoardIssues,
@@ -18,6 +19,7 @@ import {
   resolveSpaceBoardAnchor,
   type ApiClient,
   type Me,
+  type SpaceBoardIssueDetail,
   type SpaceBoardIssuePage,
   type SpaceBoardLabel,
   type SpaceBoardMeta,
@@ -26,6 +28,7 @@ import {
 } from "@pidash/api-client";
 
 import { isValidAnchor, type SpaceBoardFilters } from "../lib/address.js";
+import { isSpaceIssueId } from "../lib/peek.js";
 import { spaceBoardQuery, spaceFilterSignature } from "../layouts/model.js";
 import { spaceKeys } from "./keys.js";
 
@@ -111,6 +114,23 @@ export function spaceGroupQueryOptions(
   });
 }
 
+/**
+ * One issue's detail for the open overlay (SPC-040/043/046). Gated on a
+ * uuid so a malformed `peekId` never becomes a request; the board behind
+ * the overlay is untouched while this resolves, and neither focus nor a
+ * reconnect re-reads it (SPC-033).
+ */
+export function spaceIssueDetailQueryOptions(client: ApiClient, anchor: string, issueId: string) {
+  return queryOptions({
+    queryKey: spaceKeys.detail(anchor, issueId),
+    queryFn: () => getSpaceBoardIssue(client, anchor, issueId),
+    enabled: isValidAnchor(anchor) && isSpaceIssueId(issueId),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  });
+}
+
 export function spaceStatesQueryOptions(client: ApiClient, anchor: string) {
   return queryOptions({
     queryKey: spaceKeys.states(anchor),
@@ -175,4 +195,12 @@ export async function resolveLegacySpaceAnchor(
   }
 }
 
-export type { Me, SpaceBoardIssuePage, SpaceBoardLabel, SpaceBoardMeta, SpaceBoardSettings, SpaceBoardState };
+export type {
+  Me,
+  SpaceBoardIssueDetail,
+  SpaceBoardIssuePage,
+  SpaceBoardLabel,
+  SpaceBoardMeta,
+  SpaceBoardSettings,
+  SpaceBoardState,
+};

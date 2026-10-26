@@ -70,6 +70,20 @@ export const SPACE_MESSAGE_KEYS = [
   "filters.removeValue",
   "filters.clearFacet",
   "filters.clearAll",
+  "peek.presentation",
+  "peek.mode.side",
+  "peek.mode.modal",
+  "peek.mode.full",
+  "peek.copyLink",
+  "peek.titleLabel",
+  "peek.descriptionLabel",
+  "peek.loading",
+  "peek.detailFailure",
+  "peek.retry",
+  "peek.property.state",
+  "peek.property.priority",
+  "peek.property.dueDate",
+  "peek.empty",
 ] as const;
 
 export type SpaceMessageKey = (typeof SPACE_MESSAGE_KEYS)[number];
@@ -134,6 +148,23 @@ const ENGLISH: Record<SpaceMessageKey, string> = {
   "filters.removeValue": "Remove filter",
   "filters.clearFacet": "Clear facet",
   "filters.clearAll": "Clear all",
+  // Public issue overlay (SPC-040–046). The property labels and the empty
+  // marker are the panel's interface contract; the notices keep their own
+  // existing keys.
+  "peek.presentation": "Change presentation",
+  "peek.mode.side": "Side panel",
+  "peek.mode.modal": "Modal",
+  "peek.mode.full": "Full screen",
+  "peek.copyLink": "Copy link",
+  "peek.titleLabel": "Issue title",
+  "peek.descriptionLabel": "Issue description",
+  "peek.loading": "Loading issue",
+  "peek.detailFailure": "This issue could not be loaded.",
+  "peek.retry": "Try again",
+  "peek.property.state": "State",
+  "peek.property.priority": "Priority",
+  "peek.property.dueDate": "Due date",
+  "peek.empty": "Empty",
 };
 
 /** A locale pack: translated entries for a subset of the stable keys. */
