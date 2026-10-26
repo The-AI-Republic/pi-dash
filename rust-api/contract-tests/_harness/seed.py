@@ -637,7 +637,6 @@ class Seed:
             extra_context="",
             enabled=True,
             last_error="",
-            outcome_mode="create_issue",
             created_at=_now(),
             updated_at=_now(),
         )

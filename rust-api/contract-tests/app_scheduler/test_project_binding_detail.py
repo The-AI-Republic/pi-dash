@@ -111,3 +111,20 @@ def test_delete(org):
     assert org.request("DELETE", bind_detail(org, binding["id"]), "admin").status_code == 204
     assert org.request("GET", bind_detail(org, binding["id"]), "admin").status_code == 404
     assert org.request("GET", bind_list(org), "admin").json() == []
+
+
+def test_stale_outcome_mode_is_ignored(org):
+    # PDASHOSS01-281: outcome_mode is gone. A client that still sends it
+    # (valid or not) is not rejected; the key is dropped like any unknown.
+    sched = _scheduler(org)
+    r = _install(org, sched["id"], outcome_mode="apply_fix")
+    assert r.status_code == 201, r.text
+    binding = r.json()
+    assert "outcome_mode" not in binding
+    for value in ("fix_and_review", "explode", None):
+        r = org.request(
+            "PATCH", bind_detail(org, binding["id"]), "admin",
+            json={"outcome_mode": value},
+        )
+        assert r.status_code == 200, r.text
+        assert "outcome_mode" not in r.json()

@@ -314,29 +314,6 @@
         "default": true
       },
       {
-        "name": "outcome_mode",
-        "type": "CharField",
-        "column": "outcome_mode",
-        "null": false,
-        "blank": false,
-        "max_length": 16,
-        "default": "create_issue",
-        "choices": [
-          [
-            "create_issue",
-            "Create issues"
-          ],
-          [
-            "apply_fix",
-            "Apply fix (open PR)"
-          ],
-          [
-            "fix_and_review",
-            "Fix & open for review"
-          ]
-        ]
-      },
-      {
         "name": "next_run_at",
         "type": "DateTimeField",
         "column": "next_run_at",

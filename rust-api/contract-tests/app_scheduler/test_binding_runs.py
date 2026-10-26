@@ -250,11 +250,9 @@ def test_detail_exposes_resolved_prompt_run_count_and_scheduler_join(org):
     r = org.request("GET", bind_detail(org, binding["id"]), "admin")
     assert r.status_code == 200, r.text
     body = r.json()
-    # Composed exactly like a dispatched run: scheduler prompt, extra
-    # context, then the outcome-mode directive.
-    assert body["resolved_prompt"].startswith("x\n\nFocus on the API.")
-    assert len(body["resolved_prompt"]) > len("x\n\nFocus on the API.")
-    assert "## Work mode: create issues" in body["resolved_prompt"]
+    # Composed exactly like a dispatched run: scheduler prompt, then extra
+    # context; nothing appended (PDASHOSS01-281).
+    assert body["resolved_prompt"] == "x\n\nFocus on the API."
     assert body["run_count"] == 1
     assert body["scheduler_source"] == "builtin"
     assert body["scheduler_is_enabled"] is True
@@ -276,5 +274,5 @@ def test_patch_response_carries_detail_keys(org):
     }
     # PATCH renders the post-save row through the detail shape: the
     # prompt composes from the install defaults (prompt "x", empty
-    # extra context, create_issue directive).
-    assert body["resolved_prompt"].startswith("x\n\n## Work mode: create issues")
+    # extra context) with no work-mode section.
+    assert body["resolved_prompt"] == "x"

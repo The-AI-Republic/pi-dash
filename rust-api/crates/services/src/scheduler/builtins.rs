@@ -58,7 +58,7 @@
 //!
 //! Out of scope (read-only reference, per the split review): the
 //! `Scheduler` model itself (`db/models/scheduler.py` — columns,
-//! `SchedulerSource`, `OutcomeMode`, ordering, constraints). Only the
+//! `SchedulerSource`, ordering, constraints). Only the
 //! values this port writes are restated here ([`SOURCE_BUILTIN`]).
 //!
 //! Ported bugs (translate, don't redesign — from the `bugs` array of
@@ -98,8 +98,9 @@ pub const SECURITY_AUDIT_PROMPT: &str = r#"Scan this project's source code for p
 (injection, auth bypass, secret leakage, unsafe deserialization, SSRF,
 insecure defaults).
 
-For each finding, create a Pi Dash issue using the `pi-dash` CLI:
-    pi-dash issue create \
+For each finding, create a Pi Dash issue using the `pidash` CLI:
+    pidash issue create \
+      --project <this project's identifier> \
       --title "[security] <short summary>" \
       --description "<file path, line range, vulnerable snippet,
                      severity (high|medium|low), and suggested fix>"
@@ -143,11 +144,12 @@ path and line range, category (security|correctness) and a specific subtype,
 severity (high|medium|low), confidence (high|medium|low), a 1-3 sentence
 explanation of the exploit path or failure mode, and a concrete fix.
 
-For each NEW finding, create a Pi Dash issue with the `pi-dash` CLI. Use the
+For each NEW finding, create a Pi Dash issue with the `pidash` CLI. Use the
 title prefix "[fable-security]" for security findings and "[fable-bug]" for
 correctness findings (a dedicated namespace so this audit does not collide with
 the basic "[security]" Security Audit scheduler):
-    pi-dash issue create \
+    pidash issue create \
+      --project <this project's identifier> \
       --title "[fable-security] <short summary>" \
       --description "<file path + line range, category/subtype, severity,
                      confidence, explanation, and suggested fix>"
@@ -463,14 +465,14 @@ mod tests {
         );
         assert_eq!(
             sha_hex(SECURITY_AUDIT_PROMPT),
-            "6cba8b5a8c04221b8dfdc4a23a8de31c60abe14ec6e1483d7e814a39ff35376f"
+            "77e19b0ddc42a20771e1f693a9f459d96d2f192accb9b37b3c85bda14a23b7e0"
         );
         assert_eq!(
             sha_hex(FABLE_AUDIT_PROMPT),
-            "63a696e7115b1724dd72b30ef575e76e4603a14c482aacdb48bef5f89f3b5b36"
+            "0ce1e2f55187b8365571a7a60c876dcb4e8a89c7748b00eae094bf995c99a747"
         );
-        assert_eq!(SECURITY_AUDIT_PROMPT.chars().count(), 634);
-        assert_eq!(FABLE_AUDIT_PROMPT.chars().count(), 2962);
+        assert_eq!(SECURITY_AUDIT_PROMPT.chars().count(), 678);
+        assert_eq!(FABLE_AUDIT_PROMPT.chars().count(), 3006);
         assert_eq!(SOURCE_BUILTIN, "builtin");
         assert_eq!(
             SEED_DISPATCH_UID,

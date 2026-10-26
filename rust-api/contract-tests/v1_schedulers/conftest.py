@@ -62,7 +62,6 @@ def _seed_binding(conn, *, workspace_id, project_id, scheduler_id, actor_id):
             "exdates": [],
             "extra_context": "",
             "enabled": True,
-            "outcome_mode": "create_issue",
             "next_run_at": NEXT_RUN_AT,
             "last_error": "",
             "actor_id": actor_id,

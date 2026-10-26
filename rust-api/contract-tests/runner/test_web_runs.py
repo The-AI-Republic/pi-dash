@@ -883,10 +883,10 @@ def _seed_binding(seeder, workspace_id, project_id, scheduler_id, actor_id):
         """INSERT INTO scheduler_bindings
            (id, workspace_id, project_id, scheduler_id, actor_id, dtstart,
             tzid, rrule, rdates, exdates, extra_context, enabled, last_error,
-            outcome_mode, created_at, updated_at)
+            created_at, updated_at)
            VALUES (%s,%s,%s,%s,%s,now(),
                    'UTC','','[]','[]','',true,'',
-                   'create_issue',now(),now())""",
+                   now(),now())""",
         (binding_id, workspace_id, project_id, scheduler_id, actor_id),
     )
     seeder.track.add("scheduler_bindings", binding_id)
