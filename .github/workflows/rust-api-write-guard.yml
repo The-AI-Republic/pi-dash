@@ -1,0 +1,30 @@
+name: rust-api-write-guard
+
+# ORM-09 (design D7): ratchet against new writes to ORM-covered tables outside
+# pidash_services::domain. Pure Python, no DB. Runs on PRs into rust-dev by
+# explicit issue instruction (PIDASHCONV-1527); advisory like all rust-api CI --
+# the gate is the local check in rust-api/README.md.
+on:
+  pull_request:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-write-guard.yml"
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-write-guard.yml"
+
+jobs:
+  write-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run write guard
+        run: python3 rust-api/scripts/write_guard.py --check
+      - name: Allowlist count
+        if: always()
+        run: |
+          N=$(grep -vE '^\s*(#|$)' rust-api/scripts/write_guard_allowlist.txt | wc -l)
+          echo "write-guard allowlist entries: $N" >> "$GITHUB_STEP_SUMMARY"

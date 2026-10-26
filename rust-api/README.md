@@ -43,6 +43,19 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## Local checks
+
+GitHub CI is advisory; run these locally before pushing:
+
+```sh
+cd rust-api
+python3 scripts/write_guard.py --check
+```
+
+The write guard (ORM-09, design D7) fails when raw SQL or sea-query writes
+to the ORM-covered tables appear outside `pidash_services::domain`. New
+sites must move into `domain/`; the allowlist only shrinks.
+
 ## Run the contract suite
 
 Contract suites run unmodified against live Django today and against Rust
