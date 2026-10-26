@@ -93,16 +93,30 @@ export function alignmentOf(value: unknown): PageAlignment {
   return value === "center" || value === "right" ? value : "left";
 }
 
+/** Node types the alignment commands cover (the TextAlign extension's list). */
+const ALIGNABLE_BLOCKS = ["paragraph", "heading"] as const;
+
+/**
+ * Alignment from the selection-aware active checks. A boundary caret —
+ * select-all starts before the first block, whose parent is the document
+ * itself — carries no text-align attribute, so reading the stored
+ * attribute misreports every whole-document selection as left.
+ */
+function alignOfProbe(probe: PageEditorProbe): PageAlignment {
+  if (ALIGNABLE_BLOCKS.some((type) => probe.isActive(type, { textAlign: "center" }))) return "center";
+  if (ALIGNABLE_BLOCKS.some((type) => probe.isActive(type, { textAlign: "right" }))) return "right";
+  return "left";
+}
+
 /** The state the editor reports for the caret or selection. */
 export function readFormattingState(probe: PageEditorProbe): PageFormattingState {
   const block = probe.caretBlock();
-  const alignValue = block?.attrs["textAlign"];
   return {
     bold: probe.isActive("bold"),
     italic: probe.isActive("italic"),
     underline: probe.isActive("underline"),
     strike: probe.isActive("strike"),
-    align: alignmentOf(alignValue),
+    align: alignOfProbe(probe),
     list: probe.inTaskList()
       ? "task"
       : probe.isActive("bulletList")

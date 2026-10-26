@@ -21809,20 +21809,38 @@ export class WebNewDriver implements ParityDriver {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, {
       waitUntil: "domcontentloaded",
     });
-    // Either the body editor or the live loader proves the detail
-    // mounted; the loader is the terminal state while the socket can
-    // never connect and the local cache is empty.
-    await Promise.race([
-      this.pagesLiveBodyEditor()
-        .first()
-        .waitFor({ timeout: WebNewDriver.WAIT_MS })
-        .catch(() => undefined),
-      this.page
-        .getByTestId("page-live-loader")
-        .first()
-        .waitFor({ timeout: WebNewDriver.WAIT_MS })
-        .catch(() => undefined),
-    ]);
+    // The title shell mounts once the record resolves, but its editor is
+    // a lazy chunk behind a clickable-but-inert fallback heading: typing
+    // into the fallback is silently lost. Editable pages settle on the
+    // mounted live contenteditable; read-only pages (which mount no
+    // editor) settle on the shell's readonly marker. The live loader is
+    // NOT a settle signal: it shows transiently on every load until the
+    // socket syncs, so racing it returns before the editors exist
+    // (NEWFRONT-920). Offline callers whose editors never mount navigate
+    // directly and poll the loader instead (see collab-live PAGE-068). A
+    // load that mounts neither face within the budget is wedged (the
+    // record fetch or the socket stalled under box contention), so one
+    // reload unsticks it before the reads that follow.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) await this.page.reload({ waitUntil: "domcontentloaded" });
+      const mounted = await Promise.race([
+        this.pagesLiveTitleField()
+          .first()
+          .waitFor({ state: "visible", timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .locator('[data-testid="page-detail-title"][data-readonly="true"]')
+          .waitFor({ state: "visible", timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (mounted) return;
+    }
   }
 
   async pagesLiveSyncBadge(): Promise<string | null> {
@@ -21838,11 +21856,28 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesLiveBodyText(): Promise<string> {
-    return ((await this.pagesLiveBodyEditor().first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    // Read-only pages mount no contenteditable; their static body reads
+    // through the canvas container instead (NEWFRONT-920).
+    if ((await this.pagesLiveBodyEditor().count()) > 0) {
+      return ((await this.pagesLiveBodyEditor().first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    }
+    return (
+      (await this.page
+        .locator(".editor-container")
+        .first()
+        .innerText({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
   async pagesLiveTitleText(): Promise<string> {
-    return ((await this.pagesLiveTitleField().first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    // Read-only pages mount no live editor; their static face reads
+    // through the labelled textbox instead (NEWFRONT-920, PAGE-026).
+    if ((await this.pagesLiveTitleField().count()) > 0) {
+      return ((await this.pagesLiveTitleField().first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    }
+    const face = this.page.getByTestId("page-detail-title").getByRole("textbox", { name: "Page title" });
+    return ((await face.first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
 
   async pagesLiveTypeInBody(text: string): Promise<void> {
@@ -28998,149 +29033,498 @@ export class WebNewDriver implements ParityDriver {
   // --- Pages title, mark + formatting toolbar (NEWFRONT-315, PAGE-026-036).
   // --- Stage 0 oracle stubs; the pages build slice lands them.
 
+  // --- Pages title, mark + formatting toolbar (NEWFRONT-315 range,
+  // --- NEWFRONT-920, PAGE-026-036). Title/mark reads go through the
+  // --- detail header's test ids; the bar's icon buttons are positional
+  // --- (the twelve core controls, then the table and image entries).
+
+  /** Toolbar icon buttons in reading order (typography/color excluded). */
+  private pagesToolbarIconButtons(): Locator {
+    return this.page
+      .getByTestId("page-formatting-bar")
+      .locator(
+        'button[data-testid^="page-toolbar-"]:not([data-testid="page-toolbar-typography"]):not([data-testid="page-toolbar-color"])'
+      );
+  }
+
+  /** The canvas header block (the mark affordance's hover target). */
+  private pagesMarkHeader(): Locator {
+    return this.page.getByTestId("page-canvas-header");
+  }
+
+  /** The sibling switcher trigger showing `pageName` (the breadcrumb glyph). */
+  private pagesMarkPageSwitcherTrigger(pageName: string): Locator {
+    return this.page.locator('button[aria-haspopup="listbox"]').filter({ hasText: pageName }).first();
+  }
+
+  /** One color popover row (letter first, wash second). */
+  private pagesToolbarColorRow(kind: "text" | "background"): Locator {
+    return this.page.getByTestId(`page-color-row-${kind}`);
+  }
+
+  /** Swatch buttons of one color row (its clear control excluded). */
+  private pagesToolbarColorSwatches(kind: "text" | "background"): Locator {
+    return this.pagesToolbarColorRow(kind).locator('button:not([data-testid^="page-color-clear-"])');
+  }
+
+  /** Select the mark picker's tab by its visible label. */
+  private async pagesMarkSelectTabName(name: string): Promise<void> {
+    await this.page.getByRole("tab", { name, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** The title surface, editable or its read-only heading face. */
+  private pagesTitleEditorSurface(): Locator {
+    return this.page.getByTestId("page-detail-title").getByRole("textbox", { name: "Page title" }).first();
+  }
+
+  /** The body editing surface (the canvas container's contenteditable). */
+  private pagesTitleBodySurface(): Locator {
+    return this.page.locator('.editor-container [contenteditable="true"]').first();
+  }
+
+  /** Wait for the bar and both editors to mount after a (re)load. */
+  private async pagesToolbarWaitEditors(): Promise<void> {
+    await this.page.getByTestId("page-detail-title").waitFor({ state: "visible", timeout: 60_000 });
+    await this.pagesTitleBodySurface().waitFor({ state: "visible", timeout: 60_000 });
+    await this.page.getByTestId("page-formatting-bar").waitFor({ state: "visible", timeout: 60_000 });
+  }
+
   async pagesTitlePressEnter(): Promise<void> {
-    return todo("pagesTitlePressEnter");
+    const title = this.pagesTitleEditorSurface();
+    await title.click({ timeout: WebNewDriver.WAIT_MS });
+    await title.press("Enter");
   }
   async pagesTitleFocusInBody(): Promise<boolean> {
-    return todo("pagesTitleFocusInBody");
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body) return false;
+      if (active.closest(".page-title-editor") !== null) return false;
+      return active.closest(".editor-container") !== null;
+    });
   }
   async pagesTitleBodyCaretAtTop(): Promise<boolean> {
-    return todo("pagesTitleBodyCaretAtTop");
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      if (!active || active.closest(".page-title-editor") !== null) return false;
+      const container = active.closest(".editor-container");
+      if (!container) return false;
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return false;
+      const firstBlock = container.querySelector("p, h1, h2, h3, h4, h5, h6, li");
+      if (!firstBlock) return selection.anchorOffset === 0;
+      const range = selection.getRangeAt(0);
+      const before = range.cloneRange();
+      before.selectNodeContents(firstBlock);
+      before.setEnd(range.startContainer, range.startOffset);
+      return before.toString() === "";
+    });
   }
   async pagesTitleEditable(): Promise<boolean> {
-    return todo("pagesTitleEditable");
+    const attr = await this.pagesTitleEditorSurface().getAttribute("contenteditable", {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    return attr === "true";
   }
   async pagesTitleEmptyFallback(): Promise<string | null> {
-    return todo("pagesTitleEmptyFallback");
+    return this.page.evaluate(() => {
+      const box = document.querySelector('[data-testid="page-detail-title"] [role="textbox"]');
+      if (!box || (box.textContent ?? "") !== "") return null;
+      const before = window.getComputedStyle(box, "::before").getPropertyValue("content");
+      if (before && before !== "none" && before !== '""') return before.replace(/^["']|["']$/g, "");
+      return (
+        box.getAttribute("data-placeholder") ??
+        box.querySelector("[data-placeholder]")?.getAttribute("data-placeholder") ??
+        null
+      );
+    });
   }
   async pagesTitleCountBadge(): Promise<string | null> {
-    return todo("pagesTitleCountBadge");
+    const badge = this.page.getByTestId("page-title-count");
+    if ((await badge.count()) === 0) return null;
+    const text = (
+      (await badge
+        .first()
+        .textContent()
+        .catch(() => null)) ?? ""
+    ).trim();
+    return text === "" ? null : text;
   }
   async pagesTitleFocus(): Promise<void> {
-    return todo("pagesTitleFocus");
+    await this.pagesTitleEditorSurface().click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async pagesTitleSetTitle(_text: string, _delayMs: number): Promise<void> {
-    return todo("pagesTitleSetTitle");
+  async pagesTitleSetTitle(text: string, delayMs: number): Promise<void> {
+    const title = this.pagesTitleEditorSurface();
+    await title.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
+    await title.pressSequentially(text, { delay: delayMs });
   }
   async pagesTitleIsFocused(): Promise<boolean> {
-    return todo("pagesTitleIsFocused");
+    return this.page.evaluate(() => {
+      const active = document.activeElement;
+      if (!active) return false;
+      return active.closest(".page-title-editor") !== null;
+    });
   }
   async pagesMarkOpenPicker(): Promise<void> {
-    return todo("pagesMarkOpenPicker");
+    // The affordance hides at opacity 0 until the header is hovered (or
+    // the title is empty); hover first, then click the trigger.
+    await this.pagesMarkHeader().hover({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("page-mark-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("tablist", { name: "Mark kind" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async pagesMarkTabs(): Promise<string[]> {
-    return todo("pagesMarkTabs");
+    return this.page
+      .getByRole("tablist", { name: "Mark kind" })
+      .getByRole("tab")
+      .evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()).filter((label) => label.length > 0));
   }
   async pagesMarkSelectTab(_name: string): Promise<void> {
     return todo("pagesMarkSelectTab");
   }
-  async pagesMarkSearchPick(_emoji: string, _query: string): Promise<void> {
-    return todo("pagesMarkSearchPick");
+  async pagesMarkSearchPick(emoji: string, query: string): Promise<void> {
+    await this.pagesMarkSelectTabName("Emoji");
+    const search = this.page.getByLabel("Search marks");
+    await search.fill(query, { timeout: WebNewDriver.WAIT_MS });
+    // Exact match: substring matching would also hit the "Use <emoji>"
+    // shortcut and ZWJ sequences that contain the glyph.
+    const pick = this.page
+      .locator('ul[aria-label="Emoji"] button')
+      .filter({ hasText: new RegExp(`^${escapeRegExp(emoji)}$`) })
+      .first();
+    await pick.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await pick.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("tablist", { name: "Mark kind" })
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
-  async pagesMarkPickIcon(_index: number): Promise<void> {
-    return todo("pagesMarkPickIcon");
+  async pagesMarkPickIcon(index: number): Promise<void> {
+    await this.pagesMarkSelectTabName("Icon");
+    const icons = this.page.locator('ul[aria-label="Icons"] button');
+    await icons.nth(index).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("tablist", { name: "Mark kind" })
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async pagesMarkCurrent(): Promise<PagesMarkCurrent | null> {
-    return todo("pagesMarkCurrent");
+    const box = this.page.getByTestId("page-mark");
+    if ((await box.count()) === 0) return null;
+    const glyph = box.getByTestId("page-mark-glyph");
+    if ((await glyph.count()) > 0) {
+      const text = (
+        (await glyph
+          .first()
+          .textContent()
+          .catch(() => null)) ?? ""
+      ).trim();
+      // The neutral paragraph face is the markless drawing, not an emoji.
+      if (text === "" || text === "¶") return null;
+      return { kind: "emoji", label: text };
+    }
+    const icon = box.getByTestId("page-mark-icon");
+    if ((await icon.count()) === 0) {
+      // The glyph chunk resolves after first paint; one short wait keeps
+      // a cold load from reading an icon mark as markless.
+      await icon.waitFor({ state: "attached", timeout: 5_000 }).catch(() => undefined);
+    }
+    if ((await icon.count()) > 0) {
+      const cls =
+        (await icon
+          .first()
+          .getAttribute("class")
+          .catch(() => null)) ?? "";
+      const token = cls.split(/\s+/).find((part) => part.startsWith("lucide-") && part !== "lucide-");
+      return { kind: "icon", label: token ? token.slice("lucide-".length) : "unknown" };
+    }
+    return null;
   }
   async pagesMarkPickerDisabled(): Promise<boolean> {
-    return todo("pagesMarkPickerDisabled");
+    const trigger = this.page.getByTestId("page-mark-trigger");
+    if ((await trigger.count()) === 0) return true;
+    return trigger.first().isDisabled();
   }
   async pagesMarkAffordanceOpacity(): Promise<string> {
-    return todo("pagesMarkAffordanceOpacity");
+    const affordance = this.page.getByTestId("page-mark-affordance");
+    if ((await affordance.count()) === 0) return "selected";
+    return affordance.first().evaluate((el) => window.getComputedStyle(el).opacity);
   }
   async pagesMarkClearControl(): Promise<boolean> {
-    return todo("pagesMarkClearControl");
+    return (await this.page.getByRole("button", { name: "Remove mark", exact: true }).count()) > 0;
   }
   async pagesMarkHoverHeader(): Promise<void> {
-    return todo("pagesMarkHoverHeader");
+    await this.pagesMarkHeader().hover({ timeout: WebNewDriver.WAIT_MS });
   }
-  async pagesMarkListGlyph(_workspaceSlug: string, _projectId: string, _pageName: string): Promise<string | null> {
-    return todo("pagesMarkListGlyph");
+  async pagesMarkListGlyph(workspaceSlug: string, projectId: string, pageName: string): Promise<string | null> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages`, { waitUntil: "domcontentloaded" });
+    // The plain tabs never run the forest walk (their discovery state is
+    // "off"), so the row itself is the settle signal here.
+    const link = this.page.getByTestId("page-row").getByRole("link", { name: pageName, exact: true }).first();
+    await link.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const text = (
+      (await link
+        .locator("span")
+        .first()
+        .textContent()
+        .catch(() => null)) ?? ""
+    ).trim();
+    return text === "" ? null : text;
   }
-  async pagesMarkBreadcrumbGlyph(_pageName: string): Promise<string | null> {
-    return todo("pagesMarkBreadcrumbGlyph");
+  async pagesMarkBreadcrumbGlyph(pageName: string): Promise<string | null> {
+    const trigger = this.pagesMarkPageSwitcherTrigger(pageName);
+    if ((await trigger.count()) === 0) return null;
+    const text = ((await trigger.textContent({ timeout: WebNewDriver.WAIT_MS }).catch(() => null)) ?? "").trim();
+    return text === "" ? null : text;
   }
-  async pagesMarkSwitcherGlyph(_pageName: string): Promise<string | null> {
-    return todo("pagesMarkSwitcherGlyph");
+  async pagesMarkSwitcherGlyph(pageName: string): Promise<string | null> {
+    const trigger = this.pagesMarkPageSwitcherTrigger(pageName);
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const options = this.page.getByRole("option");
+    await options
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    const texts = await options.evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()));
+    return texts.find((text) => text.includes(pageName)) ?? null;
+  }
+  private async pagesToolbarVerifyCommands(): Promise<boolean> {
+    try {
+      const selectAll = (): Promise<void> =>
+        this.page.keyboard.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
+      const body = this.pagesTitleBodySurface();
+      await body.click({ timeout: WebNewDriver.WAIT_MS });
+      const wasEmpty = (await this.pagesLiveBodyText()) === "";
+      if (wasEmpty) await body.pressSequentially("z", { delay: 5 });
+      await selectAll();
+      await this.pagesToolbarClick(0);
+      await expect.poll(() => this.pagesToolbarBodyHtml(), { timeout: 15_000 }).toContain("<strong>");
+      await selectAll();
+      await this.pagesToolbarClick(0);
+      await expect.poll(() => this.pagesToolbarBodyHtml(), { timeout: 15_000 }).not.toContain("<strong>");
+      if (wasEmpty) {
+        await selectAll();
+        await this.page.keyboard.press("Backspace");
+        await expect.poll(() => this.pagesLiveBodyText(), { timeout: 15_000 }).toBe("");
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
   async pagesToolbarSettle(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
-    return todo("pagesToolbarSettle");
+    // Each fresh load races the socket and the editor chunks independently,
+    // so reload until a bold round-trip proves the bar drives a live editor.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (attempt > 0) await this.page.reload({ waitUntil: "domcontentloaded" });
+      await this.pagesToolbarWaitEditors();
+      if (await this.pagesToolbarVerifyCommands()) return;
+    }
+    throw new Error("[parity] toolbar stayed deaf after 4 fresh loads.");
   }
   async pagesToolbarIconCount(): Promise<number> {
-    return todo("pagesToolbarIconCount");
+    return this.pagesToolbarIconButtons().count();
   }
-  async pagesToolbarClick(_index: number): Promise<void> {
-    return todo("pagesToolbarClick");
+  async pagesToolbarClick(index: number): Promise<void> {
+    // Real mouse click: the floating selection bubble used to cover the
+    // sticky bar for first-line selections and intercept pointer events
+    // (NEWFRONT-927, fixed); it now flips below the caret, so clicks go
+    // through to the buttons again.
+    await this.pagesToolbarIconButtons().nth(index).click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async pagesToolbarActive(_index: number): Promise<boolean> {
-    return todo("pagesToolbarActive");
+  async pagesToolbarActive(index: number): Promise<boolean> {
+    const attr = await this.pagesToolbarIconButtons().nth(index).getAttribute("data-active", {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    return attr === "true";
   }
-  async pagesToolbarTooltip(_index: number): Promise<PagesToolbarTooltip> {
-    return todo("pagesToolbarTooltip");
+  async pagesToolbarTooltip(index: number): Promise<PagesToolbarTooltip> {
+    const button = this.pagesToolbarIconButtons().nth(index);
+    // A previous popup stays open under the cursor and intercepts the next
+    // hover, so dismiss it first (nothing Escape-sensitive is open here).
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("tooltip")
+      .waitFor({ state: "hidden", timeout: 5_000 })
+      .catch(() => undefined);
+    // Focus, not hover: the selection bubble can cover the button and
+    // intercept the pointer (NEWFRONT-927); the kit tooltip opens on focus.
+    await button.focus({ timeout: WebNewDriver.WAIT_MS });
+    const tip = this.page.getByRole("tooltip").first();
+    await tip.waitFor({ state: "visible", timeout: 10_000 });
+    const name = (
+      (await tip
+        .locator("span.font-medium")
+        .first()
+        .textContent()
+        .catch(() => null)) ?? ""
+    ).trim();
+    const keys = tip.locator("kbd");
+    const total = await keys.count();
+    if (total === 0) return { name, hint: null };
+    const parts: string[] = [];
+    for (let key = 0; key < total; key += 1) {
+      parts.push(
+        (
+          (await keys
+            .nth(key)
+            .textContent()
+            .catch(() => null)) ?? ""
+        ).trim()
+      );
+    }
+    return { name, hint: parts.join(" + ") };
   }
   async pagesToolbarTypography(): Promise<string> {
-    return todo("pagesToolbarTypography");
+    const label = this.page.getByTestId("page-toolbar-typography");
+    return ((await label.innerText({ timeout: WebNewDriver.WAIT_MS }).catch(() => null)) ?? "").trim();
   }
   async pagesToolbarTypographyItems(): Promise<string[]> {
-    return todo("pagesToolbarTypographyItems");
+    await this.page.getByTestId("page-toolbar-typography").click({ timeout: WebNewDriver.WAIT_MS });
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const labels = await items.evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()));
+    await this.page.keyboard.press("Escape");
+    return labels;
   }
-  async pagesToolbarTypographyPick(_name: string): Promise<void> {
-    return todo("pagesToolbarTypographyPick");
+  async pagesToolbarTypographyPick(name: string): Promise<void> {
+    await this.page.getByTestId("page-toolbar-typography").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem", { name, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async pagesToolbarColorOpen(): Promise<void> {
-    return todo("pagesToolbarColorOpen");
+    await this.page.getByTestId("page-toolbar-color").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("page-color-panel").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async pagesToolbarColorCounts(): Promise<PagesToolbarColorCounts> {
-    return todo("pagesToolbarColorCounts");
+    const row = async (kind: "text" | "background"): Promise<{ count: number; clear: boolean }> => ({
+      count: await this.pagesToolbarColorSwatches(kind).count(),
+      clear: (await this.pagesToolbarColorRow(kind).getByTestId(`page-color-clear-${kind}`).count()) > 0,
+    });
+    const text = await row("text");
+    const background = await row("background");
+    return { text: text.count, textClear: text.clear, background: background.count, backgroundClear: background.clear };
   }
-  async pagesToolbarColorPick(_kind: "text" | "background", _index: number): Promise<void> {
-    return todo("pagesToolbarColorPick");
+  async pagesToolbarColorPick(kind: "text" | "background", index: number): Promise<void> {
+    await this.pagesToolbarColorSwatches(kind).nth(index).click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async pagesToolbarColorClear(_kind: "text" | "background"): Promise<void> {
-    return todo("pagesToolbarColorClear");
+  async pagesToolbarColorClear(kind: "text" | "background"): Promise<void> {
+    await this.pagesToolbarColorRow(kind)
+      .getByTestId(`page-color-clear-${kind}`)
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async pagesToolbarColorPreview(): Promise<PagesToolbarColorPreview> {
-    return todo("pagesToolbarColorPreview");
+    const preview = this.page.getByTestId("page-color-preview");
+    const background = await preview.evaluate((el) => (el as HTMLElement).style.backgroundColor).catch(() => "");
+    const glyph = preview.locator("svg").first();
+    const text = await glyph.evaluate((el) => (el as unknown as HTMLElement).style.color).catch(() => "");
+    const normalize = (value: string): string | null => {
+      const clean = value.trim().toLowerCase();
+      if (!clean || clean === "inherit" || clean === "transparent" || clean === "rgba(0, 0, 0, 0)") return null;
+      return value.trim();
+    };
+    return { text: normalize(text), background: normalize(background) };
   }
   async pagesToolbarBodyHtml(): Promise<string> {
-    return todo("pagesToolbarBodyHtml");
+    const body = this.pagesTitleBodySurface();
+    return (await body.evaluate((el) => el.innerHTML).catch(() => "")) ?? "";
   }
   async pagesToolbarSelectAll(): Promise<void> {
-    return todo("pagesToolbarSelectAll");
+    // Keyboard-only, and extended rather than select-all: clicking the body
+    // while a selection exists can leave the DOM caret and the editor's own
+    // selection disagreeing, and the editor's own select-all spans the
+    // document boundaries (endpoints the list lift cannot work with —
+    // NEWFRONT-930), so extend a native range from the document start
+    // instead. Revert to plain select-all once NEWFRONT-930 lands.
+    const mod = process.platform === "darwin" ? "Meta" : "Control";
+    const body = this.pagesTitleBodySurface();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await body.focus({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.keyboard.press(`${mod}+Home`);
+      await this.page.keyboard.press(`${mod}+Shift+End`);
+      const selected = await this.page.evaluate(() => {
+        const selection = window.getSelection();
+        return !!selection && !selection.isCollapsed && selection.toString() !== "";
+      });
+      if (selected) return;
+      // Collapse through the editor's keymap so both sides agree before
+      // retrying.
+      await this.page.keyboard.press("ArrowRight");
+    }
+    throw new Error("[parity] body select-all never selected.");
   }
-  async pagesToolbarTypeText(_text: string): Promise<void> {
-    return todo("pagesToolbarTypeText");
+  async pagesToolbarTypeText(text: string): Promise<void> {
+    await this.pagesTitleBodySurface().pressSequentially(text, { delay: 5 });
   }
   async pagesToolbarSave(): Promise<void> {
-    return todo("pagesToolbarSave");
+    await this.page.keyboard.press(process.platform === "darwin" ? "Meta+s" : "Control+s");
   }
-  async pagesToolbarPressKey(_key: string): Promise<void> {
-    return todo("pagesToolbarPressKey");
+  async pagesToolbarPressKey(key: string): Promise<void> {
+    await this.page.keyboard.press(key);
   }
   async pagesToolbarTableDims(): Promise<string | null> {
-    return todo("pagesToolbarTableDims");
+    return this.page.evaluate(() => {
+      const editor = document.querySelector('.editor-container [contenteditable="true"]');
+      const table = editor?.querySelector("table");
+      if (!table) return null;
+      const rows = table.querySelectorAll("tr").length;
+      const cols = table.querySelector("tr")?.children.length ?? 0;
+      return `${rows}x${cols}`;
+    });
   }
   async pagesToolbarCaretCell(): Promise<string> {
-    return todo("pagesToolbarCaretCell");
+    return this.page.evaluate(() => {
+      const selection = window.getSelection();
+      let node: Node | null = selection?.anchorNode ?? null;
+      let cell: HTMLTableCellElement | null = null;
+      let row: HTMLTableRowElement | null = null;
+      while (node) {
+        const name = node.nodeName;
+        if (name === "TD" || name === "TH") cell = node as HTMLTableCellElement;
+        if (name === "TR") {
+          row = node as HTMLTableRowElement;
+          break;
+        }
+        node = node.parentNode;
+      }
+      if (!cell || !row?.parentNode) return "outside";
+      return `r${Array.prototype.indexOf.call(row.parentNode.children, row)}c${cell.cellIndex}`;
+    });
   }
-  async pagesToolbarImageUpload(_filePath: string): Promise<void> {
-    return todo("pagesToolbarImageUpload");
+  async pagesToolbarImageUpload(filePath: string): Promise<void> {
+    const [chooser] = await Promise.all([
+      this.page.waitForEvent("filechooser", { timeout: WebNewDriver.WAIT_MS }),
+      this.pagesToolbarIconButtons().nth(13).click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    await chooser.setFiles(filePath, { timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator("image-component img[src*='/api/assets/']")
+      .first()
+      .waitFor({ state: "visible", timeout: 120_000 });
   }
   async pagesToolbarEditorHasImage(): Promise<boolean> {
-    return todo("pagesToolbarEditorHasImage");
+    return this.isShown(this.page.locator("image-component img[src*='/api/assets/']").first());
   }
   async pagesToolbarImageSrc(): Promise<string | null> {
-    return todo("pagesToolbarImageSrc");
+    const img = this.page.locator("image-component img").first();
+    if ((await img.count()) === 0) return null;
+    return img.getAttribute("src").catch(() => null);
   }
   async pagesToolbarVisible(): Promise<boolean> {
-    return todo("pagesToolbarVisible");
+    // Count first: boundingBox waits on a missing node instead of
+    // answering null, which would hang the hidden-bar reads. A mounted
+    // bar always carries a non-zero height (min-h-13), so shown-ness is
+    // the same signal.
+    return this.isShown(this.page.getByTestId("page-formatting-bar"));
   }
   async pagesToolbarFloatingToggle(): Promise<boolean> {
-    return todo("pagesToolbarFloatingToggle");
+    return this.isShown(this.page.getByTestId("page-floating-pane-toggle"));
   }
-  async pagesToolbarSeedStickyPref(_value: boolean): Promise<void> {
-    return todo("pagesToolbarSeedStickyPref");
+  async pagesToolbarSeedStickyPref(value: boolean): Promise<void> {
+    await this.page.context().addInitScript((sticky: boolean) => {
+      window.localStorage.setItem(
+        "pages_config",
+        JSON.stringify({ full_width: false, font_size: "large-font", font_style: "sans-serif", sticky_toolbar: sticky })
+      );
+    }, value);
   }
   // --- Runs, approvals, run dispatch, re-tick (NEWFRONT-180, NEWFRONT-547).
   // --- The methods read the new app's own DOM contract (test ids and the

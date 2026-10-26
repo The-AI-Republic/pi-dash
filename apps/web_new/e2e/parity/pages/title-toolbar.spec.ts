@@ -264,7 +264,7 @@ test(
 test(
   specTitle(["PAGE-026"], "bug: NEWFRONT-354 over-255 titles persist and no count badge renders"),
   { tag: specTags(["PAGE-026"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const session = await signInSession(seed.email, seed.password);
     const { projectId, pageId } = await openFreshPage(driver, seed, session, "title-cap");
     try {
@@ -274,11 +274,25 @@ test(
       // badge, focused or blurred.
       const long = "x".repeat(300);
       await driver.pagesTitleSetTitle(long, 150);
-      expect(await pagesTitlePollName(seed.workspaceSlug, projectId, pageId, session, long)).toHaveLength(300);
+      // Bug NEWFRONT-354: the oracle pins the old over-limit persistence;
+      // the new app implements the intended fix instead (Parity wiki "Old
+      // bugs": web_new may implement the fix; spec §5.1 pins the 255 cap
+      // with a focused-only live count).
+      if (testInfo.project.name === "new") {
+        expect(
+          await pagesTitlePollName(seed.workspaceSlug, projectId, pageId, session, long.slice(0, 255))
+        ).toHaveLength(255);
+      } else {
+        expect(await pagesTitlePollName(seed.workspaceSlug, projectId, pageId, session, long)).toHaveLength(300);
+      }
 
       await driver.pagesTitleFocus();
       expect(await driver.pagesTitleIsFocused()).toBe(true);
-      expect(await driver.pagesTitleCountBadge()).toBe(null);
+      if (testInfo.project.name === "new") {
+        expect(await driver.pagesTitleCountBadge()).toBe("255/255");
+      } else {
+        expect(await driver.pagesTitleCountBadge()).toBe(null);
+      }
 
       await driver.pagesLiveTypeInBody("z");
       expect(await driver.pagesTitleCountBadge()).toBe(null);
@@ -405,7 +419,7 @@ test(
 test(
   specTitle(["PAGE-027"], "bug: NEWFRONT-355 marks cannot be cleared and the API rejects null with 400"),
   { tag: specTags(["PAGE-027"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const session = await signInSession(seed.email, seed.password);
     const { projectId, pageId } = await openFreshPage(driver, seed, session, "mark-clear");
     try {
@@ -421,7 +435,15 @@ test(
       const picked = await pollLogoProps(seed, projectId, pageId, session, '"in_use":"icon"');
 
       await driver.pagesMarkOpenPicker();
-      expect(await driver.pagesMarkClearControl()).toBe(false);
+      // Bug NEWFRONT-355: the oracle pins the old picker's missing remove
+      // control; the new app implements the intended fix instead (Parity
+      // wiki "Old bugs": web_new may implement the fix; spec §5.2 pins the
+      // picker's clear action on a marked page).
+      if (testInfo.project.name === "new") {
+        expect(await driver.pagesMarkClearControl()).toBe(true);
+      } else {
+        expect(await driver.pagesMarkClearControl()).toBe(false);
+      }
       await driver.pagesMarkPickIcon(1);
       await expect
         .poll(

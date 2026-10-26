@@ -23,13 +23,14 @@ function probe(
   overrides: Partial<PageEditorProbe> & {
     block?: { type: string; attrs: Record<string, unknown> } | null;
     active?: string[];
+    aligned?: { type: string; textAlign: string };
   } = {}
 ): PageEditorProbe {
   const active = new Set(overrides.active ?? []);
   return {
     isActive: (name, attributes) => {
-      if (attributes !== undefined) return false;
-      return active.has(name);
+      if (attributes === undefined) return active.has(name);
+      return overrides.aligned?.type === name && attributes["textAlign"] === overrides.aligned.textAlign;
     },
     caretBlock: () => (overrides.block === undefined ? { type: "paragraph", attrs: {} } : overrides.block),
     inTaskList: overrides.inTaskList ?? (() => false),
@@ -79,10 +80,38 @@ describe("readFormattingState", () => {
     });
   });
 
-  it("reads the caret's heading level and alignment", () => {
+  it("reads the caret's heading level", () => {
     const state = readFormattingState(probe({ block: { type: "heading", attrs: { level: 3, textAlign: "center" } } }));
     expect(state.block).toBe("heading3");
-    expect(state.align).toBe("center");
+  });
+
+  it("reads alignment from the selection-aware active checks, not the stored attribute", () => {
+    // A boundary caret (select-all starts before the first block) carries
+    // no text-align attribute, so the stored attribute alone misreports
+    // every whole-document selection as left (NEWFRONT-920).
+    const bareDoc = { type: "doc", attrs: {} };
+    expect(readFormattingState(probe({ block: bareDoc })).align).toBe("left");
+    expect(
+      readFormattingState(probe({ block: bareDoc, aligned: { type: "paragraph", textAlign: "center" } })).align
+    ).toBe("center");
+    expect(
+      readFormattingState(probe({ block: bareDoc, aligned: { type: "heading", textAlign: "center" } })).align
+    ).toBe("center");
+    expect(
+      readFormattingState(probe({ block: bareDoc, aligned: { type: "paragraph", textAlign: "right" } })).align
+    ).toBe("right");
+    expect(readFormattingState(probe({ block: bareDoc, aligned: { type: "heading", textAlign: "right" } })).align).toBe(
+      "right"
+    );
+    // A stale stored attribute never overrides the live checks.
+    expect(
+      readFormattingState(
+        probe({
+          block: { type: "paragraph", attrs: { textAlign: "center" } },
+          aligned: { type: "paragraph", textAlign: "right" },
+        })
+      ).align
+    ).toBe("right");
   });
 
   it("clamps an out-of-range or missing heading level", () => {
