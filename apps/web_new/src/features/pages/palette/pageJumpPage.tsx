@@ -39,7 +39,12 @@ export function projectPagesJumpPage(args: PageJumpPageArgs): PalettePage {
     placeholder: PAGE_JUMP_PLACEHOLDER,
     usePageState: (query: string): PalettePageState => {
       const closePalette = useCommandPalette((state) => state.closePalette);
-      const forest = useQuery(pageForestQueryOptions(getAppClient(), args.workspaceSlug, args.projectId, true));
+      // The palette spans every depth and both tabs, so its walk probes
+      // every row: `sub_pages_count` hides a shelved child under a live
+      // parent (§11.7, PAGE-090).
+      const forest = useQuery(
+        pageForestQueryOptions(getAppClient(), args.workspaceSlug, args.projectId, true, { deep: true })
+      );
       if (forest.isPending) {
         return { status: "loading", options: [], emptyText: PAGE_JUMP_EMPTY_TEXT };
       }

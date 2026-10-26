@@ -77,6 +77,8 @@ interface Harness {
   childrenByParent: Record<string, PageRow[]>;
   pagesStatus: number;
   pagesCalls: number;
+  /** Top-level collection reads only; `?parent=` reads are excluded. */
+  topLevelCalls: number;
   pagesHold: Promise<void> | null;
   members: Record<string, unknown>[];
   meStatus: number;
@@ -118,6 +120,7 @@ beforeEach(() => {
     childrenByParent: {},
     pagesStatus: 200,
     pagesCalls: 0,
+    topLevelCalls: 0,
     pagesHold: null,
     members: [makeWorkspaceMember(PAGES_USER_ID, "Ada Byron")],
     meStatus: 200,
@@ -241,6 +244,7 @@ beforeEach(() => {
       harness.pagesCalls += 1;
       if (harness.pagesHold !== null) await harness.pagesHold;
       const parent = new URL(url).searchParams.get("parent");
+      if (parent === null) harness.topLevelCalls += 1;
       if (parent !== null && harness.forestFail) return jsonResponse(url, 500, { error: "forest unavailable" });
       if (parent !== null) return jsonResponse(url, harness.pagesStatus, harness.childrenByParent[parent] ?? []);
       return jsonResponse(url, harness.pagesStatus, harness.pages);
@@ -529,6 +533,55 @@ describe("PagesListScreen", () => {
     fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "leave" } });
     expect(await screen.findByRole("link", { name: "Shelved leave policy" })).toBeInTheDocument();
     expect(screen.getByTestId("page-row-parent-path")).toHaveTextContent("Shelved handbook");
+  });
+
+  it("finds an archived child under a live parent that reports no live children", async () => {
+    // `sub_pages_count` counts live children only (§11.7), so the live
+    // parent reads as a leaf; discovery must still reach the shelved child
+    // or the Archived tab can never restore or delete it (PAGE-088/089/090).
+    const parent = makePageRow({ id: pageId(50), name: "Live handbook", sub_pages_count: 0 });
+    const child = makePageRow({
+      id: pageId(51),
+      name: "Shelved leave policy",
+      parent: parent.id,
+      parent_id: parent.id,
+      archived_at: "2026-10-20",
+    });
+    harness.pages = [parent];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen("archived");
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
+    fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "leave" } });
+    expect(await screen.findByRole("link", { name: "Shelved leave policy" })).toBeInTheDocument();
+    expect(screen.getByTestId("page-row-parent-path")).toHaveTextContent("Live handbook");
+    expect(harness.topLevelCalls).toBe(1);
+  });
+
+  it("reaches an archived child under a live parent in the archived tab", async () => {
+    const parent = makePageRow({
+      id: pageId(52),
+      name: "Live handbook",
+      sub_pages_count: 0,
+      updated_at: "2026-04-01T00:00:00Z",
+    });
+    const child = makePageRow({
+      id: pageId(53),
+      name: "Shelved leave policy",
+      parent: parent.id,
+      parent_id: parent.id,
+      archived_at: "2026-10-20",
+    });
+    harness.pages = [parent];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen("archived");
+    // A live parent never joins the archived tab; the discovered archived
+    // child becomes a root there and offers its row actions.
+    expect(await screen.findByRole("link", { name: "Shelved leave policy" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Live handbook" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved leave policy" }));
+    expect(await screen.findByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    expect(harness.topLevelCalls).toBe(1);
   });
 
   it("omits Add sub-page from an archived discovery row", async () => {
@@ -1080,7 +1133,7 @@ describe("PagesListScreen nested tree and discovery (D17, PAGE-084–090)", () =
     await screen.findByRole("link", { name: "Handbook" });
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Move to…" }));
-    expect(await screen.findByTestId("page-move-listbox")).toHaveAttribute("data-ready", "true");
+    await waitFor(() => expect(screen.getByTestId("page-move-listbox")).toHaveAttribute("data-ready", "true"));
     fireEvent.click(await screen.findByRole("option", { name: /Other/ }));
     fireEvent.click(screen.getByRole("button", { name: "Move page" }));
     await waitFor(() => expect(harness.patchBodies).toHaveLength(1));
@@ -1139,7 +1192,9 @@ describe("PagesListScreen nested tree and discovery (D17, PAGE-084–090)", () =
     harness.childrenByParent = { [parent.id]: [child] };
     renderScreen("archived");
     expect(await screen.findByRole("link", { name: "Shelved handbook" })).toBeInTheDocument();
-    expect(harness.pagesCalls).toBe(1);
+    // The archived tab is a discovery surface: it reuses the collection read
+    // and walks the whole tree, so no second top-level request (PAGE-020).
+    expect(harness.topLevelCalls).toBe(1);
     expect(screen.queryByRole("link", { name: "Shelved policy" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Shelved handbook" }));
     expect(await screen.findByRole("link", { name: "Shelved policy" })).toBeInTheDocument();
@@ -1153,6 +1208,7 @@ describe("PagesListScreen nested tree and discovery (D17, PAGE-084–090)", () =
     harness.childrenByParent = { [parent.id]: [child] };
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(pageForestKey("acme", PAGES_PROJECT_ID), { rows: [parent], complete: true });
+    client.setQueryData(pageForestKey("acme", PAGES_PROJECT_ID, true), { rows: [parent], complete: true });
     renderProject(PAGES_PROJECT_ID, client);
     await screen.findByTestId("pages-tree");
     fireEvent.click(screen.getByRole("button", { name: "Expand sub-pages of Handbook" }));

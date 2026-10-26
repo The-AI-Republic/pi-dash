@@ -701,3 +701,56 @@ test(
     }
   }
 );
+
+test(
+  specTitle(["PAGE-088", "PAGE-089", "PAGE-090"], "a shelved child under a live parent stays reachable"),
+  { tag: specTags(["PAGE-088", "PAGE-089", "PAGE-090"]) },
+  async ({ driver, seed }, testInfo) => {
+    test.skip(testInfo.project.name !== "new", "PAGE-088/089/090 are new (D17); no oracle");
+    const session = await signInSessionWithRetry(seed.email, seed.password);
+    const projectId = await scratchProject(seed, "archivedliveparent", session);
+    try {
+      if (!(await requireNestedBackend(seed, projectId, session))) {
+        testInfo.skip(true, "PDASHOSS01-270 has not landed on this stack");
+        return;
+      }
+      // A live parent counts only live children, so its shelved child leaves
+      // it reporting zero. Discovery must still reach the child, or restore
+      // and delete are unreachable from the Archived tab (§11.7).
+      const parentName = `${tag("liveparent")} handbook`;
+      const childName = `${tag("liveparent")} leave policy`;
+      const parentId = await serverCreatePage(seed.workspaceSlug, projectId, session, parentName);
+      const childId = await serverCreatePage(seed.workspaceSlug, projectId, session, childName);
+      await serverPatchPageParent(seed.workspaceSlug, projectId, childId, parentId, session);
+      await serverArchivePage(seed.workspaceSlug, projectId, childId, session);
+
+      await driver.openEntry();
+      await driver.signInWithPassword(seed.email, seed.password);
+      await driver.pagesNestedOpenArchivedList(seed.workspaceSlug, projectId);
+      // The archived child is a root in the Archived tab; the live parent
+      // never joins that tab.
+      expect(await driver.pagesNestedRowTitles()).toEqual([childName]);
+      expect((await serverPageRecord(seed.workspaceSlug, projectId, parentId, session)).archivedAt).toBeNull();
+
+      // Search finds it with its parent path even though the parent stays live.
+      await driver.pagesNestedSearch("leave");
+      expect(await driver.pagesNestedRowTitles()).toEqual([childName]);
+      expect(await driver.pagesNestedParentPath(childName)).toBe(parentName);
+      await driver.pagesNestedSearchClear();
+
+      // The palette reads the same forest.
+      const palette = await driver.pagesNestedPaletteFind("leave");
+      expect(palette.join("|")).toContain(childName);
+      expect(palette.join("|")).toContain(parentName);
+
+      // Restore is reachable on the discovered row; the live parent no longer
+      // counts the child as archived once restored.
+      await driver.pagesNestedRowMenuOpen(childName);
+      await driver.pagesNestedOptionsPick("Restore");
+      await driver.pagesNestedWaitToast("Page restored successfully.");
+      expect((await serverPageRecord(seed.workspaceSlug, projectId, childId, session)).archivedAt).toBeNull();
+    } finally {
+      await cleanupProject(seed, projectId, session);
+    }
+  }
+);

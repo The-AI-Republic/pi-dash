@@ -144,16 +144,21 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
   const searchActiveEarly = client.query.trim() !== "";
   const filtersActiveEarly = hasPageFilters(client.filters);
   const discoveryActive = searchActiveEarly || filtersActiveEarly;
-  // Discovery spans every depth and needs the whole visible forest. The
-  // archived tab stays on the one collection read and loads its subtree
-  // lazily through the tree, so PAGE-020's single-read pin still holds.
-  const forestActive = discoveryActive;
-  // Discovery (search/filters/favourites) spans every depth, so it reads
-  // the whole visible forest; the plain list stays on the one top-level
-  // collection and the tree reads children lazily per expanded parent.
+  // Discovery (search/filters/favourites) spans every depth, and the
+  // Archived tab must reach shelved children even when their live parent
+  // reports no live children (§11.7), so both read the whole visible
+  // forest. The plain live tabs stay on the one top-level collection and
+  // the tree reads children lazily per expanded parent (PAGE-020).
+  const forestActive = discoveryActive || tab === "archived";
+  // The collection read is the forest's top level, so reuse it instead of
+  // issuing a second one; only the `?parent=` child reads are added.
+  const forestRoots = pages.data;
   const forest = useQuery({
-    ...pageForestQueryOptions(getAppClient(), workspaceSlug, projectId, forestActive),
-    enabled: forestActive && project.isSuccess && !gateOff,
+    ...pageForestQueryOptions(getAppClient(), workspaceSlug, projectId, forestActive, {
+      roots: forestRoots,
+      deep: true,
+    }),
+    enabled: forestActive && pages.isSuccess && project.isSuccess && !gateOff,
   });
   const discoveryPool = forestActive ? (forest.data?.rows ?? rows) : rows;
   const activeRows = forestActive ? discoveryPool : rows;
@@ -245,8 +250,11 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
     gateOff,
     pagesPending: pages.isPending,
     pagesError: pages.isError,
-    pageCount: rows.length,
-    tabCount: tabRows.length,
+    // Discovery and the archived tab render from the whole walked pool, so
+    // a shelved child under a live parent still counts as content even
+    // though the top-level collection has no archived row (§11.7).
+    pageCount: activeRows.length,
+    tabCount: forestActive ? tabbedPool.length : tabRows.length,
     resultCount: visible.length,
     searchActive,
     filtersActive,

@@ -123,6 +123,42 @@ describe("readPageForest", () => {
     expect(listPagesMock).toHaveBeenCalledTimes(1);
   });
 
+  it("reaches an archived child under a live parent that reports no live children", async () => {
+    // `sub_pages_count` counts visible, non-archived children only (§11.7),
+    // so a live parent with only a shelved child reports zero. Discovery
+    // must still probe it (PAGE-088/089/090).
+    const liveParent = row("Handbook", { id: "live-parent", sub_pages_count: 0 });
+    const archivedChild = row("Shelved policy", {
+      id: "archived-child",
+      parent: "live-parent",
+      parent_id: "live-parent",
+      archived_at: "2026-10-20",
+    });
+    listPagesMock.mockImplementation(async (_client, _ws, _project, query) => {
+      if (query?.parent === undefined) return [liveParent];
+      if (query.parent === "live-parent") return [archivedChild];
+      return [];
+    });
+    const forest = await readPageForest(fakeClient(), "acme", "project", { deep: true });
+    expect(forest.rows.map((page) => page.id)).toEqual(["live-parent", "archived-child"]);
+    expect(listPagesMock.mock.calls.map((call) => call[3]?.parent)).toEqual([
+      undefined,
+      "live-parent",
+      "archived-child",
+    ]);
+  });
+
+  it("reuses a supplied top-level collection instead of reading it again", async () => {
+    const liveParent = row("Handbook", { id: "live-parent", sub_pages_count: 0 });
+    listPagesMock.mockImplementation(async (_client, _ws, _project, query) => {
+      if (query?.parent === "live-parent") return [];
+      throw new Error(`unexpected top-level read: ${String(query?.parent)}`);
+    });
+    const forest = await readPageForest(fakeClient(), "acme", "project", { roots: [liveParent], deep: true });
+    expect(forest.rows.map((page) => page.id)).toEqual(["live-parent"]);
+    expect(listPagesMock.mock.calls.map((call) => call[3]?.parent)).toEqual(["live-parent"]);
+  });
+
   it("skips a child already seen so a malformed cycle terminates", async () => {
     const root = row("Root", { id: "root", sub_pages_count: 1 });
     const child = row("Child", { id: "child", parent: "root", parent_id: "root", sub_pages_count: 1 });
@@ -153,7 +189,14 @@ describe("readPageForest", () => {
     const options = pageForestQueryOptions(fakeClient(), "acme", "project", false);
     expect(options.queryKey).toEqual(pageForestKey("acme", "project"));
     expect(options.enabled).toBe(false);
-    expect(pageForestKey("acme", "project")).toEqual([...pageKeys.all("acme"), "forest", "project"]);
+    expect(pageForestKey("acme", "project")).toEqual([...pageKeys.all("acme"), "forest", "project", "shallow"]);
+  });
+
+  it("keeps deep and shallow walks in separate cache entries", () => {
+    expect(pageForestKey("acme", "project", true)).toEqual([...pageKeys.all("acme"), "forest", "project", "deep"]);
+    expect(pageForestQueryOptions(fakeClient(), "acme", "project", true, { deep: true }).queryKey).toEqual(
+      pageForestKey("acme", "project", true)
+    );
   });
 
   it("resolves the query through a QueryClient", async () => {

@@ -37,21 +37,48 @@ export interface PageForest {
   complete: boolean;
 }
 
+export interface PageForestReadOptions {
+  /** Reuse an already-loaded top-level collection instead of reading it. */
+  roots?: readonly PageRow[] | undefined;
+  /**
+   * Probe every row, including ones reporting no live children. Discovery
+   * surfaces need this because `sub_pages_count` hides archived children
+   * (§11.7); a count-driven walk is enough where archived rows can never be
+   * a result (the move picker).
+   */
+  deep?: boolean | undefined;
+}
+
 /**
  * Walk the whole visible tree: the top-level collection, then the children
- * of every page that reports any, breadth-first, until nothing is left.
+ * of every page, breadth-first, until nothing is left.
  *
  * Search, filters and favourites are client-side dimensions today, so a
  * discovery pass that must also find child pages needs the whole forest in
  * hand; the tree view keeps using the lazy per-parent read. Rows only
  * arrive here if the caller can see them, so the walk naturally excludes
  * invisible pages and their counts.
+ *
+ * Every row is probed, not only the ones with a positive
+ * `sub_pages_count`: that field counts *visible, non-archived* children
+ * (§11.7), so a live parent with a shelved child reports zero and a
+ * count-driven walk would never reach it (PAGE-088/089/090). Discovery is
+ * the only surface that pays this cost; `roots` lets a caller that already
+ * holds the collection (the list, which caches it) reuse that read instead
+ * of issuing a second top-level one (PAGE-020).
  */
-export async function readPageForest(client: ApiClient, workspaceSlug: string, projectId: string): Promise<PageForest> {
-  const roots = await listPages(client, workspaceSlug, projectId, { includeArchived: true });
-  const rows: PageRow[] = [...roots];
+export async function readPageForest(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  options: PageForestReadOptions = {}
+): Promise<PageForest> {
+  const { roots, deep = false } = options;
+  const topLevel =
+    roots === undefined ? await listPages(client, workspaceSlug, projectId, { includeArchived: true }) : roots;
+  const rows: PageRow[] = [...topLevel];
   const seen = new Set(rows.map((row) => row.id));
-  const frontier = roots.filter((row) => pageMayHaveChildren(row));
+  const frontier = deep ? [...rows] : rows.filter((row) => pageMayHaveChildren(row));
   let complete = true;
   while (frontier.length > 0) {
     if (rows.length >= PAGE_FOREST_LIMIT) {
@@ -67,22 +94,34 @@ export async function readPageForest(client: ApiClient, workspaceSlug: string, p
         if (seen.has(child.id)) continue;
         seen.add(child.id);
         rows.push(child);
-        if (pageMayHaveChildren(child)) frontier.push(child);
+        // A child read can reveal an archived descendant under a live
+        // parent, so a deep walk probes every row it discovers; the shallow
+        // walk only follows rows that report live children.
+        if (deep || pageMayHaveChildren(child)) frontier.push(child);
       }
     }
   }
   return { rows, complete };
 }
 
-/** Cache key for one project's whole visible forest. */
-export function pageForestKey(workspaceSlug: string, projectId: string) {
-  return [...pageKeys.all(workspaceSlug), "forest", projectId] as const;
+/**
+ * Cache key for one project's whole visible forest. The deep walk sees more
+ * rows than the count-driven one, so the two never share an entry.
+ */
+export function pageForestKey(workspaceSlug: string, projectId: string, deep = false) {
+  return [...pageKeys.all(workspaceSlug), "forest", projectId, deep ? "deep" : "shallow"] as const;
 }
 
-export function pageForestQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string, enabled: boolean) {
+export function pageForestQueryOptions(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  enabled: boolean,
+  options: PageForestReadOptions = {}
+) {
   return queryOptions({
-    queryKey: pageForestKey(workspaceSlug, projectId),
-    queryFn: () => readPageForest(client, workspaceSlug, projectId),
+    queryKey: pageForestKey(workspaceSlug, projectId, options.deep === true),
+    queryFn: () => readPageForest(client, workspaceSlug, projectId, options),
     staleTime: LIST_STALE_TIME_MS,
     enabled,
   });

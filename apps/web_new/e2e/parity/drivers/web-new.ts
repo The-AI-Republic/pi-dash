@@ -41361,6 +41361,8 @@ export class WebNewDriver implements ParityDriver {
   }
   async aiWorkersSkeletonVisible(): Promise<boolean> {
     return (await this.page.getByTestId("project-settings-ai-workers-skeleton").count()) > 0;
+  }
+
   // --- Nested pages (D17, PAGE-084-090). Real selectors and real server
   // --- reads; the oracle driver throws a D17 notice for every one.
 

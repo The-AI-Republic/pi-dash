@@ -1214,6 +1214,13 @@ target:
   the children actually loaded. A live row never gets an expand control
   from this rule, and a page the caller cannot see is still absent from the
   child read.
+  The same blindness hides an archived child under a *live* parent, which
+  also reports `0`. Discovery therefore probes every row with
+  `GET pages/?parent=<id>` rather than trusting the count: the Archived
+  tab, search, structured filters, favourites and the command palette all
+  walk the whole forest that way, seeded from the one cached top-level
+  collection read, so PAGE-020's single top-level read still holds. Child
+  reads are not collection reads.
 - **Detail:** a child page retrieves by id under the same visibility rule;
   the client no longer gets a "not found" for a page it can see.
 - **Create/update:** `parent` (id or null) is accepted on `POST` and
