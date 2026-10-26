@@ -1247,6 +1247,14 @@ describe("pod driver methods (NEWFRONT-542, RUN-012–015)", () => {
   });
 
   it("selects a pod twice and counts no runner fetches as a client-side filter", async () => {
+    // The filter first syncs with the list's poll clock by waiting for a
+    // scheduled refresh (up to 7 s). Under the stub there is no poll clock
+    // and waitForTimeout resolves at once, so the sync would spin its whole
+    // real-time deadline (millions of retained stub calls) and OOM the
+    // worker (NEWFRONT-928). Time jumps past the deadline so the sync
+    // settles at once; the toggle counting below is unaffected. Coupled to
+    // the driver's 7 s sync window: if it changes, this jump must change
+    // with it or the sync spins again.
     let handler: ((route: unknown) => Promise<void>) | undefined;
     const page = pageStub({
       route: vi.fn(async (pattern: string, h: unknown) => {
@@ -1257,8 +1265,16 @@ describe("pod driver methods (NEWFRONT-542, RUN-012–015)", () => {
     Object.defineProperty(page, "waitForTimeout", { value: vi.fn(async () => undefined) });
     const driver = new WebNewDriver(page);
     const spy = vi.spyOn(driver, "runnersSelectPod").mockImplementation(select);
-
-    expect(await driver.runnersPodFilterIsClientSide("WEB_beefy")).toBe(true);
+    const start = 1_000_000;
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(start)
+      .mockReturnValue(start + 7_001);
+    try {
+      expect(await driver.runnersPodFilterIsClientSide("WEB_beefy")).toBe(true);
+    } finally {
+      now.mockRestore();
+    }
     expect(select).toHaveBeenCalledTimes(2);
     expect(page.unroute).toHaveBeenCalledWith("**/api/runners/?*", handler);
 
@@ -1272,6 +1288,9 @@ describe("pod driver methods (NEWFRONT-542, RUN-012–015)", () => {
   });
 
   it("counts a runner GET during selection and through the route as server-side", async () => {
+    // Same poll-clock sync as the client-side test above: time jumps past
+    // the driver's 7 s sync window so the wait settles at once instead of
+    // spinning its real-time deadline under the immediate stub (NEWFRONT-928).
     let handler: ((route: unknown) => Promise<void>) | undefined;
     const page = pageStub({
       route: vi.fn(async (_pattern: string, h: unknown) => {
@@ -1283,8 +1302,16 @@ describe("pod driver methods (NEWFRONT-542, RUN-012–015)", () => {
     vi.spyOn(driver, "runnersSelectPod").mockImplementation(async () => {
       if (handler !== undefined) await handler(stubRoute("GET"));
     });
-
-    expect(await driver.runnersPodFilterIsClientSide("WEB_beefy")).toBe(false);
+    const start = 1_000_000;
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(start)
+      .mockReturnValue(start + 7_001);
+    try {
+      expect(await driver.runnersPodFilterIsClientSide("WEB_beefy")).toBe(false);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("opens a pod's edit dialog from its menu", async () => {
