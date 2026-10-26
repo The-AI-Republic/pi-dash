@@ -166,6 +166,28 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
             "this host is already enrolled with cloud {existing} — refusing to overwrite [cli] for a different cloud {cloud_url} (pass --force to re-enroll against the new cloud)"
         );
     }
+    // Signing in rewrites the machine token (the cloud rotates it, revoking
+    // the old one, even for the same user), so a running daemon reloads and
+    // stops its runs. Ask *before* anything is minted: declining afterwards
+    // would leave this host with no valid token at all. The desktop app
+    // (`--device-code-stdin`) has already warned the user; `--yes` is the
+    // scripted opt-out.
+    if !(args.yes || args.device_code_stdin) {
+        let active_runs = session::daemon_activity(paths).await.active_runs;
+        if needs_confirmation(active_runs, false) {
+            let stored_who = previous
+                .user_email
+                .as_deref()
+                .or(previous.user_id.as_deref());
+            println!();
+            for line in preflight_notice(active_runs, stored_who, previous.runner_count) {
+                println!("{line}");
+            }
+            if !crate::util::confirm::ask("Sign in anyway?", false) {
+                anyhow::bail!("login cancelled — nothing was changed");
+            }
+        }
+    }
     let previous_dev_machine_id =
         file::load_config_opt(paths)?.and_then(|c| c.daemon.dev_machine_id);
 
@@ -249,34 +271,9 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
 
     let switching = session::is_account_switch(previous.user_id.as_deref(), new_user_id.as_deref());
     if switching {
-        // The desktop app (`--device-code-stdin`) has already warned the
-        // user; `--yes` is the scripted opt-out.
-        if !args.yes && !args.device_code_stdin {
-            let activity = session::daemon_activity(paths).await;
-            let who = previous
-                .user_email
-                .as_deref()
-                .or(previous.user_id.as_deref())
-                .unwrap_or("another account");
-            println!();
-            println!(
-                "This host is signed in as {who}. Switching accounts parks its {} runner(s) until {who} signs in here again.",
-                previous.runner_count
-            );
-            if activity.active_runs > 0 {
-                println!(
-                    "{} run(s) in progress will be stopped.",
-                    activity.active_runs
-                );
-            }
-            if !crate::util::confirm::ask("Switch accounts?", false) {
-                // Don't leave the token we just minted live on the cloud.
-                let _ = logout::revoke_token(&cloud_url, &machine_token.machine_token).await;
-                anyhow::bail!("login cancelled — still signed in as {who}");
-            }
-        }
         // Best-effort: the old user's machine token (and its handoff keys)
-        // must not outlive the switch. Unreachable cloud = warn and go on.
+        // must not outlive the switch. The cloud usually revoked it already
+        // when it minted ours; an unreachable cloud = warn and go on.
         if let (Some(old_url), Some(old_token)) =
             (previous.cloud_url.as_deref(), previous.token.as_deref())
         {
@@ -292,6 +289,15 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         }
     }
 
+    let switched_from_who = previous
+        .user_email
+        .clone()
+        .or_else(|| previous.user_id.clone())
+        .unwrap_or_else(|| "another account".to_string());
+    let switched_to_who = new_user_email
+        .clone()
+        .or_else(|| new_user_id.clone())
+        .unwrap_or_else(|| "this account".to_string());
     let outcome = session::apply_sign_in(
         paths,
         &session::SignIn {
@@ -307,9 +313,9 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     )
     .context("writing dev-machine token to config.toml")?;
     println!("  Workspace: {}", machine_token.workspace_slug);
-    if outcome.parked > 0 {
+    if switching {
         println!(
-            "  Parked {} runner(s) of the previous account.",
+            "  Switched this machine from {switched_from_who} to {switched_to_who}; {} runner(s) parked.",
             outcome.parked
         );
     }
@@ -327,6 +333,29 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     }
 
     Ok(LoginOutcome { cloud_url })
+}
+
+/// Whether an interactive sign-in must ask before starting: only when the
+/// daemon has runs in progress that the credential change will stop.
+fn needs_confirmation(active_runs: usize, skip_prompt: bool) -> bool {
+    !skip_prompt && active_runs > 0
+}
+
+/// The warning shown before an interactive sign-in that will stop runs.
+fn preflight_notice(
+    active_runs: usize,
+    stored_who: Option<&str>,
+    stored_runner_count: usize,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{active_runs} run(s) in progress will be stopped when you sign in."
+    )];
+    if let Some(who) = stored_who {
+        lines.push(format!(
+            "This host is signed in as {who}. Signing in as a different account parks {who}'s {stored_runner_count} runner(s) until {who} signs in here again."
+        ));
+    }
+    lines
 }
 
 /// Where the cloud URL we're about to authenticate against came from.
@@ -683,6 +712,28 @@ mod tests {
         let (url, source) = resolve_cloud_url(&args_with_url(None), &paths).unwrap();
         assert_eq!(url, "https://self.example.com");
         assert_eq!(source, CloudUrlSource::Config);
+    }
+
+    #[test]
+    fn confirmation_only_with_active_runs_unless_skipped() {
+        // Same-user re-login with runs in progress still asks: the token
+        // rotation reloads the daemon and stops them.
+        assert!(needs_confirmation(2, false));
+        assert!(!needs_confirmation(0, false));
+        // `--yes` / `--device-code-stdin`.
+        assert!(!needs_confirmation(2, true));
+    }
+
+    #[test]
+    fn preflight_notice_mentions_parking_when_a_user_is_stored() {
+        let lines = preflight_notice(3, None, 0);
+        assert_eq!(
+            lines,
+            vec!["3 run(s) in progress will be stopped when you sign in."]
+        );
+        let lines = preflight_notice(1, Some("a@example.com"), 2);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("different account parks a@example.com's 2 runner(s)"));
     }
 
     #[test]
