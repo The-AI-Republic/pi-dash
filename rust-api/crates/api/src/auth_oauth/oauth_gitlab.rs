@@ -61,14 +61,12 @@
 //! Deferred to follow-up issues (this issue's units are the four view
 //! functions; these need transports other domains own):
 //!
-//! - avatar S3 upload + `FileAsset` create (`adapter/base.py:145-217`):
-//!   download + content-type/size validation are ported; the SigV4 PUT
-//!   belongs to the asset domain (no S3 client exists in `rust-api/`).
-//!   Until it lands the port keeps Python's own upload-failure
-//!   behaviour (avatar URL fallback, no asset row).
 //! - invite-join cache invalidation (`workspace_project_join.py:38-44`):
 //!   `RedisHandle` exposes no key-delete API; the deletes are recorded
 //!   in the invite-join spec for the owning issue.
+//!
+//! The avatar S3 upload + `FileAsset` create (`adapter/base.py:139-218`)
+//! runs through the shared `auth_oauth` helper (PIDASHCONV-1323).
 //!
 //! Sibling provider issues (PIDASHCONV-335/336/341) merge their routers
 //! in `super::routes`; merges keep both sides.
@@ -1277,60 +1275,6 @@ async fn insert_notification_preference(
     Ok(())
 }
 
-/// Avatar content types (`base.py:170-176`).
-fn avatar_extension(content_type: &str) -> Option<&'static str> {
-    match content_type {
-        "image/jpeg" | "image/jpg" => Some("jpg"),
-        "image/png" => Some("png"),
-        "image/gif" => Some("gif"),
-        "image/webp" => Some("webp"),
-        _ => None,
-    }
-}
-
-/// `download_and_upload_avatar` (`base.py:145-217`): downloads (10s
-/// timeout), enforces the content-length / content-type / total-size
-/// gates, then uploads to storage. The SigV4 PUT + `FileAsset` create
-/// need the asset domain's S3 transport (follow-up issue); until it
-/// lands the port keeps Python's own upload-failure behaviour — the
-/// avatar URL fallback with no asset row.
-async fn download_avatar_bytes(avatar_url: &str, max_size: u64) -> Option<(Vec<u8>, String)> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-    let response = client.get(avatar_url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    if let Some(length) = response
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        if length > max_size {
-            return None;
-        }
-    }
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .split(';')
-        .next()
-        .unwrap_or("image/jpeg")
-        .trim()
-        .to_owned();
-    avatar_extension(&content_type)?;
-    let bytes = response.bytes().await.ok()?.to_vec();
-    if bytes.len() as u64 > max_size {
-        return None;
-    }
-    Some((bytes, content_type))
-}
-
 /// `get_default_props` (`workspace.py:22-50`): the JSON default for
 /// member `view_props` / `default_props`.
 fn default_props_json() -> serde_json::Value {
@@ -1398,10 +1342,13 @@ async fn gitlab_sync_enabled(pool: &PgPool, secret_key: &str) -> Result<bool, De
     }))
 }
 
-/// `sync_user_data` (`base.py:256-287`, new user + sync
-/// enabled): names, `display_name` (stored or derived), avatar URL
-/// fallback (S3 upload is the follow-up gap — old-asset delete is
-/// skipped with it), then a full-row save with its side effects.
+/// `sync_user_data` (`base.py:256-287`, new user + sync enabled): names,
+/// `display_name` (stored or derived), then the avatar pair the call site
+/// resolved: on upload success `asset` carries the new FK and `avatar` is
+/// `""` when a signup asset existed (what `delete_old_avatar` wrote) or
+/// the provider URL otherwise (the delete was a no-op); on failure
+/// `avatar` is the provider URL and `asset` is `None` (`base.py:278-284`).
+#[allow(clippy::too_many_arguments)]
 async fn sync_user_data(
     pool: &PgPool,
     user: &DbUser,
@@ -1409,17 +1356,20 @@ async fn sync_user_data(
     last_name: &str,
     display_name: &str,
     avatar: &str,
+    asset: Option<uuid::Uuid>,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), Denial> {
     let is_staff = user.is_staff || user.is_superuser;
     sqlx::query(
         r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
-                  "avatar" = $4, "is_staff" = $5, "updated_at" = $6 WHERE "id" = $7"#,
+                  "avatar" = $4, "avatar_asset_id" = $5, "is_staff" = $6,
+                  "updated_at" = $7 WHERE "id" = $8"#,
     )
     .bind(first_name)
     .bind(last_name)
     .bind(display_name)
     .bind(avatar)
+    .bind(asset)
     .bind(is_staff)
     .bind(now)
     .bind(user.id)
@@ -2024,6 +1974,9 @@ async fn callback_success(
     let found = find_user_by_email(pool, &email).await?;
     // B4: `is_signup = bool(user)` — inverted as written.
     let is_signup = found.is_some();
+    // Avatar I/O client (`S3Storage(request)` signs the public host,
+    // `base.py:198` — `is_server=False`).
+    let client = reqwest::Client::new();
 
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -2066,15 +2019,39 @@ async fn callback_success(
                 now,
             )
             .await?;
-            // Avatar: attempt the download for side-effect parity,
-            // keep the URL fallback (S3 upload is the follow-up gap).
-            let avatar = match &user_data.user.avatar {
-                serde_json::Value::String(url) if !url.is_empty() => {
-                    let _ = download_avatar_bytes(url, max_avatar).await;
-                    url.clone()
-                }
+            // Avatar (`base.py:330-339`): success sets the FK too, failure
+            // keeps the provider URL (persisted by `save_user_data`
+            // below). No old avatar exists to delete.
+            let avatar_url = match &user_data.user.avatar {
+                serde_json::Value::String(url) if !url.is_empty() => url.clone(),
                 _ => String::new(),
             };
+            let mut signup_asset = None;
+            if !avatar_url.is_empty() {
+                if let Some(asset_id) = super::download_and_upload_avatar(
+                    &client,
+                    pool,
+                    &settings.storage,
+                    if is_secure { "https" } else { "http" },
+                    &host,
+                    PROVIDER,
+                    &avatar_url,
+                    id,
+                    max_avatar,
+                    now,
+                )
+                .await
+                {
+                    sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
+                        .bind(asset_id)
+                        .bind(id)
+                        .execute(pool)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                    signup_asset = Some(asset_id);
+                }
+            }
+            let avatar = avatar_url;
             insert_profile(pool, uuid::Uuid::new_v4(), id, now).await?;
             insert_notification_preference(pool, uuid::Uuid::new_v4(), id, now).await?;
             let mut created = DbUser {
@@ -2094,12 +2071,51 @@ async fn callback_success(
                 let first_name = name_or_empty(&user_data.user.first_name);
                 let last_name = name_or_empty(&user_data.user.last_name);
                 let display_name = get_display_name(&email);
-                let avatar = match &user_data.user.avatar {
-                    serde_json::Value::String(url) if !url.is_empty() => {
-                        let _ = download_avatar_bytes(url, max_avatar).await;
-                        url.clone()
-                    }
+                let avatar_url = match &user_data.user.avatar {
+                    serde_json::Value::String(url) if !url.is_empty() => url.clone(),
                     _ => String::new(),
+                };
+                // `delete_old_avatar` + `download_and_upload_avatar`
+                // (`base.py:278-284`): the signup asset is the old avatar.
+                // On success only the FK moves — Django never writes
+                // `avatar` here, so it keeps the `''` the delete wrote
+                // when a signup asset existed, and the signup provider
+                // URL otherwise (the delete is a no-op without one).
+                // The provider URL lands only when the upload fails.
+                super::delete_old_avatar(
+                    &client,
+                    pool,
+                    &settings.storage,
+                    if is_secure { "https" } else { "http" },
+                    &host,
+                    id,
+                    signup_asset,
+                    now,
+                )
+                .await;
+                let (avatar, asset) = match super::download_and_upload_avatar(
+                    &client,
+                    pool,
+                    &settings.storage,
+                    if is_secure { "https" } else { "http" },
+                    &host,
+                    PROVIDER,
+                    &avatar_url,
+                    id,
+                    max_avatar,
+                    now,
+                )
+                .await
+                {
+                    Some(asset_id) => (
+                        if signup_asset.is_some() {
+                            String::new()
+                        } else {
+                            avatar_url.clone()
+                        },
+                        Some(asset_id),
+                    ),
+                    None => (avatar_url, None),
                 };
                 sync_user_data(
                     pool,
@@ -2108,6 +2124,7 @@ async fn callback_success(
                     &last_name,
                     &display_name,
                     &avatar,
+                    asset,
                     now,
                 )
                 .await?;
@@ -2547,11 +2564,9 @@ mod tests {
 
     #[test]
     fn helpers_match_python_shapes() {
-        assert_eq!(avatar_extension("image/jpeg"), Some("jpg"));
-        assert_eq!(avatar_extension("image/png"), Some("png"));
-        assert_eq!(avatar_extension("image/gif"), Some("gif"));
-        assert_eq!(avatar_extension("image/webp"), Some("webp"));
-        assert_eq!(avatar_extension("image/svg+xml"), None);
+        // The avatar extension allowlist now lives in the shared
+        // `pidash_storage::avatar_extension` (covered by the storage
+        // crate's own golden tests).
         assert_eq!(get_display_name("ada@example.com"), "ada");
         assert_eq!(get_display_name("no-at-sign").len(), 6);
         assert_eq!(name_or_empty(&serde_json::json!("Ada")), "Ada");
