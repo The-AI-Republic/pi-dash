@@ -371,6 +371,23 @@ describe("usePageLiveSession", () => {
     rendered.unmount();
   });
 
+  it("forces a fresh dial on connectivity even while synced", async () => {
+    const harness = fakeHarness();
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })));
+    await act(async () => undefined);
+    act(() => {
+      harness.open();
+      harness.synced();
+    });
+    expect(rendered.result.current?.stage).toEqual({ kind: "synced" });
+    await act(async () => {
+      window.dispatchEvent(new window.Event("online"));
+    });
+    expect(harness.connect).toHaveBeenCalledTimes(2);
+    expect(rendered.result.current?.stage).toEqual({ kind: "reconnecting", attempt: 1 });
+    rendered.unmount();
+  });
+
   it("nudges only on a visible tab and never before the session", async () => {
     const harness = fakeHarness();
     const gate = deferred<PageLiveBackend>();

@@ -187,7 +187,7 @@ test(
 test(
   specTitle(["PAGE-066"], "sessions open with user identity and color while socket stages map onto the sync badge"),
   { tag: specTags(["PAGE-066"]) },
-  async ({ driver, seed, browser }) => {
+  async ({ driver, seed, browser }, testInfo) => {
     const tag = stamp();
     const member = requireMentionMember(seed);
     const session = await seedSession(seed);
@@ -236,7 +236,15 @@ test(
       // the drop drives the transitional stage deterministically.
       await driver.pagesLiveSetOffline(true);
       try {
-        await expect.poll(() => driver.pagesLiveSyncBadge(), { timeout: 60_000 }).not.toBeNull();
+        if (testInfo.project.name === "new") {
+          // The new app surfaces the drop as the offline pill, not the
+          // badge (area spec §8.3: the badge hides while offline); the
+          // drop still surfaces in the header, which is what this step
+          // proves. The oracle leg below keeps pinning the old wording.
+          await driver.page.getByTestId("page-offline-pill").waitFor({ state: "visible", timeout: 60_000 });
+        } else {
+          await expect.poll(() => driver.pagesLiveSyncBadge(), { timeout: 60_000 }).not.toBeNull();
+        }
       } finally {
         await driver.pagesLiveSetOffline(false).catch(() => undefined);
       }
@@ -259,7 +267,7 @@ test(
 test(
   specTitle(["PAGE-067"], "a transient drop reconnects and re-syncs without user action"),
   { tag: specTags(["PAGE-067"]) },
-  async ({ driver, seed, browser }) => {
+  async ({ driver, seed, browser }, testInfo) => {
     const tag = stamp();
     const session = await seedSession(seed);
     const peerSession = await memberSession(seed);
@@ -271,8 +279,14 @@ test(
     try {
       await peer.driver.pagesLiveWaitSynced();
       await driver.pagesLiveSetOffline(true);
-      // The reconnecting stage surfaces as a transitional badge.
-      await expect.poll(() => driver.pagesLiveSyncBadge(), { timeout: 60_000 }).not.toBeNull();
+      // The reconnecting stage surfaces as a transitional badge — as the
+      // offline pill on the new app (area spec §8.3 hides the badge while
+      // offline). The oracle leg keeps pinning the old wording.
+      if (testInfo.project.name === "new") {
+        await driver.page.getByTestId("page-offline-pill").waitFor({ state: "visible", timeout: 60_000 });
+      } else {
+        await expect.poll(() => driver.pagesLiveSyncBadge(), { timeout: 60_000 }).not.toBeNull();
+      }
       const marker = `offline-067-${tag}`;
       await driver.pagesLiveTypeInBody(`${marker} `);
       await driver.pagesLiveSetOffline(false);
@@ -388,7 +402,7 @@ test(
     "bug: NEWFRONT-338 locked persist fails silently; the store error frame arrives but no toast shows"
   ),
   { tag: specTags(["PAGE-069"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const tag = stamp();
     const session = await seedSession(seed);
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Live069 ${tag}`);
@@ -406,8 +420,26 @@ test(
       expect(errorMessage?.length).toBeGreaterThan(0);
       expect(event.data?.error_type).toBe("store");
       // The bug: the failure stays invisible — no toast, badge still synced.
-      await driver.page.waitForTimeout(10_000);
-      expect(await driver.rulesLastToast()).toBeNull();
+      if (testInfo.project.name === "new") {
+        // The new app implements the fix (Parity wiki "Old bugs" allows
+        // it): the persist failure surfaces as an error notice while the
+        // badge stays synced. The notice auto-dismisses, so it is polled
+        // for while fresh; the oracle leg keeps pinning the silence.
+        let toast: { title: string; message: string } | null = null;
+        await expect
+          .poll(
+            async () => {
+              toast = await driver.rulesLastToast();
+              return toast;
+            },
+            { timeout: 30_000 }
+          )
+          .not.toBeNull();
+        expect(toast?.title).toBe("Could not save to the live document.");
+      } else {
+        await driver.page.waitForTimeout(10_000);
+        expect(await driver.rulesLastToast()).toBeNull();
+      }
       expect(await driver.pagesLiveSyncBadge()).toBeNull();
     } finally {
       await pagesLiveSetPageLock(seed.workspaceSlug, seed.projectId, pageId, false, session);
@@ -421,7 +453,7 @@ test(
     "bug: NEWFRONT-338 oversized persist force-closes with the dedicated code; the error frames arrive but no toast shows"
   ),
   { tag: specTags(["PAGE-069"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const tag = stamp();
     const session = await seedSession(seed);
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Live069b ${tag}`);
@@ -483,7 +515,16 @@ test(
     // so no reconnect can re-sync the megabytes while this settles.)
     await expect.poll(() => driver.pagesLiveSyncBadge(), { timeout: 180_000 }).toBe("Connection lost");
     // The bug: neither notice surfaces — no toast for the refused save.
-    expect(await driver.rulesLastToast()).toBeNull();
+    if (testInfo.project.name === "new") {
+      // The new app implements the fix (Parity wiki "Old bugs" allows
+      // it): the refused save surfaces — the oversized strip owns the
+      // incident (PAGE-063) while the failing fallback save additionally
+      // toasts. The strip is sticky, so it pins the fix
+      // deterministically; the oracle leg keeps pinning the silence.
+      await driver.page.getByTestId("page-oversized-strip").waitFor({ state: "visible", timeout: 60_000 });
+    } else {
+      expect(await driver.rulesLastToast()).toBeNull();
+    }
   }
 );
 
@@ -493,7 +534,7 @@ test(
     "bug: NEWFRONT-338 reconnecting to a removed page ends disconnected with no fetch frame or toast"
   ),
   { tag: specTags(["PAGE-069"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const tag = stamp();
     const session = await seedSession(seed);
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Live069c ${tag}`);
@@ -528,7 +569,26 @@ test(
     // failing loader is never attached at broadcast time), and nothing would
     // surface it anyway — no toast for the failed load.
     expect(await driver.pagesLiveSocketReceivedFrames()).toHaveLength(0);
-    expect(await driver.rulesLastToast()).toBeNull();
+    if (testInfo.project.name === "new") {
+      // The new app implements the fix (Parity wiki "Old bugs" allows
+      // it): with the page gone, the fallback save the terminal state
+      // activates fails and surfaces instead of wedging silently. The
+      // notice auto-dismisses, so it is polled for while fresh; the
+      // oracle leg keeps pinning the silence.
+      let toast: { title: string; message: string } | null = null;
+      await expect
+        .poll(
+          async () => {
+            toast = await driver.rulesLastToast();
+            return toast;
+          },
+          { timeout: 60_000 }
+        )
+        .not.toBeNull();
+      expect(toast?.title).toBe("Page content could not be saved.");
+    } else {
+      expect(await driver.rulesLastToast()).toBeNull();
+    }
   }
 );
 
