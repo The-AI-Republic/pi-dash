@@ -78,8 +78,9 @@ use pidash_types::runner_runs::{
 
 use super::run_endpoints::{idempotency_key as daemon_idempotency_key, FrameError};
 use super::{
-    authenticate_daemon, frame_text, json_response, pool_of, publish_chat_event, py_truthy,
-    read_request_data, server_error, truncate_chars, DaemonRunner, LivePorts, RunnerPorts,
+    authenticate_daemon, frame_text, is_uuid_path_segment, json_response, pool_of,
+    publish_chat_event, py_truthy, read_request_data, server_error, truncate_chars, DaemonRunner,
+    LivePorts, RunnerPorts,
 };
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -693,15 +694,6 @@ pub async fn resolve_chat_session(
         ));
     }
     Ok(ResolvedChatSession { id, runner_id })
-}
-
-/// `chat_session_not_found` for unparseable daemon ids (the
-/// `assistant/events.rs` precedent: the endpoint's 404 body).
-fn daemon_chat_not_found() -> Response {
-    json_response(
-        StatusCode::NOT_FOUND,
-        r#"{"error":"chat_session_not_found"}"#.to_owned(),
-    )
 }
 
 /// The project's deploy-admin role floor (`ROLE_ADMIN`, 20).
@@ -2328,15 +2320,19 @@ pub async fn chat_session_detail(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(session_id): Path<String>,
+    req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (Django 404s non-converter segments before auth):
+    // proxy the untouched request so Django's framework 404 answers
+    // byte for byte (the `runner_poll.rs` `parse_uuid` precedent).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let fetched = match fetch_session_with_runner(&pool, session_id).await {
         Ok(fetched) => fetched,
         Err(response) => return response,
@@ -2404,15 +2400,17 @@ pub async fn chat_session_warm(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(session_id): Path<String>,
+    req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return server_error(),
@@ -2499,15 +2497,17 @@ pub async fn chat_messages_list(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(session_id): Path<String>,
+    req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let fetched = match fetch_session_with_runner(&pool, session_id).await {
         Ok(fetched) => fetched,
         Err(response) => return response,
@@ -2551,14 +2551,15 @@ pub async fn chat_message_create(
     Path(session_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     // The brake runs before parsing and validation, exactly as
     // `check_throttles` does in `initial()`.
     if let ChatSendVerdict::Deny { retry_after_secs } =
@@ -2763,14 +2764,15 @@ pub async fn chat_session_cancel(
     Path(session_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
         Err(response) => return response,
@@ -2836,14 +2838,15 @@ pub async fn chat_session_close(
     Path(session_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
         Err(response) => return response,
@@ -3097,14 +3100,15 @@ pub async fn chat_approval_decide(
     Path(approval_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&approval_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let approval_id: Uuid = match approval_id.parse() {
-        Ok(approval_id) => approval_id,
-        Err(_) => return chat_not_found(),
-    };
+    let approval_id: Uuid = approval_id.parse().expect("checked segment");
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
         Err(response) => return response,
@@ -3281,8 +3285,15 @@ async fn daemon_chat_preamble(
     session_raw: &str,
     req: Request<axum::body::Body>,
 ) -> Result<(PgPool, DaemonChatRequest), Response> {
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database): proxy the
+    // untouched request so Django's framework 404 answers byte for
+    // byte (the `runner_poll.rs` `parse_uuid` precedent).
+    if !is_uuid_path_segment(session_raw) {
+        return Err(crate::edge::proxy(State(state.clone()), req).await);
+    }
     let pool = pool_of(state)?.clone();
-    let session_id: Uuid = session_raw.parse().map_err(|_| daemon_chat_not_found())?;
+    let session_id: Uuid = session_raw.parse().expect("checked segment");
     let secret = state.settings().secret_key.clone();
     let runner = authenticate_daemon(&pool, secret.as_bytes(), req.headers()).await?;
     let resolved = resolve_chat_session(&pool, session_id, runner.as_ref()).await?;
@@ -3425,14 +3436,17 @@ pub async fn daemon_chat_message_started(
     Path((session_id, message_id)): Path<(String, String)>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first: Django 404s a non-converter message id before
+    // auth, ahead of the session preamble below (the
+    // `daemon_chat_preamble` gate covers the session id).
+    if !is_uuid_path_segment(&message_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, preamble) = match daemon_chat_preamble(&state, &session_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let message_id: Uuid = match message_id.parse() {
-        Ok(message_id) => message_id,
-        Err(_) => return daemon_chat_not_found(),
-    };
+    let message_id: Uuid = message_id.parse().expect("checked segment");
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return server_error(),
@@ -3893,14 +3907,17 @@ pub async fn daemon_chat_message_complete(
     Path((session_id, message_id)): Path<(String, String)>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first: Django 404s a non-converter message id before
+    // auth, ahead of the session preamble below (the
+    // `daemon_chat_preamble` gate covers the session id).
+    if !is_uuid_path_segment(&message_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, preamble) = match daemon_chat_preamble(&state, &session_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let message_id: Uuid = match message_id.parse() {
-        Ok(message_id) => message_id,
-        Err(_) => return daemon_chat_not_found(),
-    };
+    let message_id: Uuid = message_id.parse().expect("checked segment");
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return server_error(),
