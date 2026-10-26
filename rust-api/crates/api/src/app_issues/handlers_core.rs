@@ -28,11 +28,12 @@
 //! queries-A statements (PIDASHCONV-648). Guards go through the F-06
 //! [`decide_allow`](pidash_auth::permissions::allow::decide_allow) kernel
 //! only. Signals become explicit calls: orchestration via 594
-//! `capture_prior_state` + `fire_state_transition`. The `github_signals`
+//! `capture_prior_state` + `fire_state_transition`, plus the `github_signals`
 //! completion-comment leg (`trigger_completion_comment`, which enqueues
 //! `post_completion_comment` when a mirrored issue transitions into a
-//! completed state) is NOT wired here — no merged handler wires it, and it
-//! is outside this issue's named signals scope; it needs its own issue.
+//! completed state — PIDASHCONV-1460, via the shared
+//! `crate::issue_transition::enqueue_completion_comment` helper, before
+//! the orchestration fire).
 //! Tasks enqueue by name through the jobs queue; unregistered names forward
 //! Celery-format downstream.
 //!
@@ -5732,6 +5733,22 @@ pub async fn partial_update_issue(
     row.updated_by_id = Some(user_id);
     row.updated_at = utc_now_micros();
     update_issue_row(&pool, &row).await?;
+    // `github_signals.trigger_completion_comment`
+    // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored issue
+    // into a completed-group state enqueues the provider's
+    // `post_completion_comment`. Django fires it from `Issue.save()`,
+    // before the orchestration receiver (bgtasks connects first), so it
+    // runs here — after the row write, before `fire_after_save`.
+    // Best-effort: the save stands.
+    if prev != row.state_id {
+        crate::issue_transition::enqueue_completion_comment(
+            &pool,
+            &pk,
+            prev.as_ref(),
+            row.state_id.as_ref(),
+        )
+        .await;
+    }
     let dispatch_immediate = !skip_immediate_dispatch(&parts.headers);
     fire_after_save(
         &state,
@@ -5866,6 +5883,20 @@ pub async fn put_update_issue(
     row.updated_by_id = Some(user_id);
     row.updated_at = utc_now_micros();
     update_issue_row(&pool, &row).await?;
+    // `github_signals.trigger_completion_comment`
+    // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored issue
+    // into a completed-group state enqueues the provider's
+    // `post_completion_comment` — before the orchestration receiver, as
+    // in Django. Best-effort: the save stands.
+    if prev != row.state_id {
+        crate::issue_transition::enqueue_completion_comment(
+            &pool,
+            &pk,
+            prev.as_ref(),
+            row.state_id.as_ref(),
+        )
+        .await;
+    }
     fire_after_save(
         &state,
         &pool,

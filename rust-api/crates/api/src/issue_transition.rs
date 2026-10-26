@@ -90,6 +90,40 @@ pub(crate) async fn capture_prior_state_pool(
     Ok(row.and_then(|(_, state_id)| state_id))
 }
 
+/// Post-commit completion comment-back for a state-changing save
+/// (`github_signals.py:44-75`, via the jobs-layer port; the
+/// `tools_local_store::enqueue_completion_comment` shape from
+/// PIDASHCONV-1252, shared by every app_issues/v1 write path —
+/// PIDASHCONV-1460). The caller gates on its own transition check
+/// (`prev != current`); this resolves the dispatch (group, mirror,
+/// idempotency guards) and enqueues the provider's
+/// `post_completion_comment` job. Best-effort: failures only warn, the
+/// save stands.
+pub(crate) async fn enqueue_completion_comment(
+    pool: &PgPool,
+    issue_id: &Uuid,
+    prev_state_id: Option<&Uuid>,
+    current_state_id: Option<&Uuid>,
+) {
+    use pidash_jobs::integrations::github_signals::{
+        dispatch_completion_comment, dispatch_job, DispatchOutcome,
+    };
+    let outcome =
+        dispatch_completion_comment(pool, issue_id, current_state_id, false, prev_state_id).await;
+    let target = match outcome {
+        Ok(DispatchOutcome::Dispatch(target)) => target,
+        Ok(DispatchOutcome::Skip(_)) => return,
+        Err(error) => {
+            tracing::warn!(%error, "completion comment dispatch lookup failed; op stands");
+            return;
+        }
+    };
+    let job = dispatch_job(&target);
+    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+        tracing::warn!(%error, task = %job.task, "task enqueue failed; op stands");
+    }
+}
+
 /// Run the post-save transition fire for one issue against live SQL.
 ///
 /// A non-transition answers [`FireOutcome::NoTransition`] without opening a
