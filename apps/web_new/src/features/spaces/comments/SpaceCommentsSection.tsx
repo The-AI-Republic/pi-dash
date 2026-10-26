@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Public comment thread in the issue overlay (parity/specs/space.md
-// §3.9, SPC-049–052). The section renders only while the publisher's
-// comments flag is on, in every presentation. Signed-in visitors get a
-// composer slot; anonymous visitors outside a frame get a sign-in
-// invitation; embedded visitors get neither. The thread itself is public
-// read-only and leaves edit/delete/reactions to slice J2.
+// §3.9–3.10, SPC-049–057). The section renders only while the
+// publisher's comments flag is on, in every presentation. Signed-in
+// visitors outside a frame get the composer; anonymous visitors
+// outside a frame get a sign-in invitation; embedded visitors get
+// neither. Each row manages its own write controls (owner menu, inline
+// edit, reactions) through the item below.
 
 import { Button, Skeleton } from "@pidash/kit";
 import type { SpaceComment } from "@pidash/api-client";
@@ -15,10 +16,11 @@ import * as React from "react";
 
 import { spaceRuntime } from "../api/client.js";
 import { spaceCommentsQueryOptions } from "../api/queries.js";
+import { defaultSpaceSignInRedirect } from "../engagement/SpaceIssueEngagement.js";
 import { spaceReturnPath, spaceSignInHref, type SpaceBoardSearch } from "../lib/address.js";
 import { useSpaceEmbedded } from "../lib/spaceEmbed.js";
 import { spaceMessage } from "../lib/spaceMessages.js";
-import { SpaceCommentRow } from "./SpaceCommentRow.js";
+import { SpaceCommentItem } from "./SpaceCommentItem.js";
 
 export interface SpaceCommentsSectionProps {
   anchor: string;
@@ -29,12 +31,16 @@ export interface SpaceCommentsSectionProps {
   enabled: boolean;
   /** Signed-in visitor id; null while anonymous or still loading. */
   viewerId: string | null;
-  /** Embedded hosts hide the invitation (and later the composer). */
+  /** Embedded hosts hide the invitation and the composer. */
   embedded?: boolean | undefined;
   /** Resolve stored image asset ids through the public anchor route. */
   resolveAsset: (src: string) => string;
-  /** J2 composition point for the signed-in composer. */
+  /** The composer below the thread while signed in outside a frame. */
   composer?: React.ReactNode | undefined;
+  /** Whether the publisher enabled reactions on this board. */
+  reactionsEnabled?: boolean | undefined;
+  /** Anonymous activations leave here for sign-in. */
+  onRequireSignIn?: (() => void) | undefined;
 }
 
 /** The sign-in target keeps the full current board position (SPC-049). */
@@ -51,9 +57,20 @@ export function SpaceCommentsSection({
   embedded = false,
   resolveAsset,
   composer,
+  reactionsEnabled = false,
+  onRequireSignIn,
 }: SpaceCommentsSectionProps): React.ReactElement | null {
   const framed = useSpaceEmbedded();
   const inEmbed = embedded || framed;
+  const requireSignIn = React.useCallback(() => {
+    if (onRequireSignIn !== undefined) {
+      onRequireSignIn();
+    } else {
+      defaultSpaceSignInRedirect(anchor, search);
+    }
+  }, [anchor, onRequireSignIn, search]);
+  const showInvite = viewerId === null && !inEmbed;
+  const showComposer = viewerId !== null && !inEmbed;
   const query = spaceCommentsQueryOptions(spaceRuntime.client, anchor, issueId);
   const comments = useQuery({
     ...query,
@@ -89,23 +106,30 @@ export function SpaceCommentsSection({
       ) : (
         <div className="flex flex-col gap-(--space-4)">
           {rows.map((comment) => (
-            <SpaceCommentRow key={comment.id} comment={comment} resolveAsset={resolveAsset} />
+            <SpaceCommentItem
+              key={comment.id}
+              anchor={anchor}
+              issueId={issueId}
+              comment={comment}
+              viewerId={viewerId}
+              embedded={inEmbed}
+              reactionsEnabled={reactionsEnabled}
+              onRequireSignIn={requireSignIn}
+              resolveAsset={resolveAsset}
+            />
           ))}
         </div>
       )}
-      {viewerId === null ? (
-        inEmbed ? null : (
-          <a
-            href={spaceCommentsSignInHref(anchor, search)}
-            data-testid="space-comments-signin"
-            className="text-body self-start rounded-(--radius-control) border border-(--border) px-(--space-3) py-(--space-1)"
-          >
-            {spaceMessage("comments.signInInvitation")}
-          </a>
-        )
-      ) : (
-        (composer ?? null)
-      )}
+      {showInvite ? (
+        <a
+          href={spaceCommentsSignInHref(anchor, search)}
+          data-testid="space-comments-signin"
+          className="text-body self-start rounded-(--radius-control) border border-(--border) px-(--space-3) py-(--space-1)"
+        >
+          {spaceMessage("comments.signInInvitation")}
+        </a>
+      ) : null}
+      {showComposer ? (composer ?? null) : null}
     </section>
   );
 }

@@ -93,4 +93,15 @@ describe("SpaceReactionBar", () => {
     await userEvent.click(screen.getByTestId("reaction"));
     expect(onToggle).toHaveBeenCalledWith("127881");
   });
+
+  it("renders static counts with no toggle when read-only (SPC-057)", async () => {
+    const { onToggle } = renderBar([group()], { embedded: true, readOnly: true });
+    const pill = screen.getByTestId("reaction");
+    expect(pill.tagName).toBe("SPAN");
+    expect(pill).toHaveTextContent("2");
+    expect(pill.getAttribute("data-reaction")).toBe("127881");
+    await userEvent.click(pill);
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("reaction-add")).not.toBeInTheDocument();
+  });
 });

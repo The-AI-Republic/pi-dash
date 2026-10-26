@@ -6,6 +6,8 @@
 // own pills marked, plus the add control opening the picker. The same row
 // serves the overlay and the board-card footer; inside a frame the pills
 // stay readable while the add control is not rendered (SPC-015).
+// Read-only callers (framed comment rows, SPC-057) render the pills as
+// static counts instead of toggles.
 
 import { Tooltip } from "@pidash/kit";
 import * as React from "react";
@@ -20,6 +22,8 @@ export interface SpaceReactionBarProps {
   groups: readonly SpaceReactionGroup[];
   /** Framed rows keep the pills but offer no add control. */
   embedded: boolean;
+  /** Read-only rows render the pills as static counts with no toggle. */
+  readOnly?: boolean | undefined;
   /** A pill activation toggles the visitor's row for its code. */
   onToggle: (code: string) => void;
   /** A picker choice adds the visitor's row for its code. */
@@ -35,6 +39,7 @@ export function SpaceReactionBar({
   issueName,
   groups,
   embedded,
+  readOnly = false,
   onToggle,
   onPick,
   addLabel,
@@ -48,20 +53,33 @@ export function SpaceReactionBar({
     <div data-testid={testId} className="flex min-w-0 flex-wrap items-center gap-(--space-1)">
       {groups.map((group) => (
         <Tooltip key={group.code} content={spaceReactionHint(group, you)}>
-          <button
-            type="button"
-            aria-label={`React with ${group.emoji} to ${issueName}`}
-            aria-pressed={group.reacted}
-            data-testid={pillTestId}
-            data-reaction={group.code}
-            onClick={() => onToggle(group.code)}
-            className={`text-meta inline-flex cursor-pointer items-center gap-(--space-1) rounded-(--radius-control) bg-(--subtle) px-(--space-1) ${group.reacted ? "text-(--accent)" : "text-(--text)"}`}
-          >
-            <span aria-hidden="true">{group.emoji}</span>
-            <span className={`${group.reacted ? "text-(--accent)" : "text-(--text-muted)"} tabular-nums`}>
-              {group.count}
+          {readOnly ? (
+            <span
+              data-testid={pillTestId}
+              data-reaction={group.code}
+              className={`text-meta inline-flex items-center gap-(--space-1) rounded-(--radius-control) bg-(--subtle) px-(--space-1) ${group.reacted ? "text-(--accent)" : "text-(--text)"}`}
+            >
+              <span aria-hidden="true">{group.emoji}</span>
+              <span className={`${group.reacted ? "text-(--accent)" : "text-(--text-muted)"} tabular-nums`}>
+                {group.count}
+              </span>
             </span>
-          </button>
+          ) : (
+            <button
+              type="button"
+              aria-label={`React with ${group.emoji} to ${issueName}`}
+              aria-pressed={group.reacted}
+              data-testid={pillTestId}
+              data-reaction={group.code}
+              onClick={() => onToggle(group.code)}
+              className={`text-meta inline-flex cursor-pointer items-center gap-(--space-1) rounded-(--radius-control) bg-(--subtle) px-(--space-1) ${group.reacted ? "text-(--accent)" : "text-(--text)"}`}
+            >
+              <span aria-hidden="true">{group.emoji}</span>
+              <span className={`${group.reacted ? "text-(--accent)" : "text-(--text-muted)"} tabular-nums`}>
+                {group.count}
+              </span>
+            </button>
+          )}
         </Tooltip>
       ))}
       {embedded ? null : (

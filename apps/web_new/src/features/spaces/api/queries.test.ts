@@ -13,6 +13,7 @@ import {
   spaceCommentsQueryOptions,
   spaceIssuesQueryOptions,
   spaceLabelsQueryOptions,
+  spaceMembersQueryOptions,
   spaceMetaQueryOptions,
   spaceSettingsQueryOptions,
   spaceStatesQueryOptions,
@@ -57,6 +58,7 @@ describe("space query options", () => {
     ]);
     expect(spaceStatesQueryOptions(client, "anchor-1").queryKey).toEqual(["spaces", "anchor", "anchor-1", "states"]);
     expect(spaceLabelsQueryOptions(client, "anchor-1").queryKey).toEqual(["spaces", "anchor", "anchor-1", "labels"]);
+    expect(spaceMembersQueryOptions(client, "anchor-1").queryKey).toEqual(["spaces", "anchor", "anchor-1", "members"]);
   });
 
   it("never revalidates a board read on focus or reconnect (SPC-033)", () => {
@@ -70,6 +72,7 @@ describe("space query options", () => {
       spaceGroupQueryOptions(client, "anchor-1", {}, UUID, "50:1:0"),
       spaceStatesQueryOptions(client, "anchor-1"),
       spaceLabelsQueryOptions(client, "anchor-1"),
+      spaceMembersQueryOptions(client, "anchor-1"),
       spaceMetaQueryOptions(client, "anchor-1"),
       spaceViewerQueryOptions(client),
     ];
@@ -171,6 +174,26 @@ describe("space query options", () => {
     ]);
     expect(new URL(urls[0] ?? "", "https://api.test").pathname).toBe("/api/public/anchor/anchor-1/labels/");
     expect(spaceLabelsQueryOptions(client, "bad anchor").enabled).toBe(false);
+  });
+
+  it("reads board members once per visit through the public anchor endpoint (SPC-054)", async () => {
+    const urls: string[] = [];
+    const member = { id: UUID, member: UUID, member__display_name: "Ada L", member__avatar: "" };
+    const client = clientWith(async (url) => {
+      urls.push(url);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: () => Promise.resolve(JSON.stringify([member])),
+      };
+    });
+    const options = spaceMembersQueryOptions(client, "anchor-1");
+    expect(options.enabled).toBe(true);
+    expect(options.staleTime).toBe(5 * 60_000);
+    await expect(options.queryFn!({} as never)).resolves.toEqual([member]);
+    expect(new URL(urls[0] ?? "", "https://api.test").pathname).toBe("/api/public/anchor/anchor-1/members/");
+    expect(spaceMembersQueryOptions(client, "bad anchor").enabled).toBe(false);
   });
 
   it("keys board metadata by anchor and never requests a malformed one", async () => {

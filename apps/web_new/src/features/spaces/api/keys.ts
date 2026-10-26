@@ -17,6 +17,8 @@ export const spaceKeys = {
   labels: (anchor: string) => ["spaces", "anchor", anchor, "labels"] as const,
   /** One issue's detail for the open overlay; keyed by anchor and issue. */
   detail: (anchor: string, issueId: string) => ["spaces", "anchor", anchor, "detail", issueId] as const,
+  /** The board's public members, feeding the comment mention picker. */
+  members: (anchor: string) => ["spaces", "anchor", anchor, "members"] as const,
   /** The public comment thread for one open issue. */
   comments: (anchor: string, issueId: string) => ["spaces", "anchor", anchor, "comments", issueId] as const,
   meta: (anchor: string) => ["spaces", "anchor", anchor, "meta"] as const,

@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import type { SpaceBoardIssueDetail, Transport } from "@pidash/api-client";
+import type { SpaceBoardIssueDetail, SpaceComment, Transport } from "@pidash/api-client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -170,7 +170,83 @@ describe("public comments wiring", () => {
     expect(await screen.findByTestId("space-comments")).toBeInTheDocument();
     expect(screen.queryByTestId("space-comments-signin")).not.toBeInTheDocument();
   });
+
+  it("mounts the comment composer for a signed-in visitor (SPC-053)", async () => {
+    setup({ commentsEnabled: true, viewer: "signed-in" });
+    expect(await screen.findByTestId("space-comment-composer")).toBeInTheDocument();
+  });
+
+  it("threads comment reactions and sign-in into the thread (SPC-057)", async () => {
+    const user = userEvent.setup();
+    const onRequireSignIn = vi.fn();
+    setup({
+      commentsEnabled: true,
+      reactionsEnabled: true,
+      onRequireSignIn,
+      comments: () => reply(200, [peekComment()]),
+    });
+    const pill = await screen.findByTestId("space-comment-reaction");
+    expect(pill).toHaveTextContent("1");
+    await user.click(pill);
+    await waitFor(() => expect(onRequireSignIn).toHaveBeenCalledTimes(1));
+  });
 });
+
+function peekComment(overrides: Partial<SpaceComment> = {}): SpaceComment {
+  return {
+    id: "123e4567-e89b-12d3-a456-426614174000",
+    actor: "523e4567-e89b-12d3-a456-426614174004",
+    actor_detail: {
+      id: "523e4567-e89b-12d3-a456-426614174004",
+      first_name: "Ada",
+      last_name: "L",
+      avatar: "",
+      avatar_url: null,
+      display_name: "Ada L",
+      is_bot: false,
+    },
+    issue: ISSUE_ID,
+    project: "323e4567-e89b-12d3-a456-426614174002",
+    workspace: "423e4567-e89b-12d3-a456-426614174003",
+    comment_html: "<p>Hello</p>",
+    comment_stripped: "Hello",
+    comment_json: {},
+    attachments: [],
+    labels: [],
+    access: "EXTERNAL",
+    edited_at: null,
+    comment_reactions: [
+      {
+        id: "723e4567-e89b-12d3-a456-426614174006",
+        actor: "623e4567-e89b-12d3-a456-426614174005",
+        comment: "123e4567-e89b-12d3-a456-426614174000",
+        reaction: "127881",
+        display_name: "Guest",
+        deleted_at: null,
+        workspace: "423e4567-e89b-12d3-a456-426614174003",
+        project: "323e4567-e89b-12d3-a456-426614174002",
+        created_at: "2026-10-16T22:00:00Z",
+        updated_at: "2026-10-16T22:00:00Z",
+        created_by: null,
+        updated_by: null,
+      },
+    ],
+    speaker_type: "human",
+    speaker_label: "",
+    speaker_agent_run_id: null,
+    parent: null,
+    external_source: null,
+    external_id: null,
+    is_synced: false,
+    description: null,
+    created_at: "2026-10-16T22:00:00Z",
+    updated_at: "2026-10-16T22:00:00Z",
+    created_by: "523e4567-e89b-12d3-a456-426614174004",
+    updated_by: null,
+    deleted_at: null,
+    ...overrides,
+  };
+}
 
 /** jsdom has no clipboard; install the two members each scenario needs. */
 function stubClipboard(permission: "granted" | "denied" | "unsupported") {

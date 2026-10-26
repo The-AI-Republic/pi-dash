@@ -16,6 +16,7 @@ import {
   listSpaceBoardIssues,
   listSpaceComments,
   listSpaceBoardLabels,
+  listSpaceBoardMembers,
   listSpaceBoardStates,
   resolveSpaceBoardAnchor,
   type ApiClient,
@@ -23,6 +24,7 @@ import {
   type SpaceBoardIssueDetail,
   type SpaceBoardIssuePage,
   type SpaceBoardLabel,
+  type SpaceBoardMember,
   type SpaceBoardMeta,
   type SpaceBoardSettings,
   type SpaceBoardState,
@@ -162,6 +164,23 @@ export function spaceStatesQueryOptions(client: ApiClient, anchor: string) {
 }
 
 /**
+ * The board's public members for the comment mention picker (SPC-054).
+ * Display data is read once per visit; the board never polls or
+ * revalidates it on focus.
+ */
+export function spaceMembersQueryOptions(client: ApiClient, anchor: string) {
+  return queryOptions({
+    queryKey: spaceKeys.members(anchor),
+    queryFn: () => listSpaceBoardMembers(client, anchor),
+    enabled: isValidAnchor(anchor),
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  });
+}
+
+/**
  * Label names and colours for the cards' chips (SPC-028). Display data is
  * read once per visit; the board never polls or revalidates it on focus.
  */
@@ -219,6 +238,7 @@ export type {
   SpaceBoardIssueDetail,
   SpaceBoardIssuePage,
   SpaceBoardLabel,
+  SpaceBoardMember,
   SpaceBoardMeta,
   SpaceBoardSettings,
   SpaceBoardState,

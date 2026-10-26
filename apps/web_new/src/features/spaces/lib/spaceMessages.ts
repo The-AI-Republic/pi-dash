@@ -49,6 +49,7 @@ export const SPACE_MESSAGE_KEYS = [
   "notice.reactionFailure.body",
   "notice.commentEditFailure.title",
   "notice.commentEditFailure.body",
+  "notice.commentEditSuccess.title",
   "notice.commentDeleteSuccess.title",
   "notice.commentDeleteFailure.title",
   "notice.commentDeleteFailure.body",
@@ -98,6 +99,18 @@ export const SPACE_MESSAGE_KEYS = [
   "comments.collapse",
   "comments.bodyLabel",
   "comments.signInInvitation",
+  "comments.composerLabel",
+  "comments.composerSubmit",
+  "comments.composerImage",
+  "comments.mentionSuggestions",
+  "comments.mentionUsers",
+  "comments.menuLabel",
+  "comments.menuEdit",
+  "comments.menuDelete",
+  "comments.editLabel",
+  "comments.editSave",
+  "comments.editCancel",
+  "comments.reactAdd",
 ] as const;
 
 export type SpaceMessageKey = (typeof SPACE_MESSAGE_KEYS)[number];
@@ -138,6 +151,7 @@ const ENGLISH: Record<SpaceMessageKey, string> = {
   "notice.reactionFailure.body": "Your reaction could not be saved. Please try again.",
   "notice.commentEditFailure.title": "Error!",
   "notice.commentEditFailure.body": "Your edit could not be saved. Please try again.",
+  "notice.commentEditSuccess.title": "Comment updated!",
   "notice.commentDeleteSuccess.title": "Comment deleted!",
   "notice.commentDeleteFailure.title": "Error!",
   "notice.commentDeleteFailure.body": "The comment could not be deleted. Please try again.",
@@ -197,6 +211,21 @@ const ENGLISH: Record<SpaceMessageKey, string> = {
   "comments.collapse": "Hide moderated comment",
   "comments.bodyLabel": "Comment body",
   "comments.signInInvitation": "Sign in to join the conversation",
+  // Comment write surface (SPC-053–057). The menu entries are the
+  // oracle-visible literals (comments.spec.ts, SPC-055); the rest is the
+  // new app's own wording, recognised by test ids and roles.
+  "comments.composerLabel": "Write a comment",
+  "comments.composerSubmit": "Post comment",
+  "comments.composerImage": "Attach an image",
+  "comments.mentionSuggestions": "Mention suggestions",
+  "comments.mentionUsers": "Users",
+  "comments.menuLabel": "Comment actions",
+  "comments.menuEdit": "Edit",
+  "comments.menuDelete": "Delete",
+  "comments.editLabel": "Edit comment",
+  "comments.editSave": "Save comment",
+  "comments.editCancel": "Cancel editing",
+  "comments.reactAdd": "Add a reaction to this comment",
 };
 
 /** A locale pack: translated entries for a subset of the stable keys. */

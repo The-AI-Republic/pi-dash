@@ -32,6 +32,7 @@ import { notifySpaceCopyFailure, notifySpaceCopySuccess } from "../lib/spaceNoti
 import { spaceMessage } from "../lib/spaceMessages.js";
 import { issueKey } from "../components/BoardShell.js";
 import { SpaceIssueEngagement } from "../engagement/SpaceIssueEngagement.js";
+import { SpaceCommentComposer } from "../comments/SpaceCommentComposer.js";
 import { SpaceCommentsSection } from "../comments/SpaceCommentsSection.js";
 import { SpaceOverlayProperties } from "./SpaceOverlayProperties.js";
 import { SpacePeekModeSwitch, type SpacePeekPresentation } from "./SpacePeekModeSwitch.js";
@@ -298,7 +299,10 @@ function SpaceIssuePeekBody({
         enabled={comments.enabled}
         viewerId={comments.viewerId}
         embedded={comments.embedded}
+        reactionsEnabled={reactionsEnabled}
+        onRequireSignIn={onRequireSignIn}
         resolveAsset={resolveAsset}
+        composer={<SpaceCommentComposer anchor={comments.anchor} issueId={comments.issueId} />}
       />
     </div>
   );
