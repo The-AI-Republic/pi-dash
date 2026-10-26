@@ -926,10 +926,6 @@ pub struct ValidatedIssue {
     pub created_via: Option<Option<String>>,
     pub assignee_ids: Option<Vec<Uuid>>,
     pub label_ids: Option<Vec<Uuid>>,
-    /// `labels` / `assignees` (the auto M2M twins): validated like DRF,
-    /// then fail the save with a 500, exactly like `setattr` on the
-    /// instance does.
-    pub m2m_crash: bool,
 }
 
 const ISSUE_PRIORITIES: &[&str] = &["low", "medium", "high", "urgent", "none"];
@@ -938,7 +934,8 @@ const AGENT_EXECUTORS: &[&str] = &["local_runner", "managed_runner", "cloud_agen
 /// Field-level validation for the issue branch, in serializer field
 /// order. Unknown and read-only keys (`id`, `project`, `workspace`,
 /// `created_by`, `updated_by`, `created_at`, `updated_at`,
-/// `description_binary`, `workpad`) are ignored, like DRF.
+/// `description_binary`, `workpad`, `labels`, `assignees`) are ignored,
+/// like DRF.
 pub async fn validate_issue_fields(
     pool: &PgPool,
     input: &serde_json::Map<String, serde_json::Value>,
@@ -1190,22 +1187,9 @@ pub async fn validate_issue_fields(
     if let Some(value) = input.get("label_ids") {
         out.label_ids = validate_pk_list(pool, errors, "label_ids", value, label_live_sql()).await;
     }
-    // The auto M2M twins validate like DRF, then crash the save.
-    if input.contains_key("labels") || input.contains_key("assignees") {
-        for key in ["labels", "assignees"] {
-            if let Some(value) = input.get(key) {
-                let sql = if key == "labels" {
-                    label_live_sql()
-                } else {
-                    user_live_sql()
-                };
-                let _ = validate_pk_list(pool, errors, key, value, sql).await;
-            }
-        }
-        if errors.is_empty() {
-            out.m2m_crash = true;
-        }
-    }
+    // `labels` / `assignees` (the auto M2M twins) are read-only on
+    // `IssueCreateSerializer`: M2M fields with a custom through map
+    // read-only, so DRF silently drops the keys. Ignore them here too.
     out
 }
 
@@ -1839,9 +1823,6 @@ pub async fn apply_issue_update(
     actor_id: &Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
-    if validated.m2m_crash {
-        return Err(Denial::ServerError);
-    }
     if let Some(ids) = object.assignee_ids.as_ref() {
         sqlx::query(r#"DELETE FROM issue_assignees WHERE issue_id = $1"#)
             .bind(issue.id)
