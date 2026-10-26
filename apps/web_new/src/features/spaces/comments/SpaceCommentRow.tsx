@@ -22,7 +22,7 @@ export interface SpaceCommentRowProps {
   resolveAsset: (src: string) => string;
 }
 
-/** Fold toggle text a visitor sees; the accessible name carries "Folded". */
+/** Fold toggle text a visitor sees; the accessible name names the moderated comment. */
 function foldLabel(expanded: boolean): string {
   return expanded ? spaceMessage("comments.collapse") : spaceMessage("comments.expand");
 }
