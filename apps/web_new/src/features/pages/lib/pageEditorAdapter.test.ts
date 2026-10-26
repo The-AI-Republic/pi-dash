@@ -34,6 +34,7 @@ import {
   PAGE_BODY_START,
   pageSelectionRange,
   pageCaretPosition,
+  pageTextEndpoints,
   replacePageBody,
   runBlockKind,
   runInsertImage,
@@ -148,6 +149,94 @@ describe("runPageCommand", () => {
     const { ref, calls } = editor();
     runPageCommand(ref, command);
     expect(calls).toEqual(["focus", expected, "run"]);
+  });
+});
+
+describe("pageTextEndpoints", () => {
+  /** A document node the endpoint walk understands, built from plain numbers. */
+  interface StubNode {
+    nodeSize: number;
+    toJSON: () => unknown;
+    type: { name: string };
+    isTextblock: boolean;
+    childCount: number;
+    child: (index: number) => StubNode;
+    content: { size: number };
+  }
+  function stub(name: string, children: StubNode[], textSize: number): StubNode {
+    const inline = name === "doc" ? 0 : textSize;
+    const openClose = name === "doc" ? 0 : 2;
+    const nodeSize = openClose + inline + children.reduce((total, child) => total + child.nodeSize, 0);
+    return {
+      nodeSize,
+      toJSON: () => ({ type: name }),
+      type: { name },
+      isTextblock: textSize > 0,
+      childCount: children.length,
+      child: (index: number) => children[index]!,
+      content: { size: inline },
+    };
+  }
+  /** A text block: two tokens around its text. */
+  const block = (name: string, size: number) => stub(name, [], size);
+  /** A node holding children and nothing inline. */
+  const group = (name: string, children: StubNode[]) => stub(name, children, 0);
+
+  it("spans from the first text block's start to the last text block's inline end", () => {
+    // p(7) + p(5) = 12: the text runs from 1 to 11.
+    const doc = group("doc", [block("paragraph", 5), block("paragraph", 3)]);
+    expect(pageTextEndpoints(doc as never)).toEqual({ from: 1, to: 11 });
+  });
+
+  it("descends into lists, quotes and tables to find the text blocks", () => {
+    const doc = group("doc", [
+      group("orderedList", [group("listItem", [block("paragraph", 4)])]),
+      group("blockquote", [block("paragraph", 6)]),
+      group("table", [group("tableRow", [group("tableCell", [block("paragraph", 2)])])]),
+    ]);
+    const endpoints = pageTextEndpoints(doc as never);
+    // The list's paragraph opens at 3 (doc 0, list 1, item 1).
+    expect(endpoints?.from).toBe(3);
+    // Table (20) → row (21) → cell (22) → paragraph (23) → text (24..25):
+    // the last inline position is 26.
+    expect(endpoints?.to).toBe(26);
+  });
+
+  it("answers null when the document holds no text block", () => {
+    expect(pageTextEndpoints(group("doc", [group("horizontalRule", [])]) as never)).toBeNull();
+  });
+
+  it("treats a node without a child count or inline size as empty", () => {
+    // A stub (or a prop-less node) may carry neither field; the walk then
+    // counts no children and the block's inline end is its own start.
+    const bare = { nodeSize: 2, toJSON: () => ({}), type: { name: "doc" } } as never;
+    expect(pageTextEndpoints(bare)).toBeNull();
+    const block = { nodeSize: 4, toJSON: () => ({}), type: { name: "paragraph" }, isTextblock: true } as never;
+    expect(pageTextEndpoints(block)).toEqual({ from: 1, to: 1 });
+  });
+
+  it("answers null when a child cannot be read", () => {
+    const broken = { ...group("doc", []), childCount: 1, child: () => undefined } as never;
+    expect(pageTextEndpoints(broken)).toBeNull();
+  });
+
+  it("skips an unreadable subtree when looking for the last text block", () => {
+    // The first walk enters the text block; the backward walk meets a
+    // node whose children cannot be read and keeps the last block it did
+    // reach, so the selection never runs past real text.
+    const doc = group("doc", [block("paragraph", 3), group("table", [])]);
+    const table = doc.child(1) as unknown as { childCount: number; child: () => undefined };
+    table.childCount = 1;
+    table.child = () => undefined;
+    expect(pageTextEndpoints(doc as never)).toEqual({ from: 1, to: 4 });
+  });
+});
+
+describe("runPageCommand without a live document", () => {
+  it("runs the plain chain rather than a repaired selection", () => {
+    const { ref, calls } = editor();
+    runPageCommand(ref, "orderedList");
+    expect(calls).toEqual(["focus", "toggleOrderedList", "run"]);
   });
 });
 
@@ -733,6 +822,9 @@ function documentEditor(blocks: { type: string; text?: string }[]) {
     toJSON: () => ({ type: block.type, content: [{ type: "text", text: block.text ?? "" }] }),
   }));
   const doc = {
+    nodeSize: children.reduce((total, child) => total + child.nodeSize, 0),
+    toJSON: () => ({ type: "doc" }),
+    type: { name: "doc" },
     childCount: children.length,
     child: (index: number) => {
       const child = children[index];
