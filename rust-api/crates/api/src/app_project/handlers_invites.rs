@@ -264,7 +264,7 @@ const SECRET_JOIN_BODY: &str = r#"{"error":"Only workspace admins can join priva
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
-enum Denial {
+pub(crate) enum Denial {
     /// 401, DRF `NotAuthenticated`.
     Unauthorized,
     /// 403, `@allow_permission` body.
@@ -1534,7 +1534,7 @@ async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage)
 /// minimum workspace sort order minus 10000 (65535 when none), and only
 /// then does the member row insert. `created_by` is the crum user (`None`
 /// for anonymous joins); `updated_by` stays `NULL`.
-async fn create_project_member(
+pub(crate) async fn create_project_member(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
     member_id: Option<uuid::Uuid>,

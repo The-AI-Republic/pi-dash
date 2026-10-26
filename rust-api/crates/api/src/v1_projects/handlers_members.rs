@@ -1738,7 +1738,9 @@ async fn pm_create_inner(
     .bind(workspace_id)
     .bind(project_id)
     .bind(member_id)
-    .bind(role)
+    // `smallint`: the app-project twin of this INSERT binds i16 and sqlx
+    // shares the prepared statement per connection (PIDASHCONV-1509).
+    .bind(role as i16)
     .bind(default_props_json())
     .bind(default_preferences_json())
     .bind(actor.id)
@@ -3639,6 +3641,54 @@ mod live_tests {
         let pups: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_user_properties WHERE project_id = $1::uuid AND user_id = $2::uuid AND deleted_at IS NULL")
             .bind(&seed.project_id).bind(&fresh).fetch_one(&pool).await.expect("pup");
         assert_eq!(pups, 1);
+    }
+
+    #[tokio::test]
+    async fn live_member_create_after_app_accept_insert() {
+        // The app-project invite-accept INSERT is byte-identical to this
+        // handler's, so on one connection the v1 add reuses the statement
+        // the app path prepared; both must bind role as i16 (PIDASHCONV-1509).
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let seed = seed_collab(&pool).await;
+        crate::app_project::handlers_invites::create_project_member(
+            &pool,
+            &uid(&seed.project_id),
+            Some(uid(&seed.outsider_id)),
+            15_i16,
+            Some(uid(&seed.owner_id)),
+        )
+        .await
+        .expect("app accept insert");
+        let state = AppState::new("test").with_pools(pidash_db::Pools::primary_only(pool.clone()));
+        let app = Router::new().merge(routes()).with_state(state);
+        let (status, bytes) = call(
+            app,
+            "POST",
+            &format!(
+                "/api/v1/workspaces/{}/projects/{}/members/",
+                seed.slug, seed.project_id
+            ),
+            Some(&seed.owner_key),
+            Some(serde_json::json!({"member": seed.guest_id, "role": MEMBER})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
     }
 
     #[tokio::test]
