@@ -3376,16 +3376,19 @@ pub async fn retrieve(
     if gate.is_err() {
         return guard_denial(gate);
     }
-    // `Intake.objects.filter(...).first()` then `.get(intake_id=intake_id.id)`
-    // — a missing intake dereferences `None.id` → 500.
-    let intake_id = match intake_id_for(pool, &slug, &project_id).await {
-        Ok(Some(intake_id)) => intake_id,
-        Ok(None) => return Denial::ServerError.into_response(),
-        Err(denial) => return denial.into_response(),
-    };
+    // `Intake.objects.filter(...).first()` never raises; the 404/500
+    // order below is Django's statement order: `Project.objects.get`
+    // first, then `.get(intake_id=intake_id.id)` dereferencing `None.id`
+    // → 500 (PIDASHCONV-1433 review: project row and intake both
+    // missing must answer 404, not 500).
     // `Project.objects.get(pk=project_id)` — a miss is 404.
     let view_all = match guest_view_all(pool, &project_id).await {
         Ok(view_all) => view_all,
+        Err(denial) => return denial.into_response(),
+    };
+    let intake_id = match intake_id_for(pool, &slug, &project_id).await {
+        Ok(Some(intake_id)) => intake_id,
+        Ok(None) => return Denial::ServerError.into_response(),
         Err(denial) => return denial.into_response(),
     };
     let detail = match fetch_detail(pool, &intake_id, &pk, &project_id).await {
