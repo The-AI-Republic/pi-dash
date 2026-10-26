@@ -1314,8 +1314,11 @@ pub async fn has_active_run(pool: &PgPool, issue_id: &Uuid) -> Result<bool, Deni
 
 /// Object-level validation, in `validate()` order: sync lock, dates,
 /// pod, executor, HTML sanitize, assignee/label filtering, state /
-/// parent / estimate checks. Field errors and non-field errors share
-/// the DRF body; the caller answers 400 when either is non-empty.
+/// parent / estimate checks. First error wins — every `raise` in
+/// `validate()` stops validation (`serializers/issue.py:206-385`) —
+/// so each check returns as soon as it pushes. Field errors and
+/// non-field errors share the DRF body; the caller answers 400 when
+/// either is non-empty.
 #[allow(clippy::too_many_arguments)]
 pub async fn validate_issue_object(
     pool: &PgPool,
@@ -1329,6 +1332,13 @@ pub async fn validate_issue_object(
     errors: &mut FieldErrors,
     non_field: &mut Vec<String>,
 ) -> Result<IssueObjectValidation, Denial> {
+    // The caller answers 400 and ignores the outcome whenever an
+    // error was pushed, so early exits return it empty.
+    let empty = || IssueObjectValidation {
+        assignee_ids: None,
+        label_ids: None,
+        description_html: None,
+    };
     // Read-only lock for actively-synced issues: only changed values
     // block (`serializers/issue.py:210-229`).
     if is_synced_safe(pool, issue).await {
@@ -1358,8 +1368,12 @@ pub async fn validate_issue_object(
                 blocked.push("description_stripped");
             }
         }
-        for field in blocked {
+        // One `raise` with a dict: every blocked key lands together.
+        for field in &blocked {
             push_error(errors, field, SYNC_LOCKED_MESSAGE.to_owned());
+        }
+        if !blocked.is_empty() {
+            return Ok(empty());
         }
     }
 
@@ -1369,15 +1383,18 @@ pub async fn validate_issue_object(
     ) {
         if start > target {
             non_field.push("Start date cannot exceed target date".to_owned());
+            return Ok(empty());
         }
     }
 
     if let Some(pod) = validated.assigned_pod_id.as_ref() {
-        validate_pod(pool, project_id, issue, *pod, errors, non_field).await?;
+        if validate_pod(pool, project_id, issue, *pod, errors, non_field).await? {
+            return Ok(empty());
+        }
     }
 
     if let Some(executor) = validated.agent_executor.as_ref() {
-        validate_executor(
+        if validate_executor(
             pool,
             settings,
             project_id,
@@ -1388,7 +1405,10 @@ pub async fn validate_issue_object(
             errors,
             non_field,
         )
-        .await?;
+        .await?
+        {
+            return Ok(empty());
+        }
     }
 
     // HTML sanitize (`serializers/issue.py:326-332`): truthy values
@@ -1402,6 +1422,7 @@ pub async fn validate_issue_object(
                 }
                 crate::space::sanitize::Sanitize::Invalid => {
                     push_error(errors, "error", "html content is not valid".to_owned());
+                    return Ok(empty());
                 }
             }
         }
@@ -1459,6 +1480,7 @@ pub async fn validate_issue_object(
         .map_err(|_| Denial::ServerError)?;
         if row.is_none() {
             non_field.push("State is not valid please pass a valid state_id".to_owned());
+            return Ok(empty());
         }
         let _ = input;
     }
@@ -1473,6 +1495,7 @@ pub async fn validate_issue_object(
         .map_err(|_| Denial::ServerError)?;
         if row.is_none() {
             non_field.push("Parent is not valid issue_id please pass a valid issue_id".to_owned());
+            return Ok(empty());
         }
     }
     if let Some(Some(estimate_id)) = validated.estimate_point_id.as_ref() {
@@ -1488,6 +1511,7 @@ pub async fn validate_issue_object(
             non_field.push(
                 "Estimate point is not valid please pass a valid estimate_point_id".to_owned(),
             );
+            return Ok(empty());
         }
     }
 
@@ -1499,7 +1523,8 @@ pub async fn validate_issue_object(
 }
 
 /// Pod checks (`serializers/issue.py:240-259`): project match, tombstone,
-/// mid-flight reassignment.
+/// mid-flight reassignment. First error wins, like the sequential
+/// `raise`s; returns whether an error was pushed.
 async fn validate_pod(
     pool: &PgPool,
     project_id: &Uuid,
@@ -1507,8 +1532,8 @@ async fn validate_pod(
     pod: Option<Uuid>,
     errors: &mut FieldErrors,
     _non_field: &mut Vec<String>,
-) -> Result<(), Denial> {
-    let Some(pod_id) = pod else { return Ok(()) };
+) -> Result<bool, Denial> {
+    let Some(pod_id) = pod else { return Ok(false) };
     let row: Option<(Uuid, Option<chrono::DateTime<Utc>>)> =
         sqlx::query_as(r#"SELECT project_id, deleted_at FROM pod WHERE id = $1"#)
             .bind(pod_id)
@@ -1516,7 +1541,7 @@ async fn validate_pod(
             .await
             .map_err(|_| Denial::ServerError)?;
     let Some((pod_project, pod_deleted)) = row else {
-        return Ok(());
+        return Ok(false);
     };
     if pod_project != *project_id {
         push_error(
@@ -1524,9 +1549,11 @@ async fn validate_pod(
             "assigned_pod_id",
             "pod is in a different project".to_owned(),
         );
+        return Ok(true);
     }
     if pod_deleted.is_some() {
         push_error(errors, "assigned_pod_id", "pod has been deleted".to_owned());
+        return Ok(true);
     }
     if issue.assigned_pod_id.is_some()
         && issue.assigned_pod_id != Some(pod_id)
@@ -1537,15 +1564,17 @@ async fn validate_pod(
             "assigned_pod_id",
             "cannot reassign pod while the issue has an active run".to_owned(),
         );
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Executor checks (`serializers/issue.py:275-321`): the
 /// settings-backed cloud/managed gates with Django's messages
 /// (mirroring `app_issues` step 4), and the mid-flight rule for
 /// explicit null too (`:314-321` sits outside
-/// `if executor is not None`).
+/// `if executor is not None`). First error wins, like the sequential
+/// `raise`s; returns whether an error was pushed.
 #[allow(clippy::too_many_arguments)]
 async fn validate_executor(
     pool: &PgPool,
@@ -1557,7 +1586,7 @@ async fn validate_executor(
     executor: Option<String>,
     errors: &mut FieldErrors,
     _non_field: &mut Vec<String>,
-) -> Result<(), Denial> {
+) -> Result<bool, Denial> {
     if let Some(executor) = executor.as_deref() {
         // Field level (`AGENT_EXECUTORS`) already rejected unknown
         // values with the `ChoiceField` message, so only the three
@@ -1571,6 +1600,7 @@ async fn validate_executor(
                     "agent_executor",
                     "Pi Dash Cloud Agent is not available on this instance".to_owned(),
                 );
+                return Ok(true);
             }
             Some(AgentExecutorKind::ManagedRunner) => {
                 // `self.instance.project` (`:295`): always resolved on
@@ -1652,6 +1682,7 @@ async fn validate_executor(
                         "agent_executor",
                         managed_unavailable_detail(&verdict.reason_code).into_owned(),
                     );
+                    return Ok(true);
                 }
             }
             _ => {}
@@ -1668,8 +1699,9 @@ async fn validate_executor(
             "agent_executor",
             "cannot change the execution target while the issue has an active run".to_owned(),
         );
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -3039,6 +3071,10 @@ pub async fn partial_update(
         )));
         let mut field_errors = FieldErrors::new();
         let validated = validate_issue_fields(pool, &narrowed, &mut field_errors).await;
+        if !field_errors.is_empty() {
+            // Field errors skip `validate()` entirely (DRF order).
+            return Denial::BadJson(serde_json::Value::Object(field_errors)).into_response();
+        }
         let mut non_field: Vec<String> = Vec::new();
         let object = match validate_issue_object(
             pool,

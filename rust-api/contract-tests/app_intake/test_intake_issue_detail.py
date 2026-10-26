@@ -177,6 +177,89 @@ def test_patch_bad_status_400(admin):
     assert response.json() == {"status": ['"7" is not a valid choice.']}
 
 
+def test_patch_field_error_skips_object_validation(admin):
+    """PIDASHCONV-1441: a field error skips validate() entirely.
+
+    DRF runs to_internal_value first; when any field fails, validate()
+    never runs, so the 400 carries only the field error even though the
+    dates would also fail the start<=target object check
+    (serializers/issue.py:206-236).
+    """
+    urls = intake_urls(admin)
+    created = create_intake_issue(admin["client"], urls["intake_issues"])
+    issue_id = created["issue"]["id"]
+    response = admin["client"].patch(
+        f"{urls['intake_issues']}{issue_id}/",
+        json={
+            "issue": {
+                "priority": "bogus",
+                "start_date": "2026-05-02",
+                "target_date": "2026-05-01",
+            }
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert response.json() == {"priority": ['"bogus" is not a valid choice.']}
+
+
+def test_patch_first_object_error_wins(make_tenant):
+    """PIDASHCONV-1441: validate() stops at the first object-level error.
+
+    Each raise in IssueCreateSerializer.validate stops validation, so
+    inverted dates plus a foreign state 400 with only the date error
+    (serializers/issue.py:231-236 runs before :357-364).
+    """
+    tenant = make_tenant()
+    urls = intake_urls(tenant)
+    seeder = tenant["seeder"]
+    other_project = seeder.create_project(tenant["workspace"]["id"])
+    other_state = seeder.create_state(
+        tenant["workspace"]["id"], other_project["id"]
+    )
+    created = create_intake_issue(tenant["client"], urls["intake_issues"])
+    issue_id = created["issue"]["id"]
+    response = tenant["client"].patch(
+        f"{urls['intake_issues']}{issue_id}/",
+        json={
+            "issue": {
+                "start_date": "2026-05-02",
+                "target_date": "2026-05-01",
+                "state_id": other_state["id"],
+            }
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert response.json() == {
+        "non_field_errors": ["Start date cannot exceed target date"]
+    }
+
+
+def test_patch_deleted_cross_project_pod_reports_first_error(make_tenant):
+    """PIDASHCONV-1441: pod checks raise in order, first wins.
+
+    A deleted pod from another project fails the project check before
+    the tombstone check is reached (serializers/issue.py:254-257).
+    """
+    tenant = make_tenant()
+    urls = intake_urls(tenant)
+    seeder = tenant["seeder"]
+    other_project = seeder.create_project(tenant["workspace"]["id"])
+    pod = seeder.create_pod(tenant["workspace"]["id"], other_project["id"])
+    tenant["_database"].execute(
+        "UPDATE pod SET deleted_at = now() WHERE id = %s", (pod["id"],)
+    )
+    created = create_intake_issue(tenant["client"], urls["intake_issues"])
+    issue_id = created["issue"]["id"]
+    response = tenant["client"].patch(
+        f"{urls['intake_issues']}{issue_id}/",
+        json={"issue": {"assigned_pod_id": pod["id"]}},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json() == {
+        "assigned_pod_id": ["pod is in a different project"]
+    }
+
+
 def test_patch_accept_without_default_400(admin):
     urls = intake_urls(admin)
     created = create_intake_issue(admin["client"], urls["intake_issues"])
