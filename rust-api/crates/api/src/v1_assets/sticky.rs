@@ -108,8 +108,9 @@
 //! `''` on a nullable field without `allow_blank` clears (`deleted_at`,
 //! `created_by`, `updated_by`), `''` on a not-required field without
 //! `allow_blank` skips (`sort_order`), and a `JSONField` string is
-//! `json.loads`-ed (`description`, `logo_props`). An unmatched non-empty
-//! media type is 415.
+//! `json.loads`-ed (`description`, `logo_props`); a `'null'` text parses
+//! to `None` and dies at the save with the `IntegrityError` 400
+//! (PIDASHCONV-1403). An unmatched non-empty media type is 415.
 //!
 //! # Out of scope
 //!
@@ -1130,6 +1131,11 @@ struct FieldValidation {
     /// model save then dies on (bare `NaN`/`Infinity`): the 500 that
     /// fires only when no other field error already produced a 400.
     fatal: bool,
+    /// A form `description`/`logo_props` text that parsed to JSON null:
+    /// `json.loads("null")` is `None`, which the save writes as SQL NULL
+    /// into the NOT NULL column — the save-time `IntegrityError` 400,
+    /// returned after `validate()` passes and before any INSERT/UPDATE.
+    form_json_null: bool,
 }
 
 /// Run the `StickySerializer` field path over the decoded request body:
@@ -1169,6 +1175,7 @@ fn validate_sticky_input(body: &form_body::ParsedBody, timezone: &Tz) -> FieldVa
             html: None,
             pending: Vec::new(),
             fatal: false,
+            form_json_null: false,
         };
     }
     let writable = sticky_types::strip_ignored_sticky_keys(input);
@@ -1176,6 +1183,7 @@ fn validate_sticky_input(body: &form_body::ParsedBody, timezone: &Tz) -> FieldVa
     let mut write = StickyWrite::default();
     let mut pending = Vec::new();
     let mut fatal = false;
+    let mut form_json_null = false;
     // `DateTimeField(null=True)`: JSON null clears (`allow_null`); on an
     // HTML form `''` is `None` because `blank=True` never grants a
     // DateTimeField `allow_blank` (`get_value`), so `deleted_at=` clears
@@ -1204,7 +1212,8 @@ fn validate_sticky_input(body: &form_body::ParsedBody, timezone: &Tz) -> FieldVa
     // body the value is wrapped as a JSON string and `json.loads`-ed
     // (`get_value`/`to_internal_value`), so `description=foo` and
     // `description=` are both `invalid` while `description={"a":1}` stores
-    // the parsed object.
+    // the parsed object. `description=null` parses to `None` — no field
+    // error here; the save-time `IntegrityError` 400 is flagged below.
     if let Some(value) = writable.get("description") {
         match json_field_outcome(value, is_form) {
             JsonFieldOutcome::Value(parsed) => write.description = Some(parsed),
@@ -1216,6 +1225,7 @@ fn validate_sticky_input(body: &form_body::ParsedBody, timezone: &Tz) -> FieldVa
                 vec![JSON_INVALID_MESSAGE.to_owned()],
             )),
             JsonFieldOutcome::Fatal => fatal = true,
+            JsonFieldOutcome::ParsedNull => form_json_null = true,
         }
     }
     let mut html: Option<String> = None;
@@ -1249,6 +1259,7 @@ fn validate_sticky_input(body: &form_body::ParsedBody, timezone: &Tz) -> FieldVa
                 vec![JSON_INVALID_MESSAGE.to_owned()],
             )),
             JsonFieldOutcome::Fatal => fatal = true,
+            JsonFieldOutcome::ParsedNull => form_json_null = true,
         }
     }
     if let Some(value) = writable.get("color") {
@@ -1308,6 +1319,7 @@ fn validate_sticky_input(body: &form_body::ParsedBody, timezone: &Tz) -> FieldVa
         html,
         pending,
         fatal,
+        form_json_null,
     }
 }
 
@@ -1321,6 +1333,11 @@ fn is_blank_form_value(value: &Value, is_form: bool) -> bool {
 /// `JSONField` `Value must be valid JSON.` message (`fields.py:1751`).
 const JSON_INVALID_MESSAGE: &str = "Value must be valid JSON.";
 
+/// `BaseViewSet.handle_exception` `IntegrityError` message
+/// (`base.py:252-257`): a form `JSONField` text that parsed to JSON null
+/// saves SQL NULL into the NOT NULL column.
+const PAYLOAD_NOT_VALID_MESSAGE: &str = "The payload is not valid";
+
 /// One `JSONField` input, decoded the way DRF does.
 enum JsonFieldOutcome {
     /// The value to store.
@@ -1333,14 +1350,20 @@ enum JsonFieldOutcome {
     /// HTML-form text bare `NaN`/`Infinity` accepted by CPython's
     /// `json.loads` but fatal at the model save (the 500).
     Fatal,
+    /// HTML-form text that parsed to JSON null: `json.loads("null")`
+    /// gives `None`, which the save writes as SQL NULL into the NOT NULL
+    /// column (the save-time `IntegrityError` 400, after `validate()`).
+    ParsedNull,
 }
 
 /// `JSONField.to_internal_value` (`fields.py:1758-1788`). JSON bodies pass
 /// the already-parsed value through (`json.dumps` always succeeds); HTML
 /// form bodies mark the string as a JSON string and `json.loads` it, so
 /// `'foo'`/`''` are the `invalid` message while `'{"a":1}'` stores the
-/// parsed object. A bare `NaN`/`Infinity` token parses in CPython but dies
-/// in the `JSONField` save (`json.dumps` round-trip), which is the 500.
+/// parsed object. `'null'` parses to `None` (no field error — the
+/// `IntegrityError` fires at save time); a bare `NaN`/`Infinity` token
+/// parses in CPython but dies in the `JSONField` save (`json.dumps`
+/// round-trip), which is the 500.
 fn json_field_outcome(value: &Value, is_form: bool) -> JsonFieldOutcome {
     if is_form {
         let text = match value {
@@ -1350,7 +1373,13 @@ fn json_field_outcome(value: &Value, is_form: bool) -> JsonFieldOutcome {
             _ => return JsonFieldOutcome::Invalid,
         };
         return match serde_json::from_str::<Value>(text) {
-            Ok(parsed) => JsonFieldOutcome::Value(parsed),
+            Ok(parsed) => {
+                if parsed.is_null() {
+                    JsonFieldOutcome::ParsedNull
+                } else {
+                    JsonFieldOutcome::Value(parsed)
+                }
+            }
             Err(_) => {
                 if crate::app_issues::handlers_engage::json_has_bare_nonfinite(text) {
                     JsonFieldOutcome::Fatal
@@ -1675,7 +1704,15 @@ async fn validated_write(
         // the save).
         return Err(Denial::ServerError);
     }
-    apply_validate_step(validation.write, validation.html)
+    let (write, html) = apply_validate_step(validation.write, validation.html)?;
+    if validation.form_json_null {
+        // A form `description`/`logo_props` text that parsed to JSON null:
+        // the save would write SQL NULL into the NOT NULL column, so the
+        // `IntegrityError` 400 fires here — after `validate()`, before any
+        // INSERT or UPDATE.
+        return Err(Denial::BadError(PAYLOAD_NOT_VALID_MESSAGE.to_owned()));
+    }
+    Ok((write, html))
 }
 
 /// Request preamble shared by all five actions: pool, acting user (401/403),
@@ -2891,6 +2928,26 @@ mod tests {
         );
         assert!(validation.errors.is_empty(), "{:?}", validation.errors);
         assert_eq!(validation.write.description, Some(serde_json::json!("foo")));
+    }
+
+    #[test]
+    fn form_json_null_text_flags_save_time_integrity_error() {
+        // `'null'` parses (`json.loads` gives `None`) with no field error:
+        // the save writes SQL NULL into the NOT NULL column, so
+        // `validated_write` 400s after `validate()` (PIDASHCONV-1403).
+        for field in ["description", "logo_props"] {
+            let validation = validate_sticky_input(&form_body(&[(field, "null")]), &utc());
+            assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+            assert!(validation.form_json_null, "{field}");
+            assert!(!validation.fatal, "{field}");
+        }
+        // Non-null JSON text leaves the flag off.
+        let validation = validate_sticky_input(&form_body(&[("description", "{\"a\":1}")]), &utc());
+        assert!(!validation.form_json_null);
+        // JSON bodies are unchanged: explicit null stays the `null`
+        // message, never the save-time flag.
+        let validation = validate_sticky_input(&json_body(&[("description", Value::Null)]), &utc());
+        assert!(!validation.form_json_null);
     }
 
     #[test]
