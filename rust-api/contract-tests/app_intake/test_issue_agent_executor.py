@@ -8,6 +8,9 @@ Covers the three executor-validation cases against
   reason (disabled instance here); nothing is stored.
 - null clear with a pinned executor and a live run: refused with the
   mid-flight message; the stored pin is untouched.
+- PIDASHCONV-1500 coincidence: a changed pin under a live run that also
+  fails a gate reports only the gate message (first-failure-wins), for
+  both the cloud and the managed gate.
 
 Regimes: CI runs both backends with the kill switches off, so the cloud
 case asserts the 400 message by default. With
@@ -108,3 +111,72 @@ def test_patch_clear_executor_mid_run_refused(make_tenant):
         (issue_id,),
     )
     assert row["agent_executor"] == "local_runner"
+
+
+def _seed_pinned_live_issue(tenant, name):
+    """Issue pinned to local_runner with a running agent_run; returns its id."""
+    created = create_intake_issue(tenant["client"], _issue_url(tenant), name=name)
+    issue_id = created["issue"]["id"]
+    tenant["seeder"].db.execute(
+        "UPDATE issues SET agent_executor = 'local_runner' WHERE id = %s",
+        (issue_id,),
+    )
+    pod = tenant["seeder"].create_pod(
+        tenant["workspace"]["id"], tenant["project"]["id"], name=f"{name} pod"
+    )
+    tenant["seeder"].create_agent_run(
+        tenant["workspace"]["id"],
+        tenant["user"]["id"],
+        pod["id"],
+        issue_id,
+        status="running",
+    )
+    return issue_id
+
+
+def _stored_executor(tenant, issue_id):
+    row = tenant["seeder"].db.fetchone(
+        "SELECT agent_executor FROM issues WHERE id = %s",
+        (issue_id,),
+    )
+    return row["agent_executor"]
+
+
+@pytest.mark.skipif(
+    CLOUD_ENABLED, reason="needs the cloud gate to refuse (kill switch off)"
+)
+def test_patch_cloud_pin_under_live_run_reports_gate_only(make_tenant):
+    """PIDASHCONV-1500: gate refusal aborts validate(), mid-flight never runs.
+
+    The pin changes under a live run AND the cloud gate refuses, so both
+    arms would fire if validation collected errors. Django raises on the
+    gate first (serializers/issue.py:283-309 runs before :313-321), so the
+    400 carries exactly one agent_executor message and the pin is untouched.
+    """
+    tenant = make_tenant()
+    issue_id = _seed_pinned_live_issue(tenant, "Cloud pin live")
+    response = tenant["client"].patch(
+        f"{_issue_url(tenant)}{issue_id}/",
+        json={"issue": {"agent_executor": "cloud_agent"}},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json() == {"agent_executor": [CLOUD_UNAVAILABLE]}
+    assert _stored_executor(tenant, issue_id) == "local_runner"
+
+
+def test_patch_managed_pin_under_live_run_reports_gate_only(make_tenant):
+    """PIDASHCONV-1500: managed-gate refusal likewise wins over mid-flight.
+
+    Mirror of the cloud case on a managed-disabled instance: Django raises
+    the managed message (serializers/issue.py:290-309) before the
+    mid-flight check (:313-321) can run.
+    """
+    tenant = make_tenant()
+    issue_id = _seed_pinned_live_issue(tenant, "Managed pin live")
+    response = tenant["client"].patch(
+        f"{_issue_url(tenant)}{issue_id}/",
+        json={"issue": {"agent_executor": "managed_runner"}},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json() == {"agent_executor": [MANAGED_DISABLED]}
+    assert _stored_executor(tenant, issue_id) == "local_runner"
