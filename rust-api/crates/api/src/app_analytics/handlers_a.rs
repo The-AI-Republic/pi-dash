@@ -1654,36 +1654,56 @@ pub struct ViewInput {
     pub query_dict: Option<Value>,
 }
 
-/// Validate one `name` value: DRF `CharField(max_length=255)` — type, then
-/// blank, then length in code points (Python `[:255]`-style slicing counts
-/// code points, never UTF-8 bytes).
+/// Python `str.strip()` membership: Rust `White_Space` plus U+001C-U+001F
+/// (same set as `is_py_space` in `db::app_pages::strip`, PIDASHCONV-801 /
+/// 890 — verified by exhaustively diffing `str.strip` against
+/// `char::is_whitespace` over all code points; those four are the only
+/// differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// Validate one `name` value: DRF `CharField(max_length=255)`
+/// (`run_validation` + `to_internal_value`) — `null` fails,
+/// bools/composites fail, numbers coerce via `str()`, the value strips
+/// (`trim_whitespace`), blank (empty or whitespace-only) fails, then
+/// length in code points on the stripped value (Python `[:255]`-style
+/// slicing counts code points, never UTF-8 bytes).
 fn validate_name(value: &Value) -> Result<String, Value> {
-    let text = match value {
-        Value::String(text) => text,
-        Value::Null => {
-            return Err(field_error("This field may not be null."));
-        }
+    if value.is_null() {
+        return Err(field_error("This field may not be null."));
+    }
+    let raw = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
         _ => return Err(field_error("Not a valid string.")),
     };
-    if text.is_empty() {
+    let stripped = raw.trim_matches(is_py_strip_ws);
+    if stripped.is_empty() {
         return Err(field_error("This field may not be blank."));
     }
-    if text.chars().count() > 255 {
+    if stripped.chars().count() > 255 {
         return Err(field_error(
             "Ensure this field has no more than 255 characters.",
         ));
     }
-    Ok(text.clone())
+    Ok(stripped.to_owned())
 }
 
-/// Validate one `description` value (`TextField(blank=True)`): type only —
-/// `""` is allowed, missing defaults to `""`.
+/// Validate one `description` value (`TextField(blank=True)` →
+/// `CharField(allow_blank=True)`): same coercion and strip as
+/// [`validate_name`]; blank strips to `""`, which is allowed, and there
+/// is no `max_length`. Missing defaults to `""`.
 fn validate_description(value: &Value) -> Result<String, Value> {
-    match value {
-        Value::String(text) => Ok(text.clone()),
-        Value::Null => Err(field_error("This field may not be null.")),
-        _ => Err(field_error("Not a valid string.")),
+    if value.is_null() {
+        return Err(field_error("This field may not be null."));
     }
+    let raw = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        _ => return Err(field_error("Not a valid string.")),
+    };
+    Ok(raw.trim_matches(is_py_strip_ws).to_owned())
 }
 
 fn field_error(message: &str) -> Value {
