@@ -95,7 +95,7 @@ describe("convertHTMLDocumentToAllFormats", () => {
     ]) {
       expect(result.description_html).toContain(needle);
     }
-    // The collaboration binary carries the nodes too: a client applying it renders both.
+    // The collaboration binary carries the nodes too: the document schema decodes both back out of it.
     const synced = docHTML(docFromBinary(decode(result.description_binary)));
     expect(synced).toContain("<entity-reference-component");
     expect(synced).toContain('data-label="Fix login"');
