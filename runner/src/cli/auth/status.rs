@@ -20,11 +20,11 @@ pub struct Args {
 }
 
 #[derive(Debug, Deserialize)]
-struct UserMe {
+pub(crate) struct UserMe {
     #[serde(default)]
-    id: Option<String>,
+    pub(crate) id: Option<String>,
     #[serde(default)]
-    email: Option<String>,
+    pub(crate) email: Option<String>,
     #[serde(default)]
     first_name: Option<String>,
     #[serde(default)]
@@ -48,9 +48,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
     }
     let token = runner_ops::load_cli_token(paths)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "not logged in — run `pidash auth login` to authenticate this host"
-        )
+        anyhow::anyhow!("not logged in — run `pidash auth login` to authenticate this host")
     })?;
 
     let cfg = file::load_config(paths).ok();
@@ -148,11 +146,16 @@ async fn status_json(paths: &Paths) -> Result<serde_json::Value> {
         }),
         _ => serde_json::Value::Null,
     };
+    // Signed in, but who as is not known (legacy config, lookup failed):
+    // lets the desktop app tell this apart from signed out (`user` is null
+    // in both cases).
+    let user_unknown = signed_in && cli.user_id.is_none();
     let activity = session::daemon_activity(paths).await;
     Ok(serde_json::json!({
         "signed_in": signed_in,
         "cloud_url": cloud_url,
         "user": user,
+        "user_unknown": user_unknown,
         "workspace_slug": cli.workspace_slug,
         "dev_machine_id": cfg.as_ref().and_then(|c| c.daemon.dev_machine_id).map(|id| id.to_string()),
         "changed_at": cli.changed_at().map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
@@ -164,33 +167,41 @@ async fn status_json(paths: &Paths) -> Result<serde_json::Value> {
 /// Look the signed-in user up once and record it (configs written before
 /// `[cli].user_id` existed). Best-effort with a short timeout; `true` when
 /// something was recorded.
-async fn backfill_user(paths: &Paths) -> bool {
+pub(crate) async fn backfill_user(paths: &Paths) -> bool {
     let Ok(Some(cfg)) = file::load_config_opt(paths) else {
         return false;
     };
     let Some(token) = cfg.cli.as_ref().and_then(|c| c.token.clone()) else {
         return false;
     };
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-    else {
-        return false;
-    };
-    let url = format!(
-        "{}/api/v1/users/me/",
-        cfg.daemon.cloud_url.trim_end_matches('/')
-    );
-    let Ok(resp) = client.get(&url).header("X-Api-Key", &token).send().await else {
-        return false;
-    };
-    if !resp.status().is_success() {
-        return false;
-    }
-    let Ok(me) = resp.json::<UserMe>().await else {
+    let Some(me) = whoami(&cfg.daemon.cloud_url, &token).await else {
         return false;
     };
     remember_user(paths, &me)
+}
+
+/// `GET /api/v1/users/me/` with `token` (a machine token or a device-flow
+/// API token). Best-effort with a short timeout: `None` on any failure.
+pub(crate) async fn whoami(cloud_url: &str, token: &str) -> Option<UserMe> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let url = format!("{}/api/v1/users/me/", cloud_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .header("X-Api-Key", token)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let me = resp.json::<UserMe>().await.ok()?;
+    me.id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty())
+        .then_some(me)
 }
 
 /// Record the user `/users/me/` named, unless one is already recorded.

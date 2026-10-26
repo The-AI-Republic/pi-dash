@@ -29,7 +29,7 @@ use serde::Deserialize;
 use std::io::Write;
 use std::time::Duration;
 
-use crate::cli::auth::{logout, session};
+use crate::cli::auth::{logout, session, status};
 use crate::cli::runner_ops;
 use crate::config::file;
 use crate::util::paths::Paths;
@@ -157,7 +157,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     }
 
     // Fail before the browser dance rather than after it.
-    let previous = session::current_identity(paths)?;
+    let mut previous = session::current_identity(paths)?;
     if let Some(existing) = previous.cloud_url.as_deref()
         && existing != cloud_url
         && !args.force
@@ -165,6 +165,13 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         anyhow::bail!(
             "this host is already enrolled with cloud {existing} — refusing to overwrite [cli] for a different cloud {cloud_url} (pass --force to re-enroll against the new cloud)"
         );
+    }
+    // A config signed in before user ids were recorded can't tell whether
+    // this sign-in switches accounts. Ask the cloud who the stored token
+    // belongs to; if it still can't be told, the sign-in is treated as a
+    // switch and the stored runners are parked under an `unknown-…` key.
+    if previous.user_unknown() && status::backfill_user(paths).await {
+        previous = session::current_identity(paths)?;
     }
     // Signing in rewrites the machine token (the cloud rotates it, revoking
     // the old one, even for the same user), so a running daemon reloads and
@@ -188,9 +195,6 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
             }
         }
     }
-    let previous_dev_machine_id =
-        file::load_config_opt(paths)?.and_then(|c| c.daemon.dev_machine_id);
-
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -245,14 +249,25 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         args.workspace.as_deref(),
     )
     .await?;
+    // Who is signing in, before anything is minted: the stored
+    // dev_machine_id may only be presented on behalf of the user it belongs
+    // to (the cloud answers 404 `dev_machine_not_found` for anyone else's).
+    let signing_in = status::whoami(&cloud_url, &token.access_token).await;
+    let signing_in_id = signing_in.as_ref().and_then(|me| me.id.clone());
+
     // Trade the short-lived device-flow APIToken for the shared dev-machine
     // MachineToken, which is the credential used by both the CLI and all
     // runners hosted by this install. The cloud resolves (and may merge) the
-    // dev-machine record by fingerprint and tells us which id survived.
-    let requested_machine_id = previous_dev_machine_id.unwrap_or_else(uuid::Uuid::new_v4);
+    // dev-machine record by fingerprint and tells us which id survived. On
+    // an account switch, or when either user is unknown, we send a fresh id
+    // instead of the stored one and let the fingerprint find this computer.
+    let reusable_machine_id = previous.dev_machine_id.filter(|_| {
+        session::may_reuse_dev_machine_id(previous.user_id.as_deref(), signing_in_id.as_deref())
+    });
     let host_label = crate::util::hostname::default_hostname();
     let fingerprint = crate::util::machine_fingerprint::machine_fingerprint();
-    let machine_token = exchange_for_machine_token(
+    let mut requested_machine_id = reusable_machine_id.unwrap_or_else(uuid::Uuid::new_v4);
+    let mut exchanged = exchange_for_machine_token(
         &client,
         &cloud_url,
         &token.access_token,
@@ -261,15 +276,41 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         &host_label,
         fingerprint.as_deref(),
     )
-    .await?;
-    let new_user_id = machine_token.user.as_ref().map(|u| u.id.clone());
+    .await;
+    if reusable_machine_id.is_some()
+        && let Err(e) = &exchanged
+        && is_dev_machine_not_found(e)
+    {
+        // The stored record is gone or no longer ours (deleted in the web
+        // app, config copied from another account): start over without it.
+        tracing::warn!("stored dev_machine_id was refused ({e:#}); retrying without it");
+        requested_machine_id = uuid::Uuid::new_v4();
+        exchanged = exchange_for_machine_token(
+            &client,
+            &cloud_url,
+            &token.access_token,
+            &workspace_slug,
+            &requested_machine_id,
+            &host_label,
+            fingerprint.as_deref(),
+        )
+        .await;
+    }
+    let machine_token = exchanged?;
+    let new_user_id = machine_token
+        .user
+        .as_ref()
+        .map(|u| u.id.clone())
+        .or(signing_in_id);
     let new_user_email = machine_token
         .user
         .as_ref()
         .and_then(|u| u.email.clone())
+        .or_else(|| signing_in.as_ref().and_then(|me| me.email.clone()))
         .or_else(|| token.user_email.clone());
 
-    let switching = session::is_account_switch(previous.user_id.as_deref(), new_user_id.as_deref());
+    let switching = session::is_account_switch(previous.user_id.as_deref(), new_user_id.as_deref())
+        || previous.user_unknown();
     if switching {
         // Best-effort: the old user's machine token (and its handoff keys)
         // must not outlive the switch. The cloud usually revoked it already
@@ -313,9 +354,17 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     )
     .context("writing dev-machine token to config.toml")?;
     println!("  Workspace: {}", machine_token.workspace_slug);
-    if switching {
+    if outcome.switched_from.is_some() {
         println!(
             "  Switched this machine from {switched_from_who} to {switched_to_who}; {} runner(s) parked.",
+            outcome.parked
+        );
+    } else if let Some(key) = outcome.parked_unknown.as_deref() {
+        let parked_file = session::parked_path(paths, key)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| key.to_string());
+        println!(
+            "  This machine was signed in as an account that could not be identified; its {} runner(s) were set aside in {parked_file}.",
             outcome.parked
         );
     }
@@ -626,6 +675,11 @@ async fn exchange_for_machine_token(
     resp.json::<MachineTokenResponse>()
         .await
         .context("parsing machine-token exchange response")
+}
+
+/// The cloud refused the dev_machine_id we sent as someone else's (or gone).
+fn is_dev_machine_not_found(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("dev_machine_not_found")
 }
 
 fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {

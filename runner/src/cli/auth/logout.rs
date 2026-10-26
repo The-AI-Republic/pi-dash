@@ -3,12 +3,14 @@
 //! locally. The signed-in user's `[[runner]]` blocks are parked under
 //! `<config_dir>/parked/<user_id>.toml` and come back when that user signs
 //! in again; a running daemon notices the config change and stops them.
+//! Runners of a config that never recorded its user (and whose user can't
+//! be looked up) are parked under an `unknown-<timestamp>` key instead.
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use std::time::Duration;
 
-use crate::cli::auth::session;
+use crate::cli::auth::{session, status};
 use crate::cli::runner_ops;
 use crate::config::file;
 use crate::util::paths::Paths;
@@ -58,6 +60,11 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             anyhow::bail!(
                 "config.toml is missing [daemon].cloud_url — pass --local-only to clear the local token without contacting the cloud"
             );
+        }
+        // Learn whose runners these are while the token still works, so
+        // they are parked under that user rather than an `unknown-…` key.
+        if session::current_identity(paths)?.user_unknown() {
+            status::backfill_user(paths).await;
         }
         let status = revoke_token(&cloud_url, &token).await?;
         // 200 or 401 are both acceptable: the cloud either revoked it

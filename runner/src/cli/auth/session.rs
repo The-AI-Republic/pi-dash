@@ -174,6 +174,9 @@ pub struct SignIn {
 pub struct SignInOutcome {
     /// `Some(old_user_id)` when this sign-in replaced a different user.
     pub switched_from: Option<String>,
+    /// The parked-file key (`unknown-<timestamp>`) the runners of a
+    /// signed-in host whose user was never recorded were set aside under.
+    pub parked_unknown: Option<String>,
     pub parked: usize,
     pub restored: usize,
 }
@@ -185,7 +188,17 @@ pub struct CurrentIdentity {
     pub token: Option<String>,
     pub user_id: Option<String>,
     pub user_email: Option<String>,
+    pub dev_machine_id: Option<Uuid>,
     pub runner_count: usize,
+}
+
+impl CurrentIdentity {
+    /// Signed in (a token is stored) but the user it belongs to was never
+    /// recorded — a config written before `[cli].user_id` existed whose
+    /// user could not be looked up.
+    pub fn user_unknown(&self) -> bool {
+        self.token.is_some() && self.user_id.is_none()
+    }
 }
 
 pub fn current_identity(paths: &Paths) -> Result<CurrentIdentity> {
@@ -198,6 +211,7 @@ pub fn current_identity(paths: &Paths) -> Result<CurrentIdentity> {
         token: cli.token.filter(|t| !t.is_empty()),
         user_id: cli.user_id,
         user_email: cli.user_email,
+        dev_machine_id: cfg.daemon.dev_machine_id,
         runner_count: cfg.runners.len(),
     })
 }
@@ -209,8 +223,34 @@ pub fn is_account_switch(stored_user_id: Option<&str>, new_user_id: Option<&str>
     matches!((stored_user_id, new_user_id), (Some(a), Some(b)) if a != b)
 }
 
+/// May a sign-in as `new_user_id` present the stored `dev_machine_id` to the
+/// cloud? Only when the stored id is known to belong to that same user: the
+/// cloud refuses (404 `dev_machine_not_found`) an id owned by somebody
+/// else, so on a switch — or when either user is unknown — the client sends
+/// a fresh id and lets the cloud find this computer by its fingerprint.
+pub fn may_reuse_dev_machine_id(stored_user_id: Option<&str>, new_user_id: Option<&str>) -> bool {
+    matches!((stored_user_id, new_user_id), (Some(a), Some(b)) if a == b)
+}
+
+/// Parked-file key for the runners of a host signed in as a user that was
+/// never recorded: `unknown-<UTC timestamp>`. Never matches a real user id,
+/// so nothing restores them automatically, and nothing deletes them.
+pub fn unknown_user_park_key(now: chrono::DateTime<Utc>) -> String {
+    format!("unknown-{}", now.format("%Y%m%dT%H%M%SZ"))
+}
+
+/// Signed in with a token whose user was never recorded.
+fn stored_user_unknown(cli: &crate::config::schema::CliSection) -> bool {
+    cli.user_id.is_none() && cli.token.as_deref().is_some_and(|t| !t.is_empty())
+}
+
 /// Persist a sign-in. On an account switch the previous user's runners are
 /// parked first; then the new user's parked runners (if any) are restored.
+///
+/// A host signed in as a user that was never recorded (and that the caller
+/// could not look up) counts as a switch: its runners are parked under
+/// [`unknown_user_park_key`] rather than left running under the new
+/// account.
 pub fn apply_sign_in(paths: &Paths, sign_in: &SignIn) -> Result<SignInOutcome> {
     let mut outcome = SignInOutcome::default();
     let mut delete_after = None;
@@ -237,6 +277,10 @@ pub fn apply_sign_in(paths: &Paths, sign_in: &SignIn) -> Result<SignInOutcome> {
                 let old = cli.user_id.clone().expect("switch implies a stored user");
                 outcome.parked = park_runners(paths, cfg, &old, cli.user_email.as_deref())?;
                 outcome.switched_from = Some(old);
+            } else if stored_user_unknown(&cli) && !cfg.runners.is_empty() {
+                let key = unknown_user_park_key(Utc::now());
+                outcome.parked = park_runners(paths, cfg, &key, cli.user_email.as_deref())?;
+                outcome.parked_unknown = Some(key);
             }
             if let Some(user_id) = sign_in.user_id.as_deref() {
                 let restore = restore_parked(paths, cfg, user_id)?;
@@ -273,9 +317,10 @@ pub struct SignOutOutcome {
 }
 
 /// Persist a sign-out: park the signed-in user's runners, clear the
-/// credentials and stamp `signed_out_at`. Runners of a config that never
-/// recorded its user stay where they are (there is no key to park them
-/// under). No-op without a config.
+/// credentials and stamp `signed_out_at`. Runners of a signed-in config that
+/// never recorded its user are parked under [`unknown_user_park_key`], so
+/// the next sign-in (whoever it is) does not inherit them. No-op without a
+/// config.
 pub fn apply_sign_out(paths: &Paths) -> Result<SignOutOutcome> {
     if !paths.config_path().exists() {
         return Ok(SignOutOutcome::default());
@@ -285,6 +330,9 @@ pub fn apply_sign_out(paths: &Paths) -> Result<SignOutOutcome> {
         let mut cli = cfg.cli.take().unwrap_or_default();
         if let Some(user_id) = cli.user_id.clone() {
             outcome.parked = park_runners(paths, cfg, &user_id, cli.user_email.as_deref())?;
+        } else if stored_user_unknown(&cli) {
+            let key = unknown_user_park_key(Utc::now());
+            outcome.parked = park_runners(paths, cfg, &key, cli.user_email.as_deref())?;
         }
         cli.token = None;
         cli.handoff_key = None;
@@ -550,6 +598,110 @@ mod tests {
         assert!(!is_account_switch(Some("u1"), None));
         assert!(!is_account_switch(Some("u1"), Some("u1")));
         assert!(is_account_switch(Some("u1"), Some("u2")));
+    }
+
+    fn parked_files(paths: &Paths) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(paths.parked_dir())
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    fn forget_user(paths: &Paths) {
+        file::mutate_config(paths, |cfg| {
+            let cli = cfg.cli.as_mut().unwrap();
+            cli.user_id = None;
+            cli.user_email = None;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn sign_in_over_an_unknown_user_parks_runners_under_an_unknown_key() {
+        // A legacy config: signed in, but the user was never recorded (and
+        // could not be looked up). Its runners must not keep running under
+        // whoever signs in now, and must not be thrown away either.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let r = runner("alpha", tmp.path());
+        signed_in_config(&paths, "u1", vec![r.clone()]);
+        forget_user(&paths);
+
+        let out = apply_sign_in(&paths, &sign_in_as("u2")).unwrap();
+        assert!(out.switched_from.is_none());
+        assert_eq!(out.parked, 1);
+        let key = out.parked_unknown.expect("parked under an unknown key");
+        assert!(key.starts_with("unknown-"), "{key}");
+        let cfg = file::load_config(&paths).unwrap();
+        assert!(cfg.runners.is_empty());
+        assert_eq!(cfg.cli.unwrap().user_id.as_deref(), Some("u2"));
+        assert_eq!(parked_files(&paths), vec![format!("{key}.toml")]);
+        let parked = read_parked(&parked_path(&paths, &key).unwrap()).unwrap();
+        assert_eq!(parked.runners.len(), 1);
+        assert_eq!(parked.runners[0].runner_id, r.runner_id);
+    }
+
+    #[test]
+    fn sign_in_on_a_signed_out_host_with_unknown_user_keeps_nothing_running() {
+        // Signed out (no token): nothing to attribute, nothing to park.
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        signed_in_config(&paths, "u1", vec![]);
+        apply_sign_out(&paths).unwrap();
+        let out = apply_sign_in(&paths, &sign_in_as("u2")).unwrap();
+        assert!(out.parked_unknown.is_none());
+        assert_eq!(out.parked, 0);
+    }
+
+    #[test]
+    fn sign_out_with_unknown_user_parks_under_an_unknown_key() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        signed_in_config(&paths, "u1", vec![runner("alpha", tmp.path())]);
+        forget_user(&paths);
+        let out = apply_sign_out(&paths).unwrap();
+        assert_eq!(out.parked, 1);
+        assert!(file::load_config(&paths).unwrap().runners.is_empty());
+        let files = parked_files(&paths);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].starts_with("unknown-"), "{files:?}");
+    }
+
+    #[test]
+    fn unknown_user_park_key_is_a_safe_file_name() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let key = unknown_user_park_key(Utc::now());
+        assert!(parked_path(&paths, &key).is_some(), "{key}");
+    }
+
+    #[test]
+    fn dev_machine_id_is_reused_only_for_the_same_known_user() {
+        assert!(may_reuse_dev_machine_id(Some("u1"), Some("u1")));
+        // Account switch: the old id belongs to u1; the cloud would 404.
+        assert!(!may_reuse_dev_machine_id(Some("u1"), Some("u2")));
+        // Unknown on either side: let the fingerprint decide.
+        assert!(!may_reuse_dev_machine_id(None, Some("u1")));
+        assert!(!may_reuse_dev_machine_id(Some("u1"), None));
+        assert!(!may_reuse_dev_machine_id(None, None));
+    }
+
+    #[test]
+    fn current_identity_flags_an_unknown_signed_in_user() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        signed_in_config(&paths, "u1", vec![]);
+        assert!(!current_identity(&paths).unwrap().user_unknown());
+        forget_user(&paths);
+        assert!(current_identity(&paths).unwrap().user_unknown());
+        apply_sign_out(&paths).unwrap();
+        assert!(!current_identity(&paths).unwrap().user_unknown());
     }
 
     #[test]
