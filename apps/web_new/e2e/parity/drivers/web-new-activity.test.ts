@@ -363,6 +363,84 @@ describe("activity feed driver methods", () => {
       vi.useRealTimers();
     }
   });
+
+  it("posts a comment by typing then clicking the submit button", async () => {
+    const typed: string[] = [];
+    let submitted = 0;
+    let cardWaited = 0;
+    const editor = locator({
+      pressSequentially: async (text: string) => {
+        typed.push(text);
+      },
+    });
+    const { page } = pageOf({
+      role: (role, options) => {
+        if (role === "group") {
+          return locator({
+            locator: () => editor,
+            getByRole: (inner: string, innerOptions?: unknown) => {
+              expect(inner).toBe("button");
+              expect((innerOptions as { name?: unknown }).name).toBe("Comment");
+              return locator({
+                click: async () => {
+                  submitted += 1;
+                },
+              });
+            },
+          });
+        }
+        if (role === "article") {
+          expect((options as { hasText?: unknown }).hasText).toBe("hello");
+          return locator({
+            waitFor: async () => {
+              cardWaited += 1;
+            },
+          });
+        }
+        return locator();
+      },
+    });
+    await new WebNewDriver(page).activityPostComment("hello");
+    expect(typed).toEqual(["hello"]);
+    expect(submitted).toBe(1);
+    expect(cardWaited).toBe(1);
+  });
+
+  it("waits for the first feed row before reading comment texts", async () => {
+    let reads = 0;
+    const { page } = pageOf({
+      role: (role) =>
+        role === "region"
+          ? locator({
+              locator: (selector: string) => {
+                expect(selector).toBe('[data-feed-row="true"]');
+                reads += 1;
+                return locator({ count: async () => (reads === 1 ? 0 : 2) });
+              },
+            })
+          : locator(),
+      locator: (selector: string) =>
+        selector === '[id^="comment-"]' ? locator({ allInnerTexts: async () => ["a", "b"] }) : locator(),
+    });
+    await expect(new WebNewDriver(page).activityCommentTexts()).resolves.toEqual(["a", "b"]);
+    expect(reads).toBe(2);
+  });
+
+  it("reads an empty feed as [] once the wait budget is spent", async () => {
+    vi.useFakeTimers();
+    try {
+      const { page } = pageOf({
+        role: (role) => (role === "region" ? locator({ locator: () => locator({ count: async () => 0 }) }) : locator()),
+        locator: () => locator({ allInnerTexts: async () => [] }),
+        waitForTimeout: async () => {
+          vi.advanceTimersByTime(250);
+        },
+      });
+      await expect(new WebNewDriver(page).activityCommentTexts()).resolves.toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("reaction driver methods", () => {

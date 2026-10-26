@@ -4096,6 +4096,17 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityCommentTexts(): Promise<string[]> {
+    // The feed paints after the timeline query settles, so an immediate
+    // read races a freshly opened issue and reports []. Wait for the first
+    // timeline row (every feed state keeps at least one: the creation entry
+    // or a comment), then read. On timeout return whatever is there so a
+    // genuinely empty feed still reads as [].
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.activityFeedRows().count()) > 0) break;
+      if (Date.now() > deadline) break;
+      await this.page.waitForTimeout(250);
+    }
     return this.page.locator('[id^="comment-"]').allInnerTexts();
   }
 
@@ -4162,11 +4173,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityPostComment(bodyText: string): Promise<void> {
-    const editor = this.composerEditor();
-    await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    await editor.click({ timeout: WebNewDriver.WAIT_MS });
-    await editor.fill(bodyText, { timeout: WebNewDriver.WAIT_MS });
-    await editor.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+    // Type like a user (fill() never reaches the rich editor's state) and
+    // submit with the Comment button. Enter is NOT used: the editing
+    // surface swallows it as a newline, so it never posts (suspected
+    // product bug, Comments-area-owned; CMT composer-keyboard pins Enter).
+    await this.activityComposerType(bodyText);
+    await this.activityComposerSubmit();
     await this.commentCard(bodyText).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
