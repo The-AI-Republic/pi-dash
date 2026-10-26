@@ -486,7 +486,10 @@ export function PageDetailScreen({
         <ExportDialog host={exportHost} open onClose={() => setExportOpen(false)} />
       ) : null}
       <div className="flex min-h-0 flex-1">
-        <div data-testid="page-canvas-stage" className="relative flex min-h-0 min-w-0 flex-1">
+        {/* The column isolates its own stacking so the snapshot overlay's
+            layer never climbs above the page header beside it: the header
+            stays reachable while a snapshot covers the canvas (§4.5). */}
+        <div data-testid="page-canvas-stage" className="relative isolate flex min-h-0 min-w-0 flex-1">
           <div data-testid="page-canvas-scroll" className="min-h-0 min-w-0 flex-1 overflow-y-auto">
             {/* The measured canvas fills the column, so the pane's slide
               reflows it by the pane's own width (PAGE-045). The readable
@@ -574,6 +577,19 @@ export function PageDetailScreen({
           {/* The bar's absence is what surfaces the floating toggle
               (PAGE-035); when the bar is there, this never mounts. */}
           {showBar || paneOpen ? null : <PageFloatingPaneToggle onOpen={openPane} />}
+          {/* The snapshot overlay covers this canvas column only, so the
+              page header above and the pane beside it stay usable (§4.5,
+              PAGE-052). */}
+          {openVersionId === undefined ? null : (
+            <PageVersionOverlay
+              versionId={openVersionId}
+              snapshot={snapshot.data}
+              failed={snapshot.isError}
+              onClose={closeVersion}
+              onRetry={() => retryVersion(openVersionId)}
+              restore={capabilities.canEdit ? { onRestore: restoreVersion } : null}
+            />
+          )}
         </div>
         <PageNavigationPane
           workspaceSlug={workspaceSlug}
@@ -606,16 +622,6 @@ export function PageDetailScreen({
           });
         }}
       />
-      {openVersionId === undefined ? null : (
-        <PageVersionOverlay
-          versionId={openVersionId}
-          snapshot={snapshot.data}
-          failed={snapshot.isError}
-          onClose={closeVersion}
-          onRetry={() => retryVersion(openVersionId)}
-          restore={capabilities.canEdit ? { onRestore: restoreVersion } : null}
-        />
-      )}
       {entityPeek === null ? null : (
         <React.Suspense fallback={null}>
           <LazyIssuePeek

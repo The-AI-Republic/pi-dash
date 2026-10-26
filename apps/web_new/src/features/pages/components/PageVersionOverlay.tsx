@@ -128,11 +128,14 @@ export function PageVersionOverlay({
   const shownRestore =
     failed || snapshot === undefined || restore === null ? null : { onRestore: () => restore.onRestore(snapshot) };
   return (
+    // The overlay covers the canvas, not the whole window: the page header
+    // keeps its own controls reachable while a snapshot is open (§4.5, "a
+    // full-canvas overlay above the editor"). It sits inside the screen's
+    // relative column, so the canvas column is its containing block.
     <div
       data-testid="page-version-overlay"
-      className="fixed inset-0 z-40 flex flex-col bg-(--bg)"
+      className="absolute inset-0 z-40 flex flex-col bg-(--bg)"
       role="dialog"
-      aria-modal="true"
       aria-label="Version snapshot"
     >
       <OverlayHeader

@@ -20,5 +20,10 @@ export function pagesListQueryOptions(client: ApiClient, workspaceSlug: string, 
     // for shelved rows too; the tab partition is still client-side.
     queryFn: () => listPages(client, workspaceSlug, projectId, { includeArchived: true }),
     staleTime: LIST_STALE_TIME_MS,
+    // Returning to the list (back from a page, a project switch back) is a
+    // remount, not a fresh session: the spec asks for one revalidation
+    // over the held rows (§3.9, PAGE-020). Only a mount re-runs it, so tab
+    // switches, search and sort stay purely client-side.
+    refetchOnMount: "always",
   });
 }

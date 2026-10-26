@@ -637,6 +637,19 @@ describe("PageDetailScreen title and body", () => {
     await waitFor(() => expect(screen.queryByRole("status", { name: "Loading page body" })).not.toBeInTheDocument());
   });
 
+  it("skeletons a read-only body until the stored document is painted", async () => {
+    // PAGE-079: the cold read-only body shows the same placeholder blocks
+    // the editable body does, then swaps them for the stored markup. Only
+    // a page the session has not painted yet qualifies, so this test uses
+    // its own id and the shared cache stays untouched for the others.
+    resetPageBodyCache();
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    expect(await screen.findByRole("status", { name: "Loading page body" })).toBeInTheDocument();
+    await screen.findByText("Draft body");
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Loading page body" })).not.toBeInTheDocument());
+  });
+
   it("resolves a stored picture's asset id on a read-only body", async () => {
     harness.page = record({
       is_locked: true,
