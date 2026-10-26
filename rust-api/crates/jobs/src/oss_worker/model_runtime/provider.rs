@@ -1699,7 +1699,28 @@ async fn post_with_retries(
             Ok(response) => {
                 let status = response.status().as_u16();
                 let headers = response.headers().clone();
-                let bytes = response.bytes().await.unwrap_or_default().to_vec();
+                // The non-streaming SDK `send` reads the body inside the
+                // request try block, so a body-read failure (read timeout
+                // or mid-body reset) retries exactly like a send failure.
+                let bytes = match response.bytes().await {
+                    Ok(body) => body.to_vec(),
+                    Err(error) if error.is_timeout() => {
+                        if retries_taken < MAX_RETRIES {
+                            sleep_for_retry(retries_taken, None).await;
+                            retries_taken += 1;
+                            continue;
+                        }
+                        return Err(ProviderError::Timeout);
+                    }
+                    Err(_) => {
+                        if retries_taken < MAX_RETRIES {
+                            sleep_for_retry(retries_taken, None).await;
+                            retries_taken += 1;
+                            continue;
+                        }
+                        return Err(ProviderError::Connection);
+                    }
+                };
                 if status < 400 {
                     return Ok(bytes);
                 }
