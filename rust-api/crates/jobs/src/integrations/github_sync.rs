@@ -844,11 +844,15 @@ impl GithubSyncTransport for GithubRestClient {
 
 /// Scan-section fault (`github_sync_task.py:327-335`): provider 4xx faults
 /// record `last_sync_error` and ack; anything else records and takes the
-/// `self.retry(countdown)` path.
+/// `self.retry(countdown)` path. `Setup` is the client-construction
+/// failure (`GithubClient(token=…)` built inside the `spawn_blocking`
+/// closures); it parks as `Fail` without recording, exactly like the
+/// pre-`spawn_blocking` construction it replaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanFault {
     Recordable(GithubError),
     Unexpected(String),
+    Setup(String),
 }
 
 impl ScanFault {
@@ -887,6 +891,10 @@ impl LiveTransports {
     }
 
     /// `GithubClient(token=token)` (`github_sync_task.py:292`).
+    ///
+    /// Call only on a blocking thread (inside `spawn_blocking`): the
+    /// returned client owns a `reqwest::blocking::Client`, whose
+    /// construction and last drop panic in async context (PIDASHCONV-1512).
     pub fn client(&self, token: &str) -> Result<GithubRestClient, GithubError> {
         GithubRestClient::live(token)
     }
@@ -1623,22 +1631,15 @@ pub async fn sync_one_repo(
             }
         },
     };
-    let transport = match transports.client(&scan.token) {
-        Ok(client) => client,
-        Err(error) => {
-            // `GithubClient(token="")` cannot happen (empty tokens took
-            // the missing-credential path above); a build failure is a
-            // setup fault, like any error outside the guarded `try`.
-            return Ok(Verdict::Fail {
-                error: format!(
-                    "{SYNC_ONE_REPO_TASK}: client build failed: {}",
-                    error.message()
-                ),
-            });
-        }
-    };
     let now = Utc::now();
-    match run_scan(pool, &transport, &scan, &now).await {
+    // The blocking client is built inside `run_scan`'s `spawn_blocking`
+    // closures, never in async context: `reqwest::blocking::Client`
+    // owns a tokio runtime, and both construction and the last drop
+    // panic there (PIDASHCONV-1512). `GithubClient(token="")` cannot
+    // happen (empty tokens took the missing-credential path above); a
+    // build failure arrives as `ScanFault::Setup` and parks as `Fail`,
+    // like any error outside the guarded `try`.
+    match run_scan(pool, transports, &scan, &now).await {
         Ok(()) => {
             if let Err(error) = sqlx::query(SYNC_SUCCESS_SQL)
                 .bind(scan.sync_id)
@@ -1682,6 +1683,12 @@ pub async fn sync_one_repo(
                 delay_secs: retry_countdown_secs(attempts),
             })
         }
+        // Client-construction failure (`GithubClient(token=…)`): a setup
+        // fault, identical to the pre-`spawn_blocking` mapping — parks
+        // as `Fail` without recording.
+        Err(ScanFault::Setup(message)) => Ok(Verdict::Fail {
+            error: format!("{SYNC_ONE_REPO_TASK}: client build failed: {message}"),
+        }),
     }
 }
 
@@ -1693,17 +1700,24 @@ pub async fn sync_one_repo(
 /// Exception`).
 async fn run_scan(
     pool: &PgPool,
-    transport: &GithubRestClient,
+    transports: &LiveTransports,
     scan: &RepoScan,
     now: &DateTime<Utc>,
 ) -> Result<(), ScanFault> {
     let remote_issues = {
         let (owner, name) = (scan.owner.clone(), scan.name.clone());
-        let transport = transport.clone();
-        tokio::task::spawn_blocking(move || transport.list_all_open_issues(&owner, &name))
-            .await
-            .map_err(|error| ScanFault::Unexpected(format!("provider call failed: {error}")))?
-            .map_err(ScanFault::classify)?
+        let transports = transports.clone();
+        let token = scan.token.clone();
+        tokio::task::spawn_blocking(move || {
+            let transport = transports
+                .client(&token)
+                .map_err(|error| ScanFault::Setup(error.message().to_owned()))?;
+            transport
+                .list_all_open_issues(&owner, &name)
+                .map_err(ScanFault::classify)
+        })
+        .await
+        .map_err(|error| ScanFault::Unexpected(format!("provider call failed: {error}")))??
     };
     let mut remote_issue_numbers = HashSet::new();
     let mut pairs: Vec<(i64, Uuid, Uuid)> = Vec::new();
@@ -1725,11 +1739,18 @@ async fn run_scan(
     }
     let remote_comments = {
         let (owner, name) = (scan.owner.clone(), scan.name.clone());
-        let transport = transport.clone();
-        tokio::task::spawn_blocking(move || transport.list_all_repo_comments(&owner, &name))
-            .await
-            .map_err(|error| ScanFault::Unexpected(format!("provider call failed: {error}")))?
-            .map_err(ScanFault::classify)?
+        let transports = transports.clone();
+        let token = scan.token.clone();
+        tokio::task::spawn_blocking(move || {
+            let transport = transports
+                .client(&token)
+                .map_err(|error| ScanFault::Setup(error.message().to_owned()))?;
+            transport
+                .list_all_repo_comments(&owner, &name)
+                .map_err(ScanFault::classify)
+        })
+        .await
+        .map_err(|error| ScanFault::Unexpected(format!("provider call failed: {error}")))??
     };
     // Repo-wide enumeration (`github_sync_task.py:310-318`): the parent
     // must be in this scan's remote set AND have a local pair, else the
@@ -1859,24 +1880,35 @@ pub async fn post_completion_comment(
         &project_id,
         &issue_id,
     ));
-    let transport = match transports.client(&token) {
-        Ok(client) => client,
-        Err(error) => {
-            return Ok(Verdict::Fail {
-                error: format!(
-                    "{POST_COMPLETION_COMMENT_TASK}: client build failed: {}",
-                    error.message()
-                ),
-            });
-        }
-    };
+    // Built inside `spawn_blocking`, never in async context: the
+    // blocking client owns a tokio runtime, and both construction and
+    // the last drop panic there (PIDASHCONV-1512).
     let posted = {
-        let transport = transport.clone();
+        let transports = transports.clone();
         tokio::task::spawn_blocking(move || {
-            transport.post_issue_comment(&owner, &name, repo_issue_id, &body)
+            let transport = transports
+                .client(&token)
+                .map_err(|error| error.message().to_owned())?;
+            Ok::<Result<Value, GithubError>, String>(transport.post_issue_comment(
+                &owner,
+                &name,
+                repo_issue_id,
+                &body,
+            ))
         })
         .await
         .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: provider call failed: {error}"))?
+    };
+    // Client-construction failure (`GithubClient(token=…)`): a setup
+    // fault, identical to the pre-`spawn_blocking` mapping — parks as
+    // `Fail` without recording.
+    let posted = match posted {
+        Ok(posted) => posted,
+        Err(message) => {
+            return Ok(Verdict::Fail {
+                error: format!("{POST_COMPLETION_COMMENT_TASK}: client build failed: {message}"),
+            });
+        }
     };
     let mut metadata = metadata;
     match posted {
