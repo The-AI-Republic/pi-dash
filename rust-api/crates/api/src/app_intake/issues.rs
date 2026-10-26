@@ -4667,7 +4667,7 @@ async fn ensure_triage_state(
         return Ok(id);
     }
     let max_sequence: Option<f64> = match sqlx::query_scalar(
-        "SELECT MAX(\"sequence\") FROM \"states\" WHERE (\"states\".\"project_id\" = $1 AND \"states\".\"group\" != 'triage')",
+        "SELECT MAX(\"sequence\") FROM \"states\" WHERE (\"states\".\"project_id\" = $1 AND \"states\".\"group\" != 'triage' AND \"states\".\"deleted_at\" IS NULL)",
     )
     .bind(gate.project_id)
     .fetch_one(pool)
@@ -4804,34 +4804,36 @@ async fn validate_issue_create(
     };
     // Declared-field order first: state_id, parent_id, assigned_pod_id,
     // label_ids, assignee_ids.
-    let parent_id = match opt_pk_field(issue_data, "parent_id", pool, "issues").await {
+    let parent_id = match opt_pk_field(issue_data, "parent_id", pool, "issues", true).await {
         Ok(id) => id,
         Err(message) => {
             field_errors.insert("parent_id".to_owned(), serde_json::json!([message]));
             None
         }
     };
-    let assigned_pod_id = match opt_pk_field(issue_data, "assigned_pod_id", pool, "pod").await {
-        Ok(id) => id,
-        Err(message) => {
-            field_errors.insert("assigned_pod_id".to_owned(), serde_json::json!([message]));
-            None
-        }
-    };
-    let label_ids = match opt_uuid_list_field(issue_data, "label_ids", pool, "labels").await {
+    let assigned_pod_id =
+        match opt_pk_field(issue_data, "assigned_pod_id", pool, "pod", false).await {
+            Ok(id) => id,
+            Err(message) => {
+                field_errors.insert("assigned_pod_id".to_owned(), serde_json::json!([message]));
+                None
+            }
+        };
+    let label_ids = match opt_uuid_list_field(issue_data, "label_ids", pool, "labels", true).await {
         Ok(ids) => ids,
         Err(body) => {
             field_errors.insert("label_ids".to_owned(), body);
             None
         }
     };
-    let assignee_ids = match opt_uuid_list_field(issue_data, "assignee_ids", pool, "users").await {
-        Ok(ids) => ids,
-        Err(body) => {
-            field_errors.insert("assignee_ids".to_owned(), body);
-            None
-        }
-    };
+    let assignee_ids =
+        match opt_uuid_list_field(issue_data, "assignee_ids", pool, "users", false).await {
+            Ok(ids) => ids,
+            Err(body) => {
+                field_errors.insert("assignee_ids".to_owned(), body);
+                None
+            }
+        };
     // Auto fields in `Meta` order: point, name, description_json,
     // description_html, priority (already gated), complexity_score,
     // dates, sequence_id, sort_order, completed_at, archived_at,
@@ -5138,14 +5140,14 @@ async fn validate_issue_create(
         }
     };
     let estimate_point_id =
-        match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points").await {
+        match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points", true).await {
             Ok(id) => id,
             Err(message) => {
                 field_errors.insert("estimate_point".to_owned(), serde_json::json!([message]));
                 None
             }
         };
-    let type_id = match opt_pk_field(issue_data, "type", pool, "issue_types").await {
+    let type_id = match opt_pk_field(issue_data, "type", pool, "issue_types", true).await {
         Ok(id) => id,
         Err(message) => {
             field_errors.insert("type".to_owned(), serde_json::json!([message]));
@@ -5213,7 +5215,7 @@ async fn validate_issue_create(
     let _ = triage_id;
     if let Some(parent) = parent_id {
         let in_project: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"project_id\" = $1 AND \"issues\".\"id\" = $2))",
+            "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"project_id\" = $1 AND \"issues\".\"id\" = $2 AND \"issues\".\"deleted_at\" IS NULL))",
         )
         .bind(gate.project_id)
         .bind(parent)
@@ -5229,7 +5231,7 @@ async fn validate_issue_create(
     }
     if let Some(estimate) = estimate_point_id {
         let in_project: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM \"estimate_points\" WHERE (\"estimate_points\".\"project_id\" = $1 AND \"estimate_points\".\"id\" = $2))",
+            "SELECT EXISTS (SELECT 1 FROM \"estimate_points\" WHERE (\"estimate_points\".\"project_id\" = $1 AND \"estimate_points\".\"id\" = $2 AND \"estimate_points\".\"deleted_at\" IS NULL))",
         )
         .bind(gate.project_id)
         .bind(estimate)
@@ -5283,7 +5285,12 @@ async fn validate_issue_create(
 /// floats/dicts/lists fail with the UUID message over their Python
 /// `str()` (`5.5`, `{}`, `[]`).
 #[allow(clippy::result_large_err)]
-async fn resolve_pk(pool: &PgPool, table: &str, raw: &serde_json::Value) -> Result<Uuid, String> {
+async fn resolve_pk(
+    pool: &PgPool,
+    table: &str,
+    raw: &serde_json::Value,
+    live_only: bool,
+) -> Result<Uuid, String> {
     // Ints coerce through `UUID(int=n)` (`UUIDField.get_prep_value`):
     // out-of-range negatives fail `incorrect_type`, the rest look up a
     // (practically never matching) UUID while the message keeps the
@@ -5321,15 +5328,23 @@ async fn resolve_pk(pool: &PgPool, table: &str, raw: &serde_json::Value) -> Resu
             return Err("Incorrect type. Expected pk value, received NoneType.".to_owned());
         }
     };
-    // Same-table parameterization keeps one helper. The querysets here
-    // (`Issue.objects`, `Pod.all_objects`, plain `Label`/`EstimatePoint`/
-    // `IssueType` managers) are unfiltered, so no soft-delete guard.
+    // Same-table parameterization keeps one helper. `live_only` mirrors
+    // the field queryset: the default soft-delete-scoped managers
+    // (`Issue.objects`, `Label.objects`, `EstimatePoint.objects`,
+    // `IssueType.objects`) hide `deleted_at` rows, while
+    // `Pod.all_objects` and the `users` table (no `deleted_at` column)
+    // stay unfiltered.
     let (id, display) = match &key {
         Key::Uuid(id) => (*id, id.to_string()),
         Key::Int(id, text) => (*id, text.clone()),
     };
+    let guard = if live_only {
+        " AND (\"deleted_at\" IS NULL)"
+    } else {
+        ""
+    };
     let exists: bool = sqlx::query_scalar(&format!(
-        "SELECT EXISTS (SELECT 1 FROM \"{table}\" WHERE (\"id\" = $1))"
+        "SELECT EXISTS (SELECT 1 FROM \"{table}\" WHERE (\"id\" = $1){guard})"
     ))
     .bind(id)
     .fetch_one(pool)
@@ -5392,12 +5407,13 @@ async fn opt_pk_field(
     key: &str,
     pool: &PgPool,
     table: &str,
+    live_only: bool,
 ) -> Result<Option<Uuid>, String> {
     let raw = match issue_data.get(key) {
         None | Some(serde_json::Value::Null) => return Ok(None),
         Some(raw) => raw,
     };
-    resolve_pk(pool, table, raw).await.map(Some)
+    resolve_pk(pool, table, raw, live_only).await.map(Some)
 }
 
 /// Optional `ListField(child=PrimaryKeyRelatedField)`: missing → `None`
@@ -5409,6 +5425,7 @@ async fn opt_uuid_list_field(
     key: &str,
     pool: &PgPool,
     table: &str,
+    live_only: bool,
 ) -> Result<Option<Vec<Uuid>>, serde_json::Value> {
     let raw = match issue_data.get(key) {
         None => return Ok(None),
@@ -5427,7 +5444,7 @@ async fn opt_uuid_list_field(
     let mut out = Vec::with_capacity(items.len());
     let mut errors = serde_json::Map::new();
     for (idx, item) in items.iter().enumerate() {
-        match resolve_pk(pool, table, item).await {
+        match resolve_pk(pool, table, item, live_only).await {
             Ok(id) => out.push(id),
             Err(message) => {
                 errors.insert(idx.to_string(), serde_json::json!([message]));
@@ -5707,9 +5724,9 @@ async fn filter_project_assignees(
         .map(|id| format!("'{id}'"))
         .collect::<Vec<_>>()
         .join(",");
-    // `ProjectMember.objects` is the plain manager: no soft-delete guard.
+    // `ProjectMember.objects` is the soft-delete-scoped default manager.
     let rows: Vec<Uuid> = sqlx::query_scalar(&format!(
-        "SELECT \"member_id\" FROM \"project_members\" WHERE (\"project_id\" = $1 AND \"role\" >= 15 AND \"is_active\" AND \"member_id\" IN ({list}))"
+        "SELECT \"member_id\" FROM \"project_members\" WHERE (\"project_id\" = $1 AND \"role\" >= 15 AND \"is_active\" AND \"deleted_at\" IS NULL AND \"member_id\" IN ({list}))"
     ))
     .bind(project_id)
     .fetch_all(pool)
@@ -5730,9 +5747,9 @@ async fn filter_project_labels(
         .map(|id| format!("'{id}'"))
         .collect::<Vec<_>>()
         .join(",");
-    // `Label.objects` is the plain manager: no soft-delete guard.
+    // `Label.objects` is the soft-delete-scoped default manager.
     let rows: Vec<Uuid> = sqlx::query_scalar(&format!(
-        "SELECT \"id\" FROM \"labels\" WHERE (\"project_id\" = $1 AND \"id\" IN ({list}))"
+        "SELECT \"id\" FROM \"labels\" WHERE (\"project_id\" = $1 AND \"deleted_at\" IS NULL AND \"id\" IN ({list}))"
     ))
     .bind(project_id)
     .fetch_all(pool)
