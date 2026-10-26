@@ -88,7 +88,7 @@ use crate::middleware::SessionHandle;
 use super::{
     actor, enqueue_message, enqueue_soft_delete, guard_denial, guards_error, guest_view_all,
     intake_id_for, is_issue_creator, json_truthy, load_membership, parse_body, parse_id, pool_of,
-    query_last, raw_json_response, resolve_tenant, Denial, QueryMap,
+    query_last, raw_json_response, resolve_project_id, Denial, QueryMap,
 };
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
@@ -3009,16 +3009,34 @@ pub async fn partial_update(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
+    // The id rewrite only — no row lookup, so a denied caller never
+    // learns whether the project exists (PIDASHCONV-1433).
+    let project_id = match resolve_project_id(pool, &slug, &project_id_raw).await {
+        Ok(project_id) => project_id,
+        Err(denial) => return denial.into_response(),
+    };
+    // Decorator (`:328`): ADMIN + `Issue`-creator. Runs before the body
+    // parse and every lookup, exactly like `@allow_permission`.
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
+        Ok(membership) => membership,
+        Err(denial) => return denial.into_response(),
+    };
+    let creator = match is_issue_creator(pool, &pk, &actor.id).await {
+        Ok(creator) => creator,
+        Err(denial) => return denial.into_response(),
+    };
+    let gate = guards::intake_issue_update_gate(&membership.as_guard(), creator);
+    if gate.is_err() {
+        return guard_denial(gate);
+    }
+    // DRF parses the body lazily at the first `request.data` touch
+    // (`:330-331`), after the decorator.
     let data = match parse_body(&body) {
         Ok(data) => data,
         Err(response) => return response,
     };
     let serde_json::Value::Object(mut top) = data else {
         return Denial::ServerError.into_response();
-    };
-    let tenant = match resolve_tenant(pool, &slug, &project_id_raw).await {
-        Ok(tenant) => tenant,
-        Err(denial) => return denial.into_response(),
     };
 
     // `skip_activity` pop + description-update probe (`:330-331`).
@@ -3032,28 +3050,15 @@ pub async fn partial_update(
 
     // Lookups (`:333-339`): the intake instance compiles to its pk, so
     // a missing intake reads as `IS NULL` → 404 (BUG-partial-…).
-    let intake_id = match intake_id_for(pool, &slug, &tenant.project_id).await {
+    let intake_id = match intake_id_for(pool, &slug, &project_id).await {
         Ok(intake_id) => intake_id,
         Err(denial) => return denial.into_response(),
     };
-    let bridge = match lookup_intake_issue(pool, &pk, &slug, &tenant.project_id, intake_id).await {
+    let bridge = match lookup_intake_issue(pool, &pk, &slug, &project_id, intake_id).await {
         Ok(Some(bridge)) => bridge,
         Ok(None) => return Denial::NotFound.into_response(),
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
-        Ok(membership) => membership,
-        Err(denial) => return denial.into_response(),
-    };
-    // Decorator (`:328`): ADMIN + `Issue`-creator.
-    let creator = match is_issue_creator(pool, &pk, &actor.id).await {
-        Ok(creator) => creator,
-        Err(denial) => return denial.into_response(),
-    };
-    let gate = guards::intake_issue_update_gate(&membership.as_guard(), creator);
-    if gate.is_err() {
-        return guard_denial(gate);
-    }
     // Membership gate (`:355-359`).
     let gate = guards::update_membership_gate(&membership.as_guard());
     if gate.is_err() {
@@ -3079,12 +3084,11 @@ pub async fn partial_update(
         let serde_json::Value::Object(issue_input) = &issue_value else {
             return Denial::ServerError.into_response();
         };
-        let stored =
-            match fetch_issue_annotated(pool, &bridge.issue_id, &tenant.project_id, &slug).await {
-                Ok(Some(stored)) => stored,
-                Ok(None) => return Denial::NotFound.into_response(),
-                Err(denial) => return denial.into_response(),
-            };
+        let stored = match fetch_issue_annotated(pool, &bridge.issue_id, &project_id, &slug).await {
+            Ok(Some(stored)) => stored,
+            Ok(None) => return Denial::NotFound.into_response(),
+            Err(denial) => return denial.into_response(),
+        };
         let (stored_issue, stored_labels, stored_assignees) = stored;
         // GUEST narrowing (`:398-403`): the 3-key subset with stored
         // fallbacks; every other key is silently dropped.
@@ -3131,8 +3135,8 @@ pub async fn partial_update(
         let object = match validate_issue_object(
             pool,
             state.settings(),
-            &tenant.project_id,
-            &tenant.workspace_id,
+            &project_id,
+            &bridge.workspace_id,
             &actor.id,
             &stored_issue,
             &validated,
@@ -3171,7 +3175,7 @@ pub async fn partial_update(
     let mut accept_presave: Option<IssueRow> = None;
     if guards::intake_fields_writable(&membership.as_guard()) {
         let bridge_issue =
-            match fetch_issue_annotated(pool, &bridge.issue_id, &tenant.project_id, &slug).await {
+            match fetch_issue_annotated(pool, &bridge.issue_id, &project_id, &slug).await {
                 Ok(Some((issue, _, _))) => issue,
                 Ok(None) => return Denial::NotFound.into_response(),
                 Err(denial) => return denial.into_response(),
@@ -3206,8 +3210,8 @@ pub async fn partial_update(
         };
         match validate_accept_transition(
             pool,
-            &tenant.workspace_id,
-            &tenant.project_id,
+            &bridge.workspace_id,
+            &project_id,
             validated.status,
             state_group,
         )
@@ -3232,12 +3236,11 @@ pub async fn partial_update(
         issue_requested_dump.as_ref(),
         issue_current_dump.as_ref(),
     ) {
-        let stored =
-            match fetch_issue_annotated(pool, &bridge.issue_id, &tenant.project_id, &slug).await {
-                Ok(Some((issue, _, _))) => issue,
-                Ok(None) => return Denial::NotFound.into_response(),
-                Err(denial) => return denial.into_response(),
-            };
+        let stored = match fetch_issue_annotated(pool, &bridge.issue_id, &project_id, &slug).await {
+            Ok(Some((issue, _, _))) => issue,
+            Ok(None) => return Denial::NotFound.into_response(),
+            Err(denial) => return denial.into_response(),
+        };
         if let Err(denial) =
             apply_issue_update(pool, &stored, validated, object, &actor.id, now).await
         {
@@ -3252,7 +3255,7 @@ pub async fn partial_update(
                 requested.clone(),
                 actor.id.to_string(),
                 pk.to_string(),
-                tenant.project_id.to_string(),
+                project_id.to_string(),
                 current.clone(),
                 epoch,
                 origin.clone(),
@@ -3300,7 +3303,7 @@ pub async fn partial_update(
             super::python_dumps(&serde_json::Value::Object(top.clone())),
             actor.id.to_string(),
             pk.to_string(),
-            tenant.project_id.to_string(),
+            project_id.to_string(),
             current.clone(),
             epoch,
             origin,
@@ -3317,7 +3320,7 @@ pub async fn partial_update(
     let Some(intake_uuid) = intake_id else {
         return Denial::ServerError.into_response();
     };
-    let detail = match fetch_detail(pool, &intake_uuid, &pk, &tenant.project_id).await {
+    let detail = match fetch_detail(pool, &intake_uuid, &pk, &project_id).await {
         Ok(Some(detail)) => detail,
         Ok(None) => return Denial::NotFound.into_response(),
         Err(denial) => return denial.into_response(),
@@ -3353,28 +3356,19 @@ pub async fn retrieve(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_id_raw).await {
-        Ok(tenant) => tenant,
-        Err(denial) => return denial.into_response(),
-    };
-    // `Intake.objects.filter(...).first()` then `.get(intake_id=intake_id.id)`
-    // — a missing intake dereferences `None.id` → 500.
-    let intake_id = match intake_id_for(pool, &slug, &tenant.project_id).await {
-        Ok(Some(intake_id)) => intake_id,
-        Ok(None) => return Denial::ServerError.into_response(),
-        Err(denial) => return denial.into_response(),
-    };
-    // `Project.objects.get(pk=project_id)` — a miss is 404.
-    let view_all = match guest_view_all(pool, &tenant.project_id).await {
-        Ok(view_all) => view_all,
+    // The id rewrite only — no row lookup, so a denied caller never
+    // learns whether the project exists (PIDASHCONV-1433).
+    let project_id = match resolve_project_id(pool, &slug, &project_id_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
     // Decorator (`:502`): ADMIN + MEMBER + GUEST + `Issue`-creator.
+    // Runs before every lookup, exactly like `@allow_permission`.
     let creator = match is_issue_creator(pool, &pk, &actor.id).await {
         Ok(creator) => creator,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -3382,7 +3376,22 @@ pub async fn retrieve(
     if gate.is_err() {
         return guard_denial(gate);
     }
-    let detail = match fetch_detail(pool, &intake_id, &pk, &tenant.project_id).await {
+    // `Intake.objects.filter(...).first()` never raises; the 404/500
+    // order below is Django's statement order: `Project.objects.get`
+    // first, then `.get(intake_id=intake_id.id)` dereferencing `None.id`
+    // → 500 (PIDASHCONV-1433 review: project row and intake both
+    // missing must answer 404, not 500).
+    // `Project.objects.get(pk=project_id)` — a miss is 404.
+    let view_all = match guest_view_all(pool, &project_id).await {
+        Ok(view_all) => view_all,
+        Err(denial) => return denial.into_response(),
+    };
+    let intake_id = match intake_id_for(pool, &slug, &project_id).await {
+        Ok(Some(intake_id)) => intake_id,
+        Ok(None) => return Denial::ServerError.into_response(),
+        Err(denial) => return denial.into_response(),
+    };
+    let detail = match fetch_detail(pool, &intake_id, &pk, &project_id).await {
         Ok(Some(detail)) => detail,
         Ok(None) => return Denial::NotFound.into_response(),
         Err(denial) => return denial.into_response(),
@@ -3424,25 +3433,19 @@ pub async fn destroy(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_id_raw).await {
-        Ok(tenant) => tenant,
+    // The id rewrite only — no row lookup, so a denied caller never
+    // learns whether the project exists (PIDASHCONV-1433).
+    let project_id = match resolve_project_id(pool, &slug, &project_id_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
-    let intake_id = match intake_id_for(pool, &slug, &tenant.project_id).await {
-        Ok(intake_id) => intake_id,
-        Err(denial) => return denial.into_response(),
-    };
-    let bridge = match lookup_intake_issue(pool, &pk, &slug, &tenant.project_id, intake_id).await {
-        Ok(Some(bridge)) => bridge,
-        Ok(None) => return Denial::NotFound.into_response(),
-        Err(denial) => return denial.into_response(),
-    };
-    // Decorator (`:549`): ADMIN + `Issue`-creator.
+    // Decorator (`:549`): ADMIN + `Issue`-creator. Runs before every
+    // lookup, exactly like `@allow_permission`.
     let creator = match is_issue_creator(pool, &pk, &actor.id).await {
         Ok(creator) => creator,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -3450,6 +3453,15 @@ pub async fn destroy(
     if gate.is_err() {
         return guard_denial(gate);
     }
+    let intake_id = match intake_id_for(pool, &slug, &project_id).await {
+        Ok(intake_id) => intake_id,
+        Err(denial) => return denial.into_response(),
+    };
+    let bridge = match lookup_intake_issue(pool, &pk, &slug, &project_id, intake_id).await {
+        Ok(Some(bridge)) => bridge,
+        Ok(None) => return Denial::NotFound.into_response(),
+        Err(denial) => return denial.into_response(),
+    };
 
     // The status cascade (`:560-565`): statuses -2/-1/0/2 also delete
     // the `Issue`. Soft deletes stamp `deleted_at`/`updated_at`/
@@ -3457,7 +3469,7 @@ pub async fn destroy(
     // enqueue the related-objects sweep.
     let now = Utc::now();
     if guards::destroy_cascades_to_issue(bridge.status) {
-        let issue = match fetch_issue_for_destroy(pool, &slug, &tenant.project_id, &pk).await {
+        let issue = match fetch_issue_for_destroy(pool, &slug, &project_id, &pk).await {
             Ok(Some(issue)) => issue,
             // BUG-destroy-dangling-issue: `.first()` may be `None` and
             // `.delete()` is unconditional → 500.

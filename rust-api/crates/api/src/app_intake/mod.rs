@@ -448,6 +448,27 @@ fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
+/// Resolve `slug` + `project_id` to the id the permission gate scopes
+/// on, mirroring `_rewrite_project_kwarg` (`app/views/base.py:49-82`):
+/// a UUID `project_id` is returned untouched with NO row lookup (Django
+/// returns early there, before any project query); an identifier still
+/// resolves through the tenant lookup, which for non-UUID input is
+/// exactly `Project.resolve` (an unresolvable identifier answers
+/// `Http404("Project not found")` before the gate, like Django).
+/// Callers run the decorator gate on the returned id first and only
+/// then touch rows, so a denied caller never learns whether the
+/// project exists (PIDASHCONV-1433; the PIDASHCONV-1188 split).
+pub async fn resolve_project_id(
+    pool: &PgPool,
+    slug: &str,
+    project_raw: &str,
+) -> Result<Uuid, Denial> {
+    if let Ok(id) = project_raw.parse::<Uuid>() {
+        return Ok(id);
+    }
+    Ok(resolve_tenant(pool, slug, project_raw).await?.project_id)
+}
+
 /// Resolve `slug` + `project_id` the way the view kwargs do:
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-79`) accepts a UUID
 /// or a workspace-scoped project identifier (upper-cased, like
