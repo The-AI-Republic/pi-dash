@@ -25,6 +25,7 @@ import { descriptionAssetSrc } from "../../../shared/editor/index.js";
 import { RichTextView } from "../../../shared/editor/RichTextView.js";
 import { notifyError } from "../../../shared/shell/toaster.js";
 import { getPageBodyDraft, setPageBodyDraft } from "../lib/pageBodyDraft.js";
+import { usePageOversizedIncident } from "../lib/pageRealtimeErrors.js";
 import type { PageFontSize, PageFontStyle } from "../lib/pagePreferences.js";
 import { pageImageUploadFailure, uploadPageImage, type UploadedPageImage } from "../lib/pageMedia.js";
 import { isPageSaveGesture, pageKeyCommand } from "../lib/pageToolbar.js";
@@ -38,6 +39,7 @@ import { PageCanvasHeader } from "./PageCanvasHeader.js";
 import { PageColorButton } from "./PageColorButton.js";
 import { PageBodySkeleton } from "./PageDetailLoading.js";
 import { PageFormattingBar } from "./PageFormattingBar.js";
+import { PageOversizedStrip } from "./PageOversizedStrip.js";
 import { PageImageButton } from "./PageImageButton.js";
 import { PageTableButton } from "./PageTableButton.js";
 import { PageBodyInteractionLayer } from "./PageBodyInteractionLayer.js";
@@ -123,6 +125,9 @@ export function PageEditorSurface({
   const handleRef = React.useRef<PageEditorHandle | null>(null);
   const [state, setState] = React.useState<PageFormattingState>(EMPTY_FORMATTING_STATE);
   const [uploading, setUploading] = React.useState(false);
+  // The oversized strip sits under the toolbar while a too-large incident
+  // is live for this page (PAGE-063); only editors mount this surface.
+  const oversized = usePageOversizedIncident(pageId);
   const initialHtml = React.useMemo(() => getPageBodyDraft(pageId) ?? descriptionHtml, [pageId, descriptionHtml]);
   // Latest body HTML, so the interaction layer can re-read the caret's
   // trigger after every edit without owning the editor itself.
@@ -319,6 +324,7 @@ export function PageEditorSurface({
           }
         />
       ) : null}
+      {oversized.visible ? <PageOversizedStrip onDismiss={oversized.dismiss} /> : null}
       <div className={`editor-container text-size-${fontSize ?? "large-font"} text-face-${fontStyle ?? "sans-serif"}`}>
         {bodyPending ? (
           <PageBodySkeleton />

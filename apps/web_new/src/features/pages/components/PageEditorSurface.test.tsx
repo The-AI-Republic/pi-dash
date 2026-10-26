@@ -15,7 +15,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getPageBodyDraft, resetPageBodyDrafts, setPageBodyDraft } from "../lib/pageBodyDraft.js";
 import { getPageBodyActions, resetPageBodyActions } from "../lib/pageBodyActions.js";
+import { reportPageContentTooLarge, resetPageRealtimeErrors } from "../lib/pageRealtimeErrors.js";
 import { openPageImagePicker, PageEditorSurface, PAGE_BODY_LABEL, PAGE_BODY_PLACEHOLDER } from "./PageEditorSurface.js";
+import { PAGE_OVERSIZED_DISMISS } from "./PageOversizedStrip.js";
 
 const EDITOR_TEST_TIMEOUT = 30_000;
 
@@ -114,6 +116,7 @@ function caretAtEndOf(root: HTMLElement, needle: string): void {
 afterEach(() => {
   resetPageBodyDrafts();
   resetPageBodyActions();
+  resetPageRealtimeErrors();
   toaster.notifyError.mockReset();
   appClient.getAppClient.mockClear();
   pageAssets.uploadPageAsset.mockReset();
@@ -543,3 +546,31 @@ describe(
   },
   EDITOR_TEST_TIMEOUT
 );
+
+describe("PageEditorSurface oversized strip", () => {
+  it("shows the strip under the toolbar while an incident is live (PAGE-063)", () => {
+    mount();
+    expect(screen.queryByTestId("page-oversized-strip")).not.toBeInTheDocument();
+    act(() => {
+      reportPageContentTooLarge("page-1");
+    });
+    expect(screen.getByTestId("page-oversized-strip")).toBeInTheDocument();
+  });
+
+  it("dismisses the strip without touching the body", () => {
+    mount();
+    act(() => {
+      reportPageContentTooLarge("page-1");
+    });
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OVERSIZED_DISMISS }));
+    expect(screen.queryByTestId("page-oversized-strip")).not.toBeInTheDocument();
+  });
+
+  it("ignores incidents raised for other pages", () => {
+    mount();
+    act(() => {
+      reportPageContentTooLarge("page-2");
+    });
+    expect(screen.queryByTestId("page-oversized-strip")).not.toBeInTheDocument();
+  });
+});
