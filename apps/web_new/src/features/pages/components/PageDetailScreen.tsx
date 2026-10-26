@@ -1,21 +1,23 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Pages detail shell (parity/specs/pages.md §4, §6.5–§6.9, PAGE-022–025,
-// 045–050, 079–080, 084/086). One record read by URL id with visit tracking
-// plus the shared collection read that feeds the sibling switcher; the
-// header cluster, the not-found panel, the centered record spinner, the
-// title and body surfaces, the navigation pane with its live outline/
-// statistics/assets/attribution, and the version overlay. The editor,
-// toolbar, header menu entries and collaboration client mount here in later
-// slices; this shell owns their seams and the URL protocol they share.
+// Pages detail shell (parity/specs/pages.md §4, §6.5–§6.9, §7, PAGE-022–025,
+// 045–050, 055–060, 079–080, 084/086). One record read by URL id with visit
+// tracking plus the shared collection read that feeds the sibling switcher;
+// the header cluster with its action controls and options menu, the
+// not-found panel, the centered record spinner, the title and body
+// surfaces, the navigation pane with its live outline/statistics/
+// assets/attribution, and the version overlay. The collaboration client mounts
+// here in a later slice; this shell owns their seams and the URL protocol
+// they share.
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { PageVersionDetail } from "@pidash/api-client";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { listPages, PAGE_ACCESS_PRIVATE, type PageVersionDetail } from "@pidash/api-client";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import { meQueryOptions } from "../../../core/session/queries.js";
 import { descriptionAssetSrc } from "../../../shared/editor/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
@@ -25,7 +27,9 @@ import { usePaletteWorkspaceMembers } from "../../../shared/shell/contextual/ind
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { pageDetailQueryOptions, pageVersionQueryOptions, pageVersionsQueryOptions } from "../api/detailQueries.js";
 import { usePageMark, usePageRename } from "../api/detailMutations.js";
+import { useDuplicatePage } from "../api/mutations.js";
 import { useAddSubPage } from "../api/nestedMutations.js";
+import { usePageArchiveWrite, usePageDeleteWrite, usePageVisibilityWrite } from "../api/rowMutations.js";
 import { pagesListQueryOptions } from "../api/queries.js";
 import { pageKeys } from "../api/keys.js";
 import { pageForestQueryOptions } from "../api/treeQueries.js";
@@ -46,11 +50,12 @@ import {
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 import { applyPageRestore, PAGE_VERSION_RESTORE_FAILED, PAGE_VERSION_RESTORE_SUCCESS } from "../lib/pageRestore.js";
 import { snapshotBodyHtml } from "../lib/versionContent.js";
-import { pageAncestors } from "../lib/pageNested.js";
+import { pageAncestors, pageDeleteKnownCount } from "../lib/pageNested.js";
 import { quickCreateAccess } from "../lib/pageCreate.js";
 import { copyPageLink } from "../lib/share.js";
 import { usePageSyncStatus } from "../lib/pageSync.js";
 import { PageBodySkeleton, PageDetailSpinner } from "./PageDetailLoading.js";
+import { PageDeleteDialog } from "./PageDeleteDialog.js";
 import { PageDetailPanel } from "./PageDetailPanel.js";
 import { PageDetailHeader } from "./PageDetailHeader.js";
 import { PageFloatingPaneToggle } from "./PageFloatingPaneToggle.js";
@@ -60,7 +65,7 @@ import { PageEditorSurface, PAGE_BODY_LABEL } from "./PageEditorSurface.js";
 import { PageHeadingPreview } from "./PageHeadingPreview.js";
 import { PageNavigationPane } from "./PageNavigationPane.js";
 import { PageVersionOverlay } from "./PageVersionOverlay.js";
-import { pageDetailHref, PAGE_UNTITLED } from "../lib/pageList.js";
+import { pageDetailHref, pageTabHref, PAGE_UNTITLED } from "../lib/pageList.js";
 import { formattingBarVisible, pageCanvasWidth, usePagePreferences } from "../lib/pagePreferences.js";
 import { useLivePageDocument } from "../lib/pageDocumentLive.js";
 import { pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
@@ -228,6 +233,28 @@ export function PageDetailScreen({
     [trailPool, page, ancestorsReady]
   );
   const addSubPage = useAddSubPage(workspaceSlug, projectId);
+  // The options menu drives the same shared writes as the list row menu
+  // (PAGE-057/059/060): duplication, visibility, shelve/restore and delete.
+  // The lock control and the star own their hooks inside the header.
+  const headerTarget = { workspaceSlug, projectId, page: { id: pageId, name: page?.name ?? "" } };
+  const duplicate = useDuplicatePage(workspaceSlug, projectId);
+  const visibility = usePageVisibilityWrite(headerTarget);
+  const archive = usePageArchiveWrite(headerTarget);
+  const deletion = usePageDeleteWrite(headerTarget);
+  const [deleteOpen, setDeleteOpen] = React.useState(false);
+  // A shelved page never reports its subtree size through the row, so the
+  // confirmation reads the direct children once the dialog is actually open
+  // (PAGE-089) — the same shape the connected row uses.
+  const knownDeleteCount = page === undefined ? undefined : pageDeleteKnownCount(page);
+  const deleteChildren = useQuery(
+    queryOptions({
+      queryKey: pageKeys.children(workspaceSlug, projectId, pageId, true),
+      queryFn: () => listPages(getAppClient(), workspaceSlug, projectId, { parent: pageId, includeArchived: true }),
+      staleTime: LIST_STALE_TIME_MS,
+      enabled: deleteOpen && knownDeleteCount === undefined,
+    })
+  );
+  const deleteCount = knownDeleteCount ?? deleteChildren.data?.length;
 
   // The skeleton is a cold-load surface: one committed paint of the
   // placeholder, then the stored body, and never again for this page in
@@ -340,6 +367,7 @@ export function PageDetailScreen({
     // content area (PAGE-045). The canvas column below is the page's
     // vertical scroller.
     <div data-testid="page-detail-screen" className="flex h-full min-h-0 flex-col overflow-x-clip">
+      {/* No onExport yet: the export entry and its dialog mount in NEWFRONT-846 (PAGE-074). */}
       <PageDetailHeader
         workspaceSlug={workspaceSlug}
         projectId={projectId}
@@ -351,11 +379,18 @@ export function PageDetailScreen({
         siblings={siblings}
         syncStatus={syncStatus}
         showStar={isProjectAuthorized(role)}
+        showLock={canManage}
+        canDuplicate={isProjectAuthorized(role)}
+        canManage={canManage}
         onSelectSibling={(id) => goTo(siblingHref(workspaceSlug, projectId, id))}
         onCopyLink={() => {
           void copyPageLink(workspaceSlug, projectId, page.id);
         }}
         onOpenHistory={() => onSearchChange(historySearch(search))}
+        onDuplicate={() => duplicate.mutate({ pageId: page.id })}
+        onToggleArchive={() => archive.toggleArchive(page.archived_at === null)}
+        onToggleVisibility={() => visibility.setVisibility(page.access !== PAGE_ACCESS_PRIVATE)}
+        onRequestDelete={() => setDeleteOpen(true)}
         onOpenPane={openPane}
         paneOpen={paneOpen}
         preferences={preferences}
@@ -471,6 +506,21 @@ export function PageDetailScreen({
           onSelectHeading={live.scrollToHeading}
         />
       </div>
+      <PageDeleteDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        pageName={page.name}
+        {...(deleteCount === undefined ? {} : { rehomedCount: deleteCount })}
+        pending={deletion.pending}
+        onConfirm={() => {
+          deletion.remove({
+            onDeleted: () => {
+              setDeleteOpen(false);
+              goTo(pageTabHref(workspaceSlug, projectId, "archived"));
+            },
+          });
+        }}
+      />
       {openVersionId === undefined ? null : (
         <PageVersionOverlay
           versionId={openVersionId}

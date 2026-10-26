@@ -2,28 +2,29 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Detail breadcrumb and action strip (parity/specs/pages.md §4.3, §6.5,
-// §7, PAGE-024/045/055/056, PAGE-084/086). Project context, the
-// always-present path back to the collection, the ancestor trail for a
-// nested page, the searchable sibling switcher, the sync indicator and the
-// action cluster: the navigation-pane toggle, favourite, link copy,
-// sub-page creation and the options menu. The two display toggles (full
-// width, sticky toolbar) write the page preference store (PAGE-072), and
-// the history entry writes the info pane. Later header slices add the
-// remaining menu entries at the same mount.
+// §7, PAGE-024/045/055/056/057/058/059/060, PAGE-084/086). Project
+// context, the always-present path back to the collection, the ancestor
+// trail for a nested page, the searchable sibling switcher, the shelved
+// marker, the sync indicator and the action cluster: the navigation-pane
+// toggle, favourite, lock, link copy, sub-page creation and the options
+// menu with its display toggles, hosted markup copy, history shortcut,
+// duplication, shelve/restore, visibility, delete and hosted export.
 
-import { Breadcrumbs, IconButton, Menu, type MenuAction } from "@pidash/kit";
+import { Breadcrumbs, IconButton, Menu } from "@pidash/kit";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Ellipsis, Link2, PanelRight } from "lucide-react";
 import * as React from "react";
 
 import { ProjectMark } from "../../../shared/pickers/ProjectMark.js";
-import type { PageRow as PageRowData } from "@pidash/api-client";
+import { PAGE_ACCESS_PRIVATE, type PageRow as PageRowData } from "@pidash/api-client";
 import { pageDetailHref, pageTabHref } from "../lib/pageList.js";
 import type { PageSiblingOption } from "../lib/pageDetail.js";
-import { PAGE_ACTION_ADD_SUB_PAGE, type PageAncestor } from "../lib/pageNested.js";
-import { pageDisplayMenuItems } from "../lib/pageDisplayMenu.js";
+import type { PageAncestor } from "../lib/pageNested.js";
+import { pageArchivedMarker, pageDetailMenuItems } from "../lib/pageDetailMenu.js";
+export { PAGE_HISTORY_ITEM } from "../lib/pageDetailMenu.js";
 import type { PagePreferences } from "../lib/pagePreferences.js";
-import { PageFavoriteStar } from "./PageFavoriteStar.js";
+import { PageDetailFavoriteStar } from "./PageDetailFavoriteStar.js";
+import { PageDetailLockControl } from "./PageDetailLockControl.js";
 import { PageSiblingSwitcher } from "./PageSiblingSwitcher.js";
 import { PageSyncBadge } from "./PageSyncBadge.js";
 import { getPageBodyActions, subscribePageBodyActions } from "../lib/pageBodyActions.js";
@@ -33,7 +34,6 @@ export const PAGE_CRUMB = "Pages";
 export const PAGE_COPY_LINK_LABEL = "Copy link";
 export const PAGE_COPIED_LINK_LABEL = "Copied link";
 export const PAGE_OPTIONS_LABEL = "Page options";
-export const PAGE_HISTORY_ITEM = "Version history";
 /**
  * The header-toggle name. It deliberately differs from the floating
  * toggle's "Open navigation pane": the floating control exists only when
@@ -53,15 +53,27 @@ export interface PageDetailHeaderProps {
   projectName: string;
   projectLogo: Record<string, unknown>;
   projectIdentifier: string;
-  page: Pick<PageRowData, "id" | "name" | "is_favorite" | "logo_props">;
+  page: Pick<PageRowData, "id" | "name" | "is_favorite" | "is_locked" | "access" | "archived_at" | "logo_props">;
   /** Every visible ancestor, outermost first (PAGE-086). */
   ancestors?: readonly PageAncestor[];
   siblings: readonly PageSiblingOption[];
   syncStatus: PageSyncStatus;
   showStar: boolean;
+  /** The page's owner or a project admin may use the lock control (PAGE-058). */
+  showLock: boolean;
+  /** Members and admins may copy a page (PAGE-060). */
+  canDuplicate: boolean;
+  /** The page's owner or a project admin may shelve, switch visibility, delete (PAGE-060). */
+  canManage: boolean;
   onSelectSibling: (pageId: string) => void;
   onCopyLink: () => void;
   onOpenHistory: () => void;
+  onDuplicate: () => void;
+  onToggleArchive: () => void;
+  onToggleVisibility: () => void;
+  onRequestDelete: () => void;
+  /** Opens the registered export dialog; absent until the exports area mounts it (PAGE-074). */
+  onExport?: (() => void) | undefined;
   /** Reveal the navigation pane (PAGE-045). */
   onOpenPane: () => void;
   /** Whether the navigation pane is currently open (PAGE-045). */
@@ -72,18 +84,6 @@ export interface PageDetailHeaderProps {
   preferences: PagePreferences;
   /** Write one display preference (local only, PAGE-072). */
   onPreferenceChange: (patch: Partial<PagePreferences>) => void;
-}
-
-/** The options entries: history, the registered body action and sub-page creation. */
-export function pageOptionsItems(
-  onOpenHistory: () => void,
-  body = getPageBodyActions(),
-  onAddSubPage?: (() => void) | undefined
-): MenuAction[] {
-  const items: MenuAction[] = [{ label: PAGE_HISTORY_ITEM, onSelect: onOpenHistory }];
-  if (body !== null) items.push({ label: body.copyMarkdownLabel, onSelect: () => void body.copyMarkdown() });
-  if (onAddSubPage !== undefined) items.push({ label: PAGE_ACTION_ADD_SUB_PAGE, onSelect: onAddSubPage });
-  return items;
 }
 
 export function PageDetailHeader({
@@ -97,9 +97,17 @@ export function PageDetailHeader({
   siblings,
   syncStatus,
   showStar,
+  showLock,
+  canDuplicate,
+  canManage,
   onSelectSibling,
   onCopyLink,
   onOpenHistory,
+  onDuplicate,
+  onToggleArchive,
+  onToggleVisibility,
+  onRequestDelete,
+  onExport,
   onOpenPane,
   paneOpen,
   onAddSubPage,
@@ -123,6 +131,28 @@ export function PageDetailHeader({
     if (timerRef.current !== null) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => setCopied(false), PAGE_COPY_CONFIRM_MS);
   }
+
+  const archived = page.archived_at !== null;
+  const menuItems = pageDetailMenuItems(
+    {
+      canDuplicate,
+      canManage,
+      archived,
+      restricted: page.access === PAGE_ACCESS_PRIVATE,
+      body: bodyActions,
+    },
+    {
+      onOpenHistory,
+      onDuplicate,
+      onToggleArchive,
+      onToggleVisibility,
+      onRequestDelete,
+      ...(onExport === undefined ? {} : { onExport }),
+      ...(onAddSubPage === undefined ? {} : { onAddSubPage }),
+    },
+    preferences,
+    onPreferenceChange
+  );
 
   return (
     <div
@@ -172,6 +202,11 @@ export function PageDetailHeader({
         options={siblings}
         onSelect={onSelectSibling}
       />
+      {page.archived_at === null ? null : (
+        <span data-testid="page-archived-marker" className="text-caption shrink-0 text-(--text-muted)">
+          {pageArchivedMarker(page.archived_at)}
+        </span>
+      )}
       <span className="flex-1" aria-hidden="true" />
       <PageSyncBadge status={syncStatus} />
       <IconButton
@@ -183,7 +218,8 @@ export function PageDetailHeader({
       >
         <PanelRight size={16} strokeWidth={1.5} aria-hidden="true" />
       </IconButton>
-      {showStar ? <PageFavoriteStar workspaceSlug={workspaceSlug} projectId={projectId} page={page} /> : null}
+      {showStar ? <PageDetailFavoriteStar workspaceSlug={workspaceSlug} projectId={projectId} page={page} /> : null}
+      {showLock ? <PageDetailLockControl workspaceSlug={workspaceSlug} projectId={projectId} page={page} /> : null}
       <IconButton label={copied ? PAGE_COPIED_LINK_LABEL : PAGE_COPY_LINK_LABEL} size="small" onClick={handleCopy}>
         <Link2 size={16} strokeWidth={1.5} aria-hidden="true" />
       </IconButton>
@@ -193,10 +229,7 @@ export function PageDetailHeader({
             <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
           </IconButton>
         }
-        items={[
-          ...pageDisplayMenuItems(preferences, onPreferenceChange),
-          ...pageOptionsItems(onOpenHistory, bodyActions, onAddSubPage),
-        ]}
+        items={menuItems}
       />
     </div>
   );

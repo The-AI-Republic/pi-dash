@@ -25,15 +25,26 @@ function toggle(label: string, checked: boolean, onSelect: () => void): MenuActi
   };
 }
 
-/** The two display rows, in the pinned order, over the current values. */
+export interface PageDisplayMenuOptions {
+  /** Shelved pages hide the sticky-toolbar toggle (spec §7.3, PAGE-059). */
+  hideStickyToolbar?: boolean | undefined;
+}
+
+/** The display rows, in the pinned order, over the current values. */
 export function pageDisplayMenuItems(
   preferences: PagePreferences,
-  onChange: (patch: Partial<PagePreferences>) => void
+  onChange: (patch: Partial<PagePreferences>) => void,
+  options: PageDisplayMenuOptions = {}
 ): MenuAction[] {
-  return [
+  const rows = [
     toggle(PAGE_FULL_WIDTH_LABEL, preferences.full_width, () => onChange({ full_width: !preferences.full_width })),
-    toggle(PAGE_STICKY_TOOLBAR_LABEL, preferences.sticky_toolbar, () =>
-      onChange({ sticky_toolbar: !preferences.sticky_toolbar })
-    ),
   ];
+  if (options.hideStickyToolbar !== true) {
+    rows.push(
+      toggle(PAGE_STICKY_TOOLBAR_LABEL, preferences.sticky_toolbar, () =>
+        onChange({ sticky_toolbar: !preferences.sticky_toolbar })
+      )
+    );
+  }
+  return rows;
 }
