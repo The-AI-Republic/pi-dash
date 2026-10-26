@@ -26,7 +26,7 @@ from .test_project_binding_detail import bind_detail, _installed
 from .test_project_bindings import bind_list
 from .test_workspace_scheduler_detail import _create, sched_detail
 
-RESOLVER_404 = b'{"error": "Page not found.}'
+RESOLVER_404 = b'{"error": "Page not found."}'
 
 
 def assert_resolver_404(response):
