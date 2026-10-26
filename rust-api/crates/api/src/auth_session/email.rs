@@ -745,11 +745,7 @@ async fn save_user_data(
     ip: Option<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
-    let token = format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    );
+    let token = fresh_user_token();
     sqlx::query(
         r#"UPDATE "users" SET "last_login_medium" = 'email', "last_active" = $2,
            "last_login_time" = $2, "last_login_ip" = $3, "last_login_uagent" = $4,
@@ -763,6 +759,70 @@ async fn save_user_data(
     .bind(token)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Fresh `User.save()` token: `uuid4().hex + uuid4().hex`
+/// (`db/models/user.py:174`).
+pub(crate) fn fresh_user_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Change/set-password `UPDATE`: the password write with the
+/// `User.save()` column effects folded in
+/// (`db/models/user.py:169-187`) — `updated_at` (`auto_now`), the
+/// `token`/`token_updated_at` rotation when a token is already in use
+/// (PB-1079), the empty-`display_name` fill from the email prefix, and
+/// `is_staff` for superusers — plus the `user_logged_in` signal's
+/// `last_login` bump. `$1` is the encoded password, `$2` the user id,
+/// `$3` a fresh token, `$4` the rotation timestamp. The `email`
+/// re-normalization in `save()` is a no-op on these paths (the address
+/// never changes), so it stays out.
+const PASSWORD_WRITE_WITH_LOGIN_SQL: &str = r#"UPDATE users SET password = $1,
+    is_password_autoset = false, last_login = now(), updated_at = now(),
+    token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END,
+    token_updated_at = CASE WHEN token_updated_at IS NOT NULL THEN $4 ELSE token_updated_at END,
+    display_name = CASE WHEN COALESCE(display_name, '') = '' THEN split_part(email, '@', 1) ELSE display_name END,
+    is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END
+    WHERE id = $2"#;
+
+/// Reset-password `UPDATE`: same `User.save()` effects as
+/// [`PASSWORD_WRITE_WITH_LOGIN_SQL`] but no `login()` call follows,
+/// so no `last_login` bump. Same binds.
+const PASSWORD_WRITE_SQL: &str = r#"UPDATE users SET password = $1,
+    is_password_autoset = false, updated_at = now(),
+    token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END,
+    token_updated_at = CASE WHEN token_updated_at IS NOT NULL THEN $4 ELSE token_updated_at END,
+    display_name = CASE WHEN COALESCE(display_name, '') = '' THEN split_part(email, '@', 1) ELSE display_name END,
+    is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END
+    WHERE id = $2"#;
+
+/// Password write shared by change/set/reset-password: the encoded
+/// password plus the `User.save()` column effects above.
+/// `stamp_last_login` selects the change/set-password twin (the
+/// `user_logged_in` signal bumps `last_login`) over reset-password.
+pub(crate) async fn write_password_with_save_effects(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    encoded: &str,
+    stamp_last_login: bool,
+) -> Result<(), sqlx::Error> {
+    let sql = if stamp_last_login {
+        PASSWORD_WRITE_WITH_LOGIN_SQL
+    } else {
+        PASSWORD_WRITE_SQL
+    };
+    sqlx::query(sql)
+        .bind(encoded)
+        .bind(user_id)
+        .bind(fresh_user_token())
+        .bind(chrono::Utc::now())
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
