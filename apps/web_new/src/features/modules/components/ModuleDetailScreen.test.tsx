@@ -400,14 +400,19 @@ describe("ModuleDetailScreen", () => {
     expect(routerHarness.navigate).not.toHaveBeenCalled();
   });
 
-  it("offers the link entries between Edit and Delete to an editor", async () => {
+  it("offers the link entries between Edit and Archive to an editor", async () => {
     setup();
     const actions = screen.getByTestId("extra-actions");
     const trigger = within(actions).getByRole("button", { name: "Module actions" });
     await waitFor(() => expect(trigger).toBeEnabled());
     fireEvent.click(trigger);
-    const titles = (await screen.findAllByRole("menuitem")).map((entry) => entry.textContent?.trim());
-    expect(titles).toEqual(["Edit", "Open in new tab", "Copy link", "Delete"]);
+    // Both slices share one menu: slice H's link entries sit between Edit
+    // and slice G's Archive (gated with its reason on an unfinished
+    // module), then Delete.
+    const titles = (await screen.findAllByRole("menuitem")).map(
+      (entry) => entry.querySelector("[data-menu-title]")?.textContent?.trim() ?? entry.textContent?.trim()
+    );
+    expect(titles).toEqual(["Edit", "Open in new tab", "Copy link", "Archive", "Delete"]);
   });
 
   it("shows a guest only the read-only link entries", async () => {

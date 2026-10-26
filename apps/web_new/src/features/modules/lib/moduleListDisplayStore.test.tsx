@@ -13,12 +13,20 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { StorageLike } from "./listLayoutStore.js";
 import {
+  ARCHIVED_MODULES_DISPLAY_STORAGE_KEY,
+  archivedModulesDisplayScope,
+  currentArchivedProjectDisplay,
   MODULES_LIST_DISPLAY_STORAGE_KEY,
+  modulesListDisplayScope,
   parseDisplayRecord,
+  readArchivedProjectDisplay,
   readDisplayRecord,
   readProjectDisplay,
+  resetArchivedDisplayCache,
   resetModuleDisplayCache,
+  useArchivedModuleDisplay,
   useModuleListDisplay,
+  writeArchivedProjectDisplay,
   writeProjectDisplay,
 } from "./moduleListDisplayStore.js";
 
@@ -207,5 +215,92 @@ describe("useModuleListDisplay", () => {
     expect(screen.getByTestId("query")).toHaveTextContent("");
     expect(screen.getByTestId("sort")).toHaveTextContent("name:ascending");
     expect(screen.getByTestId("status")).toBeEmptyDOMElement();
+  });
+});
+
+describe("archived screen scope", () => {
+  it("names its own browser record, apart from the live list's", () => {
+    expect(ARCHIVED_MODULES_DISPLAY_STORAGE_KEY).toBe("archived_modules_display");
+    expect(ARCHIVED_MODULES_DISPLAY_STORAGE_KEY).not.toBe(MODULES_LIST_DISPLAY_STORAGE_KEY);
+    expect(archivedModulesDisplayScope.storageKey).toBe(ARCHIVED_MODULES_DISPLAY_STORAGE_KEY);
+  });
+
+  it("writes and reads the archived record without touching the live one", () => {
+    const storage = memoryStorage();
+    writeProjectDisplay("p1", { ...readProjectDisplay("p1", storage), query: "live" }, storage);
+    writeArchivedProjectDisplay("p1", { ...readArchivedProjectDisplay("p1", storage), query: "archived" }, storage);
+    expect(readArchivedProjectDisplay("p1", storage).query).toBe("archived");
+    expect(readProjectDisplay("p1", storage).query).toBe("live");
+    expect(archivedModulesDisplayScope.readRecord(storage)).toHaveProperty("p1");
+    expect(modulesListDisplayScope.readRecord(storage)).toHaveProperty("p1");
+  });
+
+  it("gives the current project the remembered archived narrowing", () => {
+    const storage = memoryStorage({ [ARCHIVED_MODULES_DISPLAY_STORAGE_KEY]: JSON.stringify({ p1: DISPLAY }) });
+    const current = currentArchivedProjectDisplay("p1", storage);
+    expect(current.query).toBe("alpha");
+    expect(current.filters.lead).toEqual(["u1"]);
+    // Repeat reads share the reference until the next write.
+    expect(currentArchivedProjectDisplay("p1", storage)).toBe(current);
+  });
+
+  it("defaults an unknown project to an unnarrowed archive", () => {
+    const current = currentArchivedProjectDisplay("p9", memoryStorage());
+    expect(current.query).toBe("");
+    expect(current.sort).toEqual({ key: "name", direction: "ascending" });
+    expect(current.filters).toEqual({
+      favorites: false,
+      status: [],
+      lead: [],
+      members: [],
+      "start-date": [],
+      "due-date": [],
+    });
+  });
+
+  it("drops cached values and subscribers when reset", () => {
+    const storage = memoryStorage();
+    const before = currentArchivedProjectDisplay("p1", storage);
+    resetArchivedDisplayCache();
+    expect(currentArchivedProjectDisplay("p1", storage)).not.toBe(before);
+  });
+
+  it("follows its own writes and never notifies the live list's hook", () => {
+    const storage = memoryStorage();
+    function ArchivedProbe(): React.ReactElement {
+      const { display, setQuery } = useArchivedModuleDisplay("p1", storage);
+      return (
+        <div>
+          <span data-testid="archived-query">{display.query}</span>
+          <span data-testid="archived-lead">{display.filters.lead.join(",")}</span>
+          <button onClick={() => setQuery("atlas")}>set-query</button>
+        </div>
+      );
+    }
+    function useArchivedWithFilters(): ReturnType<typeof useArchivedModuleDisplay> {
+      return useArchivedModuleDisplay("p1", storage);
+    }
+    function ArchivedFiltersProbe(): React.ReactElement {
+      const { setFilters, display } = useArchivedWithFilters();
+      return <button onClick={() => setFilters({ ...display.filters, lead: ["u1"] })}>set-lead</button>;
+    }
+    function LiveProbe(): React.ReactElement {
+      return <span data-testid="live-query">{useModuleListDisplay("p1", storage).display.query}</span>;
+    }
+    render(
+      <>
+        <ArchivedProbe />
+        <ArchivedFiltersProbe />
+        <LiveProbe />
+      </>
+    );
+    act(() => screen.getByRole("button", { name: "set-query" }).click());
+    expect(screen.getByTestId("archived-query")).toHaveTextContent("atlas");
+    expect(screen.getByTestId("live-query")).toHaveTextContent("");
+    expect(readArchivedProjectDisplay("p1", storage).query).toBe("atlas");
+    expect(readProjectDisplay("p1", storage).query).toBe("");
+    act(() => screen.getByRole("button", { name: "set-lead" }).click());
+    expect(screen.getByTestId("archived-lead")).toHaveTextContent("u1");
+    expect(readArchivedProjectDisplay("p1", storage).filters.lead).toEqual(["u1"]);
   });
 });

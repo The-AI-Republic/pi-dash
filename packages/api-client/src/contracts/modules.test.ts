@@ -88,6 +88,7 @@ const ARCHIVED_ROW = {
   status: "completed",
   lead_id: UUID2,
   member_ids: [UUID2],
+  sort_order: 1024,
   total_issues: 2,
   is_favorite: false,
   cancelled_issues: 0,
@@ -108,6 +109,19 @@ describe("listArchivedModules", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.status).toBe("completed");
     expect(rows[0]?.member_ids).toEqual([UUID2]);
+  });
+
+  it("rejects a row without the manual placement the archived screen sorts by", async () => {
+    const { sort_order: _dropped, ...rest } = ARCHIVED_ROW;
+    void _dropped;
+    const { client } = stubClient([rest]);
+    await expect(listArchivedModules(client, "acme", UUID2)).rejects.toThrow();
+  });
+
+  it("reads the manual placement a row carries", async () => {
+    const { client } = stubClient([ARCHIVED_ROW]);
+    const rows = await listArchivedModules(client, "acme", UUID2);
+    expect(rows[0]?.sort_order).toBe(1024);
   });
 
   it("rejects a row without the progress counts", async () => {

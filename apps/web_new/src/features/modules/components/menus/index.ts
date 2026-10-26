@@ -5,6 +5,7 @@
 // the archived screen and the detail header all mount entries from
 // this one model, never a second menu.
 
+export { moduleArchiveMenuEntry, type ModuleArchiveEntryInput } from "./moduleArchiveEntry.js";
 export { moduleDetailMenuEntries } from "./moduleDetailMenuEntries.js";
 export {
   MODULE_ARCHIVE_GATE_HINT,

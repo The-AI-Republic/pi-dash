@@ -2,13 +2,20 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+const navigate = vi.hoisted(() => vi.fn());
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useNavigate: () => navigate,
+}));
+
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   createMemoryHistory,
   createRootRoute,
   createRoute,
   createRouter,
+  Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
 import type { ProjectDetail } from "@pidash/api-client";
@@ -17,10 +24,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../../../../core/api/client.js";
 import { authKeys } from "../../../../../../../features/auth/index.js";
+import { makeModuleRow } from "../../../../../../../features/modules/testing.js";
+import { FULL_SCREEN_PORTAL_ID } from "../../../../../../../shared/shell/document.js";
 import { Route } from "./index.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
+const ARCHIVED_ID = "323e4567-e89b-12d3-a456-426614174201";
 
 function detailRow(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
   return {
@@ -51,47 +61,109 @@ function detailRow(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
   };
 }
 
-function renderTab(row: ProjectDetail | undefined) {
+function archivedRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...makeModuleRow({ name: "Archived alpha", status: "completed" }),
+    description_text: null,
+    description_html: null,
+    archived_at: "2026-03-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function renderTab(
+  row: ProjectDetail | undefined,
+  search: Record<string, unknown> = {},
+  archived: Record<string, unknown>[] = []
+) {
+  document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
   vi.stubGlobal("matchMedia", () => ({
     matches: false,
     addEventListener: () => undefined,
     removeEventListener: () => undefined,
   }));
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme", projectId: PROJECT_ID });
+  vi.spyOn(Route, "useSearch").mockReturnValue(search as never);
   const Component = Route.options.component;
   if (!Component) throw new Error("archived modules tab has no component");
-  createAppClient("https://api.test", () => new Promise<never>(() => {}));
+  const archivedUrl = `/api/workspaces/acme/projects/${PROJECT_ID}/archived-modules/`;
+  createAppClient("https://api.test", (async (url: string) => {
+    if (url.endsWith(archivedUrl)) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(archived),
+      };
+    }
+    return new Promise<never>(() => {});
+  }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (row !== undefined) queryClient.setQueryData(authKeys.project("acme", PROJECT_ID), row);
-  const rootRoute = createRootRoute({
+  const rootRoute = createRootRoute({ component: () => <Outlet /> });
+  const tabPath = `/acme/projects/${PROJECT_ID}/archives/modules`;
+  const tabRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: tabPath,
+    validateSearch: (search: Record<string, unknown>) => search,
     component: () => (
       <QueryClientProvider client={queryClient}>
         <Component />
       </QueryClientProvider>
     ),
   });
-  const homeRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: () => null });
   const router = createRouter({
-    routeTree: rootRoute.addChildren([homeRoute]),
-    history: createMemoryHistory({ initialEntries: ["/"] }),
+    routeTree: rootRoute.addChildren([tabRoute]),
+    history: createMemoryHistory({ initialEntries: [tabPath] }),
+    defaultPreload: false,
   });
   render(<RouterProvider router={router} />);
   return router;
 }
 
 afterEach(() => {
+  navigate.mockReset();
   resetAppClient();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe("archived modules tab route", () => {
+  it("keeps a usable peek key and drops an unusable one from the address", () => {
+    const validate = Route.options.validateSearch as (search: Record<string, unknown>) => Record<string, unknown>;
+    expect(validate({ peekModule: ARCHIVED_ID, view: "list" })).toEqual({ peekModule: ARCHIVED_ID, view: "list" });
+    expect(validate({ peekModule: "not-a-module" })).toEqual({});
+  });
+
   it("mounts the shell with the active tab and per-tab title", async () => {
     renderTab(detailRow());
 
     await screen.findByTestId("archives-shell");
     expect(screen.getByRole("link", { name: "Modules" })).toHaveAttribute("aria-current", "page");
     await waitFor(() => expect(document.title).toBe("Web - Archived modules"));
+  });
+
+  it("mounts the archived modules screen in the shell slot", async () => {
+    renderTab(detailRow(), {});
+
+    expect(await screen.findByTestId("archived-modules-screen")).toBeInTheDocument();
+    expect(screen.getByTestId("archived-modules-header")).toBeInTheDocument();
+  });
+
+  it("opens the archived peek the address names", async () => {
+    renderTab(detailRow(), { peekModule: "323e4567-e89b-12d3-a456-426614174002" });
+
+    expect(await screen.findByTestId("archived-modules-screen")).toBeInTheDocument();
+    expect(screen.getByTestId("modules-peek-skeleton")).toBeInTheDocument();
+  });
+
+  it("writes the peeked module into the address from a row", async () => {
+    renderTab(detailRow(), {}, [archivedRow({ id: ARCHIVED_ID })]);
+
+    await screen.findAllByTestId("modules-row");
+    fireEvent.click(screen.getByRole("button", { name: "Open preview of Archived alpha" }));
+
+    expect(navigate).toHaveBeenCalledWith({ to: ".", search: { peekModule: ARCHIVED_ID }, replace: true });
   });
 
   it("lands on the work-items tab when the modules flag is off", async () => {

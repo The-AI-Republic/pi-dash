@@ -153,6 +153,7 @@ function archivedFixture(overrides: Partial<ArchivedModuleDetail> = {}): Archive
     status: "completed",
     lead_id: null,
     member_ids: [],
+    sort_order: 0,
     total_issues: 2,
     completed_issues: 2,
     cancelled_issues: 0,

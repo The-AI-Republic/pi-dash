@@ -4,6 +4,8 @@
 // Module dialog exports (MOD-003/009/022–025). Surfaces outside the
 // modules feature open the dialogs only through these openers.
 
+export { ModuleArchiveDialog } from "./ModuleArchiveDialog.js";
+export type { ModuleArchiveDialogProps, ModuleArchiveTarget } from "./ModuleArchiveDialog.js";
 export { ModuleCreateAction, MODULE_ADD_LABEL, MODULE_ADD_LABEL_COMPACT } from "./ModuleCreateAction.js";
 export type { ModuleCreateActionProps } from "./ModuleCreateAction.js";
 export { ModuleDeleteDialog } from "./ModuleDeleteDialog.js";

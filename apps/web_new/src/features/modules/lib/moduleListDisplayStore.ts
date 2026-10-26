@@ -29,6 +29,13 @@ import {
 /** Browser record holding every project's list search/sort/filters. */
 export const MODULES_LIST_DISPLAY_STORAGE_KEY = "modules_list_display";
 
+/**
+ * Browser record for the archived-modules screen's own search/sort/filters
+ * (§13.3.1: narrowing one list never changes the other). Same encoding,
+ * separate record.
+ */
+export const ARCHIVED_MODULES_DISPLAY_STORAGE_KEY = "archived_modules_display";
+
 const displaySchema = z.object({
   query: z.string(),
   sort: z.object({ key: z.enum(MODULE_SORT_KEYS), direction: z.enum(MODULE_SORT_DIRECTIONS) }),
@@ -61,6 +68,24 @@ export interface ModuleListDisplay {
 
 /** The record shape: project id → display state. */
 export type ModuleListDisplayRecord = Record<string, ModuleListDisplay>;
+
+/** One named browser record plus the live store layered over it. */
+export interface ModuleDisplayScope {
+  /** Browser key the scope writes to. */
+  storageKey: string;
+  /** The full record currently stored (empty for an absent or corrupt one). */
+  readRecord: (storage?: StorageLike | undefined) => ModuleListDisplayRecord;
+  /** One project's remembered display, or the documented defaults. */
+  readProject: (projectId: string, storage?: StorageLike | undefined) => ModuleListDisplay;
+  /** Write one project's display, keeping every other project's entry. */
+  writeProject: (projectId: string, display: ModuleListDisplay, storage?: StorageLike | undefined) => void;
+  /** The project's display, stable between renders until the next write. */
+  currentProject: (projectId: string, storage?: StorageLike | undefined) => ModuleListDisplay;
+  /** The project's display with setters, following every scope write. */
+  useDisplay: (projectId: string, storage?: StorageLike | undefined) => ModuleListDisplayHandle;
+  /** Drop every cached value and subscriber (sign-out and tests). */
+  reset: () => void;
+}
 
 function defaults(): ModuleListDisplay {
   return { query: "", sort: { ...DEFAULT_MODULE_SORT }, filters: emptyModuleFilters() };
@@ -112,81 +137,126 @@ export function parseDisplayRecord(raw: string | null): ModuleListDisplayRecord 
   return record;
 }
 
-/** The full record currently stored (empty for an absent or corrupt one). */
-export function readDisplayRecord(storage: StorageLike | undefined = defaultStorage()): ModuleListDisplayRecord {
-  if (storage === undefined) return {};
-  try {
-    return parseDisplayRecord(storage.getItem(MODULES_LIST_DISPLAY_STORAGE_KEY));
-  } catch {
-    return {};
-  }
-}
-
-/** One project's remembered display; the documented defaults when never chosen. */
-export function readProjectDisplay(
-  projectId: string,
-  storage: StorageLike | undefined = defaultStorage()
-): ModuleListDisplay {
-  return readDisplayRecord(storage)[projectId] ?? defaults();
-}
-
-// ---------------------------------------------------------------- live store
+// ---------------------------------------------------------------- scopes
 
 type Listener = () => void;
-const listeners = new Set<Listener>();
-/** The last written value per project; a refused write keeps this visit's choice. */
-const memory = new Map<string, ModuleListDisplay>();
-/** Values read back from storage, so repeated renders share one reference. */
-const readCache = new Map<string, ModuleListDisplay>();
 
-function notify(): void {
-  readCache.clear();
-  for (const listener of listeners) listener();
-}
+/**
+ * One browser record and its live store. Each scope owns its listeners
+ * and caches, so the live list and the archived screen share one
+ * implementation without ever notifying each other's subscribers.
+ */
+function createDisplayScope(storageKey: string): ModuleDisplayScope {
+  const listeners = new Set<Listener>();
+  /** The last written value per project; a refused write keeps this visit's choice. */
+  const memory = new Map<string, ModuleListDisplay>();
+  /** Values read back from storage, so repeated renders share one reference. */
+  const readCache = new Map<string, ModuleListDisplay>();
 
-function subscribe(listener: Listener): () => void {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
+  function notify(): void {
+    readCache.clear();
+    for (const listener of listeners) listener();
+  }
+
+  function subscribe(listener: Listener): () => void {
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  }
+
+  function readRecord(storage: StorageLike | undefined = defaultStorage()): ModuleListDisplayRecord {
+    if (storage === undefined) return {};
+    try {
+      return parseDisplayRecord(storage.getItem(storageKey));
+    } catch {
+      return {};
+    }
+  }
+
+  function readProject(projectId: string, storage: StorageLike | undefined = defaultStorage()): ModuleListDisplay {
+    return readRecord(storage)[projectId] ?? defaults();
+  }
+
+  function writeProject(
+    projectId: string,
+    display: ModuleListDisplay,
+    storage: StorageLike | undefined = defaultStorage()
+  ): void {
+    if (storage === undefined || projectId === "") return;
+    const record = readRecord(storage);
+    try {
+      storage.setItem(storageKey, JSON.stringify({ ...record, [projectId]: display }));
+    } catch {
+      // A refused write keeps the in-memory choice for this visit.
+    }
+    notify();
+  }
+
+  function currentProject(projectId: string, storage: StorageLike | undefined = defaultStorage()): ModuleListDisplay {
+    const overlay = memory.get(projectId);
+    if (overlay !== undefined) return overlay;
+    const cached = readCache.get(projectId);
+    if (cached !== undefined) return cached;
+    const value = readProject(projectId, storage);
+    readCache.set(projectId, value);
+    return value;
+  }
+
+  function replace(projectId: string, next: ModuleListDisplay, storage: StorageLike | undefined): void {
+    memory.set(projectId, next);
+    writeProject(projectId, next, storage);
+  }
+
+  return {
+    storageKey,
+    readRecord,
+    readProject,
+    writeProject,
+    currentProject,
+    reset: () => {
+      memory.clear();
+      readCache.clear();
+      listeners.clear();
+    },
+    useDisplay(projectId: string, storage: StorageLike | undefined = defaultStorage()): ModuleListDisplayHandle {
+      // One snapshot reader for the client and the server render, so both
+      // sides agree on the value and the identity between writes.
+      const snapshot = React.useCallback(() => currentProject(projectId, storage), [projectId, storage]);
+      const display = React.useSyncExternalStore(subscribe, snapshot, snapshot);
+      const update = React.useCallback(
+        (patch: Partial<ModuleListDisplay>) =>
+          replace(projectId, { ...currentProject(projectId, storage), ...patch }, storage),
+        [projectId, storage]
+      );
+      return {
+        display,
+        setQuery: React.useCallback((query: string) => update({ query }), [update]),
+        setSort: React.useCallback((sort: ModuleSort) => update({ sort }), [update]),
+        setFilters: React.useCallback((filters: ModuleListFilters) => update({ filters }), [update]),
+      };
+    },
   };
 }
 
-/** Write one project's display, keeping every other project's entry. */
-export function writeProjectDisplay(
-  projectId: string,
-  display: ModuleListDisplay,
-  storage: StorageLike | undefined = defaultStorage()
-): void {
-  if (storage === undefined || projectId === "") return;
-  const record = readDisplayRecord(storage);
-  try {
-    storage.setItem(MODULES_LIST_DISPLAY_STORAGE_KEY, JSON.stringify({ ...record, [projectId]: display }));
-  } catch {
-    // A refused write keeps the in-memory choice for this visit.
-  }
-  notify();
-}
+/** The active modules list's record (§13.3.1). */
+export const modulesListDisplayScope = createDisplayScope(MODULES_LIST_DISPLAY_STORAGE_KEY);
 
-/** The project's display, stable between renders until the next write. */
-export function currentProjectDisplay(
-  projectId: string,
-  storage: StorageLike | undefined = defaultStorage()
-): ModuleListDisplay {
-  const overlay = memory.get(projectId);
-  if (overlay !== undefined) return overlay;
-  const cached = readCache.get(projectId);
-  if (cached !== undefined) return cached;
-  const value = readProjectDisplay(projectId, storage);
-  readCache.set(projectId, value);
-  return value;
-}
+/** The archived-modules screen's record, kept apart from the live list's. */
+export const archivedModulesDisplayScope = createDisplayScope(ARCHIVED_MODULES_DISPLAY_STORAGE_KEY);
 
-/** Reset the module-level caches and subscribers (sign-out and tests). */
-export function resetModuleDisplayCache(): void {
-  memory.clear();
-  readCache.clear();
-  listeners.clear();
-}
+// ------------------------------------------------------- live list (scope 1)
+
+/** The full live-list record currently stored. */
+export const readDisplayRecord = modulesListDisplayScope.readRecord;
+/** One project's remembered live-list display; defaults when never chosen. */
+export const readProjectDisplay = modulesListDisplayScope.readProject;
+/** Write one project's live-list display, keeping every other entry. */
+export const writeProjectDisplay = modulesListDisplayScope.writeProject;
+/** The project's live-list display, stable between renders. */
+export const currentProjectDisplay = modulesListDisplayScope.currentProject;
+/** Reset the live-list caches and subscribers (sign-out and tests). */
+export const resetModuleDisplayCache = modulesListDisplayScope.reset;
 
 export interface ModuleListDisplayHandle {
   display: ModuleListDisplay;
@@ -195,34 +265,23 @@ export interface ModuleListDisplayHandle {
   setFilters: (filters: ModuleListFilters) => void;
 }
 
-function replace(projectId: string, next: ModuleListDisplay, storage: StorageLike | undefined): void {
-  memory.set(projectId, next);
-  writeProjectDisplay(projectId, next, storage);
-}
-
 /**
  * The project's active search, ordering and filters with setters. Writes
  * through to storage and notifies subscribers so another mounted list for
  * the same project follows along.
  */
-export function useModuleListDisplay(
-  projectId: string,
-  storage: StorageLike | undefined = defaultStorage()
-): ModuleListDisplayHandle {
-  const display = React.useSyncExternalStore(
-    subscribe,
-    () => currentProjectDisplay(projectId, storage),
-    () => currentProjectDisplay(projectId, storage)
-  );
-  const update = React.useCallback(
-    (patch: Partial<ModuleListDisplay>) =>
-      replace(projectId, { ...currentProjectDisplay(projectId, storage), ...patch }, storage),
-    [projectId, storage]
-  );
-  return {
-    display,
-    setQuery: React.useCallback((query: string) => update({ query }), [update]),
-    setSort: React.useCallback((sort: ModuleSort) => update({ sort }), [update]),
-    setFilters: React.useCallback((filters: ModuleListFilters) => update({ filters }), [update]),
-  };
-}
+export const useModuleListDisplay = modulesListDisplayScope.useDisplay;
+
+// ---------------------------------------------------- archived screen (scope 2)
+
+/** One project's remembered archived-screen display; defaults when never chosen. */
+export const readArchivedProjectDisplay = archivedModulesDisplayScope.readProject;
+/** Write one project's archived-screen display, keeping every other entry. */
+export const writeArchivedProjectDisplay = archivedModulesDisplayScope.writeProject;
+/** The project's archived-screen display, stable between renders. */
+export const currentArchivedProjectDisplay = archivedModulesDisplayScope.currentProject;
+/** Reset the archived-screen caches and subscribers (tests). */
+export const resetArchivedDisplayCache = archivedModulesDisplayScope.reset;
+
+/** The archived screen's own search, ordering and filters with setters. */
+export const useArchivedModuleDisplay = archivedModulesDisplayScope.useDisplay;

@@ -169,7 +169,12 @@ function ModulesListSettled({
     );
   // The live list mounts the shared quick menu (slice H) on every row
   // and card; editors get the full entries, guests the link actions.
-  // Archived hosts pass their own menu to wire the archive opener.
+  // Archived hosts pass their own menu to wire the archive opener. On the
+  // live list the menu's Archive entry opens this screen's confirmation
+  // (MOD-026), so the entry never dead-ends.
+  const openArchive = (module: ModuleRow): void => {
+    dialogs?.openArchive(module);
+  };
   const menuForRow =
     rowMenu ??
     ((module: ModuleRow) => (
@@ -179,6 +184,7 @@ function ModulesListSettled({
         module={module}
         canEdit={createAllowed}
         archived={archived}
+        onArchive={openArchive}
       />
     ));
   const body =
