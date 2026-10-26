@@ -1514,11 +1514,17 @@ fn presigned_get_url(
     let date = now.format("%Y%m%d").to_string();
     let scope = credential_scope(&date, region);
     let credential = format!("{}/{}", storage.access_key_id, scope);
-    let name = match filename {
-        Some(name) => quote_filename(&name),
-        None => Uuid::new_v4().simple().to_string(),
+    // `_get_content_disposition` (`storage.py:115-124`): a missing name
+    // mints a fresh uuid4 hex; an empty string is falsy and yields the bare
+    // disposition with no `filename*` part; any other string is quoted in.
+    let content_disposition = match filename {
+        None => format!(
+            "{disposition}; filename*=UTF-8''{}",
+            Uuid::new_v4().simple()
+        ),
+        Some(name) if name.is_empty() => disposition.to_owned(),
+        Some(name) => format!("{disposition}; filename*=UTF-8''{}", quote_filename(&name)),
     };
-    let content_disposition = format!("{disposition}; filename*=UTF-8''{name}");
     // botocore renders the URL in insertion order (the response override
     // first, then the signer params) while the SigV4 canonical string
     // sorts them — verified against live `generate_presigned_url`.
