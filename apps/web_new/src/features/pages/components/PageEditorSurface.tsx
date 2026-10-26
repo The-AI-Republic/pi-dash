@@ -25,6 +25,7 @@ import { descriptionAssetSrc } from "../../../shared/editor/index.js";
 import { RichTextView } from "../../../shared/editor/RichTextView.js";
 import { notifyError } from "../../../shared/shell/toaster.js";
 import { getPageBodyDraft, setPageBodyDraft } from "../lib/pageBodyDraft.js";
+import type { PageFontSize, PageFontStyle } from "../lib/pagePreferences.js";
 import { pageImageUploadFailure, uploadPageImage, type UploadedPageImage } from "../lib/pageMedia.js";
 import { isPageSaveGesture, pageKeyCommand } from "../lib/pageToolbar.js";
 import { titleIsEmpty } from "../lib/pageTitle.js";
@@ -66,8 +67,8 @@ export interface PageEditorSurfaceProps {
   /** The stored full-width preference: the bar content marks itself wide. */
   fullWidth?: boolean | undefined;
   /** The stored type size and typeface (PAGE-072); no switcher exists. */
-  fontSize?: string | undefined;
-  fontStyle?: string | undefined;
+  fontSize?: PageFontSize | undefined;
+  fontStyle?: PageFontStyle | undefined;
   /**
    * The cold-document skeleton holds the body area until the page's
    * document is known (PAGE-079); the header and bar render throughout.
@@ -224,6 +225,7 @@ export function PageEditorSurface({
         }}
         logoProps={logoProps}
         fontSize={fontSize ?? "large-font"}
+        fontStyle={fontStyle ?? "sans-serif"}
         editable
         titleEmpty={titleIsEmpty(titleDraft)}
         onMarkPick={onMarkPick}

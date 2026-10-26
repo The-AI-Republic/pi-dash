@@ -88,7 +88,7 @@ describe(
       expect(screen.getByTestId("page-formatting-bar").querySelector(".page-toolbar-content")).toHaveClass(
         "wide-layout"
       );
-      expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font");
+      expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font", "text-face-serif");
       expect(screen.getByTestId("page-canvas-header").closest(".frame-renderer") ?? document.body).toBeTruthy();
     });
 
@@ -98,7 +98,7 @@ describe(
       expect(screen.getByTestId("page-formatting-bar").querySelector(".page-toolbar-content")).not.toHaveClass(
         "wide-layout"
       );
-      expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-large-font");
+      expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-large-font", "text-face-sans-serif");
     });
 
     it("captures the standard save gesture without leaving the page", async () => {

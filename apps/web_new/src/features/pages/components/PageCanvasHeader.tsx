@@ -9,13 +9,15 @@
 
 import * as React from "react";
 
+import type { PageFontSize, PageFontStyle } from "../lib/pagePreferences.js";
 import { PageDetailTitle, type PageDetailTitleProps } from "./PageDetailTitle.js";
 import { PAGE_MARK_AREA, PageMarkButton } from "./PageMarkButton.js";
 
 export interface PageCanvasHeaderProps {
   title: PageDetailTitleProps;
-  /** The page's stored type size, applied to the title (PAGE-072). */
-  fontSize?: string | undefined;
+  /** The page's stored type size and face, applied to the title (PAGE-072). */
+  fontSize?: PageFontSize | undefined;
+  fontStyle?: PageFontStyle | undefined;
   /** Stored `logo_props` of the page. */
   logoProps: Record<string, unknown>;
   /** Read-only viewers get the mark as static art and no picker. */
@@ -29,18 +31,23 @@ export interface PageCanvasHeaderProps {
 export function PageCanvasHeader({
   title,
   fontSize,
+  fontStyle,
   logoProps,
   editable,
   titleEmpty,
   onMarkPick,
 }: PageCanvasHeaderProps): React.ReactElement {
+  // The title and the body share one stored pair. Both defaults mirror
+  // the body container so the two halves never disagree on a cold canvas.
+  const sizeClass = `text-size-${fontSize ?? "large-font"}`;
+  const faceClass = `text-face-${fontStyle ?? "sans-serif"}`;
   return (
     <div data-testid="page-canvas-header" className={`${PAGE_MARK_AREA} group/page-header`}>
       <div className="w-full">
         <div className="flex h-12 items-end">
           <PageMarkButton logoProps={logoProps} editable={editable} titleEmpty={titleEmpty} onPick={onMarkPick} />
         </div>
-        <PageDetailTitle {...title} {...(fontSize === undefined ? {} : { className: `text-size-${fontSize}` })} />
+        <PageDetailTitle {...title} className={`${sizeClass} ${faceClass}`} />
       </div>
     </div>
   );

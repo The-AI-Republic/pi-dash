@@ -392,6 +392,7 @@ export function PageDetailScreen({
                     <PageCanvasHeader
                       title={{ pageId: page.id, name: page.name, editable: false }}
                       fontSize={preferences.font_size}
+                      fontStyle={preferences.font_style}
                       logoProps={page.logo_props as Record<string, unknown>}
                       editable={false}
                       titleEmpty={page.name.trim() === ""}

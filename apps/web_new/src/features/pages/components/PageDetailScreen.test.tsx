@@ -1126,7 +1126,7 @@ describe("PageDetailScreen display preferences (PAGE-072)", () => {
     );
     renderScreen();
     await screen.findByRole("textbox", { name: "Page title" });
-    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font");
+    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font", "text-face-serif");
     const items = (await openOptions()).map((item) => item.textContent ?? "");
     expect(items.some((item) => /font|typeface|typography/i.test(item))).toBe(false);
     // The preference never rewrote the page record.
@@ -1138,7 +1138,7 @@ describe("PageDetailScreen display preferences (PAGE-072)", () => {
     harness.page = record({ is_locked: true });
     renderScreen();
     await screen.findByText("This page is locked and read-only.");
-    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font");
+    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font", "text-face-serif");
     await waitFor(() =>
       expect(document.querySelector(".editor-container")).toHaveClass("text-size-small-font", "text-face-serif")
     );
@@ -1147,7 +1147,7 @@ describe("PageDetailScreen display preferences (PAGE-072)", () => {
     window.localStorage.clear();
     renderScreen();
     await screen.findByText("This page is locked and read-only.");
-    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-large-font");
+    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-large-font", "text-face-sans-serif");
   });
 
   it("keeps the stored preferences across a remount (reload)", async () => {
