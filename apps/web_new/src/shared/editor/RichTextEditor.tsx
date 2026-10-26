@@ -107,7 +107,7 @@ function insertImage(editor: EditorLike, src: string, stored?: StoredImageInsert
     .chain()
     .focus()
     .insertContent({
-      type: "image",
+      type: "imageComponent",
       attrs: { src, "data-stored-src": stored.storedSrc, status: stored.status },
     })
     .run();

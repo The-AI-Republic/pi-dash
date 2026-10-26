@@ -91,8 +91,8 @@ describe("page extension set", () => {
     expect(names).toContain("tableRow");
     expect(names).toContain("tableCell");
     expect(names).toContain("tableHeader");
-    expect(names).toContain("pageColor");
-    expect(names).toContain("image");
+    expect(names).toContain("customColor");
+    expect(names).toContain("imageComponent");
     expect(names).toContain("mention");
     expect(names).toContain("pageCallout");
     expect(names).toContain("pageEmoji");

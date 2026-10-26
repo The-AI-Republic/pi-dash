@@ -294,9 +294,9 @@ function caretCell($from: {
 }
 
 describe("loadPageColorMark", () => {
-  it("loads one mark named for the letter/wash pair", async () => {
+  it("loads the server-named mark for the letter/wash pair", async () => {
     const mark = await loadPageColorMark();
-    expect(mark.name).toBe("pageColor");
+    expect(mark.name).toBe("customColor");
   });
 
   it("stores and reloads both attributes on one span", async () => {

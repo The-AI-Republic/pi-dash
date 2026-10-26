@@ -390,7 +390,7 @@ describe("table and image commands", () => {
 
 describe("colour commands", () => {
   it("writes both attributes so the untouched kind survives", () => {
-    const { ref, calls } = editor({ markAttrs: { textColor: "pink", backgroundColor: null } });
+    const { ref, calls } = editor({ markAttrs: { color: "pink", backgroundColor: null } });
     applyPageColor(ref, "background", "green");
     expect(calls[0]).toBe("focus");
     expect(calls[1]).toBe(`setMark(${PAGE_COLOR_MARK}, [object Object])`);
@@ -398,19 +398,19 @@ describe("colour commands", () => {
   });
 
   it("clears one kind and keeps the other", () => {
-    const { ref, calls } = editor({ markAttrs: { textColor: "pink", backgroundColor: "green" } });
+    const { ref, calls } = editor({ markAttrs: { color: "pink", backgroundColor: "green" } });
     clearPageColor(ref, "text");
     expect(calls).toEqual(["focus", `setMark(${PAGE_COLOR_MARK}, [object Object])`, "run"]);
   });
 
   it("drops the mark when the last kind is cleared", () => {
-    const { ref, calls } = editor({ markAttrs: { textColor: "pink", backgroundColor: null } });
+    const { ref, calls } = editor({ markAttrs: { color: "pink", backgroundColor: null } });
     clearPageColor(ref, "text");
     expect(calls).toEqual(["focus", `unsetMark(${PAGE_COLOR_MARK})`, "run"]);
   });
 
   it("exposes both colour actions on the handle", () => {
-    const { ref, calls } = editor({ markAttrs: { textColor: null, backgroundColor: null } });
+    const { ref, calls } = editor({ markAttrs: { color: null, backgroundColor: null } });
     const handle = pageEditorHandle(ref);
     handle.applyColor("text", "gray");
     handle.clearColor("text");
@@ -425,7 +425,7 @@ describe("colour commands", () => {
   });
 
   it("reads the stored colour pair into the formatting state", () => {
-    const { ref } = editor({ markAttrs: { textColor: "pink", backgroundColor: "green" } });
+    const { ref } = editor({ markAttrs: { color: "pink", backgroundColor: "green" } });
     expect(editorFormattingState(ref)).toMatchObject({ textColor: "pink", backgroundColor: "green" });
   });
 
