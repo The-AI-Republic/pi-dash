@@ -38,7 +38,8 @@ export type PageCatalogBlockKind =
 export type PageCatalogAction =
   | { type: "block"; block: PageCatalogBlockKind }
   | { type: "color"; kind: PageColorKind; key: string | null }
-  | { type: "command"; command: PageSlashCommand };
+  | { type: "command"; command: PageSlashCommand }
+  | { type: "snippet"; html: string };
 
 /** Inline commands a slash query exposes beside the structural catalogue. */
 export type PageSlashCommand =
@@ -156,14 +157,20 @@ export function pageSlashLabels(): string[] {
   return PAGE_SLASH_ENTRIES.map((entry) => entry.label);
 }
 
-/** Entries matching a typed slash query, in catalogue order. */
-export function filterSlashEntries(query: string): PageCatalogEntry[] {
+/**
+ * Entries matching a typed slash query, in catalogue order. Cloud
+ * registry snippets (PAGE-078) ride along after the structural rows;
+ * the community build passes none, so its catalogue stays exactly the
+ * pinned 35.
+ */
+export function filterSlashEntries(query: string, extra: readonly PageCatalogEntry[] = []): PageCatalogEntry[] {
   const needle = query.trim().toLowerCase();
-  if (needle === "") return [...PAGE_SLASH_ENTRIES];
+  if (needle === "") return [...PAGE_SLASH_ENTRIES, ...extra];
   const structural = PAGE_SLASH_ENTRIES.filter((entry) => entry.label.toLowerCase().includes(needle));
+  const snippets = extra.filter((entry) => entry.label.toLowerCase().includes(needle));
   const producers = PAGE_PICKER_COMMANDS.filter((entry) => entry.label.toLowerCase().includes(needle));
   const commands = PAGE_QUERY_COMMANDS.filter((entry) => entry.label.toLowerCase().includes(needle));
-  return [...structural, ...producers, ...commands];
+  return [...structural, ...snippets, ...producers, ...commands];
 }
 
 /** Drag-handle menu entries, in pinned order (spec §6.1 move actions). */

@@ -25,6 +25,15 @@ vi.mock("@pidash/api-client", async (original) => {
 });
 vi.mock("../../../core/api/client.js", () => ({ getAppClient: () => ({ stub: true }) }));
 
+const assistantTask = vi.hoisted(() => ({
+  mutateAsync: vi.fn(async () => ({ text: "done", html: "<p>done</p>" })),
+  isPending: false,
+}));
+vi.mock("../api/assistantMutations.js", () => ({ usePageAssistantAnswer: () => assistantTask }));
+
+const edition = vi.hoisted(() => ({ slots: {} as Record<string, unknown> }));
+vi.mock("@pidash/edition", () => ({ edition }));
+
 function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
   return {
     applyCommand: vi.fn(),
@@ -49,6 +58,8 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     html: vi.fn(() => "<p>html</p>"),
     linkHref: vi.fn(() => null),
     hasSelection: vi.fn(() => true),
+    selectionRange: vi.fn(() => null),
+    insertAt: vi.fn(),
     textBeforeCaret: vi.fn(() => ""),
     deleteBeforeCaret: vi.fn(),
     selectedText: vi.fn(() => ""),
@@ -72,6 +83,7 @@ function mount(overrides: Partial<React.ComponentProps<typeof PageBodyInteractio
       html="<p>html</p>"
       onPickImage={onPickImage}
       onDocumentChange={onDocumentChange}
+      assistantReady={false}
       {...overrides}
     />
   );
@@ -81,6 +93,8 @@ function mount(overrides: Partial<React.ComponentProps<typeof PageBodyInteractio
 afterEach(() => {
   api.searchMentionPeople.mockReset();
   api.searchEntityPreviews.mockReset();
+  assistantTask.mutateAsync.mockClear();
+  edition.slots = {};
 });
 
 describe("PageBodyInteractionLayer", () => {
@@ -459,6 +473,7 @@ describe("PageBodyInteractionLayer", () => {
         html="<p>/emoji</p>"
         onPickImage={vi.fn()}
         onDocumentChange={vi.fn()}
+        assistantReady={false}
       />
     );
     expect(view.queryByTestId("page-emoji-picker")).not.toBeInTheDocument();
@@ -484,6 +499,7 @@ describe("PageBodyInteractionLayer", () => {
         html="<p>html</p>"
         onPickImage={vi.fn()}
         onDocumentChange={vi.fn()}
+        assistantReady={false}
       />
     );
     fireEvent.click(screen.getByTestId("page-block-handle"));
@@ -556,6 +572,7 @@ describe("PageBodyInteractionLayer", () => {
         html="<p>done</p>"
         onPickImage={vi.fn()}
         onDocumentChange={vi.fn()}
+        assistantReady={false}
       />
     );
     await act(async () => {
@@ -584,6 +601,7 @@ describe("PageBodyInteractionLayer", () => {
         html="<p>/head</p>"
         onPickImage={vi.fn()}
         onDocumentChange={vi.fn()}
+        assistantReady={false}
       />
     );
     fireEvent.mouseDown(screen.getByRole("button", { name: "Heading 2" }));
@@ -601,6 +619,7 @@ describe("PageBodyInteractionLayer", () => {
         html="<p>html</p>"
         onPickImage={vi.fn()}
         onDocumentChange={vi.fn()}
+        assistantReady={false}
       />
     );
     fireEvent.click(screen.getByRole("button", { name: "Bold" }));
@@ -650,6 +669,7 @@ describe("PageBodyInteractionLayer", () => {
         html="<p>/emoji</p>"
         onPickImage={vi.fn()}
         onDocumentChange={vi.fn()}
+        assistantReady={false}
       />
     );
     fireEvent.click(screen.getByRole("button", { name: "Bold" }));
@@ -689,6 +709,7 @@ describe("PageBodyInteractionLayer", () => {
         html="<p>/emoji</p>"
         onPickImage={vi.fn()}
         onDocumentChange={vi.fn()}
+        assistantReady={false}
       />
     );
     const picker = screen.getByTestId("page-emoji-picker");
@@ -714,6 +735,7 @@ describe("PageBodyInteractionLayer", () => {
         html="<p>@ad</p>"
         onPickImage={vi.fn()}
         onDocumentChange={vi.fn()}
+        assistantReady={false}
       />
     );
     fireEvent.mouseDown(row);
@@ -733,11 +755,190 @@ describe("PageBodyInteractionLayer", () => {
         html="<p>html</p>"
         onPickImage={vi.fn()}
         onDocumentChange={vi.fn()}
+        assistantReady={false}
       />
     );
     fireEvent.click(screen.getByRole("button", { name: "Apply link" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove link" }));
     expect(page.setLink).not.toHaveBeenCalled();
     expect(page.unsetLink).not.toHaveBeenCalled();
+  });
+});
+
+describe("assistant menu (PAGE-075)", () => {
+  function hover(page: ReturnType<typeof handle>): void {
+    (page.blockAtPoint as ReturnType<typeof vi.fn>).mockReturnValue({
+      from: 0,
+      to: 12,
+      json: { type: "paragraph" },
+      top: 8,
+    });
+    fireEvent.mouseMove(document, { clientX: 120, clientY: 340 });
+  }
+
+  function selected(page: ReturnType<typeof handle>): void {
+    (page.selectionRange as ReturnType<typeof vi.fn>).mockReturnValue({ from: 2, to: 8 });
+    (page.selectedText as ReturnType<typeof vi.fn>).mockReturnValue("chosen text");
+  }
+
+  async function answer(): Promise<void> {
+    fireEvent.change(screen.getByLabelText("Instruction"), { target: { value: "Summarize" } });
+    fireEvent.click(screen.getByRole("button", { name: "Generate" }));
+    await screen.findByTestId("page-assistant-reply");
+  }
+
+  it("renders no AI surface when the assistant is not ready (community pin)", () => {
+    const page = handle();
+    mount({ getHandle: () => page, assistantReady: false });
+    expect(screen.queryByTestId("page-assistant-mount")).not.toBeInTheDocument();
+    hover(page);
+    expect(screen.getByTestId("page-block-handle")).toBeInTheDocument();
+    expect(screen.queryByTestId("page-ai-handle")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
+  });
+
+  it("opens the panel over the snapshotted selection", () => {
+    const page = handle();
+    selected(page);
+    mount({ getHandle: () => page, assistantReady: true });
+    expect(screen.getByTestId("page-assistant-mount")).toBeInTheDocument();
+    hover(page);
+    fireEvent.click(screen.getByTestId("page-ai-handle"));
+    expect(screen.getByRole("dialog", { name: "Assistant" })).toBeInTheDocument();
+    expect(assistantTask.mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty selection as a no-op", () => {
+    const page = handle();
+    mount({ getHandle: () => page, assistantReady: true });
+    hover(page);
+    // Collapsed selection: no range.
+    fireEvent.click(screen.getByTestId("page-ai-handle"));
+    expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
+    // A range without text opens nothing either.
+    (page.selectionRange as ReturnType<typeof vi.fn>).mockReturnValue({ from: 2, to: 8 });
+    fireEvent.click(screen.getByTestId("page-ai-handle"));
+    expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
+  });
+
+  it("opens nothing once the editor went away", () => {
+    const page = handle();
+    selected(page);
+    let live: ReturnType<typeof handle> | null = page;
+    mount({ getHandle: () => live, assistantReady: true });
+    hover(page);
+    live = null;
+    fireEvent.click(screen.getByTestId("page-ai-handle"));
+    expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
+  });
+
+  it("applies the reply over the snapshotted range and closes", async () => {
+    const page = handle();
+    selected(page);
+    const { onDocumentChange } = mount({ getHandle: () => page, assistantReady: true });
+    hover(page);
+    fireEvent.click(screen.getByTestId("page-ai-handle"));
+    await answer();
+    expect(assistantTask.mutateAsync).toHaveBeenCalledWith({ task: "Summarize", prompt: "chosen text" });
+    fireEvent.click(screen.getByRole("button", { name: "Apply in place" }));
+    expect(page.insertAt).toHaveBeenCalledWith({ from: 2, to: 8 }, "<p>done</p>");
+    expect(onDocumentChange).toHaveBeenCalledWith("<p>html</p>");
+    expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
+  });
+
+  it("appends the reply below the snapshotted range and closes", async () => {
+    const page = handle();
+    selected(page);
+    mount({ getHandle: () => page, assistantReady: true });
+    hover(page);
+    fireEvent.click(screen.getByTestId("page-ai-handle"));
+    await answer();
+    fireEvent.click(screen.getByRole("button", { name: "Append below" }));
+    expect(page.insertAt).toHaveBeenCalledWith(8, "<p><p>done</p></p>");
+    expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
+  });
+
+  it("keeps the panel when the editor went away mid-turn", async () => {
+    const page = handle();
+    selected(page);
+    let live: ReturnType<typeof handle> | null = page;
+    mount({ getHandle: () => live, assistantReady: true });
+    hover(page);
+    fireEvent.click(screen.getByTestId("page-ai-handle"));
+    await answer();
+    live = null;
+    fireEvent.click(screen.getByRole("button", { name: "Apply in place" }));
+    expect(page.insertAt).not.toHaveBeenCalled();
+    expect(screen.getByTestId("page-assistant-menu")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Append below" }));
+    expect(page.insertAt).not.toHaveBeenCalled();
+    expect(screen.getByTestId("page-assistant-menu")).toBeInTheDocument();
+  });
+
+  it("closes the panel on Close and on Escape", () => {
+    const page = handle();
+    selected(page);
+    mount({ getHandle: () => page, assistantReady: true });
+    hover(page);
+    fireEvent.click(screen.getByTestId("page-ai-handle"));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("page-ai-handle"));
+    expect(screen.getByTestId("page-assistant-menu")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
+  });
+});
+
+describe("cloud slash registry (PAGE-078)", () => {
+  it("adds nothing to the palette when the registry is absent", () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/");
+    mount({ getHandle: () => page });
+    const palette = screen.getByTestId("page-slash-palette");
+    expect(within(palette).queryByRole("button", { name: "Cloud callout" })).not.toBeInTheDocument();
+  });
+
+  it("lists registry snippets after the community catalogue when filled", () => {
+    edition.slots = {
+      "page.slashRegistry": { entries: [{ label: "Cloud callout", group: "Cloud", html: "<p>x</p>" }] },
+    };
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/");
+    mount({ getHandle: () => page });
+    const palette = screen.getByTestId("page-slash-palette");
+    const names = within(palette)
+      .getAllByRole("button")
+      .map((entry) => entry.textContent);
+    expect(names.slice(0, 35)).toHaveLength(35);
+    expect(names[35]).toBe("Cloud callout");
+    expect(within(palette).getByText("Cloud")).toBeInTheDocument();
+  });
+
+  it("inserts a picked snippet where the trigger was", () => {
+    edition.slots = {
+      "page.slashRegistry": { entries: [{ label: "Cloud callout", group: "Cloud", html: "<p>x</p>" }] },
+    };
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/");
+    (page.selectionRange as ReturnType<typeof vi.fn>).mockReturnValue({ from: 4, to: 4 });
+    const { onDocumentChange } = mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Cloud callout" }));
+    expect(page.deleteBeforeCaret).toHaveBeenCalledWith(1);
+    expect(page.insertAt).toHaveBeenCalledWith(4, "<p>x</p>");
+    expect(onDocumentChange).toHaveBeenCalledWith("<p>html</p>");
+    expect(screen.queryByTestId("page-slash-palette")).not.toBeInTheDocument();
+  });
+
+  it("closes the palette without inserting when the caret is gone", () => {
+    edition.slots = {
+      "page.slashRegistry": { entries: [{ label: "Cloud callout", group: "Cloud", html: "<p>x</p>" }] },
+    };
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/");
+    mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Cloud callout" }));
+    expect(page.insertAt).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("page-slash-palette")).not.toBeInTheDocument();
   });
 });

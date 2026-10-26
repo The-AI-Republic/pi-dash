@@ -75,12 +75,15 @@ export function PageSlashPalette({
   query,
   onPick,
   onDismiss,
+  extraEntries = [],
 }: {
   query: string;
   onPick: (entry: PageCatalogEntry) => void;
   onDismiss: () => void;
+  /** Cloud registry snippets, listed after the community catalogue (PAGE-078). */
+  extraEntries?: readonly PageCatalogEntry[];
 }): React.ReactElement {
-  const entries = filterSlashEntries(query);
+  const entries = filterSlashEntries(query, extraEntries);
   return (
     <div
       id="slash-command"

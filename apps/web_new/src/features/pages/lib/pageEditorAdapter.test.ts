@@ -32,6 +32,7 @@ import {
   pageDocumentEmpty,
   pageEditorHandle,
   PAGE_BODY_START,
+  pageSelectionRange,
   replacePageBody,
   runBlockKind,
   runInsertImage,
@@ -259,6 +260,52 @@ describe("pageEditorHandle", () => {
       state: { selection: { from: 2, to: 5, $from: base.ref.state.selection.$from } },
     };
     expect(pageEditorHandle(selected).hasSelection()).toBe(true);
+  });
+
+  it("captures the selection range for deferred writes (PAGE-075)", () => {
+    const base = editor();
+    expect(pageEditorHandle(base.ref).selectionRange()).toBeNull();
+    expect(pageSelectionRange(base.ref)).toBeNull();
+    const selected = {
+      ...base.ref,
+      state: { selection: { from: 2, to: 5, $from: base.ref.state.selection.$from } },
+    };
+    expect(pageSelectionRange(selected)).toEqual({ from: 2, to: 5 });
+    expect(pageEditorHandle(selected).selectionRange()).toEqual({ from: 2, to: 5 });
+  });
+
+  it("captures no range for a collapsed or half-open selection", () => {
+    const base = editor();
+    const collapsed = {
+      ...base.ref,
+      state: { selection: { from: 4, to: 4, $from: base.ref.state.selection.$from } },
+    };
+    expect(pageSelectionRange(collapsed)).toBeNull();
+    const halfOpen = {
+      ...base.ref,
+      state: { selection: { from: 2, $from: base.ref.state.selection.$from } },
+    };
+    expect(pageSelectionRange(halfOpen)).toBeNull();
+    const inverted = {
+      ...base.ref,
+      state: { selection: { from: 6, to: 2, $from: base.ref.state.selection.$from } },
+    };
+    expect(pageSelectionRange(inverted)).toBeNull();
+  });
+
+  it("writes markup over a range or at a position through insertAt (PAGE-075)", () => {
+    const { ref, calls } = editor();
+    const handle = pageEditorHandle(ref);
+    handle.insertAt({ from: 2, to: 5 }, "<p>reply</p>");
+    handle.insertAt(9, "<p>below</p>");
+    expect(calls).toEqual([
+      "focus",
+      "insertContentAt([object Object], <p>reply</p>)",
+      "run",
+      "focus",
+      "insertContentAt(9, <p>below</p>)",
+      "run",
+    ]);
   });
 
   it("reads the live formatting state", () => {

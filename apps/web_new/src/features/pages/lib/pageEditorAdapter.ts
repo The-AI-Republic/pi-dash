@@ -173,6 +173,14 @@ export interface PageEditorHandle {
   linkHref: () => string | null;
   /** Whether the editor currently has a non-empty text selection (PAGE-037). */
   hasSelection: () => boolean;
+  /** The selection's document range, or null when nothing is selected (PAGE-075). */
+  selectionRange: () => PageTextRange | null;
+  /**
+   * Write markup at a position or over a range: a number inserts at the
+   * caret-side position, a range replaces it (PAGE-075 assistant
+   * apply/append, PAGE-078 registry snippets).
+   */
+  insertAt: (at: number | PageTextRange, html: string) => void;
   /** Text between the block start and the caret, for slash/@ queries. */
   textBeforeCaret: () => string;
   /** Delete the typed slash/@ trigger immediately before the caret. */
@@ -415,9 +423,10 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
       const href = editor.getAttributes("link")["href"];
       return typeof href === "string" && href !== "" ? href : null;
     },
-    hasSelection: () => {
-      const { from, to } = editor.state.selection;
-      return from !== undefined && to !== undefined && to > from;
+    hasSelection: () => pageSelectionRange(editor) !== null,
+    selectionRange: () => pageSelectionRange(editor),
+    insertAt: (at, html) => {
+      editor.chain().focus().insertContentAt(at, html).run();
     },
     textBeforeCaret: () => pageTextBeforeCaret(editor),
     deleteBeforeCaret: (length) => deleteContentBeforeCaret(editor, length),
@@ -632,6 +641,23 @@ export function linkSelection(editor: PageEditorRef, href: string): void {
 /** Remove the link mark from the selection (PAGE-043). */
 export function unlinkSelection(editor: PageEditorRef): void {
   editor.chain().focus().unsetLink().run();
+}
+
+/** A captured text range, for writes after the selection is gone (PAGE-075). */
+export interface PageTextRange {
+  from: number;
+  to: number;
+}
+
+/**
+ * The selection's document range, or null for a collapsed or missing
+ * selection. The single predicate behind `hasSelection`, so the two can
+ * never disagree.
+ */
+export function pageSelectionRange(editor: PageEditorRef): PageTextRange | null {
+  const { from, to } = editor.state.selection;
+  if (from === undefined || to === undefined || to <= from) return null;
+  return { from, to };
 }
 
 /** The selected text, or the text block under the caret (link prefill). */

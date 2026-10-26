@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 import {
   INTAKE_SOURCE_PILL_FLAG,
   ISSUE_DEDUPE_FLAG,
+  PAGE_ASSISTANT_FLAG,
   PAGE_MOVE_FLAG,
   isAppRailEnabled,
+  isPageAssistantEnabled,
   isPageMoveEnabled,
   isSidebarToggleEnabled,
   edition,
@@ -68,6 +70,19 @@ describe("edition", () => {
     expect(edition.flags[PAGE_MOVE_FLAG]).toBeUndefined();
     expect(isPageMoveEnabled(edition)).toBe(false);
   });
+
+  it("leaves the page assistant absent (PAGE-075: community pins no handle or menu)", () => {
+    expect(edition.flags[PAGE_ASSISTANT_FLAG]).toBeUndefined();
+    expect(isPageAssistantEnabled(edition)).toBe(false);
+  });
+
+  it("leaves the page cloud slots absent (PAGE-076-078: community renders nothing)", () => {
+    expect(edition.slots?.["page.share"]).toBeUndefined();
+    expect(edition.slots?.["page.collaborators"]).toBeUndefined();
+    expect(edition.slots?.["page.headerActions"]).toBeUndefined();
+    expect(edition.slots?.["page.extraPaneTabs"]).toBeUndefined();
+    expect(edition.slots?.["page.slashRegistry"]).toBeUndefined();
+  });
 });
 
 describe("shell edition gates", () => {
@@ -84,6 +99,12 @@ describe("shell edition gates", () => {
     expect(isPageMoveEnabled(flags({}))).toBe(false);
     expect(isPageMoveEnabled(flags({ "page-move": false }))).toBe(false);
     expect(isPageMoveEnabled(flags({ "page-move": true }))).toBe(true);
+  });
+
+  it("enables the page assistant only where the edition opts in", () => {
+    expect(isPageAssistantEnabled(flags({}))).toBe(false);
+    expect(isPageAssistantEnabled(flags({ "page-assistant": false }))).toBe(false);
+    expect(isPageAssistantEnabled(flags({ "page-assistant": true }))).toBe(true);
   });
 
   it("mounts the sidebar toggle unless the edition opts out", () => {

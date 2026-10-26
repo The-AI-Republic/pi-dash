@@ -11,7 +11,9 @@ import * as React from "react";
 
 import { searchMentionPeople } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
-import type { PageEditorHandle, PageHoveredBlock } from "../lib/pageEditorAdapter.js";
+import { edition } from "../../../core/edition/index.js";
+import type { PageEditorHandle, PageHoveredBlock, PageTextRange } from "../lib/pageEditorAdapter.js";
+import { pageAssistantBelowHtml } from "../lib/pageAssistant.js";
 import { PAGE_BODY_EMOJIS, slashQueryAt, type PageBlockMenuAction, type PageCatalogEntry } from "../lib/pageBlocks.js";
 import { mentionQueryAt } from "../../../shared/editor/mention.js";
 import type { PageEmbedAttributes } from "../lib/pageBlocks.js";
@@ -30,6 +32,7 @@ import {
   PageSlashPalette,
   type PageMentionPerson,
 } from "./PageBodyControls.js";
+import { PageAssistantHandle, PageAssistantMenu } from "./PageAssistantMenu.js";
 
 export const PAGE_BODY_INTERACTION_LABEL = "Page body actions";
 
@@ -45,6 +48,12 @@ export interface PageBodyInteractionLayerProps {
   onDocumentChange: (html: string) => void;
   /** Edition resolver test hook: embed kind this build may render. */
   embed?: PageEmbedAttributes | null;
+  /**
+   * The assistant handle may mount: the cloud flag, member standing and
+   * a configured model all hold (PAGE-075). The community build passes
+   * false and renders no assistant surface.
+   */
+  assistantReady: boolean;
 }
 
 /** The link bubble and its prefill, keyed by selection change. */
@@ -61,6 +70,7 @@ export function PageBodyInteractionLayer({
   onPickImage,
   onDocumentChange,
   embed = null,
+  assistantReady,
 }: PageBodyInteractionLayerProps): React.ReactElement {
   const [slashQuery, setSlashQuery] = React.useState<string | null>(null);
   const [emojiOpen, setEmojiOpen] = React.useState(false);
@@ -73,6 +83,9 @@ export function PageBodyInteractionLayer({
   const [pickerChoices, setPickerChoices] = React.useState<PageEntityChoice[]>([]);
   const [anchor, setAnchor] = React.useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const [handleOpen, setHandleOpen] = React.useState(false);
+  // The assistant's snapshotted selection: text for the task prompt plus
+  // the range the reply writes back to once the menu closes (PAGE-075).
+  const [assistant, setAssistant] = React.useState<{ selection: string; range: PageTextRange } | null>(null);
   const handleRef = React.useRef<HTMLDivElement | null>(null);
   const bubbleRef = React.useRef<HTMLDivElement | null>(null);
   const [hoveredBlock, setHoveredBlock] = React.useState<PageHoveredBlock | null>(null);
@@ -144,12 +157,19 @@ export function PageBodyInteractionLayer({
   }, [getHandle]);
 
   // Escape dismisses whichever transient surface is open — the slash
-  // palette, emoji picker, mention popup, entity/embed picker or the
-  // block-actions menu — without touching the document (PAGE-037/042).
+  // palette, emoji picker, mention popup, entity/embed picker, the
+  // block-actions menu or the assistant panel — without touching the
+  // document (PAGE-037/042/075).
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape") return;
-      const anyOpen = slashQuery !== null || emojiOpen || mentionQuery !== null || picker !== null || handleOpen;
+      const anyOpen =
+        slashQuery !== null ||
+        emojiOpen ||
+        mentionQuery !== null ||
+        picker !== null ||
+        handleOpen ||
+        assistant !== null;
       if (!anyOpen) return;
       event.preventDefault();
       setSlashQuery(null);
@@ -159,10 +179,11 @@ export function PageBodyInteractionLayer({
       setPicker(null);
       setPickerChoices([]);
       setHandleOpen(false);
+      setAssistant(null);
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [slashQuery, emojiOpen, mentionQuery, picker, handleOpen]);
+  }, [slashQuery, emojiOpen, mentionQuery, picker, handleOpen, assistant]);
 
   // Mention suggestions are project-scoped and debounced by React Query's
   // own cache; an empty query still lists the project's members.
@@ -225,6 +246,15 @@ export function PageBodyInteractionLayer({
       // The palette only exists for a live query, so that query is always
       // erased before the chosen entry's effect lands in the body.
       handle.deleteBeforeCaret((slashQuery ?? "").length + 1);
+      // A cloud registry snippet inserts its markup where the trigger was
+      // (PAGE-078); the community catalogue carries no such entries.
+      if (entry.action.type === "snippet") {
+        const caret = handle.selectionRange();
+        if (caret === null) return;
+        handle.insertAt(caret.to, entry.action.html);
+        onDocumentChange(handle.html());
+        return;
+      }
       if (entry.action.type === "block" && (entry.action.block === "embed" || entry.action.block === "entity")) {
         setPicker(entry.action.block);
         setPickerQuery("");
@@ -343,6 +373,55 @@ export function PageBodyInteractionLayer({
     [getHandle, onDocumentChange]
   );
 
+  // Snapshot the selection for one assistant turn: the menu reads the
+  // focus, so the live selection would be gone by the time the reply
+  // lands. An empty selection opens nothing (PAGE-075).
+  const askAssistant = React.useCallback(() => {
+    const handle = getHandle();
+    if (handle === null) return;
+    const range = handle.selectionRange();
+    const selection = handle.selectedText();
+    if (range === null || selection === "") return;
+    setAssistant({ selection, range });
+  }, [getHandle]);
+
+  const closeAssistant = React.useCallback(() => {
+    setAssistant(null);
+  }, []);
+
+  // The reply writes through the snapshotted range, then the panel
+  // unmounts and its task state resets with it (PAGE-075). The snapshot
+  // rides as an argument because the menu only renders while one exists.
+  const applyAssistant = React.useCallback(
+    (snapshot: { range: PageTextRange }, html: string) => {
+      const handle = getHandle();
+      if (handle === null) return;
+      handle.insertAt(snapshot.range, html);
+      onDocumentChange(handle.html());
+      setAssistant(null);
+    },
+    [getHandle, onDocumentChange]
+  );
+
+  const appendAssistant = React.useCallback(
+    (snapshot: { range: PageTextRange }, html: string) => {
+      const handle = getHandle();
+      if (handle === null) return;
+      handle.insertAt(snapshot.range.to, pageAssistantBelowHtml(html));
+      onDocumentChange(handle.html());
+      setAssistant(null);
+    },
+    [getHandle, onDocumentChange]
+  );
+
+  // Cloud slash-catalogue entries, after the community set (PAGE-078);
+  // the community edition leaves the registry absent and adds nothing.
+  const registryEntries: PageCatalogEntry[] = (edition.slots?.["page.slashRegistry"]?.entries ?? []).map((entry) => ({
+    label: entry.label,
+    group: entry.group,
+    action: { type: "snippet", html: entry.html },
+  }));
+
   // The surfaces sit in their own zero-height layer beside the body, never
   // inside the measured `.editor-container`: the pane's live read counts
   // that container's blocks, so palette rows must not become paragraphs.
@@ -359,8 +438,20 @@ export function PageBodyInteractionLayer({
           style={{ top: (hoveredBlock?.top ?? 0) - 4, left: (hoveredBlock?.left ?? 0) - 32 }}
         >
           <PageBlockHandle onSelect={blockAction} open={handleOpen} onOpenChange={setHandleOpen} />
+          {assistantReady ? <PageAssistantHandle onAsk={askAssistant} /> : null}
         </div>
       ) : null}
+      {assistant === null ? null : (
+        <div className="pointer-events-auto z-30" style={popover}>
+          <PageAssistantMenu
+            workspaceSlug={workspaceSlug}
+            selection={assistant.selection}
+            onApply={(html) => applyAssistant(assistant, html)}
+            onAppend={(html) => appendAssistant(assistant, html)}
+            onClose={closeAssistant}
+          />
+        </div>
+      )}
       {selectionActive || link.open ? (
         <div
           ref={bubbleRef}
@@ -376,7 +467,12 @@ export function PageBodyInteractionLayer({
       ) : null}
       {slashQuery !== null ? (
         <div className="pointer-events-auto z-20" style={popover}>
-          <PageSlashPalette query={slashQuery} onPick={pickEntry} onDismiss={() => setSlashQuery(null)} />
+          <PageSlashPalette
+            query={slashQuery}
+            onPick={pickEntry}
+            onDismiss={() => setSlashQuery(null)}
+            extraEntries={registryEntries}
+          />
         </div>
       ) : null}
       {emojiOpen ? (
@@ -411,6 +507,7 @@ export function PageBodyInteractionLayer({
         </div>
       ) : null}
       {embed === null ? null : <span data-testid="page-embed-slot" hidden aria-hidden="true" />}
+      {assistantReady ? <span data-testid="page-assistant-mount" hidden aria-hidden="true" /> : null}
       <span data-testid="page-emoji-count" hidden aria-hidden="true">
         {PAGE_BODY_EMOJIS.length}
       </span>

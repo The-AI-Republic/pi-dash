@@ -15,7 +15,7 @@ import { X } from "lucide-react";
 import * as React from "react";
 
 import type { PageVersion } from "@pidash/api-client";
-import { edition } from "../../../core/edition/index.js";
+import { edition, type PageExtraPaneTab } from "../../../core/edition/index.js";
 import {
   closeVersionSearch,
   PAGE_PANE_TABS,
@@ -64,15 +64,22 @@ export interface PageNavigationPaneProps {
 
 function PaneTabs({
   active,
+  extra,
+  extraTabs,
   onSelect,
+  onSelectExtra,
 }: {
   active: PagePaneTab | undefined;
+  /** The selected extra tab, if any; it unselects the community tabs. */
+  extra: PageExtraPaneTab | null;
+  extraTabs: readonly PageExtraPaneTab[];
   onSelect: (tab: PagePaneTab) => void;
+  onSelectExtra: (tab: PageExtraPaneTab) => void;
 }): React.ReactElement {
   return (
     <div role="tablist" aria-label="Page navigation" className="flex items-center gap-(--space-1)">
       {PAGE_PANE_TABS.map((tab) => {
-        const selected = tab.value === active;
+        const selected = extra === null && tab.value === active;
         return (
           <button
             key={tab.value}
@@ -80,6 +87,25 @@ function PaneTabs({
             role="tab"
             aria-selected={selected}
             onClick={() => onSelect(tab.value)}
+            className={
+              selected
+                ? "text-body cursor-pointer rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) font-medium text-(--text)"
+                : "text-body cursor-pointer rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
+            }
+          >
+            {tab.label}
+          </button>
+        );
+      })}
+      {extraTabs.map((tab) => {
+        const selected = extra?.value === tab.value;
+        return (
+          <button
+            key={tab.value}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            onClick={() => onSelectExtra(tab)}
             className={
               selected
                 ? "text-body cursor-pointer rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) font-medium text-(--text)"
@@ -248,6 +274,19 @@ export function PageNavigationPane(props: PageNavigationPaneProps): React.ReactE
   // An edition's replacement body takes over the tab area only; the shell,
   // the tabs and the close control stay the app's (PAGE-045, §9.4).
   const EditionBody = edition.slots?.pageNavigationPane;
+  // Extra cloud tabs ride after the community tabs (PAGE-078). Their
+  // selection is pane-local and never touches the address, so the
+  // community deep-link contract is unaffected; closing the pane clears
+  // it. The community edition leaves the slot absent.
+  const extraTabs = edition.slots?.["page.extraPaneTabs"]?.tabs ?? [];
+  const [extraTab, setExtraTab] = React.useState<PageExtraPaneTab | null>(null);
+  React.useEffect(() => {
+    if (search.paneTab === undefined) setExtraTab(null);
+  }, [search.paneTab]);
+  const selectTab = (tab: PagePaneTab): void => {
+    setExtraTab(null);
+    onSelectTab(tab);
+  };
   return (
     <aside
       aria-label={PAGE_NAVIGATION_LABEL}
@@ -262,7 +301,15 @@ export function PageNavigationPane(props: PageNavigationPaneProps): React.ReactE
       className="flex h-full shrink-0 flex-col overflow-hidden border-l border-(--border) bg-(--bg) transition-[margin] duration-(--motion-duration) ease-(--motion-easing)"
     >
       <div className="flex items-center justify-between border-b border-(--border) px-(--space-4) py-(--space-2)">
-        {open ? <PaneTabs active={search.paneTab} onSelect={onSelectTab} /> : null}
+        {open ? (
+          <PaneTabs
+            active={search.paneTab}
+            extra={extraTab}
+            extraTabs={extraTabs}
+            onSelect={selectTab}
+            onSelectExtra={setExtraTab}
+          />
+        ) : null}
         <span className="flex-1" aria-hidden="true" />
         <IconButton label={PAGE_PANE_CLOSE} size="small" onClick={onClose}>
           <X size={16} strokeWidth={1.5} aria-hidden="true" />
@@ -270,17 +317,21 @@ export function PageNavigationPane(props: PageNavigationPaneProps): React.ReactE
       </div>
       {search.paneTab === undefined ? null : (
         <div className="min-h-0 flex-1 overflow-y-auto p-(--space-4)">
-          {EditionBody === undefined ? (
-            <PaneBody
-              tab={search.paneTab}
-              document={document}
-              actors={actors}
-              onSelectHeading={props.onSelectHeading}
-            />
+          {extraTab === null ? (
+            EditionBody === undefined ? (
+              <PaneBody
+                tab={search.paneTab}
+                document={document}
+                actors={actors}
+                onSelectHeading={props.onSelectHeading}
+              />
+            ) : (
+              <EditionBody tab={search.paneTab} workspaceSlug={workspaceSlug} projectId={projectId} pageId={pageId} />
+            )
           ) : (
-            <EditionBody tab={search.paneTab} workspaceSlug={workspaceSlug} projectId={projectId} pageId={pageId} />
+            <extraTab.Body workspaceSlug={workspaceSlug} projectId={projectId} pageId={pageId} />
           )}
-          {search.paneTab === "info" ? (
+          {search.paneTab === "info" && extraTab === null ? (
             <div className="mt-(--space-6)">
               <VersionTimeline
                 workspaceSlug={workspaceSlug}

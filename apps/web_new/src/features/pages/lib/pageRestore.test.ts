@@ -38,6 +38,8 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     html: vi.fn(() => ""),
     linkHref: vi.fn(() => null),
     hasSelection: vi.fn(() => false),
+    selectionRange: vi.fn(() => null),
+    insertAt: vi.fn(),
     textBeforeCaret: vi.fn(() => ""),
     deleteBeforeCaret: vi.fn(),
     selectedText: vi.fn(() => ""),

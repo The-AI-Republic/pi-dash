@@ -57,6 +57,14 @@ export const INTAKE_SOURCE_PILL_FLAG = "intake-source-pill";
  * move entry and no dialog ever mounts.
  */
 export const PAGE_MOVE_FLAG = "page-move";
+/**
+ * Page editor assistant (PAGE-075, parity/specs/pages.md §9.3; Decisions
+ * D26). Editions whose server serves the workspace editor-task endpoint
+ * with a configured model set this; the community edition leaves it
+ * absent, so no assistant handle or menu renders anywhere on the page
+ * detail.
+ */
+export const PAGE_ASSISTANT_FLAG = "page-assistant";
 
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {
@@ -155,6 +163,89 @@ export interface SlotComponents {
    * name is stable across editions; a rename is a breaking change.
    */
   "page.embed.workItem"?: ComponentType<PageEmbedSlotProps>;
+  /**
+   * Page share control (PAGE-076, parity/specs/pages.md §7.5, §9.4;
+   * Decisions D26). The detail header mounts it between the link-copy
+   * control and the options menu. The OSS/community edition leaves it
+   * absent and renders nothing. The name is stable across editions; a
+   * rename is a breaking change.
+   */
+  "page.share"?: ComponentType<PageCloudSlotProps>;
+  /**
+   * Page collaborator strip (PAGE-077, parity/specs/pages.md §7.5, §9.4;
+   * Decisions D26). The detail header mounts it immediately before the
+   * navigation-pane toggle, mirroring the old toolbar-end cluster. The
+   * server carries no presence roster, so a future roster comes from the
+   * client provider layer. The OSS/community edition leaves it absent
+   * and renders nothing. The name is stable across editions; a rename
+   * is a breaking change.
+   */
+  "page.collaborators"?: ComponentType<PageCloudSlotProps>;
+  /**
+   * Extra page header actions (PAGE-078, parity/specs/pages.md §7.5, §9.4;
+   * Decisions D26). The detail header mounts them after the sync badge,
+   * before the collaborator strip and the built-in cluster. The
+   * OSS/community edition leaves it absent and renders no further
+   * buttons. The name is stable across editions; a rename is a breaking
+   * change.
+   */
+  "page.headerActions"?: ComponentType<PageCloudSlotProps>;
+  /**
+   * Extra navigation-pane tabs (PAGE-078, parity/specs/pages.md §7.5,
+   * §9.4; Decisions D26). The pane renders them after the community
+   * Outline/Info/Assets tabs; an extra tab's selection is pane-local and
+   * never touches the address, so the community deep-link contract is
+   * unaffected. The OSS/community edition leaves it absent and offers
+   * exactly the three tabs. The name is stable across editions; a
+   * rename is a breaking change.
+   */
+  "page.extraPaneTabs"?: PageExtraPaneTabsSlot;
+  /**
+   * Cloud slash-catalogue entries (PAGE-078, parity/specs/pages.md §7.5,
+   * §9.4; Decisions D26). The slash palette lists them after the
+   * community catalogue; picking one inserts its markup at the caret.
+   * The OSS/community edition leaves it absent and the catalogue holds
+   * exactly the 35 community entries. The name is stable across
+   * editions; a rename is a breaking change.
+   */
+  "page.slashRegistry"?: PageSlashRegistrySlot;
+}
+
+/** What every page-cloud header slot receives (PAGE-076–078). */
+export interface PageCloudSlotProps {
+  workspaceSlug: string;
+  projectId: string;
+  pageId: string;
+}
+
+/** One extra navigation-pane tab a cloud edition contributes (PAGE-078). */
+export interface PageExtraPaneTab {
+  /** Pane-local tab value; never rides the address. */
+  value: string;
+  /** Visible tab label. */
+  label: string;
+  /** The tab's panel body. */
+  Body: ComponentType<PageCloudSlotProps>;
+}
+
+/** Extra navigation-pane tabs, in the order the pane shows them. */
+export interface PageExtraPaneTabsSlot {
+  tabs: readonly PageExtraPaneTab[];
+}
+
+/** One cloud slash-catalogue entry (PAGE-078). */
+export interface PageCloudSlashEntry {
+  /** Visible palette label. */
+  label: string;
+  /** Group heading the entry sits under. */
+  group: string;
+  /** Markup inserted at the caret when the entry is picked. */
+  html: string;
+}
+
+/** Cloud slash-catalogue entries, in palette order after the community set. */
+export interface PageSlashRegistrySlot {
+  entries: readonly PageCloudSlashEntry[];
 }
 
 /** What an edition's work-item embed renderer receives (PAGE-040). */
