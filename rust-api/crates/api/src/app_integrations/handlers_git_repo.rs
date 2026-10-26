@@ -1074,6 +1074,16 @@ fn parse_gitlab_url(url: &str, allowed_hosts: &[String]) -> Option<ParsedReposit
     if !allowed_hosts.iter().any(|h| h == &host_url) {
         return None;
     }
+    // `urlparse(candidate).path` (`gitlab.py:236-242`): the `?query` and
+    // `#fragment` never reach the split, nor do the `;params` of the last
+    // segment — all cut before the `/-/` split, which never sees them
+    // (`?next=/-/x` keeps its repo). `?`, `#`, `;` are ASCII, so the byte
+    // slices below always land on char boundaries.
+    let path = path.find(['?', '#']).map_or(path, |idx| &path[..idx]);
+    let last_segment = path.rfind('/').map_or(0, |idx| idx + 1);
+    let path = path[last_segment..]
+        .find(';')
+        .map_or(path, |idx| &path[..last_segment + idx]);
     let path = match path.split_once("/-/") {
         Some((before, _)) => before,
         None => path,
@@ -2123,6 +2133,59 @@ mod tests {
         let parsed =
             parse_repository_url("https://git.example.com/group/repo", &custom).expect("parses");
         assert_eq!(parsed.host_url, "https://git.example.com");
+    }
+
+    /// Browser-pasted URLs: `urlparse(candidate).path` drops the `?query`
+    /// and `#fragment` (`gitlab.py:236-245`), so they never reach the
+    /// namespace/name split (PIDASHCONV-1462).
+    #[test]
+    fn gitlab_url_query_fragment() {
+        let hosts = gitlab_hosts();
+        for url in [
+            "https://gitlab.com/g/r?x=1",
+            "https://gitlab.com/g/r#readme",
+            "https://gitlab.com/g/r?next=/-/tree/main",
+        ] {
+            let parsed =
+                parse_repository_url(url, &hosts).unwrap_or_else(|| panic!("parses: {url}"));
+            assert_eq!(parsed.provider, "gitlab", "{url}");
+            assert_eq!(
+                (parsed.namespace, parsed.name),
+                ("g".to_owned(), "r".to_owned()),
+                "{url}"
+            );
+        }
+        // A query/fragment `/` must not fabricate a namespace/name split:
+        // the path (`/onlygroup`) has no `/`, so the URL is unsupported.
+        assert_eq!(
+            parse_repository_url("https://gitlab.com/onlygroup?tab=/extra", &hosts),
+            None
+        );
+        assert_eq!(
+            parse_repository_url("https://gitlab.com/onlygroup#/extra", &hosts),
+            None
+        );
+        // `;params` of the last segment are cut like `urlparse().path`;
+        // a `;` earlier in the path survives (Django keeps it: the last
+        // segment `y` carries no params, then `/-/` splits first).
+        let parsed = parse_repository_url("https://gitlab.com/g/r;p=1", &hosts).expect("parses");
+        assert_eq!(
+            (parsed.namespace, parsed.name),
+            ("g".to_owned(), "r".to_owned())
+        );
+        let parsed = parse_repository_url("https://gitlab.com/g/r;x/-/y", &hosts).expect("parses");
+        assert_eq!(
+            (parsed.namespace, parsed.name),
+            ("g".to_owned(), "r;x".to_owned())
+        );
+        // The SSH form never sees `urlparse` on either backend (Django's
+        // `_ssh_repo_re` path, `gitlab.py:218-234`), so a query there stays
+        // in the name on both — bug-compatible, deliberately unchanged.
+        let parsed = parse_repository_url("git@gitlab.com:g/r?x=1", &hosts).expect("parses");
+        assert_eq!(
+            (parsed.namespace, parsed.name),
+            ("g".to_owned(), "r?x=1".to_owned())
+        );
     }
 
     #[test]
