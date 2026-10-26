@@ -2841,6 +2841,7 @@ fn link_joins_for(fragment: &str, existing: &str) -> String {
 fn legacy_filters(
     query: &QueryMap,
     binder: &mut crate::app_issues::Binder,
+    timezone: &chrono_tz::Tz,
 ) -> Result<Option<String>, IssuesDenial> {
     let flat: HashMap<String, String> = query
         .keys()
@@ -2853,9 +2854,11 @@ fn legacy_filters(
         // Error bodies are already exact (`{"error": "Please provide
         // valid detail"}` for unparseable UUIDs, 500 for unknown
         // lookups — Django's `FieldError` generic 500); propagate.
-        // UTC keeps this slice's current truncation; its own actor-zone
-        // fix follows the app_issues pattern separately.
-        let fragment = crate::app_issues::legacy_sql(binder, name, value, &chrono_tz::UTC)?;
+        // `__date` terms truncate in the actor zone (Django applies
+        // `issue_filters(request.GET)` under the activated user zone,
+        // `base.py:243`); relative dates still resolve against the UTC
+        // `today` above, like `timezone.now().date()`.
+        let fragment = crate::app_issues::legacy_sql(binder, name, value, timezone)?;
         parts.push(remap_legacy(&fragment));
     }
     if parts.is_empty() {
@@ -3454,7 +3457,7 @@ async fn get_default_analytics(
     let pool = pool_owned(&state)?;
 
     let mut binder = slugs_first(&slug);
-    let legacy = legacy_filters(&query, &mut binder)?;
+    let legacy = legacy_filters(&query, &mut binder, &authed.timezone)?;
     let scope = issue_where("$1", legacy.as_deref());
     // Link joins per statement family: the base family carries the full
     // set, while the assignee family already joins `issue_assignees`
@@ -4474,7 +4477,8 @@ mod tests {
     #[test]
     fn default_scope_threads_slug_first() {
         let mut binder = slugs_first("an-ws");
-        let legacy = legacy_filters(&QueryMap::new(), &mut binder).expect("empty params compile");
+        let legacy = legacy_filters(&QueryMap::new(), &mut binder, &chrono_tz::UTC)
+            .expect("empty params compile");
         assert!(legacy.is_none());
         let scope = issue_where("$1", legacy.as_deref());
         assert!(scope.contains("\"workspaces\".\"slug\" = $1"));

@@ -29,9 +29,13 @@ WS_SLUG = "az-ws"
 
 # A: 2026-09-30 22:00 in New York (day + month boundary).
 CREATED_A = "2026-10-01T02:00:00Z"
-# C: created 2026-03-31 21:00, completed 2026-03-31 23:00 in New York.
+# C: created 2026-03-31 21:00 in New York.
 CREATED_C = "2026-04-01T01:00:00Z"
-COMPLETED_C = "2026-04-01T03:00:00Z"
+# C completed Mar 31 23:00 New York *of the current year*: the default
+# month-wise scope filters `completed_at__year` to the current UTC year
+# (`base.py:275-282`), so a fixed year would expire every January. April 1
+# is always EDT (UTC-4), so the local Mar-31 bucket holds for any year.
+COMPLETED_C = "%d-04-01T03:00:00Z" % datetime.now(timezone.utc).year
 
 PW_SALT = "contract93seed"
 _PW_DK = hashlib.pbkdf2_hmac("sha256", b"contract93-password", PW_SALT.encode(), 10000)
@@ -236,6 +240,16 @@ def test_default_analytics_completed_month_actor_timezone(tzworld):
     resp = client.get(f"/api/workspaces/{WS_SLUG}/default-analytics/")
     assert resp.status_code == 200, resp.text[:500]
     assert resp.json()["issue_completed_month_wise"] == [{"month": 3, "count": 1}]
+
+
+def test_default_analytics_created_at_filter_actor_timezone(tzworld):
+    """``created_at=2026-10-01;after`` empties the scope (Sep 30 / Mar 31 local)."""
+    client = tzworld["client"]
+    resp = client.get(
+        f"/api/workspaces/{WS_SLUG}/default-analytics/?created_at=2026-10-01;after"
+    )
+    assert resp.status_code == 200, resp.text[:500]
+    assert resp.json()["total_issues"] == 0
 
 
 def test_advance_charts_custom_created_at_actor_timezone(tzworld):
