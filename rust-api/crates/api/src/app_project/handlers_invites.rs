@@ -32,8 +32,9 @@
 //!   (401), the `project_id` rewrite for authenticated callers only (404
 //!   `{"Detail":"Project not found"}` on a miss — the rewrite runs even on
 //!   the `AllowAny` join routes, where authentication still runs), then the
-//!   L7 gate (403), then body parsing (415 / axum rejection; empty body is
-//!   `{}` per the cycles live probe), then the handler.
+//!   L7 gate (403), then body parsing (JSON / form / multipart via the
+//!   shared DRF negotiation, 415 / axum rejection; empty body is `{}` per
+//!   the cycles live probe), then the handler.
 //! * Reads render through the L2/L1 kernels
 //!   (`ser_member::invite_to_representation`, `ser_project::DeployBoardRead`)
 //!   with datetimes in the caller's zone (`crate::serializer`, `Z` rewrite)
@@ -595,20 +596,91 @@ async fn check_board_gate(
     }
 }
 
+/// HTML-input shape for the five invite handlers that read
+/// `request.data` directly (`invite.py`, `base.py` favorites +
+/// board-create): DRF applies no serializer `get_value` rules there —
+/// `QueryDict.get` returns the last value verbatim — so no field is a
+/// list and no blank is skipped (PIDASHCONV-1508).
+const INVITE_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &[],
+    };
+
+/// HTML-input shape for the board PATCH (serializer-validated): a blank
+/// boolean behaves as absent (DRF `Field.get_value` — not required, no
+/// `allow_blank`, no `allow_null`), and so does a blank `updated_by`
+/// (the PATCH always re-stamps it to the caller, so absent and `None`
+/// converge — verified live, PIDASHCONV-1508).
+const BOARD_PATCH_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &[
+            "is_comments_enabled",
+            "is_reactions_enabled",
+            "is_votes_enabled",
+            "is_activity_enabled",
+            "is_disabled",
+            "updated_by",
+        ],
+    };
+
+/// Parse a form/multipart body through the shared DRF negotiation
+/// (PIDASHCONV-1508): the text map with the domain's HTML-input
+/// semantics. Uploaded files are dropped — no invite field is a file
+/// field (same convention as PIDASHCONV-1391).
+#[allow(clippy::result_large_err)]
+fn parse_html_body(
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    spec: &crate::v1_cycles_modules::body::BodySpec,
+) -> Result<Value, Response> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    match negotiate_body(headers, body, spec) {
+        Ok(NegotiatedBody::Form { map, .. }) => Ok(Value::Object(map)),
+        // Content-Length says empty (a header/body mismatch — the divert
+        // only runs on non-empty bytes): `{}` like the empty arm below.
+        Ok(NegotiatedBody::Empty) => Ok(Value::Object(Map::new())),
+        // Unreachable by selection (the divert only runs on the HTML
+        // mimes): decode defensively, 500 when the text is not JSON.
+        Ok(NegotiatedBody::JsonText { text, .. }) => {
+            serde_json::from_str(&text).map_err(|_| Denial::ServerError.into_response())
+        }
+        Err(BodyError::UnsupportedMediaType(detail)) => Err(Denial::Raw(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("{{\"detail\":{}}}", json_string(&detail)),
+        )
+        .into_response()),
+        Err(BodyError::ParseDetail(detail)) => Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            format!("{{\"detail\":{}}}", json_string(&detail)),
+        )
+        .into_response()),
+        Err(BodyError::ServerError) => Err(Denial::ServerError.into_response()),
+    }
+}
+
 /// Bodies parse after the gate (the handler builds on `request.data`):
 /// an empty body is `{}` (DRF never raises `ParseError` on it — the
-/// cycles live probe); a non-empty body without a JSON content type
-/// answers the `UnsupportedMediaType` 415 naming the content type
-/// (`text/plain` when missing); otherwise axum's `Json` rejection bytes
-/// apply (malformed JSON stays DRF-unmatched — its messages carry parser
-/// positions serde cannot reproduce — documented, never hit by the suite).
+/// cycles live probe); form and multipart bodies parse through the
+/// shared DRF negotiation (PIDASHCONV-1508); a non-empty body without a
+/// JSON content type answers the `UnsupportedMediaType` 415 naming the
+/// content type (`text/plain` when missing); otherwise axum's `Json`
+/// rejection bytes apply (malformed JSON stays DRF-unmatched — its
+/// messages carry parser positions serde cannot reproduce — documented,
+/// never hit by the suite). The flag reports HTML (form/multipart)
+/// input so the board PATCH can apply the serializer's HTML-only rules.
 #[allow(clippy::result_large_err)]
-async fn parse_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
+async fn parse_body(
+    state: &AppState,
+    req: axum::extract::Request,
+    spec: &crate::v1_cycles_modules::body::BodySpec,
+) -> Result<(Value, bool), Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
     let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
-        return Ok(Value::Object(Map::new()));
+        return Ok((Value::Object(Map::new()), false));
     }
     let content_type = parts
         .headers
@@ -616,6 +688,11 @@ async fn parse_body(state: &AppState, req: axum::extract::Request) -> Result<Val
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     let mime = content_type.split(';').next().unwrap_or("").trim();
+    if mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || mime.eq_ignore_ascii_case("multipart/form-data")
+    {
+        return parse_html_body(&parts.headers, &bytes, spec).map(|body| (body, true));
+    }
     if !mime.eq_ignore_ascii_case("application/json") {
         let named = if content_type.is_empty() {
             "text/plain"
@@ -630,7 +707,7 @@ async fn parse_body(state: &AppState, req: axum::extract::Request) -> Result<Val
     }
     let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
     match axum::Json::<Value>::from_request(req, state).await {
-        Ok(axum::Json(body)) => Ok(body),
+        Ok(axum::Json(body)) => Ok((body, false)),
         Err(rejection) => Err(rejection.into_response()),
     }
 }
@@ -2145,8 +2222,8 @@ async fn invite_create(
         "workspaces/<slug>/projects/<project_id>/invitations/",
     )
     .await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get("emails", [])` — a non-dict body has no `.get`
@@ -2589,8 +2666,8 @@ async fn user_invite_create(
         "users/me/workspaces/<slug>/projects/invitations/",
     )
     .await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get("project_ids", [])` — a non-dict body has no
@@ -2780,8 +2857,8 @@ async fn join_post(
     // 415 / malformed-body / non-dict failure.
     let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
     let invite = fetch_join_invite(&pool, &slug, &project_id, &pk).await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get(...)` — a non-dict body has no `.get`.
@@ -2976,8 +3053,8 @@ async fn fav_create(
         "workspaces/<slug>/user-favorite-projects/",
     )
     .await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get("project")` — a non-dict body has no `.get`.
@@ -3157,8 +3234,8 @@ async fn board_create(
     let pool = pool_of(&state)?.clone();
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     check_board_gate(&pool, &slug, &project_id, &resolved.id, "POST").await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get(...)` — a non-dict body has no `.get`.
@@ -3787,8 +3864,8 @@ async fn board_partial_update(
     check_board_gate(&pool, &slug, &project_id, &resolved.id, "PATCH").await?;
     let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
     let (current, _, _) = fetch_board_global(&pool, &pk).await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let (body, from_form) = match parse_body(&state, req, &BOARD_PATCH_BODY_SPEC).await {
+        Ok(parsed) => parsed,
         Err(response) => return Ok(response),
     };
     // `Serializer.to_internal_value` on a non-dict: `non_field_errors`
@@ -3805,6 +3882,30 @@ async fn board_partial_update(
             return Err(Denial::Raw(StatusCode::BAD_REQUEST, errors.body()));
         }
     };
+    // HTML-only input rules (DRF `Field.get_value`, `fields.py:407-429` +
+    // `JSONField.get_value`, verified live — PIDASHCONV-1508): a blank
+    // `allow_null` scalar arrives as `None` (the blank-skips in
+    // `BOARD_PATCH_BODY_SPEC` already dropped the bools and
+    // `updated_by`), and an HTML `view_props` string JSON-decodes (the
+    // `JSONString` mark) — or fails the field below. The JSON arm skips
+    // all of this: `""` runs `to_internal_value` there.
+    let mut data = data.clone();
+    let mut view_props_json_failed = false;
+    if from_form {
+        for key in ["entity_identifier", "deleted_at", "created_by", "intake"] {
+            if matches!(data.get(key), Some(Value::String(text)) if text.is_empty()) {
+                data.insert(key.to_owned(), Value::Null);
+            }
+        }
+        if let Some(Value::String(text)) = data.remove("view_props") {
+            match serde_json::from_str(&text) {
+                Ok(parsed) => {
+                    data.insert("view_props".to_owned(), parsed);
+                }
+                Err(_) => view_props_json_failed = true,
+            }
+        }
+    }
     let mut errors = BoardPatchErrors::new();
     let mut sets: Vec<(&'static str, PatchValue)> = Vec::new();
     // The just-assigned views render in-memory (user key order), like Django.
@@ -3857,7 +3958,9 @@ async fn board_partial_update(
             }
         }
     }
-    if let Some(value) = data.get("view_props") {
+    if view_props_json_failed {
+        errors.push("view_props", "Value must be valid JSON.".to_owned());
+    } else if let Some(value) = data.get("view_props") {
         if value.is_null() {
             errors.push("view_props", "This field may not be null.".to_owned());
         } else {
@@ -4642,6 +4745,51 @@ mod tests {
             ]
         );
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn html_body_negotiates() {
+        // PIDASHCONV-1508: form/multipart parse through the shared DRF
+        // negotiation (last value wins; blanks kept or skipped per spec).
+        let headers_for = |content_type: &str, len: usize| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("content-type", content_type.parse().unwrap());
+            headers.insert("content-length", len.to_string().parse().unwrap());
+            headers
+        };
+        // Raw-`.get` handlers: blanks stay in the map, last value wins.
+        let body = b"email=x%40example.com&accepted=0&accepted=1";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let value = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect("form");
+        assert_eq!(value["email"], Value::String("x@example.com".to_owned()));
+        assert_eq!(value["accepted"], Value::String("1".to_owned()));
+        let body = b"emails=";
+        let headers = headers_for(
+            "application/x-www-form-urlencoded; charset=utf-8",
+            body.len(),
+        );
+        let value = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect("blank form");
+        assert_eq!(value["emails"], Value::String(String::new()));
+        // Board PATCH: blank bools and `updated_by` behave as absent;
+        // other blanks stay for the handler's blank-to-null rules.
+        let body = b"is_votes_enabled=&updated_by=&entity_name=&intake=";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let value = parse_html_body(&headers, body, &BOARD_PATCH_BODY_SPEC).expect("patch form");
+        let map = value.as_object().expect("object");
+        assert!(!map.contains_key("is_votes_enabled"));
+        assert!(!map.contains_key("updated_by"));
+        assert_eq!(map["entity_name"], Value::String(String::new()));
+        assert_eq!(map["intake"], Value::String(String::new()));
+        // Text-only multipart decodes like the equivalent form body.
+        let body = b"--BOUND\r\nContent-Disposition: form-data; name=\"accepted\"\r\n\r\n0\r\n--BOUND--\r\n";
+        let headers = headers_for("multipart/form-data; boundary=BOUND", body.len());
+        let value = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect("multipart");
+        assert_eq!(value["accepted"], Value::String("0".to_owned()));
+        // Multipart without a boundary is DRF's `ParseError` 400.
+        let body = b"not multipart";
+        let headers = headers_for("multipart/form-data", body.len());
+        let response = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect_err("400");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
 
