@@ -300,10 +300,15 @@ fn json_string(value: &str) -> String {
 fn page_denial(error: crate::paginator::PageError) -> Denial {
     use crate::paginator::PageError;
     match error {
-        PageError::InvalidPerPage | PageError::PerPageTooLarge(_) | PageError::InvalidCursor => {
-            Denial::BadDetail(error.detail())
-        }
-        _ => Denial::ServerError,
+        PageError::InvalidPerPage
+        | PageError::PerPageTooLarge(_)
+        | PageError::InvalidCursor
+        | PageError::OffsetTooLarge
+        | PageError::NegativeOffset => Denial::BadDetail(error.detail()),
+        PageError::ZeroLimit
+        | PageError::NegativeSlice
+        | PageError::NonFiniteCursor
+        | PageError::MissingOrderKey => Denial::ServerError,
     }
 }
 
