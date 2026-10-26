@@ -6916,7 +6916,7 @@ pub fn chart_number_value(number: ChartNumber) -> Value {
 /// missing). `completed` carries one entry per completion in distribution
 /// order (date-ascending, physical ties); `None` dates are uncompleted
 /// rows, skipped like Python's `is not None` guard. Future dates (past
-/// `today`, the actor-zone day — see the caller) render `null`.
+/// `today`, the UTC day — see the caller) render `null`.
 pub fn burndown_chart(
     total: ChartNumber,
     completed: &[(Option<chrono::NaiveDate>, ChartNumber)],
@@ -7217,9 +7217,10 @@ pub async fn transfer_cycle_issues_inner(
     let start_date = row_datetime_opt(&recount, "start_date", "transfer-recount")?;
     let end_date = row_datetime_opt(&recount, "end_date", "transfer-recount")?;
     // `burndown_plot` compares each chart day against
-    // `timezone.now().date()` with the ACTOR zone active
-    // (`TimezoneMixin`, `analytics_plot.py:247-257`) — not the UTC day.
-    let today = micros_now().with_timezone(&timezone).date_naive();
+    // `timezone.now().date()`, which is always the UTC day under
+    // `USE_TZ=True` — `TimezoneMixin` activation has no effect on it
+    // (`analytics_plot.py:246,260`).
+    let today = micros_now().date_naive();
     // Estimate gate (`:153-159`): the EXISTS the snapshot branch reads.
     let estimate_type: bool = sqlx::query_scalar::<_, i32>(queries::TRANSFER_ESTIMATE_TYPE_SQL)
         .bind(slug)
@@ -9801,20 +9802,25 @@ mod tests {
 
     #[test]
     fn burndown_today_actor_zone_split() {
-        // F-C: the transfer caller derives `today` in the ACTOR zone, not
-        // UTC (`timezone.now().date()` under `TimezoneMixin`,
-        // `analytics_plot.py:247-257`). At 2026-10-02T00:30:00Z the UTC
-        // day is 10-02 while America/New_York still sits on 10-01, and
-        // the 10-02 chart entry flips between a number and `null`.
+        // The transfer caller derives `today` as the UTC day
+        // (`timezone.now().date()`, `analytics_plot.py:246,260`), not the
+        // actor-zone day: `timezone.now()` is always UTC under
+        // `USE_TZ=True`, whatever zone `TimezoneMixin` activated. At
+        // 2026-10-02T00:30:00Z the UTC day is 10-02 while
+        // America/New_York still sits on 10-01, and the 10-02 chart
+        // entry must stay a number (pending), not flip to `null`.
         use chrono_tz::Tz;
         let ny: Tz = "America/New_York".parse().expect("tz");
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:30:00Z")
             .expect("dt")
             .to_utc();
-        let utc_today = now.date_naive();
-        let actor_today = now.with_timezone(&ny).date_naive();
-        assert_eq!(utc_today.to_string(), "2026-10-02");
-        assert_eq!(actor_today.to_string(), "2026-10-01");
+        let today = now.date_naive();
+        assert_eq!(today.to_string(), "2026-10-02");
+        // The split-window scenario still holds: the actor sits a day behind.
+        assert_eq!(
+            now.with_timezone(&ny).date_naive().to_string(),
+            "2026-10-01"
+        );
         let start = Some(
             chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
                 .expect("dt")
@@ -9825,14 +9831,9 @@ mod tests {
                 .expect("dt")
                 .to_utc(),
         );
-        let actor_chart = burndown_chart(ChartNumber::Int(3), &[], start, end, actor_today);
+        let chart = burndown_chart(ChartNumber::Int(3), &[], start, end, today);
         assert_eq!(
-            serde_json::to_string(&actor_chart).expect("json"),
-            r#"{"2026-10-01":3,"2026-10-02":null}"#
-        );
-        let utc_chart = burndown_chart(ChartNumber::Int(3), &[], start, end, utc_today);
-        assert_eq!(
-            serde_json::to_string(&utc_chart).expect("json"),
+            serde_json::to_string(&chart).expect("json"),
             r#"{"2026-10-01":3,"2026-10-02":3}"#
         );
     }
