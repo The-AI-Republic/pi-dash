@@ -3475,11 +3475,13 @@ async fn fetch_scoped_page(
 }
 
 /// The create re-read (`base.py:149`: `self.get_queryset().get(pk=...)`):
-/// the full detail scope — top-level only (`:97`), owner-or-public (`:98`),
-/// the URL-project bridge (`:125`), plus the `filter_queryset` `?search=`
-/// name filter `get_queryset` carries (`base.py:88`) — with the three
-/// annotations. A child page (or any row the queryset hides, including one
-/// filtered out by `?search=`) misses here and answers 404 through
+/// the full detail scope — the live-project active-membership scope
+/// (`:92-96`, same `EXISTS` shape as `read_scope_where`), top-level only
+/// (`:97`), owner-or-public (`:98`), the URL-project bridge (`:125`), plus
+/// the `filter_queryset` `?search=` name filter `get_queryset` carries
+/// (`base.py:88`) — with the three annotations. A child page (or any row
+/// the queryset hides, including one filtered out by `?search=` or linked
+/// only to an archived project) misses here and answers 404 through
 /// `handle_exception`, exactly like Django.
 /// Binds: `$1` page, `$2` project, `$3` slug, `$4` user, then one bind per
 /// `?search=` term.
@@ -3509,6 +3511,9 @@ async fn fetch_detail_row(
            JOIN project_pages pp ON pp.page_id = p.id
                AND pp.project_id = $2 AND pp.deleted_at IS NULL
            WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL
+           AND EXISTS (SELECT 1 FROM project_pages pp_scope JOIN projects ON projects.id = pp_scope.project_id
+           JOIN project_members pm ON pm.project_id = projects.id AND pm.member_id = $4 AND pm.is_active = TRUE
+           WHERE pp_scope.page_id = p.id AND projects.archived_at IS NULL)
            AND p.parent_id IS NULL AND (p.owned_by_id = $4 OR p.access = 0){}"#,
         search_sql_on("p.name::text", 5, search),
     );
