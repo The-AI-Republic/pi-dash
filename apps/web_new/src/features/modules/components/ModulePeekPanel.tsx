@@ -4,7 +4,7 @@
 // The module quick look (parity/specs/modules.md §5, MOD-019). One panel
 // over the list or the archived tab, driven by the `peekModule` key. It
 // mounts the shared work-item peek chrome — the same frame the issues area
-// uses — and fills it with the module sidebar in read-only mode, so the
+// uses — and fills it with the module sidebar in the viewer's mode, so the
 // detail page and the peek never drift into two different sidebars. A
 // short work-item summary sits above the sidebar, read from the same detail
 // record the sidebar uses.

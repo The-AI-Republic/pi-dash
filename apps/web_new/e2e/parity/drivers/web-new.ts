@@ -17332,12 +17332,22 @@ export class WebNewDriver implements ParityDriver {
     let statusLocked = true;
     if ((await status.count()) > 0) {
       const trigger = status.first();
-      await trigger.click({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
-      await this.page.waitForTimeout(300);
-      const options = await this.page.getByRole("option").count();
-      const menus = await this.page.locator('[role="menu"]:visible, [role="listbox"]:visible').count();
-      statusLocked = (await trigger.isDisabled()) || (options === 0 && menus === 0);
-      await this.page.keyboard.press("Escape").catch(() => undefined);
+      // A disabled trigger opens nothing by itself, so pressing it would
+      // only burn the wait. Worse, the Escape meant to close a list would
+      // then reach the peek chrome's own Escape handler and close the very
+      // panel being read, so a locked trigger is left alone.
+      if (await trigger.isDisabled()) {
+        statusLocked = true;
+      } else {
+        await trigger.click({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+        await this.page.waitForTimeout(300);
+        const options = await this.page.getByRole("option").count();
+        const menus = await this.page.locator('[role="menu"]:visible, [role="listbox"]:visible').count();
+        statusLocked = options === 0 && menus === 0;
+        // Dismiss the list only when one actually opened; otherwise the
+        // press would land on the peek chrome and close the panel.
+        if (!statusLocked) await this.page.keyboard.press("Escape").catch(() => undefined);
+      }
     }
     const noLinks = panel.getByTestId("modules-links-empty");
     if ((await noLinks.count()) === 0) {

@@ -348,10 +348,31 @@ describe("the read-only module peek", () => {
       addLinkOffered: false,
       summaryShown: true,
     });
-    // A locked trigger is still pressed to prove it opens nothing.
-    expect(fake.clicks).toContain(STATUS_CONTROL);
+    // A locked trigger is read, never pressed: pressing it opens nothing
+    // and its dismiss Escape would close the panel being read.
+    expect(fake.clicks).not.toContain(STATUS_CONTROL);
+    expect(fake.keys).toEqual([]);
     // The disclosure was already open, so it is not pressed again.
     expect(fake.clicks).not.toContain(`${PEEK_PANEL} testid(modules-links-toggle)`);
+  });
+
+  it("never escapes a locked trigger, so the archived peek stays open", async () => {
+    // The regression behind NEWFRONT-702's gate failure: the status button
+    // is rendered but disabled on an archived module, so clicking then
+    // pressing Escape reached the peek chrome and closed it mid-read.
+    const fake = peekPage({
+      [STATUS_CONTROL]: { count: 1, visible: true, disabled: true },
+      [`${PEEK_PANEL} testid(modules-links-empty)`]: { count: 1, visible: true },
+    });
+
+    await expect(new WebNewDriver(fake.asPage()).archivesModulePeekReadOnly()).resolves.toEqual({
+      name: "Archived module",
+      statusLocked: true,
+      addLinkOffered: false,
+      summaryShown: true,
+    });
+    expect(fake.clicks).not.toContain(STATUS_CONTROL);
+    expect(fake.keys).toEqual([]);
   });
 
   it("reads the live twin: the status opens its list and the add link is offered", async () => {
@@ -380,12 +401,33 @@ describe("the read-only module peek", () => {
     expect(fake.keys).toContain("Escape");
   });
 
-  it("keeps reading when the status press, Escape and disclosure press refuse", async () => {
+  it("keeps reading when the disclosure press refuses", async () => {
     const fake = peekPage({
-      [STATUS_CONTROL]: { count: 1, visible: true, disabled: true, failClick: true },
+      [STATUS_CONTROL]: { count: 1, visible: true, disabled: true },
       [`${PEEK_PANEL} testid(modules-links-empty)`]: { count: 0 },
       [`${PEEK_PANEL} testid(modules-links-toggle)`]: { count: 1, visible: true, failClick: true },
       [`${PEEK_PANEL} testid(modules-links-add)`]: { count: 0 },
+    });
+
+    await expect(new WebNewDriver(fake.asPage()).archivesModulePeekReadOnly()).resolves.toEqual({
+      name: "Archived module",
+      statusLocked: true,
+      addLinkOffered: false,
+      summaryShown: true,
+    });
+    // The locked trigger is left alone; the refusal is swallowed rather
+    // than failing the read, and nothing is ever escaped.
+    expect(fake.clicks).not.toContain(STATUS_CONTROL);
+    expect(fake.clicks).toContain(`${PEEK_PANEL} testid(modules-links-toggle)`);
+    expect(fake.keys).toEqual([]);
+  });
+
+  it("keeps reading when the status press and its Escape refuse", async () => {
+    const fake = peekPage({
+      [STATUS_CONTROL]: { count: 1, visible: true, disabled: false, failClick: true },
+      "page role(option,)": { count: 0 },
+      'page css([role="menu"]:visible, [role="listbox"]:visible)': { count: 0 },
+      [`${PEEK_PANEL} testid(modules-links-empty)`]: { count: 1, visible: true },
     });
     fake.keyboardFails = true;
 
@@ -395,10 +437,10 @@ describe("the read-only module peek", () => {
       addLinkOffered: false,
       summaryShown: true,
     });
-    // Both presses were attempted, then swallowed rather than failing the read.
+    // An enabled trigger is pressed; with no list opened there is nothing
+    // to dismiss, so no Escape reaches the panel.
     expect(fake.clicks).toContain(STATUS_CONTROL);
-    expect(fake.clicks).toContain(`${PEEK_PANEL} testid(modules-links-toggle)`);
-    expect(fake.keys).toEqual(["Escape"]);
+    expect(fake.keys).toEqual([]);
   });
 
   it("keeps reading when the disclosure's empty note never lands", async () => {
