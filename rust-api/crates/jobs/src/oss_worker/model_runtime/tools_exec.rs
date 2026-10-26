@@ -36,9 +36,9 @@
 //! * Relation reference pools reuse [`MEMBER_PROJECT_ISSUES_SQL`] as an
 //!   `IN` subquery (binds `$1`/`$2`), never a forked predicate list.
 //!   `OWN_PROJECT_ISSUES_PREDICATE` slots in as `$3` on the own-project
-//!   pool. (Its doc points at the assistant's `SCOPED_ISSUES_SQL`, which
-//!   wrongly excludes stateless issues — a foundation port bug flagged
-//!   in the PR, not followed here.)
+//!   pool. (Its doc points at the assistant's `SCOPED_ISSUES_SQL`,
+//!   whose stateless exclusion PIDASHCONV-1250 fixed null-safe; not
+//!   followed here.)
 //! * Reference spelling follows the D-12 [`classify_ref`] contract; the
 //!   v1 relations handler parses a more lenient UUID grammar
 //!   (misplaced hyphens). Realistic refs agree on both; the D-12 golden
