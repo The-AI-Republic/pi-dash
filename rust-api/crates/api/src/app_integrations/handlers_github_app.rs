@@ -2675,6 +2675,40 @@ mod tests {
             "git_provider_accounts created_by"
         );
         assert_eq!(account_stamps.1, None, "git_provider_accounts updated_by");
+        // The `ON CONFLICT DO UPDATE` branch must rewrite the defaults
+        // without touching `created_by_id`: re-upsert the same workspace
+        // integration with a different actor and installation id. (The
+        // proposed row conflicts, so the unknown actor never reaches the
+        // table; `updated_by` on this branch is the known out-of-scope
+        // divergence and is deliberately not asserted.)
+        let other_actor = Uuid::new_v4();
+        let installation_id_2 = 1_000_000_000 + (Uuid::new_v4().as_u128() % 8_000_000_000) as i64;
+        let row_id_2 = upsert_installation_row(
+            &mut connection,
+            wi.id,
+            other_actor,
+            installation_id_2,
+            "kernel-octocat-2",
+            "Organization",
+            "selected",
+            5,
+            &serde_json::json!({}),
+            &serde_json::json!([]),
+            None,
+            None,
+        )
+        .await
+        .expect("installation re-upsert");
+        assert_eq!(row_id_2, row_id, "conflict branch returns same row");
+        let restamps: (Option<Uuid>, i64) = sqlx::query_as(
+            r#"SELECT "created_by_id", "installation_id" FROM "github_app_installations" WHERE "id" = $1"#,
+        )
+        .bind(row_id)
+        .fetch_one(&mut *connection)
+        .await
+        .expect("installation row after conflict");
+        assert_eq!(restamps.0, Some(user_id), "conflict keeps created_by");
+        assert_eq!(restamps.1, installation_id_2, "conflict rewrites defaults");
         drop(connection);
         cleanup_kernel_world(
             &pool,
