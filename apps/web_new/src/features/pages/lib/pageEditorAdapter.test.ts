@@ -292,6 +292,20 @@ describe("table and image commands", () => {
       "run",
     ]);
   });
+
+  it("inserts plain text and an entity reference through the handle", () => {
+    const { ref, calls } = editor();
+    const handle = pageEditorHandle(ref);
+    handle.insertText("@");
+    handle.insertEntityReference({
+      entity_name: "issue",
+      entity_identifier: "ISS-2",
+      project_identifier: "P",
+      workspace_identifier: "ws",
+      "data-label": "Fix login",
+    });
+    expect(calls).toEqual(["focus", "insertContent(@)", "run", "focus", "insertContent([object Object])", "run"]);
+  });
 });
 
 describe("colour commands", () => {
@@ -387,7 +401,7 @@ describe("page block catalogue commands", () => {
   });
 
   it("leaves the image and emoji entries to the interaction layer", () => {
-    for (const block of ["image", "emoji"] as const) {
+    for (const block of ["image", "emoji", "embed", "entity"] as const) {
       const { ref, calls } = editor();
       runCatalogBlock(ref, block);
       expect(calls).toEqual([]);

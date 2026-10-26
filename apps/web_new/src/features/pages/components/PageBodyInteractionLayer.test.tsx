@@ -6,7 +6,7 @@
 // trigger detection, catalogue forwarding, mention search and selection
 // commands all cross the same handle seam.
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -133,13 +133,79 @@ describe("PageBodyInteractionLayer", () => {
   });
 
   it("opens the reference picker from /entity and inserts a normalised reference", async () => {
-    api.searchEntityPreviews.mockResolvedValue({});
+    api.searchEntityPreviews.mockResolvedValue({
+      issue: [
+        {
+          name: "Fix login",
+          id: "11111111-1111-4111-8111-111111111111",
+          sequence_id: 42,
+          project__identifier: "WEB",
+          project_id: "22222222-2222-4222-8222-222222222222",
+          priority: "medium",
+          state_id: "33333333-3333-4333-8333-333333333333",
+          type_id: null,
+        },
+      ],
+    });
     const page = handle();
     (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/entity");
-    mount({ getHandle: () => page });
+    const { onDocumentChange } = mount({ getHandle: () => page });
     fireEvent.mouseDown(screen.getByRole("button", { name: "Entity reference" }));
-    expect(page.insertEntityReference).not.toHaveBeenCalled();
-    expect(screen.getByText("No work items match.")).toBeInTheDocument();
+    const row = await screen.findByRole("button", { name: /WEB-42 Fix login/ });
+    fireEvent.mouseDown(row);
+    expect(page.insertEntityReference).toHaveBeenCalledWith({
+      entity_name: "issue",
+      entity_identifier: "11111111-1111-4111-8111-111111111111",
+      project_identifier: "WEB",
+      workspace_identifier: "acme",
+      project_id: "22222222-2222-4222-8222-222222222222",
+      "data-label": "Fix login",
+    });
+    expect(onDocumentChange).toHaveBeenCalledWith("<p>html</p>");
+  });
+
+  it("shows the picker's empty state when its search fails", async () => {
+    api.searchEntityPreviews.mockRejectedValue(new Error("offline"));
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/embed");
+    mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Embed work item" }));
+    await waitFor(() => expect(api.searchEntityPreviews).toHaveBeenCalled());
+    expect(await screen.findByText("No work items match.")).toBeInTheDocument();
+  });
+
+  it("dismisses the work-item picker without inserting", async () => {
+    api.searchEntityPreviews.mockResolvedValue({});
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/embed");
+    mount({ getHandle: () => page });
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Embed work item" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss work-item picker" }));
+    expect(screen.queryByTestId("page-entity-picker")).not.toBeInTheDocument();
+    expect(page.insertEmbed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["align", "Left align", ["applyCommand", "alignLeft"]],
+    ["align", "Center align", ["applyCommand", "alignCenter"]],
+    ["align", "Right align", ["applyCommand", "alignRight"]],
+    ["inline", "Inline code", ["applyCommand", "code"]],
+    ["link", "Link", ["setLinkOpen", null]],
+    ["mention", "Mention", ["insertText", "@"]],
+  ] as const)("runs the %s query command %s", (query, label, expected) => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue(`/${query}`);
+    const { onDocumentChange } = mount({ getHandle: () => page });
+    const palette = screen.getByTestId("page-slash-palette");
+    fireEvent.mouseDown(within(palette).getByRole("button", { name: label }));
+    if (expected[0] === "setLinkOpen") {
+      expect(screen.getByTestId("page-link-bubble")).toBeInTheDocument();
+    } else if (expected[0] === "insertText") {
+      expect(page.insertText).toHaveBeenCalledWith("@");
+    } else {
+      expect(page.applyCommand).toHaveBeenCalledWith(expected[1]);
+    }
+    expect(onDocumentChange).toHaveBeenCalledWith("<p>html</p>");
   });
 
   it("runs the query-only inline commands from the palette", () => {

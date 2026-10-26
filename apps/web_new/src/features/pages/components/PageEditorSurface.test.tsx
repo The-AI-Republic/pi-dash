@@ -27,13 +27,18 @@ vi.mock("../../../shared/shell/toaster.js", () => ({
 const appClient = vi.hoisted(() => ({ getAppClient: vi.fn(() => ({ kind: "app-client" })) }));
 vi.mock("../../../core/api/client.js", () => ({ getAppClient: appClient.getAppClient }));
 
-const pageAssets = vi.hoisted(() => ({ uploadPageAsset: vi.fn(), duplicatePageAsset: vi.fn() }));
+const pageAssets = vi.hoisted(() => ({
+  uploadPageAsset: vi.fn(),
+  duplicatePageAsset: vi.fn(),
+  searchEntityPreviews: vi.fn(),
+}));
 vi.mock("@pidash/api-client", async (original) => {
   const actual = await original<typeof import("@pidash/api-client")>();
   return {
     ...actual,
     uploadPageAsset: pageAssets.uploadPageAsset,
     duplicatePageAsset: pageAssets.duplicatePageAsset,
+    searchEntityPreviews: pageAssets.searchEntityPreviews,
   };
 });
 
@@ -79,6 +84,15 @@ function clipboardPaste(target: HTMLElement, html: string): void {
   target.dispatchEvent(event);
 }
 
+/** Dispatch a plain-text paste with no markup flavour. */
+function plainPaste(target: HTMLElement, text: string): void {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { getData: (type: string) => (type === "text/plain" ? text : "") },
+  });
+  target.dispatchEvent(event);
+}
+
 afterEach(() => {
   resetPageBodyDrafts();
   resetPageBodyActions();
@@ -86,6 +100,7 @@ afterEach(() => {
   appClient.getAppClient.mockClear();
   pageAssets.uploadPageAsset.mockReset();
   pageAssets.duplicatePageAsset.mockReset();
+  pageAssets.searchEntityPreviews.mockReset();
 });
 
 describe(
@@ -445,6 +460,50 @@ describe(
       clipboardPaste(editable, '<image-component data-stored-src="asset-foreign"></image-component>');
       await vi.waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Clone refused."));
       expect(editable.querySelector("image-component")).toBeNull();
+    });
+
+    it("turns a pasted known work-item key into an entity preview (PAGE-043)", async () => {
+      pageAssets.searchEntityPreviews.mockResolvedValue({
+        issue: [
+          {
+            name: "Fix login",
+            id: "11111111-1111-4111-8111-111111111111",
+            sequence_id: 42,
+            project__identifier: "WEB",
+            project_id: "22222222-2222-4222-8222-222222222222",
+            priority: "medium",
+            state_id: "33333333-3333-4333-8333-333333333333",
+            type_id: null,
+          },
+        ],
+      });
+      mount({ descriptionHtml: "<p></p>" });
+      const editable = await body();
+      plainPaste(editable, "WEB-42");
+      await vi.waitFor(() => expect(pageAssets.searchEntityPreviews).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() =>
+        expect(editable.querySelector("entity-reference-component")?.getAttribute("data-label")).toBe("Fix login")
+      );
+    });
+
+    it("keeps an unknown pasted key as ordinary text", async () => {
+      pageAssets.searchEntityPreviews.mockResolvedValue({ issue: [] });
+      mount({ descriptionHtml: "<p></p>" });
+      const editable = await body();
+      plainPaste(editable, "WEB-99");
+      await vi.waitFor(() => expect(pageAssets.searchEntityPreviews).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(editable.textContent).toContain("WEB-99"));
+      expect(editable.querySelector("entity-reference-component")).toBeNull();
+    });
+
+    it("keeps a pasted key as text when the entity search fails", async () => {
+      pageAssets.searchEntityPreviews.mockRejectedValue(new Error("offline"));
+      mount({ descriptionHtml: "<p></p>" });
+      const editable = await body();
+      plainPaste(editable, "WEB-42");
+      await vi.waitFor(() => expect(pageAssets.searchEntityPreviews).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(editable.textContent).toContain("WEB-42"));
+      expect(editable.querySelector("entity-reference-component")).toBeNull();
     });
   },
   EDITOR_TEST_TIMEOUT

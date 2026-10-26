@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   embedHtml,
   emojiHtml,
+  filterPickerCommands,
   filterSlashEntries,
   PAGE_EMBED_TAG,
   PAGE_EMOJI_DATA_TYPE,
@@ -81,6 +82,12 @@ describe("page slash catalogue", () => {
     expect(filterSlashEntries("link").map((entry) => entry.label)).toEqual(["Link"]);
     expect(filterSlashEntries("mention").map((entry) => entry.label)).toEqual(["Mention"]);
     expect(filterSlashEntries("embed").map((entry) => entry.label)).toEqual(["Embed work item"]);
+  });
+
+  it("keeps the picker commands silent until the query has text", () => {
+    expect(filterPickerCommands("   ")).toEqual([]);
+    expect(filterPickerCommands("  EMB  ").map((entry) => entry.label)).toEqual(["Embed work item"]);
+    expect(filterPickerCommands("ent").map((entry) => entry.label)).toEqual(["Entity reference"]);
   });
 });
 

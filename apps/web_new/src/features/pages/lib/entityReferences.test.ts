@@ -30,6 +30,7 @@ describe("parseEntityAddress", () => {
       "WEB-0",
       "WEB-",
       "not a url https://[",
+      "https://[",
     ]) {
       expect(parseEntityAddress(text)).toBeNull();
     }
