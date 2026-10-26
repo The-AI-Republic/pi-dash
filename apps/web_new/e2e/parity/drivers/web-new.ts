@@ -27744,8 +27744,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesHeaderCanvasMaxWidth(): Promise<string> {
+    // The canvas eases width changes, so settle on two agreeing reads.
     const canvas = this.page.locator(".frame-renderer").first();
-    return canvas.evaluate((element) => getComputedStyle(element).maxWidth);
+    let previous = await canvas.evaluate((element) => getComputedStyle(element).maxWidth);
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      await this.page.waitForTimeout(100);
+      const current = await canvas.evaluate((element) => getComputedStyle(element).maxWidth);
+      if (current === previous) return current;
+      previous = current;
+    }
+    return previous;
   }
 
   async pagesHeaderToolbarVisible(): Promise<boolean> {
@@ -27839,7 +27847,7 @@ export class WebNewDriver implements ParityDriver {
   private pagesHeaderDescriptionWriteCountSeen = 0;
   private pagesHeaderDescriptionWriteTimesSeen: number[] = [];
   private pagesHeaderDescriptionWriteStatusesSeen: number[] = [];
-  private pagesHeaderDescriptionWriteKeysSeen: string[][] = [];
+  private pagesHeaderDescriptionWriteKeysSeen: string[] = [];
 
   async pagesHeaderSpyDescriptionWrites(): Promise<void> {
     if (this.pagesHeaderDescriptionSpyInstalled) return;
@@ -27850,9 +27858,9 @@ export class WebNewDriver implements ParityDriver {
       this.pagesHeaderDescriptionWriteTimesSeen.push(Date.now());
       try {
         const body = (request.postDataJSON() ?? {}) as Record<string, unknown>;
-        this.pagesHeaderDescriptionWriteKeysSeen.push(Object.keys(body));
+        this.pagesHeaderDescriptionWriteKeysSeen = Object.keys(body);
       } catch {
-        this.pagesHeaderDescriptionWriteKeysSeen.push([]);
+        this.pagesHeaderDescriptionWriteKeysSeen = [];
       }
     });
     this.page.on("response", (response) => {
@@ -27875,7 +27883,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesHeaderDescriptionWriteKeys(): Promise<string[]> {
-    return [...new Set(this.pagesHeaderDescriptionWriteKeysSeen.flat())];
+    return [...this.pagesHeaderDescriptionWriteKeysSeen];
   }
 
   private pagesHeaderPageSpyInstalled = false;

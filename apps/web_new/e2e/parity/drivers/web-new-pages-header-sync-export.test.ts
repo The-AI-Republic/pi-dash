@@ -137,6 +137,7 @@ interface PageDouble {
   on: ReturnType<typeof vi.fn>;
   grantPermissions: ReturnType<typeof vi.fn>;
   keyboardPress: ReturnType<typeof vi.fn>;
+  waitForTimeout: ReturnType<typeof vi.fn>;
   listeners: Record<string, (payload: unknown) => void>;
   routes: Array<{ pattern: string | RegExp; handler: (route: Route) => Promise<void> }>;
 }
@@ -146,6 +147,7 @@ function pageDouble(options: PageOptions = {}): PageDouble {
   const routes: PageDouble["routes"] = [];
   const grantPermissions = vi.fn(async () => undefined);
   const keyboardPress = vi.fn(async () => undefined);
+  const waitForTimeout = vi.fn(async () => undefined);
   const getByTestId = vi.fn((id: string) => options.testIds?.[id] ?? empty());
   const getByRole = vi.fn((role: string) => options.roles?.[role] ?? empty());
   const locator = vi.fn((selector: string) => options.selectors?.[selector] ?? empty());
@@ -163,6 +165,7 @@ function pageDouble(options: PageOptions = {}): PageDouble {
     locator,
     route,
     on,
+    waitForTimeout,
     evaluate: vi.fn(options.evaluate ?? (async () => undefined)),
     url: () => options.url ?? "https://app.test/",
     waitForEvent: vi.fn(
@@ -172,7 +175,19 @@ function pageDouble(options: PageOptions = {}): PageDouble {
         })
     ),
   } as unknown as Page;
-  return { page, getByTestId, getByRole, locator, route, on, grantPermissions, keyboardPress, listeners, routes };
+  return {
+    page,
+    getByTestId,
+    getByRole,
+    locator,
+    route,
+    on,
+    grantPermissions,
+    keyboardPress,
+    waitForTimeout,
+    listeners,
+    routes,
+  };
 }
 
 function routeDouble(method: string): {
@@ -604,14 +619,28 @@ describe("archived marker and delete dialog", () => {
 });
 
 describe("canvas, toolbar and pane", () => {
-  it("reads the canvas max width from the frame renderer", async () => {
-    const canvasFake = new FakeLocator({ count: 1, evaluate: async () => "720px" });
+  it("settles the canvas max width on two agreeing reads", async () => {
+    const reads = ["720px", "900px", "1152px", "1152px"];
+    const canvasFake = new FakeLocator({ count: 1, evaluate: async () => reads.shift() ?? "1152px" });
     const stub = pageDouble({ selectors: { ".frame-renderer": canvasFake as unknown as Locator } });
     const driver = new WebNewDriver(stub.page);
 
-    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("720px");
+    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("1152px");
     expect(stub.locator).toHaveBeenCalledWith(".frame-renderer");
-    expect(canvasFake.evaluate).toHaveBeenCalledTimes(1);
+    expect(canvasFake.evaluate).toHaveBeenCalledTimes(4);
+    expect(stub.waitForTimeout).toHaveBeenCalledTimes(3);
+    expect(stub.waitForTimeout).toHaveBeenCalledWith(100);
+  });
+
+  it("returns the latest canvas read when the width never settles", async () => {
+    let tick = 0;
+    const canvasFake = new FakeLocator({ count: 1, evaluate: async () => `${720 + (tick += 1)}px` });
+    const stub = pageDouble({ selectors: { ".frame-renderer": canvasFake as unknown as Locator } });
+    const driver = new WebNewDriver(stub.page);
+
+    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("746px");
+    expect(canvasFake.evaluate).toHaveBeenCalledTimes(26);
+    expect(stub.waitForTimeout).toHaveBeenCalledTimes(25);
   });
 
   it("reports the toolbar visible only while the bar shows", async () => {
@@ -730,7 +759,7 @@ describe("description and page write spies", () => {
 
   const descriptionUrl = "https://api.test/api/workspaces/w1/projects/p1/pages/pg-1/description/";
 
-  it("counts description patches with keys, times and statuses", async () => {
+  it("counts description patches and keeps the most recent keys", async () => {
     const stub = pageDouble();
     const driver = new WebNewDriver(stub.page);
 
@@ -742,17 +771,13 @@ describe("description and page write spies", () => {
     const response = stub.listeners.response as (payload: unknown) => void;
 
     request(descriptionRequest("PATCH", descriptionUrl, { description_binary: "x", description_html: "y" }));
-    request(descriptionRequest("PATCH", descriptionUrl, { description_json: "z" }));
+    request(descriptionRequest("PATCH", descriptionUrl, null, true));
     request(descriptionRequest("GET", descriptionUrl, null));
     request(descriptionRequest("PATCH", "https://api.test/api/workspaces/w1/projects/p1/pages/pg-1/", {}));
-    request(descriptionRequest("PATCH", descriptionUrl, null, true));
+    request(descriptionRequest("PATCH", descriptionUrl, { description_json: "z" }));
 
     await expect(driver.pagesHeaderDescriptionWriteCount()).resolves.toBe(3);
-    await expect(driver.pagesHeaderDescriptionWriteKeys()).resolves.toEqual([
-      "description_binary",
-      "description_html",
-      "description_json",
-    ]);
+    await expect(driver.pagesHeaderDescriptionWriteKeys()).resolves.toEqual(["description_json"]);
     const times = await driver.pagesHeaderDescriptionWriteTimes();
     expect(times).toHaveLength(3);
     expect(times.every((stamp) => typeof stamp === "number")).toBe(true);
