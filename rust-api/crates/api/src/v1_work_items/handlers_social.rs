@@ -4357,7 +4357,8 @@ fn strip_comment_html(html: &str) -> String {
 /// (`db/models/description.py:22-29`), which keeps entities verbatim —
 /// unlike the comment column's entity-decoding MLStripper. Empty HTML
 /// stores NULL. (PATCH syncs the decoded form via queryset `update()`,
-/// which runs no `save()` — that path is untouched.)
+/// which runs no `save()` — that path is untouched. The PATCH update-mint
+/// reuses this helper: `Description.objects.create` runs the same `save()`.)
 fn description_stripped_for_create(comment_html: &str) -> Option<String> {
     if comment_html.is_empty() {
         None
@@ -4548,11 +4549,10 @@ async fn comment_patch_inner(
         .comment_html
         .clone()
         .unwrap_or(before_html.clone());
-    let new_stripped = if validated.comment_html.is_some() {
-        strip_comment_html(&new_html)
-    } else {
-        before_stripped.clone()
-    };
+    // `IssueComment.save` recomputes `comment_stripped` on EVERY save
+    // (`db/models/issue.py:606`), even when `comment_html` is untouched —
+    // a stale stored value is repaired and then synced below.
+    let new_stripped = strip_comment_html(&new_html);
     let new_access = validated
         .access
         .clone()
@@ -4585,6 +4585,14 @@ async fn comment_patch_inner(
         .clone()
         .unwrap_or_else(|| before_decoded.speaker_agent_run_id.clone());
     let now = now_utc();
+    // `IssueComment.save` runs in one `transaction.atomic()`: the comment
+    // UPDATE, the `Description` INSERT-or-sync, and the `description_id`
+    // link write commit or roll back together.
+    let mut tx = pre
+        .pool
+        .begin()
+        .await
+        .map_err(|error| db_error(error, "comment-patch-tx"))?;
     sqlx::query(
         r#"UPDATE "issue_comments" SET "comment_json" = $1, "comment_html" = $2, "comment_stripped" = $3,
             "access" = $4, "external_source" = $5, "external_id" = $6, "labels" = $7,
@@ -4604,13 +4612,15 @@ async fn comment_patch_inner(
     .bind(now)
     .bind(pre.actor.id)
     .bind(pk)
-    .execute(&pre.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|error| db_error(error, "comment-patch-update"))?;
-    // The `Description` sync (`db/models/issue.py:629-647`): only changed
-    // tracked fields, plus `updated_by`/`updated_at` — via queryset
-    // `update()`, so no `save()` override re-strips. `_changes_on_save`
-    // compares VALUES: a present-but-identical key syncs nothing.
+    // The `Description` side of `IssueComment.save` (`db/models/issue.py:623-647`):
+    // a NULL `description_id` (pre-0109 legacy rows) mints a fresh
+    // `Description` over the saved triple; otherwise only changed tracked
+    // fields sync, plus `updated_by`/`updated_at` — via queryset `update()`,
+    // so no `save()` override re-strips. `_changes_on_save` compares
+    // VALUES: a present-but-identical key syncs nothing.
     let html_changed = validated
         .comment_html
         .as_ref()
@@ -4620,10 +4630,9 @@ async fn comment_patch_inner(
         .as_ref()
         .is_some_and(|json| *json != before_json);
     let stripped_changed = new_stripped != before_stripped;
-    // No `description_id` (legacy rows) skips the sync silently (`:631`).
-    if html_changed || json_changed || stripped_changed {
-        if let Some(description_id) = before_decoded.description.as_deref() {
-            let description_id: Uuid = description_id.parse().map_err(|_| Denial::ServerError)?;
+    let stored_description_id = row_uuid_opt(&before, "description_id")?;
+    if let Some(description_id) = stored_description_id {
+        if html_changed || json_changed || stripped_changed {
             let mut sets: Vec<String> = Vec::new();
             if html_changed {
                 sets.push("description_html".to_owned());
@@ -4658,11 +4667,46 @@ async fn comment_patch_inner(
                 .bind(pre.actor.id)
                 .bind(now)
                 .bind(description_id)
-                .execute(&pre.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|error| db_error(error, "comment-patch-desc"))?;
         }
+    } else {
+        // Unlinked legacy row: `Description.objects.create` over
+        // `description_defaults` (`:607-627`) — the comment's own creator
+        // stays `created_by`, the acting user is `updated_by` — then the
+        // `update_fields=["description_id"]` link write.
+        let stored_created_by = row_uuid_opt(&before, "created_by_id")?;
+        let description_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO "descriptions" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
+                "workspace_id", "project_id", "description_json", "description_html", "description_binary",
+                "description_stripped")
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)"#,
+        )
+        .bind(description_id)
+        .bind(now_utc())
+        .bind(now_utc())
+        .bind(stored_created_by)
+        .bind(pre.actor.id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(&new_json)
+        .bind(&new_html)
+        .bind(description_stripped_for_create(&new_html))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| db_error(error, "comment-patch-desc-mint"))?;
+        sqlx::query(r#"UPDATE "issue_comments" SET "description_id" = $1 WHERE "id" = $2"#)
+            .bind(description_id)
+            .bind(pk)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| db_error(error, "comment-patch-desc-link"))?;
     }
+    tx.commit()
+        .await
+        .map_err(|error| db_error(error, "comment-patch-commit"))?;
     let kwargs = work_tasks::issue_activity_kwargs(
         work_tasks::ACTIVITY_COMMENT_UPDATED,
         Some(&requested),
