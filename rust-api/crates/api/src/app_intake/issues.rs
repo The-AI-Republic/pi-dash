@@ -1843,11 +1843,17 @@ pub async fn apply_issue_update(
         return Err(Denial::ServerError);
     }
     if let Some(ids) = object.assignee_ids.as_ref() {
-        sqlx::query(r#"DELETE FROM issue_assignees WHERE issue_id = $1"#)
-            .bind(issue.id)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        // `update()` m2m replacement (`issue.py:474-475`): `IssueAssignee`
+        // uses the soft-deletion manager, so the queryset `delete()` only
+        // stamps `deleted_at` on the live rows (`db/mixins.py:48-53`) and
+        // keeps every tombstone. A hard `DELETE` here would destroy history.
+        sqlx::query(
+            r#"UPDATE issue_assignees SET deleted_at = now() WHERE issue_id = $1 AND deleted_at IS NULL"#,
+        )
+        .bind(issue.id)
+        .execute(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
         for assignee_id in ids {
             sqlx::query(
                 r#"INSERT INTO issue_assignees
@@ -1871,11 +1877,17 @@ pub async fn apply_issue_update(
         }
     }
     if let Some(ids) = object.label_ids.as_ref() {
-        sqlx::query(r#"DELETE FROM issue_labels WHERE issue_id = $1"#)
-            .bind(issue.id)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        // `update()` m2m replacement (`issue.py:495-496`): `IssueLabel`
+        // uses the soft-deletion manager, so the queryset `delete()` only
+        // stamps `deleted_at` on the live rows (`db/mixins.py:48-53`) and
+        // keeps every tombstone. A hard `DELETE` here would destroy history.
+        sqlx::query(
+            r#"UPDATE issue_labels SET deleted_at = now() WHERE issue_id = $1 AND deleted_at IS NULL"#,
+        )
+        .bind(issue.id)
+        .execute(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
         for label_id in ids {
             sqlx::query(
                 r#"INSERT INTO issue_labels
