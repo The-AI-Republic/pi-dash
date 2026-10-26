@@ -32,6 +32,11 @@ export function pageTabHref(workspaceSlug: string, projectId: string, tab: PageL
   return `/${workspaceSlug}/projects/${projectId}/pages?type=${tab}`;
 }
 
+/** Plain collection address with the trailing slash the recovery link keeps (PAGE-016). */
+export function pageListHref(workspaceSlug: string, projectId: string): string {
+  return `/${workspaceSlug}/projects/${projectId}/pages/`;
+}
+
 /** Canonical detail address a row opens. */
 export function pageDetailHref(workspaceSlug: string, projectId: string, pageId: string): string {
   return `/${workspaceSlug}/projects/${projectId}/pages/${pageId}`;

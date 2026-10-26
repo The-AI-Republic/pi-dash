@@ -22,6 +22,7 @@ import {
   pageCreatorName,
   pageSessionUserId,
   pageInTab,
+  pageListHref,
   pageSortKeyLabel,
   pageTabHref,
   pagesFeatureHref,
@@ -56,6 +57,10 @@ describe("parsePageListSearch and pageTabHref", () => {
     expect(pagesFeatureHref("acme", PAGES_PROJECT_ID)).toBe(
       `/acme/settings/projects/${PAGES_PROJECT_ID}/features/pages`
     );
+  });
+
+  it("keeps the trailing slash on the plain collection address", () => {
+    expect(pageListHref("acme", PAGES_PROJECT_ID)).toBe(`/acme/projects/${PAGES_PROJECT_ID}/pages/`);
   });
 });
 

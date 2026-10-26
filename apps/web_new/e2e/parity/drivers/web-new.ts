@@ -24926,20 +24926,152 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Pages create, star, row actions, move (NEWFRONT-313, PAGE-007-017). ---
 
-  async pagesRowOpenList(_workspaceSlug: string, _projectId: string, _tab?: PagesRowTab): Promise<void> {
-    return todo("pagesRowOpenList");
+  /** Query value the list route reads for one row tab. */
+  private pagesRowTabQuery(tab: PagesRowTab): string {
+    return tab === "restricted" ? "private" : tab === "shelved" ? "archived" : "public";
   }
 
-  async pagesRowOpenDetail(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
-    return todo("pagesRowOpenDetail");
+  /** One list row by its displayed title. */
+  private pagesRow(title: string): Locator {
+    return this.page
+      .getByTestId("page-row")
+      .filter({ has: this.page.getByRole("link", { name: title, exact: true }) })
+      .first();
+  }
+
+  /** Row titles until two consecutive reads agree (client-side reorder settles). */
+  private async pagesRowStableTitles(): Promise<string[]> {
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    let previous: string[] = await this.pagesRowTitles();
+    for (;;) {
+      await this.page.waitForTimeout(500);
+      const current: string[] = await this.pagesRowTitles();
+      if (current.join("\u0000") === previous.join("\u0000")) return current;
+      if (Date.now() > deadline) return current;
+      previous = current;
+    }
+  }
+
+  /** Inner texts of the currently open menu's items, in order. */
+  private async pagesRowMenuLabels(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      labels.push(
+        (
+          await items
+            .nth(index)
+            .innerText()
+            .catch(() => "")
+        ).trim()
+      );
+    }
+    return labels.filter((label) => label.length > 0);
+  }
+
+  /** Dismiss any open menu so every open starts from a known-closed state. */
+  private async pagesRowCloseMenu(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "hidden", timeout: 5_000 })
+      .catch(() => undefined);
+  }
+
+  /** Last path segment of a detail address (the page id). */
+  private pagesRowIdFromDetailUrl(url: string): string {
+    const parts = new URL(url).pathname.split("/").filter((part) => part.length > 0);
+    return parts[parts.length - 1] ?? "";
+  }
+
+  /** Settle on the toast stack showing at least one notice. */
+  private async pagesRowWaitToast(): Promise<void> {
+    await expect.poll(() => this.toastText(), { timeout: WebNewDriver.WAIT_MS }).not.toBeNull();
+  }
+
+  /** The form-based creation dialog root. */
+  private pagesCreateDialogRoot(): Locator {
+    return this.page.getByRole("dialog", { name: "Create page" });
+  }
+
+  /** The delete confirmation root. */
+  private pagesRowDeleteDialogRoot(): Locator {
+    return this.page.getByRole("dialog", { name: "Delete page" });
+  }
+
+  async pagesRowOpenList(workspaceSlug: string, projectId: string, tab?: PagesRowTab): Promise<void> {
+    const query = tab === undefined || tab === "open" ? "" : `?type=${this.pagesRowTabQuery(tab)}`;
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages${query}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // One of four terminal states proves the list route mounted: rows, the
+    // feature-off gate, the zero state, or the no-results state.
+    await Promise.race([
+      this.page
+        .getByTestId("page-row")
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.page
+        .getByTestId("pages-feature-gate")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.page
+        .getByTestId("pages-empty-state")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.page
+        .getByTestId("pages-no-results")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+    ]);
+    await this.pagesRowStableTitles().catch(() => []);
+  }
+
+  async pagesRowOpenDetail(workspaceSlug: string, projectId: string, pageId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // Either the canvas title, the not-found panel, or an address without
+    // the id proves the detail settled (deleted records keep their address
+    // and render the panel instead of redirecting).
+    await expect
+      .poll(
+        async () => {
+          if ((await this.page.getByTestId("page-detail-title").count()) > 0) return "ready";
+          if ((await this.page.getByTestId("page-detail-panel").count()) > 0) return "gone";
+          if (!this.page.url().includes(pageId)) return "gone";
+          return "waiting";
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .not.toBe("waiting");
   }
 
   async pagesRowTitles(): Promise<string[]> {
-    return todo("pagesRowTitles");
+    const links = this.page.getByTestId("page-row").getByRole("link");
+    const count = await links.count();
+    const titles: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const label = await links
+        .nth(index)
+        .getAttribute("aria-label")
+        .catch(() => null);
+      if (label !== null && label.trim().length > 0) titles.push(label.trim());
+    }
+    return titles;
   }
 
   async pagesRowActiveTab(): Promise<PagesRowTab | null> {
-    return todo("pagesRowActiveTab");
+    // The strip only mounts once the collection holds a row, so its
+    // absence reads as null rather than a default tab.
+    if ((await this.page.getByTestId("pages-list-tabs").count()) === 0) return null;
+    const type = new URL(this.page.url()).searchParams.get("type");
+    if (type === "private") return "restricted";
+    if (type === "archived") return "shelved";
+    return "open";
   }
 
   async pagesRowSelectTab(_tab: PagesRowTab): Promise<void> {
@@ -24947,27 +25079,59 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesCreateQuickVisible(): Promise<boolean> {
-    return todo("pagesCreateQuickVisible");
+    return this.isShown(this.page.getByTestId("pages-quick-create"));
   }
 
   async pagesCreateQuick(): Promise<string> {
-    return todo("pagesCreateQuick");
+    await this.page.getByTestId("pages-quick-create").click({ timeout: WebNewDriver.WAIT_MS });
+    // Success lands on the new id; a failed create stays put and reports
+    // through a notice instead — race the two so the failure path rejects
+    // fast instead of burning the whole wait budget.
+    try {
+      await expect
+        .poll(
+          async () => {
+            if (/^[0-9a-f-]{36}$/.test(this.pagesRowIdFromDetailUrl(this.page.url()))) return "created";
+            const toast = await this.toastText();
+            if (toast !== null && /could not be created|error/i.test(toast)) return "failed";
+            return "waiting";
+          },
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+        .not.toBe("waiting");
+    } catch {
+      throw new Error("[parity] quick-create neither navigated nor reported.");
+    }
+    const id = this.pagesRowIdFromDetailUrl(this.page.url());
+    if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error("[parity] quick-create failed as the app reports.");
+    return id;
   }
 
-  async pagesCreateFailNextCreate(_status?: number): Promise<void> {
-    return todo("pagesCreateFailNextCreate");
+  async pagesCreateFailNextCreate(status?: number): Promise<void> {
+    await this.page.route(
+      "**/api/workspaces/*/projects/*/pages/",
+      (route) => route.fulfill({ status: status ?? 500, body: "{}" }),
+      { times: 1 }
+    );
   }
 
   async pagesCreateOpenDialog(): Promise<void> {
-    return todo("pagesCreateOpenDialog");
+    await this.pressPaletteOpenChord();
+    await expect.poll(() => this.isCommandPaletteOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
+    await this.typeInCommandPalette("New page");
+    await expect.poll(() => this.paletteHasCommand("New page"), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
+    await this.activatePaletteCommand("New page");
+    await this.pagesCreateDialogRoot().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesCreateDialogVisible(): Promise<boolean> {
-    return todo("pagesCreateDialogVisible");
+    return this.isShown(this.pagesCreateDialogRoot());
   }
 
-  async pagesCreateDialogSetTitle(_text: string): Promise<void> {
-    return todo("pagesCreateDialogSetTitle");
+  async pagesCreateDialogSetTitle(text: string): Promise<void> {
+    const field = this.pagesCreateDialogRoot().getByPlaceholder("Title");
+    await field.fill(text, { timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => field.inputValue(), { timeout: WebNewDriver.WAIT_MS }).toBe(text);
   }
 
   async pagesCreateDialogTitleValue(): Promise<string> {
@@ -24975,63 +25139,135 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesCreateDialogOverLengthVisible(): Promise<boolean> {
-    return todo("pagesCreateDialogOverLengthVisible");
+    return this.isShown(this.pagesCreateDialogRoot().getByText("Keep the title to", { exact: false }));
   }
 
   async pagesCreateDialogSubmitEnabled(): Promise<boolean> {
-    return todo("pagesCreateDialogSubmitEnabled");
+    return this.pagesCreateDialogRoot()
+      .getByRole("button", { name: "Create Page", exact: true })
+      .isEnabled({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesCreateDialogAccess(): Promise<"open" | "restricted"> {
-    return todo("pagesCreateDialogAccess");
+    const label = (
+      (await this.pagesCreateDialogRoot()
+        .getByTestId("page-create-access-label")
+        .first()
+        .innerText({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => "")) ?? ""
+    ).trim();
+    return label === "Private" ? "restricted" : "open";
   }
 
-  async pagesCreateDialogSetAccess(_which: "open" | "restricted"): Promise<void> {
-    return todo("pagesCreateDialogSetAccess");
+  async pagesCreateDialogSetAccess(which: "open" | "restricted"): Promise<void> {
+    await this.pagesCreateDialogRoot()
+      .getByRole("group", { name: "Visibility" })
+      .getByRole("button", { name: which === "open" ? "Public" : "Private", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesCreateDialogAccess(), { timeout: WebNewDriver.WAIT_MS }).toBe(which);
   }
 
   async pagesCreateDialogPickIconMark(): Promise<void> {
-    return todo("pagesCreateDialogPickIconMark");
+    await this.page.getByTestId("page-create-mark").click({ timeout: WebNewDriver.WAIT_MS });
+    // The icon tab is the picker's default, so its catalogue renders
+    // without switching; the first tile is always a valid pick.
+    const icons = this.page.getByRole("list", { name: "Icons" });
+    await icons.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await icons.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesCreateDialogHasMark(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
   async pagesCreateDialogHasMark(): Promise<boolean> {
-    return todo("pagesCreateDialogHasMark");
+    const trigger = this.page.getByTestId("page-create-mark");
+    if ((await trigger.count()) === 0) return false;
+    // The trigger names its own state: choosing versus changing the mark.
+    return (await trigger.first().getAttribute("aria-label")) === "Change the page mark";
   }
 
   async pagesCreateDialogCancel(): Promise<void> {
-    return todo("pagesCreateDialogCancel");
+    await this.pagesCreateDialogRoot()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesCreateDialogRoot().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesCreateDialogSubmit(): Promise<string> {
-    return todo("pagesCreateDialogSubmit");
+    await this.pagesCreateDialogRoot()
+      .getByRole("button", { name: "Create Page", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // A valid submit closes the dialog before navigating; validation
+    // failures keep it open (or the control disabled), so a stuck dialog
+    // rejects fast here instead of burning the whole wait budget.
+    try {
+      await this.pagesCreateDialogRoot().waitFor({ state: "hidden", timeout: 10_000 });
+    } catch {
+      throw new Error("[parity] dialog submit did not close the dialog.");
+    }
+    await expect
+      .poll(() => this.pagesRowIdFromDetailUrl(this.page.url()), { timeout: WebNewDriver.WAIT_MS })
+      .toMatch(/^[0-9a-f-]{36}$/);
+    return this.pagesRowIdFromDetailUrl(this.page.url());
   }
 
-  async pagesRowStarVisible(_title: string): Promise<boolean> {
-    return todo("pagesRowStarVisible");
+  async pagesRowStarVisible(title: string): Promise<boolean> {
+    const row = this.pagesRow(title);
+    await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await row.getByTestId("page-row-star").count()) > 0;
   }
 
-  async pagesRowStarSelected(_title: string): Promise<boolean> {
-    return todo("pagesRowStarSelected");
+  async pagesRowStarSelected(title: string): Promise<boolean> {
+    const star = this.pagesRow(title).getByTestId("page-row-star");
+    if ((await star.count()) === 0) return false;
+    return (await star.first().getAttribute("aria-pressed")) === "true";
   }
 
-  async pagesRowToggleStar(_title: string): Promise<void> {
-    return todo("pagesRowToggleStar");
+  async pagesRowToggleStar(title: string): Promise<void> {
+    const star = this.pagesRow(title).getByTestId("page-row-star");
+    await star.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const before = await this.pagesRowStarSelected(title);
+    await star.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.pagesRowStarSelected(title), { timeout: WebNewDriver.WAIT_MS }).toBe(!before);
+    // The star flips optimistically while the notice trails the server
+    // roundtrip; settle on the notice so readers observe it.
+    await this.pagesRowWaitToast();
   }
 
   async pagesRowFilterFavoritesOnly(): Promise<void> {
-    return todo("pagesRowFilterFavoritesOnly");
+    const panel = this.page.getByTestId("pages-filter-panel");
+    if ((await panel.count()) === 0) {
+      await this.page.getByRole("button", { name: "Filters", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+      await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    }
+    await panel.getByRole("button", { name: "Favorites", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Escape");
+    await this.page.getByTestId("pages-filter-chips").waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesRowStableTitles().catch(() => []);
   }
 
   async pagesRowClearFilters(): Promise<void> {
-    return todo("pagesRowClearFilters");
+    await this.page
+      .getByTestId("pages-filter-chips")
+      .getByRole("button", { name: "Clear all", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesRowStableTitles().catch(() => []);
   }
 
   async pagesRowFavoritesNavOpen(): Promise<boolean> {
-    return todo("pagesRowFavoritesNavOpen");
+    // The section only mounts once a favorite exists, so its absence
+    // reads as collapsed rather than an error.
+    const toggle = this.page.getByTestId("favorites-section-toggle");
+    if ((await toggle.count()) === 0) return false;
+    return (await toggle.first().getAttribute("aria-expanded")) === "true";
   }
 
-  async pagesRowOpenMenu(_title: string): Promise<void> {
-    return todo("pagesRowOpenMenu");
+  async pagesRowOpenMenu(title: string): Promise<void> {
+    await this.pagesRowCloseMenu();
+    const row = this.pagesRow(title);
+    await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await row
+      .getByRole("button", { name: `Page actions for ${title}`, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesRowOpenContextMenu(_title: string): Promise<void> {
@@ -25039,79 +25275,146 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesRowMenuItems(): Promise<string[]> {
-    return todo("pagesRowMenuItems");
+    return this.pagesRowMenuLabels();
   }
 
-  async pagesRowMenuClick(_item: string): Promise<void> {
-    return todo("pagesRowMenuClick");
+  async pagesRowMenuClick(item: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: item, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
 
-  async pagesRowOpenInNewTab(_title: string): Promise<string> {
-    return todo("pagesRowOpenInNewTab");
+  async pagesRowOpenInNewTab(title: string): Promise<string> {
+    await this.pagesRowOpenMenu(title);
+    const popupPromise = this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS });
+    await this.pagesRowMenuClick("Open in new tab");
+    const popup = await popupPromise;
+    await popup.waitForLoadState("domcontentloaded", { timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    const url = popup.url();
+    await popup.close().catch(() => undefined);
+    return url;
   }
 
-  async pagesRowCopyLink(_title: string): Promise<void> {
-    return todo("pagesRowCopyLink");
+  async pagesRowCopyLink(title: string): Promise<void> {
+    // Headless Chromium denies clipboard writes unless permitted first.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.pagesRowOpenMenu(title);
+    await this.pagesRowMenuClick("Copy link");
+    await this.pagesRowWaitToast();
   }
 
-  async pagesRowDuplicate(_title: string): Promise<void> {
-    return todo("pagesRowDuplicate");
+  async pagesRowDuplicate(title: string): Promise<void> {
+    await this.pagesRowOpenMenu(title);
+    await this.pagesRowMenuClick("Make a copy");
+    await this.pagesRowWaitToast();
   }
 
-  async pagesRowToggleAccess(_title: string): Promise<void> {
-    return todo("pagesRowToggleAccess");
+  async pagesRowToggleAccess(title: string): Promise<void> {
+    await this.pagesRowOpenMenu(title);
+    const items = await this.pagesRowMenuItems();
+    const target = items.includes("Make private") ? "Make private" : "Make public";
+    await this.pagesRowMenuClick(target);
+    await this.pagesRowWaitToast();
   }
 
-  async pagesRowToggleLock(_title: string): Promise<void> {
-    return todo("pagesRowToggleLock");
+  async pagesRowToggleLock(title: string): Promise<void> {
+    await this.pagesRowOpenMenu(title);
+    const items = await this.pagesRowMenuItems();
+    const target = items.includes("Lock") ? "Lock" : "Unlock";
+    await this.pagesRowMenuClick(target);
+    await this.pagesRowWaitToast();
   }
 
-  async pagesRowToggleArchive(_title: string): Promise<void> {
-    return todo("pagesRowToggleArchive");
+  async pagesRowToggleArchive(title: string): Promise<void> {
+    await this.pagesRowOpenMenu(title);
+    const items = await this.pagesRowMenuItems();
+    const target = items.includes("Archive") ? "Archive" : "Restore";
+    await this.pagesRowMenuClick(target);
+    await this.pagesRowWaitToast();
   }
 
   async pagesRowDeleteModalVisible(): Promise<boolean> {
-    return todo("pagesRowDeleteModalVisible");
+    return this.isShown(this.pagesRowDeleteDialogRoot());
   }
 
   async pagesRowDeleteModalText(): Promise<string> {
-    return todo("pagesRowDeleteModalText");
+    return ((await this.pagesRowDeleteDialogRoot().first().innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
 
   async pagesRowDeleteConfirmBusy(): Promise<boolean> {
-    return todo("pagesRowDeleteConfirmBusy");
+    // The confirm control relabels while submitting, so match its progress
+    // label: a merely disabled Delete (count still resolving) is not busy.
+    return this.isShown(this.pagesRowDeleteDialogRoot().getByRole("button", { name: "Deleting…", exact: true }));
   }
 
   async pagesRowDeleteModalCancel(): Promise<void> {
-    return todo("pagesRowDeleteModalCancel");
+    await this.pagesRowDeleteDialogRoot()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesRowDeleteDialogRoot().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesRowDeleteModalConfirm(): Promise<void> {
-    return todo("pagesRowDeleteModalConfirm");
+    await this.pagesRowDeleteDialogRoot()
+      .getByRole("button", { name: "Delete", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesRowDeleteDialogRoot().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async pagesRowSlowNextDelete(_ms?: number): Promise<void> {
-    return todo("pagesRowSlowNextDelete");
+  async pagesRowSlowNextDelete(ms?: number): Promise<void> {
+    await this.page.route(
+      "**/api/workspaces/*/projects/*/pages/*/",
+      async (route) => {
+        if (route.request().method() !== "DELETE") {
+          await route.continue();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, ms ?? 800));
+        await route.continue();
+      },
+      { times: 1 }
+    );
   }
 
   async pagesRowDetailOpenOptions(): Promise<void> {
-    return todo("pagesRowDetailOpenOptions");
+    await this.pagesRowCloseMenu();
+    await this.page
+      .getByTestId("page-detail-header")
+      .getByRole("button", { name: "Page options", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesRowDetailReadOnly(): Promise<boolean> {
-    return todo("pagesRowDetailReadOnly");
+    // The title root marks itself once the capability resolves, on both
+    // the editable canvas and the static body, so one attribute settles it.
+    const title = this.page.getByTestId("page-detail-title");
+    await title.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await title.first().getAttribute("data-readonly")) === "true";
   }
 
   async pagesRowDetailMoveVisible(): Promise<boolean> {
-    return todo("pagesRowDetailMoveVisible");
+    // The community header carries no move trigger; a licensed one would
+    // name its target beside the other header controls.
+    const header = this.page.getByTestId("page-detail-header");
+    await header.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const text = (await header.innerText().catch(() => "")) ?? "";
+    if (text.includes("Move to")) return true;
+    return (await header.getByRole("button", { name: "Move", exact: true }).count()) > 0;
   }
 
   async pagesRowDetailNotFoundVisible(): Promise<boolean> {
-    return todo("pagesRowDetailNotFoundVisible");
+    return this.isShown(this.page.getByTestId("page-detail-panel"));
   }
 
   async pagesRowDetailNotFoundBackToList(): Promise<void> {
-    return todo("pagesRowDetailNotFoundBackToList");
+    await this.page
+      .getByTestId("page-detail-panel")
+      .getByRole("link", { name: "View other Pages", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   // --- Estimates enable switch, active/archived display, row gating
