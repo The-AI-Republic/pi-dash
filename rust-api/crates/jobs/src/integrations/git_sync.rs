@@ -61,6 +61,14 @@
 //! * `GIT_SYNC_ENABLED` exists nowhere in `settings/common.py`, so the
 //!   `getattr` chain always falls through to `GITHUB_SYNC_ENABLED` in
 //!   practice; [`git_sync_enabled`] keeps both lookups in order.
+//! * `GitIssueSync` / `GitCommentSync` and the mirror comment's
+//!   `Description` audit columns land NULL: `update_or_create`'s `save()`
+//!   re-stamps them from crum (no request user in the worker) and, unlike
+//!   `Issue` / `IssueComment`, there is no `.update()` restamp afterwards
+//!   (`git_sync_task.py:134-138, :177-195`); the description create runs
+//!   `BaseModel.save` itself (`issue.py:625`) while the change-tracked
+//!   update reads `self.updated_by_id` after `save()` set it to None
+//!   (`issue.py:644-646`).
 //!
 //! Fixture ids replayed by the unit tests below:
 //! `rust-api/fixtures/integrations/tasks/git_sync_task.before_after.json`
@@ -1739,8 +1747,10 @@ const UPDATE_ISSUE_SQL: &str = "UPDATE issues SET name = $2, description_html = 
 /// `GitIssueSync.objects.update_or_create(binding, external_iid, …)`
 /// (`git_sync_task.py:134-138`): full-row insert and full-defaults update
 /// (plus `updated_at`, which `save()` touches on the update path).
-const INSERT_ISSUE_SYNC_SQL: &str = "INSERT INTO git_issue_syncs (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, binding_id, issue_id, provider, external_id, external_iid, web_url, remote_state, remote_created_at, remote_updated_at, metadata) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
-const UPDATE_ISSUE_SYNC_SQL: &str = "UPDATE git_issue_syncs SET issue_id = $2, provider = $3, external_id = $4, web_url = $5, remote_state = $6, remote_created_at = $7, remote_updated_at = $8, workspace_id = $9, project_id = $10, created_by_id = $11, updated_by_id = $12, metadata = $13, updated_at = $14 WHERE id = $1";
+/// Audit lands NULL on both arms (`BaseModel.save` crum clobber, no
+/// restamp — ported bug, see the module docs).
+const INSERT_ISSUE_SYNC_SQL: &str = "INSERT INTO git_issue_syncs (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, binding_id, issue_id, provider, external_id, external_iid, web_url, remote_state, remote_created_at, remote_updated_at, metadata) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
+const UPDATE_ISSUE_SYNC_SQL: &str = "UPDATE git_issue_syncs SET issue_id = $2, provider = $3, external_id = $4, web_url = $5, remote_state = $6, remote_created_at = $7, remote_updated_at = $8, workspace_id = $9, project_id = $10, created_by_id = NULL, updated_by_id = NULL, metadata = $11, updated_at = $12 WHERE id = $1";
 
 /// `IssueSequence.objects.create(issue, sequence, project)`
 /// (`issue.py:340`): `ProjectBaseModel` audit columns, `deleted false`.
@@ -1752,8 +1762,10 @@ const INSERT_ISSUE_SEQUENCE_SQL: &str = "INSERT INTO issue_sequences (id, create
 /// (`description.py:6`, entities kept), overwriting the decoded value the
 /// caller passed (`description.py:22-28`). Hence the Django
 /// [`strip_tags`] call here, unlike every other stripped write in this
-/// module.
-const INSERT_DESCRIPTION_SQL: &str = "INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_json, description_html, description_binary, description_stripped) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, NULL, $10)";
+/// module. Audit lands NULL: the create runs `BaseModel.save`, which
+/// blanks both columns in the worker (no crum user — ported bug, see the
+/// module docs).
+const INSERT_DESCRIPTION_SQL: &str = "INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_json, description_html, description_binary, description_stripped) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, NULL, $8)";
 
 /// `IssueComment.objects.create` column list: array defaults `'{}'`,
 /// `access 'INTERNAL'`, `speaker_type 'human'`, `speaker_label ''`.
@@ -1763,12 +1775,18 @@ const INSERT_ISSUE_COMMENT_SQL: &str = "INSERT INTO issue_comments (id, created_
 /// triple plus audit restamp and `updated_at` (full `save()`); the
 /// description side-table updates only when a tracked field changed.
 const UPDATE_ISSUE_COMMENT_SQL: &str = "UPDATE issue_comments SET comment_html = $2, comment_stripped = $3, comment_json = $4, workspace_id = $5, project_id = $6, actor_id = $7, created_by_id = $8, updated_by_id = $9, updated_at = $10 WHERE id = $1";
-const UPDATE_COMMENT_DESCRIPTION_SQL: &str = "UPDATE descriptions SET description_html = $2, description_stripped = $3, description_json = $4, updated_by_id = $5, updated_at = $6 WHERE id = $1";
+/// Change-tracked description refresh (`issue.py:644-646`): a plain
+/// `filter().update`, so no `save()` — but it writes
+/// `updated_by_id=self.updated_by_id`, read after `BaseModel.save` set it
+/// to None in the worker (NULL — ported bug, see the module docs).
+const UPDATE_COMMENT_DESCRIPTION_SQL: &str = "UPDATE descriptions SET description_html = $2, description_stripped = $3, description_json = $4, updated_by_id = NULL, updated_at = $5 WHERE id = $1";
 
 /// `GitCommentSync.objects.update_or_create(issue_sync, external_id, …)`
-/// (`git_sync_task.py:177-195`).
-const INSERT_COMMENT_SYNC_SQL: &str = "INSERT INTO git_comment_syncs (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_sync_id, comment_id, provider, external_id, remote_created_at, remote_updated_at, metadata) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
-const UPDATE_COMMENT_SYNC_SQL: &str = "UPDATE git_comment_syncs SET comment_id = $2, provider = $3, remote_created_at = $4, remote_updated_at = $5, workspace_id = $6, project_id = $7, created_by_id = $8, updated_by_id = $9, metadata = $10, updated_at = $11 WHERE id = $1";
+/// (`git_sync_task.py:177-195`): audit lands NULL on both arms
+/// (`BaseModel.save` crum clobber, no restamp — ported bug, see the
+/// module docs).
+const INSERT_COMMENT_SYNC_SQL: &str = "INSERT INTO git_comment_syncs (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_sync_id, comment_id, provider, external_id, remote_created_at, remote_updated_at, metadata) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
+const UPDATE_COMMENT_SYNC_SQL: &str = "UPDATE git_comment_syncs SET comment_id = $2, provider = $3, remote_created_at = $4, remote_updated_at = $5, workspace_id = $6, project_id = $7, created_by_id = NULL, updated_by_id = NULL, metadata = $8, updated_at = $9 WHERE id = $1";
 
 /// Binding outcomes: success stamps both columns
 /// (`git_sync_task.py:264-266`); faults write only `last_sync_error`
@@ -1901,8 +1919,6 @@ async fn insert_issue_sync(
         .bind(sync_id)
         .bind(*now)
         .bind(*now)
-        .bind(scan.actor_id)
-        .bind(scan.actor_id)
         .bind(scan.project_id)
         .bind(scan.workspace_id)
         .bind(scan.binding_id)
@@ -2014,8 +2030,6 @@ async fn update_issue_sync(
         )
         .bind(scan.workspace_id)
         .bind(scan.project_id)
-        .bind(scan.actor_id)
-        .bind(scan.actor_id)
         .bind(json!({ "author": remote.author, "remote": remote.metadata }))
         .bind(*now)
         .execute(&mut **tx)
@@ -2068,8 +2082,6 @@ pub async fn upsert_comment(
                 .bind(description_id)
                 .bind(*now)
                 .bind(*now)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
                 .bind(scan.workspace_id)
                 .bind(scan.project_id)
                 .bind(json!({}))
@@ -2134,7 +2146,6 @@ pub async fn upsert_comment(
                         .bind(&comment_html)
                         .bind(&comment_stripped)
                         .bind(json!({}))
-                        .bind(scan.actor_id)
                         .bind(*now)
                         .execute(&mut *tx)
                         .await
@@ -2161,8 +2172,6 @@ pub async fn upsert_comment(
                 .bind(Uuid::new_v4())
                 .bind(*now)
                 .bind(*now)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
                 .bind(scan.project_id)
                 .bind(scan.workspace_id)
                 .bind(*sync_id)
@@ -2197,8 +2206,6 @@ pub async fn upsert_comment(
                 )
                 .bind(scan.workspace_id)
                 .bind(scan.project_id)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
                 .bind(metadata)
                 .bind(*now)
                 .execute(&mut *tx)
@@ -4024,6 +4031,18 @@ mod live_tests {
         }
     }
 
+    fn remote_comment(body: &str) -> RemoteComment {
+        RemoteComment {
+            external_id: "rs-cmt-1".to_owned(),
+            body: body.to_owned(),
+            author: "bob".to_owned(),
+            web_url: "https://github.com/rs-ct/x/issues/4242#issuecomment-1".to_owned(),
+            created_at: Some("2026-01-02T03:04:05Z".to_owned()),
+            updated_at: Some("2026-01-03T04:05:06Z".to_owned()),
+            metadata: json!({}),
+        }
+    }
+
     async fn cleanup(pool: &sqlx::PgPool, scan: &BindingScan, repo_id: Uuid, issue_id: Uuid) {
         for (sql, id) in [
             ("DELETE FROM git_issue_syncs WHERE issue_id = $1", issue_id),
@@ -4093,6 +4112,190 @@ mod live_tests {
             row.2, "4242",
             "external_iid stays the lookup key, never rewritten"
         );
+        cleanup(&pool, &scan, repo_id, issue_id).await;
+    }
+
+    async fn cleanup_comment(pool: &sqlx::PgPool, comment_id: Uuid, description_id: Option<Uuid>) {
+        sqlx::query("DELETE FROM git_comment_syncs WHERE comment_id = $1")
+            .bind(comment_id)
+            .execute(pool)
+            .await
+            .expect("teardown comment sync");
+        sqlx::query("DELETE FROM issue_comments WHERE id = $1")
+            .bind(comment_id)
+            .execute(pool)
+            .await
+            .expect("teardown mirror comment");
+        if let Some(description_id) = description_id {
+            sqlx::query("DELETE FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .execute(pool)
+                .await
+                .expect("teardown comment description");
+        }
+    }
+
+    /// `GitIssueSync` audit columns land NULL on both upsert arms
+    /// (PIDASHCONV-1473): `BaseModel.save` blanks both columns in the
+    /// worker (no crum user, `base.py:23-44`), and only `Issue` and
+    /// `IssueComment` get the follow-up `.update()` restamp
+    /// (`git_sync_task.py:109-114,170-175`) — the sync row keeps NULLs
+    /// (`git_sync_task.py:134-138`).
+    #[tokio::test]
+    async fn issue_sync_audit_columns_land_null() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let (scan, repo_id) = seed_binding(&pool).await;
+        let first = remote_issue(
+            "First title",
+            "https://github.com/rs-ct/x/issues/4242",
+            "open",
+        );
+        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &first, &Utc::now())
+            .await
+            .expect("first scan inserts the mirror issue");
+        let stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT created_by_id, updated_by_id FROM git_issue_syncs WHERE id = $1",
+        )
+        .bind(sync_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the sync row stamps");
+        assert_eq!(stamps, (None, None), "insert arm lands NULL audit columns");
+        let issue_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM issues WHERE id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the mirror issue stamps");
+        assert_eq!(
+            issue_stamps,
+            (Some(scan.actor_id), Some(scan.actor_id)),
+            "mirror issue keeps the actor restamp"
+        );
+        let second = remote_issue(
+            "Second title",
+            "https://github.com/rs-ct/x/issues/4242-moved",
+            "closed",
+        );
+        upsert_issue(&pool, &scan, &second, &Utc::now())
+            .await
+            .expect("second scan updates the mirror issue");
+        let restamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT created_by_id, updated_by_id FROM git_issue_syncs WHERE id = $1",
+        )
+        .bind(sync_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the sync row stamps after re-sync");
+        assert_eq!(
+            restamps,
+            (None, None),
+            "update arm lands NULL audit columns"
+        );
+        cleanup(&pool, &scan, repo_id, issue_id).await;
+    }
+
+    /// `GitCommentSync` and the mirror comment's `descriptions` row land
+    /// NULL (PIDASHCONV-1473): the comment-sync row keeps NULLs on both
+    /// arms (`git_sync_task.py:177-195`); `IssueComment.save` creates the
+    /// description via `objects.create`, which runs `BaseModel.save`
+    /// (`issue.py:625`), and the change-tracked update reads
+    /// `self.updated_by_id` after `save()` set it to None
+    /// (`issue.py:644-646`).
+    #[tokio::test]
+    async fn comment_sync_and_description_audit_columns_land_null() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let (scan, repo_id) = seed_binding(&pool).await;
+        let issue = remote_issue(
+            "First title",
+            "https://github.com/rs-ct/x/issues/4242",
+            "open",
+        );
+        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &issue, &Utc::now())
+            .await
+            .expect("seed scan inserts the mirror issue");
+        upsert_comment(
+            &pool,
+            &scan,
+            &remote_comment("First body"),
+            &issue_id,
+            &sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("first scan inserts the mirror comment");
+        let ids: (Uuid, Option<Uuid>) =
+            sqlx::query_as("SELECT id, description_id FROM issue_comments WHERE issue_id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the mirror comment ids");
+        let (comment_id, description_id) = ids;
+        let description_id = description_id.expect("mirror comment has a description row");
+        let sync_stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT created_by_id, updated_by_id FROM git_comment_syncs WHERE comment_id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the comment sync stamps");
+        assert_eq!(sync_stamps, (None, None), "comment sync insert lands NULL");
+        let desc_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the description stamps");
+        assert_eq!(desc_stamps, (None, None), "description insert lands NULL");
+        let comment_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM issue_comments WHERE id = $1")
+                .bind(comment_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the mirror comment stamps");
+        assert_eq!(
+            comment_stamps,
+            (Some(scan.actor_id), Some(scan.actor_id)),
+            "mirror comment keeps the actor restamp"
+        );
+        upsert_comment(
+            &pool,
+            &scan,
+            &remote_comment("Edited body"),
+            &issue_id,
+            &sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("re-sync updates the mirror comment");
+        let redesc_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the description stamps after re-sync");
+        assert_eq!(
+            redesc_stamps,
+            (None, None),
+            "description update lands NULL updated_by"
+        );
+        let resync_stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT created_by_id, updated_by_id FROM git_comment_syncs WHERE comment_id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the comment sync stamps after re-sync");
+        assert_eq!(
+            resync_stamps,
+            (None, None),
+            "comment sync update lands NULL"
+        );
+        cleanup_comment(&pool, comment_id, Some(description_id)).await;
         cleanup(&pool, &scan, repo_id, issue_id).await;
     }
 }

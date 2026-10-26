@@ -108,6 +108,11 @@
 //!   `.update()` restamp afterwards (`github_sync_task.py:168-188,
 //!   :230-240`). On the update arm the NULLs additionally clobber the
 //!   values a previous arm wrote.
+//! * The mirror comment's `Description` row lands NULL/NULL on create
+//!   (`Description.objects.create` runs `BaseModel.save` itself,
+//!   `issue.py:625`) and NULL `updated_by_id` on the change-tracked
+//!   update, which reads `self.updated_by_id` after `save()` set it to
+//!   None (`issue.py:644-646`).
 //! * The metadata read-modify-writes (`_reconcile_upstream_gone`, the
 //!   completion guard, the login merge) are non-atomic, as in Python.
 //! * A truthy non-string `config["token"]` raises out of `_resolve_token`
@@ -479,8 +484,10 @@ pub const ISSUE_COMMENT_LOOKUP_SQL: &str = "SELECT id, comment_html, comment_str
 /// (`description.py:6`, entities kept), overwriting the decoded value the
 /// caller passed (`description.py:22-28`). Hence the Django
 /// [`strip_tags`] call here, unlike every other stripped write in this
-/// module.
-const INSERT_DESCRIPTION_SQL: &str = "INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_json, description_html, description_binary, description_stripped) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, NULL, $10)";
+/// module. Audit lands NULL: the create runs `BaseModel.save`, which
+/// blanks both columns in the worker (no crum user — ported bug, see the
+/// module docs).
+const INSERT_DESCRIPTION_SQL: &str = "INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_json, description_html, description_binary, description_stripped) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, NULL, $8)";
 
 /// `IssueComment.objects.create` column list: array defaults `'{}'`,
 /// `access 'INTERNAL'`, `speaker_type 'human'`, `speaker_label ''`.
@@ -490,7 +497,11 @@ const INSERT_ISSUE_COMMENT_SQL: &str = "INSERT INTO issue_comments (id, created_
 /// triple plus audit restamp and `updated_at` (full `save()`); the
 /// description side-table updates only when a tracked field changed.
 const UPDATE_ISSUE_COMMENT_SQL: &str = "UPDATE issue_comments SET comment_html = $2, comment_stripped = $3, comment_json = $4, workspace_id = $5, project_id = $6, actor_id = $7, created_by_id = $8, updated_by_id = $8, updated_at = $9 WHERE id = $1";
-const UPDATE_COMMENT_DESCRIPTION_SQL: &str = "UPDATE descriptions SET description_html = $2, description_stripped = $3, description_json = $4, updated_by_id = $5, updated_at = $6 WHERE id = $1";
+/// Change-tracked description refresh (`issue.py:644-646`): a plain
+/// `filter().update`, so no `save()` — but it writes
+/// `updated_by_id=self.updated_by_id`, read after `BaseModel.save` set it
+/// to None in the worker (NULL — ported bug, see the module docs).
+const UPDATE_COMMENT_DESCRIPTION_SQL: &str = "UPDATE descriptions SET description_html = $2, description_stripped = $3, description_json = $4, updated_by_id = NULL, updated_at = $5 WHERE id = $1";
 
 /// Comment-sync lookup (`github_sync_task.py:230-232`):
 /// `GithubCommentSync.objects.update_or_create(issue_sync, comment, …)` —
@@ -1351,8 +1362,6 @@ pub async fn upsert_comment(
                 .bind(description_id)
                 .bind(*now)
                 .bind(*now)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
                 .bind(scan.workspace_id)
                 .bind(scan.project_id)
                 .bind(json!({}))
@@ -1411,7 +1420,6 @@ pub async fn upsert_comment(
                         .bind(&comment_html)
                         .bind(&comment_stripped)
                         .bind(json!({}))
-                        .bind(scan.actor_id)
                         .bind(*now)
                         .execute(&mut *tx)
                         .await
@@ -2618,5 +2626,290 @@ mod tests {
             route_for(&registry, "pi_dash.bgtasks.other.task"),
             Route::Unknown
         );
+    }
+}
+
+/// Live scratch-DB proof that a mirrored legacy comment's `descriptions`
+/// row lands NULL (PIDASHCONV-1473), env-gated like the `git_sync`
+/// live tests: without `DATABASE_URL` these skip. `upsert_comment` runs
+/// twice with the same remote id and a changed body — the first call
+/// takes the INSERT arm, the second the change-tracked UPDATE arm
+/// (`issue.py:598-646`), mirroring the Django `_upsert_comment` control.
+/// Pre-fix both arms stamp the binding actor; Django writes NULL on both
+/// (`Description.objects.create` runs `BaseModel.save`, `issue.py:625`;
+/// the update reads `self.updated_by_id` after `save()` set it to None,
+/// `issue.py:644-646`).
+#[cfg(test)]
+mod live_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// Seed user → workspace → project → integration → api token →
+    /// workspace integration → github repository → repository sync. Every
+    /// unique column carries a random tag so reruns never collide.
+    /// Returns the scan closure for [`upsert_issue`]/[`upsert_comment`].
+    async fn seed_scan(pool: &sqlx::PgPool) -> RepoScan {
+        let tag: String = Uuid::new_v4().simple().to_string()[..10].to_owned();
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, password, email, username, display_name, first_name, last_name, avatar, date_joined, created_at, updated_at, last_location, created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, is_password_reset_required, token, last_active, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, is_bot, user_timezone, is_email_valid) VALUES ($1, 'pbkdf2_sha256$600000$salt$hash', $2, $3, '', '', '', '', now(), now(), now(), '', '', false, false, false, true, false, false, false, false, '', now(), '', '', 'email', '', false, 'UTC', true)",
+        )
+        .bind(user_id)
+        .bind(format!("rs1473-{tag}@example.com"))
+        .bind(format!("rs1473_{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed user");
+        let workspace_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, owner_id, slug, timezone, background_color, created_at, updated_at) VALUES ($1, $2, $3, $4, 'UTC', '#ffffff', now(), now())",
+        )
+        .bind(workspace_id)
+        .bind(format!("RS1473 {tag}"))
+        .bind(user_id)
+        .bind(format!("rs1473-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        let project_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, network, workspace_id, identifier, module_view, cycle_view, issue_views_view, page_view, intake_view, is_time_tracking_enabled, is_issue_type_enabled, is_default, guest_view_all_features, members_can_edit_states, archive_in, close_in, logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, agent_review_default_interval_seconds, agent_test_default_interval_seconds, agent_ticking_enabled, default_agent_executor, created_at, updated_at) VALUES ($1, $2, '', 2, $3, $4, false, false, false, true, false, false, false, false, false, true, 0, 0, '{}', 'UTC', '', 'main', 10800, 10, 10800, 10800, true, 'local_runner', now(), now())",
+        )
+        .bind(project_id)
+        .bind(format!("RS1473 {tag}"))
+        .bind(workspace_id)
+        .bind(format!("RS{}", tag.to_uppercase()))
+        .execute(pool)
+        .await
+        .expect("seed project");
+        let integration_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO integrations (id, created_at, updated_at, title, provider, network, description, author, webhook_url, webhook_secret, redirect_url, metadata, verified, avatar_url) VALUES ($1, now(), now(), $2, $3, 1, '{}', '', '', '', '', '{}', false, NULL)",
+        )
+        .bind(integration_id)
+        .bind(format!("RS1473 {tag}"))
+        .bind(format!("rs1473-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed integration");
+        let token_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO api_tokens (id, created_at, updated_at, label, description, is_active, last_used, token, user_id, user_type, workspace_id, expired_at, is_service, allowed_rate_limit) VALUES ($1, now(), now(), $2, '', true, NULL, $3, $4, 1, $5, NULL, false, '60/min')",
+        )
+        .bind(token_id)
+        .bind(format!("rs1473-{tag}"))
+        .bind(format!("rs1473-token-{tag}"))
+        .bind(user_id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed api token");
+        let ws_integration_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspace_integrations (id, created_at, updated_at, workspace_id, actor_id, integration_id, api_token_id, metadata, config) VALUES ($1, now(), now(), $2, $3, $4, $5, '{}', '{}')",
+        )
+        .bind(ws_integration_id)
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(integration_id)
+        .bind(token_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace integration");
+        let repo_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO github_repositories (id, created_at, updated_at, project_id, workspace_id, name, url, config, repository_id, owner) VALUES ($1, now(), now(), $2, $3, $4, NULL, '{}', 99, 'rs-ct')",
+        )
+        .bind(repo_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(format!("rs{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed github repository");
+        let sync_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO github_repository_syncs (id, created_at, updated_at, project_id, workspace_id, repository_id, credentials, actor_id, workspace_integration_id, label_id, is_sync_enabled, last_synced_at, last_sync_error) VALUES ($1, now(), now(), $2, $3, $4, '{}', $5, $6, NULL, true, NULL, '')",
+        )
+        .bind(sync_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(repo_id)
+        .bind(user_id)
+        .bind(ws_integration_id)
+        .execute(pool)
+        .await
+        .expect("seed repository sync");
+        RepoScan {
+            sync_id,
+            project_id,
+            workspace_id,
+            actor_id: user_id,
+            owner: "rs-ct".to_owned(),
+            name: format!("rs{tag}"),
+            token: "x".to_owned(),
+        }
+    }
+
+    fn gh_issue(title: &str) -> Value {
+        json!({
+            "number": 7,
+            "id": 1001,
+            "title": title,
+            "body": "Remote body",
+            "state": "open",
+            "html_url": "https://github.com/rs-ct/x/issues/7",
+            "created_at": "2026-01-02T03:04:05Z",
+            "updated_at": "2026-01-03T04:05:06Z",
+        })
+    }
+
+    fn gh_comment(body: &str) -> Value {
+        json!({"id": 5001, "body": body})
+    }
+
+    async fn cleanup(
+        pool: &sqlx::PgPool,
+        scan: &RepoScan,
+        issue_id: Uuid,
+        comment_id: Uuid,
+        description_id: Uuid,
+    ) {
+        let row: (Uuid, Uuid) = sqlx::query_as(
+            "SELECT repository_id, workspace_integration_id FROM github_repository_syncs WHERE id = $1",
+        )
+        .bind(scan.sync_id)
+        .fetch_one(pool)
+        .await
+        .expect("read back seed ids");
+        let (repo_id, ws_integration_id) = row;
+        let (integration_id, token_id): (Uuid, Uuid) = sqlx::query_as(
+            "SELECT integration_id, api_token_id FROM workspace_integrations WHERE id = $1",
+        )
+        .bind(ws_integration_id)
+        .fetch_one(pool)
+        .await
+        .expect("read back integration ids");
+        for (sql, id) in [
+            (
+                "DELETE FROM github_comment_syncs WHERE comment_id = $1",
+                comment_id,
+            ),
+            ("DELETE FROM issue_comments WHERE id = $1", comment_id),
+            ("DELETE FROM descriptions WHERE id = $1", description_id),
+            (
+                "DELETE FROM github_issue_syncs WHERE issue_id = $1",
+                issue_id,
+            ),
+            ("DELETE FROM issue_sequences WHERE issue_id = $1", issue_id),
+            ("DELETE FROM issues WHERE id = $1", issue_id),
+            (
+                "DELETE FROM github_repository_syncs WHERE id = $1",
+                scan.sync_id,
+            ),
+            ("DELETE FROM github_repositories WHERE id = $1", repo_id),
+            (
+                "DELETE FROM workspace_integrations WHERE id = $1",
+                ws_integration_id,
+            ),
+            ("DELETE FROM api_tokens WHERE id = $1", token_id),
+            ("DELETE FROM integrations WHERE id = $1", integration_id),
+            ("DELETE FROM projects WHERE id = $1", scan.project_id),
+            ("DELETE FROM workspaces WHERE id = $1", scan.workspace_id),
+            ("DELETE FROM users WHERE id = $1", scan.actor_id),
+        ] {
+            sqlx::query(sql)
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("teardown delete");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_comment_description_audit_columns_land_null() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scan = seed_scan(&pool).await;
+        let (issue_id, legacy_sync_id) =
+            upsert_issue(&pool, &scan, &gh_issue("Remote title"), &Utc::now())
+                .await
+                .expect("seed scan inserts the mirror issue");
+        upsert_comment(
+            &pool,
+            &scan,
+            &gh_comment("First body"),
+            &issue_id,
+            &legacy_sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("first scan inserts the mirror comment");
+        let ids: (Uuid, Option<Uuid>) =
+            sqlx::query_as("SELECT id, description_id FROM issue_comments WHERE issue_id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the mirror comment ids");
+        let (comment_id, description_id) = ids;
+        let description_id = description_id.expect("mirror comment has a description row");
+        let desc_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the description stamps");
+        assert_eq!(desc_stamps, (None, None), "description insert lands NULL");
+        let comment_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM issue_comments WHERE id = $1")
+                .bind(comment_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the mirror comment stamps");
+        assert_eq!(
+            comment_stamps,
+            (Some(scan.actor_id), Some(scan.actor_id)),
+            "mirror comment keeps the actor restamp"
+        );
+        upsert_comment(
+            &pool,
+            &scan,
+            &gh_comment("Edited body"),
+            &issue_id,
+            &legacy_sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("re-sync updates the mirror comment");
+        let redesc_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the description stamps after re-sync");
+        assert_eq!(
+            redesc_stamps,
+            (None, None),
+            "description update lands NULL updated_by"
+        );
+        cleanup(&pool, &scan, issue_id, comment_id, description_id).await;
     }
 }
