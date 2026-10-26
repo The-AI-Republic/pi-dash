@@ -22,7 +22,7 @@ use super::{
     actor, guard_denial, guest_view_all, load_membership, parse_id, pool_of, query_last,
     raw_json_response, resolve_tenant, Denial, QueryMap,
 };
-use crate::serializer::render_datetime_in;
+use crate::serializer::{render_datetime, render_datetime_in};
 use crate::state::AppState;
 
 /// One `issue_description_versions` row.
@@ -407,13 +407,14 @@ pub async fn list(
             "issue".to_owned(),
             serde_json::Value::String(issue_id.to_string()),
         );
-        // `last_saved_at` is outside the converter's field set: it
-        // renders in the requester's zone through the active timezone,
-        // like every DRF datetime under `TimezoneMixin`.
+        // `last_saved_at` is outside the converter's field set and has
+        // no serializer field, so `TimezoneMixin` never applies: it
+        // renders as stored (UTC, `...Z`) through DRF's JSON encoder,
+        // like the app_issues twin.
         item.insert(
             "last_saved_at".to_owned(),
             last_saved_at.map_or(serde_json::Value::Null, |dt| {
-                serde_json::Value::String(render_datetime_in(&dt, &context.timezone))
+                serde_json::Value::String(render_datetime(&dt))
             }),
         );
         item.insert("owned_by".to_owned(), opt_uuid(&owned_by_id));
