@@ -94,7 +94,7 @@ interface SetupOptions {
 }
 
 function setup(options: SetupOptions = {}) {
-  const requests: Array<{ method: string; url: string; body?: string }> = [];
+  const requests: Array<{ method: string; url: string; body?: string | undefined }> = [];
   const transport: Transport = (async (url, init) => {
     requests.push({ method: init?.method ?? "GET", url, body: init?.body as string | undefined });
     if (url.includes("/api/users/me/")) {
