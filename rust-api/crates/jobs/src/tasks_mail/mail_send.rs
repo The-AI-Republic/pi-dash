@@ -1369,7 +1369,7 @@ fn split_top_level_commas(value: &str) -> Result<Vec<String>, String> {
 /// encodes via `Header(val, 'utf-8').encode()`, and the stored value
 /// refolds under the `Subject: ` prefix at emit time. Returns the
 /// full header (folds use CRLF).
-fn subject_header(subject: &str) -> Result<String, String> {
+pub fn subject_header(subject: &str) -> Result<String, String> {
     if subject.contains(['\r', '\n']) {
         return Err("invalid email header".to_owned());
     }
@@ -1389,7 +1389,7 @@ fn subject_header(subject: &str) -> Result<String, String> {
 /// the `Header()` wrap), non-ASCII values split over `getaddresses`
 /// and sanitize piece by piece (`, ` join), then the generator
 /// refolds under the real header name. Returns the full header.
-fn address_header(name: &str, value: &str) -> Result<String, String> {
+pub fn address_header(name: &str, value: &str) -> Result<String, String> {
     if value.contains(['\r', '\n']) {
         return Err("invalid email header".to_owned());
     }
@@ -1413,7 +1413,7 @@ fn address_header(name: &str, value: &str) -> Result<String, String> {
 /// then `smtplib.sendmail`'s `quoteaddr` (bare addr-spec in `<>`).
 /// The display name validates but never reaches the wire; unparsable
 /// input fails the send instead of mailing garbage.
-fn envelope_address(value: &str) -> Result<String, String> {
+pub fn envelope_address(value: &str) -> Result<String, String> {
     let (_display, local, domain) = parse_address(value, false)?;
     let local = if local.is_ascii() {
         local
