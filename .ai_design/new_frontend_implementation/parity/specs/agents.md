@@ -441,9 +441,12 @@ headings, role=switch toggles, a delay trigger named by its row lead
 and reading "N month(s)", role=option presets, a dialog titled
 "Customize time range" with an "Enter Months" field, and the refusal
 heading "Oops! You are not authorized to view this page". The dialog
-turns off native form validation so zero and over-range whole counts
-still reach its handler and raise the range message, while a
-fractional count is refused silently and never forwarded.
+keeps the numeric field's native bounds (`min` 1, `max` 12, whole steps)
+in force, so zero, over-range and fractional counts are refused by the
+browser before the handler runs: the dialog stays open, no app error
+text appears and nothing is forwarded. The handler keeps a
+`checkValidity()` guard so a submit dispatched past native validation
+behaves the same, and only an empty field reaches the range message.
 
 ## 9. Assistant landing, setup, composer gates (AGT-038–041, AGT-048, slice NEWFRONT-603)
 
