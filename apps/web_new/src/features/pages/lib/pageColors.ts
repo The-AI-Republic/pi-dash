@@ -104,15 +104,14 @@ export function colorChoiceOf(key: string | null | undefined): PageColorChoice |
 }
 
 /**
- * The paint for a stored key, falling back to the raw value. A body may
- * carry a colour written by an earlier client that is not in this
- * catalogue; painting the stored value keeps its appearance honest.
+ * The paint for a stored key. Only a catalogue key has paint: the body
+ * styles the eight stored keys and renders any other value as plain
+ * text, so the control shows the same thing the range does rather than
+ * a colour the document will not keep (PAGE-036).
  */
 export function colorPaint(kind: PageColorKind, stored: string | null | undefined): string | null {
-  if (stored === null || stored === undefined || stored === "") return null;
   const known = colorChoiceOf(stored);
-  if (known !== null) return colorSwatchPaint(kind, known);
-  return stored;
+  return known === null ? null : colorSwatchPaint(kind, known);
 }
 
 /** Active swatch state: exactly the stored key lights its own swatch. */

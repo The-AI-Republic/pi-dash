@@ -159,11 +159,6 @@ export function tableAtOrAfter(doc: PmNode, from: number): { pos: number; table:
 }
 
 /**
- * One table's caret position: the first valid text position inside the
- * new first cell, so the next Tab walks cells instead of leaving the
- * document (PAGE-033).
- */
-/**
  * The table node family. `tableEditing()` supplies the in-cell keyboard
  * behaviour the row requires — Tab and Shift-Tab walk the cells and the
  * arrow keys stay inside the table — so the nodes themselves stay plain.

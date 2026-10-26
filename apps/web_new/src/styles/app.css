@@ -123,11 +123,10 @@
     max-width: 100%;
     border-radius: var(--radius-control);
   }
-  /* Stored page pictures: the editor paints them through a node wrapper
-     (PAGE-034), and a stored element is block-level like an ordinary
-     image so it never sits inline with surrounding prose. */
-  .rich-text-content image-component,
-  .rich-text-content .node-imageComponent {
+  /* Stored page pictures: a stored element is block-level like an
+     ordinary image so it never sits inline with surrounding prose
+     (PAGE-034). */
+  .rich-text-content image-component {
     display: block;
     max-width: 100%;
   }

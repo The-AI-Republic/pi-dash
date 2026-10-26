@@ -85,9 +85,10 @@ describe("stored keys", () => {
     expect(colorChoiceOf(undefined)).toBeNull();
   });
 
-  it("paints a known key from its token and an unknown one as stored", () => {
+  it("paints a known key from its token and leaves an unknown one unpainted", () => {
     expect(colorPaint("text", "pink")).toBe("var(--page-color-pink-text)");
-    expect(colorPaint("background", "legacy-rgb")).toBe("legacy-rgb");
+    expect(colorPaint("background", "purple")).toBe("var(--page-color-purple-wash)");
+    expect(colorPaint("text", "legacy-rgb")).toBeNull();
     expect(colorPaint("text", null)).toBeNull();
     expect(colorPaint("text", "")).toBeNull();
   });

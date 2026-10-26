@@ -128,10 +128,6 @@ function createStoredImageNode(Image: TiptapImage) {
         const attrs = node.attrs as Record<string, unknown>;
         const stored = attrs["data-stored-src"];
         const dom = document.createElement("image-component");
-        // A stable hook for the surface and its tests: the stored element
-        // name alone is not addressable as a class once ProseMirror owns
-        // the node (PAGE-034).
-        dom.className = "node-imageComponent";
         dom.setAttribute("contenteditable", "false");
         for (const [name, value] of Object.entries(attrs)) {
           if (name === "src" || name === "data-stored-src" || typeof value !== "string" || value === "") continue;
