@@ -34,6 +34,7 @@ from pi_dash.runner.models import (
     MachineSession,
     MachineToken,
     Runner,
+    RunnerProvisioning,
 )
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.dev_machines import (
@@ -99,6 +100,46 @@ def test_rule1_foreign_id_raises_ownership_error(db, create_user):
         _resolve(create_user, dev_machine_id=other.id)
 
 
+def test_rule1_foreign_id_with_fingerprint_resolves_by_fingerprint(db, create_user):
+    """Account switch on one computer: the CLI still holds user A's id."""
+    other_user = _other_user()
+    foreign = _machine(other_user, fingerprint=FP_A, host_label="shared")
+    mine = _machine(create_user, fingerprint=FP_A, host_label="shared")
+    resolved = _resolve(create_user, dev_machine_id=foreign.id, fingerprint=FP_A, host_label="shared")
+    assert resolved.id == mine.id
+    foreign.refresh_from_db()
+    assert foreign.owner_id == other_user.id
+    assert foreign.revoked_at is None and foreign.merged_into_id is None
+
+
+def test_rule1_foreign_id_with_fingerprint_creates_fresh_record(db, create_user):
+    foreign = _machine(_other_user(), fingerprint=FP_A)
+    resolved = _resolve(create_user, dev_machine_id=foreign.id, fingerprint=FP_A)
+    assert resolved.id != foreign.id
+    assert resolved.owner_id == create_user.id
+    assert resolved.fingerprint == FP_A
+    assert DevMachine.objects.filter(owner=create_user).count() == 1
+
+
+def test_rule1_foreign_merged_id_with_fingerprint_resolves_by_fingerprint(db, create_user):
+    other_user = _other_user()
+    survivor = _machine(other_user, fingerprint=FP_A)
+    stale = _machine(other_user)
+    merge_dev_machines(survivor, [stale])
+    resolved = _resolve(create_user, dev_machine_id=stale.id, fingerprint=FP_A)
+    assert resolved.owner_id == create_user.id
+    assert resolved.id not in {survivor.id, stale.id}
+
+
+def test_unknown_id_with_matching_fingerprint_reuses_existing_record(db, create_user):
+    """User switch: the CLI sends a fresh random id plus the fingerprint."""
+    _machine(_other_user(), fingerprint=FP_A)
+    mine = _machine(create_user, fingerprint=FP_A)
+    resolved = _resolve(create_user, dev_machine_id=uuid4(), fingerprint=FP_A)
+    assert resolved.id == mine.id
+    assert DevMachine.objects.filter(owner=create_user).count() == 1
+
+
 def test_rule1_merged_id_follows_to_survivor(db, create_user):
     survivor = _machine(create_user, fingerprint=FP_A)
     old = _machine(create_user, merged_into=survivor, revoked_at=timezone.now())
@@ -119,6 +160,14 @@ def test_rule3_known_id_with_empty_fingerprint_is_stamped_and_absorbs_duplicates
     assert dup.merged_into_id == mine.id
     assert dup.revoked_at is not None
     assert Runner.objects.get(name="dup_runner").dev_machine_id == mine.id
+
+
+def test_rule3_known_id_without_request_fingerprint_reuses_fingerprinted_record(db, create_user):
+    machine = _machine(create_user, fingerprint=FP_A)
+    resolved = _resolve(create_user, dev_machine_id=machine.id, fingerprint="")
+    assert resolved.id == machine.id
+    assert resolved.fingerprint == FP_A
+    assert DevMachine.objects.filter(owner=create_user).count() == 1
 
 
 def test_rule3_copied_config_fingerprint_mismatch_ignores_the_id(db, create_user):
@@ -178,6 +227,11 @@ def test_rule5_revoked_id_gets_new_record(db, create_user):
 def test_legacy_no_id_no_fingerprint_reuses_host_label(db, create_user):
     existing = _machine(create_user, host_label="laptop")
     assert _resolve(create_user, host_label="laptop").id == existing.id
+
+
+def test_no_identity_at_all_creates_nothing(db, create_user):
+    assert _resolve(create_user, host_label="", fingerprint="") is None
+    assert not DevMachine.objects.exists()
 
 
 def test_unique_constraint_blocks_second_active_fingerprint(db, create_user):
@@ -327,6 +381,54 @@ def test_machine_token_exchange_foreign_id_is_404(db, api_client, create_user, w
     assert resp.data["error"] == "dev_machine_not_found"
 
 
+def test_machine_token_exchange_account_switch_ignores_foreign_id(db, api_client, create_user, workspace):
+    other_user = _other_user()
+    foreign = _machine(other_user, fingerprint=FP_A, host_label="laptop")
+    _, foreign_token = _token(other_user, workspace, foreign)
+    api_client.credentials(HTTP_X_API_KEY=_device_token(create_user, workspace).token)
+    resp = api_client.post(
+        "/api/v1/auth/machine-token/",
+        {
+            "workspace_slug": workspace.slug,
+            "dev_machine_id": str(foreign.id),
+            "host_label": "laptop",
+            "machine_fingerprint": FP_A,
+        },
+        format="json",
+    )
+    assert resp.status_code == 201, resp.data
+    assert resp.data["dev_machine_id"] != str(foreign.id)
+    assert DevMachine.objects.get(id=resp.data["dev_machine_id"]).owner_id == create_user.id
+    foreign.refresh_from_db()
+    foreign_token.refresh_from_db()
+    assert foreign.revoked_at is None and foreign.merged_into_id is None
+    assert foreign_token.revoked_at is None
+
+
+def test_cli_login_does_not_revoke_desktop_token(db, api_client, create_user, workspace):
+    machine = _machine(create_user, fingerprint=FP_A, host_label="laptop")
+    _, desktop_row = _token(create_user, workspace, machine, label="desktop: laptop")
+    _, cli_row = _token(create_user, workspace, machine)
+    api_client.credentials(HTTP_X_API_KEY=_device_token(create_user, workspace).token)
+    resp = api_client.post(
+        "/api/v1/auth/machine-token/",
+        {
+            "workspace_slug": workspace.slug,
+            "dev_machine_id": str(machine.id),
+            "host_label": "laptop",
+            "machine_fingerprint": FP_A,
+        },
+        format="json",
+    )
+    assert resp.status_code == 201, resp.data
+    desktop_row.refresh_from_db()
+    cli_row.refresh_from_db()
+    assert desktop_row.revoked_at is None
+    assert cli_row.revoked_at is not None
+    live = MachineToken.objects.filter(dev_machine=machine, revoked_at__isnull=True)
+    assert live.count() == 2
+
+
 def test_revoke_with_machine_token_revokes_handoff_keys(db, api_client, create_user, workspace):
     machine = _machine(create_user)
     raw, row = _token(create_user, workspace, machine)
@@ -341,6 +443,21 @@ def test_revoke_with_machine_token_revokes_handoff_keys(db, api_client, create_u
     assert not DesktopHandoffKey.objects.filter(dev_machine=machine, revoked_at__isnull=True).exists()
     # Keys for other machines are untouched.
     assert DesktopHandoffKey.objects.filter(dev_machine=other_machine, revoked_at__isnull=True).exists()
+
+
+def test_merge_keeps_one_token_per_workspace_and_kind(db, create_user, workspace):
+    survivor = _machine(create_user, fingerprint=FP_A)
+    other = _machine(create_user)
+    _, survivor_cli = _token(create_user, workspace, survivor)
+    _, other_cli = _token(create_user, workspace, other)
+    _, other_desktop = _token(create_user, workspace, other, label="desktop: host")
+    merge_dev_machines(survivor, [other])
+    other_cli.refresh_from_db()
+    other_desktop.refresh_from_db()
+    survivor_cli.refresh_from_db()
+    assert survivor_cli.revoked_at is None
+    assert other_cli.revoked_at is not None  # CLI slot already taken
+    assert other_desktop.revoked_at is None and other_desktop.dev_machine_id == survivor.id
 
 
 # -------------------- endpoints: runner create / enroll --------------------
@@ -386,6 +503,79 @@ def test_runner_create_with_machine_token_stamps_fingerprint(db, api_client, cre
     assert resp.data["dev_machine_id"] == str(machine.id)
     machine.refresh_from_db()
     assert machine.fingerprint == FP_A
+
+
+def _create_runner(client, project, **extra):
+    body = {"project": project.identifier, "host_label": "host"}
+    body.update(extra)
+    return client.post("/api/v1/runner/runners/", body, format="json")
+
+
+def test_runner_create_provisioning_defaults_to_manual_even_on_desktop_machine(
+    db, api_client, create_user, workspace, project
+):
+    machine = _machine(create_user, provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+    raw, _ = _token(create_user, workspace, machine)
+    api_client.credentials(HTTP_X_API_KEY=raw)
+    resp = _create_runner(api_client, project)
+    assert resp.status_code == 201, resp.data
+    assert Runner.objects.get(id=resp.data["runner_id"]).provisioning == RunnerProvisioning.MANUAL
+
+
+def test_runner_create_honours_requested_desktop_bundled(db, api_client, create_user, workspace, project):
+    machine = _machine(create_user)
+    manual = _runner(create_user, workspace, machine, "cli_runner", pod=project.pods.get(is_default=True))
+    raw, _ = _token(create_user, workspace, machine)
+    api_client.credentials(HTTP_X_API_KEY=raw)
+    first = _create_runner(api_client, project, provisioning="desktop_bundled")
+    assert first.status_code == 201, first.data
+    assert Runner.objects.get(id=first.data["runner_id"]).provisioning == RunnerProvisioning.DESKTOP_BUNDLED
+    # Re-enrolling reuses the bundled runner and never touches the CLI's.
+    second = _create_runner(api_client, project, provisioning="desktop_bundled")
+    assert second.status_code == 201, second.data
+    assert second.data["runner_id"] == first.data["runner_id"]
+    manual.refresh_from_db()
+    assert manual.provisioning == RunnerProvisioning.MANUAL
+    machine.refresh_from_db()
+    assert machine.provisioning == RunnerProvisioning.MANUAL
+
+
+def test_runner_create_desktop_token_implies_desktop_bundled(db, api_client, create_user, workspace, project):
+    machine = _machine(create_user)
+    raw, _ = _token(create_user, workspace, machine, label="desktop: host")
+    api_client.credentials(HTTP_X_API_KEY=raw)
+    resp = _create_runner(api_client, project)
+    assert resp.status_code == 201, resp.data
+    assert Runner.objects.get(id=resp.data["runner_id"]).provisioning == RunnerProvisioning.DESKTOP_BUNDLED
+    manual = _create_runner(api_client, project, provisioning="manual", name="explicit_manual")
+    assert manual.status_code == 201, manual.data
+    assert Runner.objects.get(id=manual.data["runner_id"]).provisioning == RunnerProvisioning.MANUAL
+
+
+@pytest.mark.parametrize("value", ["DESKTOP_BUNDLED", "cloud", "", 1])
+def test_runner_create_rejects_unknown_provisioning(db, api_client, create_user, workspace, project, value):
+    machine = _machine(create_user)
+    raw, _ = _token(create_user, workspace, machine)
+    api_client.credentials(HTTP_X_API_KEY=raw)
+    resp = _create_runner(api_client, project, provisioning=value)
+    assert resp.status_code == 400
+    assert resp.data["error"] == "invalid_provisioning"
+    assert not Runner.objects.filter(dev_machine=machine).exists()
+
+
+def test_runner_create_without_identity_leaves_machine_unset(db, api_key_client, workspace, project):
+    # APIToken caller sending no dev_machine_id, host_label or fingerprint
+    # (the legacy enroll endpoint requires host_label, so this is the
+    # reachable no-identity path): no blank DevMachine is minted.
+    resp = api_key_client.post(
+        "/api/v1/runner/runners/",
+        {"workspace_slug": workspace.slug, "project": project.identifier},
+        format="json",
+    )
+    assert resp.status_code == 201, resp.data
+    assert resp.data["dev_machine_id"] is None
+    assert Runner.objects.get(id=resp.data["runner_id"]).dev_machine_id is None
+    assert not DevMachine.objects.exists()
 
 
 def test_runner_enroll_returns_dev_machine_id(db, api_client, create_user, workspace):
@@ -619,7 +809,7 @@ def test_merge_command_dry_run_then_apply(db, create_user, workspace):
     # Phase 1 group: same owner + fingerprint.
     fp_one = _machine(create_user, host_label="desk", fingerprint=FP_A)
     fp_two = _machine(create_user, host_label="desk", fingerprint=FP_A)
-    # Phase 2 leftover: no fingerprint, no runners, stale, same host label.
+    # Phase 2 candidate: no fingerprint, no runners, stale, same host label.
     leftover = _machine(create_user, host_label="laptop", last_seen_at=stale)
     # Seen recently: kept.
     recent = _machine(create_user, host_label="laptop", last_seen_at=timezone.now())
@@ -629,24 +819,29 @@ def test_merge_command_dry_run_then_apply(db, create_user, workspace):
     text = out.getvalue()
     assert "WOULD MERGE" in text
     assert "same_fingerprint" in text and "stale_same_host_label" in text
+    assert "REVIEW (not merged)" in text
     assert str(leftover.id) in text and str(fp_two.id) in text
     assert str(recent.id) not in text
     assert not DevMachine.objects.filter(merged_into__isnull=False).exists()
 
     out = StringIO()
     call_command("merge_duplicate_dev_machines", "--apply", stdout=out)
-    assert "Merged 2 record(s)" in out.getvalue()
+    assert "Merged 1 record(s)" in out.getvalue()
     fp_two.refresh_from_db()
     leftover.refresh_from_db()
     recent.refresh_from_db()
     assert fp_two.merged_into_id == fp_one.id  # tie on runners -> oldest
     assert fp_two.revoked_at is not None
-    assert leftover.merged_into_id == keeper.id  # prefers the one with runners
+    # Same host label is not proof of the same computer: listed, never merged.
+    assert leftover.merged_into_id is None and leftover.revoked_at is None
     assert recent.merged_into_id is None
+    assert keeper.runners.count() == 1
 
     out = StringIO()
     call_command("merge_duplicate_dev_machines", stdout=out)
-    assert "No duplicate dev machines found." in out.getvalue()
+    text = out.getvalue()
+    assert "No duplicate dev machines found." in text
+    assert "REVIEW (not merged)" in text and str(leftover.id) in text
 
 
 def test_merge_command_owner_filter(db, create_user):

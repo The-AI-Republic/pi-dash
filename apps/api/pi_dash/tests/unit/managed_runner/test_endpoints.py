@@ -247,6 +247,37 @@ def test_enroll_with_fingerprint_joins_the_cli_machine(desktop_client, workspace
 
 
 @override_settings(**MANAGED_SETTINGS)
+def test_enroll_on_the_cli_machine_keeps_the_cli_token(desktop_client, workspace, create_user):
+    from pi_dash.runner.services import tokens
+
+    fingerprint = "a" * 64
+    cli_machine = DevMachine.objects.create(owner=create_user, host_label="laptop", fingerprint=fingerprint)
+    minted = tokens.mint_machine_token()
+    cli_token = MachineToken.objects.create(
+        user=create_user,
+        dev_machine=cli_machine,
+        workspace=workspace,
+        host_label="laptop",
+        token_hash=minted.hashed,
+        token_fingerprint=minted.fingerprint,
+        label="machine: laptop",
+    )
+    url = reverse("runner:desktop-enroll")
+    payload = {"workspace_slug": workspace.slug, "host_label": "laptop", "machine_fingerprint": fingerprint}
+    first = desktop_client.post(url, payload, content_type="application/json")
+    assert first.status_code == 201, first.json()
+    second = desktop_client.post(url, payload, content_type="application/json")
+    assert second.status_code == 201, second.json()
+
+    cli_token.refresh_from_db()
+    assert cli_token.revoked_at is None
+    live = MachineToken.objects.filter(dev_machine=cli_machine, revoked_at__isnull=True)
+    # The CLI's token plus exactly one (rotated) desktop token.
+    assert live.count() == 2
+    assert live.filter(label__startswith="desktop: ").count() == 1
+
+
+@override_settings(**MANAGED_SETTINGS)
 def test_enroll_rejects_a_malformed_fingerprint(desktop_client, workspace):
     resp = desktop_client.post(
         reverse("runner:desktop-enroll"),

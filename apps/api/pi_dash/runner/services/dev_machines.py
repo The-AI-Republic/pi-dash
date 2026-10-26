@@ -32,6 +32,7 @@ from pi_dash.runner.models import (
     MachineToken,
     Runner,
     RunnerProvisioning,
+    desktop_machine_token_q,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,25 +162,33 @@ def resolve_dev_machine(
     host_label: str,
     fingerprint: str,
     provisioning=None,
-) -> DevMachine:
+) -> Optional[DevMachine]:
     """Resolve the one active ``DevMachine`` for this computer.
 
     Must be called inside a transaction. See the module docstring and the
     contract's resolution rule:
 
     1. A known ``dev_machine_id`` owned by someone else raises
-       :class:`DevMachineOwnershipError`; a merged one is followed to its
-       survivor.
+       :class:`DevMachineOwnershipError` -- unless a fingerprint was sent,
+       in which case the id is ignored and the computer is resolved by
+       fingerprint for ``user`` (``pidash auth login`` switching accounts
+       on one computer). The other user's record is never touched or
+       revealed. A merged id is followed to its survivor.
     2. Candidates are the owner's active records with the same fingerprint.
-    3. The id's record survives when active and its fingerprint is empty
-       or equal (a different fingerprint means a copied config).
+    3. The id's record survives when active and its fingerprint is empty,
+       equal, or the request sent none. Only two different non-empty
+       fingerprints conflict (a copied config).
     4. Otherwise the candidate with the most live runners (then oldest).
     5. Otherwise a new record (client id if unused, else a fresh UUID).
     6. Stamp the fingerprint, touch, merge the other candidates.
 
     Without both id and fingerprint, older clients fall back to the
     owner's oldest active record with the same ``host_label`` (and
-    ``provisioning``, when given), as before.
+    ``provisioning``, when given), as before. With no identity at all (no
+    id, host label or fingerprint) returns ``None`` and creates nothing.
+
+    ``provisioning`` only labels a newly created record (and narrows the
+    legacy host-label fallback); runners never inherit it.
     """
     try:
         with transaction.atomic():
@@ -206,22 +215,33 @@ def _resolve(*, user, dev_machine_id, host_label, fingerprint, provisioning) -> 
     host_label = (host_label or "").strip()[:255]
     fingerprint = fingerprint or ""
 
+    if dev_machine_id is None and not host_label and not fingerprint:
+        # Nothing identifies a computer; older clients that send no
+        # identity keep their runner unattached, as before.
+        return None
+
     by_id: Optional[DevMachine] = None
     id_taken = False
     if dev_machine_id is not None:
-        by_id = DevMachine.objects.select_for_update().filter(pk=dev_machine_id).first()
+        by_id = DevMachine.objects.filter(pk=dev_machine_id).first()
         if by_id is not None:
             id_taken = True
             if by_id.owner_id != user.id:
-                raise DevMachineOwnershipError
-            if by_id.merged_into_id is not None:
-                by_id = follow_merged(by_id)
-                if by_id.owner_id != user.id:
-                    raise DevMachineOwnershipError
+                by_id = _foreign_id(user=user, dev_machine_id=dev_machine_id, fingerprint=fingerprint)
+            else:
+                by_id = DevMachine.objects.select_for_update().get(pk=by_id.pk)
+                if by_id.merged_into_id is not None:
+                    by_id = follow_merged(by_id)
+                    if by_id.owner_id != user.id:
+                        by_id = _foreign_id(user=user, dev_machine_id=dev_machine_id, fingerprint=fingerprint)
 
     candidates = _candidates(user=user, fingerprint=fingerprint)
 
-    if by_id is not None and _is_active(by_id) and (not by_id.fingerprint or by_id.fingerprint == fingerprint):
+    if (
+        by_id is not None
+        and _is_active(by_id)
+        and (not fingerprint or not by_id.fingerprint or by_id.fingerprint == fingerprint)
+    ):
         return _absorb(by_id, fingerprint=fingerprint, others=candidates, host_label=host_label)
     if by_id is not None and _is_active(by_id) and fingerprint and by_id.fingerprint != fingerprint:
         logger.info(
@@ -260,6 +280,23 @@ def _resolve(*, user, dev_machine_id, host_label, fingerprint, provisioning) -> 
     return DevMachine.objects.create(**create_kwargs)
 
 
+def _foreign_id(*, user, dev_machine_id, fingerprint: str) -> None:
+    """``dev_machine_id`` belongs to another user.
+
+    With a fingerprint the id is just stale (a CLI that signed in as
+    someone else on this computer), so drop it and let the fingerprint
+    decide. Without one there is nothing else to go on: keep the 404.
+    """
+    if not fingerprint:
+        raise DevMachineOwnershipError
+    logger.info(
+        "dev_machine.foreign_id_ignored user=%s dev_machine=%s; resolving by fingerprint",
+        user.id,
+        dev_machine_id,
+    )
+    return None
+
+
 def claim_fingerprint(machine: DevMachine, *, fingerprint: str) -> DevMachine:
     """Session-open variant of rule 6 for an already-authenticated machine.
 
@@ -291,8 +328,9 @@ def merge_dev_machines(survivor: DevMachine, others: Iterable[DevMachine], *, re
 
     - runners move to the survivor;
     - each active machine token moves when the survivor has no active
-      token for that workspace, otherwise it is revoked (one active token
-      per (workspace, dev_machine));
+      token of the same kind (CLI-issued or desktop-issued) for that
+      workspace, otherwise it is revoked (one active token per
+      (workspace, dev_machine, kind));
     - active machine sessions of merged records are revoked (``merged``);
     - active desktop handoff keys move to the survivor;
     - merged records get ``merged_into`` + ``revoked_at``.
@@ -308,25 +346,36 @@ def merge_dev_machines(survivor: DevMachine, others: Iterable[DevMachine], *, re
         other_ids = [m.pk for m in locked]
         runner_count = Runner.objects.filter(dev_machine_id__in=other_ids).update(dev_machine=survivor)
 
-        taken_workspaces = set(
-            MachineToken.objects.select_for_update()
-            .filter(dev_machine=survivor, revoked_at__isnull=True)
-            .values_list("workspace_id", flat=True)
+        # One active token per (workspace, token kind): CLI-issued and
+        # desktop-issued tokens don't compete for the same slot.
+        desktop_ids = set(
+            MachineToken.objects.filter(
+                desktop_machine_token_q(),
+                Q(dev_machine=survivor) | Q(dev_machine_id__in=other_ids),
+                revoked_at__isnull=True,
+            ).values_list("id", flat=True)
         )
+        taken = {
+            (workspace_id, token_id in desktop_ids)
+            for token_id, workspace_id in MachineToken.objects.select_for_update()
+            .filter(dev_machine=survivor, revoked_at__isnull=True)
+            .values_list("id", "workspace_id")
+        }
         moved = revoked = 0
         for token in (
             MachineToken.objects.select_for_update()
             .filter(dev_machine_id__in=other_ids, revoked_at__isnull=True)
             .order_by("-created_at")
         ):
-            if token.workspace_id in taken_workspaces:
+            slot = (token.workspace_id, token.pk in desktop_ids)
+            if slot in taken:
                 token.revoked_at = now
                 token.save(update_fields=["revoked_at"])
                 revoked += 1
             else:
                 token.dev_machine = survivor
                 token.save(update_fields=["dev_machine"])
-                taken_workspaces.add(token.workspace_id)
+                taken.add(slot)
                 moved += 1
 
         MachineSession.objects.filter(dev_machine_id__in=other_ids, revoked_at__isnull=True).update(

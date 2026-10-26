@@ -13,10 +13,13 @@ Usage::
 Phase 1 merges every (owner, fingerprint) group with more than one active
 record into the one with the most live runners (ties: oldest).
 
-Phase 2 handles records without a fingerprint: an active, fingerprint-less
-record with no live runners that has not been seen for ``--stale-days``
-is merged into another active record of the same owner and host label
-(preferring one with runners, then the most recently seen).
+Phase 2 only reports records without a fingerprint: an active,
+fingerprint-less record with no live runners that has not been seen for
+``--stale-days`` while another active record of the same owner and host
+label exists. Host labels are not unique (two laptops can both be
+"MacBook-Pro"), so these are listed for review and never merged, even
+with ``--apply``. They resolve themselves once their client sends a
+fingerprint, or can be revoked by hand.
 
 Merges go through :func:`pi_dash.runner.services.dev_machines.merge_dev_machines`.
 """
@@ -51,15 +54,29 @@ class Command(BaseCommand):
             "--stale-days",
             type=int,
             default=30,
-            help="Phase 2: only merge fingerprint-less records not seen for this many days (default 30).",
+            help="Phase 2: list (never merge) fingerprint-less records not seen for this many days (default 30).",
         )
         parser.add_argument("--owner", default="", help="Only consider machines owned by this email.")
 
     def handle(self, *args, apply: bool = False, stale_days: int = 30, owner: str = "", **options):
         plans = self._plan_fingerprint_groups(owner)
-        # Phase 2 must not target (or re-merge) records phase 1 folds away.
+        # Phase 2 must not list records phase 1 folds away.
         merged_away = {other.pk for _, others, _ in plans for other in others}
-        plans += self._plan_stale_leftovers(owner, stale_days, exclude=merged_away)
+        reviews = self._plan_stale_leftovers(owner, stale_days, exclude=merged_away)
+        for target, leftovers, reason in reviews:
+            self.stdout.write(
+                f"REVIEW (not merged) owner={target.owner.email} host_label={target.host_label!r} reason={reason}"
+            )
+            self.stdout.write(f"  likely    {target.pk} runners={target.live_runners}")
+            for other in leftovers:
+                self.stdout.write(f"  candidate {other.pk} runners={other.live_runners} last_seen={other.last_seen_at}")
+        if reviews:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"{sum(len(o) for _, o, _ in reviews)} fingerprint-less record(s) in {len(reviews)} "
+                    "group(s) listed for review only; host labels can't prove they are the same computer."
+                )
+            )
         if not plans:
             self.stdout.write(self.style.SUCCESS("No duplicate dev machines found."))
             return

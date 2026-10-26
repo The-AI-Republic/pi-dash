@@ -9,6 +9,12 @@ partial unique constraint on (owner, fingerprint) for active, unmerged
 records, and the hashed ``DesktopHandoffKey`` / ``DesktopHandoffCode``
 tables. All new columns have defaults or are nullable, so existing rows
 need no backfill.
+
+Desktop enrollment now resolves to the computer's shared record, so the
+one-active-token-per (workspace, dev_machine) constraint is split by token
+kind: CLI-issued tokens and desktop-issued (``desktop: `` label) tokens may
+each have one active row. Existing data satisfies both (it satisfied the
+stricter old constraint).
 """
 
 import uuid
@@ -56,6 +62,34 @@ class Migration(migrations.Migration):
                 ),
                 fields=("owner", "fingerprint"),
                 name="dev_machine_one_active_per_owner_fingerprint",
+            ),
+        ),
+        migrations.RemoveConstraint(
+            model_name="machinetoken",
+            name="machine_token_one_active_per_ws_dev_machine",
+        ),
+        migrations.AddConstraint(
+            model_name="machinetoken",
+            constraint=models.UniqueConstraint(
+                condition=models.Q(
+                    ("dev_machine__isnull", False),
+                    ("revoked_at__isnull", True),
+                    models.Q(("label__startswith", "desktop: "), _negated=True),
+                ),
+                fields=("workspace", "dev_machine"),
+                name="machine_token_one_active_per_ws_dev_machine",
+            ),
+        ),
+        migrations.AddConstraint(
+            model_name="machinetoken",
+            constraint=models.UniqueConstraint(
+                condition=models.Q(
+                    ("dev_machine__isnull", False),
+                    ("revoked_at__isnull", True),
+                    ("label__startswith", "desktop: "),
+                ),
+                fields=("workspace", "dev_machine"),
+                name="machine_token_one_desktop_per_ws_dev_machine",
             ),
         ),
         migrations.CreateModel(

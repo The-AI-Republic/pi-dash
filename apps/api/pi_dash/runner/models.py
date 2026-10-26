@@ -350,8 +350,10 @@ class DevMachine(models.Model):
         default=Visibility.PRIVATE,
         db_index=True,
     )
-    # Set once at enrollment from the endpoint that created it; never from a
-    # request body. Runners created on this machine inherit it.
+    # Informational: which client first created this record (set once at
+    # creation, never updated). One computer's record is shared by the CLI
+    # and the desktop app, so runners do NOT inherit it; each runner's own
+    # ``Runner.provisioning`` comes from whoever enrolled that runner.
     provisioning = models.CharField(
         max_length=24,
         choices=RunnerProvisioning.choices,
@@ -375,6 +377,8 @@ class DevMachine(models.Model):
     )
     # What keeps the daemon running: ``service`` (OS service manager),
     # ``desktop`` (child of the desktop app) or empty (unknown/older daemon).
+    # Reported by the daemon on machine session open; display only, it never
+    # decides a runner's provisioning.
     supervisor = models.CharField(max_length=16, blank=True, default="")
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
@@ -871,11 +875,26 @@ class RunMessageDedupe(models.Model):
         indexes = [models.Index(fields=["created_at"])]
 
 
+# ``MachineToken.label`` prefix of tokens minted by the desktop enroll
+# endpoint (``runner/views/desktop.py``). Desktop-issued and CLI-issued
+# (``machine: ...``) tokens are separate kinds: one computer's shared
+# ``DevMachine`` may hold one active token of each kind per workspace, and
+# rotating one kind never revokes the other.
+DESKTOP_MACHINE_TOKEN_LABEL_PREFIX = "desktop: "
+
+
+def desktop_machine_token_q() -> models.Q:
+    """Filter for desktop-issued machine tokens (negate for CLI-issued)."""
+    return models.Q(label__startswith=DESKTOP_MACHINE_TOKEN_LABEL_PREFIX)
+
+
 class MachineToken(models.Model):
     """Machine-scoped credential shared by CLI and runner runtime.
 
     A machine has at most one active MachineToken per workspace/dev-machine
-    regardless of how many runners it hosts.
+    and token kind (CLI-issued vs desktop-issued, see
+    ``DESKTOP_MACHINE_TOKEN_LABEL_PREFIX``) regardless of how many runners
+    it hosts.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -916,8 +935,15 @@ class MachineToken(models.Model):
             ),
             models.UniqueConstraint(
                 fields=["workspace", "dev_machine"],
-                condition=models.Q(revoked_at__isnull=True, dev_machine__isnull=False),
+                condition=models.Q(revoked_at__isnull=True, dev_machine__isnull=False)
+                & ~models.Q(label__startswith=DESKTOP_MACHINE_TOKEN_LABEL_PREFIX),
                 name="machine_token_one_active_per_ws_dev_machine",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "dev_machine"],
+                condition=models.Q(revoked_at__isnull=True, dev_machine__isnull=False)
+                & models.Q(label__startswith=DESKTOP_MACHINE_TOKEN_LABEL_PREFIX),
+                name="machine_token_one_desktop_per_ws_dev_machine",
             ),
         ]
         indexes = [

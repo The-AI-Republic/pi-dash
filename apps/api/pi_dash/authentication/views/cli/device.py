@@ -47,7 +47,7 @@ from pi_dash.authentication.services.cli_tokens import (
 from pi_dash.authentication.services.desktop_handoff import mint_handoff_key, revoke_handoff_keys
 from pi_dash.db.models import APIToken, CLIDeviceCode, WorkspaceMember
 from pi_dash.authentication.utils.host import base_host
-from pi_dash.runner.models import DevMachine, MachineToken
+from pi_dash.runner.models import DevMachine, MachineToken, desktop_machine_token_q
 from pi_dash.runner.services import tokens as runner_tokens
 from pi_dash.runner.services.dev_machines import (
     DevMachineOwnershipError,
@@ -75,11 +75,14 @@ DEVICE_CODE_START_MAX_RETRIES = 5
 
 
 def _rotate_machine_token(*, user, workspace, dev_machine: DevMachine, host_label: str) -> runner_tokens.MintedToken:
+    # Only CLI-issued tokens rotate: the computer's record may also carry a
+    # desktop-issued token (``desktop:`` label) for an older desktop build,
+    # which a CLI sign-in must not revoke.
     MachineToken.objects.select_for_update().filter(
         workspace=workspace,
         dev_machine=dev_machine,
         revoked_at__isnull=True,
-    ).update(revoked_at=timezone.now())
+    ).exclude(desktop_machine_token_q()).update(revoked_at=timezone.now())
     minted = runner_tokens.mint_machine_token()
     MachineToken.objects.create(
         user=user,

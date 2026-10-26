@@ -28,7 +28,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.managed_runner.permissions import IsDesktopSession
-from pi_dash.runner.models import DevMachine, MachineToken, Runner, RunnerProvisioning, RunnerStatus
+from pi_dash.runner.models import (
+    DESKTOP_MACHINE_TOKEN_LABEL_PREFIX,
+    DevMachine,
+    MachineToken,
+    Runner,
+    RunnerProvisioning,
+    RunnerStatus,
+    desktop_machine_token_q,
+)
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.dev_machines import (
     InvalidMachineFingerprint,
@@ -38,8 +46,6 @@ from pi_dash.runner.services.dev_machines import (
 from pi_dash.runner.services.permissions import is_workspace_member
 
 logger = logging.getLogger(__name__)
-
-_DESKTOP_TOKEN_LABEL_PREFIX = "desktop: "
 
 
 def _version_is_allowed(reported: str) -> bool:
@@ -122,6 +128,10 @@ class DesktopEnrollEndpoint(APIView):
             # The shared resolution rule: one record per computer, keyed on
             # the fingerprint. Builds that send none fall back to the
             # owner's desktop-provisioned record with the same host label.
+            # ``provisioning`` only labels a newly created record: the
+            # bundled daemon's runners are DESKTOP_BUNDLED because their
+            # create request is authenticated with the ``desktop:`` token
+            # minted below (or says so explicitly), never via the machine.
             dev_machine = resolve_dev_machine(
                 user=request.user,
                 dev_machine_id=None,
@@ -130,9 +140,13 @@ class DesktopEnrollEndpoint(APIView):
                 provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
             )
 
-            # One live token per (machine, workspace): rotating rather than
-            # appending means a lost laptop is revoked by one row, not N.
+            # One live desktop token per (machine, workspace): rotating
+            # rather than appending means a lost laptop is revoked by one
+            # row, not N. The record may be shared with a hand-installed
+            # CLI, whose ``machine:`` token is a different kind and is left
+            # alone (as ``DELETE`` does).
             MachineToken.objects.select_for_update().filter(
+                desktop_machine_token_q(),
                 dev_machine=dev_machine,
                 workspace=workspace,
                 revoked_at__isnull=True,
@@ -145,7 +159,7 @@ class DesktopEnrollEndpoint(APIView):
                 host_label=host_label,
                 token_hash=minted.hashed,
                 token_fingerprint=minted.fingerprint,
-                label=f"{_DESKTOP_TOKEN_LABEL_PREFIX}{host_label[:88]}",
+                label=f"{DESKTOP_MACHINE_TOKEN_LABEL_PREFIX}{host_label[:88]}",
                 is_service=True,
             )
 
@@ -172,8 +186,8 @@ class DesktopEnrollEndpoint(APIView):
         # (also used by a hand-installed CLI), so only the tokens this
         # endpoint minted (``desktop:`` label) are revoked, never the CLI's.
         desktop_tokens = MachineToken.objects.filter(
+            desktop_machine_token_q(),
             user=request.user,
-            label__startswith=_DESKTOP_TOKEN_LABEL_PREFIX,
             revoked_at__isnull=True,
             dev_machine__isnull=False,
         )

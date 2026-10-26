@@ -34,6 +34,7 @@ from pi_dash.runner.authentication import (
     RunnerRefreshTokenAuthentication,
 )
 from pi_dash.runner.models import (
+    DESKTOP_MACHINE_TOKEN_LABEL_PREFIX,
     DevMachine,
     MachineToken,
     Pod,
@@ -41,6 +42,7 @@ from pi_dash.runner.models import (
     RunnerForceRefresh,
     RunnerProvisioning,
     RunnerStatus,
+    desktop_machine_token_q,
 )
 from pi_dash.runner.serializers import RunnerEnrollRequestSerializer
 from pi_dash.runner.services import tokens
@@ -86,7 +88,9 @@ def _maybe_mint_machine_token(
     else:
         filters["host_label"] = host_label
         filters["dev_machine__isnull"] = True
-    locked = MachineToken.objects.select_for_update().filter(**filters).first()
+    # A desktop-issued token on the same record is a different kind; it
+    # neither satisfies nor blocks the CLI's own token.
+    locked = MachineToken.objects.select_for_update().filter(**filters).exclude(desktop_machine_token_q()).first()
     if locked is not None:
         return None
     minted = tokens.mint_machine_token()
@@ -124,7 +128,10 @@ def _rotate_machine_token(
         filters["user"] = user
         filters["host_label"] = host_label
         filters["dev_machine__isnull"] = True
-    MachineToken.objects.select_for_update().filter(**filters).update(revoked_at=timezone.now())
+    # CLI-issued tokens only; never revoke the desktop's (``desktop:``).
+    MachineToken.objects.select_for_update().filter(**filters).exclude(desktop_machine_token_q()).update(
+        revoked_at=timezone.now()
+    )
     minted = tokens.mint_machine_token()
     MachineToken.objects.create(
         user=user,
@@ -312,7 +319,7 @@ class RunnerEnrollEndpoint(APIView):
             "long_poll_interval_secs": 25,
             "protocol_version": 4,
             "machine_token_minted": machine_minted is not None,
-            "dev_machine_id": str(dev_machine.id),
+            "dev_machine_id": str(dev_machine.id) if dev_machine is not None else None,
         }
         if machine_minted is not None:
             body["machine_token"] = machine_minted.raw
@@ -488,6 +495,14 @@ class _TokenMachineMismatch(Exception):
     pass
 
 
+# Values a ``POST /runners/`` body may name in ``provisioning``.
+_REQUESTABLE_PROVISIONING = frozenset({RunnerProvisioning.MANUAL.value, RunnerProvisioning.DESKTOP_BUNDLED.value})
+
+
+def _is_desktop_issued(machine_token) -> bool:
+    return machine_token is not None and machine_token.label.startswith(DESKTOP_MACHINE_TOKEN_LABEL_PREFIX)
+
+
 class RunnerCreateEndpoint(APIView):
     """``POST /api/v1/runner/runners/`` — CLI-initiated runner creation.
 
@@ -529,6 +544,26 @@ class RunnerCreateEndpoint(APIView):
             fingerprint = parse_machine_fingerprint(request.data.get("machine_fingerprint"))
         except InvalidMachineFingerprint:
             return _bad_fingerprint_response()
+        # A runner's provisioning comes from whoever enrolls it, not from the
+        # computer's shared DevMachine (also used by the other client).
+        # ``pidash __managed enroll`` sends ``desktop_bundled``; a token
+        # minted by the desktop enroll endpoint implies it for older
+        # bundled daemons that send nothing; everything else is MANUAL.
+        provisioning = request.data.get("provisioning")
+        if provisioning is None:
+            provisioning = (
+                RunnerProvisioning.DESKTOP_BUNDLED
+                if _is_desktop_issued(auth_machine_token)
+                else RunnerProvisioning.MANUAL
+            )
+        elif not isinstance(provisioning, str) or provisioning not in _REQUESTABLE_PROVISIONING:
+            return Response(
+                {
+                    "error": "invalid_provisioning",
+                    "error_description": "provisioning must be one of: " + ", ".join(sorted(_REQUESTABLE_PROVISIONING)),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if not project_identifier:
             return Response(
@@ -652,17 +687,17 @@ class RunnerCreateEndpoint(APIView):
                     if (
                         auth_machine_token is not None
                         and auth_machine_token.dev_machine_id is not None
-                        and dev_machine.id != auth_machine_token.dev_machine_id
+                        and (dev_machine is None or dev_machine.id != auth_machine_token.dev_machine_id)
                     ):
                         # The fingerprint says this token's config was
                         # copied from another computer. Refuse rather than
                         # attach a runner to a machine the token can't drive;
                         # `pidash auth login` re-binds this computer.
                         raise _TokenMachineMismatch
-                    # Provisioning is inherited from the machine, never read
-                    # from the body: a client must not be able to claim it is
-                    # Pi Dash-managed and thereby take pinned desktop work.
-                    provisioning = getattr(dev_machine, "provisioning", RunnerProvisioning.MANUAL)
+                    # ``provisioning`` was decided above from the request; the
+                    # machine's own value is never copied. Bundled runners
+                    # are owner-scoped (only this user's pinned work), so a
+                    # client naming it cannot reach anyone else's runs.
                     if provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
                         # Sign-out removes the local config, but the server row
                         # deliberately survives. Re-enrollment must recover it
