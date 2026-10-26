@@ -216,6 +216,39 @@ beforeEach(() => {
       harness.pageWrites.push({ method: init.method, body: body === undefined ? null : JSON.parse(body) });
       return jsonResponse(url, 200, { id: recordRead[1], name: "Renamed" });
     }
+    if (url.endsWith("/duplicate/") && init.method === "POST") {
+      harness.pageWrites.push({ method: "DUPLICATE", body: null });
+      return jsonResponse(url, 200, {
+        ...makePageRow({ id: harness.createdId, name: `Copy of ${harness.page.name}` }),
+        description_html: "",
+      });
+    }
+    if (url.endsWith("/access/") && init.method === "POST") {
+      const body = (init as { body?: string }).body;
+      const parsed = (body === undefined ? null : JSON.parse(body)) as { access?: number } | null;
+      harness.pageWrites.push({ method: "ACCESS", body: parsed });
+      if (typeof parsed?.access === "number") harness.page = { ...harness.page, access: parsed.access };
+      return jsonResponse(url, 204, null);
+    }
+    if (url.endsWith("/lock/")) {
+      const unlocking = init.method === "DELETE";
+      harness.pageWrites.push({ method: unlocking ? "UNLOCK" : "LOCK", body: null });
+      harness.page = { ...harness.page, is_locked: !unlocking };
+      return jsonResponse(url, 204, null);
+    }
+    if (url.endsWith("/archive/")) {
+      const restoring = init.method === "DELETE";
+      harness.pageWrites.push({ method: restoring ? "RESTORE" : "ARCHIVE", body: null });
+      harness.page = restoring
+        ? { ...harness.page, archived_at: null }
+        : { ...harness.page, archived_at: "2026-10-25", is_favorite: false };
+      return jsonResponse(url, 200, { archived_at: "2026-10-25 10:00:00.123456" });
+    }
+    if (recordRead !== null && init.method === "DELETE") {
+      harness.pageWrites.push({ method: "DELETE", body: null });
+      harness.pageStatus = 404;
+      return jsonResponse(url, 204, null);
+    }
     const collection = new RegExp(`/api/workspaces/acme/projects/[0-9a-f-]+/pages/$`).exec(url);
     if (collection !== null && init.method === "POST") {
       harness.createBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
@@ -1247,5 +1280,94 @@ describe("PageDetailScreen mention and entity peeks", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Close issue peek" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Close issue peek" })).not.toBeInTheDocument());
+  });
+});
+
+describe("PageDetailScreen header actions (PAGE-055-060)", () => {
+  async function openOptions(): Promise<void> {
+    fireEvent.click(screen.getByRole("button", { name: "Page options" }));
+    await screen.findByRole("menuitem", { name: "Version history" });
+  }
+
+  it("duplicates the page from the options menu", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Make a copy" }));
+    await waitFor(() => expect(harness.pageWrites.some((write) => write.method === "DUPLICATE")).toBe(true));
+    expect(notifySuccess).toHaveBeenCalledWith("Page duplicated successfully.");
+  });
+
+  it("shelves and restores the page from the menu with the marker following", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+    await waitFor(() => expect(harness.pageWrites.some((write) => write.method === "ARCHIVE")).toBe(true));
+    expect(await screen.findByTestId("page-archived-marker")).toHaveTextContent(/^Archived at .+, 2026$/);
+    expect(notifySuccess).toHaveBeenCalledWith("Page archived successfully.");
+    // The shelved page reads back read-only with no visibility entries.
+    await openOptions();
+    expect(await screen.findByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Make private" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Restore" }));
+    await waitFor(() => expect(harness.pageWrites.some((write) => write.method === "RESTORE")).toBe(true));
+    await waitFor(() => expect(screen.queryByTestId("page-archived-marker")).not.toBeInTheDocument());
+    expect(notifySuccess).toHaveBeenCalledWith("Page restored successfully.");
+  });
+
+  it("switches visibility both ways from the menu", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Make private" }));
+    await waitFor(() => expect(harness.pageWrites).toContainEqual({ method: "ACCESS", body: { access: 1 } }));
+    await openOptions();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Make public" }));
+    await waitFor(() => expect(harness.pageWrites).toContainEqual({ method: "ACCESS", body: { access: 0 } }));
+  });
+
+  it("toggles the lock from the header control", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    fireEvent.click(screen.getByRole("button", { name: "Lock" }));
+    await waitFor(() => expect(harness.pageWrites.some((write) => write.method === "LOCK")).toBe(true));
+    fireEvent.click(await screen.findByRole("button", { name: "Locked" }));
+    await waitFor(() => expect(harness.pageWrites.some((write) => write.method === "UNLOCK")).toBe(true));
+  });
+
+  it("deletes a shelved page after confirmation and lands on the shelved tab", async () => {
+    harness.page = record({ archived_at: "2026-10-20" });
+    renderScreen();
+    expect(await screen.findByTestId("page-archived-marker")).toBeInTheDocument();
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete page" });
+    expect(within(dialog).getByText("Launch notes")).toBeInTheDocument();
+    // A shelved page does not carry its subtree count, so the dialog reads the
+    // children once and holds Delete until it knows how many are re-homed.
+    await waitFor(() => expect(screen.queryByTestId("page-delete-rehomed-loading")).not.toBeInTheDocument());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(harness.pageWrites.some((write) => write.method === "DELETE")).toBe(true));
+    expect(notifySuccess).toHaveBeenCalledWith("Page deleted successfully.");
+    await waitFor(() =>
+      expect(router.navigate).toHaveBeenCalledWith({
+        href: `/acme/projects/${PROJECT}/pages?type=archived`,
+      })
+    );
+  });
+
+  it("leaves a shelved page untouched when the delete is cancelled", async () => {
+    harness.page = record({ archived_at: "2026-10-20" });
+    renderScreen();
+    expect(await screen.findByTestId("page-archived-marker")).toBeInTheDocument();
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete page" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Delete page" })).not.toBeInTheDocument());
+    expect(harness.pageWrites.some((write) => write.method === "DELETE")).toBe(false);
+    expect(router.navigate).not.toHaveBeenCalled();
+    expect(screen.getByTestId("page-archived-marker")).toBeInTheDocument();
   });
 });

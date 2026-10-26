@@ -2,10 +2,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Detail breadcrumb and action strip (parity/specs/pages.md §4.3, §7.1,
-// §7.4, PAGE-024/055/060): the project crumb, the Pages link, the switcher,
-// the sync badge, the star and the copy confirmation, plus the history
-// entry that writes the info pane.
+// Detail breadcrumb and action strip (parity/specs/pages.md §4.3, §7,
+// PAGE-024/055/056/057/058/059/060): the project crumb, the Pages link,
+// the switcher, the shelved marker, the sync badge, the star, the lock
+// control and the copy confirmation, plus the options menu in its pinned
+// order.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -58,12 +59,20 @@ const page: PageDetail = {
 function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailHeader>> = {}): {
   onCopyLink: ReturnType<typeof vi.fn>;
   onOpenHistory: ReturnType<typeof vi.fn>;
+  onDuplicate: ReturnType<typeof vi.fn>;
+  onToggleArchive: ReturnType<typeof vi.fn>;
+  onToggleVisibility: ReturnType<typeof vi.fn>;
+  onRequestDelete: ReturnType<typeof vi.fn>;
   onOpenPane: ReturnType<typeof vi.fn>;
   onSelectSibling: ReturnType<typeof vi.fn>;
   onPreferenceChange: ReturnType<typeof vi.fn>;
 } {
   const onCopyLink = vi.fn();
   const onOpenHistory = vi.fn();
+  const onDuplicate = vi.fn();
+  const onToggleArchive = vi.fn();
+  const onToggleVisibility = vi.fn();
+  const onRequestDelete = vi.fn();
   const onPreferenceChange = vi.fn();
   const onOpenPane = vi.fn();
   const onSelectSibling = vi.fn();
@@ -79,9 +88,16 @@ function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailH
         siblings={[{ id: "other", name: "Other page", logoProps: {} }]}
         syncStatus="lost"
         showStar
+        showLock
+        canDuplicate
+        canManage
         onSelectSibling={onSelectSibling}
         onCopyLink={onCopyLink}
         onOpenHistory={onOpenHistory}
+        onDuplicate={onDuplicate}
+        onToggleArchive={onToggleArchive}
+        onToggleVisibility={onToggleVisibility}
+        onRequestDelete={onRequestDelete}
         onOpenPane={onOpenPane}
         paneOpen={false}
         preferences={PAGE_PREFERENCES_DEFAULTS}
@@ -90,7 +106,17 @@ function renderHeader(overrides: Partial<React.ComponentProps<typeof PageDetailH
       />
     </QueryClientProvider>
   );
-  return { onCopyLink, onOpenHistory, onOpenPane, onSelectSibling, onPreferenceChange };
+  return {
+    onCopyLink,
+    onOpenHistory,
+    onDuplicate,
+    onToggleArchive,
+    onToggleVisibility,
+    onRequestDelete,
+    onOpenPane,
+    onSelectSibling,
+    onPreferenceChange,
+  };
 }
 
 beforeEach(() => {
@@ -211,16 +237,81 @@ describe("PageDetailHeader", () => {
     expect(screen.queryByLabelText(PAGE_ANCESTOR_TRAIL_LABEL)).not.toBeInTheDocument();
   });
 
-  it("appends the sub-page entry after the history entry and runs it", async () => {
+  it("orders the owner menu exactly as the oracle pins it and runs every entry", async () => {
     const onAddSubPage = vi.fn();
-    renderHeader({ onAddSubPage });
+    const onExport = vi.fn();
+    const { onOpenHistory, onDuplicate, onToggleArchive, onToggleVisibility } = renderHeader({
+      onAddSubPage,
+      onExport,
+    });
+    const copyMarkdown = vi.fn(async () => undefined);
+    registerPageBodyActions({ copyMarkdownLabel: PAGE_COPY_MARKDOWN_LABEL, copyMarkdown });
     fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
     const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
-    // The display toggles lead the menu (PAGE-072), then the history
-    // entry, then the nested-pages action appended by PAGE-084.
-    expect(items).toEqual(["Full width", "Sticky toolbar", PAGE_HISTORY_ITEM, "Add sub-page"]);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Add sub-page" }));
-    expect(onAddSubPage).toHaveBeenCalledTimes(1);
+    expect(items).toEqual([
+      "Full width",
+      "Sticky toolbar",
+      PAGE_COPY_MARKDOWN_LABEL,
+      PAGE_HISTORY_ITEM,
+      "Add sub-page",
+      "Make a copy",
+      "Archive",
+      "Make private",
+      "Export",
+    ]);
+    fireEvent.click(screen.getByRole("menuitem", { name: PAGE_COPY_MARKDOWN_LABEL }));
+    expect(copyMarkdown).toHaveBeenCalledTimes(1);
+    for (const [name, handler] of [
+      [PAGE_HISTORY_ITEM, onOpenHistory],
+      ["Make a copy", onDuplicate],
+      ["Archive", onToggleArchive],
+      ["Make private", onToggleVisibility],
+      ["Add sub-page", onAddSubPage],
+      ["Export", onExport],
+    ] as const) {
+      fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+      fireEvent.click(await screen.findByRole("menuitem", { name }));
+      expect(handler).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("reduces the menu for a member and hides the lock control", async () => {
+    renderHeader({ canManage: false, showLock: false });
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
+    expect(items).toEqual(["Full width", "Sticky toolbar", PAGE_HISTORY_ITEM, "Make a copy"]);
+    expect(screen.queryByRole("button", { name: "Lock" })).not.toBeInTheDocument();
+  });
+
+  it("marks a shelved page and swaps its menu to restore plus delete", async () => {
+    const { onToggleArchive, onRequestDelete } = renderHeader({
+      page: { ...page, archived_at: "2026-03-04" },
+    });
+    expect(screen.getByTestId("page-archived-marker")).toHaveTextContent(/^Archived at .+, 2026$/);
+
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    const items = (await screen.findAllByRole("menuitem")).map((item) => item.textContent);
+    expect(items).toEqual(["Full width", PAGE_HISTORY_ITEM, "Make a copy", "Restore", "Delete"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Restore" }));
+    expect(onToggleArchive).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(onRequestDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows no marker and no delete entry on a live page", async () => {
+    renderHeader();
+    expect(screen.queryByTestId("page-archived-marker")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    await screen.findByRole("menuitem", { name: "Archive" });
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
+  });
+
+  it("offers Make public for a restricted page", async () => {
+    renderHeader({ page: { ...page, access: 1 } });
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    expect(await screen.findByRole("menuitem", { name: "Make public" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Make private" })).not.toBeInTheDocument();
   });
 
   it("hides the sub-page entry from a guest", async () => {
@@ -235,6 +326,16 @@ describe("PageDetailHeader", () => {
     fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
     fireEvent.click(await screen.findByRole("menuitem", { name: PAGE_HISTORY_ITEM }));
     expect(onOpenHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the lock control to a manager", () => {
+    renderHeader();
+    expect(screen.getByRole("button", { name: "Lock" })).toBeInTheDocument();
+  });
+
+  it("shows the locked state for a locked page", () => {
+    renderHeader({ page: { ...page, is_locked: true } });
+    expect(screen.getByRole("button", { name: "Locked" })).toBeInTheDocument();
   });
 
   it("adds the live editor's copy-markdown entry after registration (PAGE-044)", async () => {

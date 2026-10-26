@@ -32,6 +32,18 @@ describe("pages barrel", () => {
     expect(typeof pages.PageDeleteDialog).toBe("function");
     expect(typeof pages.PageMoveDialog).toBe("function");
     expect(typeof pages.PageRowConnected).toBe("function");
+    expect(typeof pages.PageDetailHeader).toBe("function");
+    expect(typeof pages.PageDetailFavoriteStar).toBe("function");
+    expect(typeof pages.PageDetailLockControl).toBe("function");
+    expect(typeof pages.pageDetailMenuItems).toBe("function");
+    expect(typeof pages.pageArchivedMarker).toBe("function");
+    expect(pages.PAGE_HISTORY_ITEM).toBe("Version history");
+    expect(pages.PAGE_EXPORT_ITEM).toBe("Export");
+    expect(pages.PAGE_LOCK_LABEL).toBe("Lock");
+    expect(pages.PAGE_LOCKED_LABEL).toBe("Locked");
+    expect(pages.PAGE_UNLOCKED_LABEL).toBe("Unlocked");
+    expect(pages.PAGE_DETAIL_FAVORITE_ADD_LABEL).toBe("Add to favorites");
+    expect(pages.PAGE_DETAIL_FAVORITE_REMOVE_LABEL).toBe("Remove favorite");
     expect(pages.PAGES_REALTIME_TOPIC).toBe("pages");
     expect(pages.CREATE_PAGE_COMMAND_ID).toBe("pages.create-page");
     expect(pages.PAGE_TITLE_MAX_LENGTH).toBe(255);

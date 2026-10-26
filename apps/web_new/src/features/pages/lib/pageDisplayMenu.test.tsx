@@ -2,9 +2,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Options-menu display toggles (parity/specs/pages.md §7.4, §9.1, PAGE-060/
-// 072): exactly two rows lead the menu, each flips one stored preference,
-// and a checked row wears a tick. Size and face have no row at all.
+// Options-menu display toggles (parity/specs/pages.md §7.4, §9.1, PAGE-059/
+// 060/072): the display rows lead the menu, each flips one stored
+// preference, and a checked row wears a tick. Shelved pages keep full
+// width alone. Size and face have no row at all.
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -37,5 +38,10 @@ describe("pageDisplayMenuItems", () => {
     const onChange = vi.fn();
     pageDisplayMenuItems({ ...PAGE_PREFERENCES_DEFAULTS, sticky_toolbar: true }, onChange)[1]?.onSelect();
     expect(onChange).toHaveBeenCalledWith({ sticky_toolbar: false });
+  });
+
+  it("keeps full width alone while the page is shelved (PAGE-059)", () => {
+    const items = pageDisplayMenuItems(PAGE_PREFERENCES_DEFAULTS, vi.fn(), { hideStickyToolbar: true });
+    expect(items.map((item) => item.label)).toEqual([PAGE_FULL_WIDTH_LABEL]);
   });
 });

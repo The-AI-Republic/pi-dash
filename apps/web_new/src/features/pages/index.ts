@@ -38,9 +38,31 @@ export { PageDetailScreen, type PageDetailScreenProps } from "./components/PageD
 export {
   PageDetailHeader,
   PAGE_CRUMB,
+  PAGE_HISTORY_ITEM,
   PAGE_PANE_TOGGLE_LABEL,
   type PageDetailHeaderProps,
 } from "./components/PageDetailHeader.js";
+export {
+  PageDetailFavoriteStar,
+  PAGE_DETAIL_FAVORITE_ADD_LABEL,
+  PAGE_DETAIL_FAVORITE_REMOVE_LABEL,
+  type PageDetailFavoriteStarProps,
+} from "./components/PageDetailFavoriteStar.js";
+export {
+  PageDetailLockControl,
+  PAGE_LOCK_LABEL,
+  PAGE_LOCKED_LABEL,
+  PAGE_UNLOCK_TRANSITION_MS,
+  PAGE_UNLOCKED_LABEL,
+  type PageDetailLockControlProps,
+} from "./components/PageDetailLockControl.js";
+export {
+  pageArchivedMarker,
+  pageDetailMenuItems,
+  PAGE_EXPORT_ITEM,
+  type PageDetailMenuCapabilities,
+  type PageDetailMenuHandlers,
+} from "./lib/pageDetailMenu.js";
 export {
   PageFloatingPaneToggle,
   PAGE_FLOATING_PANE_TEST_ID,
