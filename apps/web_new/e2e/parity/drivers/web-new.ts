@@ -11516,10 +11516,14 @@ export class WebNewDriver implements ParityDriver {
 
   private async schedulerScheduleValues(dialog: Locator): Promise<SchedulerScheduleValues> {
     const toggle = dialog.getByRole("switch").first();
+    // The rule textarea lives under the builder's advanced disclosure
+    // (AGT-065); reveal it before reading, as a person would.
+    const rawRule = dialog.getByLabel("Recurrence (RRULE)");
+    if (!(await rawRule.first().isVisible())) await this.schedulerRecurrenceAdvanced();
     return {
       dtstart: await dialog.getByLabel("Starts at").inputValue({ timeout: WebNewDriver.WAIT_MS }),
       tzid: await dialog.getByLabel("Time zone").inputValue({ timeout: WebNewDriver.WAIT_MS }),
-      rrule: await dialog.getByLabel("Recurrence (RRULE)").inputValue({ timeout: WebNewDriver.WAIT_MS }),
+      rrule: await rawRule.first().inputValue({ timeout: WebNewDriver.WAIT_MS }),
       extraContext: await dialog.getByLabel("Project context (optional)").inputValue({ timeout: WebNewDriver.WAIT_MS }),
       enabled: (await toggle.getAttribute("aria-checked")) === "true",
     };

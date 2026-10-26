@@ -405,6 +405,32 @@ describe("install dialog", () => {
     });
   });
 
+  it("reveals the advanced rule before reading edit values when it is collapsed", async () => {
+    let expanded = false;
+    const toggle = fake({
+      count: 1,
+      click: async () => {
+        expanded = true;
+      },
+      getAttribute: async (name: string) => (name === "aria-expanded" && expanded ? "true" : "false"),
+    });
+    const raw = fake({ count: 1, visible: false, input: "FREQ=WEEKLY;BYDAY=MO" });
+    const fields: Record<string, FakeLocator> = {
+      "Starts at": fake({ input: "2026-01-02T09:30" }),
+      "Time zone": fake({ input: "Europe/Berlin" }),
+      "Project context (optional)": fake({ input: "ctx" }),
+      Pod: fake({ input: "" }),
+    };
+    const dialog = fake({
+      byLabel: (label) => (label === "Recurrence (RRULE)" ? raw : (fields[label] ?? absent())),
+      role: (role) => (role === "switch" ? fake({ attribute: "true" }) : role === "button" ? toggle : absent()),
+    });
+    const page = pageOf({ getByRole: () => fake({ last: () => dialog }) });
+    const values = await new WebNewDriver(page).schedulerProjectEditValues();
+    expect(toggle.click).toHaveBeenCalledTimes(1);
+    expect(values.rrule).toBe("FREQ=WEEKLY;BYDAY=MO");
+  });
+
   it("leaves the edit outcome label blank when the checked radio cannot be read", async () => {
     const checked = fake({
       innerText: async () => Promise.reject(new Error("detached")),
