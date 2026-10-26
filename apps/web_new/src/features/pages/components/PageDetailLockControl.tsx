@@ -53,7 +53,8 @@ export function PageDetailLockControl({
   const label = transitional ? PAGE_UNLOCKED_LABEL : page.is_locked ? PAGE_LOCKED_LABEL : PAGE_LOCK_LABEL;
 
   function handleToggle(): void {
-    if (pending) return;
+    // No pending guard here: the button is disabled while the write flies,
+    // and the shared write ignores a press that slips through anyway.
     const unlocking = page.is_locked;
     toggleLock(!page.is_locked);
     if (unlocking) {
