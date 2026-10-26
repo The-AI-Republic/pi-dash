@@ -75,6 +75,10 @@ interface SetupOptions {
   /** Cached list row the board already had for this issue. */
   seed?: { name: string; sequence_id: number };
   baseUrl?: string;
+  votesEnabled?: boolean;
+  reactionsEnabled?: boolean;
+  search?: { board?: "kanban" | "list"; peekId?: string };
+  onRequireSignIn?: () => void;
 }
 
 function setup(options: SetupOptions = {}) {
@@ -103,6 +107,10 @@ function setup(options: SetupOptions = {}) {
         onClose={onClose}
         onInvalid={onInvalid}
         embedded={options.embedded}
+        votesEnabled={options.votesEnabled}
+        reactionsEnabled={options.reactionsEnabled}
+        search={options.search}
+        onRequireSignIn={options.onRequireSignIn}
       />
     </QueryClientProvider>
   );
@@ -559,5 +567,57 @@ describe("SpaceIssuePeek copy link (SPC-045)", () => {
     await user.click(screen.getByRole("button", { name: "Change presentation" }));
     await user.click(await screen.findByRole("menuitem", { name: "Full screen" }));
     expect(screen.queryByRole("button", { name: "Copy link" })).not.toBeInTheDocument();
+  });
+});
+
+describe("SpaceIssuePeek engagement (SPC-047/048)", () => {
+  const ACTOR = {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    display_name: "Ada",
+    first_name: "Ada",
+    last_name: "Lovelace",
+    avatar: "",
+    avatar_url: null,
+  };
+
+  function engagedDetail() {
+    return detail({
+      vote_items: [{ vote: 1, actor_details: ACTOR }],
+      reaction_items: [{ reaction: "127881", actor_details: ACTOR }],
+    });
+  }
+
+  it("renders the engagement section below the title while the flags are on", async () => {
+    setup({ votesEnabled: true, reactionsEnabled: true, body: () => reply(200, engagedDetail()) });
+    const section = await screen.findByTestId("space-peek-engagement");
+    expect(section).toHaveAccessibleName("Votes and reactions");
+    expect(within(section).getByTestId("space-peek-vote-up")).toHaveTextContent("1");
+    expect(within(section).getByTestId("space-peek-reaction")).toHaveAttribute("data-reaction", "127881");
+    expect(within(section).getByTestId("space-peek-reaction-add")).toBeInTheDocument();
+    // Below the title: the detail column holds engagement before the description.
+    const detailColumn = screen.getByTestId("space-peek-detail");
+    expect(detailColumn.firstElementChild).toHaveAttribute("data-testid", "space-peek-engagement");
+  });
+
+  it("renders no engagement section while the flags are off", async () => {
+    setup();
+    await screen.findByTestId("space-peek-key");
+    await waitFor(() => expect(screen.queryByTestId("space-peek-skeleton")).not.toBeInTheDocument());
+    expect(screen.queryByTestId("space-peek-engagement")).not.toBeInTheDocument();
+  });
+
+  it("sends anonymous overlay votes through the board's sign-in handler", async () => {
+    const user = userEvent.setup();
+    const onRequireSignIn = vi.fn();
+    setup({ votesEnabled: true, body: () => reply(200, engagedDetail()), onRequireSignIn });
+    await user.click(await screen.findByTestId("space-peek-vote-up"));
+    expect(onRequireSignIn).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps inert votes and hides reactions inside a frame", async () => {
+    setup({ votesEnabled: true, reactionsEnabled: true, embedded: true, body: () => reply(200, engagedDetail()) });
+    await screen.findByTestId("space-peek-engagement");
+    expect(screen.getByTestId("space-peek-vote-up")).toBeDisabled();
+    expect(screen.queryByTestId("space-peek-reactions")).not.toBeInTheDocument();
   });
 });

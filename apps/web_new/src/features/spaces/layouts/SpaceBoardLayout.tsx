@@ -37,6 +37,9 @@ export interface SpaceBoardLayoutProps {
   onOpenIssue?: ((issue: SpaceBoardIssue) => void) | undefined;
   votesEnabled?: boolean;
   reactionsEnabled?: boolean;
+  onVote?: ((issue: SpaceBoardIssue, vote: 1 | -1) => void) | undefined;
+  onReact?: ((issue: SpaceBoardIssue, reaction: string) => void) | undefined;
+  viewerId?: string | null | undefined;
 }
 
 export function SpaceBoardLayout({
@@ -51,6 +54,9 @@ export function SpaceBoardLayout({
   onOpenIssue,
   votesEnabled = false,
   reactionsEnabled = false,
+  onVote,
+  onReact,
+  viewerId,
 }: SpaceBoardLayoutProps): React.ReactElement {
   return (
     <div
@@ -71,6 +77,9 @@ export function SpaceBoardLayout({
           onOpenIssue={onOpenIssue}
           votesEnabled={votesEnabled}
           reactionsEnabled={reactionsEnabled}
+          onVote={onVote}
+          onReact={onReact}
+          viewerId={viewerId}
         />
       ))}
     </div>
@@ -89,6 +98,9 @@ interface BoardColumnProps {
   onOpenIssue: ((issue: SpaceBoardIssue) => void) | undefined;
   votesEnabled: boolean;
   reactionsEnabled: boolean;
+  onVote: ((issue: SpaceBoardIssue, vote: 1 | -1) => void) | undefined;
+  onReact: ((issue: SpaceBoardIssue, reaction: string) => void) | undefined;
+  viewerId: string | null | undefined;
 }
 
 function BoardColumn({
@@ -103,6 +115,9 @@ function BoardColumn({
   onOpenIssue,
   votesEnabled,
   reactionsEnabled,
+  onVote,
+  onReact,
+  viewerId,
 }: BoardColumnProps): React.ReactElement {
   // The observer root is state, not a ref value: the scroller mounts in this
   // same render, so a ref read during render would still be null.
@@ -163,6 +178,9 @@ function BoardColumn({
             onOpenIssue={onOpenIssue}
             votesEnabled={votesEnabled}
             reactionsEnabled={reactionsEnabled}
+            onVote={onVote}
+            onReact={onReact}
+            viewerId={viewerId}
             card
           />
         ))}

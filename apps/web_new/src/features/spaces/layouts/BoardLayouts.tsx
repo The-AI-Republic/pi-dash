@@ -67,6 +67,9 @@ export interface BoardLayoutsProps {
   issueHref: (issue: SpaceBoardIssue) => string;
   votesEnabled?: boolean;
   reactionsEnabled?: boolean;
+  onVote?: ((issue: SpaceBoardIssue, vote: 1 | -1) => void) | undefined;
+  onReact?: ((issue: SpaceBoardIssue, reaction: string) => void) | undefined;
+  viewerId?: string | null | undefined;
 }
 
 export function BoardLayouts({
@@ -83,6 +86,9 @@ export function BoardLayouts({
   issueHref,
   votesEnabled = false,
   reactionsEnabled = false,
+  onVote,
+  onReact,
+  viewerId,
 }: BoardLayoutsProps): React.ReactElement {
   const { groups, paging, failed, loadMore } = useSpaceGroups(client, anchor, filters, states, page);
   if (page.total_count === 0) return <EmptyBoardNotice />;
@@ -99,6 +105,9 @@ export function BoardLayouts({
       onOpenIssue={onOpenIssue}
       votesEnabled={votesEnabled}
       reactionsEnabled={reactionsEnabled}
+      onVote={onVote}
+      onReact={onReact}
+      viewerId={viewerId}
     />
   ) : (
     <SpaceListLayout

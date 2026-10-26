@@ -84,6 +84,10 @@ export const SPACE_MESSAGE_KEYS = [
   "peek.property.priority",
   "peek.property.dueDate",
   "peek.empty",
+  "engagement.label",
+  "engagement.you",
+  "engagement.noVotes",
+  "engagement.chooseReaction",
 ] as const;
 
 export type SpaceMessageKey = (typeof SPACE_MESSAGE_KEYS)[number];
@@ -165,6 +169,12 @@ const ENGLISH: Record<SpaceMessageKey, string> = {
   "peek.property.priority": "Priority",
   "peek.property.dueDate": "Due date",
   "peek.empty": "Empty",
+  // Public issue engagement (SPC-047/048). The hints name server-provided
+  // voters; only the surrounding words translate through these keys.
+  "engagement.label": "Votes and reactions",
+  "engagement.you": "you",
+  "engagement.noVotes": "No votes yet",
+  "engagement.chooseReaction": "Choose a reaction",
 };
 
 /** A locale pack: translated entries for a subset of the stable keys. */

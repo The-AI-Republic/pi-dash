@@ -10,12 +10,16 @@
 
 import type { SpaceBoardIssue, SpaceBoardLabel, SpaceBoardState } from "@pidash/api-client";
 import { Tooltip } from "@pidash/kit";
-import { AlertCircle, Ban, SignalHigh, SignalLow, SignalMedium, SmilePlus, ThumbsDown, ThumbsUp } from "lucide-react";
+import { AlertCircle, Ban, SignalHigh, SignalLow, SignalMedium } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 
 import { issueKey } from "../components/BoardShell.js";
+import { groupSpaceReactions, spaceReactionEmoji, tallySpaceVotes } from "../engagement/model.js";
+import { SpaceReactionBar } from "../engagement/SpaceReactionBar.js";
+import { SpaceVoteControls } from "../engagement/SpaceVoteControls.js";
 import { useSpaceEmbedded } from "../lib/spaceEmbed.js";
+import { spaceMessage } from "../lib/spaceMessages.js";
 import { StateMarker } from "./StateMarker.js";
 
 type PriorityLevel = NonNullable<SpaceBoardIssue["priority"]>;
@@ -88,11 +92,7 @@ export function spaceCardVoteCounts(issue: Pick<SpaceBoardIssue, "vote_items">):
 
 /** The character for one API reaction key; an unknown key shows the key itself. */
 export function spaceCardReactionEmoji(code: string): string {
-  const parts = code.split("-");
-  if (parts.some((part) => !/^\d+$/.test(part))) return code;
-  const points = parts.map((part) => Number(part));
-  if (points.some((point) => point > 0x10ffff)) return code;
-  return String.fromCodePoint(...points);
+  return spaceReactionEmoji(code);
 }
 
 /** Emoji reactions grouped by their API code, preserving first-seen order. */
@@ -121,6 +121,8 @@ export interface SpaceIssueRowProps {
   onOpenIssue?: ((issue: SpaceBoardIssue) => void) | undefined;
   onVote?: ((issue: SpaceBoardIssue, vote: 1 | -1) => void) | undefined;
   onReact?: ((issue: SpaceBoardIssue, reaction: string) => void) | undefined;
+  /** The signed-in visitor's id; without one the footer shows no own mark. */
+  viewerId?: string | null | undefined;
 }
 
 interface MarkerStripProps {
@@ -183,6 +185,8 @@ interface CardFooterProps {
   votesEnabled: boolean;
   reactionsEnabled: boolean;
   embedded: boolean;
+  /** The signed-in visitor's id; without one no own mark shows. */
+  viewerId?: string | null | undefined;
   onVote?: ((issue: SpaceBoardIssue, vote: 1 | -1) => void) | undefined;
   onReact?: ((issue: SpaceBoardIssue, reaction: string) => void) | undefined;
 }
@@ -192,73 +196,40 @@ function CardFooter({
   votesEnabled,
   reactionsEnabled,
   embedded,
+  viewerId,
   onVote,
   onReact,
 }: CardFooterProps): React.ReactElement | null {
   if (!votesEnabled && !reactionsEnabled) return null;
-  const votes = spaceCardVoteCounts(issue);
-  const reactions = spaceCardReactionCounts(issue.reaction_items);
   return (
     <div
       data-testid="space-board-card-footer"
       className="flex items-center gap-(--space-2) border-t border-(--border) px-(--space-2) py-(--space-1)"
     >
       {votesEnabled ? (
-        <div data-testid="space-card-votes" className="flex items-center gap-(--space-1)">
-          <button
-            type="button"
-            aria-label={`Upvote ${issue.name}`}
-            aria-disabled={embedded ? "true" : undefined}
-            disabled={embedded}
-            data-testid="space-card-vote-up"
-            onClick={embedded ? undefined : () => onVote?.(issue, 1)}
-            className={`text-meta inline-flex items-center gap-(--space-1) rounded-(--radius-control) px-(--space-1) text-(--text-muted) ${embedded ? "cursor-default opacity-60" : "cursor-pointer hover:bg-(--subtle) hover:text-(--text)"}`}
-          >
-            <ThumbsUp size={12} strokeWidth={1.75} aria-hidden="true" />
-            <span className="tabular-nums">{votes.up}</span>
-          </button>
-          <button
-            type="button"
-            aria-label={`Downvote ${issue.name}`}
-            aria-disabled={embedded ? "true" : undefined}
-            disabled={embedded}
-            data-testid="space-card-vote-down"
-            onClick={embedded ? undefined : () => onVote?.(issue, -1)}
-            className={`text-meta inline-flex items-center gap-(--space-1) rounded-(--radius-control) px-(--space-1) text-(--text-muted) ${embedded ? "cursor-default opacity-60" : "cursor-pointer hover:bg-(--subtle) hover:text-(--text)"}`}
-          >
-            <ThumbsDown size={12} strokeWidth={1.75} aria-hidden="true" />
-            <span className="tabular-nums">{votes.down}</span>
-          </button>
-        </div>
+        <SpaceVoteControls
+          issueName={issue.name}
+          tally={tallySpaceVotes(issue.vote_items, viewerId)}
+          embedded={embedded}
+          onVote={(side) => onVote?.(issue, side)}
+          testId="space-card-votes"
+          upTestId="space-card-vote-up"
+          downTestId="space-card-vote-down"
+        />
       ) : null}
       {reactionsEnabled ? (
-        <div data-testid="space-card-reactions" className="flex min-w-0 items-center gap-(--space-1)">
-          {reactions.map(({ reaction, emoji, count }) => (
-            <button
-              key={reaction}
-              type="button"
-              aria-label={`React with ${emoji} to ${issue.name}`}
-              data-testid="space-card-reaction"
-              data-reaction={reaction}
-              onClick={() => onReact?.(issue, reaction)}
-              className="text-meta inline-flex cursor-pointer items-center gap-(--space-1) rounded-(--radius-control) bg-(--subtle) px-(--space-1)"
-            >
-              <span aria-hidden="true">{emoji}</span>
-              <span className="text-(--text-muted) tabular-nums">{count}</span>
-            </button>
-          ))}
-          {embedded ? null : (
-            <button
-              type="button"
-              aria-label={`Add a reaction to ${issue.name}`}
-              aria-haspopup="dialog"
-              data-testid="space-card-reaction-add"
-              className="inline-flex cursor-pointer items-center rounded-(--radius-control) p-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
-            >
-              <SmilePlus size={13} strokeWidth={1.75} aria-hidden="true" />
-            </button>
-          )}
-        </div>
+        <SpaceReactionBar
+          issueName={issue.name}
+          groups={groupSpaceReactions(issue.reaction_items, viewerId)}
+          embedded={embedded}
+          onToggle={(code) => onReact?.(issue, code)}
+          onPick={(code) => onReact?.(issue, code)}
+          addLabel={`Add a reaction to ${issue.name}`}
+          panelLabel={spaceMessage("engagement.chooseReaction")}
+          testId="space-card-reactions"
+          pillTestId="space-card-reaction"
+          addTestId="space-card-reaction-add"
+        />
       ) : null}
     </div>
   );
@@ -277,6 +248,7 @@ export function SpaceIssueRow({
   onOpenIssue,
   onVote,
   onReact,
+  viewerId,
 }: SpaceIssueRowProps): React.ReactElement {
   const embedded = useSpaceEmbedded();
   const [titleTooltipOpen, setTitleTooltipOpen] = React.useState(false);
@@ -330,6 +302,7 @@ export function SpaceIssueRow({
           votesEnabled={votesEnabled}
           reactionsEnabled={reactionsEnabled}
           embedded={embedded}
+          viewerId={viewerId}
           onVote={onVote}
           onReact={onReact}
         />
