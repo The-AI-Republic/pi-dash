@@ -63,9 +63,9 @@ use pidash_types::runner_runs::{
 };
 
 use super::{
-    authenticate_daemon, frame_model, frame_text, json_response, pool_of, py_truthy,
-    read_request_data, resolve_runner_for_run, server_error, truncate_chars, view_response,
-    DaemonRunner, LivePorts, RunnerPorts, ALLOW_RUN_DAEMON,
+    authenticate_daemon, frame_model, frame_text, is_uuid_path_segment, json_response, pool_of,
+    py_truthy, read_request_data, resolve_runner_for_run, server_error, truncate_chars,
+    view_response, DaemonRunner, LivePorts, RunnerPorts, ALLOW_RUN_DAEMON,
 };
 use crate::state::AppState;
 
@@ -1481,13 +1481,6 @@ struct DaemonRequest {
     key: String,
 }
 
-fn run_not_found() -> Response {
-    json_response(
-        StatusCode::NOT_FOUND,
-        r#"{"error":"run_not_found"}"#.to_owned(),
-    )
-}
-
 /// Authenticate (DRF `initial`, before parsing) and read
 /// `request.data`. Used by the eight endpoints that touch the body;
 /// the other four ([`daemon_preamble_nobody`]) never parse, so a
@@ -1497,8 +1490,15 @@ async fn daemon_preamble(
     run_id_raw: &str,
     req: Request<axum::body::Body>,
 ) -> Result<(PgPool, DaemonRequest), Response> {
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database): proxy the
+    // untouched request so Django's framework 404 answers byte for
+    // byte (the `runner_poll.rs` `parse_uuid` precedent).
+    if !is_uuid_path_segment(run_id_raw) {
+        return Err(crate::edge::proxy(State(state.clone()), req).await);
+    }
     let pool = pool_of(state)?.clone();
-    let run_id: Uuid = run_id_raw.parse().map_err(|_| run_not_found())?;
+    let run_id: Uuid = run_id_raw.parse().expect("checked segment");
     let secret = state.settings().secret_key.clone();
     let runner = authenticate_daemon(&pool, secret.as_bytes(), req.headers()).await?;
     let key = idempotency_key(req.headers());
@@ -1516,16 +1516,22 @@ async fn daemon_preamble(
 
 /// [`daemon_preamble`] without the body read, for `accept`, `queued`,
 /// `awaiting-reauth` and `resumed`, which never touch `request.data`.
+/// Takes the whole request (headers only are read) so a non-converter
+/// run id can fall through to Django's resolver 404.
 async fn daemon_preamble_nobody(
     state: &AppState,
     run_id_raw: &str,
-    headers: &HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Result<(PgPool, DaemonRunner, Uuid, String), Response> {
+    // Resolver first (see [`daemon_preamble`]).
+    if !is_uuid_path_segment(run_id_raw) {
+        return Err(crate::edge::proxy(State(state.clone()), req).await);
+    }
     let pool = pool_of(state)?.clone();
-    let run_id: Uuid = run_id_raw.parse().map_err(|_| run_not_found())?;
+    let run_id: Uuid = run_id_raw.parse().expect("checked segment");
     let secret = state.settings().secret_key.clone();
-    let runner = authenticate_daemon(&pool, secret.as_bytes(), headers).await?;
-    let key = idempotency_key(headers);
+    let runner = authenticate_daemon(&pool, secret.as_bytes(), req.headers()).await?;
+    let key = idempotency_key(req.headers());
     // `_resolve` runs next and 403s anonymous callers; unwrap here
     // would mistranslate that into a 500, so resolve inline.
     let run = resolve_run(&pool, run_id, runner.as_ref()).await?;
@@ -1548,10 +1554,10 @@ async fn commit_tx(tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), Resp
 pub async fn run_accept(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
     view_response(
-        run_accept_inner(State(state), Path(run_id), headers).await,
+        run_accept_inner(State(state), Path(run_id), req).await,
         ALLOW_RUN_DAEMON,
     )
 }
@@ -1559,10 +1565,9 @@ pub async fn run_accept(
 async fn run_accept_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, &headers).await
-    {
+    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
@@ -1621,10 +1626,10 @@ async fn run_accept_inner(
 pub async fn run_queued(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
     view_response(
-        run_queued_inner(State(state), Path(run_id), headers).await,
+        run_queued_inner(State(state), Path(run_id), req).await,
         ALLOW_RUN_DAEMON,
     )
 }
@@ -1632,13 +1637,12 @@ pub async fn run_queued(
 async fn run_queued_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, _run_id, _key) =
-        match daemon_preamble_nobody(&state, &run_id, &headers).await {
-            Ok(preamble) => preamble,
-            Err(response) => return response,
-        };
+    let (pool, _runner, _run_id, _key) = match daemon_preamble_nobody(&state, &run_id, req).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
     let _ = pool;
     json_response(StatusCode::OK, r#"{"ok":true,"ignored":true}"#.to_owned())
 }
@@ -2073,10 +2077,10 @@ async fn run_approval_inner(
 pub async fn run_awaiting_reauth(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
     view_response(
-        run_awaiting_reauth_inner(State(state), Path(run_id), headers).await,
+        run_awaiting_reauth_inner(State(state), Path(run_id), req).await,
         ALLOW_RUN_DAEMON,
     )
 }
@@ -2084,10 +2088,9 @@ pub async fn run_awaiting_reauth(
 async fn run_awaiting_reauth_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, &headers).await
-    {
+    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
@@ -2607,10 +2610,10 @@ async fn run_cancelled_inner(
 pub async fn run_resumed(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
     view_response(
-        run_resumed_inner(State(state), Path(run_id), headers).await,
+        run_resumed_inner(State(state), Path(run_id), req).await,
         ALLOW_RUN_DAEMON,
     )
 }
@@ -2618,10 +2621,9 @@ pub async fn run_resumed(
 async fn run_resumed_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, &headers).await
-    {
+    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
