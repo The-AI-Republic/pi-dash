@@ -531,6 +531,25 @@ describe("PagesListScreen", () => {
     expect(screen.getByTestId("page-row-parent-path")).toHaveTextContent("Shelved handbook");
   });
 
+  it("omits Add sub-page from an archived discovery row", async () => {
+    harness.pages = [
+      makePageRow({
+        id: pageId(46),
+        name: "Shelved handbook",
+        archived_at: "2026-10-20",
+      }),
+    ];
+    harness.childrenByParent = {};
+    renderScreen("archived");
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
+    fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "shelved" } });
+    await screen.findByRole("link", { name: "Shelved handbook" });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved handbook" }));
+    expect(await screen.findByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Add sub-page" })).not.toBeInTheDocument();
+  });
+
   it("finds a shelved child through a structured filter", async () => {
     const today = new Date().toISOString();
     const parent = makePageRow({

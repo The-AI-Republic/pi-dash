@@ -184,6 +184,21 @@ describe("PageTree", () => {
     expect(screen.getByRole("menuitem", { name: "Move to…" })).toBeInTheDocument();
   });
 
+  it("omits Add sub-page on an archived tree row", async () => {
+    const archivedParent = makePageRow({
+      id: PARENT,
+      name: "Shelved handbook",
+      sub_pages_count: 0,
+      archived_at: "2026-10-20",
+      owned_by: PAGES_USER_ID,
+    });
+    listPagesMock.mockResolvedValue([]);
+    renderTree({ tab: "archived", rows: [archivedParent], pool: [archivedParent], includeArchivedChildren: true });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved handbook" }));
+    expect(await screen.findByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Add sub-page" })).not.toBeInTheDocument();
+  });
+
   it("hides the nested move from a member who does not own the page", async () => {
     renderTree({ currentUserId: "523e4567-e89b-12d3-a456-426614174199", viewerIsAdmin: false, canMove: true });
     fireEvent.click(screen.getByRole("button", { name: "Page actions for Handbook" }));

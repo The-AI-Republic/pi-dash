@@ -255,6 +255,17 @@ describe("PageRow", () => {
     expect(onRequestNestedMove).toHaveBeenCalledTimes(1);
   });
 
+  it("omits Add sub-page on a shelved row", () => {
+    renderRow({
+      canManage: true,
+      page: makePageRow({ archived_at: "2026-10-01" }),
+      onAddSubPage: vi.fn(),
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Launch notes" }));
+    const items = screen.getAllByRole("menuitem").map((item) => item.textContent);
+    expect(items).not.toContain("Add sub-page");
+  });
+
   it("shows the parent path as a secondary line for a discovery result", () => {
     renderRow({ parentPath: "Handbook / Policies" });
     expect(screen.getByTestId("page-row-parent-path")).toHaveTextContent("Handbook / Policies");

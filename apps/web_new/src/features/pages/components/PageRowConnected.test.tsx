@@ -38,6 +38,10 @@ interface Harness {
   deleteStatus: number;
   moveStatus: number;
   moveCalls: number;
+  childPages: ReturnType<typeof makePageRow>[];
+  childReadCalls: number;
+  childReadRelease: (() => void) | null;
+  childReadHold: Promise<void> | null;
 }
 
 let harness: Harness;
@@ -51,6 +55,10 @@ beforeEach(() => {
     deleteStatus: 204,
     moveStatus: 204,
     moveCalls: 0,
+    childPages: [],
+    childReadCalls: 0,
+    childReadRelease: null,
+    childReadHold: null,
   };
   toaster.notifySuccess.mockReset();
   toaster.notifyError.mockReset();
@@ -82,6 +90,12 @@ beforeEach(() => {
       return jsonResponse(url, harness.deleteStatus, null);
     }
     if (url.endsWith("/projects/")) return jsonResponse(url, 200, pickerHarness.projects);
+    const pagesRead = new RegExp(`/api/workspaces/acme/projects/[0-9a-f-]+/pages/\\?.*parent=[0-9a-f-]+.*$`).exec(url);
+    if (pagesRead !== null) {
+      harness.childReadCalls += 1;
+      if (harness.childReadHold !== null) await harness.childReadHold;
+      return jsonResponse(url, 200, harness.childPages);
+    }
     throw new Error(`unexpected request: ${url}`);
   }) as never);
 });
@@ -139,9 +153,31 @@ describe("PageRowConnected", () => {
     openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(await screen.findByRole("heading", { name: "Delete page" })).toBeInTheDocument();
+    await waitFor(() => expect(harness.childReadCalls).toBe(1));
+    await waitFor(() => expect(screen.queryByTestId("page-delete-rehomed-loading")).not.toBeInTheDocument());
+    expect(screen.queryByTestId("page-delete-rehomed")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(harness.deleteCalls).toBe(1));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("refuses to confirm a shelved row's delete until its child count resolves", async () => {
+    let release = (): void => {};
+    harness.childReadHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    harness.childPages = [makePageRow({ name: "Shelved child", archived_at: "2026-10-01" })];
+    renderRow({ page: makePageRow({ name: "Connected row", archived_at: "2026-10-01" }) });
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByTestId("page-delete-rehomed-loading")).toHaveTextContent("Counting sub-pages…");
+    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+    expect(harness.deleteCalls).toBe(0);
+    release();
+    expect(await screen.findByTestId("page-delete-rehomed")).toHaveTextContent(
+      "1 sub-page will move to the top level."
+    );
+    expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
   });
 
   it("keeps the delete dialog open when the write is refused", async () => {
@@ -149,7 +185,9 @@ describe("PageRowConnected", () => {
     renderRow({ page: makePageRow({ name: "Connected row", archived_at: "2026-10-01" }) });
     openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    const confirm = await screen.findByRole("button", { name: "Delete" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
     await waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Page could not be deleted."));
     expect(screen.getByRole("heading", { name: "Delete page" })).toBeInTheDocument();
   });

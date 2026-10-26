@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   PAGE_ACTION_ARCHIVE,
+  PAGE_ACTION_ADD_SUB_PAGE,
   PAGE_ACTION_COPY_LINK,
   PAGE_ACTION_DELETE,
   PAGE_ACTION_DUPLICATE,
@@ -16,6 +17,7 @@ import {
   PAGE_ACTION_MAKE_PRIVATE,
   PAGE_ACTION_MAKE_PUBLIC,
   PAGE_ACTION_MOVE,
+  PAGE_ACTION_MOVE_TO,
   PAGE_ACTION_OPEN_IN_NEW_TAB,
   PAGE_ACTION_RESTORE,
   PAGE_ACTION_UNLOCK,
@@ -60,6 +62,8 @@ function handlers() {
     toggleArchive: vi.fn(),
     requestDelete: vi.fn(),
     requestMove: vi.fn(),
+    addSubPage: vi.fn(),
+    moveTo: vi.fn(),
   };
 }
 
@@ -144,6 +148,12 @@ describe("pageRowActions", () => {
   it("offers deletion only for a shelved page", () => {
     expect(labels(OWNER)).not.toContain(PAGE_ACTION_DELETE);
     expect(labels({ ...OWNER, archived: true })).toContain(PAGE_ACTION_DELETE);
+  });
+
+  it("omits Add sub-page on a shelved row because the contract refuses the parent", () => {
+    const entries = pageRowActions({ ...OWNER, archived: true, addSubPage: true, nestedMove: true }, handlers());
+    expect(entries.map((entry) => entry.label)).not.toContain(PAGE_ACTION_ADD_SUB_PAGE);
+    expect(entries.map((entry) => entry.label)).toContain(PAGE_ACTION_MOVE_TO);
   });
 
   it("offers the cross-project move only where the edition enables it", () => {

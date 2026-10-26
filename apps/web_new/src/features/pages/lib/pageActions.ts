@@ -116,8 +116,9 @@ export function pageRowActions(capabilities: PageRowCapabilities, handlers: Page
   }
   // Nested pages (D17) append after the pinned prefix so the oracle-backed
   // order above never shifts. A member creates children; only an owner or
-  // admin reparents.
-  if (capabilities.addSubPage && handlers.addSubPage !== undefined) {
+  // admin reparents. The API refuses an archived parent, so the entry is
+  // absent on every shelved row even when the caller can create pages.
+  if (!capabilities.archived && capabilities.addSubPage && handlers.addSubPage !== undefined) {
     entries.push({ label: PAGE_ACTION_ADD_SUB_PAGE, onSelect: handlers.addSubPage });
   }
   if (capabilities.nestedMove && handlers.moveTo !== undefined) {
