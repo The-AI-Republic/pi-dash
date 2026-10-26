@@ -17,7 +17,11 @@
 //! 1. Make sure the CLI is installed (from the app bundle when possible).
 //! 2. Move any legacy per-workspace config into the default one: stop any
 //!    daemon an earlier build left running on it, `pidash __managed adopt`
-//!    each dir, and delete a dir only once its adopt succeeded.
+//!    each dir, and delete a dir only once adopt reports every runner in it
+//!    moved. A dir whose runners belong to a workspace the CLI is not signed
+//!    in to is kept (its token is their only credential) and reported, so the
+//!    UI can say so; a later launch adopts them once the CLI is signed in to
+//!    that workspace.
 //! 3. If a daemon already answers at the default socket, use it.
 //! 4. Otherwise install and start the OS service (`pidash install`,
 //!    `pidash start`). If that fails, run the same daemon as a child of this
@@ -79,6 +83,10 @@ pub struct DaemonStatus {
     /// The installed CLI predates the commands this app needs (contract §6).
     pub cli_outdated: bool,
     pub message: Option<String>,
+    /// Runners still in a legacy per-workspace config because adopt could not
+    /// move them (signed in to another workspace, or not at all). They cannot
+    /// run until the CLI is signed in to their workspace.
+    pub unadopted: Vec<UnadoptedRunner>,
 }
 
 impl DaemonStatus {
@@ -87,6 +95,7 @@ impl DaemonStatus {
             mode,
             cli_outdated: false,
             message: None,
+            unadopted: Vec::new(),
         }
     }
 
@@ -95,8 +104,20 @@ impl DaemonStatus {
             mode: DaemonMode::Unavailable,
             cli_outdated: false,
             message: Some(message.into()),
+            unadopted: Vec::new(),
         }
     }
+}
+
+/// A runner `pidash __managed adopt` left in its legacy config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnadoptedRunner {
+    pub name: String,
+    /// The runner's workspace slug as adopt reports it, else the legacy
+    /// dir's name (also a slug); empty when neither is known.
+    pub workspace: String,
+    /// The CLI's reason: `workspace_mismatch`, `not_signed_in`, …
+    pub reason: String,
 }
 
 /// Process-wide state for the shared daemon.
@@ -458,19 +479,24 @@ async fn ensure_locked<R: Runtime>(app: &AppHandle<R>, force_service: bool) -> D
     };
 
     let mut cli_outdated = false;
+    let mut unadopted = Vec::new();
     if let Ok(paths) = ManagedPaths::resolve(app) {
         let adopt_cli = cli.clone();
         let outcome = tauri::async_runtime::spawn_blocking(move || {
             if legacy_config_dirs(&paths.config_dir).is_empty() {
-                return Ok(0);
+                return Ok(LegacyMigration::default());
             }
             stop_orphaned_daemons(&paths.runner);
             migrate_legacy(&paths.config_dir, |dir| adopt(&adopt_cli, dir))
         })
         .await;
-        if let Ok(Err(e)) = outcome {
-            cli_outdated |= e.is_outdated();
-            eprintln!("legacy desktop config migration: {e}");
+        match outcome {
+            Ok(Ok(migration)) => unadopted = migration.unadopted,
+            Ok(Err(e)) => {
+                cli_outdated |= e.is_outdated();
+                eprintln!("legacy desktop config migration: {e}");
+            }
+            Err(_) => {}
         }
     }
 
@@ -479,6 +505,7 @@ async fn ensure_locked<R: Runtime>(app: &AppHandle<R>, force_service: bool) -> D
         Err(e) => {
             return DaemonStatus {
                 cli_outdated: cli_outdated || e.is_outdated(),
+                unadopted,
                 ..DaemonStatus::unavailable(e.message)
             };
         }
@@ -486,6 +513,7 @@ async fn ensure_locked<R: Runtime>(app: &AppHandle<R>, force_service: bool) -> D
     *state.socket.lock().unwrap() = Some(socket.clone());
     let with_flag = |mut s: DaemonStatus| {
         s.cli_outdated |= cli_outdated;
+        s.unadopted = unadopted.clone();
         s
     };
 
@@ -634,31 +662,97 @@ fn legacy_config_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Adopt every legacy config dir into the default config and delete it.
+/// What one `pidash __managed adopt --from-config-dir <dir>` reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AdoptOutcome {
+    /// Every runner in the dir is now in the default config (adopted now or
+    /// earlier). Only then may the dir — and the token in it, the only
+    /// credential its runners have — be deleted.
+    fully_adopted: bool,
+    /// Runners left behind.
+    skipped: Vec<SkippedRunner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkippedRunner {
+    name: String,
+    /// Adopt's `workspace_id`, which is the workspace's slug (may be null).
+    workspace_id: Option<String>,
+    workspace_slug: Option<String>,
+    reason: String,
+}
+
+/// The result of one migration pass.
+#[derive(Debug, Default)]
+struct LegacyMigration {
+    /// Dirs adopted and deleted.
+    migrated: usize,
+    /// Runners kept in their legacy dir, for the UI to explain.
+    unadopted: Vec<UnadoptedRunner>,
+}
+
+/// Adopt every legacy config dir into the default config, deleting each one
+/// adopt fully moved.
 ///
-/// A dir is deleted only after its own adopt succeeded; the first failure
-/// stops the pass, so the root (whose deletion would take the remaining
-/// subdirs with it) is never removed while anything in it is unmigrated.
-/// Runs on every launch and is a no-op once nothing is left.
+/// A dir is deleted only when its own adopt reported `fully_adopted`. One with
+/// runners adopt left behind (another workspace than the CLI's, or a
+/// signed-out CLI) is kept untouched — its token is the only credential those
+/// runners have — and its runners are reported; adopt is idempotent, so the
+/// next launch (or the next ensure, after a sign-in) picks them up. A failed
+/// adopt, or output that cannot be read, stops the pass with nothing deleted
+/// for that dir. The root, whose deletion would take its subdirs with it, is
+/// removed only once every subdir is gone.
 fn migrate_legacy(
     root: &Path,
-    mut adopt: impl FnMut(&Path) -> Result<(), CliError>,
-) -> Result<usize, CliError> {
-    let mut migrated = 0;
+    mut adopt: impl FnMut(&Path) -> Result<AdoptOutcome, CliError>,
+) -> Result<LegacyMigration, CliError> {
+    let mut migration = LegacyMigration::default();
+    let mut kept_subdir = false;
     for dir in legacy_config_dirs(root) {
-        adopt(&dir)?;
+        let outcome = adopt(&dir)?;
+        let is_root = dir == root;
+        if !outcome.fully_adopted {
+            // The CLI's `workspace_id` is the runner's workspace slug; a
+            // subdir is named after one too, for a runner that has none.
+            let dir_slug = (!is_root)
+                .then(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .flatten();
+            migration.unadopted.extend(
+                outcome
+                    .skipped
+                    .into_iter()
+                    .filter(|r| !r.reason.starts_with("already"))
+                    .map(|r| UnadoptedRunner {
+                        workspace: r
+                            .workspace_slug
+                            .or(r.workspace_id)
+                            .or_else(|| dir_slug.clone())
+                            .unwrap_or_default(),
+                        name: r.name,
+                        reason: r.reason,
+                    }),
+            );
+            kept_subdir |= !is_root;
+            continue;
+        }
+        if is_root && kept_subdir {
+            // Adopt is idempotent: the root is adopted again (as a no-op) and
+            // deleted on the launch that empties it.
+            continue;
+        }
         if let Err(e) = std::fs::remove_dir_all(&dir) {
             // Adopt is idempotent, so a dir that survives is adopted again
             // (as a no-op) next launch and deleted then.
             eprintln!("removing adopted legacy config {}: {e}", dir.display());
+            kept_subdir |= !is_root;
         }
-        migrated += 1;
+        migration.migrated += 1;
     }
-    Ok(migrated)
+    Ok(migration)
 }
 
 /// `pidash __managed adopt --from-config-dir <dir>` at the default paths.
-fn adopt(cli: &Path, dir: &Path) -> Result<(), CliError> {
+fn adopt(cli: &Path, dir: &Path) -> Result<AdoptOutcome, CliError> {
     let dir = dir.to_string_lossy();
     let out = run_cli(
         cli,
@@ -669,15 +763,55 @@ fn adopt(cli: &Path, dir: &Path) -> Result<(), CliError> {
     if !out.success {
         return Err(out.error("__managed adopt"));
     }
-    // `{"adopted": [...], "skipped": [...]}`. Anything else is a CLI that
-    // exited 0 without adopting — do not delete on its word.
-    let value: serde_json::Value = serde_json::from_str(out.stdout.trim())
-        .map_err(|_| CliError::new("cli_failed", "pidash __managed adopt printed no result"))?;
-    if value.get("adopted").is_some_and(|v| v.is_array()) {
-        Ok(())
-    } else {
-        Err(CliError::new("cli_failed", "pidash __managed adopt printed no result"))
+    parse_adopt(&out.stdout)
+}
+
+/// Read adopt's report: `{"adopted": [...], "skipped": [{"name", "workspace_id",
+/// "reason"}], "fully_adopted": bool}`. Anything else is a CLI that exited 0
+/// without saying what it did — an error, so nothing is deleted on its word.
+/// A report without `fully_adopted` (an earlier CLI) counts as not fully
+/// adopted for the same reason.
+fn parse_adopt(stdout: &str) -> Result<AdoptOutcome, CliError> {
+    let no_result = || CliError::new("cli_failed", "pidash __managed adopt printed no result");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|_| no_result())?;
+    if !value.get("adopted").is_some_and(|v| v.is_array()) {
+        return Err(no_result());
     }
+    let text = |entry: &serde_json::Value, key: &str| {
+        entry
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let skipped = match value.get("skipped") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(entries)) => entries
+            .iter()
+            .map(|entry| match entry {
+                // The contract's first draft listed bare names.
+                serde_json::Value::String(name) => Some(SkippedRunner {
+                    name: name.clone(),
+                    workspace_id: None,
+                    workspace_slug: None,
+                    reason: String::new(),
+                }),
+                serde_json::Value::Object(_) => Some(SkippedRunner {
+                    name: text(entry, "name")?,
+                    workspace_id: text(entry, "workspace_id"),
+                    workspace_slug: text(entry, "workspace_slug"),
+                    reason: text(entry, "reason").unwrap_or_default(),
+                }),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(no_result)?,
+        Some(_) => return Err(no_result()),
+    };
+    Ok(AdoptOutcome {
+        fully_adopted: value.get("fully_adopted").and_then(|v| v.as_bool()) == Some(true),
+        skipped,
+    })
 }
 
 /// Stop the daemons earlier builds ran on their legacy config dirs.
@@ -820,6 +954,19 @@ mod tests {
         assert_eq!(legacy_config_dirs(&root).last(), Some(&root));
     }
 
+    fn fully() -> AdoptOutcome {
+        AdoptOutcome { fully_adopted: true, skipped: Vec::new() }
+    }
+
+    fn skipped(name: &str, workspace_id: &str, reason: &str) -> SkippedRunner {
+        SkippedRunner {
+            name: name.into(),
+            workspace_id: Some(workspace_id.into()),
+            workspace_slug: None,
+            reason: reason.into(),
+        }
+    }
+
     #[test]
     fn each_legacy_dir_is_deleted_only_after_its_adopt_succeeds() {
         let tmp = tempfile::tempdir().unwrap();
@@ -832,7 +979,7 @@ mod tests {
         let mut seen = Vec::new();
         let result = migrate_legacy(&root, |dir| {
             seen.push(dir.to_path_buf());
-            if dir == beta { Err(CliError::outdated()) } else { Ok(()) }
+            if dir == beta { Err(CliError::outdated()) } else { Ok(fully()) }
         });
         assert!(result.unwrap_err().is_outdated());
         assert_eq!(seen, vec![acme.clone(), beta.clone()]);
@@ -842,18 +989,113 @@ mod tests {
 
         // Next launch, with a CLI that can adopt: everything goes, root last.
         let mut order = Vec::new();
-        assert_eq!(
-            migrate_legacy(&root, |dir| {
-                order.push(dir.to_path_buf());
-                Ok(())
-            })
-            .unwrap(),
-            3
-        );
+        let migration = migrate_legacy(&root, |dir| {
+            order.push(dir.to_path_buf());
+            Ok(fully())
+        })
+        .unwrap();
+        assert_eq!(migration.migrated, 3);
+        assert!(migration.unadopted.is_empty());
         assert_eq!(order, vec![beta, gamma, root.clone()]);
         assert!(!root.exists());
         // And then it is a no-op.
-        assert_eq!(migrate_legacy(&root, |_| panic!("nothing to adopt")).unwrap(), 0);
+        assert_eq!(migrate_legacy(&root, |_| panic!("nothing to adopt")).unwrap().migrated, 0);
+    }
+
+    #[test]
+    fn a_partly_adopted_dir_is_kept_and_its_runners_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("pidash");
+        let acme = legacy(&root, "acme");
+        let beta = legacy(&root, "beta");
+        std::fs::write(root.join("config.toml"), "").unwrap();
+
+        // Signed in to acme: beta's runner belongs elsewhere, the root is fine.
+        let migration = migrate_legacy(&root, |dir| {
+            Ok(if dir == beta {
+                AdoptOutcome {
+                    fully_adopted: false,
+                    skipped: vec![
+                        skipped("desktop-b", "beta-ws", "workspace_mismatch"),
+                        SkippedRunner { workspace_id: None, ..skipped("desktop-c", "", "workspace_unknown") },
+                        skipped("desktop-a", "acme", "already_present"),
+                    ],
+                }
+            } else {
+                fully()
+            })
+        })
+        .unwrap();
+        assert!(!acme.exists());
+        assert!(beta.join("config.toml").exists(), "its token is the runner's only credential");
+        assert!(root.join("config.toml").exists(), "deleting the root would take beta with it");
+        assert_eq!(migration.migrated, 1);
+        assert_eq!(
+            migration.unadopted,
+            vec![
+                UnadoptedRunner {
+                    name: "desktop-b".into(),
+                    workspace: "beta-ws".into(),
+                    reason: "workspace_mismatch".into(),
+                },
+                UnadoptedRunner {
+                    name: "desktop-c".into(),
+                    workspace: "beta".into(),
+                    reason: "workspace_unknown".into(),
+                },
+            ]
+        );
+
+        // The root's own runners are named by the slug adopt reports.
+        std::fs::remove_dir_all(&beta).unwrap();
+        let migration = migrate_legacy(&root, |_| {
+            Ok(AdoptOutcome {
+                fully_adopted: false,
+                skipped: vec![skipped("old", "gamma", "not_signed_in")],
+            })
+        })
+        .unwrap();
+        assert!(root.join("config.toml").exists());
+        assert_eq!(migration.unadopted[0].workspace, "gamma");
+
+        // A later sign-in to that workspace: the next pass adopts and deletes.
+        assert_eq!(migrate_legacy(&root, |_| Ok(fully())).unwrap().migrated, 1);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn adopt_output_is_trusted_only_when_it_says_fully_adopted() {
+        let full = parse_adopt(
+            r#"{"adopted":[{"name":"a","workspace_id":"w1"}],"skipped":[],"fully_adopted":true}"#,
+        )
+        .unwrap();
+        assert!(full.fully_adopted && full.skipped.is_empty());
+
+        let partial = parse_adopt(
+            r#"{"adopted":[],"skipped":[{"name":"b","workspace_id":"w2","reason":"workspace_mismatch"},{"name":"c","workspace_id":null,"reason":"workspace_unknown"}],"fully_adopted":false}"#,
+        )
+        .unwrap();
+        assert!(!partial.fully_adopted);
+        assert_eq!(partial.skipped[0], skipped("b", "w2", "workspace_mismatch"));
+        assert_eq!(partial.skipped[1].workspace_id, None);
+        // A failed adopt (exit 1) never gets this far; its error object is no report either.
+        assert!(parse_adopt(r#"{"error":"adopt_failed","message":"x"}"#).is_err());
+
+        // An earlier CLI without the flag never gets a dir deleted.
+        let old = parse_adopt(r#"{"adopted":["a"],"skipped":["b"]}"#).unwrap();
+        assert!(!old.fully_adopted);
+        assert_eq!(old.skipped[0].name, "b");
+
+        for bad in [
+            "",
+            "adopted 1 runner",
+            r#"{"fully_adopted":true}"#,
+            r#"{"adopted":{},"fully_adopted":true}"#,
+            r#"{"adopted":[],"skipped":"b","fully_adopted":true}"#,
+            r#"{"adopted":[],"skipped":[{"reason":"x"}],"fully_adopted":true}"#,
+        ] {
+            assert_eq!(parse_adopt(bad).unwrap_err().code, "cli_failed", "{bad}");
+        }
     }
 
     #[test]
@@ -909,14 +1151,14 @@ mod tests {
         let cli = fake_cli(
             tmp.path(),
             "echo \"$* cfg=${PIDASH_CONFIG_DIR-unset} data=${PIDASH_DATA_DIR-unset}\" > \"$(dirname \"$0\")/argv\"\n\
-             echo '{\"adopted\":[\"desktop-a\"],\"skipped\":[]}'",
+             echo '{\"adopted\":[{\"name\":\"desktop-a\",\"workspace_id\":\"w\"}],\"skipped\":[],\"fully_adopted\":true}'",
         );
         let legacy = tmp.path().join("managed/pidash/acme");
         // SAFETY: tests in this binary never read these variables concurrently.
         unsafe { std::env::set_var("PIDASH_CONFIG_DIR", "/should/not/leak") };
         let result = retry_busy_cli(|| adopt(&cli, &legacy));
         unsafe { std::env::remove_var("PIDASH_CONFIG_DIR") };
-        result.unwrap();
+        assert!(result.unwrap().fully_adopted);
         let argv = std::fs::read_to_string(tmp.path().join("argv")).unwrap();
         assert_eq!(
             argv.trim(),

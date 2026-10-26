@@ -51,6 +51,10 @@ pub struct AuthStatus {
     pub daemon_running: bool,
     #[serde(default)]
     pub active_runs: u64,
+    /// Fields this build does not know (e.g. the CLI's flag for a signed-in
+    /// user it cannot name), handed to the overlay unchanged.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -261,6 +265,15 @@ mod tests {
         let signed_out = r#"{"signed_in": false, "cloud_url": null, "user": null, "workspace_slug": null,
             "dev_machine_id": null, "changed_at": null, "daemon_running": false, "active_runs": 0}"#;
         assert!(!parse_auth_status(&out(0, signed_out, "")).unwrap().signed_in);
+    }
+
+    #[test]
+    fn auth_status_passes_unknown_fields_through_to_the_overlay() {
+        let json = r#"{"signed_in": true, "user": null, "user_unknown": true, "active_runs": 1}"#;
+        let status = parse_auth_status(&out(0, json, "")).unwrap();
+        let back = serde_json::to_value(&status).unwrap();
+        assert_eq!(back["user_unknown"], serde_json::json!(true));
+        assert_eq!(back["active_runs"], serde_json::json!(1));
     }
 
     #[test]
