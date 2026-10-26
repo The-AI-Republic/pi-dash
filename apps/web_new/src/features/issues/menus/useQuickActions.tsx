@@ -76,6 +76,12 @@ export interface QuickActionsInput {
   onArchived?: (() => void) | undefined;
   /** After a landed delete (a detail page navigates back to its list). */
   onDeleted?: (() => void) | undefined;
+  /**
+   * Address copy-link and open-in-new-tab hand out. Archived surfaces
+   * pass their detail address (parity/specs/archives.md §3.3); every
+   * other surface keeps the live browse address.
+   */
+  linkHref?: string | undefined;
 }
 
 export interface QuickActionHandlers {
@@ -176,7 +182,7 @@ export function useQuickActions(input: QuickActionsInput | null): QuickActionsSt
     input?.onChanged?.();
   }, [queryClient, input, workspaceSlug]);
 
-  const href = workItemBrowseHref(workspaceSlug, target.projectIdentifier, target.sequenceId);
+  const href = input?.linkHref ?? workItemBrowseHref(workspaceSlug, target.projectIdentifier, target.sequenceId);
 
   const copyLink = React.useCallback(() => {
     void copyLinkWithToast(

@@ -1,14 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Archived work-items tab body (parity/specs/archives.md §2,
-// ARCH-005–007). A read-only list with the shared rich-filter row and
-// display control, grouped client-side by the server's buckets, and the
-// archived side peek driven by the address. The tab's expression,
-// display options and columns live in the window-local record the
-// oracle seeds; the project's server preferences are never read or
-// written here. Row menus, restore/delete and the empty-state
-// automation control belong to NEWFRONT-700.
+// Archived work-items tab body (parity/specs/archives.md §2–3,
+// ARCH-004–008, ARCH-033 behavior). A read-only list with the shared
+// rich-filter row and display control, grouped client-side by the
+// server's buckets, per-row archived menus (restore, open, copy, delete
+// with the archived detail address), and the archived side peek driven
+// by the address. The tab's expression, display options and columns live
+// in the window-local record the oracle seeds; the project's server
+// preferences are never read or written here.
 
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -17,6 +17,8 @@ import type { IssueListItem, ProjectDetail } from "@pidash/api-client";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { ROLE_ADMIN } from "../../../core/session/permissions.js";
+import { useWorkspaceMembership } from "../../auth/index.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { DisplayControl } from "../display/DisplayControl.js";
 import { archivedDisplayMatrix } from "../display/matrix.js";
@@ -28,9 +30,10 @@ import { GroupHeader } from "../list/GroupHeader.js";
 import { ListRow } from "../list/ListRow.js";
 import { useListReferences } from "../list/reference.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
-import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
+import { isProjectAdmin, projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { ArchivedIssuePeek } from "../peek/ArchivedIssuePeek.js";
 import {
+  archivedIssueDetailPath,
   projectAutomationsPath,
   readArchivedLocalState,
   useArchivedPages,
@@ -54,7 +57,7 @@ export interface ArchivedIssuesScreenProps {
 }
 
 function archivedHref(workspaceSlug: string, projectId: string, issue: IssueListItem): string {
-  return `/${workspaceSlug}/projects/${projectId}/archives/issues/${issue.id}`;
+  return archivedIssueDetailPath(workspaceSlug, projectId, issue.id);
 }
 
 /** The archived tab body. */
@@ -68,6 +71,7 @@ export function ArchivedIssuesScreen({
   const client = getAppClient();
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(client, workspaceSlug));
   const { data: details } = useQuery(projectDetailsQueryOptions(client, workspaceSlug));
+  const membership = useWorkspaceMembership(workspaceSlug);
   const project = projects.find((entry) => entry.id === projectId) ?? null;
   const projectDetails: ProjectDetail | null = details?.find((entry) => entry.id === projectId) ?? null;
 
@@ -114,6 +118,12 @@ export function ArchivedIssuesScreen({
 
   const projectIdentifier = project.identifier;
   const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at !== null });
+  // The empty state's automations control opens an admin-gated page, so
+  // it stays enabled only for effective admins — the project admin role
+  // or a workspace admin — and renders disabled for members and guests
+  // (spec §2.4). Unknown workspace standing fails closed.
+  const canOpenAutomations =
+    isProjectAdmin(project.member_role) || (!membership.isError && (membership.data?.role ?? 0) >= ROLE_ADMIN);
   const filtered = isFilteredEmpty({
     // Archived expressions come from the stored record, so a restored
     // condition that hides every row must show the no-match card even
@@ -164,7 +174,8 @@ export function ArchivedIssuesScreen({
         showSubIssues={false}
         timeZone={projectDetails?.timezone ?? null}
         menuContext="archived"
-        showMenu={false}
+        menuCanWrite={canEdit}
+        menuLinkHref={archivedIssueDetailPath(workspaceSlug, projectId, issue.id)}
       />
     );
   }
@@ -213,7 +224,7 @@ export function ArchivedIssuesScreen({
           <FilteredEmptyCard context="archived" clearLabel="Clear filters" canAct onClear={parts.clearFilters} />
         ) : pages.total === 0 ? (
           <ArchivedIssuesEmpty
-            canAct={canEdit}
+            canAct={canOpenAutomations}
             onSetAutomation={() => {
               void navigate({ to: projectAutomationsPath(workspaceSlug, projectId) } as never);
             }}

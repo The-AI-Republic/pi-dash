@@ -510,6 +510,11 @@ export class WebNewDriver implements ParityDriver {
     | { matches: (url: URL) => boolean; handler: (route: Route) => Promise<void> }
     | undefined = undefined;
 
+  /** The armed one-shot archives mutation failure, if archivesFailNextMutation set one. */
+  private archivesMutationFailureRoute:
+    | { matches: (url: URL) => boolean; handler: (route: Route) => Promise<void> }
+    | undefined = undefined;
+
   // Runner-chat stubs and counters (NEWFRONT-549); set by the chat methods.
   private runnerChatSessionCreateFailRemaining = 0;
   private runnerChatSessionCreateDelayMs = 0;
@@ -16939,13 +16944,60 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesChooseArchivedModuleMenuEntry");
   }
   async archivesArchiveDialog(): Promise<ArchivesArchiveDialog | null> {
-    return todo("archivesArchiveDialog");
+    const dialog = this.page.locator('[role="dialog"]').first();
+    // The dialog mounts a beat after the menu click; wait briefly so a
+    // genuine dialog is never missed, then report absence honestly.
+    await dialog.waitFor({ timeout: 3_000 }).catch(() => undefined);
+    if ((await dialog.count()) === 0) return null;
+    const title = (
+      await dialog
+        .getByRole("heading")
+        .first()
+        .innerText()
+        .catch(() => "")
+    ).trim();
+    if (title === "") return null;
+    const body = (
+      await dialog
+        .locator("p")
+        .first()
+        .innerText()
+        .catch(() => "")
+    ).trim();
+    const confirmLabel = (await (await this.archivesDialogConfirm(dialog)).innerText().catch(() => "")).trim();
+    return { title, body, confirmLabel };
   }
   async archivesConfirmArchiveDialog(): Promise<void> {
-    return todo("archivesConfirmArchiveDialog");
+    const dialog = this.page.locator('[role="dialog"]').first();
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const toasts = this.page.locator('[data-testid="toast-notification"]');
+    const seenToasts = await toasts.count();
+    await (await this.archivesDialogConfirm(dialog)).click({ timeout: WebNewDriver.WAIT_MS });
+    // Settle on the write's outcome: the dialog closes on success, and a
+    // new confirmation appears either way; a quiet dialog still returns
+    // so the caller can assert.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await dialog.count()) === 0) return;
+      if ((await toasts.count()) > seenToasts) return;
+      if (Date.now() >= deadline) return;
+      await this.page.waitForTimeout(300);
+    }
   }
   async archivesCancelArchiveDialog(): Promise<void> {
-    return todo("archivesCancelArchiveDialog");
+    const dialog = this.page.locator('[role="dialog"]').first();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+  /**
+   * The archive dialog's confirm control: the Archive entry by name, or
+   * the trailing action when a slice words it differently (actions
+   * render Cancel first, confirm last).
+   */
+  private async archivesDialogConfirm(dialog: Locator): Promise<Locator> {
+    const named = dialog.getByRole("button", { name: /archiv/i }).first();
+    if ((await named.count()) > 0) return named;
+    return dialog.getByRole("button").last();
   }
   async archivesFailNextModuleWrite(): Promise<void> {
     return todo("archivesFailNextModuleWrite");
@@ -17048,14 +17100,19 @@ export class WebNewDriver implements ParityDriver {
     }
     return titles;
   }
-  async archivesOpenRowMenu(_name: string): Promise<void> {
-    return todo("archivesOpenRowMenu");
+  async archivesOpenRowMenu(name: string): Promise<void> {
+    await this.archivesRowMenuOpenFirst(name);
   }
   async archivesRowMenuEntries(): Promise<string[]> {
-    return todo("archivesRowMenuEntries");
+    return this.archivesRowMenuEntryTitles();
   }
   async archivesCloseMenus(): Promise<void> {
-    return todo("archivesCloseMenus");
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "detached", timeout: 10_000 })
+      .catch(() => undefined);
   }
   async archivesInlineEditorOpens(name: string): Promise<boolean> {
     // Probe the row's first control: an editor opens a listbox or dialog.
@@ -17914,7 +17971,23 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesProjectFailNextWrite");
   }
   async archivesItemFailNextWrite(): Promise<void> {
-    return todo("archivesItemFailNextWrite");
+    // One-shot abort of the next issue/cycle/module archive or restore
+    // write; reads and other writes pass through. The predicate mirrors
+    // the oracle driver's so both targets fail the same requests.
+    let armed = true;
+    await this.page.route("**/archive/", async (route) => {
+      const request = route.request();
+      const method = request.method();
+      const isItemWrite =
+        (method === "POST" || method === "DELETE") &&
+        /\/(issues|cycles|modules)\/[^/]+\/archive\/$/.test(request.url());
+      if (armed && isItemWrite) {
+        armed = false;
+        await route.abort();
+        return;
+      }
+      await route.continue();
+    });
   }
   async archivesTabOpen(workspaceSlug: string, projectId: string, tab: ArchivesTab): Promise<void> {
     await this.archivesGotoTab(`/${workspaceSlug}/projects/${projectId}/archives/${tab}`);
@@ -17926,14 +17999,58 @@ export class WebNewDriver implements ParityDriver {
     if (after.startsWith("modules")) return "modules";
     return "issues";
   }
-  async archivesRowMenuOpenFirst(_name: string): Promise<void> {
-    return todo("archivesRowMenuOpenFirst");
+  async archivesRowMenuOpenFirst(name: string): Promise<void> {
+    const trigger = this.archivesRowMenuTrigger(name);
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await trigger.scrollIntoViewIfNeeded().catch(() => undefined);
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async archivesRowMenuEntryTitles(): Promise<string[]> {
-    return todo("archivesRowMenuEntryTitles");
+    // First-line titles: an entry with a trailing note (a disabled
+    // reason, a cycle hint) contributes its title line only. A torn-down
+    // item reads as blank and is skipped, like a blank row.
+    const items = this.page.getByRole("menuitem");
+    const total = await items.count();
+    const out: string[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const raw = (
+        await items
+          .nth(index)
+          .innerText()
+          .catch(() => "")
+      ).trim();
+      if (raw === "") continue;
+      // A painted item carries its title on the first line, so it exists.
+      const title = raw.split("\n")[0] as string;
+      out.push(title.trim());
+    }
+    return out;
   }
-  async archivesRowMenuClick(_entry: string): Promise<void> {
-    return todo("archivesRowMenuClick");
+  async archivesRowMenuClick(entry: string): Promise<void> {
+    const item = this.page.getByRole("menuitem").filter({ hasText: entry }).first();
+    await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+  }
+  /** The row-menu trigger of the named row on the active archives tab. */
+  private archivesRowMenuTrigger(name: string): Locator {
+    const content = this.archivesContent();
+    const tab = this.archivesTabFromUrl();
+    if (tab === "cycles") {
+      return content
+        .locator('[data-testid="cycle-row"]', { hasText: name })
+        .first()
+        .getByTestId(/cycle-row-menu-(trigger|inline)/)
+        .first();
+    }
+    if (tab === "modules") {
+      return content
+        .locator('[data-testid="modules-row"], [data-testid="modules-board-card"]', { hasText: name })
+        .first()
+        .getByRole("button", { name: /actions/i })
+        .first();
+    }
+    return content.locator('[data-testid="list-row"]', { hasText: name }).first().getByTestId("row-menu-trigger");
   }
   /** The archives tab the address belongs to. */
   private archivesTabFromUrl(): ArchivesTab {
@@ -18043,7 +18160,14 @@ export class WebNewDriver implements ParityDriver {
     await expect.poll(() => this.archivesPeekParamName(), { timeout: WebNewDriver.WAIT_MS }).toBeNull();
   }
   async archivesDetailBannerText(): Promise<string | null> {
-    return todo("archivesDetailBannerText");
+    return this.archivesDetailBannerRead();
+  }
+  /** The archived-detail notice banner text, or null when no banner shows. */
+  private async archivesDetailBannerRead(): Promise<string | null> {
+    const banner = this.archivesContent().getByTestId("archived-detail-banner").first();
+    if ((await banner.count()) === 0) return null;
+    const text = (await banner.innerText().catch(() => "")).trim();
+    return text === "" ? null : text;
   }
   async archivesSkeletonVisible(): Promise<boolean> {
     const probe = '.animate-shimmer, .animate-pulse, [data-testid*="skeleton" i]';
@@ -18866,57 +18990,109 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async archivesMutationVisibleIssueNames(): Promise<string[]> {
-    return todo("archivesMutationVisibleIssueNames");
+    return this.archivesVisibleIssueNames();
   }
 
-  async archivesFailNextMutation(_method: "POST" | "DELETE", _urlPart: string): Promise<void> {
-    return todo("archivesFailNextMutation");
+  async archivesFailNextMutation(method: "POST" | "DELETE", urlPart: string): Promise<void> {
+    // One-shot 500 in the failNextIssuePatch shape: only the next request
+    // with this method whose path contains urlPart fails; reads and other
+    // writes pass through, and the handler removes itself after answering
+    // so a retried mutation goes to the real server. A URL predicate (not
+    // a glob) routes the request, matching the established pattern.
+    await this.archivesClearMutationFailure();
+    const matches = (url: URL): boolean => url.pathname.includes(urlPart);
+    const handler = async (route: Route): Promise<void> => {
+      if (route.request().method() !== method) {
+        await route.continue();
+        return;
+      }
+      try {
+        await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+      } finally {
+        await this.archivesClearMutationFailure();
+      }
+    };
+    this.archivesMutationFailureRoute = { matches, handler };
+    await this.page.route(matches, handler);
   }
 
   async archivesClearMutationFailure(): Promise<void> {
-    return todo("archivesClearMutationFailure");
+    const current = this.archivesMutationFailureRoute;
+    this.archivesMutationFailureRoute = undefined;
+    if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
   }
 
   async archivesArchiveModalTitle(): Promise<string | null> {
-    return todo("archivesArchiveModalTitle");
+    const dialog = this.page.locator('[role="dialog"]').first();
+    if ((await dialog.count()) === 0) return null;
+    const title = (
+      await dialog
+        .getByRole("heading")
+        .first()
+        .innerText()
+        .catch(() => "")
+    ).trim();
+    return title === "" ? null : title;
   }
 
   async archivesArchiveModalBody(): Promise<string | null> {
-    return todo("archivesArchiveModalBody");
+    const dialog = this.page.locator('[role="dialog"]').first();
+    if ((await dialog.count()) === 0) return null;
+    const body = (
+      await dialog
+        .locator("p")
+        .first()
+        .innerText()
+        .catch(() => "")
+    ).trim();
+    return body === "" ? null : body;
   }
 
   async archivesArchiveModalCancel(): Promise<void> {
-    return todo("archivesArchiveModalCancel");
+    const dialog = this.page.locator('[role="dialog"]').first();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
 
-  async archivesDetailMenuChoose(_item: string): Promise<void> {
-    return todo("archivesDetailMenuChoose");
+  async archivesDetailMenuChoose(item: string): Promise<void> {
+    await this.page.getByTestId("detail-menu-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const entry = this.page.getByRole("menuitem").filter({ hasText: item }).first();
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async archivesOpenDetailRaw(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("archivesOpenDetailRaw");
+  async archivesOpenDetailRaw(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/issues/${issueId}`, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
 
   async archivesDetailBreadcrumbText(): Promise<string> {
-    return todo("archivesDetailBreadcrumbText");
+    const trail = this.page.getByRole("navigation", { name: "Breadcrumb" }).first();
+    return (await trail.innerText().catch(() => "")).trim().replace(/\s+/g, " ");
   }
 
   async archivesMutationDetailBannerText(): Promise<string | null> {
-    return todo("archivesMutationDetailBannerText");
+    return this.archivesDetailBannerRead();
   }
 
   async archivesDetailBannerBack(): Promise<void> {
-    return todo("archivesDetailBannerBack");
+    const banner = this.archivesContent().getByTestId("archived-detail-banner").first();
+    await banner.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await banner.getByRole("link").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL("**/archives/issues**", { timeout: WebNewDriver.WAIT_MS });
   }
 
   async archivesDetailNotFoundVisible(): Promise<boolean> {
-    return todo("archivesDetailNotFoundVisible");
+    const heading = this.archivesContent().getByRole("heading", { name: "No work item matches this address" }).first();
+    if ((await heading.count()) === 0) return false;
+    return heading.isVisible().catch(() => false);
   }
 
   async archivesDetailPendingStateOnHeldFetch(
-    _workspaceSlug: string,
-    _projectId: string,
-    _issueId: string
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string
   ): Promise<{
     heldRequests: number;
     bannerDuringHold: string | null;
@@ -18924,15 +19100,74 @@ export class WebNewDriver implements ParityDriver {
     activityDuringHold: boolean;
     settled: boolean;
   }> {
-    return todo("archivesDetailPendingStateOnHeldFetch");
+    // Gate the detail record read while entering, sampling what the screen
+    // shows with the fetch provably outstanding; release and settle on the
+    // detail. The first intercepted read is the fetch-gated proof: the
+    // sample below cannot be mistaken for a slow boot. A URL predicate
+    // (not a glob) routes the request, matching the established pattern.
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") && url.pathname.includes(`/projects/${projectId}/issues/${issueId}`);
+    let heldRequests = 0;
+    let released = false;
+    let releaseGate: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const handler = async (route: Route): Promise<void> => {
+      if (route.request().method() !== "GET" || released) {
+        await route.continue();
+        return;
+      }
+      heldRequests += 1;
+      await gate;
+      await route.continue();
+    };
+    await this.page.route(matches, handler);
+    const release = (): void => {
+      released = true;
+      releaseGate();
+    };
+    try {
+      await this.archivesOpenDetailRaw(workspaceSlug, projectId, issueId);
+      const engaged = Date.now() + 120_000;
+      for (;;) {
+        if (heldRequests > 0) break;
+        if (Date.now() >= engaged)
+          throw new Error("[parity] archived detail never issued its record read; the hold predicate missed.");
+        await this.page.waitForTimeout(300);
+      }
+      // The read is outstanding: dwell so any pending indicator would have
+      // painted, then sample the screen.
+      await this.page.waitForTimeout(3_000);
+      const bannerDuringHold = await this.archivesMutationDetailBannerText();
+      const breadcrumbDuringHold = await this.archivesDetailBreadcrumbText();
+      const activityDuringHold = (await this.archivesContent().locator('section[aria-label="Activity"]').count()) > 0;
+      release();
+      await this.archivesContent()
+        .locator('section[aria-label="Activity"]')
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS });
+      return { heldRequests, bannerDuringHold, breadcrumbDuringHold, activityDuringHold, settled: true };
+    } finally {
+      release();
+      await this.page.unroute(matches, handler).catch(() => {});
+    }
   }
 
   async archivesDetailComposerVisible(): Promise<boolean> {
-    return todo("archivesDetailComposerVisible");
+    const submit = this.archivesContent().getByRole("button", { name: "Comment", exact: true }).first();
+    if ((await submit.count()) === 0) return false;
+    return submit.isVisible().catch(() => false);
   }
 
   async archivesDetailReactionControlEnabled(): Promise<boolean> {
-    return todo("archivesDetailReactionControlEnabled");
+    // The issue-level reaction cluster keeps a control only while it
+    // accepts input: chips carry aria-disabled once frozen and the add
+    // control unmounts, so any undisabled button reads as enabled and
+    // an absent cluster reads as disabled.
+    const cluster = this.archivesContent().locator('section[aria-label="Reactions on this work item"]').first();
+    if ((await cluster.count()) === 0) return false;
+    return (await cluster.locator('button:not([aria-disabled="true"])').count()) > 0;
   }
 
   async intakeCreateDialogOpen(): Promise<boolean> {

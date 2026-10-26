@@ -334,6 +334,23 @@ describe("useQuickActions", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't copy the link", "Denied"));
   });
 
+  it("opens the override address in a new tab when one is given (ARCH-010)", async () => {
+    transport();
+    const linkHref = `/${SLUG}/projects/${PROJECT}/archives/issues/${ISSUE}`;
+    const { result } = renderMenu({ workspaceSlug: SLUG, target: target(), context: "archived", linkHref });
+    await act(async () => result.current?.handlers.run("openInNewTab"));
+    expect(globalThis.open).toHaveBeenCalledWith(linkHref, "_blank", "noopener,noreferrer");
+  });
+
+  it("copies the override address when one is given (ARCH-010)", async () => {
+    transport();
+    const linkHref = `/${SLUG}/projects/${PROJECT}/archives/issues/${ISSUE}`;
+    const { result } = renderMenu({ workspaceSlug: SLUG, target: target(), context: "archived", linkHref });
+    await act(async () => result.current?.handlers.run("copyLink"));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Link copied", undefined));
+    expect(clipboard.writeText).toHaveBeenCalledWith(expect.stringContaining(linkHref));
+  });
+
   it("opens the edit and copy forms as dialogs with the project standing", async () => {
     transport();
     const { result } = renderMenu({ workspaceSlug: SLUG, target: target(), context: "cycle", cycleId: CYCLE });

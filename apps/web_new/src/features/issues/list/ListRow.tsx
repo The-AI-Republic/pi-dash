@@ -131,12 +131,14 @@ export interface ListRowProps {
   menuCanWrite?: boolean | undefined;
   /** Called after any menu write lands (the route refreshes its own reads). */
   onMenuChanged?: (() => void) | undefined;
-  /**
-   * Render the row's quick-action menu. Archived rows suppress it until
-   * the archives slice wires its read-only menu; the rest of the row is
-   * unchanged.
-   */
+  /** Render the row's quick-action menu. */
   showMenu?: boolean | undefined;
+  /**
+   * Address the menu's copy-link and open-in-new-tab hand out. Archived
+   * rows pass their detail address (parity/specs/archives.md §3.3);
+   * absent keeps the live browse address.
+   */
+  menuLinkHref?: string | undefined;
 }
 
 export function issueKey(projectIdentifier: string, issue: Pick<IssueListItem, "sequence_id">): string {
@@ -262,6 +264,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
           cycleId: props.menuCycleId ?? null,
           moduleId: props.menuModuleId ?? null,
           ...(props.menuCanWrite === undefined ? {} : { canWrite: props.menuCanWrite }),
+          ...(props.menuLinkHref === undefined ? {} : { linkHref: props.menuLinkHref }),
           onChanged: props.onMenuChanged,
         }
   );
