@@ -10,6 +10,7 @@ queue/rollback behavior, and Django's filter-coercion edges.
 from __future__ import annotations
 
 import contextlib
+import os
 import uuid
 
 import pytest
@@ -22,6 +23,12 @@ WEB = "/api/runners"
 DAEMON = "/api/v1/runner"
 
 pytestmark = pytest.mark.contract
+
+CLOUD_ENABLED = os.environ.get("CONTRACT_CLOUD_AGENT_ENABLED", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 RUN_KEYS = {
     "id", "status", "executor_kind", "dispatch_attempts", "cancel_requested_at",
@@ -686,6 +693,96 @@ def test_web_runs_create_drains_pod_to_idle_runner(
     assert str(second["runner_id"]) in online_runner_pair
     assert str(second["runner_id"]) != str(first["runner_id"])
     assert second["owner_id"] is not None and second["assigned_at"] is not None
+
+
+def test_web_runs_create_runai_201_body_is_predispatch_with_idle_runner(
+    user_client, seeder, daemon_world, online_runner_pair
+):
+    """run_ai 201 renders the pre-dispatch run while the row assigns (PIDASHCONV-1482).
+
+    Django serializes the in-memory run with no ``refresh_from_db``
+    (``runs.py`` ``_post_run_ai``), so the body stays queued and runner-less
+    even though the on-commit dispatch assigned the row in-request.
+    """
+    issue = _ticking_issue(seeder, daemon_world)
+    response = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    body = response.json()
+    assert RUN_KEYS <= set(body)
+    assert body["executor_kind"] == "local_runner"
+    assert body["status"] == "queued"
+    assert body["runner"] is None
+    assert body["owner"] is None
+    assert body["assigned_at"] is None
+    assert body["dispatch_attempts"] == 0
+    row = seeder.db.fetchone(
+        "SELECT status, runner_id, owner_id, assigned_at FROM agent_run WHERE id = %s",
+        (body["id"],),
+    )
+    assert row["status"] == "assigned"
+    assert str(row["runner_id"]) in online_runner_pair
+    assert row["owner_id"] is not None and row["assigned_at"] is not None
+
+
+def _seed_llm_config(seeder, user_id):
+    """BYOK marker row so ``user_has_llm_config`` passes (cf. dispatch/conftest.py)."""
+    seeder.db.execute(
+        """INSERT INTO assistant_user_llm_config
+           (provider_kind, base_url, model_name, api_key_encrypted,
+            last_verified_at, created_at, updated_at, user_id)
+           VALUES ('openai_compatible','https://llm.example.invalid/v1','contract-model',
+                   decode('deadbeef','hex'),NULL,now(),now(),%s)""",
+        (user_id,),
+    )
+    row_id = seeder.db.fetchval(
+        "SELECT id FROM assistant_user_llm_config WHERE user_id = %s", (user_id,)
+    )
+    seeder.track.add("assistant_user_llm_config", row_id)
+
+
+def test_web_runs_create_runai_201_body_is_predispatch_for_cloud(
+    user_client, seeder, daemon_world
+):
+    """Cloud run_ai 201 keeps dispatch_attempts 0 while the row leases to 1 (PIDASHCONV-1482).
+
+    Regime: servers booted with ``CLOUD_AGENT_ENABLED=true``
+    (``CONTRACT_CLOUD_AGENT_ENABLED=true``); skipped otherwise — CI runs the
+    kill-switches off, where a cloud-default project refuses the create.
+    """
+    if not CLOUD_ENABLED:
+        pytest.skip("needs CLOUD_AGENT_ENABLED=true servers (CONTRACT_CLOUD_AGENT_ENABLED)")
+    seeder.db.execute(
+        "UPDATE projects SET default_agent_executor = 'cloud_agent' WHERE id = %s",
+        (daemon_world["project"]["id"],),
+    )
+    _seed_llm_config(seeder, daemon_world["owner"]["id"])
+    # The cloud creator must hold a project role (check_project_role in
+    # _resolve_creator_for_trigger); the local path returns the actor bare.
+    seeder.create_project_member(
+        daemon_world["workspace"]["id"], daemon_world["project"]["id"],
+        daemon_world["owner"]["id"], role=15,
+    )
+    issue = _ticking_issue(seeder, daemon_world)
+    response = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    body = response.json()
+    assert RUN_KEYS <= set(body)
+    assert body["executor_kind"] == "cloud_agent"
+    assert body["status"] == "queued"
+    assert body["dispatch_attempts"] == 0
+    row = seeder.db.fetchone(
+        "SELECT status, dispatch_attempts, lease_expires_at FROM agent_run WHERE id = %s",
+        (body["id"],),
+    )
+    assert row["status"] == "queued"
+    assert row["dispatch_attempts"] == 1
+    assert row["lease_expires_at"] is not None
 
 
 def test_web_runs_create_runai_queued_202(user_client, seeder, daemon_world):
