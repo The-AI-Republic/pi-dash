@@ -32,6 +32,11 @@ export function shareableAddress(path: string): string {
   return platform.shareableUrl(path);
 }
 
+/** Open `path`'s shareable address through the active platform. Rejects on failure. */
+export async function openShareAddress(path: string): Promise<void> {
+  await platform.openExternal(shareableAddress(path));
+}
+
 /** Write `path`'s shareable address to the clipboard. Rejects on failure. */
 export async function copyShareAddress(path: string): Promise<string> {
   const address = shareableAddress(path);

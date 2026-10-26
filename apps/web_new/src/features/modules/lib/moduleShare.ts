@@ -7,11 +7,10 @@
 // it needs no second copy. Row copy always clips the canonical detail
 // address — never the current address with its query — and confirms
 // visibly; a refused clipboard reports the failure instead of claiming
-// success. Opening in a new tab goes through the active platform, so
+// success. Opening in a new tab goes through the shared shell seam, so
 // the desktop bundle hands out the hosted app's address.
 
-import { platform } from "../../../core/platform/index.js";
-import { copyLinkWithToast, shareableAddress } from "../../../shared/shell/shareLink.js";
+import { copyLinkWithToast, openShareAddress } from "../../../shared/shell/shareLink.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 import { moduleDetailHref } from "./moduleList.js";
 import { MODULE_FAILURE_TITLE, MODULE_SUCCESS_TITLE } from "./moduleForm.js";
@@ -39,7 +38,7 @@ export async function copyModuleLink(workspaceSlug: string, projectId: string, m
  */
 export async function openModuleInNewTab(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
   try {
-    await platform.openExternal(shareableAddress(moduleDetailHref(workspaceSlug, projectId, moduleId)));
+    await openShareAddress(moduleDetailHref(workspaceSlug, projectId, moduleId));
   } catch (error) {
     notifyError(MODULE_OPEN_NEW_TAB_FAILED_TITLE, error instanceof Error ? error.message : undefined);
   }
