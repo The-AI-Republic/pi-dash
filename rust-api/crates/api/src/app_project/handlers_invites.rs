@@ -2238,14 +2238,21 @@ async fn invite_create(
             token,
         });
     }
-    // `bulk_create(batch_size=10, ignore_conflicts=True)` (`:98-100`):
-    // one INSERT per 10 rows, each committed separately in autocommit —
-    // so the per-batch role/length prep runs against the CURRENT batch
-    // only (a bad row in batch 2 leaves batch 1 persisted, exactly like
-    // Django). `bulk_create` skips `save()`: no audit stamp beyond the
-    // explicit `created_by`, `accepted` false, `message`/`responded_at`
-    // NULL. The table carries no unique constraint besides the pk, so
-    // `ON CONFLICT DO NOTHING` only ever meets uuid collisions.
+    // `bulk_create(batch_size=10, ignore_conflicts=True)` (`:101-103`):
+    // Django wraps the WHOLE bulk in one `transaction.atomic`
+    // (`query.py:785`) and prepares each batch's values just before
+    // inserting that batch (`_batched_insert` → `_insert`), so an error
+    // in any batch — a role `int()` failure or a failed INSERT — rolls
+    // back every batch: all invitations or none. The per-batch
+    // conversion below is load-bearing order, not an accident: a
+    // batch-1 INSERT failure (400) wins over a batch-2 conversion
+    // failure (500), exactly like Django. `bulk_create` skips `save()`:
+    // no audit stamp beyond the explicit `created_by`, `accepted`
+    // false, `message`/`responded_at` NULL. The table carries no unique
+    // constraint besides the pk, so `ON CONFLICT DO NOTHING` only ever
+    // meets uuid collisions. Dropping `tx` uncommitted on any `return`
+    // below rolls the batches back.
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
     for batch in pending.chunks(INVITE_BULK_BATCH_SIZE) {
         let mut roles: Vec<Option<i16>> = Vec::with_capacity(batch.len());
         for invite in batch.iter() {
@@ -2301,10 +2308,11 @@ async fn invite_create(
                 .bind(&invite.token)
                 .bind(*role);
         }
-        if let Err(error) = query.execute(&pool).await {
+        if let Err(error) = query.execute(&mut *tx).await {
             return Err(integrity_denial(error));
         }
     }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
     // Per-row enqueues (`:104-111`): one `project_invitation` job per
     // invitation, best-effort (without the queue the response stands).
     let current_site = crate::v1_projects::handlers_project::app_origin(&state);
