@@ -2315,7 +2315,13 @@ pub async fn blocker_summary(
                  AND (st."group" IS NULL OR st."group" != 'triage')
                  AND i.archived_at IS NULL AND NOT i.is_draft
                  AND p.deleted_at IS NULL AND p.archived_at IS NULL
-               ORDER BY p.identifier, i.sequence_id LIMIT 100"#,
+               -- `_summary_list` (`blockers.py:172-181`): the `_resolved`
+               -- annotation sorts open rows first and the cap applies
+               -- after, so open items are never the ones cut. A NULL
+               -- group takes the ELSE branch (open), like Django.
+               ORDER BY CASE WHEN s."group" IN ('cancelled', 'completed')
+                        THEN 1 ELSE 0 END,
+                 p.identifier, i.sequence_id LIMIT 100"#,
         )
         .bind(&id_list)
         .fetch_all(pool)
