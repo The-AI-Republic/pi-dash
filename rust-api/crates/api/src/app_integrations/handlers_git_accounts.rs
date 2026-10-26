@@ -71,6 +71,7 @@ use pidash_db::integrations::git_models::git_provider_account::GitProviderAccoun
 
 use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
 /// Exact bytes of the providers payload (`registry.py:45-53`).
 pub const PROVIDERS_BODY: &str = r#"{"providers":[{"key":"github","display_name":"GitHub","code_review_term":"pull request"},{"key":"gitlab","display_name":"GitLab","code_review_term":"merge request"}]}"#;
@@ -1188,8 +1189,9 @@ async fn create_account(
 
 /// Shared detail lookup for get/delete/repos:
 /// `get_object_or_404(GitProviderAccount, id, workspace__slug)`
-/// (`git.py:100,105,120`). A non-UUID `account_id` proxies to Django —
-/// its `<uuid:>` converter 404s there exactly as before the cutover.
+/// (`git.py:100,105,120`). Only the canonical spelling is served: any
+/// other spelling proxies to Django, whose `<uuid:>` converter 404s
+/// there exactly as before the cutover (PIDASHCONV-1463).
 // `Response` is axum's handle type, so boxing it buys no runtime win;
 // the crate-wide `Result<_, Response>` helper shape stays as-is.
 #[allow(clippy::result_large_err)]
@@ -1199,9 +1201,11 @@ async fn detail_or_proxy(
     account_id: &str,
     req: axum::extract::Request,
 ) -> Result<GitProviderAccount, Response> {
-    let account_uuid = match account_id.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => return Err(crate::edge::proxy(State(state.clone()), req).await),
+    let account_uuid = match classify_uuid_segment(account_id) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return Err(crate::edge::proxy(State(state.clone()), req).await)
+        }
     };
     let pool = pool_of(state).map_err(denial_response)?;
     match queries_git::fetch_provider_account_detail(&pool, account_uuid, slug).await {
