@@ -259,6 +259,28 @@ async function resolveDesktopUser(known: string | null | undefined): Promise<str
   }
 }
 
+/** What the account-switch confirmation shows. */
+export type AccountSwitch = { daemonEmail: string; desktopEmail: string; activeRuns: number };
+type AccountSwitchPrompt = (request: AccountSwitch, resolve: (confirmed: boolean) => void) => void;
+
+let switchPrompt: AccountSwitchPrompt | null = null;
+
+/** Mounts (or, with `null`, unmounts) the dialog {@link confirmAccountSwitch} opens. */
+export function registerAccountSwitchPrompt(prompt: AccountSwitchPrompt | null) {
+  switchPrompt = prompt;
+}
+
+/**
+ * Ask before switching a CLI that has runs in progress to the app's account.
+ * With no dialog to ask through, the answer is no: the switch would stop
+ * runs without the user having agreed.
+ */
+export function confirmAccountSwitch(request: AccountSwitch): Promise<boolean> {
+  const prompt = switchPrompt;
+  if (!prompt) return Promise.resolve(false);
+  return new Promise((resolve) => prompt(request, resolve));
+}
+
 // The last action attempted for a given state, so a failure (an older server
 // without the handoff endpoint, a CLI bound to another cloud) is not retried
 // every 15 s. Session storage survives the handoff's full-page navigations.
@@ -283,6 +305,8 @@ function rememberAttempt(key: string) {
 export type SyncOptions = {
   /** The app's user as the store knows it; omitted or empty asks the server. */
   desktopUserId?: string | null;
+  /** The app user's email, for the switch confirmation. */
+  desktopEmail?: string;
   /** Where the user is, for binding the CLI when signing it in. */
   workspaceSlug?: string;
   /** Sign the app out *without* signing the CLI out (it is the CLI being followed). */
@@ -326,6 +350,21 @@ async function runSync(options: SyncOptions): Promise<SyncDecision> {
       await invoke<void>("pidash_desktop_handoff");
       break;
     case "sign_daemon_in":
+      // Switching a CLI that is signed in as someone else stops its runs, so
+      // that is never silent. Declining means the CLI's account wins: sign
+      // the app out, and the next pass hands the CLI's account over — the
+      // two never stay mismatched.
+      if (daemon.signed_in && daemon.user && daemon.active_runs > 0) {
+        const confirmed = await confirmAccountSwitch({
+          daemonEmail: daemon.user.email,
+          desktopEmail: options.desktopEmail ?? "",
+          activeRuns: daemon.active_runs,
+        });
+        if (!confirmed) {
+          await options.signOutDesktop();
+          return "sign_desktop_out_then_handoff";
+        }
+      }
       await signDaemonIn(options.workspaceSlug);
       break;
     case "sign_desktop_out":

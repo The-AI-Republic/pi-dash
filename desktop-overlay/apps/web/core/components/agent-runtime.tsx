@@ -9,6 +9,7 @@ import { observer } from "mobx-react";
 import { useMatches } from "react-router";
 import { useUser } from "@/hooks/store/user";
 import { useProject } from "@/hooks/store/use-project";
+import { DesktopAccountSwitchDialog } from "@/components/desktop-account-switch-dialog";
 import { DesktopDaemonNotice } from "@/components/desktop-daemon-notice";
 import { DesktopSignOutDialog } from "@/components/desktop-sign-out-dialog";
 import {
@@ -54,8 +55,8 @@ export const AgentRuntime = observer(function AgentRuntime() {
   const [message, setMessage] = useState("");
 
   // Latest values for the account-sync loop, which outlives renders.
-  const syncContext = useRef({ userId: user?.id, workspaceSlug, signOut: userStore.signOut });
-  syncContext.current = { userId: user?.id, workspaceSlug, signOut: userStore.signOut };
+  const syncContext = useRef({ userId: user?.id, email: user?.email, workspaceSlug, signOut: userStore.signOut });
+  syncContext.current = { userId: user?.id, email: user?.email, workspaceSlug, signOut: userStore.signOut };
 
   // The one `pidash` daemon this computer shares with the CLI: install the
   // CLI and start the daemon on launch, then keep the app's sign-in and the
@@ -66,9 +67,10 @@ export const AgentRuntime = observer(function AgentRuntime() {
     let active = true;
     const sync = () => {
       if (!active) return;
-      const { userId, workspaceSlug: slug, signOut } = syncContext.current;
+      const { userId, email, workspaceSlug: slug, signOut } = syncContext.current;
       void syncAccounts({
         desktopUserId: userId,
+        desktopEmail: email,
         workspaceSlug: slug,
         signOutDesktop: () => signOutFollowingCli(() => signOut({ skipConfirmation: true })),
       }).catch((error: unknown) => {
@@ -192,6 +194,7 @@ export const AgentRuntime = observer(function AgentRuntime() {
       {/* Mounted on every page: sign-out can be started from any of them. */}
       <DesktopSignOutDialog />
       <DesktopDaemonNotice />
+      <DesktopAccountSwitchDialog />
       {user?.id && projectId && message && (
         <div
           role="status"

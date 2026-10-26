@@ -143,6 +143,57 @@ describe("a sync pass", () => {
     expect(commands().at(-1)).toBe("daemon_ensure");
   });
 
+  describe("switching a CLI signed in as someone else", () => {
+    const busy = () => daemon({ user: { id: "user-b", email: "b@example.test" }, changed_at: EARLY, active_runs: 2 });
+
+    it("switches silently when nothing is running", async () => {
+      status = daemon({ user: { id: "user-b", email: "b@example.test" }, changed_at: EARLY, active_runs: 0 });
+      const sync = await import("../../core/services/desktop-account-sync");
+      const prompt = vi.fn();
+      sync.registerAccountSwitchPrompt(prompt);
+      await expect(sync.syncAccounts({ desktopUserId: "user-a", signOutDesktop })).resolves.toBe("sign_daemon_in");
+      expect(prompt).not.toHaveBeenCalled();
+      expect(commands()).toContain("pidash_cli_login");
+    });
+
+    it("asks first when runs are in progress, and switches on confirm", async () => {
+      status = busy();
+      const sync = await import("../../core/services/desktop-account-sync");
+      const prompt = vi.fn((_request: unknown, resolve: (confirmed: boolean) => void) => resolve(true));
+      sync.registerAccountSwitchPrompt(prompt);
+      await expect(
+        sync.syncAccounts({ desktopUserId: "user-a", desktopEmail: "a@example.test", signOutDesktop })
+      ).resolves.toBe("sign_daemon_in");
+      expect(prompt.mock.calls[0][0]).toEqual({
+        daemonEmail: "b@example.test",
+        desktopEmail: "a@example.test",
+        activeRuns: 2,
+      });
+      expect(commands()).toContain("pidash_cli_login");
+      expect(signOutDesktop).not.toHaveBeenCalled();
+    });
+
+    it("lets the CLI's account win when the switch is declined", async () => {
+      status = busy();
+      const sync = await import("../../core/services/desktop-account-sync");
+      sync.registerAccountSwitchPrompt((_request, resolve) => resolve(false));
+      await expect(sync.syncAccounts({ desktopUserId: "user-a", signOutDesktop })).resolves.toBe(
+        "sign_desktop_out_then_handoff"
+      );
+      expect(signOutDesktop).toHaveBeenCalledOnce();
+      expect(commands()).not.toContain("pidash_cli_login");
+    });
+
+    it("never stops runs without asking, even with no dialog mounted", async () => {
+      status = busy();
+      const sync = await import("../../core/services/desktop-account-sync");
+      sync.registerAccountSwitchPrompt(null);
+      await sync.syncAccounts({ desktopUserId: "user-a", signOutDesktop });
+      expect(commands()).not.toContain("pidash_cli_login");
+      expect(signOutDesktop).toHaveBeenCalledOnce();
+    });
+  });
+
   it("signs the app out when the CLI's change is newer", async () => {
     status = daemon({ user: { id: "user-b", email: "b@example.test" }, changed_at: LATE });
     desktopChangedAt = EARLY;

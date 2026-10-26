@@ -42,6 +42,7 @@ vi.mock("@/hooks/store/use-project", () => ({
 // The sign-out dialog has its own test; here it only needs to mount.
 vi.mock("@/components/desktop-sign-out-dialog", () => ({ DesktopSignOutDialog: () => null }));
 vi.mock("@/components/desktop-daemon-notice", () => ({ DesktopDaemonNotice: () => null }));
+vi.mock("@/components/desktop-account-switch-dialog", () => ({ DesktopAccountSwitchDialog: () => null }));
 vi.mock("@/services/agent-runtime", () => ({
   connectAgentProject: mocks.connect,
   refreshAgentRuntime: mocks.refresh,
