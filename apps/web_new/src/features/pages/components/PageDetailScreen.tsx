@@ -109,10 +109,13 @@ export function PageDetailScreen({
   const hasAncestor = page !== undefined && (page.parent_id ?? page.parent) !== null;
   // Breadcrumbs walk the whole visible forest: a middle ancestor is never in
   // the top-level collection, and a parent the caller cannot see is absent
-  // entirely, which is exactly what the restricted fallback reads.
+  // entirely, which is exactly what the restricted fallback reads. The walk
+  // is deep because `sub_pages_count` hides an archived middle ancestor
+  // under a live parent (§11.7); it reuses the collection as its roots and
+  // shares the discovery cache entry.
   const forest = useQuery({
-    ...pageForestQueryOptions(client, workspaceSlug, projectId, hasAncestor),
-    enabled: hasAncestor && project.isSuccess && project.data.page_view !== false,
+    ...pageForestQueryOptions(client, workspaceSlug, projectId, hasAncestor, { roots: pages.data, deep: true }),
+    enabled: hasAncestor && pages.isSuccess && project.isSuccess && project.data.page_view !== false,
   });
   const role = roles.data?.[projectId] ?? null;
   const viewerId = me.data?.id ?? null;
@@ -187,9 +190,13 @@ export function PageDetailScreen({
     if (page === undefined) return visible;
     return [page, ...visible.filter((row) => row.id !== page.id)];
   }, [page, forest.data, pages.data]);
+  // The trail renders once the ancestor walk settles: a pending read must
+  // never flash the restricted fallback for an ancestor it simply has not
+  // loaded yet (PAGE-086).
+  const ancestorsReady = !hasAncestor || forest.isSuccess;
   const ancestors = React.useMemo(
-    () => (page === undefined ? [] : pageAncestors(trailPool, page.id)),
-    [trailPool, page]
+    () => (page === undefined || !ancestorsReady ? [] : pageAncestors(trailPool, page.id)),
+    [trailPool, page, ancestorsReady]
   );
   const addSubPage = useAddSubPage(workspaceSlug, projectId);
 

@@ -558,6 +558,26 @@ describe("PagesListScreen", () => {
     expect(harness.topLevelCalls).toBe(1);
   });
 
+  it("reports discovery as off on a plain live tab", async () => {
+    harness.pages = [makePageRow({ id: pageId(60), name: "Live handbook" })];
+    harness.childrenByParent = {};
+    renderScreen("public");
+    await screen.findByTestId("pages-list");
+    expect(screen.getByTestId("pages-list-screen")).toHaveAttribute("data-discovery", "off");
+  });
+
+  it("reports discovery as loading until the archived forest settles", async () => {
+    let release: () => void = () => undefined;
+    harness.pagesHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    harness.pages = [makePageRow({ id: pageId(61), name: "Live handbook", sub_pages_count: 0 })];
+    renderScreen("archived");
+    expect(await screen.findByTestId("pages-list-screen")).toHaveAttribute("data-discovery", "loading");
+    release();
+    await waitFor(() => expect(screen.getByTestId("pages-list-screen")).toHaveAttribute("data-discovery", "ready"));
+  });
+
   it("reaches an archived child under a live parent in the archived tab", async () => {
     const parent = makePageRow({
       id: pageId(52),

@@ -1217,10 +1217,12 @@ target:
   The same blindness hides an archived child under a *live* parent, which
   also reports `0`. Discovery therefore probes every row with
   `GET pages/?parent=<id>` rather than trusting the count: the Archived
-  tab, search, structured filters, favourites and the command palette all
-  walk the whole forest that way, seeded from the one cached top-level
-  collection read, so PAGE-020's single top-level read still holds. Child
-  reads are not collection reads.
+  tab, search, structured filters, favourites, the command palette and the
+  detail header's ancestor trail all walk the whole forest that way, seeded
+  from the one cached top-level collection read, so PAGE-020's single
+  top-level read still holds. Child reads are not collection reads. The
+  trail and the discovery surfaces render once their walk settles, so a
+  pending read never flashes the restricted fallback or a partial list.
 - **Detail:** a child page retrieves by id under the same visibility rule;
   the client no longer gets a "not found" for a page it can see.
 - **Create/update:** `parent` (id or null) is accepted on `POST` and
@@ -1305,7 +1307,10 @@ In order, the rows are exactly:
 - **PAGE-086 — breadcrumbs.** A child opens by URL or from the tree and
   its header shows breadcrumbs of every ancestor from the top, each
   clickable. An ancestor the caller cannot see renders as the literal
-  fallback `Restricted page` (pinned) with no link.
+  fallback `Restricted page` (pinned) with no link. An archived middle
+  ancestor under a live parent resolves through the same deep walk
+  (§11.7); the trail waits for the walk so it never shows the fallback
+  for an ancestor that is merely not loaded yet.
 - **PAGE-087 — move picker and drag.** **Move to…** in the overflow menu
   (owner or admin) and drag-and-drop in the tree put a page under another
   page or back to the top level, carrying its whole subtree. Refused with a

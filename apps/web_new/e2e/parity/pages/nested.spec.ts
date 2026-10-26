@@ -8,6 +8,7 @@
 // the rows, each scenario seeds and removes its own scratch project, and
 // only the driver plus API helpers are driven.
 import { test, expect } from "../fixtures";
+import type { ParitySeedFacts } from "../drivers/parity-driver";
 import {
   parityProjectIdentifier,
   serverArchivePage,
@@ -25,7 +26,6 @@ import {
   serverSetPageAccess,
   signInSessionWithRetry,
   type PagesListServerRow,
-  type ParitySeedFacts,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
@@ -73,11 +73,34 @@ async function cleanupProject(seed: ParitySeedFacts, projectId: string, session:
 }
 
 /** Second seeded member, used where visibility must differ from the owner. */
-function requireMentionMember(seed: ParitySeedFacts): { email: string; password: string } {
+function requireMentionMember(seed: ParitySeedFacts): { email: string; password: string; displayName: string } {
   if (seed.mentionMember === undefined) {
     throw new Error("[parity] seed facts carry no mention member; rerun parity-up.sh.");
   }
-  return { email: seed.mentionMember.email, password: seed.mentionMember.password };
+  return {
+    email: seed.mentionMember.email,
+    password: seed.mentionMember.password,
+    displayName: seed.mentionMember.displayName,
+  };
+}
+
+/** Poll a page's parent link until the server settles it (drag writes race a bare read). */
+async function waitForServerParent(
+  seed: ParitySeedFacts,
+  projectId: string,
+  pageId: string,
+  session: string,
+  expected: string | null
+): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const record = await serverPageRecord(seed.workspaceSlug, projectId, pageId, session);
+    if (record.parentId === expected) return;
+    if (Date.now() > deadline) {
+      throw new Error(`[parity] parent of ${pageId} never settled to ${String(expected)}.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
 }
 
 /**
@@ -343,6 +366,45 @@ test(
 );
 
 test(
+  specTitle(["PAGE-086"], "breadcrumbs resolve an archived middle ancestor under a live parent"),
+  { tag: specTags(["PAGE-086"]) },
+  async ({ driver, seed }, testInfo) => {
+    test.skip(testInfo.project.name !== "new", "PAGE-086 is new (D17); no oracle");
+    const session = await signInSessionWithRetry(seed.email, seed.password);
+    const projectId = await scratchProject(seed, "archivedcrumb", session);
+    try {
+      if (!(await requireNestedBackend(seed, projectId, session))) {
+        testInfo.skip(true, "PDASHOSS01-270 has not landed on this stack");
+        return;
+      }
+      const topName = `${tag("midcrumb")} handbook`;
+      const middleName = `${tag("midcrumb")} policies`;
+      const leafName = `${tag("midcrumb")} leave`;
+      const topId = await serverCreatePage(seed.workspaceSlug, projectId, session, topName);
+      const middleId = await serverCreatePage(seed.workspaceSlug, projectId, session, middleName);
+      const leafId = await serverCreatePage(seed.workspaceSlug, projectId, session, leafName);
+      await serverPatchPageParent(seed.workspaceSlug, projectId, middleId, topId, session);
+      await serverPatchPageParent(seed.workspaceSlug, projectId, leafId, middleId, session);
+      // Archiving the middle cascades to the leaf; the top stays live and
+      // reports no live children, which must not hide the middle (§11.7).
+      await serverArchivePage(seed.workspaceSlug, projectId, middleId, session);
+
+      await driver.openEntry();
+      await driver.signInWithPassword(seed.email, seed.password);
+      await driver.pagesNestedOpenPage(seed.workspaceSlug, projectId, leafId);
+      expect(await driver.pagesNestedBreadcrumbs()).toEqual([topName, middleName]);
+      expect(await driver.pagesNestedBreadcrumbLinked(topName)).toBe(true);
+      expect(await driver.pagesNestedBreadcrumbLinked(middleName)).toBe(true);
+
+      await driver.pagesNestedBreadcrumbClick(middleName);
+      expect(await driver.currentUrlPath()).toBe(`/${seed.workspaceSlug}/projects/${projectId}/pages/${middleId}`);
+    } finally {
+      await cleanupProject(seed, projectId, session);
+    }
+  }
+);
+
+test(
   specTitle(["PAGE-087"], "Move to… puts a page and its subtree under another page or the top level"),
   { tag: specTags(["PAGE-087"]) },
   async ({ driver, seed }, testInfo) => {
@@ -375,8 +437,11 @@ test(
       // The whole subtree follows the move.
       expect((await serverPageRecord(seed.workspaceSlug, projectId, childId, session)).parentId).toBe(movingId);
 
-      // Back to the top level through the picker's top-level row.
+      // Back to the top level through the picker's top-level row. The
+      // reload collapses the tree, so the moved row needs its parent
+      // expanded before its menu can open.
       await driver.pagesNestedOpenList(seed.workspaceSlug, projectId);
+      await driver.pagesNestedExpand(targetName);
       await driver.pagesNestedMovePickerOpen(movingName);
       await driver.pagesNestedMovePick(null);
       await driver.pagesNestedMoveConfirm();
@@ -471,11 +536,17 @@ test(
       await driver.signInWithPassword(seed.email, seed.password);
       await driver.pagesNestedOpenList(seed.workspaceSlug, projectId);
       await driver.pagesNestedDragRow(movingName, targetName);
-      expect((await serverPageRecord(seed.workspaceSlug, projectId, movingId, session)).parentId).toBe(targetId);
+      // The notice fires on the write's success, so the server assert below
+      // cannot race the PATCH.
+      await driver.pagesNestedWaitToast("Page moved.");
       expect(await driver.pagesNestedToastText()).toContain("Page moved.");
+      expect((await serverPageRecord(seed.workspaceSlug, projectId, movingId, session)).parentId).toBe(targetId);
 
       await driver.pagesNestedExpand(targetName);
       await driver.pagesNestedDragRow(movingName, null);
+      // The first notice may still be visible, so the top-level write is
+      // awaited on the server state instead of a second toast.
+      await waitForServerParent(seed, projectId, movingId, session, null);
       expect((await serverPageRecord(seed.workspaceSlug, projectId, movingId, session)).parentId).toBeNull();
     } finally {
       await cleanupProject(seed, projectId, session);

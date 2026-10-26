@@ -161,6 +161,9 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
     enabled: forestActive && pages.isSuccess && project.isSuccess && !gateOff,
   });
   const discoveryPool = forestActive ? (forest.data?.rows ?? rows) : rows;
+  // The parity drivers wait on this state: discovery assertions (and the
+  // archived tab) may only read once the forest walk has settled (PAGE-090).
+  const discoveryState = forestActive ? (forest.isSuccess ? "ready" : "loading") : "off";
   const activeRows = forestActive ? discoveryPool : rows;
   const visible = React.useMemo(
     () => visiblePageRows(activeRows, tab, client.sort, client.query, client.filters, now),
@@ -304,6 +307,7 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
     <section
       aria-label={PAGES_CRUMB}
       data-testid="pages-list-screen"
+      data-discovery={discoveryState}
       className="flex min-h-0 flex-1 flex-col gap-(--space-4) p-(--space-4)"
     >
       {body === "gate" ? (

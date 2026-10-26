@@ -50,6 +50,7 @@ import { PageDetailScreen } from "./PageDetailScreen.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const OTHER = "323e4567-e89b-12d3-a456-426614174009";
+const MID = "423e4567-e89b-12d3-a456-426614174010";
 const VIEWER = "523e4567-e89b-12d3-a456-426614174005";
 
 interface Harness {
@@ -59,6 +60,7 @@ interface Harness {
   pageCalls: string[];
   pageWrites: { method: string; body: unknown }[];
   pages: PageRow[];
+  childrenByParent: Record<string, PageRow[]>;
   pagesStatus: number;
   pagesCalls: number;
   pagesHold: Promise<void> | null;
@@ -100,6 +102,7 @@ beforeEach(() => {
     pageCalls: [],
     pageWrites: [],
     pages: [],
+    childrenByParent: {},
     pagesStatus: 200,
     pagesCalls: 0,
     pagesHold: null,
@@ -208,6 +211,8 @@ beforeEach(() => {
     if (collection !== null) {
       harness.pagesCalls += 1;
       if (harness.pagesHold !== null) await harness.pagesHold;
+      const parent = new URL(requested).searchParams.get("parent");
+      if (parent !== null) return jsonResponse(url, harness.pagesStatus, harness.childrenByParent[parent] ?? []);
       return jsonResponse(url, harness.pagesStatus, harness.pages);
     }
     if (url.endsWith("/api/workspaces/acme/members/")) {
@@ -298,6 +303,37 @@ describe("PageDetailScreen loading and panel", () => {
     // breadcrumb walk is gated with it.
     await screen.findByRole("textbox", { name: "Page title" });
     expect(harness.pagesCalls).toBe(0);
+  });
+
+  it("resolves an archived middle ancestor under a live top-level parent", async () => {
+    // `sub_pages_count` hides the shelved middle page from a count-driven
+    // walk (§11.7), so the trail would stop at the restricted fallback; the
+    // deep walk reaches it and every ancestor links (PAGE-086).
+    const liveTop = makePageRow({ id: OTHER, name: "Handbook", sub_pages_count: 0 });
+    const middle = makePageRow({
+      id: MID,
+      name: "Policies",
+      parent: OTHER,
+      parent_id: OTHER,
+      archived_at: "2026-10-20",
+      sub_pages_count: 0,
+    });
+    harness.page = record({
+      name: "Leave",
+      parent: MID,
+      parent_id: MID,
+      archived_at: "2026-10-20",
+    });
+    harness.pages = [liveTop];
+    harness.childrenByParent = { [OTHER]: [middle], [MID]: [harness.page] };
+    renderScreen();
+    const trail = await screen.findByRole("navigation", { name: "Page path" });
+    expect(within(trail).getByRole("link", { name: "Handbook" })).toHaveAttribute(
+      "href",
+      `/acme/projects/${PROJECT}/pages/${OTHER}`
+    );
+    expect(within(trail).getByRole("link", { name: "Policies" })).toBeInTheDocument();
+    expect(within(trail).queryByText("Restricted page")).not.toBeInTheDocument();
   });
 
   it("panels a failed record without mounting an editor", async () => {

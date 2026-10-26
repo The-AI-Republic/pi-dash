@@ -41385,6 +41385,33 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
   }
 
+  private async pagesNestedWaitDiscovery(): Promise<void> {
+    // Discovery (and the archived tab) reads the whole forest on top of the
+    // collection; assertions may only run once that walk settles (PAGE-090).
+    await this.page
+      .locator('[data-testid="pages-list-screen"][data-discovery="ready"]')
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private async pagesNestedFilterPanel(): Promise<Locator> {
+    // The trigger toggles: reopening an open panel would close it, so an
+    // already-open panel is reused (PAGE-090 combines filters).
+    const panel = this.page.getByTestId("pages-filter-panel");
+    if ((await panel.count()) === 0) {
+      await this.page.getByRole("button", { name: "Filters", exact: true }).click();
+      await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    }
+    return panel;
+  }
+
+  private async pagesNestedWaitTrail(): Promise<void> {
+    // The detail renders the ancestor trail once its walk settles, so a
+    // pending read never flashes the restricted fallback (PAGE-086).
+    await this.page
+      .getByRole("navigation", { name: "Page path" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
   async pagesNestedOpenList(workspaceSlug: string, projectId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages`, { waitUntil: "domcontentloaded" });
     await Promise.race([
@@ -41401,6 +41428,7 @@ export class WebNewDriver implements ParityDriver {
       this.page.getByTestId("pages-tree").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }),
       this.page.getByTestId("pages-empty-state").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }),
     ]);
+    await this.pagesNestedWaitDiscovery();
   }
 
   async pagesNestedOpenRow(title: string): Promise<void> {
@@ -41452,7 +41480,16 @@ export class WebNewDriver implements ParityDriver {
   async pagesNestedExpand(title: string): Promise<void> {
     const row = this.pagesNestedRow(title);
     await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    const before = await this.pagesNestedRows().count();
     await row.getByRole("button", { name: `Expand sub-pages of ${title}` }).click();
+    // The children arrive on their own read, so the expansion only settles
+    // once the row count grows (PAGE-085).
+    await this.page.waitForFunction(
+      (expected: number) =>
+        document.querySelectorAll('[data-testid="page-tree-item"], [data-testid="page-row"]').length > expected,
+      before,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
 
   async pagesNestedCollapse(title: string): Promise<void> {
@@ -41485,20 +41522,21 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesNestedBreadcrumbs(): Promise<string[]> {
+    await this.pagesNestedWaitTrail();
     const trail = this.page.getByRole("navigation", { name: "Page path" });
-    if ((await trail.count()) === 0) return [];
     return (await trail.first().getByRole("listitem").allTextContents())
       .map((part) => part.trim().replace(/\s+/g, " "))
       .filter((part) => part !== "");
   }
 
   async pagesNestedBreadcrumbLinked(label: string): Promise<boolean> {
+    await this.pagesNestedWaitTrail();
     const trail = this.page.getByRole("navigation", { name: "Page path" });
-    if ((await trail.count()) === 0) return false;
     return (await trail.getByRole("link", { name: label, exact: true }).count()) > 0;
   }
 
   async pagesNestedBreadcrumbClick(label: string): Promise<void> {
+    await this.pagesNestedWaitTrail();
     await this.page
       .getByRole("navigation", { name: "Page path" })
       .getByRole("link", { name: label, exact: true })
@@ -41532,6 +41570,7 @@ export class WebNewDriver implements ParityDriver {
     if ((await open.count()) > 0) await open.click();
     const box = this.page.getByPlaceholder("Search pages");
     await box.fill(text);
+    await this.pagesNestedWaitDiscovery();
   }
 
   async pagesNestedSearchClear(): Promise<void> {
@@ -41539,15 +41578,17 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesNestedFavoritesFilter(): Promise<void> {
-    await this.page.getByRole("button", { name: "Filters", exact: true }).click();
-    await this.page.getByTestId("pages-filter-panel").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    await this.page.getByRole("button", { name: "Favorites", exact: true }).click();
+    const panel = await this.pagesNestedFilterPanel();
+    await panel.getByRole("button", { name: "Favorites", exact: true }).click();
+    await this.pagesNestedWaitDiscovery();
   }
 
   async pagesNestedCreatorFilter(name: string): Promise<void> {
-    await this.page.getByRole("button", { name: "Filters", exact: true }).click();
-    await this.page.getByTestId("pages-filter-panel").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    await this.page.getByTestId("pages-filter-panel").getByRole("button", { name, exact: true }).click();
+    const panel = await this.pagesNestedFilterPanel();
+    // The option's accessible name repeats the member (avatar label plus
+    // text), so the match is a substring, never exact (PAGE-090).
+    await panel.getByRole("button", { name }).click();
+    await this.pagesNestedWaitDiscovery();
   }
 
   async pagesNestedFiltersClear(): Promise<void> {
@@ -41628,6 +41669,12 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesNestedDeleteDialogText(): Promise<string> {
     const dialog = this.page.getByRole("dialog", { name: "Delete page" });
+    await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // A collapsed archived parent resolves its count on its own read; the
+    // text is only stable once that settles (PAGE-089).
+    await dialog
+      .getByTestId("page-delete-rehomed-loading")
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
     return ((await dialog.textContent()) ?? "").trim();
   }
 

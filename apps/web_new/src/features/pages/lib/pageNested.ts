@@ -200,9 +200,8 @@ export function pageMoveRefusalMessage(refusal: PageMoveRefusal): string {
 
 /**
  * Rows the move picker offers: every live page the caller can see, minus
- * the page being moved and its whole subtree, and minus the page's current
- * parent only while that would be a no-op (the caller may still re-select
- * it; the dialog starts on it as the current target).
+ * the page being moved and its whole subtree. The page's current parent
+ * stays offered as the current selection; picking it is a legal no-op.
  */
 export function pageMoveTargets(rows: readonly PageRow[], pageId: string): PageRow[] {
   const excluded = descendantIds(rows, pageId);
