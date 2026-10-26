@@ -1118,6 +1118,13 @@ pub async fn execute_create_issue<S: ToolStore>(
             )
             .await?;
     }
+    // The drive may have bounced the issue to a Backlog target
+    // (`scheduling.py:1111-1113` mutates the in-memory issue Django
+    // briefs at `issues.py:284`): re-read so the brief reports the
+    // post-drive row. A miss (a concurrent delete narrowed the scoped
+    // read) falls back to the saved row — Django briefs its in-memory
+    // issue regardless (PIDASHCONV-1444).
+    let row = store.scoped_issue(deps, &row.id).await?.unwrap_or(row);
     let identifier = tool_identifier(&row.project_identifier, row.sequence_id);
     let link = row_link(deps, &row);
     store
@@ -2051,6 +2058,13 @@ mod tests {
         insert_race_once: Mutex<bool>,
         activities: Mutex<Vec<RelationActivity>>,
         created_issues: Mutex<Vec<NewIssueInput>>,
+        /// The last row `create_issue_row` returned (pins the
+        /// post-drive re-read target).
+        last_created: Mutex<Option<IssueRow>>,
+        /// When set, `scoped_issue` answers the last created id with
+        /// the created row moved to this state (pins the post-drive
+        /// brief, PIDASHCONV-1444).
+        post_drive_state: Option<(Uuid, String, String)>,
         updated_issues: Mutex<Vec<(Uuid, IssuePatch)>>,
         transitions: Mutex<Vec<Uuid>>,
         transition_outcome: TransitionOutcome,
@@ -2324,6 +2338,8 @@ mod tests {
                 insert_race_once: Mutex::new(false),
                 activities: Mutex::new(Vec::new()),
                 created_issues: Mutex::new(Vec::new()),
+                last_created: Mutex::new(None),
+                post_drive_state: None,
                 updated_issues: Mutex::new(Vec::new()),
                 transitions: Mutex::new(Vec::new()),
                 transition_outcome: TransitionOutcome {
@@ -2425,6 +2441,21 @@ mod tests {
             _deps: &AssistantDeps,
             issue_id: &Uuid,
         ) -> Result<Option<IssueRow>, StoreError> {
+            // The post-drive re-read: when armed, answer the created
+            // id with the created row moved to the drive's target
+            // state (PIDASHCONV-1444).
+            if let (Some((id, name, group)), Some(created)) = (
+                self.post_drive_state.clone(),
+                self.last_created.lock().unwrap().clone(),
+            ) {
+                if created.id == *issue_id {
+                    let mut row = created;
+                    row.state_id = Some(id);
+                    row.state_name = Some(name);
+                    row.state_group = Some(group);
+                    return Ok(Some(row));
+                }
+            }
             let mut found = self
                 .scoped()
                 .into_iter()
@@ -2780,7 +2811,7 @@ mod tests {
                     })
                 })
                 .unwrap_or((None, None));
-            Ok(IssueRow {
+            let row = IssueRow {
                 id: Uuid::new_v4(),
                 project_id: input.project_id,
                 project_identifier: input.project_identifier.clone(),
@@ -2799,7 +2830,9 @@ mod tests {
                 },
                 created_by_id: Some(input.created_by),
                 updated_at: *now,
-            })
+            };
+            *self.last_created.lock().unwrap() = Some(row.clone());
+            Ok(row)
         }
 
         async fn update_issue_row(
@@ -3641,6 +3674,36 @@ mod tests {
             .expect("uuid parses");
         assert_eq!(*store.transitions.lock().unwrap(), vec![id]);
         assert_eq!(*store.transition_from.lock().unwrap(), vec![None]);
+        assert_eq!(
+            *store.transition_to.lock().unwrap(),
+            vec![(uid(202), "In Progress".to_owned(), "started".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_issue_brief_reports_post_drive_row() {
+        // PIDASHCONV-1444: the drive bounced the issue to Backlog, so
+        // the re-read answers the Backlog row and the brief reports it
+        // — while the drive itself saw the saved ticking target. The
+        // sibling tests above (no `post_drive_state`: the re-read
+        // misses and falls back) pin the unmoved shape.
+        let mut store = FixtureStore::standard();
+        store.post_drive_state = Some((uid(201), "Backlog".to_owned(), "backlog".to_owned()));
+        let out = ok_value(
+            call(
+                &store,
+                "create_issue",
+                json!({
+                    "project_id": uid(101).to_string(),
+                    "name": "Bounced",
+                    "state_id": uid(202).to_string(),
+                }),
+            )
+            .await,
+        );
+        assert_eq!(out["created"], json!(true));
+        assert_eq!(out["state"], json!("Backlog"));
+        assert_eq!(out["state_group"], json!("backlog"));
         assert_eq!(
             *store.transition_to.lock().unwrap(),
             vec![(uid(202), "In Progress".to_owned(), "started".to_owned())]

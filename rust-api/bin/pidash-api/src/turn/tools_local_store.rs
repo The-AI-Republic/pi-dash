@@ -1704,14 +1704,19 @@ impl ToolStore for PgToolStore {
         .bind(issue_id)
         .fetch_optional(&mut **tx.inner())
         .await?;
-        let row = row
+        let mut row = row
             .map(issue_row_from_tuple)
             .ok_or(StoreError::Missing { model: "Issue" })?;
+        // The save-time state: the completion-comment decision below
+        // stays keyed to the save (`to_state`), exactly as Django's
+        // save-time receiver — the post-drive re-read must not move
+        // it (PIDASHCONV-1444).
+        let saved_state_id = row.state_id;
         // `to_state is not None and from_state != to_state`
         // (`issues.py:373`): the ORM instances compare by pk, and a
         // stateless issue always counts as changed.
         let changed = to_state.as_ref().is_some_and(|to| from_id != Some(to.id));
-        let (tx, drive_outcome, post_commit) = if changed {
+        let (mut tx, drive_outcome, post_commit) = if changed {
             let to = to_state.expect("changed implies a target");
             // Name/group come from the locked row (`from_state =
             // locked.state`, `issues.py:339`), not the pre-lock read —
@@ -1881,6 +1886,26 @@ impl ToolStore for PgToolStore {
         } else {
             (tx, None, None)
         };
+        // The drive may have bounced the issue to a Backlog target
+        // (`scheduling.py:1111-1113` mutates the in-memory issue
+        // Django briefs at `issues.py:388`): re-read on this same
+        // transaction so the returned row is post-drive. The row is
+        // locked and the bounce wrote here, so a miss is unreachable;
+        // `Missing` keeps the file's lost-race shape (PIDASHCONV-1444).
+        if changed {
+            let fresh: Option<IssueRowTuple> = sqlx::query_as(&format!(
+                "SELECT {ISSUE_ROW_COLUMNS} FROM issues \
+                 INNER JOIN projects ON projects.id = issues.project_id \
+                 LEFT OUTER JOIN states ON states.id = issues.state_id \
+                 WHERE issues.id = $1"
+            ))
+            .bind(issue_id)
+            .fetch_optional(&mut **tx.inner())
+            .await?;
+            row = fresh
+                .map(issue_row_from_tuple)
+                .ok_or(StoreError::Missing { model: "Issue" })?;
+        }
         tx.commit().await?;
         // `github_signals.trigger_completion_comment`
         // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored
@@ -1895,7 +1920,7 @@ impl ToolStore for PgToolStore {
         // like the relation enqueues: the edit already committed, so
         // a lookup or queue failure must not fail the tool.
         if changed {
-            self.enqueue_completion_comment(issue_id, from_id.as_ref(), row.state_id.as_ref())
+            self.enqueue_completion_comment(issue_id, from_id.as_ref(), saved_state_id.as_ref())
                 .await;
         }
         // Post-commit dispatch drain (the `dispatch_coding_run` drain
