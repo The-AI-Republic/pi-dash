@@ -1075,15 +1075,20 @@ fn parse_gitlab_url(url: &str, allowed_hosts: &[String]) -> Option<ParsedReposit
         return None;
     }
     // `urlparse(candidate).path` (`gitlab.py:236-242`): the `?query` and
-    // `#fragment` never reach the split, nor do the `;params` of the last
-    // segment — all cut before the `/-/` split, which never sees them
+    // `#fragment` never reach the split. `/-/` inside them never splits
     // (`?next=/-/x` keeps its repo). `?`, `#`, `;` are ASCII, so the byte
     // slices below always land on char boundaries.
     let path = path.find(['?', '#']).map_or(path, |idx| &path[..idx]);
-    let last_segment = path.rfind('/').map_or(0, |idx| idx + 1);
-    let path = path[last_segment..]
-        .find(';')
-        .map_or(path, |idx| &path[..last_segment + idx]);
+    // Last-segment `;params` are cut for http/https only: `ssh` is not in
+    // `urllib.parse.uses_params`, so Django keeps them in `.path` there.
+    let path = if scheme_lower == "ssh" {
+        path
+    } else {
+        let last_segment = path.rfind('/').map_or(0, |idx| idx + 1);
+        path[last_segment..]
+            .find(';')
+            .map_or(path, |idx| &path[..last_segment + idx])
+    };
     let path = match path.split_once("/-/") {
         Some((before, _)) => before,
         None => path,
@@ -2177,6 +2182,13 @@ mod tests {
         assert_eq!(
             (parsed.namespace, parsed.name),
             ("g".to_owned(), "r;x".to_owned())
+        );
+        // `ssh` is not in `urllib.parse.uses_params`, so Django keeps the
+        // `;params` in `.path` for `ssh://` URLs — and so do we.
+        let parsed = parse_repository_url("ssh://gitlab.com/g/r;p=1", &hosts).expect("parses");
+        assert_eq!(
+            (parsed.namespace, parsed.name),
+            ("g".to_owned(), "r;p=1".to_owned())
         );
         // The SSH form never sees `urlparse` on either backend (Django's
         // `_ssh_repo_re` path, `gitlab.py:218-234`), so a query there stays
