@@ -812,7 +812,7 @@ test(
 test(
   specTitle(["PAGE-061"], "connection-lost badge explains that background saves continue"),
   { tag: specTags(["PAGE-061"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     test.slow();
     const tag = stamp();
     const session = await seedSession(seed);
@@ -831,9 +831,14 @@ test(
       const tooltip = await driver.pagesHeaderSyncBadgeTooltip();
       expect(tooltip).not.toBeNull();
       expect(tooltip ?? "").toContain("Connection lost");
-      // Observed wording (live): the fault note still names the old
-      // ten-second cadence while the fallback actually runs every 30s.
-      expect(tooltip ?? "").toContain("synced and saved every 10 seconds");
+      // The oracle pins the old stale ten-second wording (spec §15); the
+      // new app states the real 30-second fallback cadence, which the
+      // parity wiki allows as an intended fix, so branch only this leg.
+      if (testInfo.project.name === "oracle") {
+        expect(tooltip ?? "").toContain("synced and saved every 10 seconds");
+      } else {
+        expect(tooltip ?? "").toContain("every 30 seconds");
+      }
     } finally {
       await driver.pagesLiveUnblockCollaborationSocket();
     }
@@ -900,7 +905,7 @@ test(
 test(
   specTitle(["PAGE-063"], "bug: NEWFRONT-338 oversized persist broadcasts error frames but the strip never shows"),
   { tag: specTags(["PAGE-063"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     test.slow();
     const tag = stamp();
     const session = await seedSession(seed);
@@ -951,12 +956,15 @@ test(
     const closes = await driver.pagesLiveSocketCloseEvents();
     expect(closes.map((entry) => entry.code)).toContain(4001);
     expect(closes.find((entry) => entry.code === 4001)?.reason).toBe("document_too_large");
-    // The bug, pinned on the incident page: the refused save stays
-    // invisible — the oversized strip never renders and no notice appears,
-    // though the row intends the strip. (Bounded pagesHeader readers:
-    // shared text/subtree reads blow the string limit on the oversized
-    // doc.)
-    expect(await driver.pagesHeaderOversizedStrip()).toBeNull();
+    // The oracle pins the bug where the refused save stays invisible. The
+    // new app implements the intended NEWFRONT-338 fix (spec §15 and the
+    // parity wiki's bug rule), so its strip must render; the notice stays
+    // absent on both legs. Bounded readers keep the oversized doc safe.
+    if (testInfo.project.name === "oracle") {
+      expect(await driver.pagesHeaderOversizedStrip()).toBeNull();
+    } else {
+      expect(await driver.pagesHeaderOversizedStrip()).toContain("Page too large to sync");
+    }
     expect(await driver.pagesHeaderToastText()).toBeNull();
     // Now refuse reconnections: without the block the client would re-sync
     // the megabytes in a loop instead of settling on the terminal badge.
@@ -1232,7 +1240,7 @@ test(
 test(
   specTitle(["PAGE-074"], "bug: NEWFRONT-356 markdown text-only scope keeps markdown-syntax images"),
   { tag: specTags(["PAGE-074"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const tag = stamp();
     const session = await seedSession(seed);
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Hdr074b ${tag}`);
@@ -1257,15 +1265,20 @@ test(
       if (candidate.headText.includes(shot)) withImages = candidate;
     }
     expect(withImages?.headText).toContain(shot);
-    // The editor serializes images as markdown image syntax, which the
-    // text-only strip (tag patterns only) never matches — so both scopes
-    // emit the image reference identically.
+    // The oracle pins the bug where text-only scope still emits markdown
+    // image syntax. The new app implements the intended NEWFRONT-356 fix
+    // (parity wiki bug rule), so its text-only scope drops that syntax
+    // while keeping the prose.
     await driver.pagesHeaderOpenOptions();
     await driver.pagesHeaderChooseMenuItem("Export");
     await driver.pagesHeaderExportSetFormat("Markdown");
     await driver.pagesHeaderExportSetScope("No images");
     const textOnly = await driver.pagesHeaderExportConfirm();
-    expect(textOnly.headText).toContain(shot);
+    if (testInfo.project.name === "oracle") {
+      expect(textOnly.headText).toContain(shot);
+    } else {
+      expect(textOnly.headText).not.toContain(shot);
+    }
     expect(textOnly.headText).toContain(text);
   }
 );

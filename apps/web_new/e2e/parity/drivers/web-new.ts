@@ -5,7 +5,7 @@
 // the oracle driver so scenarios compile against either target, but every
 // action throws until the matching area lands in apps/web_new. Area issues
 // fill these in method by method; the oracle driver stays untouched.
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 
 import { expect, test, type CDPSession, type Locator, type Page, type Route, type WebSocket } from "@playwright/test";
 
@@ -27554,146 +27554,424 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.getByTestId("modules-links-section"));
   }
 
+  private pagesHeaderCluster(): Locator {
+    return this.page.getByTestId("page-detail-header").first();
+  }
+
+  private pagesHeaderOptionsTrigger(): Locator {
+    return this.pagesHeaderCluster().getByRole("button", { name: "Page options", exact: true }).first();
+  }
+
+  private pagesHeaderMenuEntries(): Locator {
+    return this.page.getByRole("menuitem");
+  }
+
+  private pagesHeaderExportDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Export page" }).last();
+  }
+
+  private pagesHeaderDeleteDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Delete page" }).last();
+  }
+
+  private async pagesHeaderMenuLabel(item: Locator): Promise<string> {
+    return ((await item.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
   async pagesHeaderCopyLinkLabel(): Promise<string | null> {
-    return todo("pagesHeaderCopyLinkLabel");
+    const header = this.pagesHeaderCluster();
+    if ((await header.getByRole("button", { name: "Copied link", exact: true }).count()) > 0) return "Copied link";
+    if ((await header.getByRole("button", { name: "Copy link", exact: true }).count()) > 0) return "Copy link";
+    return null;
   }
+
   async pagesHeaderClickCopyLink(): Promise<void> {
-    return todo("pagesHeaderClickCopyLink");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.pagesHeaderCluster()
+      .getByRole("button", { name: /^(Copy link|Copied link)$/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesHeaderReadClipboard(): Promise<string> {
-    return todo("pagesHeaderReadClipboard");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
+
   async pagesHeaderFavoriteLabel(): Promise<string | null> {
-    return todo("pagesHeaderFavoriteLabel");
+    const star = this.page.getByTestId("page-detail-star").first();
+    if ((await star.count()) === 0) return null;
+    const label = await star.getAttribute("aria-label");
+    return label === "Add to favorites" || label === "Remove favorite" ? label : null;
   }
+
   async pagesHeaderFavoriteFilled(): Promise<boolean> {
-    return todo("pagesHeaderFavoriteFilled");
+    const star = this.page.getByTestId("page-detail-star").first();
+    if ((await star.count()) === 0) return false;
+    return (await star.getAttribute("aria-pressed")) === "true";
   }
+
   async pagesHeaderToggleFavorite(): Promise<void> {
-    return todo("pagesHeaderToggleFavorite");
+    await this.page.getByTestId("page-detail-star").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesHeaderFavoritesExpanded(): Promise<boolean> {
-    return todo("pagesHeaderFavoritesExpanded");
+    const toggle = this.page.getByTestId("favorites-section-toggle").first();
+    if ((await toggle.count()) === 0) return false;
+    return (await toggle.getAttribute("aria-expanded")) === "true";
   }
+
   async pagesHeaderFavoritesNames(): Promise<string[]> {
-    return todo("pagesHeaderFavoritesNames");
+    const entries = this.page.getByTestId("favorite-entry");
+    const names: string[] = [];
+    const count = await entries.count();
+    for (let index = 0; index < count; index += 1) {
+      const name = await entries.nth(index).getAttribute("data-entry-name");
+      if (name !== null && name !== "") names.push(name);
+    }
+    return names;
   }
+
+  private pagesHeaderFavoriteFailInstalled = false;
+  private pagesHeaderFavoriteFailBlocked = false;
+
   async pagesHeaderFailFavoriteWrites(): Promise<void> {
-    return todo("pagesHeaderFailFavoriteWrites");
+    if (!this.pagesHeaderFavoriteFailInstalled) {
+      this.pagesHeaderFavoriteFailInstalled = true;
+      await this.page.route(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/favorite-pages\//, async (route) => {
+        const method = route.request().method();
+        if (this.pagesHeaderFavoriteFailBlocked && (method === "POST" || method === "DELETE")) {
+          await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+        } else {
+          await route.continue();
+        }
+      });
+    }
+    this.pagesHeaderFavoriteFailBlocked = true;
   }
+
   async pagesHeaderUnfailFavoriteWrites(): Promise<void> {
-    return todo("pagesHeaderUnfailFavoriteWrites");
+    this.pagesHeaderFavoriteFailBlocked = false;
   }
+
   async pagesHeaderOpenOptions(): Promise<void> {
-    return todo("pagesHeaderOpenOptions");
+    await this.pagesHeaderOptionsTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesHeaderMenuEntries().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesHeaderMenuItems(): Promise<string[]> {
-    return todo("pagesHeaderMenuItems");
+    const items = this.pagesHeaderMenuEntries();
+    const labels: string[] = [];
+    const count = await items.count();
+    for (let index = 0; index < count; index += 1) {
+      const label = await this.pagesHeaderMenuLabel(items.nth(index));
+      if (label !== "") labels.push(label);
+    }
+    return labels;
   }
-  async pagesHeaderChooseMenuItem(_label: string): Promise<void> {
-    return todo("pagesHeaderChooseMenuItem");
+
+  async pagesHeaderChooseMenuItem(label: string): Promise<void> {
+    await this.pagesHeaderMenuEntries()
+      .filter({ hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesHeaderLockLabel(): Promise<string | null> {
-    return todo("pagesHeaderLockLabel");
+    const lock = this.page.getByTestId("page-detail-lock").first();
+    if ((await lock.count()) === 0) return null;
+    const label = await lock.getAttribute("aria-label");
+    return label === "Lock" || label === "Locked" || label === "Unlocked" ? label : null;
   }
+
   async pagesHeaderToggleLock(): Promise<void> {
-    return todo("pagesHeaderToggleLock");
+    await this.page.getByTestId("page-detail-lock").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesHeaderEditorEditable(): Promise<boolean> {
-    return todo("pagesHeaderEditorEditable");
+    return (await this.pagesLiveBodyEditor().count()) > 0;
   }
+
+  private pagesHeaderLockFailInstalled = false;
+  private pagesHeaderLockFailBlocked = false;
+
   async pagesHeaderFailLockWrites(): Promise<void> {
-    return todo("pagesHeaderFailLockWrites");
+    if (!this.pagesHeaderLockFailInstalled) {
+      this.pagesHeaderLockFailInstalled = true;
+      await this.page.route(/\/api\/workspaces\/.+\/projects\/.+\/pages\/.+\/lock\//, async (route) => {
+        const method = route.request().method();
+        if (this.pagesHeaderLockFailBlocked && (method === "POST" || method === "DELETE")) {
+          await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+        } else {
+          await route.continue();
+        }
+      });
+    }
+    this.pagesHeaderLockFailBlocked = true;
   }
+
   async pagesHeaderUnfailLockWrites(): Promise<void> {
-    return todo("pagesHeaderUnfailLockWrites");
+    this.pagesHeaderLockFailBlocked = false;
   }
+
   async pagesHeaderArchivedMarker(): Promise<string | null> {
-    return todo("pagesHeaderArchivedMarker");
+    const marker = this.page.getByTestId("page-archived-marker").first();
+    if ((await marker.count()) === 0) return null;
+    return ((await marker.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || null;
   }
+
   async pagesHeaderDeleteDialogVisible(): Promise<boolean> {
-    return todo("pagesHeaderDeleteDialogVisible");
+    return (await this.pagesHeaderDeleteDialog().count()) > 0;
   }
+
   async pagesHeaderDeleteDialogText(): Promise<string> {
-    return todo("pagesHeaderDeleteDialogText");
+    const dialog = this.pagesHeaderDeleteDialog();
+    await dialog.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    return ((await dialog.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
   }
+
   async pagesHeaderConfirmDelete(): Promise<void> {
-    return todo("pagesHeaderConfirmDelete");
+    await this.pagesHeaderDeleteDialog()
+      .getByRole("button", { name: "Delete", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesHeaderDeleteDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesHeaderCancelDelete(): Promise<void> {
-    return todo("pagesHeaderCancelDelete");
+    await this.pagesHeaderDeleteDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesHeaderCanvasMaxWidth(): Promise<string> {
-    return todo("pagesHeaderCanvasMaxWidth");
+    // The canvas eases width changes, so settle on two agreeing reads.
+    const canvas = this.page.locator(".frame-renderer").first();
+    let previous = await canvas.evaluate((element) => getComputedStyle(element).maxWidth);
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      await this.page.waitForTimeout(100);
+      const current = await canvas.evaluate((element) => getComputedStyle(element).maxWidth);
+      if (current === previous) return current;
+      previous = current;
+    }
+    return previous;
   }
+
   async pagesHeaderToolbarVisible(): Promise<boolean> {
-    return todo("pagesHeaderToolbarVisible");
+    return this.isShown(this.page.getByTestId("page-formatting-bar").first());
   }
+
   async pagesHeaderPaneTabParam(): Promise<string | null> {
-    return todo("pagesHeaderPaneTabParam");
+    return new URL(this.page.url()).searchParams.get("paneTab");
   }
+
   async pagesHeaderPaneOpen(): Promise<boolean> {
-    return todo("pagesHeaderPaneOpen");
+    const pane = this.page.getByTestId("page-navigation-pane").first();
+    if ((await pane.count()) === 0) return false;
+    return (await pane.getAttribute("data-open")) === "true";
   }
+
   async pagesHeaderSyncBadgeTooltip(): Promise<string | null> {
-    return todo("pagesHeaderSyncBadgeTooltip");
+    const header = this.pagesHeaderCluster();
+    const badge = header.getByText("Connection lost", { exact: true }).first();
+    if ((await badge.count()) === 0) {
+      const syncing = header.getByText("Syncing...", { exact: true }).first();
+      if ((await syncing.count()) === 0) return null;
+      return (await syncing.getAttribute("title")) ?? null;
+    }
+    return (await badge.getAttribute("title")) ?? null;
   }
+
   async pagesHeaderOfflinePill(): Promise<string | null> {
-    return todo("pagesHeaderOfflinePill");
+    const pill = this.page.getByTestId("page-offline-pill").first();
+    if ((await pill.count()) === 0) return null;
+    return (await this.isShown(pill)) ? "Offline" : null;
   }
+
   async pagesHeaderOversizedStrip(): Promise<string | null> {
-    return todo("pagesHeaderOversizedStrip");
+    return this.page.evaluate(() => {
+      const strip = document.querySelector('[data-testid="page-oversized-strip"]');
+      if (strip === null) return null;
+      const walker = document.createTreeWalker(strip, NodeFilter.SHOW_TEXT);
+      const parts: string[] = [];
+      let node = walker.nextNode();
+      let scanned = 0;
+      while (node !== null && scanned < 40) {
+        scanned += 1;
+        const value = (node.nodeValue ?? "").trim();
+        if (value !== "") parts.push(value);
+        node = walker.nextNode();
+      }
+      return parts.join(" ").slice(0, 240) || null;
+    });
   }
+
   async pagesHeaderSyncBadgeText(): Promise<string | null> {
-    return todo("pagesHeaderSyncBadgeText");
+    return this.page.evaluate(() => {
+      const header = document.querySelector('[data-testid="page-detail-header"]');
+      if (header === null) return null;
+      const walker = document.createTreeWalker(header, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      let scanned = 0;
+      let syncing: string | null = null;
+      while (node !== null && scanned < 100) {
+        scanned += 1;
+        const value = (node.nodeValue ?? "").trim();
+        if (value === "Connection lost") return value;
+        if (value === "Syncing...") syncing = value;
+        node = walker.nextNode();
+      }
+      return syncing;
+    });
   }
+
   async pagesHeaderToastText(): Promise<string | null> {
-    return todo("pagesHeaderToastText");
+    return this.page.evaluate(() => {
+      const stack = document.querySelector('[data-testid="toast-stack"]');
+      if (stack === null) return null;
+      const walker = document.createTreeWalker(stack, NodeFilter.SHOW_TEXT);
+      const parts: string[] = [];
+      let node = walker.nextNode();
+      let scanned = 0;
+      while (node !== null && scanned < 120) {
+        scanned += 1;
+        const value = (node.nodeValue ?? "").trim();
+        if (value !== "") parts.push(value);
+        node = walker.nextNode();
+      }
+      const text = parts.join(" ").trim();
+      return text === "" ? null : text.slice(0, 500);
+    });
   }
+
+  private pagesHeaderDescriptionSpyInstalled = false;
+  private pagesHeaderDescriptionWriteCountSeen = 0;
+  private pagesHeaderDescriptionWriteTimesSeen: number[] = [];
+  private pagesHeaderDescriptionWriteStatusesSeen: number[] = [];
+  private pagesHeaderDescriptionWriteKeysSeen: string[] = [];
+
   async pagesHeaderSpyDescriptionWrites(): Promise<void> {
-    return todo("pagesHeaderSpyDescriptionWrites");
+    if (this.pagesHeaderDescriptionSpyInstalled) return;
+    this.pagesHeaderDescriptionSpyInstalled = true;
+    this.page.on("request", (request) => {
+      if (request.method() !== "PATCH" || !request.url().includes("/description/")) return;
+      this.pagesHeaderDescriptionWriteCountSeen += 1;
+      this.pagesHeaderDescriptionWriteTimesSeen.push(Date.now());
+      try {
+        const body = (request.postDataJSON() ?? {}) as Record<string, unknown>;
+        this.pagesHeaderDescriptionWriteKeysSeen = Object.keys(body);
+      } catch {
+        this.pagesHeaderDescriptionWriteKeysSeen = [];
+      }
+    });
+    this.page.on("response", (response) => {
+      const request = response.request();
+      if (request.method() !== "PATCH" || !request.url().includes("/description/")) return;
+      this.pagesHeaderDescriptionWriteStatusesSeen.push(response.status());
+    });
   }
+
   async pagesHeaderDescriptionWriteCount(): Promise<number> {
-    return todo("pagesHeaderDescriptionWriteCount");
+    return this.pagesHeaderDescriptionWriteCountSeen;
   }
+
   async pagesHeaderDescriptionWriteTimes(): Promise<number[]> {
-    return todo("pagesHeaderDescriptionWriteTimes");
+    return [...this.pagesHeaderDescriptionWriteTimesSeen];
   }
+
   async pagesHeaderDescriptionWriteStatuses(): Promise<number[]> {
-    return todo("pagesHeaderDescriptionWriteStatuses");
+    return [...this.pagesHeaderDescriptionWriteStatusesSeen];
   }
+
   async pagesHeaderDescriptionWriteKeys(): Promise<string[]> {
-    return todo("pagesHeaderDescriptionWriteKeys");
+    return [...this.pagesHeaderDescriptionWriteKeysSeen];
   }
+
+  private pagesHeaderPageSpyInstalled = false;
+  private pagesHeaderPageWriteCountSeen = 0;
+
   async pagesHeaderSpyPageWrites(): Promise<void> {
-    return todo("pagesHeaderSpyPageWrites");
+    if (this.pagesHeaderPageSpyInstalled) return;
+    this.pagesHeaderPageSpyInstalled = true;
+    this.page.on("request", (request) => {
+      if (request.method() !== "PATCH") return;
+      if (/\/api\/workspaces\/.+\/projects\/.+\/pages\/[^/]+\/$/.test(new URL(request.url()).pathname)) {
+        this.pagesHeaderPageWriteCountSeen += 1;
+      }
+    });
   }
+
   async pagesHeaderPageWriteCount(): Promise<number> {
-    return todo("pagesHeaderPageWriteCount");
+    return this.pagesHeaderPageWriteCountSeen;
   }
+
   async pagesHeaderPressSave(): Promise<void> {
-    return todo("pagesHeaderPressSave");
+    await this.page.keyboard.press("ControlOrMeta+S");
   }
+
   async pagesHeaderExportDialogVisible(): Promise<boolean> {
-    return todo("pagesHeaderExportDialogVisible");
+    return (await this.pagesHeaderExportDialog().count()) > 0;
   }
+
   async pagesHeaderExportForm(): Promise<PagesHeaderExportForm> {
-    return todo("pagesHeaderExportForm");
+    const dialog = this.pagesHeaderExportDialog();
+    await dialog.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const selected = async (id: string): Promise<string> => {
+      const select = dialog.locator(`#${id}`);
+      if ((await select.count()) === 0) return "";
+      const text = await select
+        .locator("option:checked")
+        .innerText()
+        .catch(() => "");
+      return text.trim();
+    };
+    const pageFormat = dialog.locator("#page-export-size");
+    return {
+      format: await selected("page-export-format"),
+      scope: await selected("page-export-scope"),
+      pageFormat: await selected("page-export-size"),
+      pageFormatVisible: (await pageFormat.count()) > 0,
+    };
   }
-  async pagesHeaderExportSetFormat(_label: string): Promise<void> {
-    return todo("pagesHeaderExportSetFormat");
+
+  async pagesHeaderExportSetFormat(label: string): Promise<void> {
+    await this.pagesHeaderExportDialog()
+      .locator("#page-export-format")
+      .selectOption({ label }, { timeout: WebNewDriver.WAIT_MS });
   }
-  async pagesHeaderExportSetScope(_label: string): Promise<void> {
-    return todo("pagesHeaderExportSetScope");
+
+  async pagesHeaderExportSetScope(label: string): Promise<void> {
+    await this.pagesHeaderExportDialog()
+      .locator("#page-export-scope")
+      .selectOption({ label }, { timeout: WebNewDriver.WAIT_MS });
   }
-  async pagesHeaderExportSetPageFormat(_label: string): Promise<void> {
-    return todo("pagesHeaderExportSetPageFormat");
+
+  async pagesHeaderExportSetPageFormat(label: string): Promise<void> {
+    await this.pagesHeaderExportDialog()
+      .locator("#page-export-size")
+      .selectOption({ label }, { timeout: WebNewDriver.WAIT_MS });
   }
+
   async pagesHeaderExportConfirm(): Promise<PagesHeaderDownload> {
-    return todo("pagesHeaderExportConfirm");
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebNewDriver.WAIT_MS }),
+      this.pagesHeaderExportDialog()
+        .getByRole("button", { name: /^(Export|Exporting)$/ })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const localPath = await download.path();
+    if (localPath === null) throw new Error("[parity] page export produced no local file.");
+    return {
+      fileName: download.suggestedFilename(),
+      byteLength: statSync(localPath).size,
+      headText: readFileSync(localPath).subarray(0, 400).toString("latin1"),
+    };
   }
+
   async pagesHeaderExportCancel(): Promise<void> {
-    return todo("pagesHeaderExportCancel");
+    await this.pagesHeaderExportDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   // --- Pages title, mark + formatting toolbar (NEWFRONT-315, PAGE-026-036).
