@@ -77,15 +77,36 @@ impl ConfigValue {
 
 /// Parse a string with CPython `float()` rules for the common cases:
 /// surrounding whitespace ignored, decimal/integer/exponent forms plus
-/// case-insensitive `inf`/`infinity`/`nan` with optional sign. Hex float
-/// syntax and underscores are rejected (Python's `float()` rejects
-/// underscores too). Unrepresentable magnitudes yield `None` here rather
-/// than Python's `inf`.
+/// case-insensitive `inf`/`infinity`/`nan` with optional sign. Single
+/// underscores between digits are accepted (`"1_0"` is 10.0), like Python;
+/// any other underscore placement is rejected. Hex float syntax is
+/// rejected. Unrepresentable magnitudes yield `None` here rather than
+/// Python's `inf`.
 fn parse_python_float(s: &str) -> Option<f64> {
     let t = s.trim_matches(|c: char| c.is_whitespace());
-    if t.is_empty() || t.contains('_') {
+    if t.is_empty() {
         return None;
     }
+    let stripped;
+    let t = if t.contains('_') {
+        // Mirror `parse_python_int`: one `_` only ever sits between two
+        // ASCII digits (`1_0`, `1e1_0`); `_1`, `1_`, `1__0`, `1_.0` and
+        // `in_f` are all rejected, as in CPython.
+        let bytes = t.as_bytes();
+        let valid = bytes.iter().enumerate().all(|(i, b)| {
+            *b != b'_'
+                || (i > 0
+                    && bytes[i - 1].is_ascii_digit()
+                    && matches!(bytes.get(i + 1), Some(next) if next.is_ascii_digit()))
+        });
+        if !valid {
+            return None;
+        }
+        stripped = t.replace('_', "");
+        stripped.as_str()
+    } else {
+        t
+    };
     let lower = t.to_ascii_lowercase();
     if ["inf", "infinity", "+inf", "+infinity", "-inf", "-infinity"].contains(&lower.as_str())
         || ["nan", "+nan", "-nan"].contains(&lower.as_str())
@@ -202,7 +223,13 @@ mod tests {
         assert_eq!(ConfigValue::from(" 1e3 ").to_float(), Some(1000.0));
         assert_eq!(ConfigValue::Null.to_float(), None);
         assert_eq!(ConfigValue::from("abc").to_float(), None);
-        assert_eq!(ConfigValue::from("1_0").to_float(), None);
+        assert_eq!(ConfigValue::from("1_0").to_float(), Some(10.0));
+        assert_eq!(ConfigValue::from("1_0.5").to_float(), Some(10.5));
+        assert_eq!(ConfigValue::from("1e1_0").to_float(), Some(1e10));
+        assert_eq!(ConfigValue::from("_1").to_float(), None);
+        assert_eq!(ConfigValue::from("1_").to_float(), None);
+        assert_eq!(ConfigValue::from("1__0").to_float(), None);
+        assert_eq!(ConfigValue::from("1_.0").to_float(), None);
         assert_eq!(ConfigValue::from("1e999").to_float(), None);
     }
 
