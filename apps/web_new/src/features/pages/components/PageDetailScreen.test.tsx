@@ -47,6 +47,20 @@ import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 import { getPageBodyDraft } from "../lib/pageBodyDraft.js";
 import { applyPageRestore } from "../lib/pageRestore.js";
 import { PageDetailScreen } from "./PageDetailScreen.js";
+import { mentionNameFor, resetMentionDirectory } from "../../../shared/editor/mentionDirectory.js";
+import { requestEntityPeek, resetEntityPeek } from "../../../shared/shell/entityPeek.js";
+
+const issuePeek = vi.hoisted(() => vi.fn());
+vi.mock("../../issues/peek/ResolvingIssuePeek.js", () => ({
+  ResolvingIssuePeek: (props: { peeked: string; peekProjectId?: string | null; onClose: () => void }) => {
+    issuePeek(props);
+    return (
+      <button type="button" onClick={props.onClose}>
+        Close issue peek
+      </button>
+    );
+  },
+}));
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const OTHER = "323e4567-e89b-12d3-a456-426614174009";
@@ -92,6 +106,9 @@ function record(overrides: Partial<PageDetail> = {}): PageDetail {
 }
 
 beforeEach(() => {
+  resetMentionDirectory();
+  resetEntityPeek();
+  issuePeek.mockReset();
   harness = {
     pageId: "323e4567-e89b-12d3-a456-426614174002",
     page: {
@@ -224,6 +241,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetMentionDirectory();
+  resetEntityPeek();
+});
+
+afterEach(() => {
+  cleanup();
   resetAppClient();
   document.title = "";
   vi.mocked(applyPageRestore).mockClear();
@@ -236,8 +259,12 @@ function renderScreen(search: PageDetailSearch = {}): {
   changes: PageDetailSearch[];
 } {
   const changes: PageDetailSearch[] = [];
+  // Hold the client for the mounted tree's lifetime: unmounting stops
+  // pending retries, and clearing the query cache releases their timers
+  // before the next test resets the app client.
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <QueryClientProvider client={queryClient}>
       <PageDetailScreen
         workspaceSlug="acme"
         projectId={PROJECT}
@@ -1193,5 +1220,32 @@ describe("PageDetailScreen negative rows (PAGE-082, PAGE-083)", () => {
     for (const absent of ["Lock", "Unlock", "Open in new tab", "Move to project…"]) {
       expect(labels).not.toContain(absent);
     }
+  });
+});
+
+describe("PageDetailScreen mention and entity peeks", () => {
+  it("publishes the workspace member directory for mention chips (PAGE-041)", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await waitFor(() => expect(mentionNameFor(PAGES_USER_ID, "Stored")).toBe("Ada Byron"));
+  });
+
+  it("opens the shell's issue peek from an entity request and closes it (PAGE-043)", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    requestEntityPeek({
+      entityName: "issue",
+      entityIdentifier: "ISS-2",
+      projectIdentifier: "WEB",
+      workspaceIdentifier: "acme",
+      projectId: PROJECT,
+      label: "Fix login",
+    });
+    expect(await screen.findByRole("button", { name: "Close issue peek" })).toBeInTheDocument();
+    expect(issuePeek).toHaveBeenCalledWith(
+      expect.objectContaining({ peeked: "ISS-2", peekProjectId: PROJECT, projectIdentifier: "WEB" })
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Close issue peek" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Close issue peek" })).not.toBeInTheDocument());
   });
 });

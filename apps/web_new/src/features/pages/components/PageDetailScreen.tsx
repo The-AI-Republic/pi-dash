@@ -64,6 +64,14 @@ import { pageDetailHref, PAGE_UNTITLED } from "../lib/pageList.js";
 import { formattingBarVisible, pageCanvasWidth, usePagePreferences } from "../lib/pagePreferences.js";
 import { useLivePageDocument } from "../lib/pageDocumentLive.js";
 import { pageActorMembers, pageActorRows, type PageDocument } from "../lib/pagePane.js";
+import { resetMentionDirectory, setMentionDirectory } from "../../../shared/editor/mentionDirectory.js";
+import { subscribeEntityPeek, type EntityPeekRequest } from "../../../shared/shell/entityPeek.js";
+
+// The peek host loads on first use: the page shell must not pull the
+// issues area into its initial chunk (§13.2, Quality gates).
+const LazyIssuePeek = React.lazy(() =>
+  import("../../issues/peek/ResolvingIssuePeek.js").then((module) => ({ default: module.ResolvingIssuePeek }))
+);
 
 export interface PageDetailScreenProps {
   workspaceSlug: string;
@@ -139,6 +147,27 @@ export function PageDetailScreen({
   // The timeline names each snapshot's author from the same directory the
   // attribution rows use (PAGE-051).
   const versionMembers = pageActorMembers(directory.data);
+
+  // Mentions resolve their display name from this same directory (PAGE-041).
+  React.useEffect(() => {
+    if (directory.data === undefined) return;
+    setMentionDirectory(
+      directory.data.map((member) => ({ id: member.member.id, name: member.member.display_name ?? "" })),
+      viewerId
+    );
+    return resetMentionDirectory;
+  }, [directory.data, viewerId]);
+
+  // The page owns no peek surface; it emits a request and lets the shell's
+  // issues peek host open the matching item (PAGE-043, §13.2).
+  const [entityPeek, setEntityPeek] = React.useState<EntityPeekRequest | null>(null);
+  React.useEffect(
+    () =>
+      subscribeEntityPeek((request) => {
+        if (request.entityName === "issue" && request.projectId !== null) setEntityPeek(request);
+      }),
+    []
+  );
 
   const body = resolvePageDetailBody({
     pending: record.isPending || me.isPending || roles.isPending || directory.isPending,
@@ -451,6 +480,18 @@ export function PageDetailScreen({
           onRetry={() => retryVersion(openVersionId)}
           restore={capabilities.canEdit ? { onRestore: restoreVersion } : null}
         />
+      )}
+      {entityPeek === null ? null : (
+        <React.Suspense fallback={null}>
+          <LazyIssuePeek
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            projectIdentifier={project.data?.identifier ?? ""}
+            peeked={entityPeek.entityIdentifier}
+            peekProjectId={entityPeek.projectId}
+            onClose={() => setEntityPeek(null)}
+          />
+        </React.Suspense>
       )}
     </div>
   );

@@ -11,7 +11,7 @@
 // the history entry writes the info pane. Later header slices add the
 // remaining menu entries at the same mount.
 
-import { Breadcrumbs, IconButton, Menu } from "@pidash/kit";
+import { Breadcrumbs, IconButton, Menu, type MenuAction } from "@pidash/kit";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Ellipsis, Link2, PanelRight } from "lucide-react";
 import * as React from "react";
@@ -26,6 +26,7 @@ import type { PagePreferences } from "../lib/pagePreferences.js";
 import { PageFavoriteStar } from "./PageFavoriteStar.js";
 import { PageSiblingSwitcher } from "./PageSiblingSwitcher.js";
 import { PageSyncBadge } from "./PageSyncBadge.js";
+import { getPageBodyActions, subscribePageBodyActions } from "../lib/pageBodyActions.js";
 import type { PageSyncStatus } from "../lib/pageSync.js";
 
 export const PAGE_CRUMB = "Pages";
@@ -73,6 +74,18 @@ export interface PageDetailHeaderProps {
   onPreferenceChange: (patch: Partial<PagePreferences>) => void;
 }
 
+/** The options entries: history, the registered body action and sub-page creation. */
+export function pageOptionsItems(
+  onOpenHistory: () => void,
+  body = getPageBodyActions(),
+  onAddSubPage?: (() => void) | undefined
+): MenuAction[] {
+  const items: MenuAction[] = [{ label: PAGE_HISTORY_ITEM, onSelect: onOpenHistory }];
+  if (body !== null) items.push({ label: body.copyMarkdownLabel, onSelect: () => void body.copyMarkdown() });
+  if (onAddSubPage !== undefined) items.push({ label: PAGE_ACTION_ADD_SUB_PAGE, onSelect: onAddSubPage });
+  return items;
+}
+
 export function PageDetailHeader({
   workspaceSlug,
   projectId,
@@ -94,6 +107,7 @@ export function PageDetailHeader({
   onPreferenceChange,
 }: PageDetailHeaderProps): React.ReactElement {
   const navigate = useNavigate();
+  const bodyActions = React.useSyncExternalStore(subscribePageBodyActions, getPageBodyActions, () => null);
   const [copied, setCopied] = React.useState(false);
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   React.useEffect(
@@ -181,8 +195,7 @@ export function PageDetailHeader({
         }
         items={[
           ...pageDisplayMenuItems(preferences, onPreferenceChange),
-          { label: PAGE_HISTORY_ITEM, onSelect: onOpenHistory },
-          ...(onAddSubPage === undefined ? [] : [{ label: PAGE_ACTION_ADD_SUB_PAGE, onSelect: onAddSubPage }]),
+          ...pageOptionsItems(onOpenHistory, bodyActions, onAddSubPage),
         ]}
       />
     </div>

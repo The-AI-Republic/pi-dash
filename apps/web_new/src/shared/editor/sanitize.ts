@@ -12,9 +12,18 @@
 import DOMPurify, { type UponSanitizeAttributeHook } from "dompurify";
 
 import { MENTION_CONTENT_TAGS, MENTION_ENTITY } from "./mention.js";
+import { isCurrentMentionUser, mentionNameFor } from "./mentionDirectory.js";
 
 /** Editor node elements stored bodies carry beside ordinary HTML. */
-export const STORED_CONTENT_TAGS = ["mention-component", "image-component", "label", "input"] as const;
+export const STORED_CONTENT_TAGS = [
+  "mention-component",
+  "image-component",
+  "label",
+  "input",
+  "issue-embed-component",
+  "entity-reference-component",
+  "callout-component",
+] as const;
 
 /**
  * Attributes the stored-body contract keeps on the editor nodes
@@ -23,6 +32,28 @@ export const STORED_CONTENT_TAGS = ["mention-component", "image-component", "lab
  */
 const STORED_CONTENT_ATTRIBUTES: Record<string, readonly string[]> = {
   "mention-component": ["id", "entity_identifier", "entity_name", "data-name"],
+  // Work-item embeds keep every identifier the document stores (PAGE-040).
+  "issue-embed-component": ["id", "entity_identifier", "project_identifier", "workspace_identifier", "entity_name"],
+  // Entity references resolve through the shell peek (PAGE-043).
+  "entity-reference-component": [
+    "entity_name",
+    "entity_identifier",
+    "project_identifier",
+    "workspace_identifier",
+    "project_id",
+    "data-label",
+  ],
+  "callout-component": ["data-type"],
+  // Stored callout form the API allowlist keeps (PAGE-037).
+  div: [
+    "data-block-type",
+    "data-background",
+    "data-icon-name",
+    "data-icon-color",
+    "data-emoji-unicode",
+    "data-emoji-url",
+    "data-logo-in-use",
+  ],
   "image-component": [
     "id",
     "src",
@@ -42,7 +73,8 @@ const STORED_CONTENT_ATTRIBUTES: Record<string, readonly string[]> = {
   th: ["colspan", "rowspan", "data-colwidth"],
   // Letter and wash marks (PAGE-036): the stored palette key paints the
   // span and is what a later edit reads back.
-  span: ["data-text-color", "data-background-color"],
+  // Letter/wash keys and the inline body emoji marker (PAGE-036, PAGE-042).
+  span: ["data-text-color", "data-background-color", "data-type"],
   label: ["class", "for"],
   input: ["type", "checked", "disabled"],
 };
@@ -165,8 +197,10 @@ export function renderableHtml(
     const chip = document.createElement(href === null ? "span" : "a");
     if (href !== null) chip.setAttribute("href", href);
     chip.setAttribute("data-mention-id", mention.id);
-    chip.setAttribute("class", "mention-chip");
-    chip.textContent = `@${mentionDisplayName(mention)}`;
+    const current = isCurrentMentionUser(mention.entityIdentifier);
+    chip.setAttribute("class", current ? "mention-chip mention-chip-current" : "mention-chip");
+    if (current) chip.setAttribute("data-current-user", "true");
+    chip.textContent = `@${mentionNameFor(mention.entityIdentifier, mention.name) || mentionDisplayName(mention)}`;
     element.replaceWith(chip);
   }
   for (const element of Array.from(document.body.querySelectorAll("image-component"))) {
@@ -183,6 +217,77 @@ export function renderableHtml(
       if (value !== null && value !== "") image.setAttribute(name, value);
     }
     element.replaceWith(image);
+  }
+  for (const element of Array.from(
+    document.body.querySelectorAll('callout-component, div[data-block-type="callout-component"]')
+  )) {
+    // A callout is a container in storage; the read surface paints it as a
+    // distinct aside while keeping its child blocks intact (PAGE-037). The
+    // allowlisted stored form is the div; the tag stays readable for
+    // bodies saved by earlier builds.
+    const aside = document.createElement("aside");
+    aside.setAttribute("data-type", "callout");
+    aside.setAttribute("class", "page-callout");
+    aside.append(...Array.from(element.childNodes));
+    element.replaceWith(aside);
+  }
+  for (const element of Array.from(document.body.querySelectorAll("issue-embed-component"))) {
+    // Community never fetches the referenced work item: it shows the
+    // upgrade prompt where a licensed resolver would paint the card
+    // (PAGE-040, §13.4). The prompt carries the kit's Pro marker and the
+    // kit's outbound-link styling; identifiers remain data attributes for
+    // the edition slot. The static read surface cannot mount React, so the
+    // marker is the same pill markup the kit renders.
+    const card = document.createElement("div");
+    card.setAttribute("class", "page-embed-upgrade");
+    card.setAttribute("data-embed-upgrade", "");
+    for (const name of ["id", "entity_identifier", "project_identifier", "workspace_identifier", "entity_name"]) {
+      const value = element.getAttribute(name);
+      if (value !== null && value !== "") card.setAttribute(`data-${name.replace(/_/g, "-")}`, value);
+    }
+    const title = document.createElement("p");
+    title.setAttribute("class", "flex items-center gap-2 font-medium");
+    title.textContent = "Work-item embeds are a Pro feature ";
+    const pill = document.createElement("span");
+    pill.setAttribute("data-testid", "upgrade-pill");
+    pill.setAttribute(
+      "class",
+      "inline-flex w-fit items-center rounded-(--radius-full) bg-(--accent-subtle) py-px text-caption font-medium whitespace-nowrap text-(--accent) px-(--space-2)"
+    );
+    pill.textContent = "Pro";
+    title.append(pill);
+    const body = document.createElement("p");
+    body.textContent = "Upgrade to show live work items inside a page.";
+    const link = document.createElement("a");
+    link.setAttribute("href", "https://airepublic.com/pricing");
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noopener noreferrer");
+    link.setAttribute("class", "text-(--accent) underline underline-offset-2 hover:text-(--accent-hover)");
+    link.textContent = "Upgrade";
+    card.append(title, body, link);
+    element.replaceWith(card);
+  }
+  for (const element of Array.from(document.body.querySelectorAll("entity-reference-component"))) {
+    // A recognised entity paints as a preview card; its identifiers stay on
+    // the node so the shell can open the matching peek (PAGE-043, §13.2).
+    const label = element.getAttribute("data-label") ?? element.getAttribute("entity_identifier") ?? "";
+    const preview = document.createElement("span");
+    preview.setAttribute("class", "page-entity-preview");
+    preview.setAttribute("data-entity-preview", "");
+    preview.setAttribute("role", "button");
+    preview.setAttribute("tabindex", "0");
+    for (const name of [
+      "entity_name",
+      "entity_identifier",
+      "project_identifier",
+      "workspace_identifier",
+      "project_id",
+    ]) {
+      const value = element.getAttribute(name);
+      if (value !== null && value !== "") preview.setAttribute(`data-${name.replace(/_/g, "-")}`, value);
+    }
+    preview.textContent = label;
+    element.replaceWith(preview);
   }
   return document.body.innerHTML;
 }

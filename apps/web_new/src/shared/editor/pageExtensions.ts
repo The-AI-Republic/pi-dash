@@ -9,7 +9,8 @@
 // arrives in the editor's own chunk, never in the initial closure. Later
 // slices extend this same set — blocks and embeds (PAGE-037–044).
 
-import { loadDescriptionExtensions, loadStoredImageExtension } from "./extensions.js";
+import { loadDescriptionExtensions, loadMentionExtension, loadStoredImageExtension } from "./extensions.js";
+import { loadPageBlockExtensions } from "./pageBlockExtensions.js";
 import { loadPageColorMark, loadPageTableExtensions } from "./pageTableExtensions.js";
 
 /** Tiptap's extension type, named without a static import of the package. */
@@ -21,7 +22,7 @@ type AnyExtension = import("@tiptap/core").AnyExtension;
  * array because the description loader's inferred pair is narrower than
  * what a page adds.
  */
-export async function loadPageExtensions(): Promise<AnyExtension[]> {
+export async function loadPageExtensions(workspaceSlug = ""): Promise<AnyExtension[]> {
   const [
     { default: Underline },
     { default: TextAlign },
@@ -31,15 +32,19 @@ export async function loadPageExtensions(): Promise<AnyExtension[]> {
     tables,
     color,
     image,
+    blocks,
+    mention,
   ] = await Promise.all([
     import("@tiptap/extension-underline"),
     import("@tiptap/extension-text-align"),
     import("@tiptap/extension-task-list"),
     import("@tiptap/extension-task-item"),
-    loadDescriptionExtensions(),
+    loadDescriptionExtensions({ horizontalRule: false }),
     loadPageTableExtensions(),
     loadPageColorMark(),
     loadStoredImageExtension(),
+    loadPageBlockExtensions(),
+    loadMentionExtension(workspaceSlug),
   ]);
   return [
     ...base,
@@ -51,5 +56,7 @@ export async function loadPageExtensions(): Promise<AnyExtension[]> {
     ...tables,
     color,
     image,
+    mention,
+    ...(blocks as AnyExtension[]),
   ];
 }

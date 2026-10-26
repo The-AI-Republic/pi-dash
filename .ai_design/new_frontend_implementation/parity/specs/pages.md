@@ -616,6 +616,20 @@ entity kinds the shell resolver knows. The pages slice does not own the
 peek overlay: it emits the entity reference and lets the shell's peek
 open it (§13.2).
 
+**Storage contract (open, tracked).** The reference's stored element is
+`entity-reference-component` with its identifiers and `data-label`. That
+tag is not yet on the API content allowlist
+(`apps/api/pi_dash/utils/content_validator.py`) and the unchanged live
+editor schema does not parse it, so a save round-trip through the server
+drops it (the label lives only in `data-label`, never as text). The
+client-side producer, preview and peek work, and a preview survives any
+body the app itself holds; persistence of the node needs a backend
+allowlist/schema change owned outside this slice. Until that lands,
+PAGE-043's save/reload clause is *not* claimed as proven — see the open
+follow-up issue linked from NEWFRONT-842. The same gap applies to
+`issue-embed-component` (PAGE-040); its identifiers persist only in the
+structured `description_json` snapshot, not in `description_html`.
+
 ### 6.4 Mentions (PAGE-041)
 
 Typing the mention trigger opens person search across the workspace,

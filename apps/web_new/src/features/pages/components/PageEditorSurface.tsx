@@ -28,6 +28,10 @@ import { getPageBodyDraft, setPageBodyDraft } from "../lib/pageBodyDraft.js";
 import type { PageFontSize, PageFontStyle } from "../lib/pagePreferences.js";
 import { pageImageUploadFailure, uploadPageImage, type UploadedPageImage } from "../lib/pageMedia.js";
 import { isPageSaveGesture, pageKeyCommand } from "../lib/pageToolbar.js";
+import { clonePastedAssets, rewritePastedAssets } from "../lib/pageMedia.js";
+import { parseEntityAddress } from "../lib/entityReferences.js";
+import { entityReferenceHtml, pageEntityReferenceFor, resolvePastedEntity } from "../lib/pageEmbeds.js";
+import { pageBodyActionsFor, registerPageBodyActions } from "../lib/pageBodyActions.js";
 import { titleIsEmpty } from "../lib/pageTitle.js";
 import { PageBodyEditor, type PageEditorHandle } from "./PageBodyEditor.js";
 import { PageCanvasHeader } from "./PageCanvasHeader.js";
@@ -36,9 +40,12 @@ import { PageBodySkeleton } from "./PageDetailLoading.js";
 import { PageFormattingBar } from "./PageFormattingBar.js";
 import { PageImageButton } from "./PageImageButton.js";
 import { PageTableButton } from "./PageTableButton.js";
+import { PageBodyInteractionLayer } from "./PageBodyInteractionLayer.js";
 
 export const PAGE_BODY_LABEL = "Page body";
 export const PAGE_BODY_PLACEHOLDER = "Start writing, or press / for commands";
+/** Id of the shared file input the catalogue's Image entry opens. */
+export const PAGE_IMAGE_INPUT_ID = "page-image-input";
 
 export interface PageEditorSurfaceProps {
   pageId: string;
@@ -87,6 +94,14 @@ export interface PageEditorSurfaceProps {
   uploadImage?: ((file: File) => Promise<UploadedPageImage>) | undefined;
 }
 
+/**
+ * Open the toolbar's file input from another entry (the catalogue's
+ * Image row). One picker exists per surface, so this never forks one.
+ */
+export function openPageImagePicker(): void {
+  document.getElementById(PAGE_IMAGE_INPUT_ID)?.click();
+}
+
 export function PageEditorSurface({
   pageId,
   workspaceSlug,
@@ -108,11 +123,14 @@ export function PageEditorSurface({
   const handleRef = React.useRef<PageEditorHandle | null>(null);
   const [state, setState] = React.useState<PageFormattingState>(EMPTY_FORMATTING_STATE);
   const [uploading, setUploading] = React.useState(false);
+  const initialHtml = React.useMemo(() => getPageBodyDraft(pageId) ?? descriptionHtml, [pageId, descriptionHtml]);
+  // Latest body HTML, so the interaction layer can re-read the caret's
+  // trigger after every edit without owning the editor itself.
+  const [bodyHtml, setBodyHtml] = React.useState(initialHtml);
   // The typed title, before its debounce saves it: an empty draft keeps
   // the mark affordance pinned even though the stored name still has text.
   const [titleDraft, setTitleDraft] = React.useState(name);
   React.useEffect(() => setTitleDraft(name), [name]);
-  const initialHtml = React.useMemo(() => getPageBodyDraft(pageId) ?? descriptionHtml, [pageId, descriptionHtml]);
   // A stored body keeps the asset id; the editor paints the served URL
   // while serialization writes the id back (PAGE-034, ISS-127).
   const resolveAsset = React.useCallback(
@@ -145,9 +163,56 @@ export function PageEditorSurface({
     (html: string) => {
       // The save slice (PAGE-064, NEWFRONT-846) subscribes to this seam.
       setPageBodyDraft(pageId, html);
+      setBodyHtml(html);
     },
     [pageId]
   );
+
+  // The options menu's copy entry reads the live body; read-only pages
+  // never mount here, so the registry exists only for editors (PAGE-044).
+  React.useEffect(
+    () => registerPageBodyActions(pageBodyActionsFor(() => handleRef.current?.html() ?? bodyHtml)),
+    [bodyHtml]
+  );
+
+  // A pasted picture that carries an asset id from another page is cloned
+  // onto this page before it lands (PAGE-039, bug NEWFRONT-351). The
+  // handle reports the rewritten markup as an ordinary edit, so the save
+  // path and the assets pane both see the new id.
+  const onPasteHtml = React.useCallback(
+    async (pasted: string): Promise<string | null> => {
+      try {
+        const clones = await clonePastedAssets(getAppClient(), { workspaceSlug, projectId, pageId }, pasted);
+        return rewritePastedAssets(pasted, clones);
+      } catch (error) {
+        notifyError(pageImageUploadFailure(error));
+        return null;
+      }
+    },
+    [workspaceSlug, projectId, pageId]
+  );
+
+  // A pasted bare work-item key or browse address becomes an entity
+  // reference; the resolver only rewrites when the search returns the
+  // exact row, so an unknown key stays a normal link (PAGE-043).
+  const onPasteText = React.useCallback(
+    async (text: string): Promise<string | null> => {
+      const parsed = parseEntityAddress(text);
+      if (parsed === null) return null;
+      try {
+        const choice = await resolvePastedEntity(getAppClient(), workspaceSlug, projectId, parsed);
+        if (choice === null) return null;
+        return entityReferenceHtml(pageEntityReferenceFor(choice, workspaceSlug));
+      } catch {
+        return null;
+      }
+    },
+    [workspaceSlug, projectId]
+  );
+
+  // Only a recognised work-item key/address is claimed; ordinary prose and
+  // multi-line text keep the editor's native paste path (PAGE-043).
+  const claimsPasteText = React.useCallback((text: string) => parseEntityAddress(text) !== null, []);
 
   const run = React.useCallback((command: PageFormatCommand) => {
     handleRef.current?.applyCommand(command);
@@ -180,7 +245,11 @@ export function PageEditorSurface({
         .then((uploaded) => {
           handleRef.current?.insertImage(
             uploaded.assetUrl === "" ? pageAssetUrl(workspaceSlug, projectId, uploaded.assetId) : uploaded.assetUrl,
-            uploaded.assetId
+            uploaded.assetId,
+            // The assets pane reads alt first; a bare UUID source would
+            // otherwise be its row name. The old app's `image-<id>` label
+            // keeps the row readable (PAGE-039).
+            `image-${uploaded.assetId}`
           );
         })
         .catch((error: unknown) => {
@@ -239,7 +308,7 @@ export function PageEditorSurface({
           mediaControls={
             <>
               <PageTableButton onInsert={() => handleRef.current?.insertTable()} />
-              <PageImageButton onPick={pickImage} busy={uploading} />
+              <PageImageButton onPick={pickImage} busy={uploading} inputId={PAGE_IMAGE_INPUT_ID} />
               <PageColorButton
                 textColor={state.textColor}
                 backgroundColor={state.backgroundColor}
@@ -263,16 +332,37 @@ export function PageEditorSurface({
               key={pageId}
               initialHtml={initialHtml}
               resolveAsset={resolveAsset}
+              workspaceSlug={workspaceSlug}
               onChange={onChange}
               onFormattingChange={setState}
               onReady={onReady}
               label={PAGE_BODY_LABEL}
               placeholder={PAGE_BODY_PLACEHOLDER}
               handleKeyDown={handleKeyDown}
+              onPasteHtml={onPasteHtml}
+              onPasteText={onPasteText}
+              claimsPasteText={claimsPasteText}
             />
           </React.Suspense>
         )}
       </div>
+      {/* The transient surfaces are a sibling of the body, never inside the
+          measured `.editor-container`: the pane counts that container's
+          blocks, so palette and mention rows must not lift the counts. They
+          are fixed-positioned from the caret, so no wrapper is needed — and
+          `.frame-renderer > .editor-container` stays the editor's own path. */}
+      {bodyPending ? null : (
+        <React.Suspense fallback={null}>
+          <PageBodyInteractionLayer
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            getHandle={() => handleRef.current}
+            html={bodyHtml}
+            onPickImage={openPageImagePicker}
+            onDocumentChange={setBodyHtml}
+          />
+        </React.Suspense>
+      )}
     </>
   );
 }

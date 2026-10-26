@@ -16,6 +16,8 @@ import {
   type PageFormatCommand,
   type PageFormattingState,
 } from "../../../shared/editor/pageFormatting.js";
+import { emojiHtml, embedHtml, type PageCatalogBlockKind, type PageEmbedAttributes } from "./pageBlocks.js";
+import type { PageEntityReferenceAttributes } from "../../../shared/editor/pageBlockExtensions.js";
 
 /** The chain methods this adapter calls, by the command that calls them. */
 export interface PageEditorChain {
@@ -41,6 +43,14 @@ export interface PageEditorChain {
   unsetMark: (name: string) => PageEditorChain;
   /** Insert one node or HTML string at the caret (PAGE-034). */
   insertContent: (content: unknown) => PageEditorChain;
+  /** Write content at a position or over a range (PAGE-037 block moves). */
+  insertContentAt: (position: number | "end" | { from: number; to: number }, content: unknown) => PageEditorChain;
+  /** Delete one document range (drag-handle Delete). */
+  deleteRange: (range: { from: number; to: number }) => PageEditorChain;
+  /** Set or replace the link mark on the selection (PAGE-043). */
+  setLink: (attributes: { href: string }) => PageEditorChain;
+  /** Remove the link mark (PAGE-043). */
+  unsetLink: () => PageEditorChain;
   run: () => boolean;
 }
 
@@ -52,6 +62,32 @@ export interface PageEditorChain {
  */
 export type PageFocusPosition = number | "start" | "end";
 
+/** A resolved document position, narrowed to what the block reads use. */
+export interface PageResolvedPosition {
+  depth?: number;
+  before?: (depth: number) => number;
+  after?: (depth: number) => number;
+  node?: (depth: number) => { nodeSize: number; toJSON: () => unknown };
+}
+
+/** The document half of the editor view the block geometry reads. */
+export interface PageEditorDocument {
+  childCount: number;
+  child: (index: number) => { nodeSize: number; toJSON: () => unknown; type: { name: string } };
+  resolve: (position: number) => PageResolvedPosition;
+}
+
+/** The view methods the hovered-block resolver needs. */
+export interface PageEditorView {
+  dom: {
+    getBoundingClientRect: () => { top: number; left?: number; width?: number; height?: number };
+    contains: (node: Node | null) => boolean;
+  };
+  posAtCoords: (coords: { left: number; top: number }) => { pos: number } | null;
+  coordsAtPos: (position: number) => { top: number; left?: number };
+  state: { doc: PageEditorDocument };
+}
+
 /** What the adapter needs from a Tiptap editor. */
 export interface PageEditorRef {
   chain: () => PageEditorChain;
@@ -61,11 +97,29 @@ export interface PageEditorRef {
   commands: { focus: (position?: PageFocusPosition) => void };
   /** Tiptap's mark-attribute read; optional so simple probes still work. */
   getAttributes?: (name: string) => Record<string, unknown>;
+  /** Present on a live editor; absent on simple probes and in unit tests. */
+  view?: PageEditorView;
   state: {
     selection: {
+      from?: number;
+      to?: number;
       $from: {
-        parent: { type: { name: string }; attrs: Record<string, unknown>; textContent: string };
+        depth?: number;
+        parent: {
+          type: { name: string };
+          attrs: Record<string, unknown>;
+          textContent: string;
+          textBetween?: (from: number, to: number, block?: string, leaf?: string) => string;
+        };
+        doc?: { textBetween: (from: number, to: number, block?: string, leaf?: string) => string };
+        start?: () => number;
+        parentOffset?: number;
+        before?: (depth: number) => number;
+        after?: (depth: number) => number;
+        node?: (depth: number) => { nodeSize: number; toJSON: () => unknown };
+        textBetween?: (from: number, to: number, block?: string, leaf?: string) => string;
       };
+      $to?: { parentOffset?: number };
     };
   };
 }
@@ -80,10 +134,53 @@ export interface PageEditorHandle {
   applyColor: (kind: "text" | "background", key: string) => void;
   /** Clear one colour kind back to plain text/wash (PAGE-036). */
   clearColor: (kind: "text" | "background") => void;
-  /** Insert an uploaded picture at the caret (PAGE-034). */
-  insertImage: (src: string, storedSrc: string) => void;
+  /** Insert an uploaded picture at the caret (PAGE-034). `alt` names its row. */
+  insertImage: (src: string, storedSrc: string, alt?: string) => void;
   /** Restyle the block under the caret as the given typography entry. */
   applyBlockKind: (kind: PageBlockKind) => void;
+  /** Run one slash-catalogue entry (PAGE-037). */
+  applyCatalogBlock: (block: PageCatalogBlockKind) => void;
+  /** Insert an inline body emoji at the caret (PAGE-042). */
+  insertEmoji: (glyph: string) => void;
+  /** Insert a person mention at the caret, replacing a live @query (PAGE-041). */
+  insertMention: (target: { id: string; name: string }) => void;
+  /** Insert a work-item embed as an atomic block (PAGE-040). */
+  insertEmbed: (attributes: PageEmbedAttributes) => void;
+  /** Insert a normalised entity reference inline (PAGE-043). */
+  insertEntityReference: (attributes: PageEntityReferenceAttributes) => void;
+  /** Insert plain text at the caret (the slash Mention command's trigger). */
+  insertText: (text: string) => void;
+  /** Duplicate or delete the block that owns the caret (PAGE-037). */
+  duplicateBlock: (target?: PageCaretBlock | null) => void;
+  deleteBlock: (target?: PageCaretBlock | null) => void;
+  /** Move a block one slot up or down past its sibling (PAGE-037). */
+  moveBlock: (target: PageCaretBlock, direction: "up" | "down") => void;
+  /** The top-level block under a viewport point, for the hover handle. */
+  blockAtPoint: (clientX: number, clientY: number) => PageHoveredBlock | null;
+  /**
+   * Where the caret sits in viewport coordinates. The transient surfaces
+   * anchor here so they open beside the caret rather than at the end of
+   * the document (PAGE-037/042).
+   */
+  caretAnchor: () => { top: number; left: number } | null;
+  /** Set the link on the selection in place (PAGE-043). */
+  setLink: (href: string) => void;
+  /** Remove the link mark from the selection (PAGE-043). */
+  unsetLink: () => void;
+  /** The live document HTML, for the copy-markup entry (PAGE-044). */
+  html: () => string;
+  /** The link mark's address under the caret, or null (PAGE-043). */
+  linkHref: () => string | null;
+  /** Whether the editor currently has a non-empty text selection (PAGE-037). */
+  hasSelection: () => boolean;
+  /** Text between the block start and the caret, for slash/@ queries. */
+  textBeforeCaret: () => string;
+  /** Delete the typed slash/@ trigger immediately before the caret. */
+  deleteBeforeCaret: (length: number) => void;
+  /** The selected text, for the link bubble prefill. */
+  selectedText: () => string;
+  /** Collapse the caret to the end of the document. */
+  focusEnd: () => void;
   /** Put the caret at the very start of the body (title Enter, PAGE-026). */
   focusStart: () => void;
   /** The formatting state right now, for a bar that mounted after it. */
@@ -197,13 +294,18 @@ export function clearPageColor(editor: PageEditorRef, kind: "text" | "background
  * upload status the oracle reads back, while the editable surface paints
  * the upload's served URL in `src`.
  */
-export function runInsertImage(editor: PageEditorRef, src: string, storedSrc: string): void {
+export function runInsertImage(editor: PageEditorRef, src: string, storedSrc: string, alt?: string): void {
   editor
     .chain()
     .focus()
     .insertContent({
       type: "image",
-      attrs: { src, "data-stored-src": storedSrc, status: "uploaded" },
+      attrs: {
+        src,
+        "data-stored-src": storedSrc,
+        status: "uploaded",
+        ...(alt === undefined ? {} : { alt }),
+      },
     })
     .run();
 }
@@ -283,9 +385,286 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
     insertTable: () => insertPageTable(editor),
     applyColor: (kind, key) => applyPageColor(editor, kind, key),
     clearColor: (kind) => clearPageColor(editor, kind),
-    insertImage: (src, storedSrc) => runInsertImage(editor, src, storedSrc),
+    insertImage: (src, storedSrc, alt) => runInsertImage(editor, src, storedSrc, alt),
+    applyCatalogBlock: (block) => runCatalogBlock(editor, block),
+    insertEmoji: (glyph) => insertPageEmoji(editor, glyph),
+    insertMention: (target) =>
+      editor
+        .chain()
+        .focus()
+        .insertContent({
+          type: "mention",
+          attrs: { id: target.id, entity_identifier: target.id, entity_name: "user_mention", "data-name": target.name },
+        })
+        .run(),
+    insertEmbed: (attributes) => insertPageEmbed(editor, attributes),
+    insertEntityReference: (attributes) => insertPageEntityReference(editor, attributes),
+    insertText: (text) => {
+      editor.chain().focus().insertContent(text).run();
+    },
+    duplicateBlock: (target) => duplicatePageBlock(editor, target),
+    deleteBlock: (target) => deletePageBlock(editor, target),
+    moveBlock: (target, direction) => movePageBlock(editor, target, direction),
+    blockAtPoint: (clientX, clientY) => pageBlockAtPoint(editor, clientX, clientY),
+    caretAnchor: () => pageCaretAnchor(editor),
+    setLink: (href) => linkSelection(editor, href),
+    unsetLink: () => unlinkSelection(editor),
+    html: () => editor.getHTML(),
+    linkHref: () => {
+      if (!editor.isActive("link") || editor.getAttributes === undefined) return null;
+      const href = editor.getAttributes("link")["href"];
+      return typeof href === "string" && href !== "" ? href : null;
+    },
+    hasSelection: () => {
+      const { from, to } = editor.state.selection;
+      return from !== undefined && to !== undefined && to > from;
+    },
+    textBeforeCaret: () => pageTextBeforeCaret(editor),
+    deleteBeforeCaret: (length) => deleteContentBeforeCaret(editor, length),
+    selectedText: () => selectedPageText(editor),
+    focusEnd: () => editor.commands.focus("end"),
     focusStart: () => editor.commands.focus(PAGE_BODY_START),
     readState: () => editorFormattingState(editor),
     replaceBody: (html) => replacePageBody(editor, html),
   };
+}
+
+/** One top-level block around the caret: its document range and JSON. */
+export interface PageCaretBlock {
+  from: number;
+  to: number;
+  json: unknown;
+}
+
+/**
+ * The top-level block the caret sits in. Depth 1 is the document's own
+ * child list, so a paragraph inside a callout resolves at its outer
+ * container when the selection is deeper than one level.
+ */
+export function caretBlockRange(editor: PageEditorRef): PageCaretBlock | null {
+  const { $from } = editor.state.selection;
+  const depth = $from.depth ?? 0;
+  if (depth < 1 || $from.before === undefined || $from.after === undefined || $from.node === undefined) return null;
+  return { from: $from.before(1), to: $from.after(1), json: $from.node(1).toJSON() };
+}
+
+/** Duplicate one block, immediately after itself (default: the caret's). */
+export function duplicatePageBlock(editor: PageEditorRef, target?: PageCaretBlock | null): void {
+  const block = target ?? caretBlockRange(editor);
+  if (block === null) return;
+  editor.chain().focus().insertContentAt(block.to, block.json).run();
+}
+
+/** Remove one block (default: the caret's), never the surrounding document. */
+export function deletePageBlock(editor: PageEditorRef, target?: PageCaretBlock | null): void {
+  const block = target ?? caretBlockRange(editor);
+  if (block === null) return;
+  editor.chain().focus().deleteRange({ from: block.from, to: block.to }).run();
+}
+
+/** Every top-level block with its document range, in reading order. */
+export function pageTopLevelBlocks(editor: PageEditorRef): PageCaretBlock[] {
+  const doc = editor.view?.state.doc;
+  if (doc === undefined) return [];
+  const blocks: PageCaretBlock[] = [];
+  let position = 0;
+  for (let index = 0; index < doc.childCount; index++) {
+    const child = doc.child(index);
+    blocks.push({ from: position, to: position + child.nodeSize, json: child.toJSON() });
+    position += child.nodeSize;
+  }
+  return blocks;
+}
+
+/**
+ * Swap one block with its sibling above or below (PAGE-037). The later
+ * range is rewritten first so replacing the earlier one never shifts the
+ * range still to be written.
+ */
+export function movePageBlock(editor: PageEditorRef, target: PageCaretBlock, direction: "up" | "down"): void {
+  const blocks = pageTopLevelBlocks(editor);
+  const index = blocks.findIndex((block) => block.from === target.from && block.to === target.to);
+  if (index === -1) return;
+  if (direction === "up") {
+    const previous = blocks[index - 1];
+    if (previous === undefined) return;
+    editor.chain().focus().insertContentAt({ from: target.from, to: target.to }, previous.json).run();
+    editor.chain().focus().insertContentAt({ from: previous.from, to: previous.to }, target.json).run();
+    return;
+  }
+  const next = blocks[index + 1];
+  if (next === undefined) return;
+  editor.chain().focus().insertContentAt({ from: next.from, to: next.to }, target.json).run();
+  editor.chain().focus().insertContentAt({ from: target.from, to: target.to }, next.json).run();
+}
+
+/**
+ * The caret's position in viewport coordinates, which is the space the
+ * transient surfaces are positioned in. A view without geometry answers
+ * null and the surfaces fall back to the editor's own top.
+ */
+export function pageCaretAnchor(editor: PageEditorRef): { top: number; left: number } | null {
+  const view = editor.view;
+  if (view === undefined) return null;
+  const from = editor.state.selection.from;
+  const position = typeof from === "number" ? from : 0;
+  const coords = view.coordsAtPos(position);
+  return { top: coords.top, left: coords.left ?? 0 };
+}
+
+/** One top-level block plus where the hover handle should sit beside it. */
+export interface PageHoveredBlock extends PageCaretBlock {
+  /** The block's top edge in viewport coordinates, in px. */
+  top: number;
+  /** The block's left edge in viewport coordinates, in px. */
+  left: number;
+}
+
+/**
+ * The top-level block under a viewport point (PAGE-037). The drag handle
+ * is driven by where the pointer actually is, so its menu always acts on
+ * the block that was hovered rather than whichever block holds the caret.
+ * A point outside the editor, or one ProseMirror cannot place, answers
+ * null and the handle hides.
+ */
+export function pageBlockAtPoint(editor: PageEditorRef, clientX: number, clientY: number): PageHoveredBlock | null {
+  const view = editor.view;
+  if (view === undefined) return null;
+  const found = view.posAtCoords({ left: clientX, top: clientY });
+  if (found === null) return null;
+  const blocks = pageTopLevelBlocks(editor);
+  if (blocks.length === 0) return null;
+  // The block whose half-open range holds the point; the last block also
+  // takes the document's final position.
+  const inside = blocks.find((block) => found.pos >= block.from && found.pos < block.to) ?? blocks[blocks.length - 1];
+  if (inside === undefined) return null;
+  const blockCoords = view.coordsAtPos(inside.from);
+  return { ...inside, top: Math.round(blockCoords.top), left: Math.round(blockCoords.left ?? 0) };
+}
+
+/** Insert one slash-catalogue entry at the caret (PAGE-037). */
+export function runCatalogBlock(editor: PageEditorRef, block: PageCatalogBlockKind): void {
+  switch (block) {
+    case "embed":
+    case "entity":
+      // These rows open their picker in the interaction layer; reaching
+      // the adapter without a choice is a no-op.
+      return;
+    case "text":
+      runBlockKind(editor, "paragraph");
+      return;
+    case "heading1":
+    case "heading2":
+    case "heading3":
+    case "heading4":
+    case "heading5":
+    case "heading6":
+      runBlockKind(editor, block);
+      return;
+    case "numbered":
+      runPageCommand(editor, "orderedList");
+      return;
+    case "bulleted":
+      runPageCommand(editor, "bulletList");
+      return;
+    case "todo":
+      runPageCommand(editor, "taskList");
+      return;
+    case "table":
+      insertPageTable(editor);
+      return;
+    case "quote":
+      runPageCommand(editor, "blockquote");
+      return;
+    case "code":
+      editor.chain().focus().insertContent({ type: "codeBlock" }).run();
+      return;
+    case "callout":
+      editor
+        .chain()
+        .focus()
+        .insertContent({ type: "pageCallout", content: [{ type: "paragraph" }] })
+        .run();
+      return;
+    case "divider":
+      editor.chain().focus().insertContent({ type: "horizontalRule" }).run();
+      return;
+    case "emoji":
+      // The palette row opens the inline picker instead of inserting a
+      // block; the surface handles this sentinel before reaching here.
+      return;
+    case "image":
+      return;
+  }
+}
+
+/** Insert one body emoji inline at the caret (PAGE-042). */
+export function insertPageEmoji(editor: PageEditorRef, glyph: string): void {
+  editor.chain().focus().insertContent(emojiHtml(glyph)).run();
+}
+
+/**
+ * Insert a fresh asset picture, cloning a foreign asset first when the
+ * source belongs to another page (PAGE-039). The clone result is the new
+ * stored id; the caller supplies the served address.
+ */
+export function insertPageEmbed(editor: PageEditorRef, attributes: PageEmbedAttributes): void {
+  editor.chain().focus().insertContent(embedHtml(attributes)).run();
+}
+
+/** Insert one stored entity reference inline at the caret (PAGE-043). */
+export function insertPageEntityReference(editor: PageEditorRef, attributes: PageEntityReferenceAttributes): void {
+  editor
+    .chain()
+    .focus()
+    .insertContent({
+      type: "pageEntityReference",
+      attrs: attributes,
+    })
+    .run();
+}
+
+/** Set the link on the current selection in place (PAGE-043). */
+export function linkSelection(editor: PageEditorRef, href: string): void {
+  editor.chain().focus().setLink({ href }).run();
+}
+
+/** Remove the link mark from the selection (PAGE-043). */
+export function unlinkSelection(editor: PageEditorRef): void {
+  editor.chain().focus().unsetLink().run();
+}
+
+/** The selected text, or the text block under the caret (link prefill). */
+export function selectedPageText(editor: PageEditorRef): string {
+  const { $from } = editor.state.selection;
+  const selection = editor.state.selection;
+  if (selection.from !== undefined && selection.to !== undefined && selection.to > selection.from) {
+    // ProseMirror puts `textBetween` on the document, not on a resolved
+    // position, so a range's text comes from the document it belongs to.
+    const doc = $from.doc;
+    if (doc !== undefined) return doc.textBetween(selection.from, selection.to, " ");
+  }
+  return $from.parent.textContent ?? "";
+}
+
+/** Delete `length` characters immediately before the caret. */
+export function deleteContentBeforeCaret(editor: PageEditorRef, length: number): void {
+  const { $from } = editor.state.selection;
+  if (length <= 0 || $from.start === undefined || $from.parentOffset === undefined) return;
+  const caret = $from.start() + $from.parentOffset;
+  editor
+    .chain()
+    .focus()
+    .deleteRange({ from: caret - length, to: caret })
+    .run();
+}
+
+/** Text before the caret in its own block, for slash and @ queries. */
+export function pageTextBeforeCaret(editor: PageEditorRef): string {
+  const { $from } = editor.state.selection;
+  // The text comes from the caret's own block: a resolved position has no
+  // `textBetween`, only the node does (PAGE-037/041 trigger detection).
+  const block = $from.parent;
+  if (typeof block.textBetween !== "function" || $from.parentOffset === undefined) return "";
+  return block.textBetween(0, $from.parentOffset, undefined, "\ufffc");
 }

@@ -9,7 +9,7 @@
 // extend the same contract module rather than forking a copy, and the
 // assets pane (NEWFRONT-843) resolves display and download from the id.
 
-import { uploadPageAsset, type PageAssetByteUpload } from "@pidash/api-client";
+import { duplicatePageAsset, pageAssetUrl, uploadPageAsset, type PageAssetByteUpload } from "@pidash/api-client";
 
 import type { ApiClient } from "@pidash/api-client";
 
@@ -51,4 +51,72 @@ export async function uploadPageImage(
 export function pageImageUploadFailure(error: unknown): string {
   if (error instanceof Error && error.message.trim() !== "") return error.message;
   return "The image could not be uploaded.";
+}
+
+/**
+ * Clone an existing page image onto `pageId` (PAGE-039). A paste or block
+ * duplication from another page must not leave the body pointing at a
+ * foreign asset id, so the duplicate-assets contract returns the fresh id
+ * the cloned node stores.
+ */
+export async function clonePageImage(
+  client: ApiClient,
+  input: { workspaceSlug: string; projectId: string; pageId: string; sourceAssetId: string }
+): Promise<UploadedPageImage> {
+  const clone = await duplicatePageAsset(
+    client,
+    input.workspaceSlug,
+    input.projectId,
+    input.sourceAssetId,
+    input.pageId
+  );
+  return { assetId: clone.asset_id, assetUrl: pageAssetUrl(input.workspaceSlug, input.projectId, clone.asset_id) };
+}
+
+/** Bare stored asset ids inside pasted HTML (absolute sources excluded). */
+export function pastedAssetIds(html: string): string[] {
+  if (typeof globalThis.DOMParser === "undefined") return [];
+  const document = new DOMParser().parseFromString(html, "text/html");
+  const ids = new Set<string>();
+  for (const element of Array.from(document.querySelectorAll("image-component, img"))) {
+    const src = element.getAttribute("data-stored-src") ?? element.getAttribute("src") ?? "";
+    if (src === "" || /^(https?:|data:|blob:|\/)/i.test(src)) continue;
+    ids.add(src);
+  }
+  return [...ids];
+}
+
+/** Clone every foreign id in pasted markup, returning old→new ids. */
+export async function clonePastedAssets(
+  client: ApiClient,
+  input: { workspaceSlug: string; projectId: string; pageId: string },
+  html: string
+): Promise<Map<string, UploadedPageImage>> {
+  const clones = new Map<string, UploadedPageImage>();
+  for (const source of pastedAssetIds(html)) {
+    clones.set(source, await clonePageImage(client, { ...input, sourceAssetId: source }));
+  }
+  return clones;
+}
+
+/** Rewrite pasted image sources onto their cloned asset ids. */
+export function rewritePastedAssets(html: string, clones: ReadonlyMap<string, UploadedPageImage>): string {
+  if (typeof globalThis.DOMParser === "undefined" || clones.size === 0) return html;
+  const document = new DOMParser().parseFromString(html, "text/html");
+  for (const element of Array.from(document.querySelectorAll("image-component, img"))) {
+    const stored = element.getAttribute("data-stored-src") ?? element.getAttribute("src") ?? "";
+    const clone = clones.get(stored);
+    if (clone === undefined) continue;
+    element.setAttribute("src", clone.assetUrl === "" ? clone.assetId : clone.assetUrl);
+    element.setAttribute("data-stored-src", clone.assetId);
+    element.setAttribute("status", "uploaded");
+    // The assets pane names a row by its alt text, falling back to the
+    // stored source's file name (a UUID). Carry the old app's readable
+    // `image-<id>` label through the clone so the row stays legible
+    // (PAGE-039).
+    if ((element.getAttribute("alt") ?? "").trim() === "") {
+      element.setAttribute("alt", `image-${clone.assetId}`);
+    }
+  }
+  return document.body.innerHTML;
 }

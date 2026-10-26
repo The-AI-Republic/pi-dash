@@ -14,7 +14,8 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getPageBodyDraft, resetPageBodyDrafts, setPageBodyDraft } from "../lib/pageBodyDraft.js";
-import { PageEditorSurface, PAGE_BODY_LABEL, PAGE_BODY_PLACEHOLDER } from "./PageEditorSurface.js";
+import { getPageBodyActions, resetPageBodyActions } from "../lib/pageBodyActions.js";
+import { openPageImagePicker, PageEditorSurface, PAGE_BODY_LABEL, PAGE_BODY_PLACEHOLDER } from "./PageEditorSurface.js";
 
 const EDITOR_TEST_TIMEOUT = 30_000;
 
@@ -26,10 +27,19 @@ vi.mock("../../../shared/shell/toaster.js", () => ({
 const appClient = vi.hoisted(() => ({ getAppClient: vi.fn(() => ({ kind: "app-client" })) }));
 vi.mock("../../../core/api/client.js", () => ({ getAppClient: appClient.getAppClient }));
 
-const pageAssets = vi.hoisted(() => ({ uploadPageAsset: vi.fn() }));
+const pageAssets = vi.hoisted(() => ({
+  uploadPageAsset: vi.fn(),
+  duplicatePageAsset: vi.fn(),
+  searchEntityPreviews: vi.fn(),
+}));
 vi.mock("@pidash/api-client", async (original) => {
   const actual = await original<typeof import("@pidash/api-client")>();
-  return { ...actual, uploadPageAsset: pageAssets.uploadPageAsset };
+  return {
+    ...actual,
+    uploadPageAsset: pageAssets.uploadPageAsset,
+    duplicatePageAsset: pageAssets.duplicatePageAsset,
+    searchEntityPreviews: pageAssets.searchEntityPreviews,
+  };
 });
 
 function mount(props: Partial<React.ComponentProps<typeof PageEditorSurface>> = {}): ReturnType<typeof render> {
@@ -65,11 +75,50 @@ async function body(): Promise<HTMLElement> {
   return editable;
 }
 
+/** Dispatch a stored-markup paste the editor's capture handler reads. */
+function clipboardPaste(target: HTMLElement, html: string): void {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { getData: (type: string) => (type === "text/html" ? html : "") },
+  });
+  target.dispatchEvent(event);
+}
+
+/** Dispatch a plain-text paste with no markup flavour. */
+function plainPaste(target: HTMLElement, text: string): void {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { getData: (type: string) => (type === "text/plain" ? text : "") },
+  });
+  target.dispatchEvent(event);
+}
+
+/** Put a collapsed caret after `needle`, where a "/" trigger belongs. */
+function caretAtEndOf(root: HTMLElement, needle: string): void {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const text = node.textContent ?? "";
+    if (!text.includes(needle)) continue;
+    const range = document.createRange();
+    range.setStart(node, text.indexOf(needle) + needle.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+    return;
+  }
+  throw new Error(`no text node holds ${needle}`);
+}
+
 afterEach(() => {
   resetPageBodyDrafts();
+  resetPageBodyActions();
   toaster.notifyError.mockReset();
   appClient.getAppClient.mockClear();
   pageAssets.uploadPageAsset.mockReset();
+  pageAssets.duplicatePageAsset.mockReset();
+  pageAssets.searchEntityPreviews.mockReset();
 });
 
 describe(
@@ -146,6 +195,23 @@ describe(
       await vi.waitFor(() =>
         expect(screen.getByRole("button", { name: "Bold" })).toHaveAttribute("aria-pressed", "true")
       );
+    });
+
+    it("keeps the transient surfaces out of the measured body container (PAGE-037/049)", async () => {
+      mount();
+      const editable = await body();
+      const user = userEvent.setup();
+      // Type a slash at the caret: the palette opens as a real user sees it.
+      editable.focus();
+      caretAtEndOf(editable, "Stored words");
+      await user.keyboard(" /he");
+      const palette = await screen.findByTestId("page-slash-palette", undefined, { timeout: 10_000 });
+      const container = editable.closest(".editor-container");
+      expect(container).not.toBeNull();
+      // The pane counts the blocks inside `.editor-container`, so a palette
+      // row rendered there would lift Characters/Paragraphs as you type.
+      expect(container?.contains(palette)).toBe(false);
+      expect(container?.contains(screen.getByTestId("page-body-interactions"))).toBe(false);
     });
 
     it("reopens a body typed earlier this session over the stored one", async () => {
@@ -365,6 +431,9 @@ describe(
       const editable = await body();
       const user = userEvent.setup();
       await user.dblClick(within(editable).getByText("Stored words"));
+      // The mark must own a text selection before the colour command runs;
+      // a click in the popover tears down a selection that has not landed.
+      await vi.waitFor(() => expect(window.getSelection()?.toString().trim()).not.toBe(""));
       fireEvent.click(screen.getByRole("button", { name: "Color" }));
       fireEvent.click(await screen.findByRole("button", { name: "Letter color Pink" }));
       await vi.waitFor(() => expect(editable.querySelector('[data-text-color="pink"]')).not.toBeNull());
@@ -383,6 +452,93 @@ describe(
         const row = await screen.findByTestId(`page-color-row-${kind}`);
         expect(within(row).getAllByRole("button")).toHaveLength(9);
       }
+    });
+    it("clones a foreign pasted asset before it lands", async () => {
+      pageAssets.duplicatePageAsset.mockResolvedValue({ asset_id: "asset-cloned" });
+      mount();
+      const editable = await body();
+      clipboardPaste(editable, '<image-component data-stored-src="asset-foreign"></image-component>');
+
+      await vi.waitFor(() => expect(pageAssets.duplicatePageAsset).toHaveBeenCalledTimes(1));
+      const call = pageAssets.duplicatePageAsset.mock.calls[0] as unknown[];
+      expect(call[1]).toBe("acme");
+      expect(call[2]).toBe("project-1");
+      expect(call[3]).toBe("asset-foreign");
+      expect(call[4]).toBe("page-1");
+      await vi.waitFor(() =>
+        expect(editable.querySelector("image-component")?.getAttribute("data-stored-src")).toBe("asset-cloned")
+      );
+    });
+
+    it("opens the surface's own picker from another entry", () => {
+      mount();
+      const input = screen.getByTestId("page-toolbar-image-input") as HTMLInputElement;
+      const click = vi.spyOn(input, "click").mockImplementation(() => undefined);
+      openPageImagePicker();
+      expect(click).toHaveBeenCalledTimes(1);
+    });
+
+    it("publishes the copy entry before the editor handle exists", async () => {
+      mount();
+      await vi.waitFor(() => expect(getPageBodyActions()).not.toBeNull());
+      const writeText = vi.fn(async () => undefined);
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      await getPageBodyActions()?.copyMarkdown();
+      expect(writeText).toHaveBeenCalledWith("Stored words\n");
+      vi.unstubAllGlobals();
+    });
+
+    it("reports a refused clone instead of pasting the foreign asset", async () => {
+      pageAssets.duplicatePageAsset.mockRejectedValue(new Error("Clone refused."));
+      mount();
+      const editable = await body();
+      clipboardPaste(editable, '<image-component data-stored-src="asset-foreign"></image-component>');
+      await vi.waitFor(() => expect(toaster.notifyError).toHaveBeenCalledWith("Clone refused."));
+      expect(editable.querySelector("image-component")).toBeNull();
+    });
+
+    it("turns a pasted known work-item key into an entity preview (PAGE-043)", async () => {
+      pageAssets.searchEntityPreviews.mockResolvedValue({
+        issue: [
+          {
+            name: "Fix login",
+            id: "11111111-1111-4111-8111-111111111111",
+            sequence_id: 42,
+            project__identifier: "WEB",
+            project_id: "22222222-2222-4222-8222-222222222222",
+            priority: "medium",
+            state_id: "33333333-3333-4333-8333-333333333333",
+            type_id: null,
+          },
+        ],
+      });
+      mount({ descriptionHtml: "<p></p>" });
+      const editable = await body();
+      plainPaste(editable, "WEB-42");
+      await vi.waitFor(() => expect(pageAssets.searchEntityPreviews).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() =>
+        expect(editable.querySelector("entity-reference-component")?.getAttribute("data-label")).toBe("Fix login")
+      );
+    });
+
+    it("keeps an unknown pasted key as ordinary text", async () => {
+      pageAssets.searchEntityPreviews.mockResolvedValue({ issue: [] });
+      mount({ descriptionHtml: "<p></p>" });
+      const editable = await body();
+      plainPaste(editable, "WEB-99");
+      await vi.waitFor(() => expect(pageAssets.searchEntityPreviews).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(editable.textContent).toContain("WEB-99"));
+      expect(editable.querySelector("entity-reference-component")).toBeNull();
+    });
+
+    it("keeps a pasted key as text when the entity search fails", async () => {
+      pageAssets.searchEntityPreviews.mockRejectedValue(new Error("offline"));
+      mount({ descriptionHtml: "<p></p>" });
+      const editable = await body();
+      plainPaste(editable, "WEB-42");
+      await vi.waitFor(() => expect(pageAssets.searchEntityPreviews).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(editable.textContent).toContain("WEB-42"));
+      expect(editable.querySelector("entity-reference-component")).toBeNull();
     });
   },
   EDITOR_TEST_TIMEOUT

@@ -12,6 +12,7 @@
 // what the tests pin is exactly what the editor runs.
 
 import { MENTION_ENTITY, MENTION_TAG, mentionLabel } from "./mention.js";
+import { isCurrentMentionUser, mentionNameFor, subscribeMentionDirectory } from "./mentionDirectory.js";
 
 type TiptapCore = typeof import("@tiptap/core");
 type TiptapImage = typeof import("@tiptap/extension-image").default;
@@ -21,7 +22,11 @@ type TiptapImage = typeof import("@tiptap/extension-image").default;
  * Built inside the lazy loaders because the boundary check allows
  * Tiptap only through import().
  */
-function createMentionNode(Node: TiptapCore["Node"], mergeAttributes: TiptapCore["mergeAttributes"]) {
+function createMentionNode(
+  Node: TiptapCore["Node"],
+  mergeAttributes: TiptapCore["mergeAttributes"],
+  workspaceSlug = ""
+) {
   return Node.create({
     name: "mention",
     group: "inline",
@@ -51,18 +56,40 @@ function createMentionNode(Node: TiptapCore["Node"], mergeAttributes: TiptapCore
         const attrs = node.attrs as {
           "data-name"?: string | null;
           entity_identifier?: string | null;
+          entity_name?: string | null;
           id?: string | null;
         };
         const dom = document.createElement(MENTION_TAG);
         dom.setAttribute("contenteditable", "false");
+        // The live editor carries the same class the read surface uses so
+        // a page's mention is one observable component wherever it renders
+        // (PAGE-041).
+        dom.className = "mention-component";
         for (const [name, value] of Object.entries(attrs)) {
           if (typeof value === "string" && value !== "") dom.setAttribute(name, value);
         }
-        const chip = document.createElement("span");
-        chip.className = "mention-chip";
-        chip.textContent = mentionLabel(attrs["data-name"], attrs.entity_identifier ?? attrs.id);
+        const identifier = attrs.entity_identifier ?? attrs.id;
+        const href =
+          workspaceSlug !== "" && (attrs.entity_name ?? MENTION_ENTITY) === MENTION_ENTITY && identifier
+            ? `/${workspaceSlug}/profile/${encodeURIComponent(identifier)}`
+            : null;
+        const chip = document.createElement(href === null ? "span" : "a");
+        if (href !== null) chip.setAttribute("href", href);
+        const paint = (): void => {
+          const current = isCurrentMentionUser(identifier);
+          chip.className = current ? "mention-chip mention-chip-current" : "mention-chip";
+          if (current) chip.setAttribute("data-current-user", "true");
+          else chip.removeAttribute("data-current-user");
+          const name = mentionNameFor(identifier, attrs["data-name"]);
+          chip.textContent = name === "" ? mentionLabel(null, identifier) : `@${name}`;
+        };
+        paint();
+        const unsubscribe = subscribeMentionDirectory(paint);
         dom.append(chip);
-        return { dom };
+        return {
+          dom,
+          destroy: () => unsubscribe(),
+        };
       };
     },
     renderText({ node }) {
@@ -160,15 +187,20 @@ export async function loadStoredImageExtension() {
 }
 
 /** Description editing: paragraphs, headings, lists, code, links. */
-export async function loadDescriptionExtensions() {
+export async function loadDescriptionExtensions(options: { horizontalRule?: boolean } = {}) {
   const [{ default: StarterKit }, { default: Link }] = await Promise.all([
     import("@tiptap/starter-kit"),
     import("@tiptap/extension-link"),
   ]);
   // Links stay inert while editing: a click moves the caret instead of
   // navigating away mid-edit. Serialized links keep the extension's
-  // default target/rel (pinned in compat.test.ts).
-  return [StarterKit, Link.configure({ openOnClick: false })];
+  // default target/rel (pinned in compat.test.ts). The page set supplies
+  // its own stored-form divider node (PAGE-037), so it turns StarterKit's
+  // `<hr>` rule off.
+  return [
+    StarterKit.configure(options.horizontalRule === false ? { horizontalRule: false } : {}),
+    Link.configure({ openOnClick: false }),
+  ];
 }
 
 /**
@@ -177,13 +209,18 @@ export async function loadDescriptionExtensions() {
  * upload control and mentions through its lookup, so this set only has
  * to parse and serialize what those controls insert.
  */
+export async function loadMentionExtension(workspaceSlug = "") {
+  const [{ Node, mergeAttributes }] = await Promise.all([import("@tiptap/core")]);
+  return createMentionNode(Node, mergeAttributes, workspaceSlug);
+}
+
 export async function loadIssueDescriptionExtensions() {
-  const [{ default: Image }, { Node, mergeAttributes }, base] = await Promise.all([
+  const [{ default: Image }, base, mention] = await Promise.all([
     import("@tiptap/extension-image"),
-    import("@tiptap/core"),
     loadDescriptionExtensions(),
+    loadMentionExtension(),
   ]);
-  return [...base, createStoredImageNode(Image), createMentionNode(Node, mergeAttributes)];
+  return [...base, createStoredImageNode(Image), mention];
 }
 
 /**

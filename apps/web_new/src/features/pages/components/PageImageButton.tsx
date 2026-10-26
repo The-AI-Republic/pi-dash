@@ -34,9 +34,14 @@ export interface PageImageButtonProps {
   onPick: (file: File) => void;
   /** True while an upload is running; the tile refuses input meanwhile. */
   busy?: boolean | undefined;
+  /**
+   * Element id for the file input, so another surface (the slash menu's
+   * Image entry, PAGE-037) opens the same picker instead of forking one.
+   */
+  inputId?: string | undefined;
 }
 
-export function PageImageButton({ onPick, busy = false }: PageImageButtonProps): React.ReactElement {
+export function PageImageButton({ onPick, busy = false, inputId }: PageImageButtonProps): React.ReactElement {
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 
   return (
@@ -63,6 +68,7 @@ export function PageImageButton({ onPick, busy = false }: PageImageButtonProps):
       {pickerPortal(
         <input
           ref={inputRef}
+          {...(inputId === undefined ? {} : { id: inputId })}
           data-testid={PAGE_IMAGE_INPUT_TEST_ID}
           type="file"
           accept="image/*"

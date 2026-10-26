@@ -146,6 +146,27 @@ export interface SlotComponents {
    * across editions; a rename is a breaking change.
    */
   pageNavigationPane?: ComponentType<PageNavigationPaneSlotProps>;
+  /**
+   * Work-item embed resolver (PAGE-040, parity/specs/pages.md §13.4).
+   * The page body owns the atomic embed node and its stored identifiers;
+   * a licensed edition fills this with a component that resolves the
+   * referenced item and opens its peek. The OSS/community edition leaves
+   * it absent and renders the upgrade prompt with an outbound link. The
+   * name is stable across editions; a rename is a breaking change.
+   */
+  "page.embed.workItem"?: ComponentType<PageEmbedSlotProps>;
+}
+
+/** What an edition's work-item embed renderer receives (PAGE-040). */
+export interface PageEmbedSlotProps {
+  /** Stored identifiers the atomic node carries. */
+  attributes: {
+    id: string;
+    entity_identifier: string;
+    project_identifier: string;
+    workspace_identifier: string;
+    entity_name: string;
+  };
 }
 
 /** What an edition's replacement pane body receives (PAGE-045). */
