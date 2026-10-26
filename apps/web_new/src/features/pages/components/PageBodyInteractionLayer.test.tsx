@@ -889,6 +889,16 @@ describe("assistant menu (PAGE-075)", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
   });
+
+  it("ignores Escape when every transient surface is shut (PAGE-075)", () => {
+    const page = handle();
+    (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("plain prose");
+    mount({ getHandle: () => page, assistantReady: true });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByTestId("page-assistant-menu")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Heading 2" })).not.toBeInTheDocument();
+    expect(page.deleteBeforeCaret).not.toHaveBeenCalled();
+  });
 });
 
 describe("cloud slash registry (PAGE-078)", () => {
