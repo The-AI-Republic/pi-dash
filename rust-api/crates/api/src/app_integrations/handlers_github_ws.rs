@@ -980,9 +980,21 @@ fn encrypt_token(state: &AppState, token: &str) -> String {
     pidash_services::license::encryption::encrypt_data(&keyring, Some(token))
 }
 
-/// `timezone.now().isoformat()`: UTC with microseconds and `+00:00`.
+/// `timezone.now().isoformat()`: UTC with `+00:00`; microseconds render
+/// as six digits when nonzero and are omitted on whole-second stamps
+/// (Python drops the fraction when `microsecond == 0`). Reuses the
+/// PIDASHCONV-1464 rule ([`crate::assistant::common::py_iso`]), which
+/// reads microsecond precision like Django's clock, so sub-microsecond
+/// nanos never render.
 fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+    now_iso_at(&chrono::Utc::now())
+}
+
+/// Clock-injected core of [`now_iso`] so tests pin the whole-second shape
+/// deterministically (the live clock lands on a second boundary ~1e-6 of
+/// calls).
+fn now_iso_at(now: &chrono::DateTime<chrono::Utc>) -> String {
+    crate::assistant::common::py_iso(now)
 }
 
 // ---------------------------------------------------------------------------
@@ -1681,9 +1693,23 @@ mod tests {
         let rendered = now_iso();
         assert!(rendered.contains('T'), "{rendered}");
         assert!(rendered.ends_with("+00:00"), "{rendered}");
-        // Microseconds, always: `...SS.ffffff+00:00`.
-        let frac = rendered.split('.').nth(1).expect("fraction");
-        assert_eq!(frac.len(), 6 + "+00:00".len(), "{rendered}");
+        // The fraction appears only when nonzero: `...SS.ffffff+00:00`,
+        // else the bare whole-second `...SS+00:00` (PIDASHCONV-1511).
+        if let Some((_, frac)) = rendered.split_once('.') {
+            assert_eq!(frac.len(), 6 + "+00:00".len(), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn now_iso_omits_fraction_on_whole_second() {
+        let whole = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00+00:00")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(now_iso_at(&whole), "2026-01-01T00:00:00+00:00");
+        let micros = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.120000+00:00")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(now_iso_at(&micros), "2026-01-01T00:00:00.120000+00:00");
     }
 
     #[test]
