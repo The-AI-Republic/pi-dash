@@ -322,7 +322,7 @@ fn estimates_sql() -> String {
             group("started"),
             group("cancelled"),
             group("completed"),
-            "SUM(CAST(ep.value AS DOUBLE PRECISION)) AS total".to_owned(),
+            "COALESCE(SUM(CAST(ep.value AS DOUBLE PRECISION)), 0.0) AS total".to_owned(),
         ]
         .join(", "),
         ISSUE_SCOPE_SQL
@@ -361,13 +361,12 @@ fn or_zero(value: Option<f64>) -> Value {
     }
 }
 
-/// `total` is NOT passed through `or 0` (`base.py:774`): the
-/// `COALESCE` zero answers int `0`, a real zero sum answers `0.0`.
+/// `total` is NOT passed through `or 0` (`base.py:774`): Django's
+/// `Sum(default=0, output_field=FloatField())` compiles to
+/// `COALESCE(SUM(...), 0)` typed `double precision`, so the empty
+/// zero answers float `0.0` and renders raw.
 fn total_num(value: Option<f64>) -> Value {
-    match value {
-        None => Value::Number(0.into()),
-        Some(v) => json_float(v),
-    }
+    json_float(value.unwrap_or(0.0))
 }
 
 fn json_float(v: f64) -> Value {
@@ -593,8 +592,8 @@ mod tests {
     }
 
     #[test]
-    fn total_keeps_zero_float_but_coalesce_zero_is_int() {
-        assert_eq!(total_num(None), Value::Number(0.into()));
+    fn total_coalesce_zero_is_float() {
+        assert_eq!(total_num(None).to_string(), "0.0");
         assert_eq!(total_num(Some(0.0)).to_string(), "0.0");
         assert_eq!(total_num(Some(14.5)).to_string(), "14.5");
     }
@@ -618,12 +617,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_cycle_renders_int_zeros() {
-        // F-C27-08 "live-count branch, empty cycle": every value int 0.
+    fn empty_cycle_renders_float_total_int_groups() {
+        // F-C27-08 "live-count branch, empty cycle": the five group keys
+        // go through `or 0` (int 0); the total renders raw as 0.0.
         let body = progress_envelope([None; 5], None, [0; 6]);
         assert_eq!(
             body,
-            r#"{"backlog_estimate_points":0,"unstarted_estimate_points":0,"started_estimate_points":0,"cancelled_estimate_points":0,"completed_estimate_points":0,"total_estimate_points":0,"backlog_issues":0,"total_issues":0,"completed_issues":0,"cancelled_issues":0,"started_issues":0,"unstarted_issues":0}"#
+            r#"{"backlog_estimate_points":0,"unstarted_estimate_points":0,"started_estimate_points":0,"cancelled_estimate_points":0,"completed_estimate_points":0,"total_estimate_points":0.0,"backlog_issues":0,"total_issues":0,"completed_issues":0,"cancelled_issues":0,"started_issues":0,"unstarted_issues":0}"#
         );
     }
 
@@ -696,6 +696,7 @@ mod tests {
             "i.is_draft = FALSE",
             "NOT (s.group = 'triage')",
             "CAST(ep.value AS DOUBLE PRECISION)",
+            "COALESCE(SUM(CAST(ep.value AS DOUBLE PRECISION)), 0.0) AS total",
         ] {
             assert!(
                 sql.contains(fragment),
