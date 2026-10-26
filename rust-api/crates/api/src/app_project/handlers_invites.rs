@@ -3894,7 +3894,9 @@ async fn board_partial_update(
     // `BOARD_PATCH_BODY_SPEC` already dropped the bools and
     // `updated_by`), and an HTML `view_props` string JSON-decodes (the
     // `JSONString` mark) — or fails the field below. The JSON arm skips
-    // all of this: `""` runs `to_internal_value` there.
+    // all of this: `""` runs `to_internal_value` there, except on the
+    // PK keys, where the `RelatedField` rule maps it to null first
+    // (PIDASHCONV-1518).
     let mut data = data.clone();
     let mut view_props_json_failed = false;
     let mut view_props_decoded_null = false;
@@ -4004,12 +4006,12 @@ async fn board_partial_update(
         if let Some(value) = data.get(field) {
             match validate_patch_pk(&pool, table, live_only, value).await? {
                 // `updated_by` validates (a bad value still 400s) but
-                // never writes: `perform_update` passes
-                // `updated_by=request.user` to `save()`, and DRF
-                // `save(**kwargs)` overwrites the validated value, so
-                // the audit stamp below always wins — emitting both
-                // would double-SET the column (Postgres 42601,
-                // PIDASHCONV-1518).
+                // never writes: `BaseModel.save()` re-stamps
+                // `updated_by` to the current user on every update
+                // (`db/models/base.py`, via crum), overwriting the
+                // validated value — so the audit stamp below always
+                // wins, and emitting both would double-SET the column
+                // (Postgres 42601, PIDASHCONV-1518).
                 PkValidation::Null => {
                     if field != "updated_by" {
                         sets.push((column, PatchValue::Null));

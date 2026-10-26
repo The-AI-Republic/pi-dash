@@ -1,9 +1,9 @@
 """Contract tests: board PATCH audit/PK edge inputs (PIDASHCONV-1518).
 
 Two JSON-path divergences (plus the review-requested form twin), all
-probed live on Django: ``updated_by`` present (null or UUID) must 200
-with the audit stamp winning over the validated value, and blank-string
-PKs (``intake`` / ``created_by``) must 200 as null (DRF
+probed live on Django: ``updated_by`` present (null, blank, or UUID)
+must 200 with the audit stamp winning over the validated value, and
+blank-string PKs (``intake`` / ``created_by``) must 200 as null (DRF
 ``RelatedField.run_validation`` forces ``''`` to ``None``). Every test
 below runs unchanged against Django and against Rust with identical
 expectations.
@@ -21,15 +21,16 @@ def _form(**fields):
 
 
 def test_board_patch_json_updated_by_stamp_wins(world, db):
-    # `updated_by` validates but never writes: `perform_update` passes
-    # `updated_by=request.user` to `save()`, and DRF `save(**kwargs)`
-    # overwrites the validated value — the stamp always wins.
+    # `updated_by` validates but never writes: `BaseModel.save()`
+    # re-stamps it to the current user on every update, overwriting the
+    # validated value (null, blank, or another user) — the stamp wins.
     client, user, ws, project = world.full_stack()
     other, _ = world.add_member(ws, project)
     base = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/project-deploy-boards/"
     board_id = client.post(base, json={}).json()["id"]
     url = f"{base}{board_id}/"
-    for payload in ({"updated_by": None}, {"updated_by": str(other["id"])}):
+    for payload in ({"updated_by": None}, {"updated_by": ""},
+                    {"updated_by": str(other["id"])}):
         resp = client.patch(url, json=payload)
         assert resp.status_code == 200, (payload, resp.text[:300])
         assert resp.json()["updated_by"] == str(user["id"])
