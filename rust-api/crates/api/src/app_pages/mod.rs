@@ -497,8 +497,10 @@ async fn resolve_project_id(pool: &PgPool, slug: &str, raw: &str) -> Result<uuid
 /// `Project` uses `SoftDeletionManager` (`db/mixins.py:56-66`), so a missing
 /// or soft-deleted row raises `DoesNotExist` → the `handle_exception` 404
 /// `{"error":"The required object does not exist."}`. Not workspace-scoped,
-/// matching `pk=` exactly; only these three handlers read the row (the
-/// permission layer, the favorite route, versions and duplicate never do).
+/// matching `pk=` exactly; create reads the same row through its own
+/// workspace lookup (`PageSerializer.create`, `page.py:69-70`) instead of
+/// this helper. The permission layer, the favorite route, versions and
+/// duplicate never read the row.
 async fn require_live_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<(), Denial> {
     let row: Option<(uuid::Uuid,)> =
         sqlx::query_as(r#"SELECT p.id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#)
@@ -3852,16 +3854,24 @@ pub async fn page_create(
     {
         return Denial::ServerError.into_response();
     }
-    let workspace_id: uuid::Uuid =
-        match sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(Some((id,))) => id,
-            Ok(None) => return Denial::ProjectNotFound.into_response(),
-            Err(_) => return Denial::ServerError.into_response(),
-        };
+    // `Project.objects.get(pk=project_id)` (`page.py:69-70`): the create
+    // serializer reads the live project row before `Page.objects.create`,
+    // and `Project` uses `SoftDeletionManager`, so a missing or
+    // soft-deleted row raises `DoesNotExist` → the `handle_exception` 404
+    // `{"error":"The required object does not exist."}` with nothing
+    // written. After `validate_page_fields` (serializer 400s win) and
+    // before any insert, matching `is_valid()` → `save()` order.
+    let workspace_id: uuid::Uuid = match sqlx::query_as(
+        r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some((id,))) => id,
+        Ok(None) => return Denial::ObjectNotFound.into_response(),
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let timezone = match actor_timezone(pool, &user_id).await {
         Ok(tz) => tz,
         Err(denial) => return denial.into_response(),
