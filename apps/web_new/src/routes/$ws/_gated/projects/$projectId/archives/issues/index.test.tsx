@@ -13,11 +13,33 @@ import {
 } from "@tanstack/react-router";
 import type { ProjectDetail } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../../../../core/api/client.js";
 import { authKeys } from "../../../../../../../features/auth/index.js";
 import { Route } from "./index.js";
+
+// The tab body owns the list and its reads; this suite proves the route
+// hands it the address selection and writes/clears the peek params
+// without pushing history.
+const archiveScreenProps = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
+const archiveNavigate = vi.hoisted(() => ({ fn: vi.fn() }));
+vi.mock("../../../../../../../features/issues/contexts/ArchivedIssuesScreen.js", () => ({
+  ArchivedIssuesScreen: (props: Record<string, unknown>) => {
+    archiveScreenProps.current = props;
+    return <div data-testid="archived-screen" />;
+  },
+}));
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@tanstack/react-router")>();
+  return {
+    ...original,
+    useNavigate:
+      () =>
+      (...args: unknown[]) =>
+        archiveNavigate.fn(...args),
+  };
+});
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
@@ -78,6 +100,10 @@ function renderTab(seedRow: boolean) {
   return router;
 }
 
+beforeEach(() => {
+  archiveNavigate.fn.mockClear();
+});
+
 afterEach(() => {
   resetAppClient();
   vi.restoreAllMocks();
@@ -99,5 +125,55 @@ describe("archived work-items tab route", () => {
     await waitFor(() => expect(router.state.isLoading).toBe(false));
     expect(document.title).toBe("Archives");
     expect(screen.queryByTestId("archives-shell")).toBeNull();
+  });
+});
+
+describe("archived work-items tab peek address", () => {
+  it("clears every peek param when the selection clears", async () => {
+    vi.spyOn(Route, "useSearch").mockReturnValue({
+      peekIssueId: UUID,
+      peekProjectId: "p-2",
+      peekNestingLevel: "1",
+      layout: "compact",
+    } as never);
+    renderTab(true);
+    await screen.findByTestId("archived-screen");
+    const onPeekChange = archiveScreenProps.current?.["onPeekChange"] as (id: string | null) => void;
+    onPeekChange(null);
+    expect(archiveNavigate.fn).toHaveBeenCalledWith({
+      to: ".",
+      search: { layout: "compact" },
+      replace: true,
+    });
+  });
+
+  it("writes the item and drops the nested peek params", async () => {
+    vi.spyOn(Route, "useSearch").mockReturnValue({
+      peekIssueId: UUID,
+      peekProjectId: "p-2",
+      peekNestingLevel: "1",
+      layout: "compact",
+    } as never);
+    renderTab(true);
+    await screen.findByTestId("archived-screen");
+    const onPeekChange = archiveScreenProps.current?.["onPeekChange"] as (id: string | null) => void;
+    onPeekChange("423e4567-e89b-12d3-a456-426614174003");
+    expect(archiveNavigate.fn).toHaveBeenCalledWith({
+      to: ".",
+      search: { peekIssueId: "423e4567-e89b-12d3-a456-426614174003", layout: "compact" },
+      replace: true,
+    });
+  });
+
+  it("parses the address search into the issue-search shape", () => {
+    const validate = Route.options.validateSearch as (search: Record<string, unknown>) => Record<string, unknown>;
+    expect(validate({ peekIssueId: UUID, layout: "compact" })).toMatchObject({ peekIssueId: UUID });
+  });
+
+  it("does not touch the address for a plain first mount", async () => {
+    vi.spyOn(Route, "useSearch").mockReturnValue({ layout: "compact" } as never);
+    renderTab(true);
+    await screen.findByTestId("archived-screen");
+    expect(archiveNavigate.fn).not.toHaveBeenCalled();
   });
 });

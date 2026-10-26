@@ -246,6 +246,12 @@ describe("ListRow", () => {
     expect(screen.queryByRole("button", { name: /^Actions for/ })).not.toBeInTheDocument();
   });
 
+  it("suppresses the quick-action menu for a read-only surface (archived rows)", () => {
+    renderRow(<ListRow {...props({ showMenu: false })} />);
+    expect(screen.queryByRole("button", { name: /^Actions for/ })).not.toBeInTheDocument();
+    expect(screen.queryAllByRole("menuitem", { hidden: true })).toHaveLength(0);
+  });
+
   it("takes an explicit write standing and a change hook from the layout (ISS-063)", async () => {
     const onMenuChanged = vi.fn();
     renderRow(

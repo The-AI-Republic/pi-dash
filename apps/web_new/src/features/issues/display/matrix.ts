@@ -126,6 +126,19 @@ const FULL_ORDERS: readonly string[] = [
   "target_date",
 ];
 
+const ARCHIVED_GROUP: readonly (string | null)[] = [
+  "state",
+  "cycle",
+  "module",
+  "priority",
+  "labels",
+  "assignees",
+  "created_by",
+  null,
+];
+
+const ARCHIVED_ORDERS: readonly string[] = ["sort_order", "-created_at", "-updated_at", "start_date", "-priority"];
+
 const SHEET_ORDERS: readonly string[] = ["sort_order", "-created_at", "-updated_at", "start_date", "-priority"];
 
 const ALL_PILLS: readonly string[] = [
@@ -194,6 +207,22 @@ export function layoutDisplayMatrix(layout: LayoutKind): LayoutDisplayMatrix {
         switches: ["sub_issue"],
       };
   }
+}
+
+/**
+ * The archived work-items matrix (parity/specs/archives.md §2.3,
+ * ARCH-006). It is list-only: grouping, ordering and the live column
+ * set, with the empty-group switch but no sub-work-item switch and no
+ * item-type section. Reordering is not offered on this tab.
+ */
+export function archivedDisplayMatrix(): LayoutDisplayMatrix {
+  return {
+    properties: ALL_PILLS,
+    groupBy: ARCHIVED_GROUP,
+    subGroupBy: null,
+    orderBy: ARCHIVED_ORDERS,
+    switches: ["show_empty_groups"],
+  };
 }
 
 /** Project feature gates behind the cycle/module suppression. */
