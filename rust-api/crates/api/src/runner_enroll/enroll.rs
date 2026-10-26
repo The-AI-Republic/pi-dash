@@ -545,8 +545,8 @@ pub async fn check_anon_throttle(
     let xff = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok());
-    let remote = remote.map(|addr| addr.ip().to_string()).unwrap_or_default();
-    let ident = enroll_throttle::get_ident(xff, &remote);
+    let remote = remote.map(|addr| addr.ip().to_string());
+    let ident = enroll_throttle::get_ident(xff, remote.as_deref());
     let key = enroll_throttle::anon_cache_key(false, &ident).expect("anon key");
     let history: Vec<f64> = match redis.get_string(&key).await {
         Ok(Some(raw)) => decode_throttle_history(&raw),

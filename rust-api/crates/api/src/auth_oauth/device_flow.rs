@@ -73,6 +73,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
+use crate::auth_session::throttle_ident;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::auth_oauth::models::{api_token_device_flow, cli_device_code};
@@ -373,18 +374,6 @@ where
     }
 }
 
-/// DRF `get_ident` (`throttling.py:23-41`, `NUM_PROXIES` unset): the
-/// `X-Forwarded-For` header with all whitespace stripped, else the peer
-/// address.
-fn throttle_ident(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if !xff.is_empty() {
-            return xff.split_whitespace().collect();
-        }
-    }
-    peer.map(|p| p.ip().to_string()).unwrap_or_default()
-}
-
 fn now_secs_f64() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -411,7 +400,10 @@ async fn check_start_throttle(
         Some(parsed) => parsed,
         None => return Ok(()),
     };
-    let key = match device_start_cache_key(false, &throttle_ident(headers, peer)) {
+    let key = match device_start_cache_key(
+        false,
+        &throttle_ident(headers, peer.map(|p| p.ip().to_string())),
+    ) {
         Some(key) => key,
         None => return Ok(()),
     };
@@ -892,6 +884,14 @@ fn poll_gap() -> chrono::Duration {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn peerless_throttle_ident_is_drf_none() {
+        // PIDASHCONV-1419: with no XFF and no peer, DRF's `cache_format
+        // % {'ident': None}` renders "None", never "".
+        let headers = axum::http::HeaderMap::new();
+        assert_eq!(throttle_ident(&headers, None), "None");
+    }
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/auth_oauth")
