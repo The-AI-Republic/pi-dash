@@ -1635,6 +1635,7 @@ async fn wait_inner(
         issue.id,
         run_id,
         Some(pre.actor.id),
+        Some(pre.actor.id),
     )
     .await
     .map_err(|error| db_error(error, "wait-driver"))?;
