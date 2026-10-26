@@ -43,3 +43,9 @@ boto3>=1.34
 # PIDASHCONV-1290 (tasks_cleanup mongo oracle): plant the conflicting
 # archive document + unique index on `id`. Never touches Django.
 pymongo>=4.6
+
+# PIDASHCONV-1505 (tasks_webhooks link-crawl oracles): test_link_crawl_decoding.py
+# and test_link_crawl_rcdata.py import bs4 at module top. Pinned to the exact
+# version the oracles assert (bs4.__version__ == "4.12.3") and Django uses
+# (apps/api/requirements/base.txt) — a drift would reshape the entity table.
+beautifulsoup4==4.12.3
