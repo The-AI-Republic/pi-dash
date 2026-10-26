@@ -23059,16 +23059,16 @@ export class WebNewDriver implements ParityDriver {
         }))
       );
     // Levels share a 1:2:4 indentation ratio; ranking against the smallest
-    // keeps the reading honest under any root font size.
-    const min = rows.reduce((least, row) => Math.min(least, row.padding), Number.POSITIVE_INFINITY);
-    return rows
-      .filter((row) => row.text !== "")
-      .map((row) => {
-        const ratio = min > 0 && Number.isFinite(row.padding) ? row.padding / min : Number.NaN;
-        const level: 1 | 2 | 3 | null =
-          Math.abs(ratio - 1) < 0.01 ? 1 : Math.abs(ratio - 2) < 0.01 ? 2 : Math.abs(ratio - 4) < 0.01 ? 3 : null;
-        return { level, text: row.text };
-      });
+    // keeps the reading honest under any root font size. Blank rows drop
+    // out first so an empty node never sets the baseline.
+    const kept = rows.filter((row) => row.text !== "");
+    const min = kept.reduce((least, row) => Math.min(least, row.padding), Number.POSITIVE_INFINITY);
+    return kept.map((row) => {
+      const ratio = min > 0 && Number.isFinite(row.padding) ? row.padding / min : Number.NaN;
+      const level: 1 | 2 | 3 | null =
+        Math.abs(ratio - 1) < 0.01 ? 1 : Math.abs(ratio - 2) < 0.01 ? 2 : Math.abs(ratio - 4) < 0.01 ? 3 : null;
+      return { level, text: row.text };
+    });
   }
 
   async pagesPaneOutlineClick(text: string): Promise<void> {
