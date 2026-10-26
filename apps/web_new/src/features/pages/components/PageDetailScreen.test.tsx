@@ -1133,6 +1133,23 @@ describe("PageDetailScreen display preferences (PAGE-072)", () => {
     expect(harness.pageWrites).toHaveLength(0);
   });
 
+  it("applies the stored type size to a read-only title and body", async () => {
+    window.localStorage.setItem("pages_config", JSON.stringify({ font_size: "small-font", font_style: "serif" }));
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByText("This page is locked and read-only.");
+    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-small-font");
+    await waitFor(() =>
+      expect(document.querySelector(".editor-container")).toHaveClass("text-size-small-font", "text-face-serif")
+    );
+
+    cleanup();
+    window.localStorage.clear();
+    renderScreen();
+    await screen.findByText("This page is locked and read-only.");
+    expect(screen.getByTestId("page-detail-title")).toHaveClass("text-size-large-font");
+  });
+
   it("keeps the stored preferences across a remount (reload)", async () => {
     const first = renderScreen();
     void first;
