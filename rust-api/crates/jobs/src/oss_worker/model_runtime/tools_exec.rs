@@ -53,29 +53,53 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
+use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::admission::RedisAdmissionCache;
-use crate::dispatch::{append_event, dispatch_agent_run};
-use crate::orchestration::{LiveCreationStore, StoreDeps};
+use crate::dispatch::{append_event, dispatch_agent_run, DispatchDecision};
+use crate::orchestration::{
+    fire_tick_seam::{
+        create_ticker_sql, emit_logs, lock_ticker_by_issue_sql, map_ticker, save_clock_sql,
+    },
+    live_inputs::JobsMatcher,
+    preflight_eligibility_or_bounce, LiveCreationStore, StoreDeps,
+};
 use crate::queue::{enqueue, enqueue_in, NewJob};
+use crate::runner_runs::sweeps_chat::terminal_effects_job;
 use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::orchestration::querysets::MEMBER_PROJECT_ISSUES_SQL;
+use pidash_db::orchestration::workpad::AgentUserCollisionError;
+use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::markdown::to_safe_html;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
 use pidash_services::assistant::tools_issues::{escape_icontains, PROJECT_WRITE_GATE_SQL};
+use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::dispatch::tools as plan;
-use pidash_services::dispatch::{consume_admission_token, LlmProfile};
+use pidash_services::dispatch::{
+    admission::AdmissionCache, consume_admission_token, DeferredConsume, LlmProfile,
+};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
-use pidash_services::orchestration::creation::STATE_SELECT_SQL;
+use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
+use pidash_services::orchestration::creation::{
+    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
+    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
+    RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
+};
 use pidash_services::orchestration::entries::{
-    handle_issue_state_transition, PreflightSeam, TransitionRequest,
+    fire_state_transition, handle_issue_state_transition, BindingView, EntriesSeam, FireOutcome,
+    FireRequest, NewSchedulerRun, PreflightSeam, ProjectRoleFacts, SchedulerView,
+    TransitionRequest, WorkspaceView, CLOCK_POLICY_SQL, PRIOR_STATE_SELECT_SQL,
 };
 use pidash_services::orchestration::relations as rel;
+use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
+use pidash_services::runner_runs::{finalization, LifecycleEffect};
+use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
+use pidash_types::dispatch::AgentExecutorKind;
 
 use super::agent::{ToolExecutor, ToolOutcome};
 use super::github::{GithubAppContext, GithubFailure, GithubRestClient};
@@ -270,6 +294,11 @@ pub struct ToolCtx {
     pub github: GithubAppContext,
     /// Injected cloud-agent toolsets seam (transition store inputs).
     pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    /// Shared Redis client (`None` when `REDIS_URL` is unset or
+    /// unparsable): the create fire's pod drain (PIDASHCONV-1494).
+    pub redis: Option<redis::Client>,
+    /// Runner settings (the create fire's pod drain inputs).
+    pub runner: RunnerSettings,
 }
 
 /// The `_scope` outcome (`tools.py:46-73`): the run's tenant position
@@ -491,9 +520,26 @@ pub async fn write_commit(
     tool_name: &'static str,
     result: Value,
 ) -> Result<Value, ToolExecError> {
+    let run_id = audit.scope.run_id;
+    let value = write_commit_tx(ctx, audit, result).await?;
+    emit_completed(ctx, run_id, tool_name, plan::ToolRisk::Write).await?;
+    Ok(value)
+}
+
+/// Ledger success-mark plus commit: the write-path
+/// `transaction.atomic()` body (`tools.py:97-129`), without the
+/// `tool_completed` append (`tools.py:156`). The create caller commits
+/// through this so its post-save fire runs on commit-success — Django's
+/// signal fires inside the save, before the append — while the tool
+/// result still covers the append exactly as [`write_commit`] does.
+async fn write_commit_tx(
+    ctx: &ToolCtx,
+    audit: WriteAudit<'_>,
+    result: Value,
+) -> Result<Value, ToolExecError> {
     let WriteAudit {
         mut tx,
-        scope,
+        scope: _,
         ledger_id,
     } = audit;
     let bounded = plan::bounded(result.clone(), ctx.cloud.max_tool_result_bytes)?;
@@ -511,7 +557,6 @@ pub async fn write_commit(
         .execute(&mut **tx.inner())
         .await?;
     tx.commit().await?;
-    emit_completed(ctx, scope.run_id, tool_name, plan::ToolRisk::Write).await?;
     Ok(result)
 }
 
@@ -1115,12 +1160,14 @@ async fn state_view_tx(
 /// a tool-supplied completed state, insert the issue plus its
 /// sequence row, and return the brief. The title/description are
 /// pre-validated by the dispatch; `stripped_title` is what stores.
+/// Returns the brief plus the post-commit fire inputs — the caller
+/// drives [`fire_create_transition`] once the audit commits.
 async fn op_create_project_issue(
     tx: &mut Transaction<'_>,
     scope: &ToolScope,
     description: &str,
     stripped_title: &str,
-) -> Result<Value, ToolExecError> {
+) -> Result<(Value, CreateDispatch), ToolExecError> {
     // `run.scheduler_binding.project_id` (the raw attname): the tool
     // uses the binding's project even when the run also has a bound
     // issue in another project.
@@ -1293,8 +1340,619 @@ async fn op_create_project_issue(
         None,
     );
     let created = plan::issue_created(&plan::issue_brief(&detail));
-    serde_json::to_value(created)
-        .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
+    let value = serde_json::to_value(created).map_err(|error| {
+        ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
+    })?;
+    Ok((value, CreateDispatch { issue_id, state_id }))
+}
+
+/// What a create hands its caller for the post-commit orchestration
+/// fire (`signals.py:74-107`): the new issue plus its resolved state.
+/// `state_id` is `None` when the project has no state at all — the
+/// fire's early return (Django's `prev == current` no-op).
+struct CreateDispatch {
+    issue_id: Uuid,
+    state_id: Option<Uuid>,
+}
+
+/// Preflight for the tool's create: the live
+/// `preflight_eligibility_or_bounce` driver over the jobs
+/// [`JobsMatcher`]. A create is not an agent move (`moved_by_run` is
+/// `None`), so `dispatch_now` is reachable and the eligibility gate
+/// must run for real — the transition sibling's [`BinPreflight`] would
+/// fail closed here. Mirrors the api crate's `LivePreflight`; the deps
+/// travel by `Option` because the driver takes them by value while the
+/// seam only lends `&mut self`, and the driver consults preflight at
+/// most once per fire.
+struct LiveToolPreflight<C, H, P> {
+    pool: PgPool,
+    deps: Option<StoreDeps<C, H, P>>,
+    matcher: JobsMatcher,
+    now: DateTime<Utc>,
+    jitter_secs: f64,
+}
+
+impl<C, H, P> PreflightSeam for LiveToolPreflight<C, H, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    async fn preflight_eligibility_or_bounce(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+        triggered_by: &str,
+    ) -> Result<bool, pidash_services::orchestration::creation::CreationError> {
+        let Some(deps) = self.deps.take() else {
+            return Err(pidash_services::orchestration::creation::CreationError::Db(
+                "tool create reached preflight twice: the driver consults at most once".to_owned(),
+            ));
+        };
+        let out = preflight_eligibility_or_bounce(
+            &self.pool,
+            deps,
+            &self.matcher,
+            self.now,
+            self.jitter_secs,
+            issue_id,
+            Some(creator_id),
+            pod_id,
+            triggered_by,
+        )
+        .await
+        .map_err(|error| {
+            pidash_services::orchestration::creation::CreationError::Db(error.to_string())
+        })?;
+        emit_logs(&out.outcome.logs);
+        Ok(out.outcome.proceed)
+    }
+}
+
+/// The [`StoreDeps`] behind the create fire: the transition shape
+/// ([`drive_transition`]) — creator presence prefetched from the pool,
+/// the actor-is-creator closures — over the fire's own clock. Built
+/// twice per fire (store + preflight), like the v1 path's
+/// `dispatch_deps_for_ids` pair.
+fn create_fire_deps(
+    ctx: &ToolCtx,
+    creator: Uuid,
+    has_key: bool,
+    now_unix_secs: i64,
+) -> StoreDeps<
+    RedisAdmissionCache,
+    impl Fn(Uuid) -> bool + Clone + Send + Sync,
+    impl Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+> {
+    StoreDeps {
+        cloud: ctx.cloud.clone(),
+        managed: ctx.managed.clone(),
+        cache: RedisAdmissionCache::from_env(),
+        has_usable_llm_config: move |user: Uuid| user == creator && has_key,
+        toolsets: ctx.toolsets.clone(),
+        llm_profile: move |user: Option<Uuid>| {
+            let key = user == Some(creator) && has_key;
+            let profile = agent_model_profile_for_user(key);
+            LlmProfile {
+                available: profile.available,
+                reason_code: profile.reason_code,
+            }
+        },
+        now_unix_secs,
+    }
+}
+
+/// The create fire's transition seam: the api `LiveTransitionSeam`
+/// shape (PIDASHCONV-1216), which the jobs crate cannot reuse across
+/// the crate direction.
+///
+/// The ticker/clock seam methods run pool-direct (autocommit);
+/// everything else delegates to the tx-backed [`LiveCreationStore`].
+/// The split is load-bearing: the reconcile clock lock must not be
+/// held across `preflight_eligibility_or_bounce`, whose bounce opens
+/// its own transaction and locks the same ticker row. Autocommit per
+/// ticker statement mirrors Django's own separate reconcile atomic
+/// (which commits before preflight).
+struct LiveToolTransitionSeam<'a, C, H, P> {
+    pool: &'a PgPool,
+    store: LiveCreationStore<'a, C, H, P>,
+}
+
+/// One [`CLOCK_POLICY_SQL`] row: ticking flag, pool, impl/review/test
+/// cadence columns (the scheduler-dispatch alias shape).
+type ClockPolicyRow = (
+    Option<bool>,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
+);
+
+impl<'a, C, H, P> LiveToolTransitionSeam<'a, C, H, P> {
+    fn db(error: sqlx::Error) -> CreationError {
+        CreationError::Db(error.to_string())
+    }
+
+    /// Recover the transaction (to commit) plus the outboxes (to drain
+    /// after commit).
+    fn into_parts(
+        self,
+    ) -> (
+        Transaction<'a>,
+        &'a PgPool,
+        C,
+        Vec<Uuid>,
+        Vec<DeferredConsume>,
+        Vec<Uuid>,
+    ) {
+        self.store.into_parts()
+    }
+}
+
+impl<C, H, P> CreationSeam for LiveToolTransitionSeam<'_, C, H, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    async fn issue(&mut self, issue_id: Uuid) -> Result<IssueView, CreationError> {
+        self.store.issue(issue_id).await
+    }
+
+    async fn project(&mut self, project_id: Uuid) -> Result<ProjectView, CreationError> {
+        self.store.project(project_id).await
+    }
+
+    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
+        self.store.state(state_id).await
+    }
+
+    async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.store.latest_prior_run(issue_id).await
+    }
+
+    async fn active_run_for(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.store.active_run_for(issue_id).await
+    }
+
+    async fn run(&mut self, run_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.store.run(run_id).await
+    }
+
+    async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
+        self.store.runner(runner_id).await
+    }
+
+    async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
+        self.store.assigned_pod(pod_id).await
+    }
+
+    async fn default_pod_for_project(
+        &mut self,
+        project_id: Uuid,
+    ) -> Result<Option<PodView>, CreationError> {
+        self.store.default_pod_for_project(project_id).await
+    }
+
+    async fn resume_parent_run_id(
+        &mut self,
+        issue_id: Uuid,
+    ) -> Result<Option<Uuid>, CreationError> {
+        self.store.resume_parent_run_id(issue_id).await
+    }
+
+    async fn work_item_id_for_run(&mut self, run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
+        self.store.work_item_id_for_run(run_id).await
+    }
+
+    async fn lock_issue_for_handoff(
+        &mut self,
+        issue_id: Uuid,
+    ) -> Result<Option<LockedIssue>, CreationError> {
+        self.store.lock_issue_for_handoff(issue_id).await
+    }
+
+    async fn lock_run_for_handoff(
+        &mut self,
+        run_id: Uuid,
+    ) -> Result<Option<RunView>, CreationError> {
+        self.store.lock_run_for_handoff(run_id).await
+    }
+
+    async fn user_flags(&mut self, user_id: Uuid) -> Result<UserFlags, CreationError> {
+        self.store.user_flags(user_id).await
+    }
+
+    async fn insert_run(&mut self, row: &NewAgentRun) -> Result<RunView, CreationError> {
+        self.store.insert_run(row).await
+    }
+
+    async fn save_prompt(
+        &mut self,
+        run_id: Uuid,
+        prompt: &str,
+        manifest: &Value,
+    ) -> Result<(), CreationError> {
+        self.store.save_prompt(run_id, prompt, manifest).await
+    }
+
+    async fn save_run_config(&mut self, run_id: Uuid, config: &Value) -> Result<(), CreationError> {
+        self.store.save_run_config(run_id, config).await
+    }
+
+    async fn execution_fields(
+        &mut self,
+        req: &ExecutionRequest,
+    ) -> Result<ExecutionFields, ExecutionError> {
+        self.store.execution_fields(req).await
+    }
+
+    async fn lock_cloud_creation_capacity(
+        &mut self,
+        workspace_id: Uuid,
+        executor_kind: AgentExecutorKind,
+        automatic: bool,
+    ) -> Result<Option<AdmissionError>, CreationError> {
+        self.store
+            .lock_cloud_creation_capacity(workspace_id, executor_kind, automatic)
+            .await
+    }
+
+    fn dispatch_after_commit(&mut self, run_id: Uuid) {
+        self.store.dispatch_after_commit(run_id)
+    }
+
+    async fn render_bundle(
+        &mut self,
+        issue_id: Uuid,
+        run_id: Uuid,
+        parent_run_id: Option<Uuid>,
+        trigger: &str,
+        created_by_id: Uuid,
+    ) -> Result<RenderBundle, CreationError> {
+        self.store
+            .render_bundle(issue_id, run_id, parent_run_id, trigger, created_by_id)
+            .await
+    }
+
+    fn extra_toolsets_schema_tool(&self) -> String {
+        self.store.extra_toolsets_schema_tool()
+    }
+}
+
+impl<C, H, P> FinalizeAgentRunSeam for LiveToolTransitionSeam<'_, C, H, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    async fn finalize_failed_run(
+        &mut self,
+        run_id: Uuid,
+        error_code: &str,
+        error: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<RunView, CreationError> {
+        self.store
+            .finalize_failed_run(run_id, error_code, error, now)
+            .await
+    }
+}
+
+impl<C, H, P> EntriesSeam for LiveToolTransitionSeam<'_, C, H, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
+        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
+            .bind(issue_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(Self::db)?;
+        Ok(row.and_then(|(_, state_id)| state_id))
+    }
+
+    async fn queued_follow_up(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.store.queued_follow_up(issue_id).await
+    }
+
+    async fn lock_ticker(
+        &mut self,
+        issue_id: Uuid,
+    ) -> Result<Option<IssueAgentTicker>, CreationError> {
+        let row: Option<PgRow> = sqlx::query(&lock_ticker_by_issue_sql())
+            .bind(issue_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(Self::db)?;
+        row.map(|row| map_ticker(&row))
+            .transpose()
+            .map_err(Self::db)
+    }
+
+    async fn save_ticker(
+        &mut self,
+        row: &IssueAgentTicker,
+        write: ClockWrite,
+    ) -> Result<(), CreationError> {
+        match write {
+            ClockWrite::None => Ok(()),
+            ClockWrite::Insert => {
+                sqlx::query(&create_ticker_sql())
+                    .bind(row.created_at)
+                    .bind(row.created_by_id)
+                    .bind(row.id)
+                    .bind(row.issue_id)
+                    .bind(row.next_run_at)
+                    .bind(row.enabled)
+                    .bind(row.disarm_reason.as_str())
+                    .bind(row.pending_entry)
+                    .bind(row.pending_entry_free)
+                    .bind(row.pending_entry_actor_id)
+                    .bind(row.pending_entry_trigger.as_str())
+                    .bind(row.resume_parent_run_id)
+                    .execute(self.pool)
+                    .await
+                    .map_err(Self::db)?;
+                Ok(())
+            }
+            ClockWrite::Update => {
+                sqlx::query(&save_clock_sql())
+                    .bind(Utc::now())
+                    .bind(row.granted)
+                    .bind(row.next_run_at)
+                    .bind(row.enabled)
+                    .bind(row.disarm_reason.as_str())
+                    .bind(row.pending_entry)
+                    .bind(row.pending_entry_free)
+                    .bind(row.pending_entry_actor_id)
+                    .bind(row.pending_entry_trigger.as_str())
+                    .bind(row.resume_parent_run_id)
+                    .bind(row.id)
+                    .execute(self.pool)
+                    .await
+                    .map_err(Self::db)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn set_rollback(&mut self) {
+        self.store.set_rollback()
+    }
+
+    async fn clock_policy(
+        &mut self,
+        project_id: Uuid,
+    ) -> Result<ProjectClockPolicy, CreationError> {
+        let row: Option<ClockPolicyRow> = sqlx::query_as(CLOCK_POLICY_SQL)
+            .bind(project_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(Self::db)?;
+        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
+        else {
+            return Err(CreationError::MissingRow(format!(
+                "no clock policy {project_id}"
+            )));
+        };
+        Ok(ProjectClockPolicy {
+            agent_ticking_enabled: ticking_enabled,
+            agent_default_max_ticks: max_ticks,
+            agent_default_interval_seconds: interval.map(i64::from),
+            agent_review_default_interval_seconds: interval_review.map(i64::from),
+            agent_test_default_interval_seconds: interval_test.map(i64::from),
+        })
+    }
+
+    async fn binding(&mut self, binding_id: Uuid) -> Result<BindingView, CreationError> {
+        self.store.binding(binding_id).await
+    }
+
+    async fn scheduler_override_pod(
+        &mut self,
+        pod_id: Uuid,
+        project_id: Option<Uuid>,
+    ) -> Result<Option<PodView>, CreationError> {
+        self.store.scheduler_override_pod(pod_id, project_id).await
+    }
+
+    async fn workspace(&mut self, workspace_id: Uuid) -> Result<WorkspaceView, CreationError> {
+        self.store.workspace(workspace_id).await
+    }
+
+    async fn scheduler_row(&mut self, scheduler_id: Uuid) -> Result<SchedulerView, CreationError> {
+        self.store.scheduler_row(scheduler_id).await
+    }
+
+    async fn scheduler_override_rows(
+        &mut self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<OverrideRow>, CreationError> {
+        self.store.scheduler_override_rows(workspace_id).await
+    }
+
+    async fn project_role_facts(
+        &mut self,
+        user_id: Uuid,
+        workspace_slug: &str,
+        project_id: Uuid,
+    ) -> Result<ProjectRoleFacts, CreationError> {
+        self.store
+            .project_role_facts(user_id, workspace_slug, project_id)
+            .await
+    }
+
+    async fn has_usable_llm_config(&mut self, user_id: Uuid) -> Result<bool, CreationError> {
+        self.store.has_usable_llm_config(user_id).await
+    }
+
+    async fn agent_system_user(
+        &mut self,
+    ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError> {
+        self.store.agent_system_user().await
+    }
+
+    async fn insert_scheduler_run(
+        &mut self,
+        row: &NewSchedulerRun,
+    ) -> Result<RunView, CreationError> {
+        self.store.insert_scheduler_run(row).await
+    }
+
+    fn compose_scheduler_turn(
+        &mut self,
+        context: &Value,
+        index: &OverrideIndex,
+        workspace_id: Option<&str>,
+        executor_kind: Option<&str>,
+        tool_catalog_version: i64,
+    ) -> Result<RenderedTurn, String> {
+        self.store.compose_scheduler_turn(
+            context,
+            index,
+            workspace_id,
+            executor_kind,
+            tool_catalog_version,
+        )
+    }
+}
+
+/// The post-save fire for a tool-created issue
+/// (`fire_state_transition`, `signals.py:74-107`): a new row has no
+/// prior state, so creating directly in a ticking state arms the clock
+/// and creates the entry run — the v1 create fire (`fire_after_save`,
+/// PIDASHCONV-1216) over the tool's write.
+///
+/// Best-effort: the issue already committed, so nothing here fails the
+/// tool. A failed handler rolls the fire transaction back and logs the
+/// verbatim line (the counter already bumped inside); a lookup storage
+/// failure only warns. `created_by` is the run creator — the signal
+/// fires inside `impersonate(run.created_by)` (`tools.py:357`), so the
+/// crum user stamps the ticker row. The pool-direct clock writes are
+/// never rolled back (the api split seam's contract): a bounce or a
+/// late failure keeps the reconcile row, like Django.
+async fn fire_create_transition(
+    ctx: &ToolCtx,
+    creator_id: Uuid,
+    issue_id: Uuid,
+    state_id: Option<Uuid>,
+) {
+    let Some(current_state_id) = state_id else {
+        return;
+    };
+    let now = Utc::now();
+    let has_key = match crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(
+        &ctx.pool, creator_id,
+    )
+    .await
+    {
+        Ok(row) => row.as_ref().is_some_and(|row| row.has_api_key()),
+        Err(error) => {
+            tracing::warn!(%error, "tool create fire: llm presence lookup failed; fire skipped");
+            return;
+        }
+    };
+    let now_unix_secs = now.timestamp();
+    let store_deps = create_fire_deps(ctx, creator_id, has_key, now_unix_secs);
+    let preflight_deps = create_fire_deps(ctx, creator_id, has_key, now_unix_secs);
+    let tx = match Transaction::begin(&ctx.pool).await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(%error, "tool create fire: begin failed; fire skipped");
+            return;
+        }
+    };
+    let mut seam = LiveToolTransitionSeam {
+        pool: &ctx.pool,
+        store: LiveCreationStore::new(tx, &ctx.pool, store_deps),
+    };
+    let mut preflight = LiveToolPreflight {
+        pool: ctx.pool.clone(),
+        deps: Some(preflight_deps),
+        matcher: JobsMatcher::new(ctx.pool.clone()),
+        now,
+        jitter_secs: 0.0,
+    };
+    let request = FireRequest {
+        issue_id,
+        prev_state_id: None,
+        current_state_id: Some(current_state_id),
+        dispatch_immediate: true,
+        moved_by_run: None,
+        now,
+        // Caller-drawn jitter (L5 quirk-5): none, like the v1 create
+        // fire over the same entered-bucket event.
+        jitter_secs: 0.0,
+        created_by: Some(creator_id),
+    };
+    let outcome = fire_state_transition(&mut seam, &mut preflight, &request).await;
+    let (tx, pool, cache, dispatches, deferred, terminal_effects) = seam.into_parts();
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::warn!(%error, "tool create fire: state lookup failed; issue stands unfired");
+            return;
+        }
+    };
+    if !matches!(outcome, FireOutcome::Called(_)) {
+        // NoTransition (unreachable: a `Some` state always differs from
+        // the `None` prior) / Failed: nothing this drive wrote is kept.
+        let _ = tx.rollback().await;
+        if let FireOutcome::Failed { log_line, .. } = outcome {
+            tracing::error!("{log_line}");
+        }
+        return;
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(%error, "tool create fire: commit failed; issue stands unfired");
+        return;
+    }
+    for run_id in dispatches {
+        // The driver only *returns* the decision (`dispatch.py:61-70`
+        // drains the pod inline), so a `PodDrain` must be acted on here
+        // or the run stays QUEUED (PIDASHCONV-1494). Best-effort, like
+        // the rest of the fire: the entry run stands either way.
+        match dispatch_agent_run(pool, &ctx.cloud, run_id, now).await {
+            Ok(DispatchDecision::PodDrain { pod_id }) => {
+                if let Err(error) =
+                    drain_pod_by_id(pool, ctx.redis.as_ref(), &ctx.runner, pod_id).await
+                {
+                    tracing::warn!(%error, "tool create fire: pod drain failed");
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "tool create fire: entry-run dispatch failed");
+            }
+        }
+    }
+    for consume in &deferred {
+        consume_admission_token(&cache, consume);
+    }
+    for effect_id in terminal_effects {
+        for effect in finalization::plan_publish_effects(effect_id) {
+            match effect {
+                LifecycleEffect::PublishTerminalEffects { run_id } => {
+                    let job = terminal_effects_job(&run_id);
+                    if let Err(error) = enqueue(pool, &job).await {
+                        tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
+                    }
+                }
+                LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+                    tracing::warn!(
+                        "skipping inline terminal effects for run {run_id}: no live RunnerRunsSeams \
+                         (PIDASHCONV-859); the queued effects task covers the hooks idempotently"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2699,18 +3357,50 @@ async fn dispatch_fn(
                         ledger_id,
                     } = audit;
                     match op_create_project_issue(&mut tx, &scope, description, &stripped).await {
-                        Ok(result) => {
-                            write_commit(
+                        Ok((result, fire)) => {
+                            let creator_id = scope.creator_id;
+                            let run_id = scope.run_id;
+                            // The orchestration post-save fire
+                            // (`signals.py:74-107`): Django's
+                            // `Issue.objects.create` runs it inside the
+                            // save; here signals are explicit calls after
+                            // the commit lands (the v1 create shape,
+                            // PIDASHCONV-1216). The fire runs on
+                            // commit-success even when the
+                            // `tool_completed` append below fails
+                            // (Django appends at `tools.py:156`, after
+                            // the save's signal). Best-effort: the issue
+                            // already committed.
+                            match write_commit_tx(
                                 ctx,
                                 WriteAudit {
                                     tx,
                                     scope,
                                     ledger_id,
                                 },
-                                TOOL_CREATE_PROJECT_ISSUE,
                                 result,
                             )
                             .await
+                            {
+                                Ok(value) => {
+                                    fire_create_transition(
+                                        ctx,
+                                        creator_id,
+                                        fire.issue_id,
+                                        fire.state_id,
+                                    )
+                                    .await;
+                                    emit_completed(
+                                        ctx,
+                                        run_id,
+                                        TOOL_CREATE_PROJECT_ISSUE,
+                                        plan::ToolRisk::Write,
+                                    )
+                                    .await?;
+                                    Ok(value)
+                                }
+                                Err(error) => Err(error),
+                            }
                         }
                         Err(error) => {
                             let _ = tx.rollback().await;
