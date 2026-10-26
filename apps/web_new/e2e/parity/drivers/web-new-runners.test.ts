@@ -584,12 +584,38 @@ describe("playwright stub sanity", () => {
 
 describe("runner chat shell (NEWFRONT-549)", () => {
   it("opens the chat URL with the session cursor and settles on the page", async () => {
-    const page = pageStub();
+    // The session wait polls for the active history row until it appears.
+    // The stub reports it on the first read so the open settles at once:
+    // with the default count of zero the wait would spin its whole real-time
+    // deadline (millions of retained stub calls under immediate stubs) and
+    // OOM the worker (NEWFRONT-917).
+    const activeRow = stubLocator({ count: vi.fn(async () => 1) });
+    const history = stubLocator({ locator: vi.fn(() => activeRow) });
+    const page = pageStub({ getByTestId: vi.fn(() => history) });
     const driver = new WebNewDriver(page);
     await driver.runnerChatOpen("acme", "r-1", "s-9");
     expect(page.goto).toHaveBeenCalledWith("/acme/runners/chat/r-1?sessionId=s-9", { timeout: 60_000 });
     await driver.runnerChatOpen("acme", "r-1");
     expect(page.goto).toHaveBeenLastCalledWith("/acme/runners/chat/r-1", { timeout: 60_000 });
+  });
+
+  it("opens an unknown session once the row wait lapses", async () => {
+    // Unknown sessions legitimately never see the row; the open still
+    // settles once the bounded wait lapses. Time jumps past the deadline
+    // so the test neither waits out the real window nor spins against it.
+    const page = pageStub();
+    const driver = new WebNewDriver(page);
+    const start = 1_000_000;
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(start)
+      .mockReturnValue(start + 15_001);
+    try {
+      await driver.runnerChatOpen("acme", "r-1", "s-9");
+    } finally {
+      now.mockRestore();
+    }
+    expect(page.goto).toHaveBeenCalledWith("/acme/runners/chat/r-1?sessionId=s-9", { timeout: 60_000 });
   });
 
   it("lists contacts from the rail", async () => {
