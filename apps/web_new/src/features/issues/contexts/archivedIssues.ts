@@ -43,6 +43,15 @@ export function projectAutomationsPath(workspaceSlug: string, projectId: string)
 }
 
 /**
+ * One archived work item's own address (parity/specs/archives.md §3.3).
+ * The archived row and detail menus hand this out for copy-link and
+ * open-in-new-tab; the live browse address is never used here.
+ */
+export function archivedIssueDetailPath(workspaceSlug: string, projectId: string, issueId: string): string {
+  return `/${workspaceSlug}/projects/${projectId}/archives/issues/${issueId}`;
+}
+
+/**
  * One flat page of a project's archived work items. The archived tab
  * always sends an order, so the first paint is manual rather than the
  * server's unqualified default (spec §2.1).

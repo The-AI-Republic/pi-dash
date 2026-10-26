@@ -278,6 +278,20 @@ describe("ListRow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Actions for WEB-42" }));
     expect(screen.getAllByRole("menuitem", { hidden: true }).length).toBeGreaterThan(0);
   });
+
+  it("hands the menu an override address for its link entries (ARCH-010)", () => {
+    const open = vi.fn();
+    Object.defineProperty(globalThis, "open", { value: open, configurable: true, writable: true });
+    const linkHref = `/acme/projects/${PROJECT}/archives/issues/${ISSUE}`;
+    renderRow(<ListRow {...props({ menuContext: "archived", menuCanWrite: true, menuLinkHref: linkHref })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Actions for WEB-42" }));
+    const entry = screen
+      .getAllByRole("menuitem", { hidden: true })
+      .find((item) => item.textContent?.includes("Open in new tab"));
+    if (entry === undefined) throw new Error("expected the open entry");
+    fireEvent.click(entry);
+    expect(open).toHaveBeenCalledWith(linkHref, "_blank", "noopener,noreferrer");
+  });
 });
 
 describe("ListRow selection", () => {

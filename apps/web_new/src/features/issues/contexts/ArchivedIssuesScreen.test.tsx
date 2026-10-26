@@ -7,7 +7,7 @@
 // the unfiltered list back, and Set automation leaves for the project's
 // automation settings.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IssueListResponse, Project } from "@pidash/api-client";
 import * as React from "react";
@@ -33,6 +33,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { membershipQueryOptions } from "../../auth/index.js";
 import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { ArchivedIssuesScreen } from "./ArchivedIssuesScreen.js";
 import { archivedPageQueryOptions, ARCHIVED_FILTER_STORAGE_KEY, DEFAULT_ARCHIVED_DISPLAY } from "./archivedIssues.js";
@@ -137,6 +138,7 @@ function renderScreen(
     page?: unknown;
     failList?: boolean;
     estimate?: Record<string, unknown> | null;
+    workspaceRole?: number;
   } = {}
 ) {
   const projects = options.projects ?? [project()];
@@ -153,6 +155,11 @@ function renderScreen(
   }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   queryClient.setQueryData(projectsQueryOptions(apiClient, SLUG).queryKey, projects);
+  if (options.workspaceRole !== undefined) {
+    queryClient.setQueryData(membershipQueryOptions(apiClient, SLUG).queryKey, {
+      role: options.workspaceRole,
+    } as never);
+  }
   queryClient.setQueryData(
     projectDetailsQueryOptions(apiClient, SLUG).queryKey,
     options.estimate === undefined ? [] : [{ ...project(), estimate: options.estimate } as never]
@@ -356,6 +363,29 @@ describe("ArchivedIssuesScreen", () => {
     renderScreen({ projects: [{ ...project(), member_role: 5 }] });
     expect(await screen.findByText("No archived work items yet")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Set automation" })).toBeDisabled();
+  });
+
+  it("disables Set automation for a plain member, who cannot open the page (ARCH-033)", async () => {
+    renderScreen({ projects: [{ ...project(), member_role: 15 }], workspaceRole: 15 });
+    expect(await screen.findByText("No archived work items yet")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set automation" })).toBeDisabled();
+  });
+
+  it("enables Set automation for a workspace admin on a member project (ARCH-033)", async () => {
+    renderScreen({ projects: [{ ...project(), member_role: 15 }], workspaceRole: 20 });
+    expect(await screen.findByText("No archived work items yet")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set automation" })).toBeEnabled();
+  });
+
+  it("offers restore, open, copy-link and delete on every archived row (ARCH-004)", async () => {
+    renderScreen({ rows: 1 });
+    await screen.findByText("Old login form");
+    fireEvent.click(screen.getByRole("button", { name: "Actions for WEB-7" }));
+    const titles = screen
+      .getAllByRole("menuitem", { hidden: true })
+      .map((item) => item.textContent ?? "")
+      .filter((title) => title !== "");
+    expect(titles).toEqual(["Restore", "Open in new tab", "Copy link", "Delete"]);
   });
 
   it("hands the peek the list row so its memberships survive the detail read", async () => {

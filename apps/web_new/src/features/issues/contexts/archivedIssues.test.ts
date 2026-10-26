@@ -14,6 +14,7 @@ import { issueKeys } from "../api/keys.js";
 import {
   ARCHIVED_FILTER_STORAGE_KEY,
   DEFAULT_ARCHIVED_DISPLAY,
+  archivedIssueDetailPath,
   archivedIssueQueryOptions,
   archivedIssuesQueryOptions,
   archivedPageQueryOptions,
@@ -29,6 +30,7 @@ import {
 const SLUG = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const OTHER = "323e4567-e89b-12d3-a456-426614174002";
+const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
 const EXPRESSION = { and: [{ state_group__in: ["cancelled"] }] };
 
 function memoryStorage(seed: Record<string, string> = {}) {
@@ -112,6 +114,12 @@ describe("archivedIssuesQueryOptions", () => {
 describe("projectAutomationsPath", () => {
   it("points at the project's automation settings", () => {
     expect(projectAutomationsPath(SLUG, PROJECT)).toBe(`/${SLUG}/settings/projects/${PROJECT}/automations`);
+  });
+});
+
+describe("archivedIssueDetailPath", () => {
+  it("points at the archived work item's own address", () => {
+    expect(archivedIssueDetailPath(SLUG, PROJECT, ISSUE)).toBe(`/${SLUG}/projects/${PROJECT}/archives/issues/${ISSUE}`);
   });
 });
 
