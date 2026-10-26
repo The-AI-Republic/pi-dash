@@ -125,15 +125,30 @@ describe("projectPagesJumpPage", () => {
     expect(captured?.options).toEqual([]);
   });
 
-  it("excludes archived pages from the picker", async () => {
-    const shelved = makePageRow({ id: "323e4567-e89b-12d3-a456-426614174303", name: "Old", archived_at: "x" });
-    listPagesMock.mockImplementation(async (_client, _ws, _project, query) => {
-      if (query?.parent === undefined) return [parent, shelved];
-      return [child];
+  it("finds an archived child even when its parent reports no live children", async () => {
+    // A cascaded archive leaves the parent at `sub_pages_count: 0` (§11.7),
+    // so the palette must still walk it to reach the shelved child.
+    const shelvedParent = makePageRow({
+      id: PARENT,
+      name: "Shelved handbook",
+      sub_pages_count: 0,
+      archived_at: "2026-10-20",
     });
-    renderPage();
+    const shelvedChild = makePageRow({
+      id: CHILD,
+      name: "Shelved leave policy",
+      parent: PARENT,
+      parent_id: PARENT,
+      archived_at: "2026-10-20",
+    });
+    listPagesMock.mockImplementation(async (_client, _ws, _project, query) => {
+      if (query?.parent === undefined) return [shelvedParent];
+      if (query.parent === PARENT) return [shelvedChild];
+      return [];
+    });
+    renderPage("shelved leave");
     await waitFor(() => expect(screen.getByTestId("jump-status")).toHaveTextContent("ready"));
-    expect(screen.queryByRole("button", { name: "Old" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Shelved leave policy" })).toBeInTheDocument();
   });
 });
 

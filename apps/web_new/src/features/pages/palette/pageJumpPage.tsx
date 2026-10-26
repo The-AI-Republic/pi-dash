@@ -46,7 +46,10 @@ export function projectPagesJumpPage(args: PageJumpPageArgs): PalettePage {
       if (forest.isError) {
         return { status: "ready", options: [], emptyText: PAGE_JUMP_EMPTY_TEXT };
       }
-      const rows = forest.data.rows.filter((row) => row.archived_at === null);
+      // The palette spans the archived tab too: a shelved child is still a
+      // page the caller can open, and PAGE-090 asks every discovery surface
+      // to find child pages with their parent path.
+      const rows = forest.data.rows;
       const options = rows.map((row) => {
         const path = pageParentPath(rows, row.id);
         return {

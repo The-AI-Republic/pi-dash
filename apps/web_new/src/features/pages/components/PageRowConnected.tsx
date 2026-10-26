@@ -8,8 +8,12 @@
 // a write in flight pins its own row's action control through the hook's
 // pending flag.
 
-import type { PageRow as PageRowData } from "@pidash/api-client";
+import { useQuery, queryOptions } from "@tanstack/react-query";
+import { listPages, type PageRow as PageRowData } from "@pidash/api-client";
 import * as React from "react";
+
+import { getAppClient } from "../../../core/api/client.js";
+import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 
 import {
   usePageArchiveWrite,
@@ -18,6 +22,7 @@ import {
   usePageMoveWrite,
   usePageVisibilityWrite,
 } from "../api/rowMutations.js";
+import { pageKeys } from "../api/keys.js";
 import type { PageCreatorOption } from "../lib/pageList.js";
 import { PageDeleteDialog } from "./PageDeleteDialog.js";
 import { PageRow } from "./PageRow.js";
@@ -40,7 +45,12 @@ export interface PageRowConnectedProps {
   onRequestNestedMove?: (() => void) | undefined;
   /** Ancestor trail as a secondary line (PAGE-090). */
   parentPath?: string | null | undefined;
-  /** Direct children that move up when this page is deleted (PAGE-089). */
+  /**
+   * Direct children that move up when this page is deleted (PAGE-089).
+   * Undefined means the caller cannot know from its own reads: an archived
+   * parent reports zero live children, so the count is resolved from one
+   * `?parent=` read when the dialog opens, without requiring an expansion.
+   */
   rehomedCount?: number | undefined;
   /**
    * Overrides the archive write: the nested tree archives whole subtrees and
@@ -65,7 +75,7 @@ export function PageRowConnected({
   onAddSubPage,
   onRequestNestedMove,
   parentPath = null,
-  rehomedCount = 0,
+  rehomedCount,
   onToggleArchive,
   onOpenInNewTab,
   onCopyLink,
@@ -79,6 +89,21 @@ export function PageRowConnected({
   const move = usePageMoveWrite(target);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [moveOpen, setMoveOpen] = React.useState(false);
+  // A collapsed archived parent cannot report its shelved children through
+  // `sub_pages_count`, so the confirmation reads them once the dialog is
+  // actually open. Live rows and already-expanded archived rows pass a
+  // number and never trigger this read.
+  const directChildren = useQuery(
+    queryOptions({
+      queryKey: pageKeys.children(workspaceSlug, projectId, page.id, true),
+      // Resolve the client inside the query so a never-run read (every row
+      // whose count is already known) does not need one.
+      queryFn: () => listPages(getAppClient(), workspaceSlug, projectId, { parent: page.id, includeArchived: true }),
+      staleTime: LIST_STALE_TIME_MS,
+      enabled: deleteOpen && rehomedCount === undefined,
+    })
+  );
+  const deleteCount = rehomedCount ?? directChildren.data?.length;
 
   return (
     <>
@@ -113,7 +138,7 @@ export function PageRowConnected({
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
         pageName={page.name}
-        rehomedCount={rehomedCount}
+        {...(deleteCount === undefined ? {} : { rehomedCount: deleteCount })}
         pending={deletion.pending}
         onConfirm={() => {
           deletion.remove({

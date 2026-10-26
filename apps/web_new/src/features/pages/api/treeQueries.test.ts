@@ -84,6 +84,45 @@ describe("readPageForest", () => {
     expect(listPagesMock.mock.calls.every((call) => call[3]?.includeArchived === true)).toBe(true);
   });
 
+  it("walks into an archived parent that reports no live children", async () => {
+    // A cascaded archive leaves `sub_pages_count` at 0 (§11.7), so the walk
+    // must treat every archived row as potentially expandable or the
+    // shelved subtree never reaches search/filters/favourites/palette.
+    const archivedParent = row("Shelved handbook", {
+      id: "archived-parent",
+      sub_pages_count: 0,
+      archived_at: "2026-10-20",
+    });
+    const archivedChild = row("Shelved policy", {
+      id: "archived-child",
+      parent: "archived-parent",
+      parent_id: "archived-parent",
+      archived_at: "2026-10-20",
+    });
+    listPagesMock.mockImplementation(async (_client, _ws, _project, query) => {
+      if (query?.parent === undefined) return [archivedParent];
+      if (query.parent === "archived-parent") return [archivedChild];
+      return [];
+    });
+    const forest = await readPageForest(fakeClient(), "acme", "project");
+    expect(forest.rows.map((page) => page.id)).toEqual(["archived-parent", "archived-child"]);
+    // The archived child is archived too, so the walk also proves it empty
+    // before it stops: every archived row is a potential parent.
+    expect(listPagesMock.mock.calls.map((call) => call[3]?.parent)).toEqual([
+      undefined,
+      "archived-parent",
+      "archived-child",
+    ]);
+  });
+
+  it("still skips a live row with no children", async () => {
+    const leaf = row("Leaf", { id: "leaf", sub_pages_count: 0 });
+    listPagesMock.mockResolvedValueOnce([leaf]);
+    const forest = await readPageForest(fakeClient(), "acme", "project");
+    expect(forest.rows.map((page) => page.id)).toEqual(["leaf"]);
+    expect(listPagesMock).toHaveBeenCalledTimes(1);
+  });
+
   it("skips a child already seen so a malformed cycle terminates", async () => {
     const root = row("Root", { id: "root", sub_pages_count: 1 });
     const child = row("Child", { id: "child", parent: "root", parent_id: "root", sub_pages_count: 1 });

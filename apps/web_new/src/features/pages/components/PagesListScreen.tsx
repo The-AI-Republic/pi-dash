@@ -60,7 +60,7 @@ import { PageCreateDialogEntry, PagesQuickCreate } from "./PagesCreateEntry.js";
 import { PageRowConnected } from "./PageRowConnected.js";
 import { PageNestedMoveDialog } from "./PageNestedMoveDialog.js";
 import { PageTree } from "./PageTree.js";
-import { pageDiscoveryRows, pageTreeRoots, type PageNestedRow } from "../lib/pageNested.js";
+import { pageDeleteKnownCount, pageDiscoveryRows, pageTreeRoots, type PageNestedRow } from "../lib/pageNested.js";
 import { edition, isPageMoveEnabled } from "../../../core/edition/index.js";
 import { registerCommands, registerPalettePages } from "../../../shared/commands/index.js";
 import { buildPageJumpCommand } from "../palette/pageJumpCommands.js";
@@ -267,7 +267,7 @@ export function PagesListScreen({ workspaceSlug, projectId, tab }: PagesListScre
         canManage={viewerIsAdmin || (currentUserId !== null && page.owned_by === currentUserId)}
         canMove={canMovePages}
         parentPath={entry.parentPath}
-        rehomedCount={page.sub_pages_count ?? 0}
+        rehomedCount={pageDeleteKnownCount(page)}
         onToggleArchive={(archived) => {
           archiveSubtree(page, archived);
         }}

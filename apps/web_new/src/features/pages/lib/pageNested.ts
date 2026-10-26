@@ -64,6 +64,17 @@ export function pageChildCount(row: Pick<PageRow, "sub_pages_count">): number {
 }
 
 /**
+ * Whether a row can still have children worth reading. `sub_pages_count`
+ * counts live children only, so a cascaded archive leaves an archived
+ * parent reporting zero even though its shelved subtree exists (PAGE-088).
+ * Discovery therefore treats every archived row as potentially expandable
+ * until its `?parent=` read settles, while live rows follow the count.
+ */
+export function pageMayHaveChildren(row: Pick<PageRow, "sub_pages_count" | "archived_at">): boolean {
+  return pageChildCount(row) > 0 || row.archived_at !== null;
+}
+
+/**
  * The children of one parent inside a pool of rows. The pool is whatever
  * collection reads the caller has; rows are ordered by the list's sort
  * elsewhere, so this only partitions.
@@ -252,6 +263,16 @@ export function pageParentPath(rows: readonly PageRow[], pageId: string): string
  */
 export function pageDeleteRehomedCount(row: Pick<PageRow, "sub_pages_count">): number {
   return pageChildCount(row);
+}
+
+/**
+ * The direct-child count a caller may show without reading further: the
+ * contract count for a live page, or undefined for an archived one, whose
+ * zero count says nothing about its shelved subtree (PAGE-088/089). The
+ * delete dialog resolves the undefined case from one `?parent=` read.
+ */
+export function pageDeleteKnownCount(row: Pick<PageRow, "sub_pages_count" | "archived_at">): number | undefined {
+  return row.archived_at === null ? pageChildCount(row) : undefined;
 }
 
 /** Confirmation sentence naming the re-homed children; null for a leaf. */

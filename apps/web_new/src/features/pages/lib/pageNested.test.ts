@@ -18,8 +18,10 @@ import {
   hasRestrictedAncestor,
   pageAncestors,
   pageChildCount,
+  pageDeleteKnownCount,
   pageDeleteRehomedCount,
   pageDeleteRehomedMessage,
+  pageMayHaveChildren,
   pageMoveRefusal,
   pageMoveRefusalMessage,
   pageMoveTargets,
@@ -253,6 +255,22 @@ describe("archive, restore and delete", () => {
     expect(restoreDetaches([parent, parent], parent)).toBe(false);
     // The parent can be missing from the loaded tab, so no stale notice.
     expect(restoreDetaches([child], child)).toBe(false);
+  });
+
+  it("treats an archived row as potentially expandable even at count zero", () => {
+    // The contract counts live children only, so a cascaded archive reports
+    // zero and the discovery walk must still open it (§11.7, PAGE-088/090).
+    expect(pageMayHaveChildren({ sub_pages_count: 0, archived_at: "2026-10-20" })).toBe(true);
+    expect(pageMayHaveChildren({ sub_pages_count: 2, archived_at: "2026-10-20" })).toBe(true);
+    expect(pageMayHaveChildren({ sub_pages_count: 2, archived_at: null })).toBe(true);
+    expect(pageMayHaveChildren({ sub_pages_count: 0, archived_at: null })).toBe(false);
+  });
+
+  it("only trusts the count for a live page before a child read", () => {
+    expect(pageDeleteKnownCount({ sub_pages_count: 3, archived_at: null })).toBe(3);
+    expect(pageDeleteKnownCount({ sub_pages_count: 0, archived_at: null })).toBe(0);
+    // An archived parent's count says nothing about its shelved subtree.
+    expect(pageDeleteKnownCount({ sub_pages_count: 0, archived_at: "2026-10-20" })).toBeUndefined();
   });
 
   it("states how many direct children a delete re-homes", () => {

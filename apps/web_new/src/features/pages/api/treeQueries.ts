@@ -11,7 +11,7 @@ import { queryOptions } from "@tanstack/react-query";
 import { listPages, type ApiClient, type PageRow } from "@pidash/api-client";
 
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
-import { pageChildCount, pageParentId } from "../lib/pageNested.js";
+import { pageMayHaveChildren, pageParentId } from "../lib/pageNested.js";
 import { pageKeys } from "./keys.js";
 
 export function pageChildrenQueryOptions(
@@ -51,7 +51,7 @@ export async function readPageForest(client: ApiClient, workspaceSlug: string, p
   const roots = await listPages(client, workspaceSlug, projectId, { includeArchived: true });
   const rows: PageRow[] = [...roots];
   const seen = new Set(rows.map((row) => row.id));
-  const frontier = roots.filter((row) => pageChildCount(row) > 0);
+  const frontier = roots.filter((row) => pageMayHaveChildren(row));
   let complete = true;
   while (frontier.length > 0) {
     if (rows.length >= PAGE_FOREST_LIMIT) {
@@ -67,7 +67,7 @@ export async function readPageForest(client: ApiClient, workspaceSlug: string, p
         if (seen.has(child.id)) continue;
         seen.add(child.id);
         rows.push(child);
-        if (pageChildCount(child) > 0) frontier.push(child);
+        if (pageMayHaveChildren(child)) frontier.push(child);
       }
     }
   }

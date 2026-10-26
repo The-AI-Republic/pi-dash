@@ -582,7 +582,8 @@ test(
       await driver.openEntry();
       await driver.signInWithPassword(seed.email, seed.password);
       await driver.pagesNestedOpenArchivedList(seed.workspaceSlug, projectId);
-      await driver.pagesNestedExpand(parentName);
+      // Delete is offered on the archived row as it renders, collapsed: the
+      // confirmation must resolve the direct children itself (PAGE-089).
       await driver.pagesNestedRowMenuOpen(parentName);
       await driver.pagesNestedOptionsPick("Delete");
       expect(await driver.pagesNestedDeleteDialogText()).toContain("1 sub-page will move to the top level.");
@@ -652,6 +653,46 @@ test(
       await driver.pagesNestedFiltersClear();
 
       // The palette jumps to a child and names its path.
+      const palette = await driver.pagesNestedPaletteFind("leave");
+      expect(palette.join("|")).toContain(childName);
+      expect(palette.join("|")).toContain(parentName);
+    } finally {
+      await cleanupProject(seed, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["PAGE-090"], "search, filters and the palette find a shelved child under its parent path"),
+  { tag: specTags(["PAGE-090"]) },
+  async ({ driver, seed }, testInfo) => {
+    test.skip(testInfo.project.name !== "new", "PAGE-090 is new (D17); no oracle");
+    const session = await signInSessionWithRetry(seed.email, seed.password);
+    const projectId = await scratchProject(seed, "searcharchived", session);
+    try {
+      if (!(await requireNestedBackend(seed, projectId, session))) {
+        testInfo.skip(true, "PDASHOSS01-270 has not landed on this stack");
+        return;
+      }
+      // A cascaded archive leaves the parent reporting no live children, so
+      // discovery must walk it to reach the shelved child (§11.7).
+      const parentName = `${tag("archivedsearch")} handbook`;
+      const childName = `${tag("archivedsearch")} leave policy`;
+      const parentId = await serverCreatePage(seed.workspaceSlug, projectId, session, parentName);
+      const childId = await serverCreatePage(seed.workspaceSlug, projectId, session, childName);
+      await serverPatchPageParent(seed.workspaceSlug, projectId, childId, parentId, session);
+      await serverArchivePage(seed.workspaceSlug, projectId, parentId, session);
+
+      await driver.openEntry();
+      await driver.signInWithPassword(seed.email, seed.password);
+      await driver.pagesNestedOpenArchivedList(seed.workspaceSlug, projectId);
+      await driver.pagesNestedSearch("leave");
+      expect(await driver.pagesNestedRowTitles()).toEqual([childName]);
+      expect(await driver.pagesNestedParentPath(childName)).toBe(parentName);
+      await driver.pagesNestedSearchClear();
+
+      // The palette reads the same forest, so a shelved child is reachable
+      // by name with its parent path even while the parent stays collapsed.
       const palette = await driver.pagesNestedPaletteFind("leave");
       expect(palette.join("|")).toContain(childName);
       expect(palette.join("|")).toContain(parentName);

@@ -1319,7 +1319,11 @@ In order, the rows are exactly:
 - **PAGE-090 — search across children.** Search, filters, favourites and
   the command palette find child pages as well as top-level ones; results
   show the parent path (the breadcrumb trail as a secondary line). This
-  needs the backend's search-including-children behaviour (§11.7).
+  needs the backend's search-including-children behaviour (§11.7). The
+  Archived tab is part of the same list, so discovery also reaches a
+  shelved child: the forest walk treats an archived row as potentially
+  expandable (its `sub_pages_count` is 0 even with a subtree), and the
+  palette reads the same forest without dropping archived rows.
 
 ### 12.3 web_new-only scenario convention (rows 084–090)
 

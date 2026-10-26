@@ -343,6 +343,38 @@ describe("PageTree", () => {
     });
   });
 
+  it("resolves a collapsed archived parent's delete count without expanding it", async () => {
+    const archivedParent = makePageRow({
+      id: PARENT,
+      name: "Shelved handbook",
+      sub_pages_count: 0,
+      archived_at: "2026-10-20",
+      owned_by: PAGES_USER_ID,
+    });
+    const archivedChild = makePageRow({
+      id: CHILD,
+      name: "Shelved policy",
+      parent: PARENT,
+      parent_id: PARENT,
+      archived_at: "2026-10-20",
+      owned_by: PAGES_USER_ID,
+    });
+    listPagesMock.mockResolvedValue([archivedChild]);
+    renderTree({ tab: "archived", rows: [archivedParent], pool: [archivedParent], includeArchivedChildren: true });
+    // The parent is still collapsed: the tree has loaded no children yet.
+    expect(screen.queryByRole("link", { name: "Shelved policy" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await screen.findByRole("heading", { name: "Delete page" });
+    expect(await screen.findByTestId("page-delete-rehomed")).toHaveTextContent(
+      "1 sub-page will move to the top level."
+    );
+    expect(listPagesMock).toHaveBeenCalledWith(expect.anything(), "acme", PAGES_PROJECT_ID, {
+      parent: PARENT,
+      includeArchived: true,
+    });
+  });
+
   it("drops the expand control after an archived parent's read proves it empty", async () => {
     const archivedLeaf = makePageRow({
       id: PARENT,

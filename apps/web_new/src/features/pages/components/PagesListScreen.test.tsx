@@ -507,6 +507,83 @@ describe("PagesListScreen", () => {
     expect(screen.getByTestId("page-row-parent-path")).toHaveTextContent("Handbook");
   });
 
+  it("finds a shelved child by search even when its archived parent reports no live children", async () => {
+    const parent = makePageRow({
+      id: pageId(40),
+      name: "Shelved handbook",
+      sub_pages_count: 0,
+      archived_at: "2026-10-20",
+    });
+    const child = makePageRow({
+      id: pageId(41),
+      name: "Shelved leave policy",
+      parent: parent.id,
+      parent_id: parent.id,
+      archived_at: "2026-10-20",
+    });
+    harness.pages = [parent];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen("archived");
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Open page search" }));
+    fireEvent.change(screen.getByPlaceholderText("Search pages"), { target: { value: "leave" } });
+    expect(await screen.findByRole("link", { name: "Shelved leave policy" })).toBeInTheDocument();
+    expect(screen.getByTestId("page-row-parent-path")).toHaveTextContent("Shelved handbook");
+  });
+
+  it("finds a shelved child through a structured filter", async () => {
+    const today = new Date().toISOString();
+    const parent = makePageRow({
+      id: pageId(42),
+      name: "Shelved handbook",
+      sub_pages_count: 0,
+      archived_at: "2026-10-20",
+    });
+    const child = makePageRow({
+      id: pageId(43),
+      name: "Shelved leave policy",
+      parent: parent.id,
+      parent_id: parent.id,
+      archived_at: "2026-10-20",
+      created_at: today,
+    });
+    harness.pages = [parent];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen("archived");
+    await screen.findByTestId("pages-list");
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    fireEvent.click(screen.getByRole("button", { name: "Today" }));
+    expect(await screen.findByRole("link", { name: "Shelved leave policy" })).toBeInTheDocument();
+    expect(screen.getByTestId("page-row-parent-path")).toHaveTextContent("Shelved handbook");
+  });
+
+  it("opens Delete on a collapsed shelved parent and names the child count", async () => {
+    const parent = makePageRow({
+      id: pageId(44),
+      name: "Shelved handbook",
+      sub_pages_count: 0,
+      archived_at: "2026-10-20",
+    });
+    const child = makePageRow({
+      id: pageId(45),
+      name: "Shelved leave policy",
+      parent: parent.id,
+      parent_id: parent.id,
+      archived_at: "2026-10-20",
+    });
+    harness.pages = [parent];
+    harness.childrenByParent = { [parent.id]: [child] };
+    renderScreen("archived");
+    await screen.findByTestId("pages-tree");
+    expect(screen.queryByRole("link", { name: "Shelved leave policy" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Page actions for Shelved handbook" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await screen.findByRole("heading", { name: "Delete page" });
+    expect(await screen.findByTestId("page-delete-rehomed")).toHaveTextContent(
+      "1 sub-page will move to the top level."
+    );
+  });
+
   it("offers clear-filters in the no-results state and restores the rows", async () => {
     harness.pages = [makePageRow({ name: "Alpha", created_at: "2026-09-01T12:00:00Z" })];
     renderScreen();

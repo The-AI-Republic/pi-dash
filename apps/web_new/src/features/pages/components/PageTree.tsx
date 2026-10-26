@@ -331,7 +331,7 @@ export function PageTree(props: PageTreeProps): React.ReactElement {
                   canDuplicate={canDuplicate}
                   canManage={manage}
                   canMove={canMoveProject}
-                  rehomedCount={entry.childCount}
+                  rehomedCount={archivedUnresolved ? undefined : entry.childCount}
                   onToggleArchive={(archived) => {
                     onToggleArchive(page, archived, movePool);
                   }}
