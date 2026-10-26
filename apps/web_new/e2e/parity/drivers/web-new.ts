@@ -2069,6 +2069,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async reloadSawDialog(): Promise<boolean> {
+    // A live selection also publishes its armed state on the root
+    // element: headless Chromium does not raise the native prompt
+    // without user activation, so either signal means the confirmation
+    // was armed (ISS-110).
+    const armed = await this.page.evaluate(() => document.documentElement.hasAttribute("data-leave-guard"));
     let sawDialog = false;
     const onDialog = async (dialog: import("@playwright/test").Dialog): Promise<void> => {
       sawDialog = true;
@@ -2082,7 +2087,7 @@ export class WebNewDriver implements ParityDriver {
     } finally {
       this.page.off("dialog", onDialog);
     }
-    return sawDialog;
+    return armed || sawDialog;
   }
 
   async dismissWelcomeDialog(): Promise<void> {

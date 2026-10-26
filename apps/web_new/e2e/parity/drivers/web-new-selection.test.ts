@@ -43,6 +43,7 @@ interface PageStub {
   testIds: string[];
   selectors: string[];
   reloads: number;
+  leaveGuardArmed: boolean;
   dialogHandlers: Array<(dialog: { type: () => string; dismiss: () => Promise<void> }) => void>;
 }
 
@@ -52,6 +53,7 @@ function pageOf(parts: { testId?: (id: string) => Locator; locator?: (selector: 
     testIds: [],
     selectors: [],
     reloads: 0,
+    leaveGuardArmed: false,
     dialogHandlers: [],
   };
   state.page = {
@@ -65,6 +67,7 @@ function pageOf(parts: { testId?: (id: string) => Locator; locator?: (selector: 
     },
     getByRole: () => locator({ count: async () => 0 }),
     keyboard: { down: async () => undefined, up: async () => undefined, press: async () => undefined },
+    evaluate: async () => state.leaveGuardArmed,
     on: (event: string, handler: (dialog: never) => void) => {
       if (event === "dialog") state.dialogHandlers.push(handler as never);
     },
@@ -108,6 +111,13 @@ describe("web_new selection reads", () => {
   it("reports no bulk bar when neither surface renders", async () => {
     const { page } = pageOf({ testId: () => locator({ count: async () => 0 }) });
     await expect(new WebNewDriver(page).bulkBarVisible()).resolves.toBe(false);
+  });
+
+  it("reports an armed leave guard even without a native dialog", async () => {
+    const stub = pageOf();
+    stub.leaveGuardArmed = true;
+    (stub.page as unknown as { reload: () => Promise<null> }).reload = async () => null;
+    await expect(new WebNewDriver(stub.page).reloadSawDialog()).resolves.toBe(true);
   });
 
   it("reports a leave dialog when the page arms one", async () => {
