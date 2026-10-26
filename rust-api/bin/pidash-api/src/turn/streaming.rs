@@ -3157,7 +3157,11 @@ mod tests {
 
     /// The captured 401/402 failures classify to the exact codes
     /// Django recorded, with the exact `ModelHTTPError` message
-    /// text.
+    /// text. That text is `str()` of pydantic-ai's exception, whose
+    /// body the OpenAI SDK already unwrapped (`body["error"]`); the
+    /// raw response envelope in the fixture is NOT what `str(exc)`
+    /// shows (probed live against pinned pydantic-ai 1.107.0 +
+    /// openai 2.29.0, PIDASHCONV-1536).
     #[test]
     fn error_exchanges_classify_like_django() {
         let lane = Lane::OpenAICompatible {
@@ -3168,11 +3172,11 @@ mod tests {
         for (name, want_message) in [
             (
                 "error_401",
-                "status_code: 401, model_name: oracle-stub, body: {'error': {'message': 'Incorrect API key provided.', 'type': 'invalid_api_key', 'code': 'invalid_api_key'}}",
+                "status_code: 401, model_name: oracle-stub, body: {'message': 'Incorrect API key provided.', 'type': 'invalid_api_key', 'code': 'invalid_api_key'}",
             ),
             (
                 "error_402",
-                "status_code: 402, model_name: oracle-stub, body: {'error': {'message': 'Insufficient credits. Top up at https://example.test/billing.', 'type': 'insufficient_credits', 'code': 402}}",
+                "status_code: 402, model_name: oracle-stub, body: {'message': 'Insufficient credits. Top up at https://example.test/billing.', 'type': 'insufficient_credits', 'code': 402}",
             ),
         ] {
             let fixture = load_fixture(name);
