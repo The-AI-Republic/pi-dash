@@ -4061,11 +4061,21 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityHasCreationEntry(): Promise<boolean> {
-    return (
-      (await this.activitySection()
-        .getByText(/created the work item/i)
-        .count()) > 0
-    );
+    // The feed paints its first row after the timeline query settles, so a
+    // one-shot count races a freshly opened issue. Poll until the entry
+    // appears or the driver's normal wait budget runs out.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (
+        (await this.activitySection()
+          .getByText(/created the work item/i)
+          .count()) > 0
+      ) {
+        return true;
+      }
+      if (Date.now() > deadline) return false;
+      await this.page.waitForTimeout(250);
+    }
   }
 
   private async openActivityFilterMenu(): Promise<void> {

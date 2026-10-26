@@ -6,7 +6,7 @@
 // selectors the methods read, so a markup change that breaks the parity
 // hooks fails here before the parity stack is ever brought up.
 import type { Locator, Page } from "@playwright/test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { WebNewDriver } from "./web-new";
 
@@ -73,6 +73,7 @@ function pageOf(
     locator?: (selector: string) => Locator;
     role?: (role: string, options?: unknown) => Locator;
     evaluate?: (fn: (arg?: unknown) => unknown, arg?: unknown) => unknown;
+    waitForTimeout?: (ms: number) => Promise<void>;
   } = {}
 ): { page: Page; recorded: Recorded } {
   const recorded: Recorded = { selectors: [], roles: [], clicks: [], hovers: [], keys: [], evaluated: 0 };
@@ -95,6 +96,7 @@ function pageOf(
       return parts.evaluate === undefined ? fn(arg) : parts.evaluate(fn, arg);
     },
     waitForFunction: async () => undefined,
+    waitForTimeout: parts.waitForTimeout ?? (async () => undefined),
     url: () => "https://p.test/acme/browse/WEB-1",
   } as unknown as Page;
   return { page, recorded };
@@ -322,6 +324,44 @@ describe("activity feed driver methods", () => {
     });
     await expect(new WebNewDriver(page).activityHasCreationEntry()).resolves.toBe(true);
     expect(recorded.roles).toContain("region");
+  });
+
+  it("keeps polling while the feed paints, then reports the entry", async () => {
+    let reads = 0;
+    const { page } = pageOf({
+      role: (role) =>
+        role === "region"
+          ? locator({
+              getByText: () => {
+                reads += 1;
+                // The timeline query has not settled on the first read.
+                return locator({ count: async () => (reads === 1 ? 0 : 1) });
+              },
+            })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).activityHasCreationEntry()).resolves.toBe(true);
+    expect(reads).toBe(2);
+  });
+
+  it("gives up and reports no entry once the wait budget is spent", async () => {
+    let polls = 0;
+    vi.useFakeTimers();
+    try {
+      const { page } = pageOf({
+        role: (role) =>
+          role === "region" ? locator({ getByText: () => locator({ count: async () => 0 }) }) : locator(),
+        waitForTimeout: async () => {
+          polls += 1;
+          vi.advanceTimersByTime(250);
+        },
+      });
+      await expect(new WebNewDriver(page).activityHasCreationEntry()).resolves.toBe(false);
+      expect(polls).toBeGreaterThan(1);
+      expect(polls).toBeLessThan(1000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
