@@ -553,7 +553,7 @@ test(
 test(
   specTitle(["PAGE-006"], "bug: NEWFRONT-362 private glyph shows no tooltip; owner, mark, star, menu and date hold"),
   { tag: specTags(["PAGE-006"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const session = await signInSessionWithRetry(seed.email, seed.password);
     const projectId = await scratchProject(seed, "rowsbug", session);
     try {
@@ -574,7 +574,10 @@ test(
       // Observed bug (NEWFRONT-362): the lock glyph never opens its
       // "Private" tooltip — the icon does not forward the trigger ref.
       // Intended: hovering reveals "Private", mirroring public rows.
-      expect(detail.visibility).toBe(null);
+      // The new app implements the fix (Parity wiki "Old bugs" allows it),
+      // so the oracle leg keeps pinning the bug while the new leg pins the fix.
+      const fixed = testInfo.project.name === "new";
+      expect(detail.visibility).toBe(fixed ? "Private" : null);
       expect(detail.createdOn?.startsWith("Created on")).toBe(true);
       expect(detail.starOffered).toBe(true);
       expect(detail.menuOffered).toBe(true);
