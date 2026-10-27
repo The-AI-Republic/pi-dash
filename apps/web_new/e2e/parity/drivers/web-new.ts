@@ -5800,44 +5800,90 @@ export class WebNewDriver implements ParityDriver {
     return this.intakeDetailPropertyDisabled("State");
   }
 
-  async viewsOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("viewsOpenList");
+  /** The view-create form the layout picker lives in. */
+  private viewsForm(): Locator {
+    return this.page.getByTestId("create-view-form");
+  }
+
+  /** The form's layout trigger: the button naming the current layout. */
+  private viewsLayoutTrigger(): Locator {
+    return this.viewsForm()
+      .getByRole("button", { name: /List|Board|Calendar|Spreadsheet|Timeline/ })
+      .first();
+  }
+
+  /** The open layout picker's option list. */
+  private viewsLayoutListbox(): Locator {
+    return this.page.locator('ul[aria-label="Layouts"]');
+  }
+
+  async viewsOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the create entry (zero-state action or header), so the
+    // list screen has mounted before the caller drives it.
+    await this.page.getByRole("button", { name: "Create view" }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async viewsOpenCreate(): Promise<void> {
-    return todo("viewsOpenCreate");
+    await this.page.getByRole("button", { name: "Create view" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async viewsLayoutValue(): Promise<string> {
-    return todo("viewsLayoutValue");
+    return ((await this.viewsLayoutTrigger().innerText()) ?? "").trim();
   }
 
   async viewsLayoutOpenPicker(): Promise<void> {
-    return todo("viewsLayoutOpenPicker");
+    // Idempotent: never toggle an open popup shut with a blind click.
+    if (await this.pickerOpen()) return;
+    const trigger = this.viewsLayoutTrigger();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.viewsLayoutListbox().waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    await this.viewsLayoutListbox().getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async viewsLayoutOptionTexts(): Promise<string[]> {
-    return todo("viewsLayoutOptionTexts");
+    // Options pair aria-hidden glyphs with the label span, so the
+    // button text is the label alone.
+    const texts = await this.viewsLayoutListbox().getByRole("option").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   async viewsLayoutHasSearch(): Promise<boolean> {
-    return todo("viewsLayoutHasSearch");
+    // The search field (when enabled) is a direct child of the popup
+    // beside the list, so scope to the list's own popup.
+    const popup = this.viewsLayoutListbox().locator("xpath=ancestor::div[1]");
+    return (await popup.getByRole("combobox").count()) > 0;
   }
 
-  async viewsLayoutSelectedMarked(_text: string): Promise<boolean> {
-    return todo("viewsLayoutSelectedMarked");
+  async viewsLayoutSelectedMarked(text: string): Promise<boolean> {
+    const marked = this.viewsLayoutListbox().getByRole("option", { name: text, selected: true });
+    if ((await marked.count()) === 0) return false;
+    await marked.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return true;
   }
 
-  async viewsLayoutPick(_text: string): Promise<void> {
-    return todo("viewsLayoutPick");
+  async viewsLayoutPick(text: string): Promise<void> {
+    const pattern = new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    await this.viewsLayoutListbox()
+      .getByRole("option", { name: pattern })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // Single-select closes on pick; a refusal leaves it open and fails
+    // the wait honestly.
+    await this.viewsLayoutListbox().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async viewsFillName(_name: string): Promise<void> {
-    return todo("viewsFillName");
+  async viewsFillName(name: string): Promise<void> {
+    await this.viewsForm().getByLabel("Title").fill(name, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async viewsSubmit(): Promise<void> {
-    return todo("viewsSubmit");
+    await this.viewsForm().getByRole("button", { name: "Create View" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("heading", { name: "Create View" })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async subIssueFiltersOpen(_workspaceSlug: string, _projectId: string, _parentIssueId: string): Promise<void> {
