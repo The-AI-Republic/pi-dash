@@ -3165,6 +3165,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pidash-sdk"
+version = "0.1.0"
+dependencies = [
+ "pidash-api",
+ "pidash-auth",
+ "pidash-db",
+ "pidash-jobs",
+ "pidash-ops",
+ "pidash-services",
+ "pidash-types",
+]
+
+[[package]]
 name = "pidash-services"
 version = "0.1.0"
 dependencies = [
