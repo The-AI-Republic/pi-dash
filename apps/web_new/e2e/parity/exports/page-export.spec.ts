@@ -840,7 +840,7 @@ test(
       // Intended: a visible focus indicator. A Tab first establishes
       // keyboard modality so :focus-visible outlines render; the tabIndex
       // reads alongside prove the control exists (an absent control
-      // reports its style trivially unchanged).
+      // returns false, which would pass the style read alone).
       await driver.page.keyboard.press("Tab");
       expect(await controlTabIndex(driver, "page", "export", true)).toBe(0);
       expect(await focusStyleUnchanged(driver, "page", "export", true)).toBe(false);
@@ -873,6 +873,8 @@ test(
       expect(await controlTabIndex(driver, "dialog", "everything")).toBe(0);
       expect(await controlTabIndex(driver, "dialog", "a4")).toBe(0);
       await driver.page.keyboard.press("Tab");
+      expect(await controlTabIndex(driver, "dialog", "cancel")).toBe(0);
+      expect(await controlTabIndex(driver, "dialog", "export")).toBe(0);
       expect(await focusStyleUnchanged(driver, "dialog", "cancel")).toBe(false);
       expect(await focusStyleUnchanged(driver, "dialog", "export")).toBe(false);
 
