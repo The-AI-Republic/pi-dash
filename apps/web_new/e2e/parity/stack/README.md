@@ -481,15 +481,19 @@ PANICs with `No space left on device` mid-sweep; the API starts returning
 500s and the sweep burns (NEWFRONT-175).
 
 `parity-up.sh` therefore runs `parity-disk-check.sh` before the docker
-build. The check reads the filesystems holding `/` and Docker's data-root,
-warns at `PARITY_DISK_WARN_PCT` (default 80% used) and refuses to start at
-`PARITY_DISK_MAX_USE_PCT` (default 90%). Run it by hand before a long
+build. The check reads the filesystems holding `/` and Docker's data-root
+and judges the one with the least free space. The limits are absolute free
+space, not a percentage, so a large disk at 90% used with hundreds of GB
+left is not refused: it warns below `PARITY_DISK_WARN_FREE_GB` (default 15)
+and refuses to start below `PARITY_DISK_MIN_FREE_GB` (default 6, the old 90%
+limit on a 60 GB host). The retired `PARITY_DISK_WARN_PCT` and
+`PARITY_DISK_MAX_USE_PCT` overrides now exit 2. Run it by hand before a long
 sweep against a kept stack, where no fresh bring-up runs the gate:
 
 On Docker Desktop (macOS and Windows) the data-root only exists inside the
 daemon's Linux VM, so the host cannot `df` it. The guard then measures the
 VM disk from a throwaway container (`docker run --rm --network none
-alpine:3.20 df -P /`) and applies the same thresholds. If that container
+alpine:3.20 df -P /`) and applies the same limits. If that container
 cannot run, it prints a warning that the VM disk was not checked and
 continues with the host `/` check; a data-root that exists on the host is
 always checked as before, and an unreadable data-root on a non-Desktop

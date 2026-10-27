@@ -10,8 +10,11 @@
 #
 # Checks the filesystem holding / plus the filesystem holding Docker's
 # data-root (when the daemon answers), since either one filling up kills the
-# slot's Postgres. Warns at PARITY_DISK_WARN_PCT (default 80), refuses at
-# PARITY_DISK_MAX_USE_PCT (default 90). PARITY_IGNORE_DISK_CHECK=1 bypasses
+# slot's Postgres. The limits are absolute free space, not a percentage, so a
+# large disk is not refused while it still has room for many stacks: warns
+# below PARITY_DISK_WARN_FREE_GB (default 15), refuses below
+# PARITY_DISK_MIN_FREE_GB (default 6, the old 90% limit on a 60 GB host).
+# PARITY_IGNORE_DISK_CHECK=1 bypasses
 # the refusal for emergencies; never use it on a shared host without the
 # operator's acknowledgement.
 #
@@ -19,14 +22,12 @@
 # 2 usage/config error.
 set -euo pipefail
 
-export WARN_PCT
-WARN_PCT="${PARITY_DISK_WARN_PCT:-80}"
-export MAX_PCT
-MAX_PCT="${PARITY_DISK_MAX_USE_PCT:-90}"
+WARN_GB="${PARITY_DISK_WARN_FREE_GB:-15}"
+MIN_GB="${PARITY_DISK_MIN_FREE_GB:-6}"
 
 usage() {
   echo "usage: parity-disk-check.sh [--path <dir>]..."
-  echo "Refuses (exit 1) when / or Docker's data-root is at or above PARITY_DISK_MAX_USE_PCT (default 90); warns at PARITY_DISK_WARN_PCT (default 80)."
+  echo "Refuses (exit 1) when / or Docker's data-root has less than PARITY_DISK_MIN_FREE_GB free (default 6); warns below PARITY_DISK_WARN_FREE_GB (default 15)."
   echo "PARITY_IGNORE_DISK_CHECK=1 bypasses the refusal for emergencies."
 }
 
@@ -53,24 +54,34 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case "$WARN_PCT" in ''|*[!0-9]*)
-  echo "[parity] PARITY_DISK_WARN_PCT must be an integer 1-100, got '$WARN_PCT'" >&2
+# The percentage limits were replaced by free-space floors; fail loudly
+# rather than silently ignore an old override.
+for old in PARITY_DISK_WARN_PCT PARITY_DISK_MAX_USE_PCT; do
+  if [ -n "${!old:-}" ]; then
+    echo "[parity] $old is no longer supported; use PARITY_DISK_WARN_FREE_GB / PARITY_DISK_MIN_FREE_GB (free GB)" >&2
+    exit 2
+  fi
+done
+case "$WARN_GB" in ''|*[!0-9]*)
+  echo "[parity] PARITY_DISK_WARN_FREE_GB must be a whole number of GB, got '$WARN_GB'" >&2
   exit 2
   ;;
 esac
-case "$MAX_PCT" in ''|*[!0-9]*)
-  echo "[parity] PARITY_DISK_MAX_USE_PCT must be an integer 1-100, got '$MAX_PCT'" >&2
+case "$MIN_GB" in ''|*[!0-9]*)
+  echo "[parity] PARITY_DISK_MIN_FREE_GB must be a whole number of GB, got '$MIN_GB'" >&2
   exit 2
   ;;
 esac
-if [ "$WARN_PCT" -lt 1 ] || [ "$WARN_PCT" -gt 100 ] || [ "$MAX_PCT" -lt 1 ] || [ "$MAX_PCT" -gt 100 ]; then
-  echo "[parity] thresholds must be integers 1-100, got warn=$WARN_PCT max=$MAX_PCT" >&2
+if [ "$MIN_GB" -lt 1 ]; then
+  echo "[parity] PARITY_DISK_MIN_FREE_GB must be at least 1, got $MIN_GB" >&2
   exit 2
 fi
-if [ "$WARN_PCT" -ge "$MAX_PCT" ]; then
-  echo "[parity] PARITY_DISK_WARN_PCT ($WARN_PCT) must be below PARITY_DISK_MAX_USE_PCT ($MAX_PCT)" >&2
+if [ "$WARN_GB" -le "$MIN_GB" ]; then
+  echo "[parity] PARITY_DISK_WARN_FREE_GB ($WARN_GB) must be above PARITY_DISK_MIN_FREE_GB ($MIN_GB)" >&2
   exit 2
 fi
+MIN_KB=$((MIN_GB * 1048576))
+WARN_KB=$((WARN_GB * 1048576))
 
 if [ "${PARITY_IGNORE_DISK_CHECK:-0}" = "1" ]; then
   echo "[parity] disk check BYPASSED via PARITY_IGNORE_DISK_CHECK=1 (emergencies only)"
@@ -92,6 +103,8 @@ usage_for() {
   echo "$use $avail $dev"
 }
 
+# The filesystem with the least free space decides the outcome.
+WORST_AVAIL=""
 WORST_USE=0
 WORST_PATH=""
 
@@ -103,7 +116,8 @@ record_usage() {
   dev="$4"
   avail_gb="$(awk -v a="$avail" 'BEGIN {printf "%.1f", a/1048576}')"
   echo "[parity] disk: $path on $dev at ${use}% used (${avail_gb}G free)"
-  if [ "$use" -gt "$WORST_USE" ]; then
+  if [ -z "$WORST_AVAIL" ] || [ "$avail" -lt "$WORST_AVAIL" ]; then
+    WORST_AVAIL="$avail"
     WORST_USE="$use"
     WORST_PATH="$path"
   fi
@@ -189,17 +203,18 @@ if [ "${#EXTRA_PATHS[@]}" -gt 0 ]; then
   done
 fi
 
-if [ "$WORST_USE" -ge "$MAX_PCT" ]; then
-  echo "[parity] disk check REFUSED: $WORST_PATH at ${WORST_USE}% used (limit ${MAX_PCT}%; warn at ${WARN_PCT}%)"
+WORST_GB="$(awk -v a="$WORST_AVAIL" 'BEGIN {printf "%.1f", a/1048576}')"
+if [ "$WORST_AVAIL" -lt "$MIN_KB" ]; then
+  echo "[parity] disk check REFUSED: $WORST_PATH has ${WORST_GB}G free, ${WORST_USE}% used (needs ${MIN_GB}G free; warn below ${WARN_GB}G)"
   echo "[parity] refusing to start: a sweep against a full disk panics Postgres (NEWFRONT-175)."
   echo "[parity] read-only diagnosis: df -h / ; df -h /tmp ; docker system df"
   echo "[parity] recovery is the operator's janitoring (NEWFRONT-248): free space, restart the slot Postgres, verify the seed, re-sweep from pristine state."
   echo "[parity] agents must not prune sibling stacks/images/caches or /tmp owned by other runs. Bypass (emergencies only): PARITY_IGNORE_DISK_CHECK=1."
   exit 1
 fi
-if [ "$WORST_USE" -ge "$WARN_PCT" ]; then
-  echo "[parity] disk check WARNING: $WORST_PATH at ${WORST_USE}% used (warn at ${WARN_PCT}%, refuse at ${MAX_PCT}%); proceeding"
+if [ "$WORST_AVAIL" -lt "$WARN_KB" ]; then
+  echo "[parity] disk check WARNING: $WORST_PATH has ${WORST_GB}G free, ${WORST_USE}% used (warn below ${WARN_GB}G, refuse below ${MIN_GB}G); proceeding"
   exit 0
 fi
-echo "[parity] disk check ok: worst ${WORST_USE}% used on $WORST_PATH (warn at ${WARN_PCT}%, refuse at ${MAX_PCT}%)"
+echo "[parity] disk check ok: least free ${WORST_GB}G (${WORST_USE}% used) on $WORST_PATH (warn below ${WARN_GB}G, refuse below ${MIN_GB}G)"
 exit 0
