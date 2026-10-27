@@ -587,3 +587,53 @@ describe("openProjectView", () => {
     }
   });
 });
+
+describe("rich write settle", () => {
+  it("remove waits out the post-write hidden window", async () => {
+    const clicks: string[] = [];
+    let visibleCalls = 0;
+    const row = locator({
+      getByRole: () => locator({ nth: () => locator({ click: async () => void clicks.push("remove") }) }),
+      isVisible: async () => {
+        visibleCalls += 1;
+        return visibleCalls > 1;
+      },
+    });
+    const page = pageOf({ testId: () => row });
+    await new WebNewDriver(page).removeRichCondition(0);
+    expect(clicks).toEqual(["remove"]);
+    expect(visibleCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("clear settles on the absent row", async () => {
+    let counts = 0;
+    const row = locator({
+      getByTestId: () => locator({ click: async () => undefined }),
+      count: async () => {
+        counts += 1;
+        return counts > 1 ? 0 : 1;
+      },
+    });
+    const page = pageOf({ testId: () => row });
+    await new WebNewDriver(page).clearRichFilters();
+    expect(counts).toBeGreaterThanOrEqual(3);
+  });
+
+  it("settle gives up silently when the row never stabilizes", async () => {
+    const row = locator({ isVisible: async () => false });
+    const page = pageOf({ testId: () => row });
+    // Construct before mocking time: the driver's startedAt initializer
+    // consumes a Date.now call at construction.
+    const driver = new WebNewDriver(page);
+    let calls = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => {
+      calls += 1;
+      return calls <= 1 ? 1_000 : 1_000 + 31_000;
+    });
+    try {
+      await driver.clearRichFilters();
+    } finally {
+      now.mockRestore();
+    }
+  });
+});

@@ -7013,6 +7013,27 @@ export class WebNewDriver implements ParityDriver {
     return this.richRow().getByRole("button", { name: "Remove filter" });
   }
 
+  /**
+   * Settle after an expression write. The optimistic prefs write
+   * re-suspends the route (NEWFRONT-947), so the row hides behind the
+   * list skeleton until the refetch lands — seconds on a shared stack.
+   * Two consecutive stable samples (visible, or absent after a clearing
+   * write) 500ms apart; gives up silently at 30s so a genuinely wedged
+   * app still fails on the caller's own read, not here.
+   */
+  private async settleRichWrite(): Promise<void> {
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    let last = "";
+    for (;;) {
+      const row = this.richRow();
+      const state = (await row.count()) === 0 ? "absent" : (await row.first().isVisible()) ? "visible" : "hidden";
+      if (state !== "hidden" && state === last) return;
+      last = state;
+      if (Date.now() > deadline) return;
+      await this.page.waitForTimeout(500);
+    }
+  }
+
   async toggleRichFilterRow(): Promise<void> {
     await this.page.getByTestId("rich-filter-toggle").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
@@ -7059,6 +7080,7 @@ export class WebNewDriver implements ParityDriver {
       if (Date.now() > deadline) throw new Error(`[parity] picking ${property} added no condition.`);
       await this.page.waitForTimeout(250);
     }
+    await this.settleRichWrite();
   }
 
   async listRichPickerOptions(): Promise<string[]> {
@@ -7108,6 +7130,7 @@ export class WebNewDriver implements ParityDriver {
         .click({ timeout: WebNewDriver.WAIT_MS });
     }
     await this.closeRichValueSlot();
+    await this.settleRichWrite();
   }
 
   async pickRichValuesContaining(values: string[]): Promise<void> {
@@ -7116,6 +7139,7 @@ export class WebNewDriver implements ParityDriver {
       await this.richValueChoices().filter({ hasText: value }).first().click({ timeout: WebNewDriver.WAIT_MS });
     }
     await this.closeRichValueSlot();
+    await this.settleRichWrite();
   }
 
   /**
@@ -7152,6 +7176,7 @@ export class WebNewDriver implements ParityDriver {
   async pickRichOperator(option: string): Promise<void> {
     await (await this.singleConditionOperator()).click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByRole("option", { name: option, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settleRichWrite();
   }
 
   async isSingleRichOperatorLocked(): Promise<boolean> {
@@ -7182,6 +7207,7 @@ export class WebNewDriver implements ParityDriver {
       .filter({ hasText: new RegExp(`^\\s*${day}\\s*$`) })
       .first();
     await cell.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settleRichWrite();
   }
 
   async richConditionCount(): Promise<number> {
@@ -7190,10 +7216,12 @@ export class WebNewDriver implements ParityDriver {
 
   async removeRichCondition(index: number): Promise<void> {
     await this.richRemoveControls().nth(index).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settleRichWrite();
   }
 
   async clearRichFilters(): Promise<void> {
     await this.richRow().getByTestId("rich-clear-all").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settleRichWrite();
   }
 
   async openProjectView(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
