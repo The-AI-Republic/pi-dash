@@ -108,7 +108,7 @@ use crate::state::AppState;
 
 use crate::assistant::throttles::{allow_request, cache_key, ThrottleSpec, RATE_LIMIT_BODY};
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_bytes_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
 use pidash_services::prompting::{composer, context, recipes, registry, validation};

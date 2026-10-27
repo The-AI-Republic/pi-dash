@@ -57,13 +57,13 @@ use uuid::Uuid;
 use crate::runner_runs::json_response;
 use crate::runner_runs::server_error;
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython;
-use crate::v1_cycles_modules::json_cpython::JObject;
-use crate::v1_cycles_modules::json_cpython::JVal;
-use crate::v1_cycles_modules::json_cpython::JsonFail;
+use crate::v1_cycles_modules::json;
+use crate::v1_cycles_modules::json::JObject;
+use crate::v1_cycles_modules::json::JVal;
+use crate::v1_cycles_modules::json::JsonFail;
 
 // ---------------------------------------------------------------------------
-// Request bodies (the `manage.rs` envelope over `json_cpython`, PIDASHCONV-591)
+// Request bodies (the `manage.rs` envelope over `json`, PIDASHCONV-591)
 // ---------------------------------------------------------------------------
 
 /// Read `request.data` for a POST/DELETE body: content-length 0 validates as
@@ -108,7 +108,7 @@ pub(crate) async fn read_request_data(state: &AppState, req: Request) -> Result<
         .await
         .map(|collected| collected.to_bytes())
         .map_err(|_| server_error())?;
-    match json_cpython::parse_request_data(&bytes) {
+    match json::parse_request_data(&bytes) {
         Ok(value) => Ok(value),
         Err(JsonFail::Message(detail)) => Err(json_response(
             StatusCode::BAD_REQUEST,
@@ -125,7 +125,7 @@ pub(crate) fn parse_error_body(detail: &str) -> String {
     format!(
         "{{\"{}\":{}}}",
         "detail",
-        serde_json::to_string(&format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX))
+        serde_json::to_string(&format!("{}{detail}", json::JSON_PARSE_PREFIX))
             .expect("json string"),
     )
 }
@@ -239,7 +239,7 @@ mod tests {
     use super::*;
 
     fn parse_body(json: &str) -> JVal {
-        json_cpython::parse_request_bytes(json.as_bytes()).expect("test json parses")
+        json::parse_request_bytes(json.as_bytes()).expect("test json parses")
     }
 
     /// The 400 `ParseError` body keeps DRF's lowercase `detail` key and

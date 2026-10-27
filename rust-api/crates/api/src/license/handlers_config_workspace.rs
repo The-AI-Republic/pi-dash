@@ -109,7 +109,7 @@ use super::{
     QueryMap,
 };
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
 
 /// Register the five configuration/workspace paths. Sibling license paths
 /// stay unmatched and proxy to Django; unowned methods on these paths
@@ -460,7 +460,7 @@ fn py_repr_str(s: &str) -> String {
 /// The base match lowercases like Django's `parse_header_parameters`, so
 /// `Application/JSON`, charset params, and the `*/*`, `application/*`,
 /// and `*/json` wildcards all serve. JSON bodies parse through the shared
-/// CPython layer (`json_cpython`, PIDASHCONV-1128), so malformed JSON,
+/// CPython layer (`json`, PIDASHCONV-1128), so malformed JSON,
 /// strict constants, int-limit and codec errors carry CPython's exact
 /// text; past the depth cap is Django's JSON 500.
 fn decode_json_body(
@@ -476,11 +476,11 @@ fn decode_json_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     match select_body_kind(content_type) {
-        Some(BodyKind::Json) => match json_cpython::parse_request_bytes(body) {
-            Ok(jval) => Ok(ParsedBody::json(json_cpython::to_serde_publish(&jval))),
+        Some(BodyKind::Json) => match json::parse_request_bytes(body) {
+            Ok(jval) => Ok(ParsedBody::json(json::to_serde_publish(&jval))),
             Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
                 "{}{detail}",
-                json_cpython::JSON_PARSE_PREFIX
+                json::JSON_PARSE_PREFIX
             ))),
             Err(JsonFail::Recursion) => Err(Denial::ServerError),
         },

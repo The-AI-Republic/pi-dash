@@ -18,7 +18,7 @@
 pub mod body;
 pub mod cycle;
 pub mod gates;
-pub mod json_cpython;
+pub mod json;
 pub mod module;
 
 use axum::Router;

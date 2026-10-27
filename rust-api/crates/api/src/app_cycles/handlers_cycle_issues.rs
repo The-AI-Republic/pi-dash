@@ -60,7 +60,7 @@ use crate::app_issues::{
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
 
 /// `GET` + `POST` on the collection path; `DELETE` on the detail path.
@@ -155,7 +155,7 @@ const CYCLE_WRITE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 ///   `select_parser` order; an unsupported or missing content type is the
 ///   415 `{"detail": "Unsupported media type ..."}`.
 /// - JSON text decodes through the CPython-error layer
-///   (`json_cpython`), so a syntax error carries CPython's exact
+///   (`json`), so a syntax error carries CPython's exact
 ///   `{"detail": "JSON parse error - ..."}` text.
 /// - Form and multipart bodies become the `request.data` scalar map.
 /// - A non-object JSON body has no `.get` in the view (`AttributeError` →
@@ -174,9 +174,9 @@ pub(crate) fn decode_request_body(headers: &HeaderMap, body: &[u8]) -> Result<Va
     match negotiated {
         shared_body::NegotiatedBody::Empty => Ok(Value::Object(Map::new())),
         shared_body::NegotiatedBody::JsonText { text, .. } => {
-            match json_cpython::parse_request_data(text.as_bytes()) {
+            match json::parse_request_data(text.as_bytes()) {
                 Ok(parsed) => {
-                    let value = json_cpython::to_serde_publish(&parsed);
+                    let value = json::to_serde_publish(&parsed);
                     if value.is_object() {
                         Ok(value)
                     } else {
@@ -187,7 +187,7 @@ pub(crate) fn decode_request_body(headers: &HeaderMap, body: &[u8]) -> Result<Va
                 }
                 Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
                     "{}{detail}",
-                    json_cpython::JSON_PARSE_PREFIX
+                    json::JSON_PARSE_PREFIX
                 ))),
                 Err(JsonFail::Recursion) => Err(Denial::ServerError),
             }

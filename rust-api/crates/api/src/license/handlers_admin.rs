@@ -102,7 +102,7 @@ use crate::paginator::py_float_str;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::uuid_path::is_canonical_uuid;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
 
 /// Register the seven owned endpoints. Cutover granularity is the
 /// route + method (pilot `owned()` pattern): sibling methods on these
@@ -640,7 +640,7 @@ fn render_admin(
 /// branch the body must be an object (`None.get("email")` /
 /// `[1].get("email")` raise `AttributeError` out of the view → generic
 /// 500); otherwise it parses through the shared CPython layer
-/// (`json_cpython`, PIDASHCONV-1128), so malformed JSON, strict constants,
+/// (`json`, PIDASHCONV-1128), so malformed JSON, strict constants,
 /// int-limit and codec errors carry CPython's exact text as `ParseError`
 /// 400 `{"detail"}`; past the depth cap is Django's JSON 500.
 fn parse_json_body(
@@ -656,9 +656,9 @@ fn parse_json_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     match select_body_kind(content_type) {
-        Some(BodyKind::Json) => match json_cpython::parse_request_bytes(body) {
+        Some(BodyKind::Json) => match json::parse_request_bytes(body) {
             Ok(jval) => {
-                let data = json_cpython::to_serde_publish(&jval);
+                let data = json::to_serde_publish(&jval);
                 if data.is_object() {
                     Ok(ParsedBody::json(data))
                 } else {
@@ -669,7 +669,7 @@ fn parse_json_body(
             }
             Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
                 "{}{detail}",
-                json_cpython::JSON_PARSE_PREFIX
+                json::JSON_PARSE_PREFIX
             ))),
             Err(JsonFail::Recursion) => Err(Denial::ServerError),
         },

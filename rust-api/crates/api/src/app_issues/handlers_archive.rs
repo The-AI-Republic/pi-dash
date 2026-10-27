@@ -104,7 +104,7 @@ use super::{
 };
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_bytes_spans, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
 
@@ -2089,7 +2089,7 @@ async fn fire_after_save(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1_cycles_modules::json_cpython::parse_request_bytes;
+    use crate::v1_cycles_modules::json::parse_request_bytes;
     use pidash_services::app_issues::{ISSUE_DETAIL_ARCHIVE_FIELDS, ISSUE_DETAIL_BASE_FIELDS};
     use pidash_services::orchestration::entries::fire_state_transition;
 

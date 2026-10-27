@@ -124,7 +124,7 @@ use super::auth as enroll_auth;
 use crate::middleware::SessionHandle;
 use crate::runner_runs::{json_response, pool_of, server_error};
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython::{self, JObject, JVal, JsonFail};
+use crate::v1_cycles_modules::json::{self, JObject, JVal, JsonFail};
 
 // ---------------------------------------------------------------------------
 // Error bodies (D13-F7 `handlers/endpoints.golden.json`, key order verbatim)
@@ -440,7 +440,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
         .await
         .map(|collected| collected.to_bytes())
         .map_err(|_| server_error())?;
-    match json_cpython::parse_request_data(&bytes) {
+    match json::parse_request_data(&bytes) {
         Ok(value) => Ok(value),
         Err(JsonFail::Message(detail)) => Err(json_response(
             StatusCode::BAD_REQUEST,
@@ -455,7 +455,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
 fn parse_error_body(detail: &str) -> String {
     format!(
         "{{\"detail\":{}}}",
-        serde_json::to_string(&format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX))
+        serde_json::to_string(&format!("{}{detail}", json::JSON_PARSE_PREFIX))
             .expect("json string")
     )
 }

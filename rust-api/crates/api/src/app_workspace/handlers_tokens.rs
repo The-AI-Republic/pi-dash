@@ -100,7 +100,7 @@ use super::gates;
 use crate::app_issues::Denial;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_data, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
 
@@ -2469,7 +2469,7 @@ const TIMEZONE_TABLE: [(&str, &str); 120] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1_cycles_modules::json_cpython::JNum;
+    use crate::v1_cycles_modules::json::JNum;
 
     #[test]
     fn soft_delete_message_shape() {

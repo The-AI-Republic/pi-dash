@@ -144,7 +144,7 @@ use crate::middleware::gzip::{accepts_gzip, compress_if_shorter, MIN_COMPRESS_BY
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_data_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
 

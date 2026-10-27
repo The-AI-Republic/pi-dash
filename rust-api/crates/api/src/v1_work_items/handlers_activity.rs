@@ -21,7 +21,7 @@
 //! `pidash_services::v1_work_items::shape_social`, representative SQL in
 //! `queries_sub`, POST validation + S3 offline inputs in `tasks`, gates in
 //! [`super::perms`] over the F-06 kernel (`pidash_auth::permissions`),
-//! request bodies through `crate::v1_cycles_modules::{body, json_cpython}`,
+//! request bodies through `crate::v1_cycles_modules::{body, json}`,
 //! pagination through `crate::paginator`, task fan-out through
 //! `pidash_jobs::queue`. This module owns the HTTP shell: API-key auth, the
 //! slug→UUID rewrite, permission wiring, the write statements, the SigV4
@@ -3958,9 +3958,7 @@ struct PostData {
 /// (Python calls `.get` on the parsed list — `AttributeError`).
 fn parse_post_data(headers: &HeaderMap, body: &[u8]) -> Result<PostData, Denial> {
     use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
-    use crate::v1_cycles_modules::json_cpython::{
-        parse_json_text_spans, to_serde_publish_map, JsonFail,
-    };
+    use crate::v1_cycles_modules::json::{parse_json_text_spans, to_serde_publish_map, JsonFail};
     match negotiate_body(headers, body, &POST_BODY_SPEC) {
         Err(BodyError::UnsupportedMediaType(detail)) => Err(Denial::UnsupportedMediaType(detail)),
         Err(BodyError::ParseDetail(detail)) => Err(Denial::BadDetail(detail)),

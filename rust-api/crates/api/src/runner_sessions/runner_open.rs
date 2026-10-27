@@ -54,7 +54,7 @@
 //!   emits capital-`Detail` until PIDASHCONV-718 lands).
 //! * Body: [`crate::runner_enroll::read_request_data`] (CPython-exact
 //!   JSON, lowercase 400s, non-JSON content proxied to Django), then
-//!   [`json_cpython::to_serde_publish`](crate::v1_cycles_modules::json_cpython::to_serde_publish)
+//!   [`json::to_serde_publish`](crate::v1_cycles_modules::json::to_serde_publish)
 //!   for the kernel maps.
 //! * Plans: [`session_service`](pidash_services::runner_sessions::session_service)
 //!   (hello, reaper, slug, resume, redeliver),
@@ -166,7 +166,7 @@ use crate::runner_runs::{
     RunnerPorts,
 };
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython;
+use crate::v1_cycles_modules::json;
 
 /// Revoke reason stamped on the prior session at open (`:181`).
 const REASON_EVICTED_BY_NEW_SESSION: &str = "evicted_by_new_session";
@@ -1944,7 +1944,7 @@ async fn runner_session_open_inner(
     };
     // `body = request.data or {}`: a truthy non-dict reaches
     // `body.get` and 500s (`AttributeError`).
-    let body = match json_cpython::to_serde_publish(&parsed) {
+    let body = match json::to_serde_publish(&parsed) {
         Value::Object(map) => map,
         other if py_truthy(&other) => return server_error(),
         _ => Map::new(),

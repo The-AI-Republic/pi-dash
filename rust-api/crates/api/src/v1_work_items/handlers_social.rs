@@ -33,7 +33,7 @@
 //! representative SQL in `queries_sub`, POST validation in the shapes,
 //! task kwargs in `tasks`, gates in [`super::perms`] over the F-06 kernel
 //! (`pidash_auth::permissions`), request bodies through
-//! `crate::v1_cycles_modules::{body, json_cpython}`, pagination through
+//! `crate::v1_cycles_modules::{body, json}`, pagination through
 //! `crate::paginator`, task fan-out through `pidash_jobs::queue`. This
 //! module owns the HTTP shell: API-key auth, the slug→UUID rewrite,
 //! permission wiring, the write statements, the read-shape rendering and
@@ -1989,7 +1989,7 @@ struct WriteBody {
 /// exists here — an unpinned edge; Python would 400 them as non-strings).
 fn parse_write_body(headers: &HeaderMap, body: &[u8]) -> Result<WriteBody, Denial> {
     use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
-    use crate::v1_cycles_modules::json_cpython::{
+    use crate::v1_cycles_modules::json::{
         parse_json_text_spans, to_serde_publish, to_serde_publish_map, JsonFail,
     };
     match negotiate_body(headers, body, &WRITE_BODY_SPEC) {

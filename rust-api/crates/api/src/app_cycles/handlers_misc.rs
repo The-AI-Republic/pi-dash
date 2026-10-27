@@ -84,7 +84,7 @@ use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_types::WorkspaceId;
 
@@ -547,16 +547,15 @@ pub fn parse_object_body(headers: &HeaderMap, body: &[u8]) -> Result<Map<String,
         shared_body::NegotiatedBody::Empty => Ok(Map::new()),
         shared_body::NegotiatedBody::JsonText { text, surr } => {
             let value =
-                json_cpython::parse_request_data_spans(text.as_bytes(), &surr).map_err(|fail| {
-                    match fail {
-                        JsonFail::Message(detail) => Denial::BadDetail(format!(
-                            "{}{detail}",
-                            json_cpython::JSON_PARSE_PREFIX
-                        )),
+                json::parse_request_data_spans(text.as_bytes(), &surr).map_err(
+                    |fail| match fail {
+                        JsonFail::Message(detail) => {
+                            Denial::BadDetail(format!("{}{detail}", json::JSON_PARSE_PREFIX))
+                        }
                         JsonFail::Recursion => Denial::ServerError,
-                    }
-                })?;
-            match json_cpython::to_serde_publish(&value) {
+                    },
+                )?;
+            match json::to_serde_publish(&value) {
                 Value::Object(map) => Ok(map),
                 _ => Err(Denial::ServerError),
             }

@@ -52,7 +52,7 @@
 //! * QUIRK-surrogate: DRF's `ProhibitSurrogateCharactersValidator` reports
 //!   lone surrogates per field, but lone surrogates never survive JSON
 //!   parsing into this layer (`serde_json` rejects them at the envelope,
-//!   like the D-20 `json_cpython` precedent in the api crate). Envelope
+//!   like the D-20 `json` precedent in the api crate). Envelope
 //!   acceptance is the handler layer's concern, not this kernel's.
 //! * QUIRK-coerce-inf: `coerce_token(float('inf'))` raises an uncaught
 //!   `OverflowError` in Python (only `TypeError`/`ValueError` are caught).

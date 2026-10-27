@@ -150,7 +150,7 @@ pub enum Denial {
 impl Denial {
     fn content_type(&self) -> &'static str {
         match self {
-            Denial::RendererCrash => super::json_cpython::PLAIN_CRASH_CONTENT_TYPE,
+            Denial::RendererCrash => super::json::PLAIN_CRASH_CONTENT_TYPE,
             _ => "application/json",
         }
     }
@@ -189,7 +189,7 @@ impl Denial {
             ),
             Denial::RendererCrash => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                super::json_cpython::PLAIN_CRASH_BODY.to_owned(),
+                super::json::PLAIN_CRASH_BODY.to_owned(),
             ),
         }
     }
@@ -2340,14 +2340,14 @@ fn json_field_surr(text: &str, surr: &[(usize, u16)]) -> FieldSurr {
     if surr.is_empty() {
         return out;
     }
-    let Ok(value) = super::json_cpython::parse_json_text_spans(text, surr) else {
+    let Ok(value) = super::json::parse_json_text_spans(text, surr) else {
         return out;
     };
     let Some(object) = value.into_object() else {
         return out;
     };
     for (key, value) in object.iter() {
-        let super::json_cpython::JVal::Str(text) = value else {
+        let super::json::JVal::Str(text) = value else {
             continue;
         };
         if let (Some(name), Some(unit)) = (key.to_clean_string(), text.first_surrogate()) {
@@ -2381,7 +2381,7 @@ fn form_field_surr(
         if spans.is_empty() {
             continue;
         }
-        if let Some(unit) = super::json_cpython::JStr::from_dirty(text, spans).first_surrogate() {
+        if let Some(unit) = super::json::JStr::from_dirty(text, spans).first_surrogate() {
             out.insert(key.clone(), unit);
         }
     }
@@ -2405,7 +2405,7 @@ fn json_members_dirty(text: &str, surr: &[(usize, u16)]) -> MembersDirty {
     if surr.is_empty() {
         return out;
     }
-    let Ok(value) = super::json_cpython::parse_json_text_spans(text, surr) else {
+    let Ok(value) = super::json::parse_json_text_spans(text, surr) else {
         return out;
     };
     let Some(object) = value.into_object() else {
@@ -2415,13 +2415,13 @@ fn json_members_dirty(text: &str, surr: &[(usize, u16)]) -> MembersDirty {
         if key.to_clean_string().as_deref() != Some("members") {
             continue;
         }
-        if let super::json_cpython::JVal::Array(items) = value {
+        if let super::json::JVal::Array(items) = value {
             out = items
                 .iter()
                 .map(|item| {
                     matches!(
                         item,
-                        super::json_cpython::JVal::Str(text) if text.has_surrogate()
+                        super::json::JVal::Str(text) if text.has_surrogate()
                     )
                 })
                 .collect();
@@ -2460,7 +2460,7 @@ fn form_members_dirty(
             if spans.is_empty() {
                 return false;
             }
-            super::json_cpython::JStr::from_dirty(text, spans).has_surrogate()
+            super::json::JStr::from_dirty(text, spans).has_surrogate()
         })
         .collect()
 }
@@ -6075,10 +6075,7 @@ mod tests {
         assert_eq!(denial.content_type(), "text/plain");
         let (status, body) = denial.status_and_body();
         assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            body,
-            super::super::json_cpython::PLAIN_CRASH_BODY.to_owned()
-        );
+        assert_eq!(body, super::super::json::PLAIN_CRASH_BODY.to_owned());
     }
 
     #[test]
