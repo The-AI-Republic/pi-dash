@@ -1696,3 +1696,68 @@ describe("PageDetailScreen collaboration mount (PAGE-065-067)", () => {
     expect(live.snapshot).toHaveBeenCalledWith(harness.pageId, true);
   });
 });
+
+describe("PageDetailScreen stored-embed heal (PAGE-040)", () => {
+  const STORED_EMBED = {
+    id: "emb-screen-1",
+    entity_identifier: "N932-ISS-1",
+    project_identifier: "N932-PROJ",
+    workspace_identifier: "acme",
+    entity_name: "Embedded issue",
+  };
+
+  /** The PAGE-040 stored shape: the markup lost the embed the snapshot kept. */
+  function jsonOnlyPage(): PageDetail {
+    return record({
+      description_html: "<p>before embed</p>",
+      description_json: {
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "before embed" }] },
+          { type: "issue-embed-component", attrs: STORED_EMBED },
+        ],
+      },
+    });
+  }
+
+  it("paints the community upgrade card from the record read's snapshot", async () => {
+    // The consumer path, end to end: the detail read's description_json
+    // reaches the canvas through the screen and surface props, so a
+    // dropped prop between them fails here, not only in the leaf tests.
+    harness.page = jsonOnlyPage();
+    renderScreen();
+    const card = await waitFor(
+      () => {
+        const found = document.querySelector(
+          'issue-embed-component [data-testid="page-embed-upgrade"]'
+        ) as HTMLElement | null;
+        expect(found).not.toBeNull();
+        return found as HTMLElement;
+      },
+      { timeout: 10_000 }
+    );
+    expect(card.querySelector("a")?.getAttribute("href")).toBe("https://airepublic.com/pricing");
+    expect(screen.getAllByText("before embed").length).toBeGreaterThan(0);
+    expect(document.querySelectorAll("issue-embed-component")).toHaveLength(1);
+  });
+
+  it("leaves a body whose stored markup already carries the embed alone", async () => {
+    harness.page = record({
+      description_html:
+        '<p>before embed</p><issue-embed-component id="emb-screen-1" entity_identifier="N932-ISS-1" project_identifier="N932-PROJ" workspace_identifier="acme" entity_name="Embedded issue"></issue-embed-component>',
+      description_json: {
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "before embed" }] },
+          { type: "issue-embed-component", attrs: STORED_EMBED },
+        ],
+      },
+    });
+    renderScreen();
+    await screen.findByText("before embed");
+    await waitFor(() => expect(document.querySelectorAll("issue-embed-component")).toHaveLength(1));
+    // A later re-render must not restore a second copy.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(document.querySelectorAll("issue-embed-component")).toHaveLength(1);
+  });
+});

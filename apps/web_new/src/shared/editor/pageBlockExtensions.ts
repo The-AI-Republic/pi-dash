@@ -171,6 +171,10 @@ function createEmoji(Node: Core["Node"], mergeAttributes: MergeAttributes) {
  */
 function createEmbed(Node: Core["Node"], mergeAttributes: MergeAttributes) {
   return Node.create({
+    // The live server's name for the stored embed (NEWFRONT-932, after the
+    // NEWFRONT-929 precedent): only this node name comes back from Yjs
+    // sync as issue-embed-component. The stored element is unchanged —
+    // the tag still parses, and rendering still emits the same element.
     name: "issue-embed-component",
     group: "block",
     atom: true,

@@ -16,6 +16,7 @@ import * as React from "react";
 import { formattingStatesEqual, type PageFormattingState } from "../../../shared/editor/pageFormatting.js";
 import {
   editorFormattingState,
+  healMissingPageEmbeds,
   pageDocumentEmpty,
   pageEditorHandle,
   type PageEditorHandle,
@@ -60,6 +61,12 @@ export interface PageBodyEditorProps {
   collab?: PageLiveDocBinding | null | undefined;
   /** Seed empty shared fields from the stored markup once the server state is known. */
   seedDocument?: boolean | undefined;
+  /**
+   * The stored structured snapshot. A body whose markup lost its embed
+   * tags still carries them here; each missing embed is restored once,
+   * at its snapshot position, after the server state is known (PAGE-040).
+   */
+  descriptionJson?: Record<string, unknown> | null | undefined;
 }
 
 /** Tiptap's EditorContent takes its own editor type; this is ours. */
@@ -95,6 +102,7 @@ async function loadPageEditor(
     claimsPasteText,
     collab,
     seedDocument,
+    descriptionJson,
   }: PageBodyEditorProps): React.ReactElement {
     const shownHtml = React.useMemo(() => prepareEditorHtml(initialHtml, resolveAsset), [initialHtml, resolveAsset]);
     const onChangeRef = React.useRef(onChange);
@@ -172,6 +180,19 @@ async function loadPageEditor(
       if (!pageDocumentEmpty(editor as unknown as PageEditorRef)) return;
       editor.commands.setContent(shownHtml);
     }, [editor, seedDocument, shownHtml]);
+
+    // The snapshot heal runs after the seed, on the same signal: the
+    // standalone editor heals as soon as it exists, the live editor once
+    // the server state is known, and either way exactly once per mount
+    // (PAGE-040). Running after the seed keeps the seed from wiping a
+    // restored embed on an empty shared field.
+    const healedRef = React.useRef(false);
+    React.useLayoutEffect(() => {
+      if (editor === null || healedRef.current) return;
+      if (collaboration !== null && seedDocument !== true) return;
+      healedRef.current = true;
+      healMissingPageEmbeds(editor as unknown as PageEditorRef, descriptionJson ?? null);
+    }, [editor, seedDocument, descriptionJson, collaboration]);
 
     React.useEffect(() => {
       if (editor !== null) readyRef.current(pageEditorHandle(editor as unknown as PageEditorRef));

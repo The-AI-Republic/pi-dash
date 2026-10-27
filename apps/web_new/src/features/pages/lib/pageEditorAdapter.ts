@@ -17,6 +17,7 @@ import {
   type PageFormattingState,
 } from "../../../shared/editor/pageFormatting.js";
 import { emojiHtml, embedHtml, type PageCatalogBlockKind, type PageEmbedAttributes } from "./pageBlocks.js";
+import { missingPageEmbedInserts } from "./pageEmbedHeal.js";
 import type { PageEntityReferenceAttributes } from "../../../shared/editor/pageBlockExtensions.js";
 
 /** The chain methods this adapter calls, by the command that calls them. */
@@ -114,6 +115,8 @@ export interface PageEditorRef {
   commands: { focus: (position?: PageFocusPosition) => void };
   /** Tiptap's mark-attribute read; optional so simple probes still work. */
   getAttributes?: (name: string) => Record<string, unknown>;
+  /** The document's structured form; optional so simple probes still work. */
+  getJSON?: () => unknown;
   /** Present on a live editor; absent on simple probes and in unit tests. */
   view?: PageEditorView;
   state: {
@@ -735,6 +738,32 @@ export function insertPageEmoji(editor: PageEditorRef, glyph: string): void {
  */
 export function insertPageEmbed(editor: PageEditorRef, attributes: PageEmbedAttributes): void {
   editor.chain().focus().insertContent(embedHtml(attributes)).run();
+}
+
+/**
+ * Restore the stored embeds a mounted body lost (PAGE-040, NEWFRONT-932).
+ * Each missing embed lands after its snapshot index's block, so a body
+ * whose prose still matches the snapshot regains the author's order; a
+ * body that drifted clamps to its own end. An editor that cannot report
+ * its document heals nothing. No focus is taken: this runs on mount,
+ * before the operator ever reaches the canvas.
+ */
+export function healMissingPageEmbeds(editor: PageEditorRef, snapshot: unknown): void {
+  if (editor.getJSON === undefined) return;
+  const inserts = missingPageEmbedInserts(snapshot, editor.getJSON());
+  for (const insert of inserts) {
+    editor.chain().insertContentAt(healPosition(editor, insert.index), embedHtml(insert.attributes)).run();
+  }
+}
+
+/** The document position after the index's block, clamped to the end. */
+function healPosition(editor: PageEditorRef, index: number): number | "end" {
+  const doc = editor.view?.state.doc;
+  if (doc === undefined) return "end";
+  const after = Math.min(Math.max(index, 0), doc.childCount);
+  let position = 0;
+  for (let block = 0; block < after; block += 1) position += doc.child(block).nodeSize;
+  return position;
 }
 
 /** Insert one stored entity reference inline at the caret (PAGE-043). */

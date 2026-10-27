@@ -2,16 +2,17 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Live-sync wire compatibility (parity/specs/pages.md §5.3, PAGE-034/036).
-// A page body persists through live Yjs sync, and the collaboration
-// server turns the synced state back into HTML with its own schema. Only
-// the type and attribute names that schema knows survive the trip: an
-// unknown mark is dropped with its span, and the plain image node comes
-// back as a literal img instead of the stored image-component. The page
-// editor must therefore speak the server's names for the colour mark and
-// the stored-image node, and this suite pins that contract. The names
-// below are the server's (verified against its schema); the simulation
-// only drops what the server cannot know and renders what it keeps.
+// Live-sync wire compatibility (parity/specs/pages.md §5.3,
+// PAGE-034/036/040). A page body persists through live Yjs sync, and the
+// collaboration server turns the synced state back into HTML with its own
+// schema. Only the type and attribute names that schema knows survive the
+// trip: an unknown mark is dropped with its span, and the plain image
+// node comes back as a literal img instead of the stored image-component.
+// The page editor must therefore speak the server's names for the colour
+// mark, the stored-image node and the work-item embed, and this suite
+// pins that contract. The names below are the server's (verified against
+// its schema); the simulation only drops what the server cannot know and
+// renders what it keeps.
 
 import type { AnyExtension } from "@tiptap/core";
 import { describe, expect, it } from "vitest";
@@ -39,6 +40,7 @@ const SERVER_NODES: Record<string, readonly string[]> = {
   text: [],
   image: ["src", "alt", "title"],
   imageComponent: ["src", "alt", "title", "id", "width", "height", "aspectRatio", "alignment", "status"],
+  "issue-embed-component": ["id", "entity_identifier", "project_identifier", "workspace_identifier", "entity_name"],
 };
 
 const SERVER_MARKS: Record<string, readonly string[]> = {
@@ -104,6 +106,11 @@ function serverHtml(node: WireNode): string {
     const parts = Object.entries(attrs).map(([name, value]) => `${name}="${escapeHtml(String(value))}"`);
     return `<image-component${parts.length === 0 ? "" : ` ${parts.join(" ")}`}></image-component>`;
   }
+  if (node.type === "issue-embed-component") {
+    const attrs = node.attrs ?? {};
+    const parts = Object.entries(attrs).map(([name, value]) => `${name}="${escapeHtml(String(value))}"`);
+    return `<issue-embed-component${parts.length === 0 ? "" : ` ${parts.join(" ")}`}></issue-embed-component>`;
+  }
   return (node.content ?? []).map(serverHtml).join("");
 }
 
@@ -150,5 +157,24 @@ describe("live-sync wire names", () => {
     const html = serverHtml(serverView(json) ?? { type: "doc", content: [] });
     expect(html).toContain("<image-component");
     expect(html).toContain('status="uploaded"');
+  });
+
+  it("names the work-item embed for the server schema (PAGE-040)", async () => {
+    const extensions = (await loadPageExtensions()) as unknown as AnyExtension[];
+    const embed = extensions.find((extension) => extension.name === "issue-embed-component");
+    expect(embed?.name).toBe("issue-embed-component");
+  });
+
+  it("keeps a stored embed as issue-embed-component through the server's view (PAGE-040)", async () => {
+    const json = await clientJson(
+      '<p>before embed</p><issue-embed-component id="emb-1" entity_identifier="ISS-1" project_identifier="P" workspace_identifier="ws" entity_name="Embedded"></issue-embed-component>'
+    );
+    const embed = json.content?.find((child) => child.type === "issue-embed-component");
+    expect(embed?.type).toBe("issue-embed-component");
+    expect(embed?.attrs?.["entity_identifier"]).toBe("ISS-1");
+    const html = serverHtml(serverView(json) ?? { type: "doc", content: [] });
+    expect(html).toContain("<issue-embed-component");
+    expect(html).toContain('entity_identifier="ISS-1"');
+    expect(html).toContain("before embed");
   });
 });

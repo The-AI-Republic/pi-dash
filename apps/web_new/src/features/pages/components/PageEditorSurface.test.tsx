@@ -593,6 +593,51 @@ describe("PageEditorSurface oversized strip", () => {
   });
 });
 
+describe(
+  "PageEditorSurface snapshot heal",
+  () => {
+    const snapshot = (): Record<string, unknown> => ({
+      type: "doc",
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: "before embed" }] },
+        {
+          type: "issue-embed-component",
+          attrs: {
+            id: "emb-1",
+            entity_identifier: "ISS-1",
+            project_identifier: "P",
+            workspace_identifier: "acme",
+            entity_name: "Embedded",
+          },
+        },
+      ],
+    });
+
+    it("heals a JSON-only embed into the community upgrade card (PAGE-040)", async () => {
+      mount({ descriptionHtml: "<p>before embed</p>", descriptionJson: snapshot() });
+      const editable = await body();
+      const card = await vi.waitFor(() => {
+        const found = editable.querySelector('issue-embed-component [data-testid="page-embed-upgrade"]');
+        expect(found).not.toBeNull();
+        return found as HTMLElement;
+      });
+      expect(card.querySelector("a")?.getAttribute("href")).toBe("https://airepublic.com/pricing");
+      expect(editable).toHaveTextContent("before embed");
+    });
+
+    it("withholds the snapshot while a session draft is newer (PAGE-040)", async () => {
+      // The draft is the operator's own newer body: healing the older
+      // snapshot over it could resurrect an embed deleted this session.
+      setPageBodyDraft("page-1", "<p>Typed earlier</p>");
+      mount({ descriptionHtml: "<p>before embed</p>", descriptionJson: snapshot() });
+      const editable = await body();
+      expect(editable).toHaveTextContent("Typed earlier");
+      expect(editable.querySelector("issue-embed-component")).toBeNull();
+    });
+  },
+  EDITOR_TEST_TIMEOUT
+);
+
 describe("PageEditorSurface collaboration", () => {
   function sharedDoc(title: string, body: string): Y.Doc {
     const peer = new Y.Doc();

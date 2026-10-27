@@ -106,7 +106,11 @@ function row(overrides: Record<string, unknown> = {}) {
   };
 }
 
-const DETAIL = row({ description_html: "<p>Body</p>", issue_ids: [] });
+const DETAIL = row({
+  description_html: "<p>Body</p>",
+  description_json: { type: "doc", content: [{ type: "paragraph" }] },
+  issue_ids: [],
+});
 const CREATED = row({ description_html: "<p>Body</p>" });
 
 describe("pages collection contracts", () => {
@@ -218,7 +222,17 @@ describe("pages collection contracts", () => {
     expect(calls[0]?.url).toBe(`${BASE}${PAGE}/`);
     expect(calls[0]?.query).toEqual({ track_visit: false });
     expect(detail.description_html).toBe("<p>Body</p>");
+    expect(detail.description_json).toEqual({ type: "doc", content: [{ type: "paragraph" }] });
     expect(detail.issue_ids).toEqual([]);
+  });
+
+  it("reads a detail whose answer carries no structured snapshot", async () => {
+    // The snapshot stays optional so a reduced echo still parses; the
+    // canvas then heals nothing and shows the stored markup as-is.
+    const { client } = stubClient({ json: () => CREATED });
+    const detail = await getPage(client, WS, PROJECT, PAGE, { trackVisit: false });
+    expect(detail.description_html).toBe("<p>Body</p>");
+    expect(detail.description_json).toBeUndefined();
   });
 
   it("tracks the visit unless the caller opts out", async () => {
