@@ -55,8 +55,8 @@ use std::sync::LazyLock;
 use encoding_rs::Encoding;
 use serde_json::{Map, Value};
 
-use super::html_entities;
 use crate::assistant::ssrf::address_is_private_or_reserved;
+use pidash_types::html_entities::lookup_bare_entity;
 
 /// Celery task name (`work_item_link_task.py:262`, `@shared_task`).
 pub const CRAWL_TASK_NAME: &str = "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title";
@@ -1102,7 +1102,7 @@ fn match_entityref(out: &mut String, text: &str, index: usize) -> Option<usize> 
         end += 1;
     }
     let name = &text[index + 1..end];
-    match html_entities::lookup(name) {
+    match lookup_bare_entity(name) {
         Some(replacement) => out.push_str(replacement),
         None => {
             out.push('&');
