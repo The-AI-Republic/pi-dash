@@ -63,24 +63,40 @@ class IssueActivityEndpoint(BaseAPIView):
             )
         )
 
-        if request.GET.get("activity_type", None) == "issue-property":
-            issue_activities = issue_activities.prefetch_related(
-                Prefetch(
-                    "issue__issue_intake",
-                    queryset=IntakeIssue.objects.only("source_email", "source", "extra"),
-                    to_attr="source_data",
-                )
+        # The property rows carry the intake source only when the related
+        # intake is prefetched onto ``issue.source_data``; do it for every
+        # branch so the merged and split reads describe a row the same way.
+        issue_activities = issue_activities.prefetch_related(
+            Prefetch(
+                "issue__issue_intake",
+                queryset=IntakeIssue.objects.only("source_email", "source", "extra"),
+                to_attr="source_data",
             )
-            issue_activities = IssueActivitySerializer(issue_activities, many=True).data
-            return Response(issue_activities, status=status.HTTP_200_OK)
+        )
 
-        if request.GET.get("activity_type", None) == "issue-comment":
-            issue_comments = IssueCommentSerializer(issue_comments, many=True).data
-            return Response(issue_comments, status=status.HTTP_200_OK)
+        activity_type = request.GET.get("activity_type", None)
 
+        if activity_type == "issue-property":
+            return Response(
+                IssueActivitySerializer(issue_activities, many=True).data,
+                status=status.HTTP_200_OK,
+            )
+
+        if activity_type == "issue-comment":
+            return Response(
+                IssueCommentSerializer(issue_comments, many=True).data,
+                status=status.HTTP_200_OK,
+            )
+
+        # Merged read: serialize each side with its own serializer first, then
+        # merge the plain dicts. Sorting the model rows directly would compare
+        # model instances and blow up on the subscript.
         result_list = sorted(
-            chain(issue_activities, issue_comments),
-            key=lambda instance: instance["created_at"],
+            chain(
+                IssueActivitySerializer(issue_activities, many=True).data,
+                IssueCommentSerializer(issue_comments, many=True).data,
+            ),
+            key=lambda entry: entry["created_at"],
         )
 
         return Response(result_list, status=status.HTTP_200_OK)

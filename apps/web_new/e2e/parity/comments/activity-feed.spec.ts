@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Oracle scenario (NEWFRONT-114): the merged activity feed. The old app
-// never reads the merged history endpoint (it 500s — bug NEWFRONT-128, the
-// merged branch subscripts uns serialized model rows); it reads the
-// property and comment splits and merges them client-side, oldest-first by
-// default. This scenario drives one comment plus one title change through
-// the UI and proves the on-screen feed merges both sources in chronological
-// order with actor, timestamp and per-field content, and that entry links
-// navigate. Row: CMT-013.
+// reads the property and comment splits and merges them client-side,
+// oldest-first by default. The server now also serves the merged read
+// (NEWFRONT-128 fixed the 500 caused by sorting uns serialized model rows),
+// so this scenario checks both the on-screen feed and that one merged read
+// returns the same combined, ascending list. This scenario drives one
+// comment plus one title change through the UI and proves the on-screen feed
+// merges both sources in chronological order with actor, timestamp and
+// per-field content, and that entry links navigate. Row: CMT-013.
 import { test, expect } from "../fixtures";
 import { serverCreateIssue, serverCleanupIssue, serverHistory, signInSessionWithRetry } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
@@ -17,7 +18,7 @@ const ROWS = ["CMT-013"];
 const TIME_HINT = /(ago|just now|\b\d{4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b|\d{1,2}:\d{2})/i;
 
 test(
-  specTitle(ROWS, "activity feed merges property changes and comments in order (bug: NEWFRONT-128)"),
+  specTitle(ROWS, "activity feed merges property changes and comments in order"),
   { tag: specTags(ROWS) },
   async ({ driver, seed }) => {
     // The scratch stack and runner host are shared with concurrent
@@ -75,7 +76,7 @@ test(
         expect(url).toMatch(/profile/);
       });
 
-      await test.step("the server agrees: splits 200, merged 500 (NEWFRONT-128)", async () => {
+      await test.step("the server agrees: splits and the merged read are 200", async () => {
         const props = await serverHistory(
           seed.workspaceSlug,
           seed.projectId,
@@ -99,8 +100,18 @@ test(
           expect(typeof entry.created_at).toBe("string");
         }
         expect(comments.entries[0]?.comment_html ?? comments.entries[0]?.comment).toBeDefined();
+
         const merged = await serverHistory(seed.workspaceSlug, seed.projectId, issueId, session, "");
-        expect(merged.status).toBe(500);
+        expect(merged.status).toBe(200);
+        expect(merged.entries).toHaveLength(3);
+        const mergedIds = merged.entries.map((entry) => entry.id);
+        expect(new Set(mergedIds)).toEqual(new Set([...props.entries, ...comments.entries].map((entry) => entry.id)));
+        const timestamps = merged.entries.map((entry) => entry.created_at);
+        expect(timestamps).toEqual([...timestamps].sort());
+        for (const entry of merged.entries) {
+          expect(typeof entry.id).toBe("string");
+          expect(typeof entry.created_at).toBe("string");
+        }
       });
     } finally {
       await serverCleanupIssue(seed.workspaceSlug, seed.projectId, issueId, seed.email, seed.password, session);
