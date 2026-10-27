@@ -67,6 +67,35 @@ describe("stripMarkdownImages", () => {
     expect(stripMarkdownImages("a ![oops")).toBe("a ![oops");
   });
 
+  it("recognises indented fences and leaves a document with an open fence alone", () => {
+    expect(stripMarkdownImages("   ~~~\n![a](b.png)\n   ~~~\n![c](d.png)")).toBe("   ~~~\n![a](b.png)\n   ~~~\n");
+    expect(stripMarkdownImages("```\n![a](b.png)")).toBe("```\n![a](b.png)");
+    expect(stripMarkdownImages("```")).toBe("```");
+  });
+
+  it("does not treat a short backtick run or a backtick info string as a fence", () => {
+    expect(stripMarkdownImages("``code`` ![a](b.png)")).toBe("``code`` ");
+    expect(stripMarkdownImages("``` a`b\n![a](b.png)")).toBe("``` a`b\n");
+  });
+
+  it("treats a longer backtick run inside an open span as literal text", () => {
+    expect(stripMarkdownImages("``a` ![x](y.png)`` and ![a](b.png)")).toBe("``a` ![x](y.png)`` and ");
+  });
+
+  it("leaves an unclosed code span alone", () => {
+    expect(stripMarkdownImages("open `tick ![a](b.png)")).toBe("open `tick ");
+  });
+
+  it("handles escapes and line breaks inside a label, destination or reference", () => {
+    expect(stripMarkdownImages("![a\\]b](c.png) tail")).toBe(" tail");
+    expect(stripMarkdownImages("![a\n](b.png) tail")).toBe("![a\n](b.png) tail");
+    expect(stripMarkdownImages("![a](b\\)c.png) tail")).toBe(" tail");
+    expect(stripMarkdownImages("![a](b\nc.png) tail")).toBe("![a](b\nc.png) tail");
+    expect(stripMarkdownImages("![a][b\\]c] tail")).toBe(" tail");
+    expect(stripMarkdownImages("![a][b\nc] tail")).toBe("![a][b\nc] tail");
+    expect(stripMarkdownImages("![a][b")).toBe("![a][b");
+  });
+
   it("keeps a linked picture's surrounding link address", () => {
     expect(stripMarkdownImages("[![alt](shot.png)](https://example.com/page)")).toBe("[](https://example.com/page)");
   });
