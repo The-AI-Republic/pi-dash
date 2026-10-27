@@ -817,8 +817,9 @@ describe("SubIssueSection dialogs", () => {
   it("opens the create dialog for a parent with no children yet", async () => {
     stubApi({ pages: [page({ sub_issues: [], state_distribution: {}, total_count: 0 })] });
     const ref = React.createRef<SubIssueSectionHandle>();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
-      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <QueryClientProvider client={client}>
         <SubIssueSection
           ref={ref}
           workspaceSlug={WS}
@@ -832,6 +833,8 @@ describe("SubIssueSection dialogs", () => {
         />
       </QueryClientProvider>
     );
+    await waitFor(() => expect(client.getQueryState(subIssuesKey(WS, PROJECT, PARENT))?.status).toBe("success"));
+    expect(screen.queryByTestId("sub-issues-section")).not.toBeInTheDocument();
     ref.current?.openCreate();
     expect(await screen.findByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
     ref.current?.openExisting();
