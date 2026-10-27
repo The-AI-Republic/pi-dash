@@ -106,6 +106,7 @@ use super::gates;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::py_strip;
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
@@ -307,12 +308,6 @@ pub fn positional(sql: &str, params: &[&str]) -> String {
 // ---------------------------------------------------------------------------
 // Python semantics (probed live against CPython + Django 4.2.30 / DRF 3.15.2)
 // ---------------------------------------------------------------------------
-
-/// Python `str.strip()` with no arguments: Unicode whitespace plus
-/// `\x1c`-`\x1f`, which Rust's `char::is_whitespace` does not cover.
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
-}
 
 /// What CPython `int()` strips: Unicode whitespace EXCEPT `\x1c`-`\x1f`
 /// (probed — `int("\x1c5")` raises while `"\x1c5".strip()` is `"5"`),

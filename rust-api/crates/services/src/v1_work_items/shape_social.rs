@@ -115,6 +115,7 @@ use serde_json::{Map, Value};
 
 use super::shape_issue::{field_errors_body, BASE_EXPANSION_NAMES, INVALID_HTML_BODY};
 use super::{filter_fields, python_number_str, FieldSpec, FilterError};
+use pidash_compat::py::{py_is_space, py_strip};
 
 /// `IssueAttachmentSerializer` read order (`issue.py:907-927`,
 /// `fields="__all__"`): declared `id`, then plain model fields in model
@@ -281,18 +282,6 @@ fn max_length_message(max_chars: usize) -> String {
 /// raw input (see [`py_str`]).
 fn invalid_choice_message(py_input: &str) -> String {
     format!("\"{py_input}\" is not a valid choice.")
-}
-
-/// Python `str.strip()` membership (live-probed): Rust `is_whitespace` plus
-/// `\x1c`-`\x1f` (which Python strips but `White_Space` omits). The `re`
-/// `\s` class used by `re_decimal` matches the same set.
-fn py_is_space(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
-}
-
-/// Python `str.strip()` (no-arg): strip [`py_is_space`] from both ends.
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(py_is_space)
 }
 
 /// Render a parsed-JSON value the way Python `str(data)` would, for the

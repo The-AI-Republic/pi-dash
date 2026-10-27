@@ -78,6 +78,7 @@ use super::{
 use crate::license::{query_last, resolve_actor, QueryMap, UNAUTHENTICATED_BODY};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+pub(crate) use pidash_compat::py::py_strip;
 use pidash_compat::response::server_error;
 
 // ---------------------------------------------------------------------------
@@ -142,13 +143,6 @@ pub fn py_truthy_json(value: Option<&Value>) -> bool {
         Some(Value::Array(items)) => !items.is_empty(),
         Some(Value::Object(map)) => !map.is_empty(),
     }
-}
-
-/// Python `str.strip()` (no args): Rust's `White_Space` plus U+001C–U+001F,
-/// which CPython's `Py_UNICODE_ISSPACE` strips but the Unicode property
-/// does not (verified against CPython 3.12). Same formula as the L4 twin.
-pub fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
 /// First `max` Unicode code points of `text` (`text[:max]`, `runs.py:560`).

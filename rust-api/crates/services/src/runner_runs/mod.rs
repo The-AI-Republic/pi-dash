@@ -130,6 +130,7 @@ pub use scheduler_hook::{
     plan_scheduler_hook, scheduler_binding_update_sql, BindingFacts, SchedulerHookPlan,
 };
 
+use pidash_compat::py::{py_str, py_strip, py_truthy};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -192,33 +193,6 @@ pub enum SetValue {
     Json(Value),
 }
 
-/// Python truthiness for JSON frame values (`None`/`False`/`0`/`""`/`[]`/`{}`
-/// are falsy; everything else is truthy).
-pub(crate) fn py_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i != 0
-            } else if let Some(u) = n.as_u64() {
-                u != 0
-            } else {
-                n.as_f64().map(|f| f != 0.0).unwrap_or(false)
-            }
-        }
-        Value::String(s) => !s.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
-}
-
-/// Python `str.strip()`: Rust's `is_whitespace` set plus U+001C..=U+001F
-/// (same formula as the L1 `py_strip` twins).
-pub(crate) fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
-}
-
 /// First `max` Unicode code points of `text` (`text[:max]`).
 /// Byte-slicing would panic on a UTF-8 boundary; `chars().take()`
 /// cannot. A string that fits in `max` bytes needs no walk.
@@ -227,133 +201,6 @@ pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
         return text.to_string();
     }
     text.chars().take(max).collect()
-}
-
-/// Python `str(value)` for JSON frame values. Only ever called on
-/// truthy values (every call site checks truthiness first, as the
-/// `or ""` / `if …` in the source does), but total: `None`/`True`/`False`
-/// spellings, integers verbatim, floats in CPython repr form,
-/// strings as-is, containers in single-quote repr form. Container
-/// key order follows `serde_json::Map` iteration order.
-pub(crate) fn py_str(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => py_num_str(n),
-        Value::String(s) => s.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr(v)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-/// Python `repr(value)` for a value nested in a container: identical
-/// to [`py_str`] except strings, which gain quotes.
-fn py_repr(value: &Value) -> String {
-    match value {
-        Value::String(s) => py_repr_str(s),
-        other => py_str(other),
-    }
-}
-
-/// Python `str(number)`: integers verbatim, floats in CPython repr form.
-/// Integers beyond `u64` parse as `f64` (their digits are already lost
-/// by `serde_json`, exactly as for a float literal with the same
-/// value), so they render in exponent form like the float they parse
-/// to — `10^30` and `1e30` are the same `Value` and the same output.
-fn py_num_str(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_i64() {
-        return i.to_string();
-    }
-    if let Some(u) = n.as_u64() {
-        return u.to_string();
-    }
-    n.as_f64()
-        .map(py_float_str)
-        .unwrap_or_else(|| n.to_string())
-}
-
-/// CPython `repr(float)`: Rust's `Debug` shortest round-trip with the
-/// exponent normalized to Python's `e±XX` form (`1e16` → `1e+16`,
-/// `1e-5` → `1e-05`). The two engines switch to exponent notation
-/// at different magnitudes in rare cases; that edge is documented,
-/// not bridged — frame floats are already absurd this far down.
-fn py_float_str(f: f64) -> String {
-    if f.is_nan() {
-        return "nan".to_owned();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    let rust = format!("{f:?}");
-    let Some(pos) = rust.find('e') else {
-        return rust;
-    };
-    let (mantissa, exp) = rust.split_at(pos);
-    let exp = &exp[1..];
-    let (sign, digits) = match exp.strip_prefix('-') {
-        Some(digits) => ("-", digits),
-        None => ("+", exp.strip_prefix('+').unwrap_or(exp)),
-    };
-    format!("{mantissa}e{sign}{digits:0>2}")
-}
-
-/// Python `repr(str)`: single quotes unless the string contains `'`
-/// but not `"`, backslash escapes for quotes/backslash/whitespace,
-/// `\xNN` / `\uNNNN` / `\U00NNNNNN` for the rest of the
-/// non-printables. The printable test covers controls, DEL and the
-/// line/paragraph separators; exotic format characters (`Cf`) pass
-/// through raw — a divergence reachable only from hostile frames.
-fn py_repr_str(s: &str) -> String {
-    let use_double = s.contains('\'') && !s.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push(quote);
-    for c in s.chars() {
-        if c == quote {
-            out.push('\\');
-            out.push(c);
-        } else {
-            match c {
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if py_printable(c) => out.push(c),
-                c if (c as u32) < 0x100 => {
-                    out.push_str(&format!("\\x{:02x}", c as u32));
-                }
-                c if (c as u32) < 0x1_0000 => {
-                    out.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                c => {
-                    out.push_str(&format!("\\U{:08x}", c as u32));
-                }
-            }
-        }
-    }
-    out.push(quote);
-    out
-}
-
-/// Approximation of `str.isprintable` for [`py_repr_str`]: controls,
-/// DEL and U+2028/2029 are non-printable; everything else (including
-/// the exotic `Cf` format characters) prints raw.
-fn py_printable(c: char) -> bool {
-    !(c.is_control() || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}')
 }
 
 /// `issues` columns in Django `_meta` order (captured from
@@ -541,18 +388,6 @@ mod tests {
         // Single-key dict (multi-key order follows the map).
         assert_eq!(py_str(&json!({"a": 1})), "{'a': 1}");
         assert_eq!(py_str(&json!({"a": "x's"})), "{'a': \"x's\"}");
-    }
-
-    #[test]
-    fn py_repr_str_quotes_and_escapes() {
-        assert_eq!(py_repr_str("abc"), "'abc'");
-        assert_eq!(py_repr_str("x's"), "\"x's\"");
-        assert_eq!(py_repr_str("say \"hi\""), "'say \"hi\"'");
-        assert_eq!(py_repr_str("a'b\"c"), "'a\\'b\"c'");
-        assert_eq!(py_repr_str("a\nb\tc\\d"), "'a\\nb\\tc\\\\d'");
-        assert_eq!(py_repr_str("\u{1}"), "'\\x01'");
-        assert_eq!(py_repr_str("\u{7f}"), "'\\x7f'");
-        assert_eq!(py_repr_str("—"), "'—'");
     }
 
     #[test]

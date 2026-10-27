@@ -105,6 +105,7 @@ use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_compat::datetime::render_rfc3339_in;
+use pidash_compat::py::python_dumps;
 use pidash_compat::response::json_response;
 use pidash_compat::validate::push_error;
 use pidash_db::app_pages::strip::ml_strip_tags;
@@ -543,81 +544,6 @@ async fn project_workspace_id(
 // ---------------------------------------------------------------------------
 // `json.dumps` with CPython defaults (Celery `requested_data` payloads)
 // ---------------------------------------------------------------------------
-
-/// `json.dumps(value)`: `separators=(', ', ': ')`, `ensure_ascii=True`,
-/// insertion-ordered keys. Same implementation as the intake handlers'
-/// `python_dumps` (convergent copy; the two dedupe if both merge).
-fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
-    }
-}
-
-/// CPython `py_encode_basestring_ascii`.
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-}
 
 /// The `Description` mirror row's stripped text on `create()`: `Description.save`
 /// RECOMPUTES it with Django's own `strip_tags` (`db/models/description.py:22-29`),
@@ -3319,19 +3245,6 @@ mod tests {
             ]
             .map(str::to_owned)
             .to_vec()
-        );
-    }
-
-    #[test]
-    fn python_dumps_matches_cpython_separators() {
-        let value = serde_json::json!({"a": 1, "b": "<p>hi</p>", "c": "héllo"});
-        assert_eq!(
-            python_dumps(&value),
-            r#"{"a": 1, "b": "<p>hi</p>", "c": "h\u00e9llo"}"#
-        );
-        assert_eq!(
-            python_dumps(&serde_json::json!([1, true, None::<()>])),
-            "[1, true, null]"
         );
     }
 

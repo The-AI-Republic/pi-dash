@@ -115,6 +115,7 @@ use crate::middleware::SessionHandle;
 use crate::runner_runs::{json_response, pool_of, server_error};
 use crate::state::AppState;
 use crate::v1_cycles_modules::json::{self, JObject, JVal, JsonFail};
+use pidash_compat::py::py_strip;
 
 // ---------------------------------------------------------------------------
 // Error bodies (D13-F7 `handlers/endpoints.golden.json`, key order verbatim
@@ -360,17 +361,6 @@ fn data_get<'a>(data: &'a JVal, key: &str) -> Result<Option<&'a JVal>, Response>
             Err(server_error())
         }
     }
-}
-
-/// Python `str.strip()` parity (the services-layer `py_strip` twin —
-/// services is read-only from this crate's layer boundary, so the
-/// predicate is mirrored, not imported): Python strips
-/// `str.isspace()` — Unicode `White_Space` plus U+001C-U+001F and
-/// U+0085 — while Rust `trim()` strips `White_Space` only.
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 /// `(request.data.get(key) or "").strip()` (`QUIRK-name-500`): falsy

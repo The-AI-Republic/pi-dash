@@ -100,6 +100,7 @@ use pidash_services::user_settings::SettingsSchema;
 use crate::middleware::SessionHandle;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use pidash_compat::py::py_json_string;
 pub use pidash_compat::response::{json_response, SERVER_ERROR_BODY};
 
 /// Register the owned D-24 user-extras routes. Unowned methods fall
@@ -657,38 +658,6 @@ fn py_json_dumps(value: &serde_json::Value) -> String {
             out
         }
     }
-}
-
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, `0x7f` raw, everything
-/// else non-ASCII as `\uXXXX` (lowercase hex, surrogate pairs past
-/// the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
 }
 
 /// CPython `json.dumps` number encoding: ints verbatim (`-0` parses

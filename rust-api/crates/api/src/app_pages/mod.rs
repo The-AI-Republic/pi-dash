@@ -150,6 +150,7 @@ use std::convert::Infallible;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::py::{py_is_space, py_strip};
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
@@ -929,17 +930,6 @@ fn unescape_string_literal(term: &str) -> String {
     inner
         .replace(&escaped, &quote.to_string())
         .replace("\\\\", "\\")
-}
-
-/// Python whitespace (`str.strip`, `re \s`, `str.isspace` — all the same
-/// 29 chars: Rust's `char::is_whitespace` plus `\x1c`-`\x1f`).
-fn py_is_space(ch: char) -> bool {
-    ch.is_whitespace() || ('\x1c'..='\x1f').contains(&ch)
-}
-
-/// Python `str.strip()` with no arguments.
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(py_is_space)
 }
 
 /// Escape one term for `name__icontains`: Django escapes the LIKE

@@ -111,6 +111,7 @@ use crate::middleware::SessionHandle;
 use crate::paginator::py_float_str;
 use crate::state::AppState;
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::{py_repr_string, py_strip};
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::domain::projects::members as project_members;
@@ -313,13 +314,6 @@ pub fn positional(sql: &str, params: &[&str]) -> String {
 
 fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-/// Python `str.strip()` with no arguments: Unicode whitespace plus
-/// `\x1c`-`\x1f`, which Rust's `char::is_whitespace` does not cover
-/// (the `v1_projects` `py_strip` precedent, verified against CPython).
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
 }
 
 /// `request.data.get("email", "").strip().lower()`
@@ -1349,31 +1343,6 @@ fn py_repr(value: &Value) -> String {
         Value::Array(_) | Value::Object(_) => py_str(value),
         _ => py_str(value),
     }
-}
-
-fn py_repr_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    let use_double = text.contains('\'') && !text.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    out.push(quote);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
 }
 
 /// Pure input half of the asset-FK check (DB-free, unit-tested):

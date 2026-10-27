@@ -578,81 +578,6 @@ fn parse_json_body(text: &str) -> Result<Map<String, Value>, Denial> {
 // CPython value semantics (`dumps` / float rendering)
 // ---------------------------------------------------------------------------
 
-/// `json.dumps(value, cls=DjangoJSONEncoder)` for task kwargs: CPython
-/// separators plus `ensure_ascii` string escaping. Inputs here are plain
-/// JSON (no datetimes/UUIDs/Decimals reach these dumps unrendered), so
-/// only separators and escaping are ported.
-fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
-    }
-}
-
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-}
-
 /// Rewrite every parsed f64 to its CPython `repr` literal, so `str()` of
 /// a request float (`title: 1e-3` → `"0.001"`) matches Python.
 fn normalize_parse_floats(value: &mut Value) {
@@ -708,67 +633,6 @@ fn py_float_repr(value: f64) -> String {
     // Unreachable in practice (17 significant digits always identify
     // an f64); fall back to the longest rendering laid out.
     layout_py_float(&format!("{value:.18e}"), value)
-}
-
-/// Lay out a `d.dddde±xx` rendering per the CPython magnitude rule
-/// (plain inside `[1e-4, 1e16)`, exponent outside). Same algorithm as the
-/// engage handler's copy.
-fn layout_py_float(rendered: &str, value: f64) -> String {
-    let (mantissa, exp) = match rendered.split_once(['e', 'E']) {
-        Some((mantissa, exp)) => (mantissa, exp.parse::<i32>().unwrap_or(0)),
-        None => (rendered, 0),
-    };
-    let negative = mantissa.starts_with('-');
-    let digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    let digits = digits.trim_start_matches('0');
-    let digits = digits.trim_end_matches('0');
-    let digits = if digits.is_empty() { "0" } else { digits };
-    // Decimal exponent of `0.digits × 10^E`.
-    let point_at = mantissa
-        .find('.')
-        .map(|pos| pos - usize::from(negative))
-        .unwrap_or_else(|| mantissa.len() - usize::from(negative));
-    let exp10 = exp + point_at as i32;
-    let abs = value.abs();
-    let mut out = String::new();
-    if negative {
-        out.push('-');
-    }
-    if (1e-4..1e16).contains(&abs) {
-        // Plain layout.
-        if exp10 <= 0 {
-            out.push_str("0.");
-            out.push_str(&"0".repeat((-exp10) as usize));
-            out.push_str(digits);
-        } else if exp10 as usize >= digits.len() {
-            out.push_str(digits);
-            out.push_str(&"0".repeat(exp10 as usize - digits.len()));
-            out.push_str(".0");
-        } else {
-            let at = exp10 as usize;
-            out.push_str(&digits[..at]);
-            out.push('.');
-            out.push_str(&digits[at..]);
-        }
-        return out;
-    }
-    // Exponent layout: `d[.ddd]e±XX`.
-    let head: String = digits.chars().take(1).collect();
-    let tail: String = digits.chars().skip(1).collect();
-    out.push_str(&head);
-    if !tail.is_empty() {
-        out.push('.');
-        out.push_str(&tail);
-    }
-    let exp = exp10 - 1;
-    out.push('e');
-    out.push(if exp < 0 { '-' } else { '+' });
-    let mag = exp.abs().to_string();
-    if mag.len() < 2 {
-        out.push('0');
-    }
-    out.push_str(&mag);
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -4982,6 +4846,7 @@ impl GitStore for ReviewStore {
 // Transports: production `GithubClient` + `GitLabTransport`
 // ---------------------------------------------------------------------------
 
+use pidash_compat::py::{layout_py_float, python_dumps};
 use pidash_db::app_integrations::queries_github::{build_app_jwt_claims, normalize_private_key};
 use pidash_db::config::encryption::Keyring;
 use pidash_services::integrations::adapters_github::{
@@ -6496,22 +6361,6 @@ mod tests {
     }
 
     // -- dumps + floats -----------------------------------------------------
-
-    #[test]
-    fn python_dumps_matches_separators_and_ascii() {
-        let value = serde_json::json!({"b": [1, true, null], "a": "é"});
-        assert_eq!(
-            python_dumps(&value),
-            r#"{"b": [1, true, null], "a": "\u00e9"}"#
-        );
-        // Astral planes escape as surrogate pairs.
-        assert_eq!(python_dumps(&serde_json::json!("𝄞")), r#""\ud834\udd1e""#);
-        // Controls escape short or long.
-        assert_eq!(
-            python_dumps(&serde_json::json!("a\nb\tc\x01")),
-            r#""a\nb\tc\u0001""#
-        );
-    }
 
     #[test]
     fn py_float_repr_matches_cpython() {

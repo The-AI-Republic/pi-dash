@@ -50,6 +50,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::state::AppState;
+use pidash_compat::py::python_dumps;
 pub use pidash_compat::response::{json_ok as raw_json_response, SERVER_ERROR_BODY};
 
 /// Exact bytes of the DRF `IsAuthenticated` denial.
@@ -199,81 +200,6 @@ pub fn guards_error(error: pidash_services::app_intake::permissions::ErrorBody) 
             serde_json::to_string(&error.body).expect("serializable guard body"),
         ))
         .expect("guard denial response")
-}
-
-/// `json.dumps` with CPython defaults (`, ` / `: ` separators): the task
-/// `requested_data` / `current_instance` / `updated_issue` payloads.
-/// Same algorithm as the D-02 `space` twin; kept per module so sibling
-/// handler issues never fork a shared helper.
-pub fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
-    }
-}
-
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
 }
 
 /// An intake path: the owned methods serve from Rust, everything else

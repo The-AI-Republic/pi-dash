@@ -141,6 +141,7 @@ use super::gates::{
 };
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::workspace::WorkspaceFacts;
+use pidash_compat::py::{py_is_space, py_strip, py_uuid_or_none};
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::app_project::ser_member as d25;
@@ -768,18 +769,6 @@ fn like_param(term: &str) -> String {
     }
     out.push('%');
     out
-}
-
-/// Python whitespace (`str.strip`, `re \s`, `str.isspace` — all the same
-/// 29 chars: Rust's `char::is_whitespace` plus `\x1c`-`\x1f`, verified
-/// equal over the whole scalar range).
-fn py_is_space(ch: char) -> bool {
-    ch.is_whitespace() || ('\x1c'..='\x1f').contains(&ch)
-}
-
-/// Python `str.strip()` with no arguments.
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(py_is_space)
 }
 
 /// Zero code points of the 68 Unicode decimal-digit blocks (general
@@ -2387,8 +2376,8 @@ fn asset_url_for_row(row: &MemberFullRow) -> Result<Option<String>, Denial> {
             let slug = asset_workspace_slug(row)?;
             Ok(Some(format!(
                 "/api/assets/v2/workspaces/{slug}/projects/{}/issues/{}/attachments/{asset_id}/",
-                opt_uuid(&row.fa_project_id),
-                opt_uuid(&row.fa_issue_id),
+                py_uuid_or_none(&row.fa_project_id),
+                py_uuid_or_none(&row.fa_issue_id),
             )))
         }
         Some(
@@ -2400,7 +2389,7 @@ fn asset_url_for_row(row: &MemberFullRow) -> Result<Option<String>, Denial> {
             let slug = asset_workspace_slug(row)?;
             Ok(Some(format!(
                 "/api/assets/v2/workspaces/{slug}/projects/{}/{asset_id}/",
-                opt_uuid(&row.fa_project_id),
+                py_uuid_or_none(&row.fa_project_id),
             )))
         }
         _ => Ok(None),
@@ -2413,12 +2402,6 @@ fn asset_workspace_slug(row: &MemberFullRow) -> Result<&str, Denial> {
         (None, None) => Err(Denial::ServerError),
         (None, Some(_)) => Err(Denial::ObjectNotFound),
     }
-}
-
-/// Python f-string of a nullable id (`None` renders `None`).
-fn opt_uuid(id: &Option<Uuid>) -> String {
-    id.map(|id| id.to_string())
-        .unwrap_or_else(|| "None".to_owned())
 }
 
 /// `User.avatar_url` (`db/models/user.py:142-151`) for one row: attached

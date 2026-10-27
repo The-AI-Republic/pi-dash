@@ -131,6 +131,7 @@
 //! `app_assets/queries_v2_user_workspace.rs`); char-boundary-safe
 //! `[:N]` slicing (Porting guide semantic traps).
 
+use pidash_compat::py::py_strip;
 use pidash_db::app_project::models::project as project_cols;
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
@@ -751,17 +752,6 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max_chars).collect()
-}
-
-/// Python `str.strip()` parity: Python strips `str.isspace()`
-/// characters — Unicode `White_Space` plus U+001C-U+001F and U+0085 —
-/// while Rust `trim()` strips `White_Space` only. (In-domain precedent:
-/// `runner_enroll::serializers::shapes` documents the same gap for its
-/// `py_trim`; this also covers U+0085, which Python strips too.)
-fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 /// D-path host label (`_get_or_create_dev_machine:78`,

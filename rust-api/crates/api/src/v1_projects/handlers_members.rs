@@ -97,6 +97,7 @@ use pidash_db::v1_projects::queries_projmem::{self, TenantScope as QueryScope};
 use pidash_types::{ProjectId, WorkspaceId};
 
 use super::perms::{self, V1Route, CLASS_DENIAL_BODY};
+use pidash_compat::py::py_strip;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
@@ -1226,13 +1227,6 @@ fn validate_role_value(value: &Value, errors: &mut FieldErrors) -> Option<i32> {
             None
         }
     }
-}
-
-/// Python `str.strip()` with no arguments: Unicode whitespace plus
-/// `\x1c`-`\x1f`, which Rust's `char::is_whitespace` does not cover
-/// (verified against CPython: `'\x1c'.isspace()` is true).
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
 }
 
 /// Validate `email` through DRF's `CharField(max_length=255)` pipeline

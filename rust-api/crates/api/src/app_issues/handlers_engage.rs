@@ -77,6 +77,7 @@ use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use pidash_compat::datetime::{render_date, render_datetime_in, render_rfc3339_in};
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::{layout_py_float, python_dumps};
 use pidash_compat::response::{empty_response, json_response};
 use pidash_db::app_pages::strip::ml_strip_tags;
 
@@ -1101,81 +1102,6 @@ fn json_type_name(value: &Value) -> &'static str {
 // `json.dumps` with CPython defaults (Celery `requested_data` payloads)
 // ---------------------------------------------------------------------------
 
-/// `json.dumps(value)`: `separators=(', ', ': ')`, `ensure_ascii=True`,
-/// insertion-ordered keys. Same implementation as the social handlers'
-/// `python_dumps` (convergent copy; that module's is private).
-fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
-    }
-}
-
-/// CPython `py_encode_basestring_ascii`.
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-}
-
 // Comment `save()` computes `comment_stripped` through
 // `pi_dash.utils.html_processor.strip_tags` (`MLStripper`,
 // `db/models/issue.py:606`; `""` stays `""`) — the shared
@@ -1223,66 +1149,6 @@ fn py_float_repr(value: f64) -> String {
     // Unreachable in practice (17 significant digits always identify
     // an f64); fall back to the longest rendering laid out.
     layout_py_float(&format!("{value:.18e}"), value)
-}
-
-/// Lay out a `d.dddde±xx` rendering per the CPython magnitude rule
-/// (plain inside `[1e-4, 1e16)`, exponent outside).
-fn layout_py_float(rendered: &str, value: f64) -> String {
-    let (mantissa, exp) = match rendered.split_once(['e', 'E']) {
-        Some((mantissa, exp)) => (mantissa, exp.parse::<i32>().unwrap_or(0)),
-        None => (rendered, 0),
-    };
-    let negative = mantissa.starts_with('-');
-    let digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    let digits = digits.trim_start_matches('0');
-    let digits = digits.trim_end_matches('0');
-    let digits = if digits.is_empty() { "0" } else { digits };
-    // Decimal exponent of `0.digits × 10^E`.
-    let point_at = mantissa
-        .find('.')
-        .map(|pos| pos - usize::from(negative))
-        .unwrap_or_else(|| mantissa.len() - usize::from(negative));
-    let exp10 = exp + point_at as i32;
-    let abs = value.abs();
-    let mut out = String::new();
-    if negative {
-        out.push('-');
-    }
-    if (1e-4..1e16).contains(&abs) {
-        // Plain layout.
-        if exp10 <= 0 {
-            out.push_str("0.");
-            out.push_str(&"0".repeat((-exp10) as usize));
-            out.push_str(digits);
-        } else if exp10 as usize >= digits.len() {
-            out.push_str(digits);
-            out.push_str(&"0".repeat(exp10 as usize - digits.len()));
-            out.push_str(".0");
-        } else {
-            let at = exp10 as usize;
-            out.push_str(&digits[..at]);
-            out.push('.');
-            out.push_str(&digits[at..]);
-        }
-        return out;
-    }
-    // Exponent layout: `d[.ddd]e±XX`.
-    let head: String = digits.chars().take(1).collect();
-    let tail: String = digits.chars().skip(1).collect();
-    out.push_str(&head);
-    if !tail.is_empty() {
-        out.push('.');
-        out.push_str(&tail);
-    }
-    let exp = exp10 - 1;
-    out.push('e');
-    out.push(if exp < 0 { '-' } else { '+' });
-    let mag = exp.abs().to_string();
-    if mag.len() < 2 {
-        out.push('0');
-    }
-    out.push_str(&mag);
-    out
 }
 
 /// CPython `str()` over a parsed JSON value: `None` / `True` / `False`,
@@ -6898,19 +6764,6 @@ mod tests {
         assert_eq!(ml_strip_tags("a < b"), "a < b");
         assert_eq!(ml_strip_tags("<p>x</p><!-- c -->tail"), "xtail");
         assert_eq!(ml_strip_tags("&lt;p&gt;"), "<p>");
-    }
-
-    #[test]
-    fn python_dumps_matches_cpython() {
-        let value = json!({"b": [1, "x\ny"], "a": Value::Null, "u": "caf\u{e9}"});
-        assert_eq!(
-            python_dumps(&value),
-            r#"{"b": [1, "x\ny"], "a": null, "u": "caf\u00e9"}"#
-        );
-        assert_eq!(
-            python_dumps(&json!({"comment_id": "abc"})),
-            r#"{"comment_id": "abc"}"#
-        );
     }
 
     #[test]

@@ -3243,6 +3243,7 @@ dependencies = [
  "ammonia",
  "base64 0.22.1",
  "chrono",
+ "pidash-compat",
  "regex",
  "serde",
  "serde_json",
