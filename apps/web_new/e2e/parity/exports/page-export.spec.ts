@@ -387,10 +387,14 @@ test(
 
     // Re-pinned to intended (NEWFRONT-951; old-app bug NEWFRONT-470):
     // the full-fidelity scope embeds the uploaded raster, so the full
-    // file is larger and carries one image object; the image-free scope
-    // drops it.
+    // file is larger and carries the raster's image objects while the
+    // image-free scope drops them. One RGBA raster embeds as two image
+    // objects (image plus soft mask): a paste-only probe of the same
+    // bytes through the same pipeline reads imageCount 2, so the
+    // re-pinned count is 2, not the 1 the issue text guessed (see
+    // NEWFRONT-951; NEWFRONT-952 routes uploads through this pipeline).
     expect(fullFile.byteLength).toBeGreaterThan(strippedFile.byteLength);
-    expect(full.imageCount).toBe(1);
+    expect(full.imageCount).toBe(2);
     expect(stripped.imageCount).toBe(0);
   }
 );
