@@ -42,6 +42,18 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   unlabeled, yet render in no lane (old bug NEWFRONT-158, pinned by a bug
   scenario on a scratch project). Oracle swimlane scenarios use scratch
   projects so no label history leaks between them.
+- Intended behavior (NEWFRONT-158): an unlabeled row always renders in the
+  synthetic None lane, whatever its label history. The labels sub-grouped
+  envelope offers no signal that such a row exists: the server drops it
+  from every lane and from the envelope total alike, so its lanes always
+  sum to its total. Every labels board therefore reads its main grouping
+  once more without the label axis, and that read is the authority. An
+  unlabeled row of a complete fallback column that no lane shows joins
+  None; the column keeps the fallback's total, the None cell keeps the
+  fallback's unlabeled count, and a column the labels read dropped whole
+  joins the board so its row has somewhere to render. Recovery waits for
+  complete fallback rows and complete lane windows per column, so ordinary
+  pagination can never be mistaken for a ghost.
 
 ### Collapse and empty groups (ISS-030–ISS-032)
 

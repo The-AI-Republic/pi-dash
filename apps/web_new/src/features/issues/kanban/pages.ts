@@ -42,6 +42,7 @@ import {
   flatBoard,
   groupedBoard,
   mergeBoardPage,
+  reconcileLabelGhosts,
   subGroupedBoard,
   type BoardCell,
   type BoardData,
@@ -123,6 +124,68 @@ export async function readBoard(
     return listGroupedModuleIssues(client, workspaceSlug, projectId, input.entity.moduleId, query);
   }
   return listGroupedIssues(client, workspaceSlug, projectId, query);
+}
+
+/** Rows per recovery page while walking a label-grouped fallback. */
+export const LABEL_RECOVERY_PAGE_SIZE = 100;
+
+/**
+ * Rows from a main-dimension grouped read, without the label axis. The
+ * labels sub-grouped serializer can omit a row whose only label was
+ * deleted (NEWFRONT-158); this read still carries it. It is project-scoped
+ * because that is the only scope that offers sub-grouping, and it follows
+ * the envelope's cursor chain so a column beyond the first window is not
+ * mistaken for complete. A repeated cursor stops the walk.
+ */
+export async function readLabelRecovery(
+  client: ApiClient,
+  workspaceSlug: string,
+  input: BoardReadInput
+): Promise<GroupedIssueListResponse> {
+  const projectId = boardProjectId(input.entity);
+  if (projectId === null) throw new Error("label recovery needs a project-scoped entity");
+  const groupBy = serverGroupBy(input.groupBy);
+  if (groupBy === null) throw new Error("label recovery needs a grouped board");
+  const buckets: GroupedIssueListResponse["results"] = {};
+  const fold = (page: GroupedIssueListResponse) => {
+    for (const [key, bucket] of Object.entries(page.results)) {
+      const existing = buckets[key];
+      if (existing === undefined) {
+        buckets[key] = { results: [...bucket.results], total_results: bucket.total_results };
+        continue;
+      }
+      const seen = new Set(existing.results.map((row) => row.id));
+      buckets[key] = {
+        results: [...existing.results, ...bucket.results.filter((row) => !seen.has(row.id))],
+        total_results: bucket.total_results,
+      };
+    }
+  };
+  const firstPage = await listGroupedIssues(client, workspaceSlug, projectId, {
+    ...baseQuery(input, LABEL_RECOVERY_PAGE_SIZE),
+    groupBy,
+  });
+  fold(firstPage);
+  const asked = new Set<string>();
+  let page = firstPage;
+  while (page.next_page_results && page.next_cursor !== "" && !asked.has(page.next_cursor)) {
+    asked.add(page.next_cursor);
+    page = await listGroupedIssues(client, workspaceSlug, projectId, {
+      ...baseQuery(input, LABEL_RECOVERY_PAGE_SIZE, page.next_cursor),
+      groupBy,
+    });
+    fold(page);
+  }
+  return { ...firstPage, results: buckets };
+}
+
+/** Grouped fallback read used to restore rows omitted by label grouping. */
+export function labelRecoveryQueryOptions(client: ApiClient, workspaceSlug: string, input: BoardReadInput) {
+  return queryOptions({
+    queryKey: [...boardQueryKey(workspaceSlug, input), "label-recovery"],
+    queryFn: () => readLabelRecovery(client, workspaceSlug, input),
+    staleTime: LIST_STALE_TIME_MS,
+  });
 }
 
 /** Board query key; every axis that changes the envelope rides in it. */
@@ -273,6 +336,16 @@ export function useBoard(client: ApiClient, workspaceSlug: string, input: BoardR
   }
 
   const first = useQuery(boardQueryOptions(client, workspaceSlug, input));
+  const subKey = serverGroupBy(effectiveSubGroup(input.groupBy, input.subGroupBy));
+  const primaryBoard = React.useMemo(
+    () => (first.data === undefined ? null : toBoard(first.data, input)),
+    [first.data, input]
+  );
+  // The sub-grouped envelope carries no signal for a ghosted row: the
+  // server drops it from the lanes and from the total alike. Only the
+  // main-dimension read can show it, so labels boards always read one
+  // (NEWFRONT-158).
+  const recover = subKey === "labels__id" && input.entity.scope === "project";
   const extras = React.useMemo<BoardExtraPage[]>(
     () => [
       ...Object.entries(columnCursors).flatMap(([key, cursors]) =>
@@ -288,16 +361,23 @@ export function useBoard(client: ApiClient, workspaceSlug: string, input: BoardR
   const extraQueries = useQueries({
     queries: extras.map((entry) => boardPageQueryOptions(client, workspaceSlug, input, entry.cursor)),
   });
+  const recovery = useQuery({
+    ...labelRecoveryQueryOptions(client, workspaceSlug, input),
+    enabled: recover,
+  });
 
   const board = React.useMemo(() => {
-    if (first.data === undefined) return null;
-    let merged = toBoard(first.data, input);
+    if (primaryBoard === null) return null;
+    let merged = primaryBoard;
     for (const [index, query] of extraQueries.entries()) {
       if (query.data === undefined) continue;
       merged = mergeBoardPage(merged, toBoard(query.data, input), pageOwner(extras[index]!));
     }
+    if (recover && recovery.data !== undefined) {
+      merged = reconcileLabelGhosts(merged, toBoard(recovery.data, { ...input, subGroupBy: null }));
+    }
     return merged;
-  }, [first.data, extraQueries, extras, input]);
+  }, [primaryBoard, extraQueries, extras, input, recover, recovery.data, subKey]);
 
   const flatPages = React.useMemo(() => {
     const pages: BoardResponse[] = [];
@@ -357,7 +437,7 @@ export function useBoard(client: ApiClient, workspaceSlug: string, input: BoardR
   return {
     board,
     isPending: first.isPending,
-    isFetching: first.isFetching || extraQueries.some((query) => query.isFetching),
+    isFetching: first.isFetching || recovery.isFetching || extraQueries.some((query) => query.isFetching),
     loadMoreColumn,
     loadMoreCell,
     columnHasMore: (columnKey) => {

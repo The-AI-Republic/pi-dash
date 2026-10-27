@@ -457,6 +457,92 @@ export function mergeBoardPage(current: BoardData, incoming: BoardData, owner?: 
   return { columns: reconciled, lanes, subGrouped: current.subGrouped, total: incoming.total };
 }
 
+/**
+ * Fold rows the labels sub-grouped read omits back into the None lane
+ * (ISS-031/NEWFRONT-158). A deleted label leaves a soft-deleted join row:
+ * the server's labels grouping filters it out of every lane and out of
+ * the envelope total, while the flat read still shows the issue as
+ * unlabeled. Nothing in the sub-grouped envelope marks the omission, so
+ * the caller always reads the board once without the label axis and this
+ * merge decides what is missing.
+ *
+ * The fallback read is grouped only by the board's main dimension. A
+ * column is trusted only when its fallback rows and every lane's window
+ * for it are complete, so a partially paged column is never mistaken for
+ * a ghost. Unlabeled rows
+ * the board does not already show join None; the fallback's unlabeled
+ * count is the count authority for the cell, and a column the ghost
+ * emptied joins the board so its row has somewhere to render.
+ */
+export function reconcileLabelGhosts(board: BoardData, fallback: BoardData): BoardData {
+  if (!board.subGrouped || fallback.subGrouped) return board;
+  const fallbackLane = fallback.lanes[0];
+  if (fallbackLane === undefined) return board;
+  const recovered = new Map<string, { rows: IssueListItem[]; unlabeled: number; total: number }>();
+  const known = new Set(board.columns.map((column) => column.key));
+  const candidates = [...board.columns, ...fallback.columns.filter((column) => !known.has(column.key))];
+  for (const column of candidates) {
+    const fallbackCell = fallbackLane.cells[column.key];
+    if (fallbackCell === undefined || fallbackCell.rows.length < fallbackCell.total) continue;
+    // Every lane must hold its whole window for this column before a row
+    // missing from the board can be called ghosted rather than simply not
+    // paged in yet.
+    const settled = board.lanes.every((lane) => {
+      const cell = lane.cells[column.key];
+      return cell === undefined || cell.rows.length >= cell.total;
+    });
+    if (!settled) continue;
+    const unlabeled = fallbackCell.rows.filter((row) => row.label_ids.length === 0);
+    const present = new Set<string>();
+    for (const lane of board.lanes) {
+      for (const row of lane.cells[column.key]?.rows ?? []) present.add(row.id);
+    }
+    const missing = unlabeled.filter((row) => !present.has(row.id));
+    if (missing.length === 0) continue;
+    recovered.set(column.key, { rows: missing, unlabeled: unlabeled.length, total: fallbackCell.total });
+  }
+  if (recovered.size === 0) return board;
+  // A column only the fallback read knows joins the board when it actually
+  // recovered a row; otherwise it would carry a count with no cards.
+  const columns = [
+    ...board.columns,
+    ...fallback.columns.filter((column) => !known.has(column.key) && recovered.has(column.key)),
+  ].map((column) => {
+    const entry = recovered.get(column.key);
+    return entry === undefined ? column : { ...column, total: entry.total };
+  });
+  const growNone = (lane: BoardLane): BoardLane => {
+    const cells = { ...lane.cells };
+    for (const [key, entry] of recovered) {
+      const rows = [...(cells[key]?.rows ?? NO_ROWS), ...entry.rows];
+      cells[key] = { columnKey: key, rows, total: Math.max(entry.unlabeled, rows.length) };
+    }
+    return { ...lane, cells, total: Object.values(cells).reduce((sum, cell) => sum + cell.total, 0) };
+  };
+  const lanes = board.lanes.map((lane) => (lane.key === "None" ? growNone(lane) : lane));
+  if (!lanes.some((lane) => lane.key === "None")) {
+    const cells: Record<string, BoardCell> = {};
+    for (const [key, entry] of recovered) {
+      cells[key] = { columnKey: key, rows: [...entry.rows], total: Math.max(entry.unlabeled, entry.rows.length) };
+    }
+    lanes.push({
+      key: "None",
+      title: GROUP_NONE_LABEL,
+      total: Object.values(cells).reduce((sum, cell) => sum + cell.total, 0),
+      cells,
+    });
+  }
+  return {
+    columns,
+    lanes,
+    subGrouped: true,
+    total: Math.max(
+      board.total,
+      columns.reduce((sum, column) => sum + column.total, 0)
+    ),
+  };
+}
+
 /** Cell prefill translated to the create dialog's initial values. */
 export function boardCreateInitialValues(prefill: Record<string, string | string[]>): CreateFormInitialValues {
   const initial: CreateFormInitialValues = {};

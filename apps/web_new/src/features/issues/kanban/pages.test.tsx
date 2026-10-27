@@ -21,6 +21,7 @@ import {
   isGrouped,
   isSubGrouped,
   readBoard,
+  readLabelRecovery,
   toBoard,
   useBoard,
   type BoardReadInput,
@@ -177,6 +178,132 @@ describe("readBoard", () => {
   });
 });
 
+describe("readLabelRecovery", () => {
+  it("rejects an ungrouped board and folds pages without duplicating rows", async () => {
+    const first = {
+      ...envelope,
+      grouped_by: "state_id",
+      total_count: 2,
+      next_cursor: "100:1:0",
+      next_page_results: true,
+      results: { [STATE]: { results: [row()], total_results: 2 } },
+    };
+    const second = {
+      ...envelope,
+      grouped_by: "state_id",
+      total_count: 2,
+      results: { [STATE]: { results: [row(), row({ id: "123e4567-e89b-12d3-a456-426614174099" })], total_results: 2 } },
+    };
+    const pages: Record<string, unknown> = { "100:1:0": second };
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: async (url) => {
+        const cursor = new URL(url).searchParams.get("cursor") ?? "";
+        return {
+          status: 200,
+          url,
+          headers: { get: () => "application/json" },
+          text: async () => JSON.stringify(pages[cursor] ?? first),
+        };
+      },
+    });
+    await expect(readLabelRecovery(client, "acme", input({ groupBy: null }))).rejects.toThrow("grouped board");
+    await expect(readLabelRecovery(client, "acme", input({ entity: { scope: "workspace" } }))).rejects.toThrow(
+      "project-scoped"
+    );
+    const recovered = await readLabelRecovery(client, "acme", input());
+    expect(recovered.results[STATE]?.results).toHaveLength(2);
+    expect(recovered.results[STATE]?.total_results).toBe(2);
+  });
+
+  it("stops when the server repeats its next cursor", async () => {
+    const page = {
+      ...envelope,
+      grouped_by: "state_id",
+      next_cursor: "100:1:0",
+      next_page_results: true,
+      results: { [STATE]: { results: [row()], total_results: 1 } },
+    };
+    const { client } = recordingClient(page);
+    const recovered = await readLabelRecovery(client, "acme", input());
+    expect(recovered.results[STATE]?.results).toHaveLength(1);
+  });
+});
+
+describe("label recovery", () => {
+  it("walks the grouped fallback and folds an omitted unlabeled row into None", async () => {
+    const ghost = row({ id: "123e4567-e89b-12d3-a456-426614174010", label_ids: [] });
+    const kept = row({
+      id: "123e4567-e89b-12d3-a456-426614174011",
+      label_ids: ["423e4567-e89b-12d3-a456-426614174003"],
+    });
+    const plain = row({ id: "123e4567-e89b-12d3-a456-426614174012", label_ids: [] });
+    // The server drops the ghost from the lanes and from every count, so
+    // the envelope claims two rows and sums to two (NEWFRONT-158).
+    const subEnvelope = {
+      ...envelope,
+      grouped_by: "state_id",
+      sub_grouped_by: "labels__id",
+      total_count: 2,
+      total_results: 2,
+      results: {
+        [STATE]: {
+          results: {
+            "423e4567-e89b-12d3-a456-426614174003": { results: [kept], total_results: 1 },
+            None: { results: [plain], total_results: 1 },
+          },
+          total_results: 2,
+        },
+      },
+    };
+    const fallback = {
+      ...envelope,
+      grouped_by: "state_id",
+      total_count: 3,
+      results: { [STATE]: { results: [kept, ghost, plain], total_results: 3 } },
+    };
+    const calls: string[] = [];
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: async (url) => {
+        calls.push(url);
+        const sub = new URL(url).searchParams.get("sub_group_by");
+        return {
+          status: 200,
+          url,
+          headers: { get: () => "application/json" },
+          text: async () => JSON.stringify(sub === null ? fallback : subEnvelope),
+        };
+      },
+    });
+    const queryClient = boardClient();
+    const { result } = renderHook(() => useBoard(client, "acme", input({ subGroupBy: "labels" })), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board?.lanes).toHaveLength(2));
+    const board = result.current.board;
+    expect(board?.lanes.map((lane) => [lane.key, lane.total])).toEqual([
+      ["423e4567-e89b-12d3-a456-426614174003", 1],
+      ["None", 2],
+    ]);
+    expect(board?.lanes[1]?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual([plain.id, ghost.id]);
+    expect(board?.lanes[1]?.cells[STATE]?.total).toBe(2);
+    expect(board?.columns[0]?.total).toBe(3);
+    expect(board?.total).toBe(3);
+    expect(calls.some((url) => new URL(url).searchParams.get("sub_group_by") === null)).toBe(true);
+  });
+
+  it("does not request a fallback for non-label sub-grouping", async () => {
+    const { client, calls } = recordingClient(subEnvelope);
+    const queryClient = boardClient();
+    const { result } = renderHook(() => useBoard(client, "acme", input({ subGroupBy: "assignees" })), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe("boardQueryKey", () => {
   it("changes with every axis that changes the envelope", () => {
     const base = boardQueryKey("acme", input());
@@ -330,6 +457,11 @@ function deferredClient(first: Record<string, unknown>, second: Record<string, u
   return { client, calls, release };
 }
 
+/** Board reads that ask for a sub-group, in request order. */
+function subGroupCalls(calls: readonly string[]): string[] {
+  return calls.filter((url) => new URL(url).searchParams.get("sub_group_by") === "labels__id");
+}
+
 function boardClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
@@ -430,11 +562,12 @@ describe("board pagination", () => {
     act(() => result.current.loadMoreCell(STATE, "None"));
     await waitFor(() => expect(result.current.cellHasMore(STATE, "None")).toBe(false));
     expect(boardCellOf(result.current.board, STATE, "None")?.rows).toHaveLength(12);
-    expect(calls).toHaveLength(2);
-    expect(new URL(calls[1]!).searchParams.get("cursor")).toBe("10:1:0");
+    const pages = subGroupCalls(calls);
+    expect(pages).toHaveLength(2);
+    expect(new URL(pages[1]!).searchParams.get("cursor")).toBe("10:1:0");
     act(() => result.current.loadMoreCell(STATE, "None"));
     act(() => result.current.loadMoreCell(STATE, "missing"));
-    expect(calls).toHaveLength(2);
+    expect(subGroupCalls(calls)).toHaveLength(2);
   });
 
   it("follows the flat cursor chain on the single column", async () => {
@@ -493,10 +626,10 @@ describe("board pagination", () => {
     });
     await waitFor(() => expect(result.current.board).not.toBeNull());
     act(() => result.current.loadMoreCell(STATE, "None"));
-    await waitFor(() => expect(calls).toHaveLength(2));
+    await waitFor(() => expect(subGroupCalls(calls)).toHaveLength(2));
     expect(result.current.cellHasMore(STATE, "None")).toBe(true);
     act(() => result.current.loadMoreCell(STATE, "None"));
-    expect(calls).toHaveLength(2);
+    expect(subGroupCalls(calls)).toHaveLength(2);
   });
 
   it("holds a flat cursor the server repeats", async () => {
