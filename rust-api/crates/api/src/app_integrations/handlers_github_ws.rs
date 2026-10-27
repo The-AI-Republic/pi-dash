@@ -1239,22 +1239,17 @@ async fn ensure_workspace_integration(
     let token_id = uuid::Uuid::new_v4();
     let api_token = format!("pi_dash_api_{}", uuid::Uuid::new_v4().simple());
     let label = format!("github-integration-{workspace_id}");
-    sqlx::query(
-        r#"INSERT INTO api_tokens
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            label, description, is_active, last_used, token,
-            user_id, user_type, workspace_id, expired_at, is_service, allowed_rate_limit)
-           VALUES ($1,$2,$2,$3,NULL,NULL,
-            $4,'GitHub integration FK shim — not for auth',false,NULL,$5,
-            $3,1,$6,NULL,false,'60/min')"#,
+    pidash_services::domain::tokens::insert_github_shim_token(
+        &mut *ex,
+        &pidash_services::domain::tokens::NewGithubShimToken {
+            id: token_id,
+            label,
+            token: api_token,
+            actor_id: *actor_id,
+            workspace_id: *workspace_id,
+            now,
+        },
     )
-    .bind(token_id)
-    .bind(now)
-    .bind(actor_id)
-    .bind(&label)
-    .bind(&api_token)
-    .bind(workspace_id)
-    .execute(&mut *ex)
     .await
     .map_err(|_| Denial::ServerError)?;
     let wi_id = uuid::Uuid::new_v4();

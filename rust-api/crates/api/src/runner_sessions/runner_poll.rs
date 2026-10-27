@@ -1080,13 +1080,14 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), SessionOutboxError> {
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(now_micros())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map_err(SessionOutboxError::Db)?;
+        pidash_services::domain::tokens::revoke_runner_session(
+            self.pool,
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(SessionOutboxError::Db)?;
         Ok(())
     }
 
@@ -1664,10 +1665,7 @@ pub async fn runner_session_poll(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    if sqlx::query(runner_session::TOUCH_SQL)
-        .bind(now_micros())
-        .bind(sid)
-        .execute(&pool)
+    if pidash_services::domain::tokens::touch_runner_session(&pool, sid, now_micros())
         .await
         .is_err()
     {

@@ -704,13 +704,14 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), OutboxError> {
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(Utc::now())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map_err(OutboxError::Db)?;
+        pidash_services::domain::tokens::revoke_runner_session(
+            self.pool,
+            session_id,
+            Utc::now(),
+            reason,
+        )
+        .await
+        .map_err(OutboxError::Db)?;
         Ok(())
     }
 
@@ -1618,30 +1619,26 @@ async fn open_transaction(
     if let Some(row) = prior {
         let prior = runner_session_from_row(&row).map_err(TxnFail::from)?;
         old_session_id = Some(prior.id.to_string());
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(Utc::now())
-            .bind(REASON_EVICTED_BY_NEW_SESSION)
-            .bind(prior.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(TxnFail::from)?;
-    }
-    // `create(… last_seen_at=now())`: the kwarg `now()` evaluates
-    // first, then `auto_now_add` stamps `created_at` — two calls, in
-    // that order.
-    let last_seen_at = Utc::now();
-    let created_at = Utc::now();
-    sqlx::query(runner_session::OPEN_INSERT_SQL)
-        .bind(new_sid)
-        .bind(runner.id)
-        .bind(runner_session::DEFAULT_PROTOCOL_VERSION)
-        .bind(created_at)
-        .bind(last_seen_at)
-        .bind(None::<DateTime<Utc>>)
-        .bind(runner_session::DEFAULT_REVOKED_REASON)
-        .execute(&mut *tx)
+        pidash_services::domain::tokens::revoke_runner_session(
+            &mut *tx,
+            prior.id,
+            Utc::now(),
+            REASON_EVICTED_BY_NEW_SESSION,
+        )
         .await
         .map_err(TxnFail::from)?;
+    }
+    // `create(… last_seen_at=now())`: the kwarg `now()` evaluates
+    // first, then `auto_now_add` stamps `created_at` — the domain
+    // driver keeps that order.
+    pidash_services::domain::tokens::open_runner_session(
+        &mut *tx,
+        new_sid,
+        runner.id,
+        runner_session::DEFAULT_PROTOCOL_VERSION,
+    )
+    .await
+    .map_err(TxnFail::from)?;
     execute_hello(&mut tx, runner, body).await?;
     let mut effects = OpenEffects::default();
     execute_reap_open(&mut tx, runner.id, body, &mut effects).await?;
@@ -2155,13 +2152,14 @@ async fn runner_session_delete_inner(
         }
         return StatusCode::NO_CONTENT.into_response();
     }
-    if sqlx::query(runner_session::REVOKE_SQL)
-        .bind(Utc::now())
-        .bind(REASON_CLEAN_SHUTDOWN)
-        .bind(sid)
-        .execute(&pool)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::revoke_runner_session(
+        &pool,
+        sid,
+        Utc::now(),
+        REASON_CLEAN_SHUTDOWN,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }

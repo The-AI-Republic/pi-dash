@@ -1672,24 +1672,10 @@ async fn token_delete(
     if found.is_none() {
         return Denial::NotFound.into_response();
     }
-    let write = bind_placeholders(queries_user::api_token_soft_delete_sql());
-    if sqlx::query(&write)
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(pk)
-        .execute(&pool)
-        .await
-        .is_err()
-    {
-        return Denial::ServerError.into_response();
-    }
     // `delete()` saves the instance, so `BaseModel.save` stamps
-    // `updated_by` too (second statement — the services text is owned;
-    // same handler sequencing as the PATCH save).
-    if sqlx::query("UPDATE api_tokens SET updated_by_id = $1 WHERE id = $2")
-        .bind(user_id)
-        .bind(pk)
-        .execute(&pool)
+    // `updated_by` too (second statement inside the domain pair — same
+    // handler sequencing as the PATCH save).
+    if pidash_services::domain::tokens::soft_delete_token(&pool, pk, user_id)
         .await
         .is_err()
     {
@@ -1798,41 +1784,37 @@ async fn token_create(
     if label_null || description_null {
         return Denial::BadError("The payload is not valid".to_owned()).into_response();
     }
-    let id = uuid::Uuid::new_v4();
-    let token = format!("pi_dash_api_{}", uuid::Uuid::new_v4().simple());
-    let created = Utc::now();
-    let updated = Utc::now();
     let user_type: i16 = if is_bot { 1 } else { 0 };
-    let sql = bind_placeholders(queries_user::api_token_insert_sql());
-    if let Err(error) = sqlx::query(&sql)
-        .bind(created)
-        .bind(updated)
-        .bind(user_id)
-        .bind(id)
-        .bind(&label)
-        .bind(&description)
-        .bind(&token)
-        .bind(user_id)
-        .bind(user_type)
-        .bind(expired_at)
-        .execute(&pool)
-        .await
+    let issued = match pidash_services::domain::tokens::issue_token(
+        &pool,
+        &pidash_services::domain::tokens::NewApiToken {
+            label: label.clone(),
+            description: description.clone(),
+            user_id,
+            user_type,
+            expired_at,
+        },
+    )
+    .await
     {
-        if is_unique_violation(&error) {
-            return Denial::BadError("The payload is not valid".to_owned()).into_response();
+        Ok(issued) => issued,
+        Err(error) => {
+            if is_unique_violation(&error) {
+                return Denial::BadError("The payload is not valid".to_owned()).into_response();
+            }
+            return Denial::ServerError.into_response();
         }
-        return Denial::ServerError.into_response();
-    }
+    };
     let row = TokenRow {
-        id,
-        created_at: created,
-        updated_at: updated,
+        id: issued.id,
+        created_at: issued.created_at,
+        updated_at: issued.updated_at,
         deleted_at: None,
         label,
         description,
         is_active: true,
         last_used: None,
-        token,
+        token: issued.token,
         user_type,
         expired_at,
         is_service: false,
@@ -2107,32 +2089,25 @@ async fn token_patch(
     // `serializer.save()`: the builder's writable SET plus the
     // `BaseModel.save` stamps (`updated_at` always moves — even on a
     // no-op PATCH — and `updated_by` is the actor whatever the input
-    // carried). The stamp rides a second statement: the services text
-    // is owned, and the queries layer documents `updated_by` as
-    // handler sequencing.
+    // carried). The stamp rides a second statement inside the domain
+    // pair.
     let now = Utc::now();
-    let save = bind_placeholders(queries_user::api_token_patch_save_sql());
-    if sqlx::query(&save)
-        .bind(&label)
-        .bind(&description)
-        .bind(is_service)
-        .bind(&allowed_rate_limit)
-        .bind(deleted_at)
-        .bind(created_by)
-        .bind(now)
-        .bind(pk)
-        .execute(&pool)
-        .await
-        .is_err()
-    {
-        return Denial::ServerError.into_response();
-    }
-    if sqlx::query("UPDATE api_tokens SET updated_by_id = $1 WHERE id = $2")
-        .bind(user_id)
-        .bind(pk)
-        .execute(&pool)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::update_token(
+        &pool,
+        pk,
+        user_id,
+        now,
+        &pidash_services::domain::tokens::ApiTokenPatch {
+            label: label.clone(),
+            description: description.clone(),
+            is_service,
+            allowed_rate_limit: allowed_rate_limit.clone(),
+            deleted_at,
+            created_by,
+        },
+    )
+    .await
+    .is_err()
     {
         return Denial::ServerError.into_response();
     }
@@ -3275,21 +3250,9 @@ mod tests {
         assert_eq!(py_str(&JVal::Null), None);
     }
 
-    #[test]
-    fn bind_placeholders_vectors() {
-        assert_eq!(
-            bind_placeholders(queries_user::api_token_insert_sql()),
-            "INSERT INTO api_tokens (created_at, updated_at, created_by_id, updated_by_id, deleted_at, id, label, description, is_active, last_used, token, user_id, user_type, workspace_id, expired_at, is_service, allowed_rate_limit) VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, TRUE, NULL, $7, $8, $9, NULL, $10, FALSE, '60/min')"
-        );
-        assert_eq!(
-            bind_placeholders(queries_user::api_token_soft_delete_sql()),
-            "UPDATE api_tokens SET deleted_at = $1, updated_at = $2 WHERE id = $3"
-        );
-        assert_eq!(
-            bind_placeholders(queries_user::api_token_patch_save_sql()),
-            "UPDATE api_tokens SET label = $1, description = $2, is_service = $3, allowed_rate_limit = $4, deleted_at = $5, created_by_id = $6, updated_at = $7 WHERE id = $8"
-        );
-    }
+    // (The write-builder vector pins moved with the statements to
+    // `pidash_services::domain::tokens`, whose `bind_placeholders_vectors`
+    // test asserts the same three renderings.)
 
     #[test]
     fn field_errors_wire_order() {

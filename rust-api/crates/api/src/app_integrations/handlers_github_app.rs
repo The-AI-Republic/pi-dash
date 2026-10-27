@@ -1296,15 +1296,20 @@ async fn get_or_create_workspace_integration(
     // request user and leaves `updated_by` NULL on create
     // (`db/models/base.py:36-39`).
     let token_id = Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO "api_tokens" ("id", "created_at", "updated_at", "created_by_id", "label", "description", "is_active", "last_used", "token", "user_id", "user_type", "workspace_id", "expired_at", "is_service", "allowed_rate_limit") VALUES ($1, now(), now(), $4, $2, 'GitHub integration FK shim — not for auth', false, NULL, $3, $4, 1, $5, NULL, false, '60/min')"#,
+    // The shim row is never rendered (its id is the only thing the
+    // integration reads back), so the bound `now()` for both stamps is
+    // interchangeable with the two `now()` calls the inline text used.
+    pidash_services::domain::tokens::insert_github_shim_token(
+        &mut *connection,
+        &pidash_services::domain::tokens::NewGithubShimToken {
+            id: token_id,
+            label: format!("github-integration-{workspace_id}"),
+            token: format!("github-shim-{}", Uuid::new_v4()),
+            actor_id,
+            workspace_id,
+            now: chrono::Utc::now(),
+        },
     )
-    .bind(token_id)
-    .bind(format!("github-integration-{workspace_id}"))
-    .bind(format!("github-shim-{}", Uuid::new_v4()))
-    .bind(actor_id)
-    .bind(workspace_id)
-    .execute(&mut *connection)
     .await
     .map_err(|error| GithubTransportError(error.to_string()))?;
     let wi_id = Uuid::new_v4();

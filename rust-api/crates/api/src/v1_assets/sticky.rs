@@ -365,10 +365,7 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, 
             return Err(Denial::InvalidToken);
         }
     }
-    sqlx::query(r#"UPDATE api_tokens SET last_used = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -442,18 +439,12 @@ async fn authenticate_machine(
         .await
         .map_err(|_| Denial::ServerError)?;
     if !member.unwrap_or(false) {
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2"#)
-            .bind(now)
-            .bind(id)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
             .await
             .map_err(|_| Denial::ServerError)?;
         return Err(Denial::InvalidToken);
     }
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     // The token loggers stamp this id on the `process_logs` payload

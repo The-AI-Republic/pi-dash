@@ -7,10 +7,14 @@
 //!   columns `db/models/user.py:280-302`) — AUTHOAUTH-F6.
 //! * `deactivate_api_token`
 //!   (`apps/api/pi_dash/authentication/services/cli_tokens.py:1-19`, full
-//!   file; call site `views/cli/device.py:476-477`) — AUTHOAUTH-F7.
+//!   file; call site `views/cli/device.py:476-477`) — AUTHOAUTH-F7
+//!   (moved to `pidash_services::domain::tokens::cli_token`,
+//!   PIDASHCONV-1520).
 //! * `_touch_dev_machine` (`views/cli/device.py:73-85`),
-//!   `_get_or_create_dev_machine` (`:88-109`) and `_rotate_machine_token`
-//!   (`:112-129`; mint `runner/services/tokens.py:84-86`) — AUTHOAUTH-F8.
+//!   `_get_or_create_dev_machine` (`:88-109`) and the
+//!   `_rotate_machine_token` label derivations (`:112-129`; the
+//!   statements moved to `pidash_services::domain::tokens`,
+//!   PIDASHCONV-1520) — AUTHOAUTH-F8.
 //!
 //! `Account`, `APIToken`, `DevMachine`, `MachineToken` and `WorkspaceMember`
 //! are external models used as-is: this module records only the table names
@@ -389,70 +393,9 @@ pub mod account {
 // cli_token — deactivate_api_token (AUTHOAUTH-F7)
 // ---------------------------------------------------------------------------
 
-/// `deactivate_api_token` (`services/cli_tokens.py:1-19`, full file).
-pub mod cli_token {
-    /// `APIToken` table (`db/models/api.py`, `Meta.db_table`; same table the
-    /// `api_token_device_flow` reference in the sibling [`super::super::models`]
-    /// module pins — reused as-is, not redefined).
-    pub const TABLE: &str = super::super::models::api_token_device_flow::TABLE;
-
-    /// `CLI_DEVICE_API_TOKEN_DESCRIPTION` (`cli_tokens.py:9`).
-    pub const DEVICE_FLOW_DESCRIPTION: &str =
-        super::super::models::api_token_device_flow::DEVICE_FLOW_DESCRIPTION;
-
-    /// `APIToken.objects.filter(token=$1, is_active=true).update(
-    /// is_active=false, updated_at=$2)` — fixture F7 `emitted_sql` without
-    /// the description guard.
-    pub const DEACTIVATE_SQL: &str = "UPDATE \"api_tokens\" SET \"is_active\" = false, \"updated_at\" = $1 WHERE \"api_tokens\".\"token\" = $2 AND \"api_tokens\".\"is_active\" = true";
-
-    /// Same with the CLI-device guard
-    /// (`.filter(description=CLI_DEVICE_API_TOKEN_DESCRIPTION)`).
-    pub const DEACTIVATE_CLI_ONLY_SQL: &str = "UPDATE \"api_tokens\" SET \"is_active\" = false, \"updated_at\" = $1 WHERE \"api_tokens\".\"token\" = $2 AND \"api_tokens\".\"is_active\" = true AND \"api_tokens\".\"description\" = $3";
-
-    /// `if not raw_token: return 0` (`cli_tokens.py:14-15`): `None` or `""`
-    /// short-circuits with no query.
-    pub fn is_noop_token(raw_token: Option<&str>) -> bool {
-        raw_token.unwrap_or("").is_empty()
-    }
-
-    /// Mark an `APIToken` inactive after its exchange for an `mt_` token
-    /// (`cli_tokens.py:12-19`). Returns the updated row count (`0` when the
-    /// token is empty/`None`, unmatched, inactive, or — with
-    /// `only_cli_device_tokens` — not a device-flow token). The revoke
-    /// endpoint does NOT use this helper (inline `is_active=False` save,
-    /// `device.py:496-511`).
-    pub async fn deactivate_api_token<'e, E>(
-        ex: E,
-        raw_token: Option<&str>,
-        only_cli_device_tokens: bool,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        let token = raw_token.unwrap_or("");
-        if token.is_empty() {
-            return Ok(0);
-        }
-        let rows = if only_cli_device_tokens {
-            sqlx::query(DEACTIVATE_CLI_ONLY_SQL)
-                .bind(now)
-                .bind(token)
-                .bind(DEVICE_FLOW_DESCRIPTION)
-                .execute(ex)
-                .await?
-                .rows_affected()
-        } else {
-            sqlx::query(DEACTIVATE_SQL)
-                .bind(now)
-                .bind(token)
-                .execute(ex)
-                .await?
-                .rows_affected()
-        };
-        Ok(rows)
-    }
-}
+// NOTE: the `cli_token` helper (`deactivate_api_token`) used to live
+// here; it moved to `pidash_services::domain::tokens::cli_token`
+// (PIDASHCONV-1520), whose tests carry the F7 pins.
 
 // ---------------------------------------------------------------------------
 // dev_machine — _touch / _get_or_create / _rotate (AUTHOAUTH-F8)
@@ -580,16 +523,12 @@ pub mod dev_machine {
     pub const TOUCH_LABEL_SQL: &str = "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2, \"label\" = $3 WHERE \"dev_machine\".\"id\" = $4";
     pub const TOUCH_HOST_AND_LABEL_SQL: &str = "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2, \"host_label\" = $3, \"label\" = $4 WHERE \"dev_machine\".\"id\" = $5";
 
-    /// `MachineToken.objects.select_for_update().filter(workspace=,
-    /// dev_machine=, revoked_at__isnull=True).update(revoked_at=now)`
-    /// (`device.py:113-117`).
-    pub const ROTATE_REVOKE_SQL: &str = "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"workspace_id\" = $2 AND \"machine_token\".\"dev_machine_id\" = $3 AND \"machine_token\".\"revoked_at\" IS NULL";
-
-    /// `MachineToken.objects.create(user=, dev_machine=, workspace=,
-    /// host_label=, token_hash=, token_fingerprint=, label=, is_service=True)`
-    /// (`device.py:119-127`): `id` is a client-side `uuid4` (caller
-    /// supplies it); `created_at` = now; `last_used_at`/`revoked_at` NULL.
-    pub const ROTATE_CREATE_SQL: &str = "INSERT INTO \"machine_token\" (\"id\", \"user_id\", \"dev_machine_id\", \"workspace_id\", \"host_label\", \"token_hash\", \"token_fingerprint\", \"label\", \"is_service\", \"created_at\", \"last_used_at\", \"revoked_at\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
+    // NOTE: the rotate statements (`ROTATE_REVOKE_SQL`,
+    // `ROTATE_CREATE_SQL`) and the `rotate_machine_token` driver used to
+    // live here; they moved to `pidash_services::domain::tokens`
+    // (`revoke_tokens_for_device_pair`, `insert_machine_token`;
+    // PIDASHCONV-1520), whose tests carry the pins. The label
+    // derivations below stay: pure helpers with live callers.
 
     /// Raised on owner mismatch, on the existing row and on the post-race
     /// row alike (`device.py:69-70`); the caller maps it to 404
@@ -853,70 +792,11 @@ pub mod dev_machine {
         }
     }
 
-    /// Parameters for the rotate insert (`device.py:119-127`). `id` is a
-    /// caller-generated `uuid4`; `token_hash`/`token_fingerprint` come from
-    /// `runner_tokens.mint_machine_token()`; `now` stands in for
-    /// `timezone.now()`.
-    pub struct NewMachineToken<'a> {
-        pub id: uuid::Uuid,
-        pub user_id: uuid::Uuid,
-        pub dev_machine_id: uuid::Uuid,
-        pub workspace_id: uuid::Uuid,
-        pub host_label: &'a str,
-        pub token_hash: &'a str,
-        pub token_fingerprint: &'a str,
-        pub now: chrono::DateTime<chrono::Utc>,
-    }
-
-    /// `_rotate_machine_token` (`device.py:112-129`): revoke every active
-    /// token for `(workspace, dev_machine)`, then mint-and-store one row
-    /// with `is_service=True`. Returns the stored `host_label`/`label`
-    /// derivations alongside the revoked count for caller assertions.
-    ///
-    /// Takes `&mut PgConnection` (or `&mut *tx`); Python runs the two
-    /// statements in autocommit, so both are faithful.
-    pub async fn rotate_machine_token(
-        conn: &mut PgConnection,
-        params: &NewMachineToken<'_>,
-    ) -> Result<RotateOutcome, sqlx::Error> {
-        let revoked = sqlx::query(ROTATE_REVOKE_SQL)
-            .bind(params.now)
-            .bind(params.workspace_id)
-            .bind(params.dev_machine_id)
-            .execute(&mut *conn)
-            .await?
-            .rows_affected();
-        let stored_host_label = rotate_host_label(params.host_label);
-        let stored_label = machine_token_label(params.host_label);
-        sqlx::query(ROTATE_CREATE_SQL)
-            .bind(params.id)
-            .bind(params.user_id)
-            .bind(params.dev_machine_id)
-            .bind(params.workspace_id)
-            .bind(&stored_host_label)
-            .bind(params.token_hash)
-            .bind(params.token_fingerprint)
-            .bind(&stored_label)
-            .bind(true)
-            .bind(params.now)
-            .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
-            .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
-            .execute(&mut *conn)
-            .await?;
-        Ok(RotateOutcome {
-            revoked,
-            stored_host_label,
-            stored_label,
-        })
-    }
-
-    /// What [`rotate_machine_token`] revoked and stored.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct RotateOutcome {
-        pub revoked: u64,
-        pub stored_host_label: String,
-        pub stored_label: String,
-    }
+    // NOTE: `NewMachineToken` / `rotate_machine_token` /
+    // `RotateOutcome` used to live here; the statements moved to
+    // `pidash_services::domain::tokens` (PIDASHCONV-1520). The driver
+    // had no production callers (the device handler inlines the pair
+    // on its own transaction).
 }
 
 #[cfg(test)]
@@ -1118,55 +998,9 @@ mod tests {
     }
 
     // -- AUTHOAUTH-F7: deactivate_api_token -----------------------------------
-
-    #[test]
-    fn f7_sql_and_const_match_fixture() {
-        let f7 = fixture("F7_deactivate_token.before_after.json");
-        assert_eq!(
-            cli_token::DEVICE_FLOW_DESCRIPTION,
-            "Issued by pidash auth login (device-code flow)."
-        );
-        assert_eq!(
-            f7["function"]["const"],
-            "CLI_DEVICE_API_TOKEN_DESCRIPTION='Issued by pidash auth login (device-code flow).'"
-        );
-        let emitted = f7["emitted_sql"].as_str().expect("emitted sql");
-        // (Django fragment, Rust rendering with quoted identifiers).
-        for (frag, rust) in [
-            ("SET is_active=false", "\"is_active\" = false"),
-            ("updated_at=%s", "\"updated_at\" = $1"),
-            ("WHERE token=%s", "\"token\" = $2"),
-            ("is_active=true", "\"is_active\" = true"),
-        ] {
-            assert!(emitted.contains(frag), "emitted sql has {frag}");
-            assert!(
-                cli_token::DEACTIVATE_SQL.contains(rust)
-                    || cli_token::DEACTIVATE_CLI_ONLY_SQL.contains(rust),
-                "rust sql has {frag} as {rust}"
-            );
-        }
-        assert!(
-            emitted.contains("description='Issued by pidash auth login (device-code flow).'"),
-            "description guard recorded"
-        );
-        assert!(
-            cli_token::DEACTIVATE_CLI_ONLY_SQL.contains("\"description\" = $3"),
-            "cli-only sql guards description"
-        );
-        assert!(
-            !cli_token::DEACTIVATE_SQL.contains("description"),
-            "base sql has no description guard"
-        );
-    }
-
-    #[test]
-    fn f7_empty_token_is_noop() {
-        assert!(cli_token::is_noop_token(None));
-        assert!(cli_token::is_noop_token(Some("")));
-        assert!(!cli_token::is_noop_token(Some("TOK")));
-        let f7 = fixture("F7_deactivate_token.before_after.json");
-        assert_eq!(f7["after_state"]["empty_token_case"]["out"], 0);
-    }
+    // (The SQL/noop pins moved with the helper to
+    // `pidash_services::domain::tokens::cli_token`; only the
+    // fixture-shape assertions stay here.)
 
     #[test]
     fn f7_before_after_cases_shape() {
@@ -1184,6 +1018,8 @@ mod tests {
         let g = &f7["after_state"]["description_guard_case"];
         assert_eq!(g["out"], 0);
         assert_eq!(g["rows_after"][0]["is_active"], true);
+        // Empty-token case short-circuits with no query.
+        assert_eq!(f7["after_state"]["empty_token_case"]["out"], 0);
     }
 
     // -- AUTHOAUTH-F8: device helpers ------------------------------------------
@@ -1279,20 +1115,10 @@ mod tests {
 
     #[test]
     fn f8_rotate_revoke_and_label() {
+        // (The rotate/revoke SQL pins moved with the statements to
+        // `pidash_services::domain::tokens`; the label derivations
+        // and fixture columns stay here.)
         let f8 = fixture("F8_device_helpers.golden.json");
-        // Revoke targets (workspace, dev_machine) actives only.
-        let revoke = dev_machine::ROTATE_REVOKE_SQL;
-        assert!(
-            revoke.contains("WHERE \"machine_token\".\"workspace_id\" = $1")
-                || revoke.contains("\"workspace_id\" = $2"),
-            "workspace filter"
-        );
-        assert!(
-            revoke.contains("\"dev_machine_id\" = $3"),
-            "dev-machine filter"
-        );
-        assert!(revoke.contains("\"revoked_at\" IS NULL"), "actives only");
-        assert!(revoke.contains("SET \"revoked_at\" = $1"), "revoke stamp");
         // Label derivations.
         assert_eq!(
             dev_machine::machine_token_label("myhost"),
@@ -1316,10 +1142,6 @@ mod tests {
             serde_json::json!("f'machine: {host_label[:96]}'")
         );
         assert_eq!(create_cols["is_service"], serde_json::json!(true));
-        assert!(
-            dev_machine::ROTATE_CREATE_SQL.contains("\"is_service\""),
-            "is_service stored"
-        );
         assert_eq!(f8["_rotate_machine_token"]["mint"], "runner_tokens.mint_machine_token() -> raw='mt_'+token_urlsafe(32) (runner/services/tokens.py:84-86)");
     }
 }

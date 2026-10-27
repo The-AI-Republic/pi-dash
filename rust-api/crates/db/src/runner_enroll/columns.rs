@@ -616,10 +616,9 @@ pub mod machine_token {
     /// `save(update_fields=["revoked_at"])` — `updated_at` does not
     /// exist on this model, and no other column is touched.
     pub const REVOKE_UPDATE_COLUMNS: &[&str] = &["revoked_at"];
-    /// `revoke` SQL (`:865-869`). `$1` is now, `$2` the token id. Plain
-    /// pk `WHERE`: `save()` never applies a manager scope.
-    pub const REVOKE_SQL: &str =
-        "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"id\" = $2";
+    // NOTE: the `revoke` SQL const lived here; the statement moved to
+    // `pidash_services::domain::tokens::revoke_machine_token_by_id`
+    // (PIDASHCONV-1520), whose test carries the pin.
 }
 
 // ---------------------------------------------------------------------------
@@ -1243,10 +1242,8 @@ mod tests {
             "UPDATE \"runner\" SET \"last_heartbeat_at\" = $1 WHERE \"runner\".\"id\" = $2"
         );
         assert_eq!(machine_token::REVOKE_UPDATE_COLUMNS, &["revoked_at"]);
-        assert_eq!(
-            machine_token::REVOKE_SQL,
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"id\" = $2"
-        );
+        // (The `REVOKE_SQL` pin moved with the statement to
+        // `pidash_services::domain::tokens`.)
         assert!(machine_token::needs_revoke::<u8>(None));
         assert!(!machine_token::needs_revoke(Some(1u8)));
     }

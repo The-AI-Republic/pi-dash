@@ -627,47 +627,10 @@ pub fn profile_full_save_sql() -> String {
 // Unit 4b — API tokens (views/api.py:20-72)
 // ---------------------------------------------------------------------------
 
-/// `api_tokens` concrete columns in `_meta` order (abstract parents
-/// first, then `id`, then `api.py:37-51` declared order): the
-/// `INSERT` column set for [`api_token_insert_sql`].
-pub const API_TOKEN_INSERT_COLUMNS: &[&str] = &[
-    "created_at",
-    "updated_at",
-    "created_by_id",
-    "updated_by_id",
-    "deleted_at",
-    "id",
-    "label",
-    "description",
-    "is_active",
-    "last_used",
-    "token",
-    "user_id",
-    "user_type",
-    "workspace_id",
-    "expired_at",
-    "is_service",
-    "allowed_rate_limit",
-];
-
-/// Token create (`:29-35`):
-/// `APIToken.objects.create(label=..., description=...,
-/// user=..., user_type=..., expired_at=...)`.
-///
-/// Python-side defaults resolved BEFORE the `INSERT` (`:22-27`):
-/// `label` falls back to `uuid4().hex` only when the key is absent
-/// (ported bug 10 — an explicit empty label stores empty);
-/// `description` defaults to `""`; `expired_at` defaults to `None`;
-/// `user_type` is `1` iff `request.user.is_bot`, else `0`.
-/// Model-side: `token` is `generate_token()` (`"pi_dash_api_" +
-/// `uuid4().hex`, `api.py:20-21`); `is_active` is `TRUE`;
-/// `is_service` is `FALSE`; `workspace_id` is `NULL`;
-/// `allowed_rate_limit` is `"60/min"`; `created_by_id` is stamped
-/// from the request user by `BaseModel.save()` (`None` when
-/// anonymous); `updated_by_id` stays `NULL` on create.
-pub fn api_token_insert_sql() -> String {
-    "INSERT INTO api_tokens (created_at, updated_at, created_by_id, updated_by_id, deleted_at, id, label, description, is_active, last_used, token, user_id, user_type, workspace_id, expired_at, is_service, allowed_rate_limit) VALUES (:now, :now, :actor, NULL, NULL, :id, :label, :description, TRUE, NULL, :token, :user, :user_type, NULL, :expired_at, FALSE, '60/min')".to_owned()
-}
+// NOTE: the token create builder lived here; the statement moved to
+// `crate::domain::tokens::issue_token` (PIDASHCONV-1520), whose tests
+// carry the pins (including ported bug 10's label fallback, resolved
+// by the handler before the call).
 
 /// Token list (`:43`):
 /// `APIToken.objects.filter(user=request.user, is_service=False)`.
@@ -696,14 +659,10 @@ pub fn api_token_delete_lookup_sql() -> String {
     "SELECT api_tokens.* FROM api_tokens WHERE api_tokens.user_id = :user AND api_tokens.id = :pk AND api_tokens.is_service = FALSE AND api_tokens.deleted_at IS NULL".to_owned()
 }
 
-/// Token delete write (`:53`): instance `.delete()` on a soft-delete
-/// model — `deleted_at` is stamped and the instance is SAVED, so
-/// `updated_at` moves too (same full-row-save shape as the sibling
-/// `invite_soft_delete_sql`). The write also enqueues
-/// `soft_delete_related_objects` (tasks-owned, PIDASHCONV-614).
-pub fn api_token_soft_delete_sql() -> String {
-    "UPDATE api_tokens SET deleted_at = :now, updated_at = :now WHERE id = :pk".to_owned()
-}
+// NOTE: the token soft-delete builder lived here; the statement moved
+// to `crate::domain::tokens::soft_delete_token` (PIDASHCONV-1520),
+// whose tests carry the pin (the `soft_delete_related_objects`
+// enqueue stays tasks-owned, PIDASHCONV-614).
 
 /// Token PATCH lookup (`:63-65`):
 /// `APIToken.objects.filter(user=request.user, pk=pk,
@@ -738,13 +697,9 @@ pub const API_TOKEN_PATCH_WRITABLE: &[&str] = &[
     "created_by",
 ];
 
-/// Token PATCH save (`:68-71`): `serializer.save()` on the partial
-/// serializer issues a full-row `UPDATE`; per convention the builder
-/// lists the writable columns ([`API_TOKEN_PATCH_WRITABLE`]) plus the
-/// `auto_now` stamp.
-pub fn api_token_patch_save_sql() -> String {
-    "UPDATE api_tokens SET label = :label, description = :description, is_service = :is_service, allowed_rate_limit = :rate, deleted_at = :deleted_at, created_by_id = :created_by, updated_at = :now WHERE id = :pk".to_owned()
-}
+// NOTE: the token PATCH-save builder lived here; the statement moved
+// to `crate::domain::tokens::update_token` (PIDASHCONV-1520), whose
+// tests carry the pin.
 
 #[cfg(test)]
 mod tests {
@@ -1037,21 +992,14 @@ mod tests {
 
     #[test]
     fn unit4_api_tokens() {
-        // INSERT column set: audit parents first, then id, then declared.
-        assert_eq!(API_TOKEN_INSERT_COLUMNS.len(), 17);
-        let insert = api_token_insert_sql();
-        assert!(insert.contains("INSERT INTO api_tokens (created_at, updated_at"));
-        assert!(insert.contains(":token, :user, :user_type, NULL, :expired_at, FALSE, '60/min'"));
+        // (The INSERT/soft-delete/PATCH-save pins moved with the
+        // statements to `crate::domain::tokens`.)
         // List carries is_service=False; detail omits it (ported bug 7).
         assert!(api_token_list_sql().contains("api_tokens.is_service = FALSE"));
         assert!(!api_token_detail_sql().contains("is_service"));
         assert!(api_token_detail_sql().contains("api_tokens.id = :pk"));
-        // Delete lookup re-adds the guard; write is a stamp-and-save.
+        // Delete lookup re-adds the guard.
         assert!(api_token_delete_lookup_sql().contains("api_tokens.is_service = FALSE"));
-        assert_eq!(
-            api_token_soft_delete_sql(),
-            "UPDATE api_tokens SET deleted_at = :now, updated_at = :now WHERE id = :pk"
-        );
         // PATCH lookup: scoped .first(); writable set per SER-E probe.
         let lookup = api_token_patch_lookup_sql();
         assert!(lookup.contains("api_tokens.is_service = FALSE"));
@@ -1067,12 +1015,6 @@ mod tests {
                 "created_by"
             ]
         );
-        let save = api_token_patch_save_sql();
-        assert!(save.contains("is_service = :is_service"));
-        assert!(save.contains("deleted_at = :deleted_at"));
-        assert!(save.contains("created_by_id = :created_by"));
-        assert!(!save.contains("expired_at"));
-        assert!(!save.contains("user_type"));
     }
 
     #[test]

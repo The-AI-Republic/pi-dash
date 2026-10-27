@@ -234,10 +234,7 @@ async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Resp
         }
     }
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    sqlx::query(r#"UPDATE api_tokens SET last_used = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -303,19 +300,13 @@ async fn authenticate_machine(
     if !is_member(pool, workspace_id, user_id).await? {
         // `machine_token.revoke()` on the way out (`revoked_at` is `None`
         // here, so the guard is a no-op and the write always lands).
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2"#)
-            .bind(now)
-            .bind(id)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
             .await
             .map_err(|_| server_error())?;
         return Err(invalid_token());
     }
     // `MachineToken.objects.filter(pk=...).update(last_used_at=now)`.
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -436,13 +427,14 @@ impl revoke::RevokeStore for DeleteStore<'_> {
         now: DateTime<Utc>,
         stored_reason: &str,
     ) -> Result<(), revoke::RevokeError> {
-        sqlx::query(revoke::REVOKE_ACTIVE_SESSIONS_SQL)
-            .bind(now)
-            .bind(stored_reason)
-            .bind(runner_id)
-            .execute(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
+        pidash_services::domain::tokens::revoke_runner_sessions_for_runner(
+            &mut *self.tx,
+            runner_id,
+            now,
+            stored_reason,
+        )
+        .await
+        .map_err(store_err)?;
         Ok(())
     }
 
@@ -648,13 +640,14 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_> {
         for row in rows {
             let session = rs_models::runner_session_from_row(&row).map_err(store_err)?;
             let sid = session.id.to_string();
-            sqlx::query(rs_models::REVOKE_SQL)
-                .bind(now_micros())
-                .bind(pubsub::FORCE_CLOSE_REASON)
-                .bind(session.id)
-                .execute(&mut *self.tx)
-                .await
-                .map_err(store_err)?;
+            pidash_services::domain::tokens::revoke_runner_session(
+                &mut *self.tx,
+                session.id,
+                now_micros(),
+                pubsub::FORCE_CLOSE_REASON,
+            )
+            .await
+            .map_err(store_err)?;
             outbox::clear_session_marker(self.redis.as_ref(), &sid)
                 .await
                 .map_err(store_err)?;
@@ -675,12 +668,13 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_> {
         machine_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), revoke::RevokeError> {
-        sqlx::query(delete_svc::REVOKE_MACHINE_TOKENS_SQL)
-            .bind(now)
-            .bind(machine_id)
-            .execute(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
+        pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+            &mut *self.tx,
+            machine_id,
+            now,
+        )
+        .await
+        .map_err(store_err)?;
         Ok(())
     }
 
@@ -787,12 +781,12 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_> {
         &mut self,
         runner_ids: &[Uuid],
     ) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::delete_runner_sessions_sql(runner_ids.len()),
+        pidash_services::domain::tokens::delete_runner_sessions_for_runners(
+            &mut *self.tx,
             runner_ids,
         )
         .await
+        .map_err(store_err)
     }
 
     async fn delete_force_refresh(
@@ -910,9 +904,7 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_> {
     }
 
     async fn null_token_machines(&mut self, machine_id: Uuid) -> Result<(), revoke::RevokeError> {
-        sqlx::query(delete_svc::NULL_TOKEN_MACHINES_SQL)
-            .bind(machine_id)
-            .execute(&mut *self.tx)
+        pidash_services::domain::tokens::clear_token_dev_machines(&mut *self.tx, machine_id)
             .await
             .map_err(store_err)?;
         Ok(())
