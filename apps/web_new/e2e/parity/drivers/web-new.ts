@@ -5055,16 +5055,29 @@ export class WebNewDriver implements ParityDriver {
     return todo("openArchivedIssueDetail");
   }
 
-  async datePickerOpen(_label: string): Promise<void> {
-    return todo("datePickerOpen");
+  /** Any open date calendar: every picker testids its calendar *-calendar, and closed popovers unmount. */
+  private dateCalendar(): Locator {
+    return this.page.locator('[data-testid$="-calendar"]');
+  }
+
+  async datePickerOpen(label: string): Promise<void> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.dateCalendar().last().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async datePickerVisible(): Promise<boolean> {
-    return todo("datePickerVisible");
+    return (await this.dateCalendar().count()) > 0;
   }
 
   async datePickerVisibleMonth(): Promise<{ month: string; year: string }> {
-    return todo("datePickerVisibleMonth");
+    const calendar = this.dateCalendar().last();
+    const month = calendar.getByLabel("Month", { exact: true });
+    const year = calendar.getByLabel("Year", { exact: true });
+    await month.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const selected = (select: Locator): Promise<string> => select.locator("option:checked").first().innerText();
+    return { month: ((await selected(month)) ?? "").trim(), year: ((await selected(year)) ?? "").trim() };
   }
 
   /** One in-month calendar day button, by its day number. */
@@ -5080,12 +5093,22 @@ export class WebNewDriver implements ParityDriver {
     return this.calendarDay(day).isDisabled();
   }
 
-  async datePickerPortalAttached(_label: string): Promise<boolean> {
-    return todo("datePickerPortalAttached");
+  async datePickerPortalAttached(label: string): Promise<boolean> {
+    const row = this.propertyRow(label).first();
+    const calendar = this.dateCalendar().last();
+    if ((await row.count()) === 0 || (await calendar.count()) === 0) return false;
+    const handle = await calendar.elementHandle();
+    if (handle === null) return false;
+    return row.evaluate((rowEl, calendarEl) => !rowEl.contains(calendarEl as unknown as Node), handle);
   }
 
-  async datePickerClear(_label: string): Promise<void> {
-    return todo("datePickerClear");
+  async datePickerClear(label: string): Promise<void> {
+    const row = this.propertyRow(label);
+    await this.propertyTrigger(label).hover({ timeout: WebNewDriver.WAIT_MS });
+    await row
+      .getByRole("button", { name: `Clear ${label}`, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async propertyRowPresent(label: string): Promise<boolean> {
@@ -5215,16 +5238,31 @@ export class WebNewDriver implements ParityDriver {
     return todo("issueModalSubmit");
   }
 
-  async rangeMergedCellText(_issueName: string): Promise<string> {
-    return todo("rangeMergedCellText");
+  /** The merged-dates cell trigger in the row naming the issue (list, or the fresh strip above it). */
+  private async rangeMergedCell(issueName: string): Promise<Locator> {
+    const anchors = await this.issueRowAnchors(issueName);
+    return anchors.first().getByTestId("row-dates-trigger");
   }
 
-  async rangeMergedCellOpen(_issueName: string): Promise<void> {
-    return todo("rangeMergedCellOpen");
+  async rangeMergedCellText(issueName: string): Promise<string> {
+    const cell = await this.rangeMergedCell(issueName);
+    await cell.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await cell.innerText()) ?? "").trim();
   }
 
-  async rangeMergedCellClear(_issueName: string): Promise<void> {
-    return todo("rangeMergedCellClear");
+  async rangeMergedCellOpen(issueName: string): Promise<void> {
+    // Click the label span, not the button box: a box click near the end
+    // lands on the clear control and wipes the dates instead of opening.
+    const cell = await this.rangeMergedCell(issueName);
+    await cell.locator("span").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.webNewRangeCalendar().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async rangeMergedCellClear(issueName: string): Promise<void> {
+    const anchors = await this.issueRowAnchors(issueName);
+    const row = anchors.first();
+    await row.getByTestId("row-dates-trigger").hover({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByTestId("row-dates-clear").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   /**

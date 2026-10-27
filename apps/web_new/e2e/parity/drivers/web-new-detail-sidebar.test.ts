@@ -29,6 +29,8 @@ interface StubNode {
   last?: () => Locator;
   nth?: (index: number) => Locator;
   or?: (other: Locator) => Locator;
+  elementHandle?: () => Promise<unknown>;
+  evaluate?: (fn: (el: unknown, arg: unknown) => unknown, arg?: unknown) => Promise<unknown>;
 }
 
 function node(overrides: Partial<StubNode> = {}): Locator {
@@ -41,6 +43,8 @@ function node(overrides: Partial<StubNode> = {}): Locator {
     fill: async () => undefined,
     hover: async () => undefined,
     waitFor: async () => undefined,
+    elementHandle: async () => null,
+    evaluate: async () => undefined,
     ...overrides,
   };
   const chain: StubNode = {
@@ -595,5 +599,178 @@ describe("DetailSidebarDriver", () => {
     });
     await new WebNewDriver(page).removeLabel("Gone");
     expect(clicked).toBe("chip");
+  });
+});
+
+describe("DateDropdownDriver", () => {
+  const CALENDAR = '[data-testid$="-calendar"]';
+
+  /** A property group row with a trigger button and an optional clear button. */
+  function dateRow(calls: string[], clearName: string): Locator {
+    return node({
+      getByRole: (role: string, options?: unknown) => {
+        if (role !== "button") return absent();
+        const want = (options as { name?: string } | undefined)?.name;
+        if (want === undefined) {
+          return node({
+            click: async () => {
+              calls.push("trigger-click");
+            },
+            hover: async () => {
+              calls.push("trigger-hover");
+            },
+          });
+        }
+        if (want === clearName) {
+          return node({
+            click: async () => {
+              calls.push("clear-click");
+            },
+          });
+        }
+        return absent();
+      },
+    });
+  }
+
+  it("opens the row trigger and waits for the calendar", async () => {
+    const calls: string[] = [];
+    const waits: unknown[] = [];
+    const page = pageOf({
+      role: (role: string) => (role === "group" ? dateRow(calls, "Clear Start date") : absent()),
+      locator: (selector: string) =>
+        selector === CALENDAR
+          ? node({
+              waitFor: async (options?: unknown) => {
+                waits.push(options);
+              },
+            })
+          : absent(),
+    });
+    await new WebNewDriver(page).datePickerOpen("Start date");
+    expect(calls).toEqual(["trigger-click"]);
+    expect(waits).toContainEqual({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("reads calendar presence as open", async () => {
+    const open = pageOf({ locator: (selector: string) => (selector === CALENDAR ? node() : absent()) });
+    expect(await new WebNewDriver(open).datePickerVisible()).toBe(true);
+    expect(await new WebNewDriver(pageOf()).datePickerVisible()).toBe(false);
+  });
+
+  it("reads the open month and year from the caption selects", async () => {
+    const select = (text: string) => node({ locator: () => node({ innerText: async () => text }) });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === CALENDAR
+          ? node({
+              getByLabel: (label: string) =>
+                label === "Month" ? select(" October ") : label === "Year" ? select("2026") : absent(),
+            })
+          : absent(),
+    });
+    expect(await new WebNewDriver(page).datePickerVisibleMonth()).toEqual({ month: "October", year: "2026" });
+  });
+
+  it("reports whether the calendar mounts outside the row", async () => {
+    const attached = pageOf({
+      role: () => node({ evaluate: async () => true }),
+      locator: (selector: string) => (selector === CALENDAR ? node({ elementHandle: async () => ({}) }) : absent()),
+    });
+    expect(await new WebNewDriver(attached).datePickerPortalAttached("Start date")).toBe(true);
+    expect(await new WebNewDriver(pageOf()).datePickerPortalAttached("Start date")).toBe(false);
+  });
+
+  it("clears through the hovered row's clear control", async () => {
+    const calls: string[] = [];
+    const page = pageOf({
+      role: (role: string) => (role === "group" ? dateRow(calls, "Clear Due date") : absent()),
+    });
+    await new WebNewDriver(page).datePickerClear("Due date");
+    expect(calls).toEqual(["trigger-hover", "clear-click"]);
+  });
+
+  /** The row anchor naming the issue, with a merged-dates cell. */
+  function datedRow(cell: Locator): Locator {
+    const anchor = node({
+      getByTestId: (id: string) => {
+        if (id === "row-dates-trigger") return cell;
+        if (id === "row-dates-clear") {
+          return node({
+            click: async () => {
+              (cell as unknown as { cleared?: boolean }).cleared = true;
+            },
+          });
+        }
+        return absent();
+      },
+    });
+    return node({ filter: () => node({ first: () => anchor }) });
+  }
+
+  it("reads the merged cell's smart label", async () => {
+    const cell = node({ innerText: async () => " 10 - 20 Oct " });
+    const page = pageOf({
+      role: (role: string) => (role === "region" ? node({ locator: () => datedRow(cell) }) : absent()),
+    });
+    expect(await new WebNewDriver(page).rangeMergedCellText("Dated")).toBe("10 - 20 Oct");
+  });
+
+  it("opens the range calendar from the label span", async () => {
+    const calls: string[] = [];
+    const waits: unknown[] = [];
+    const cell = node({
+      locator: () =>
+        node({
+          click: async () => {
+            calls.push("span-click");
+          },
+        }),
+    });
+    const page = pageOf({
+      role: (role: string) => (role === "region" ? node({ locator: () => datedRow(cell) }) : absent()),
+      locator: (selector: string) =>
+        selector === CALENDAR
+          ? node({
+              waitFor: async (options?: unknown) => {
+                waits.push(options);
+              },
+            })
+          : absent(),
+    });
+    await new WebNewDriver(page).rangeMergedCellOpen("Dated");
+    expect(calls).toEqual(["span-click"]);
+    expect(waits).toContainEqual({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("clears both ends through the merged cell's clear control", async () => {
+    const calls: string[] = [];
+    const anchor = node({
+      getByTestId: (id: string) => {
+        if (id === "row-dates-trigger") {
+          return node({
+            hover: async () => {
+              calls.push("trigger-hover");
+            },
+          });
+        }
+        if (id === "row-dates-clear") {
+          return node({
+            click: async () => {
+              calls.push("clear-click");
+            },
+          });
+        }
+        return absent();
+      },
+    });
+    const page = pageOf({
+      role: (role: string) => {
+        if (role !== "region") return absent();
+        return node({ locator: () => node({ filter: () => node({ first: () => anchor }) }) });
+      },
+    });
+    await new WebNewDriver(page).rangeMergedCellClear("Dated");
+    expect(calls).toEqual(["trigger-hover", "clear-click"]);
   });
 });
