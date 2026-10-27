@@ -14,6 +14,7 @@ import {
   boardPageCursor,
   boardPrefill,
   boardQuickAddDisabledReason,
+  bucketTotal,
   effectiveSubGroup,
   flatBoard,
   groupedBoard,
@@ -155,6 +156,30 @@ describe("boardColumns", () => {
     });
     expect(columns[0]?.title).toBe("High");
   });
+
+  it("counts the rendered rows when the server total undercounts (NEWFRONT-153)", () => {
+    const columns = boardColumns(
+      grouped({ [STATE]: { rows: [row({ id: "a" }), row({ id: "b" }), row({ id: "c" })], total: 2 } }),
+      labels,
+      { dimension: "state", showEmpty: true }
+    );
+    expect(columns).toEqual([{ key: STATE, title: "Todo", total: 3 }]);
+  });
+
+  it("keeps a column whose rows render despite a zero server total when show-empty is off", () => {
+    const columns = boardColumns(grouped({ [STATE]: { rows: [row()], total: 0 } }), labels, {
+      dimension: "state",
+      showEmpty: false,
+    });
+    expect(columns.map((column) => column.key)).toEqual([STATE]);
+  });
+});
+
+describe("bucketTotal", () => {
+  it("takes the larger of the server total and the rendered rows", () => {
+    expect(bucketTotal({ results: [row(), row(), row()] as never, total_results: 2 })).toBe(3);
+    expect(bucketTotal({ results: [row()] as never, total_results: 4 })).toBe(4);
+  });
 });
 
 describe("flatBoard", () => {
@@ -188,6 +213,15 @@ describe("groupedBoard", () => {
       showEmpty: false,
     });
     expect(Object.keys(board.lanes[0]?.cells ?? {})).toEqual([LABEL]);
+  });
+
+  it("reconciles the column and cell totals with the rendered rows (NEWFRONT-153)", () => {
+    const board = groupedBoard(
+      grouped({ [STATE]: { rows: [row({ id: "a" }), row({ id: "b" }), row({ id: "c" })], total: 2 } }),
+      { dimension: "state", labels, showEmpty: true }
+    );
+    expect(board.columns[0]?.total).toBe(3);
+    expect(board.lanes[0]?.cells[STATE]?.total).toBe(3);
   });
 });
 
@@ -247,6 +281,38 @@ describe("sub-grouped lanes", () => {
       showEmpty: false,
     });
     expect(columns).toEqual([]);
+  });
+
+  it("counts rendered rows when a sub-bucket total undercounts (NEWFRONT-153)", () => {
+    const under = subGrouped({
+      [STATE]: {
+        [LABEL]: { rows: [row({ id: "a" }), row({ id: "b" })], total: 1 },
+        None: { rows: [row({ id: "c" })], total: 1 },
+      },
+    });
+    expect(laneTotal(under, LABEL)).toBe(2);
+    expect(laneTotal(under, "None")).toBe(1);
+    const columns = subGroupedColumns(under, labels, { dimension: "state", showEmpty: true });
+    expect(columns).toEqual([{ key: STATE, title: "Todo", total: 3 }]);
+    const board = subGroupedBoard(under, {
+      groupDimension: "state",
+      subDimension: "labels",
+      groupLabels: labels,
+      subLabels: labels,
+      showEmpty: true,
+    });
+    expect(board.lanes.map((lane) => [lane.key, lane.total])).toEqual([
+      [LABEL, 2],
+      ["None", 1],
+    ]);
+    expect(board.lanes[0]?.cells[STATE]?.total).toBe(2);
+  });
+
+  it("keeps a larger server group total over the sub-bucket rows", () => {
+    const response = subGrouped({ [STATE]: { [LABEL]: { rows: [row()], total: 1 } } });
+    response.results[STATE]!.total_results = 9;
+    const columns = subGroupedColumns(response, labels, { dimension: "state", showEmpty: true });
+    expect(columns[0]?.total).toBe(9);
   });
 });
 
@@ -647,6 +713,87 @@ describe("mergeBoardPage", () => {
     expect(merged.columns.map((column) => column.key)).toEqual([STATE, "done"]);
     expect(merged.lanes[0]?.cells["done"]?.rows.map((entry) => entry.id)).toEqual(["d1"]);
     expect(merged.lanes[0]?.cells[STATE]?.rows).toHaveLength(1);
+  });
+
+  it("keeps merged totals at or above the rendered rows (NEWFRONT-153)", () => {
+    const current = boardData({
+      columns: [{ key: STATE, title: "Todo", total: 2 }],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 2,
+          cells: {
+            [STATE]: {
+              columnKey: STATE,
+              rows: [row({ id: "a" }), row({ id: "b" }), row({ id: "c" })],
+              total: 2,
+            },
+          },
+        },
+      ],
+      total: 2,
+    });
+    const incoming = boardData({
+      columns: [{ key: STATE, title: "Todo", total: 2 }],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 2,
+          cells: { [STATE]: { columnKey: STATE, rows: [row({ id: "a" })], total: 2 } },
+        },
+      ],
+      total: 2,
+    });
+    const merged = mergeBoardPage(current, incoming);
+    expect(merged.lanes[0]?.cells[STATE]?.rows).toHaveLength(3);
+    expect(merged.lanes[0]?.cells[STATE]?.total).toBe(3);
+    expect(merged.columns[0]?.total).toBe(3);
+    expect(merged.lanes[0]?.total).toBe(3);
+  });
+
+  it("never drops a non-owner total below its rendered rows (NEWFRONT-153)", () => {
+    const current = boardData({
+      columns: [
+        { key: STATE, title: "Todo", total: 2 },
+        { key: "done", title: "Done", total: 1 },
+      ],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 3,
+          cells: {
+            [STATE]: { columnKey: STATE, rows: [row({ id: "a" })], total: 2 },
+            done: { columnKey: "done", rows: [row({ id: "b1" }), row({ id: "b2" })], total: 1 },
+          },
+        },
+      ],
+      total: 3,
+    });
+    const incoming = boardData({
+      columns: [
+        { key: STATE, title: "Todo", total: 2 },
+        { key: "done", title: "Done", total: 1 },
+      ],
+      lanes: [
+        {
+          key: "",
+          title: "",
+          total: 3,
+          cells: {
+            [STATE]: { columnKey: STATE, rows: [row({ id: "a3" })], total: 2 },
+            done: { columnKey: "done", rows: [row({ id: "b1" })], total: 1 },
+          },
+        },
+      ],
+      total: 3,
+    });
+    const merged = mergeBoardPage(current, incoming, { kind: "column", columnKey: STATE });
+    expect(merged.lanes[0]?.cells["done"]?.rows.map((entry) => entry.id)).toEqual(["b1", "b2"]);
+    expect(merged.lanes[0]?.cells["done"]?.total).toBe(2);
+    expect(merged.columns.find((column) => column.key === "done")?.total).toBe(2);
   });
 });
 
