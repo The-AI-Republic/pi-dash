@@ -4,7 +4,8 @@
 // Oracle scenarios (NEWFRONT-122): date-range dropdown — the issues-list
 // merged-dates cell renders one smart label for the start+due pair and
 // repicks either end; its clear control drops one end to the
-// concurrent-PATCH race (bug:NEWFRONT-150, observed behavior); the
+// concurrent-PATCH race on the old app (bug:NEWFRONT-150, observed
+// behavior) while the new app clears both ends in one update; the
 // cycle-create form renders the split from/to pair with today as the
 // minimum day. Rows: ISS-215 (date-range dropdown).
 //
@@ -248,13 +249,18 @@ test(
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await reloadAndSettleOnRow(driver, seed.workspaceSlug, projectId, issue.name);
       await expect.poll(() => driver.rangeMergedCellText(issue.name), { timeout: 30_000 }).toContain("10 - 20");
-      // bug:NEWFRONT-150 — the clear control fires two concurrent
+      // bug:NEWFRONT-150 — the old app's clear control fires two concurrent
       // single-field PATCHes and the server's whole-row write drops one
       // (both 204, exactly one survives), so one click clears exactly one
-      // end; which end survives varies. Intended: both ends null. If both
-      // PATCHes are throttled (neither end moves), reload and click once
-      // more; a partial clear needs no retry because the observation is the
-      // single cleared end.
+      // end; which end survives varies. web_new implements the intent: both
+      // ends travel in one PATCH, so one click clears both. The oracle keeps
+      // pinning the observed race; the new target proves the fix.
+      const expectedNulls = driver.target === "web_new" ? 2 : 1;
+      // If every clear PATCH is throttled (no end moves), reload and click
+      // once more. Any movement is the observation, not a flake: a partial
+      // clear stays exactly that on the oracle, and on web_new the single
+      // PATCH either lands both ends or none — the final assertion below
+      // decides, never a retry.
       for (let round = 1; round <= 2; round++) {
         if (round > 1) await reloadAndSettleOnRow(driver, seed.workspaceSlug, projectId, issue.name);
         await driver.rangeMergedCellClear(issue.name);
@@ -273,9 +279,8 @@ test(
           );
         if (moved) break;
       }
-      // The race resolves to exactly one cleared end (bug:NEWFRONT-150);
-      // require that state to hold across a re-read so a straggler second
-      // PATCH cannot slip in between the read and the assertion.
+      // Require the cleared state to hold across a re-read so a straggler
+      // second PATCH cannot slip in between the read and the assertion.
       const nulledEnds = async (): Promise<number> => {
         const current = await serverIssue(seed.workspaceSlug, projectId, issue.id, session);
         return [current.start_date, current.target_date].filter((d) => d === null).length;
@@ -283,15 +288,15 @@ test(
       await expect
         .poll(
           async () => {
-            if ((await nulledEnds()) !== 1) return 0;
+            if ((await nulledEnds()) !== expectedNulls) return 0;
             await new Promise((resolve) => setTimeout(resolve, 1000));
             return nulledEnds();
           },
           { timeout: 30_000 }
         )
-        .toBe(1);
+        .toBe(expectedNulls);
       const after = await serverIssue(seed.workspaceSlug, projectId, issue.id, session);
-      expect([after.start_date, after.target_date].filter((d) => d === null)).toHaveLength(1);
+      expect([after.start_date, after.target_date].filter((d) => d === null)).toHaveLength(expectedNulls);
     } finally {
       await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, issue.id, session);
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
