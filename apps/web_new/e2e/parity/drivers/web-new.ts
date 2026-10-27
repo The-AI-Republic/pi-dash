@@ -8298,9 +8298,18 @@ export class WebNewDriver implements ParityDriver {
 
   /**
    * Pick `option` from the cell's combobox popup, then settle it closed.
-   * Multi-pick popups stay open after a pick, so Escape always follows.
+   * Single-pick cells paint the value optimistically, so callers that
+   * render the picked name pass `settleValue` and the pick waits for the
+   * paint instead of racing the spec's immediate read. Multi-pick popups
+   * stay open after a pick, so Escape follows only while one is open —
+   * never blindly, where it could swallow an uncommitted selection.
    */
-  private async layoutsSheetCellPick(issueName: string, column: string, option: string): Promise<void> {
+  private async layoutsSheetCellPick(
+    issueName: string,
+    column: string,
+    option: string,
+    settleValue: boolean
+  ): Promise<void> {
     const cell = this.layoutsSheetCell(issueName, column);
     await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     const trigger = cell.locator("button:not([disabled])").first();
@@ -8309,16 +8318,29 @@ export class WebNewDriver implements ParityDriver {
     const listbox = this.page.getByRole("listbox").last();
     await listbox.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await listbox.getByRole("option", { name: option }).first().click({ timeout: WebNewDriver.WAIT_MS });
-    await this.page.keyboard.press("Escape");
+    if (settleValue) {
+      const deadline = Date.now() + WebNewDriver.WAIT_MS;
+      for (;;) {
+        const text = (await cell.innerText()).trim().replace(/\s+/g, " ");
+        if (text.includes(option)) break;
+        if (Date.now() >= deadline) {
+          throw new Error(`[parity] sheet cell "${column}" for "${issueName}" never showed "${option}".`);
+        }
+        await this.page.waitForTimeout(250);
+      }
+    }
+    if (await listbox.isVisible()) {
+      await this.page.keyboard.press("Escape");
+    }
     await listbox.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsSheetCellSetState(issueName: string, stateName: string): Promise<void> {
-    await this.layoutsSheetCellPick(issueName, "State", stateName);
+    await this.layoutsSheetCellPick(issueName, "State", stateName, true);
   }
 
   async layoutsSheetCellSetPriority(issueName: string, priorityName: string): Promise<void> {
-    await this.layoutsSheetCellPick(issueName, "Priority", priorityName);
+    await this.layoutsSheetCellPick(issueName, "Priority", priorityName, true);
   }
 
   async layoutsSheetFocusCell(issueName: string, column: string): Promise<void> {
@@ -9334,7 +9356,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsSheetCellSetAssignee(issueName: string, memberName: string): Promise<void> {
-    await this.layoutsSheetCellPick(issueName, "Assignees", memberName);
+    // Assignee cells render avatars, not the member name, so there is no
+    // painted value to settle on; the spec polls the server instead.
+    await this.layoutsSheetCellPick(issueName, "Assignees", memberName, false);
   }
 
   async layoutsAddExistingModalIssueNames(): Promise<string[]> {

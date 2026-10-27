@@ -335,6 +335,9 @@ describe("web_new sheet cells", () => {
       });
       const cell = node({
         locator: () => node(),
+        // The sheet paints single-pick values optimistically; the stub
+        // reports the paint already landed.
+        innerText: async () => (method === "layoutsSheetCellSetAssignee" ? "Assignees" : option),
       });
       const stub = pageOf({
         locator: () => cell,
@@ -347,6 +350,44 @@ describe("web_new sheet cells", () => {
       expect(keys).toEqual(["Escape"]);
       expect(states).toEqual(["visible", "hidden"]);
     }
+  });
+
+  it("throws when the picked value never paints", async () => {
+    let now = 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const closed = node({
+        waitFor: async () => undefined,
+        getByRole: () => node(),
+        isVisible: async () => true,
+      });
+      const stub = pageOf({
+        locator: () => node({ locator: () => node() }),
+        role: (role: string) => (role === "listbox" ? closed : node({ count: async () => 0 })),
+        tick: () => {
+          now += 60_000;
+        },
+      });
+      await expect(new WebNewDriver(stub.page).layoutsSheetCellSetState("Alpha", "Parity Sheet")).rejects.toThrow(
+        '[parity] sheet cell "State" for "Alpha" never showed "Parity Sheet".'
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("skips Escape when the popup closed on its own", async () => {
+    const closed = node({
+      waitFor: async () => undefined,
+      getByRole: () => node(),
+      isVisible: async () => false,
+    });
+    const stub = pageOf({
+      locator: () => node({ locator: () => node(), innerText: async () => "High" }),
+      role: (role: string) => (role === "listbox" ? closed : node({ count: async () => 0 })),
+    });
+    await new WebNewDriver(stub.page).layoutsSheetCellSetPriority("Alpha", "High");
+    expect(stub.keys).toEqual([]);
   });
 
   it("focuses cells directly and moves with arrows", async () => {
