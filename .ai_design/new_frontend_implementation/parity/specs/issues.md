@@ -461,6 +461,17 @@ hide without it. Duplicate in this build goes through the create modal
 prefilled from the source issue (native duplication is cloud-only).
 Oracle: `layouts-a-row-actions.spec.ts`.
 
+Edit opens the same work-item dialog as creation, in edit mode: the
+form arrives prefilled from the row and its heading says the form
+edits an existing record rather than creating one. The heading's exact
+wording is each app's own copy, not a parity property — the rebuild
+says "Update work item", the old app says "Update", and the oracle
+scenario pins the intent (an edit-mode heading naming an update) so it
+passes on both (NEWFRONT-934). The same single heading serves every
+entry point that opens the edit form: the row menu, the relations
+widget's row edit, and the intake accept form; only the intake form
+names the specific action it performs.
+
 The archive entry is gated on the issue's state group (ISS-061):
 unless the issue sits in a completed or cancelled state the entry
 renders disabled with an explanatory note that only finished work
