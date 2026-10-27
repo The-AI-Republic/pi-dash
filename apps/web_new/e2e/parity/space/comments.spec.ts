@@ -649,8 +649,17 @@ test(
       });
 
       await test.step("typing a mention trigger offers nothing", async () => {
-        const query = (seed.mentionMember?.displayName ?? "Parity Mention").slice(0, 3);
-        const result = await driver.spaceCommentMention(query, seed.mentionMember?.displayName ?? "Parity Mention");
+        const memberName = seed.mentionMember?.displayName ?? "Parity Mention";
+        const query = memberName.slice(0, 3);
+        const result = await driver.spaceCommentMention(query, memberName);
+        if (driver.target === "web_new") {
+          // Intended behavior (bug NEWFRONT-460): the trigger offers
+          // matching board members and picking one inserts a chip.
+          expect(result.offered).toBe(true);
+          expect(result.inserted).toBe(true);
+          expect(await driver.spaceCommentDraftText()).toContain(memberName);
+          return;
+        }
         expect(result.offered).toBe(false);
         expect(result.inserted).toBe(false);
         expect(await driver.spaceCommentMentionOpen()).toBe(false);
