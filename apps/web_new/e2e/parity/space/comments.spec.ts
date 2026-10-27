@@ -8,7 +8,8 @@
 // Each scenario flips the board flags through the publish API and restores
 // them, so reruns on one seeded stack stay green. Seven scenarios pin
 // current bugs (NEWFRONT-459/460/461/465/466/467); the rows record the
-// intent.
+// intent. The 459 age scenario pins the bare line on the old app and
+// proves the relative age on web_new.
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
 import {
@@ -335,13 +336,24 @@ test(
         await driver.spaceCommentOpenIssue(anchor, issueName);
       });
 
-      await test.step("the age line reads bare with the timestamp stored server-side", async () => {
+      await test.step("the age line matches its target with the timestamp stored server-side", async () => {
         await expect
           .poll(() => driver.spaceCommentRows().then((rows) => rows.length), { timeout: 60_000 })
           .toBeGreaterThanOrEqual(1);
         const row = (await driver.spaceCommentRows()).find((candidate) => candidate.contentText.includes(marker))!;
         expect(row).toBeDefined();
-        expect(row.ageText).toBe("commented");
+        // bug:NEWFRONT-459 — the old row interpolates an empty age, so the
+        // line reads bare; web_new implements the intent (the shared timeAgo
+        // ladder, matching the workspace rows), so the line carries a
+        // relative age. Fresh rows read "just now" but may tick over on a
+        // slow run, so the new target accepts any ladder rung.
+        if (driver.target === "web_new") {
+          expect(row.ageText).toMatch(
+            /^commented (just now|\d+ minutes? ago|\d+ hours? ago|yesterday|\d+ days ago|\d+ weeks? ago|\d+ months? ago|\d+ years? ago)$/
+          );
+        } else {
+          expect(row.ageText).toBe("commented");
+        }
         const stored = (await serverSpaceComments(anchor, issueId)).find((comment) => comment.id === commentId)!;
         expect(stored.createdAt).not.toBe("");
       });
