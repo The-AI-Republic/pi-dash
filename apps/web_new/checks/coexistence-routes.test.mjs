@@ -433,4 +433,16 @@ describe("main", () => {
       "expected the error to name the shadowed AIO file"
     );
   });
+
+  it("names every covered route when one line shadows several entries", () => {
+    const list = listFile({ entries: ["/sign-in", "/god-mode"], reservedTopLevel: [] });
+    const { ce, aio } = scratch({ ce: ceFixture, aio: aioFixture });
+    const argv = ["--list", list, "--caddy-ce", ce, "--caddy-aio", aio];
+    runMain(argv);
+    const lines = readFileSync(ce, "utf8").split("\n");
+    const at = lines.findIndex((candidate) => candidate.includes("BEGIN MIGRATED ROUTES"));
+    lines.splice(at, 0, "\treverse_proxy /* old:3000");
+    writeFileSync(ce, lines.join("\n"));
+    assert.throws(() => runMain([...argv, "--check"]), /shadows migrated routes \/sign-in, \/god-mode/);
+  });
 });
