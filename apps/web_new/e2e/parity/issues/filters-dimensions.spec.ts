@@ -21,8 +21,10 @@
 // scenario here; see the parent finding.
 //
 // REVEAL PATTERN (verified live): the row renders only while the stored
-// expression is non-empty (NEWFRONT-146), so every scenario seeds an
-// expression through the API, then opens the list.
+// expression is non-empty, so every scenario seeds an expression through
+// the API, then opens the list. (The dev-oracle toggle gap is
+// NEWFRONT-146; the production oracle's toggle works and seeded entry is
+// what the row's visibility states are proven from on both builds.)
 import { test, expect } from "../fixtures";
 import {
   resetIssueUserProperties,
