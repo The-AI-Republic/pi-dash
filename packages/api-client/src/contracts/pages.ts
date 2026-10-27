@@ -73,13 +73,17 @@ export const PageRows = z.array(PageRow);
 export type PageRows = z.infer<typeof PageRows>;
 
 /**
- * The detail read: the row plus the body markup and the work items the page
- * mentions. The record view always sends `issue_ids`; the create response
- * shares this shape but omits that annotation, so it stays optional.
+ * The detail read: the row plus the body markup, the structured snapshot
+ * the canvas heals HTML-only bodies from (PAGE-040), and the work items
+ * the page mentions. The record view always sends `issue_ids`; the
+ * create response shares this shape but omits that annotation, so it
+ * stays optional, and the snapshot stays optional so answers without
+ * it (older stubs, reduced echoes) still parse.
  */
 export const PageDetail = z.object({
   ...PageRow.shape,
   description_html: z.string(),
+  description_json: z.optional(z.record(z.string(), z.unknown())),
   issue_ids: z.optional(z.array(nullableUuid())),
 });
 export type PageDetail = z.infer<typeof PageDetail>;

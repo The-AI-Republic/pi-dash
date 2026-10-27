@@ -60,6 +60,11 @@ export interface PageEditorSurfaceProps {
   name: string;
   /** Stored body HTML; a draft typed this session wins over it. */
   descriptionHtml: string;
+  /**
+   * The stored structured snapshot, for healing embeds the markup lost
+   * (PAGE-040). Withheld from the body while a session draft is newer.
+   */
+  descriptionJson?: Record<string, unknown> | undefined;
   /** Stored `logo_props`, drawn in the canvas header. */
   logoProps: Record<string, unknown>;
   /** Persist the record name (title saves outside the body path). */
@@ -123,6 +128,7 @@ export function PageEditorSurface({
   projectId,
   name,
   descriptionHtml,
+  descriptionJson,
   logoProps,
   onRename,
   onMarkPick,
@@ -145,6 +151,13 @@ export function PageEditorSurface({
   // is live for this page (PAGE-063); only editors mount this surface.
   const oversized = usePageOversizedIncident(pageId);
   const initialHtml = React.useMemo(() => getPageBodyDraft(pageId) ?? descriptionHtml, [pageId, descriptionHtml]);
+  // A session draft is newer than the stored snapshot: healing the
+  // snapshot's embeds over it could resurrect an embed deleted this
+  // session, so a draft keeps the snapshot from the body (PAGE-040).
+  const healSnapshot = React.useMemo(
+    () => (getPageBodyDraft(pageId) === null ? descriptionJson : undefined),
+    [pageId, descriptionJson]
+  );
   // Latest body HTML, so the interaction layer can re-read the caret's
   // trigger after every edit without owning the editor itself.
   const [bodyHtml, setBodyHtml] = React.useState(initialHtml);
@@ -355,6 +368,7 @@ export function PageEditorSurface({
             <PageBodyEditor
               key={pageId}
               initialHtml={initialHtml}
+              descriptionJson={healSnapshot}
               resolveAsset={resolveAsset}
               workspaceSlug={workspaceSlug}
               onChange={onChange}

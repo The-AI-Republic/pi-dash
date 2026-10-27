@@ -522,6 +522,7 @@ export function PageDetailScreen({
                       projectId={projectId}
                       name={page.name}
                       descriptionHtml={page.description_html}
+                      descriptionJson={page.description_json}
                       logoProps={page.logo_props as Record<string, unknown>}
                       onRename={saveName}
                       onMarkPick={saveMark}

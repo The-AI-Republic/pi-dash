@@ -39,8 +39,10 @@ import {
   runBlockKind,
   runInsertImage,
   runPageCommand,
+  healMissingPageEmbeds,
   type PageEditorChain,
   type PageEditorRef,
+  type PageEditorView,
   type PageFocusPosition,
 } from "./pageEditorAdapter.js";
 
@@ -677,6 +679,97 @@ describe("page block catalogue commands", () => {
     const { ref, calls } = editorAt({ from: 6, parentOffset: 4, start: 2 });
     deleteContentBeforeCaret(ref, 3);
     expect(calls).toEqual(["focus", "deleteRange([object Object])", "run"]);
+  });
+});
+
+const HEAL_ATTRS = {
+  id: "emb-1",
+  entity_identifier: "ISS-1",
+  project_identifier: "P",
+  workspace_identifier: "ws",
+  entity_name: "Embedded",
+};
+
+function healDoc(...content: unknown[]): Record<string, unknown> {
+  return { type: "doc", content };
+}
+
+function healParagraph(text: string): Record<string, unknown> {
+  return { type: "paragraph", content: [{ type: "text", text }] };
+}
+
+function healEmbed(): Record<string, unknown> {
+  return { type: "issue-embed-component", attrs: HEAL_ATTRS };
+}
+
+/** A ref whose document reports JSON and block sizes, for heal placement. */
+function editorWithDoc(json: unknown, blockSizes?: number[]): { ref: PageEditorRef; calls: string[] } {
+  const base = editor();
+  const ref: PageEditorRef = {
+    ...base.ref,
+    getJSON: () => json,
+    ...(blockSizes === undefined
+      ? {}
+      : {
+          view: {
+            state: {
+              doc: {
+                childCount: blockSizes.length,
+                child: (index: number) => ({ nodeSize: blockSizes[index] ?? 0 }),
+              },
+            },
+          } as unknown as PageEditorView,
+        }),
+  };
+  return { ref, calls: base.calls };
+}
+
+describe("healMissingPageEmbeds", () => {
+  it("heals nothing when the editor cannot report its document", () => {
+    const { ref, calls } = editor();
+    healMissingPageEmbeds(ref, healDoc(healParagraph("before embed"), healEmbed()));
+    expect(calls).toEqual([]);
+  });
+
+  it("heals nothing when the document already carries every embed", () => {
+    const snapshot = healDoc(healParagraph("before embed"), healEmbed());
+    const { ref, calls } = editorWithDoc(snapshot, [14, 2]);
+    healMissingPageEmbeds(ref, snapshot);
+    expect(calls).toEqual([]);
+  });
+
+  it("restores a missing embed after its snapshot block without taking focus", () => {
+    const { ref, calls } = editorWithDoc(healDoc(healParagraph("before embed")), [14]);
+    healMissingPageEmbeds(ref, healDoc(healParagraph("before embed"), healEmbed()));
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toContain("insertContentAt(14, ");
+    expect(calls[0]).toContain("<issue-embed-component");
+    expect(calls[0]).toContain('entity_identifier="ISS-1"');
+    expect(calls[1]).toBe("run");
+  });
+
+  it("inserts a leading embed at the document start", () => {
+    const { ref, calls } = editorWithDoc(healDoc(healParagraph("words")), [7]);
+    healMissingPageEmbeds(ref, healDoc(healEmbed(), healParagraph("words")));
+    expect(calls[0]).toContain("insertContentAt(0, ");
+    expect(calls[1]).toBe("run");
+  });
+
+  it("clamps a snapshot index past the body's end", () => {
+    const { ref, calls } = editorWithDoc(healDoc(healParagraph("before embed")), [14]);
+    healMissingPageEmbeds(
+      ref,
+      healDoc(healParagraph("before embed"), healParagraph("after embed"), healParagraph("more"), healEmbed())
+    );
+    expect(calls[0]).toContain("insertContentAt(14, ");
+    expect(calls[1]).toBe("run");
+  });
+
+  it("appends when the document geometry is unavailable", () => {
+    const { ref, calls } = editorWithDoc(healDoc(healParagraph("before embed")));
+    healMissingPageEmbeds(ref, healDoc(healParagraph("before embed"), healEmbed()));
+    expect(calls[0]).toContain("insertContentAt(end, ");
+    expect(calls[1]).toBe("run");
   });
 });
 

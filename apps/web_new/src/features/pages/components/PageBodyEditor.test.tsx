@@ -474,3 +474,109 @@ function fakeEvent(data: { html?: string; text?: string }): {
     },
   };
 }
+
+const HEAL_IDENTIFIERS = {
+  id: "emb-oracle-1",
+  entity_identifier: "N316-ISS-1",
+  project_identifier: "N316-PROJ",
+  workspace_identifier: "acme",
+  entity_name: "Embedded issue",
+};
+
+/** The PAGE-040 stored shape: prose plus an embed the markup lost. */
+function healSnapshot(): Record<string, unknown> {
+  return {
+    type: "doc",
+    content: [
+      { type: "paragraph", content: [{ type: "text", text: "before embed" }] },
+      { type: "issue-embed-component", attrs: HEAL_IDENTIFIERS },
+    ],
+  };
+}
+
+/** The community upgrade card a restored embed paints. */
+async function upgradeCard(editable: HTMLElement): Promise<HTMLElement> {
+  return vi.waitFor(
+    () => {
+      const card = editable.querySelector(
+        'issue-embed-component [data-testid="page-embed-upgrade"]'
+      ) as HTMLElement | null;
+      expect(card).not.toBeNull();
+      return card as HTMLElement;
+    },
+    { timeout: 10_000 }
+  );
+}
+
+describe(
+  "PageBodyEditor snapshot heal",
+  () => {
+    it("restores a JSON-only embed as the community upgrade card", async () => {
+      const mounted = mount({ initialHtml: "<p>before embed</p>", descriptionJson: healSnapshot() });
+      const editable = await surface();
+      const card = await upgradeCard(editable);
+      expect(card.textContent).toContain("Pro feature");
+      const link = card.querySelector("a");
+      expect(link?.getAttribute("href")).toBe("https://airepublic.com/pricing");
+      expect(editable).toHaveTextContent("before embed");
+      await vi.waitFor(() =>
+        expect(mounted.onChange.mock.calls.some((call) => String(call[0]).includes("<issue-embed-component"))).toBe(
+          true
+        )
+      );
+    });
+
+    it("heals once per mount, never duplicating the restored embed", async () => {
+      const mounted = mount({ initialHtml: "<p>before embed</p>", descriptionJson: healSnapshot() });
+      const editable = await surface();
+      await upgradeCard(editable);
+      // A fresh snapshot object re-runs the effect; the mount guard holds.
+      // The rerender flushes effects synchronously, so any duplicate would
+      // already be in the document.
+      mounted.rerender({ descriptionJson: healSnapshot() });
+      expect(editable.querySelectorAll("issue-embed-component")).toHaveLength(1);
+    });
+
+    it("leaves a body whose markup already carries the embed alone", async () => {
+      mount({
+        initialHtml:
+          '<p>before embed</p><issue-embed-component id="emb-oracle-1" entity_identifier="N316-ISS-1" project_identifier="N316-PROJ" workspace_identifier="acme" entity_name="Embedded issue"></issue-embed-component>',
+        descriptionJson: healSnapshot(),
+      });
+      const editable = await surface();
+      await upgradeCard(editable);
+      expect(editable.querySelectorAll("issue-embed-component")).toHaveLength(1);
+    });
+
+    it("waits for the server state before healing a shared document", async () => {
+      const doc = new Y.Doc();
+      const mounted = mount({
+        initialHtml: "<p>before embed</p>",
+        collab: { doc },
+        descriptionJson: healSnapshot(),
+      });
+      const editable = await surface();
+      expect(editable.querySelector("issue-embed-component")).toBeNull();
+      mounted.rerender({ seedDocument: true });
+      const card = await upgradeCard(editable);
+      expect(card.textContent).toContain("Pro feature");
+    });
+
+    it("heals after seeding an empty shared field", async () => {
+      const doc = new Y.Doc();
+      mount({
+        initialHtml: "<p>before embed</p>",
+        collab: { doc },
+        seedDocument: true,
+        descriptionJson: healSnapshot(),
+      });
+      const editable = await surface();
+      // The seed restores the prose first; the heal's embed survives it.
+      await vi.waitFor(() => expect(editable).toHaveTextContent("before embed"));
+      const card = await upgradeCard(editable);
+      expect(editable.querySelectorAll("issue-embed-component")).toHaveLength(1);
+      expect(card.textContent).toContain("Pro feature");
+    });
+  },
+  EDITOR_TEST_TIMEOUT
+);
