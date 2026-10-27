@@ -1779,6 +1779,21 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     );
   });
 
+  it("applies a due-date section prefill to the form and the create payload", async () => {
+    const user = userEvent.setup();
+    const h = setup({}, { initialValues: { stateId: STATE_ID, targetDate: "2026-12-01" } });
+    await waitFor(() => expect(screen.getByRole("heading", { name: CREATE_DIALOG_TITLE })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Due date" })).toHaveTextContent("Dec 1, 2026");
+    await user.type(titleField(), "Dated from the section");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({
+      name: "Dated from the section",
+      state_id: STATE_ID,
+      target_date: "2026-12-01",
+    });
+  });
+
   it("lists cycles, modules and estimate only when the project enables them", async () => {
     const setupWith = (overrides: Record<string, unknown>) =>
       setup({

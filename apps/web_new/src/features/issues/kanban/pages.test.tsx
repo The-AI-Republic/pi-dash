@@ -139,6 +139,15 @@ describe("readBoard", () => {
     expect(url.searchParams.get("sub_group_by")).toBe("labels__id");
   });
 
+  it("reads a target-date sub-group as the date axis", async () => {
+    const { client, calls } = recordingClient(subEnvelope);
+    await readBoard(client, "acme", input({ subGroupBy: "target_date" }));
+    const url = new URL(calls[0]!.url);
+    expect(url.searchParams.get("per_page")).toBe("10");
+    expect(url.searchParams.get("group_by")).toBe("state_id");
+    expect(url.searchParams.get("sub_group_by")).toBe("target_date");
+  });
+
   it("ignores a stored sub-group that repeats the group", async () => {
     const { client, calls } = recordingClient(groupedEnvelope);
     await readBoard(client, "acme", input({ subGroupBy: "state" }));
@@ -344,6 +353,33 @@ describe("envelope shaping", () => {
     const board = toBoard(subEnvelope as never, input({ subGroupBy: "labels" }));
     expect(board.subGrouped).toBe(true);
     expect(board.lanes.map((lane) => lane.title)).toEqual(["None"]);
+  });
+
+  it("shapes dated lanes with readable titles and their cards", () => {
+    const dated = {
+      ...envelope,
+      grouped_by: "state_id",
+      sub_grouped_by: "target_date",
+      total_count: 2,
+      count: 2,
+      total_results: 2,
+      results: {
+        [STATE]: {
+          results: {
+            "2026-12-01": { results: [row({ id: "a" })], total_results: 1 },
+            "2026-12-02": { results: [row({ id: "b" })], total_results: 1 },
+          },
+          total_results: 2,
+        },
+      },
+    };
+    const board = toBoard(dated as never, input({ subGroupBy: "target_date" }));
+    expect(board.subGrouped).toBe(true);
+    expect(board.lanes.map((lane) => [lane.key, lane.title])).toEqual([
+      ["2026-12-01", "Dec 1, 2026"],
+      ["2026-12-02", "Dec 2, 2026"],
+    ]);
+    expect(board.lanes.map((lane) => lane.cells[STATE]?.rows.map((entry) => entry.id))).toEqual([["a"], ["b"]]);
   });
 
   it("shapes a flat board into its single column", () => {

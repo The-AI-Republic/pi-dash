@@ -77,6 +77,7 @@ export interface CreateFormInitialValues {
   labelIds?: string[] | undefined;
   cycleId?: string | null | undefined;
   moduleIds?: string[] | undefined;
+  targetDate?: string | null | undefined;
 }
 
 /** A blank form with the caller's listing prefill applied. */
@@ -94,6 +95,7 @@ export function initialCreateForm(
   if (initial.labelIds !== undefined) form.labelIds = [...initial.labelIds];
   if (initial.cycleId !== undefined) form.cycleId = initial.cycleId;
   if (initial.moduleIds !== undefined) form.moduleIds = [...initial.moduleIds];
+  if (initial.targetDate !== undefined && initial.targetDate !== null) form.targetDate = initial.targetDate;
   return form;
 }
 

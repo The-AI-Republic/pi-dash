@@ -11,6 +11,7 @@
 import type { GroupedIssueListResponse, GroupedIssueRow, IssueGroupBucket, IssueListItem } from "@pidash/api-client";
 
 import { GROUP_NONE_LABEL } from "../display/matrix.js";
+import { formatDay } from "../dropdowns/calendar.js";
 
 /** One rendered section: key, title, rows, total and add metadata. */
 export interface IssueGroupSection {
@@ -36,6 +37,7 @@ const GROUP_KEY_BY_DIMENSION: Record<string, string> = {
   team_project: "project_id",
   created_by: "created_by",
   "state_detail.group": "state__group",
+  target_date: "target_date",
 };
 
 /** The server group key for a display dimension, or null for flat. */
@@ -111,6 +113,7 @@ function isNoneKey(key: string): boolean {
 export function defaultGroupTitle(dimension: string | null, key: string): string | undefined {
   if (dimension === "priority") return PRIORITY_TITLES[key];
   if (dimension === "state_detail.group") return STATE_GROUP_TITLES[key];
+  if (dimension === "target_date") return formatDay(key);
   return undefined;
 }
 
@@ -267,6 +270,8 @@ export function sectionPrefill(
       return { cycle_id: section.value };
     case "module":
       return { module_ids: [section.value] };
+    case "target_date":
+      return { target_date: section.value };
     default:
       return {};
   }

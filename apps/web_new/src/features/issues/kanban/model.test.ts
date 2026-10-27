@@ -583,6 +583,17 @@ describe("boardPrefill", () => {
     });
   });
 
+  it("carries a lane's target date into the create prefill", () => {
+    expect(boardPrefill("state", STATE, "target_date", "2026-12-01")).toEqual({
+      state_id: STATE,
+      target_date: "2026-12-01",
+    });
+    expect(boardCreateInitialValues(boardPrefill("state", STATE, "target_date", "2026-12-01"))).toEqual({
+      stateId: STATE,
+      targetDate: "2026-12-01",
+    });
+  });
+
   it("clears nothing for the empty buckets and keeps list fields", () => {
     expect(boardPrefill("labels", "None", "assignees", "None")).toEqual({});
     expect(boardPrefill("assignees", "member-1", null, null)).toEqual({ assignee_ids: ["member-1"] });

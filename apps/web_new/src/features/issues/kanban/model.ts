@@ -552,5 +552,6 @@ export function boardCreateInitialValues(prefill: Record<string, string | string
   if (Array.isArray(prefill["label_ids"])) initial.labelIds = [...prefill["label_ids"]];
   if (typeof prefill["cycle_id"] === "string") initial.cycleId = prefill["cycle_id"];
   if (Array.isArray(prefill["module_ids"])) initial.moduleIds = [...prefill["module_ids"]];
+  if (typeof prefill["target_date"] === "string") initial.targetDate = prefill["target_date"];
   return initial;
 }
