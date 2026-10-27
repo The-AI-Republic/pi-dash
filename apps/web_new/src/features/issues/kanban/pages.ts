@@ -193,12 +193,17 @@ export async function readLabelRecovery(
 }
 
 /**
- * The recovery read a board enables, or undefined when it enables none.
- * Only project-scoped boards recover: the grouped and sub-grouped
- * serializers that answer a labels axis are mounted there alone.
+ * The recovery read a board enables, or undefined when it enables none. A
+ * labels main axis recovers on every project-scoped board: its flat and
+ * grouped fallbacks exist per scope and `readBoard` routes them there
+ * (NEWFRONT-971). The labels sub-group stays project-only: the sub-grouped
+ * serializer that answers it is mounted on the project list alone.
  */
 export function labelRecoveryForBoard(input: BoardReadInput): BoardReadInput | undefined {
-  return input.entity.scope === "project" ? labelRecoveryInput(input) : undefined;
+  const recovery = labelRecoveryInput(input);
+  if (recovery === undefined || boardProjectId(input.entity) === null) return undefined;
+  if (input.entity.scope === "project") return recovery;
+  return input.groupBy === "labels" ? recovery : undefined;
 }
 
 /** Fallback read used to restore rows omitted by labels grouping. */

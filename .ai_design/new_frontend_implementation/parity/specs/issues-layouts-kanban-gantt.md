@@ -65,6 +65,11 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   count, and a labels read that dropped None entirely gains the column
   so the row has somewhere to render. A labels board with no ghosts is
   left exactly as the server answered it.
+- Intended behavior (NEWFRONT-971): the labels main-axis recovery runs on
+  cycle and module boards too — their grouped endpoints carry the same
+  label-axis filter, and the flat and grouped fallback reads exist per
+  scope. The labels sub-group stays project-only: the sub-grouped
+  serializer is mounted on the project list alone.
 
 ### Collapse and empty groups (ISS-030–ISS-032)
 
