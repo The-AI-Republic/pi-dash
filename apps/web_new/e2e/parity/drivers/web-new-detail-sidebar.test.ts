@@ -215,14 +215,12 @@ describe("DetailSidebarDriver", () => {
     expect(keys).toEqual(["Escape"]);
   });
 
-  it("lists runs-on options and closes the picker", async () => {
+  it("lists runs-on options with their reasons and closes the picker", async () => {
     const keys: string[] = [];
     const listbox = node({
       getByRole: (inner: string) => {
         if (inner !== "option") return absent();
-        return node({
-          locator: () => node({ allInnerTexts: async () => ["PAR_pod_1", "Cloud (not enabled)"] }),
-        });
+        return node({ allInnerTexts: async () => ["PAR_pod_1", "Cloud run  not enabled"] });
       },
     });
     const page = pageOf({
@@ -243,7 +241,51 @@ describe("DetailSidebarDriver", () => {
         keys.push(key);
       },
     });
-    await expect(new WebNewDriver(page).runsOnOptions()).resolves.toEqual(["PAR_pod_1", "Cloud (not enabled)"]);
+    await expect(new WebNewDriver(page).runsOnOptions()).resolves.toEqual(["PAR_pod_1", "Cloud run not enabled"]);
+    expect(keys).toEqual(["Escape"]);
+  });
+
+  it("dismisses the assignee picker after picking", async () => {
+    const keys: string[] = [];
+    const calls: string[] = [];
+    const page = pageOf({
+      role: (role: string, options?: unknown) => {
+        if (role === "group") {
+          const name = (options as { name?: string } | undefined)?.name;
+          if (name === "Assignees") {
+            return node({
+              getByRole: (inner: string) =>
+                inner === "button"
+                  ? node({
+                      click: async () => {
+                        calls.push("click:trigger");
+                      },
+                    })
+                  : absent(),
+            });
+          }
+          return absent();
+        }
+        if (role === "listbox") {
+          return node({
+            getByRole: (inner: string) =>
+              inner === "option"
+                ? node({
+                    click: async () => {
+                      calls.push("click:option");
+                    },
+                  })
+                : absent(),
+          });
+        }
+        return absent();
+      },
+      keyboardPress: async (key: string) => {
+        keys.push(key);
+      },
+    });
+    await new WebNewDriver(page).pickAssignee("You");
+    expect(calls).toEqual(["click:trigger", "click:option"]);
     expect(keys).toEqual(["Escape"]);
   });
 
@@ -386,6 +428,34 @@ describe("DetailSidebarDriver", () => {
     ]);
     expect(opened).toBe(true);
     expect(keys).toEqual([]);
+  });
+
+  it("retries the banner trigger when a re-render swallows the click", async () => {
+    let clicks = 0;
+    let waits = 0;
+    const page = pageOf({
+      role: () =>
+        node({
+          click: async () => {
+            clicks += 1;
+          },
+        }),
+      locator: (selector: string) => {
+        if (selector !== '[role="menuitem"]:visible') return absent();
+        return node({
+          first: () =>
+            node({
+              waitFor: async () => {
+                waits += 1;
+                if (waits === 1) throw new Error("swallowed");
+              },
+            }),
+          allTextContents: async () => ["Remove parent work item"],
+        });
+      },
+    });
+    await expect(new WebNewDriver(page).bannerMenuNames("PAR-2")).resolves.toEqual(["Remove parent work item"]);
+    expect(clicks).toBe(2);
   });
 
   it("removes the parent through the banner menu", async () => {

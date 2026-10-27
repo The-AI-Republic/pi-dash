@@ -3529,14 +3529,23 @@ export class WebNewDriver implements ParityDriver {
     return todo("composerVisibleNotices");
   }
   async pickAssignee(displayName: string): Promise<void> {
-    await this.pickSidebarOption("Assignees", displayName);
+    await this.propertyOpenPicker("Assignees");
+    await this.pickerPick(displayName);
+    // Multi-select stays open after a pick; dismiss it so later reads
+    // see the settled row.
+    await this.page.keyboard.press("Escape").catch(() => {});
   }
   async pickRunsOn(name: string): Promise<void> {
     await this.pickSidebarOption("Runs on", name);
   }
   async runsOnOptions(): Promise<string[]> {
     await this.propertyOpenPicker("Runs on");
-    const names = await this.pickerOptionTexts();
+    // Full option text, reasons included: the label-only read drops the
+    // trailing "unavailable / not enabled" notes the scenario pins.
+    const listbox = this.page.getByRole("listbox").last();
+    const names = (await listbox.getByRole("option").allInnerTexts())
+      .map((t) => t.trim().replace(/\s+/g, " "))
+      .filter((t) => t.length > 0);
     await this.page.keyboard.press("Escape").catch(() => {});
     return names;
   }
@@ -3591,14 +3600,26 @@ export class WebNewDriver implements ParityDriver {
     return ((await banner.innerText().catch(() => "")) ?? "").trim() || null;
   }
   async bannerMenuNames(_childSeq: string): Promise<string[]> {
-    await this.page.getByRole("button", { name: "Parent options" }).first().click({ timeout: WebNewDriver.WAIT_MS });
-    const items = this.page.locator('[role="menuitem"]:visible');
-    await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const items = await this.openBannerMenu();
     // Ends with the menu open; the scenario dismisses it.
     return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
   }
+  /** Open the banner ellipsis menu; ends with its items visible. Retries past re-render swallows. */
+  private async openBannerMenu(): Promise<Locator> {
+    const trigger = this.page.getByRole("button", { name: "Parent options" }).first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        return visibleItems;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] parent banner menu did not open.");
+      }
+    }
+  }
   async removeParent(): Promise<void> {
-    await this.page.getByRole("button", { name: "Parent options" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.openBannerMenu();
     await this.page
       .getByRole("menuitem", { name: /Remove parent work item/i })
       .first()
