@@ -125,13 +125,21 @@ confirm calls
 `POST .../projects/{pid}/members/leave/` and on success routes to
 the workspace project list. Failures notice and membership stays.
 
-Pinned divergence NEWFRONT-406: submitting a removal for an
-already-deleted membership ends the page outright with no navigation
-or notice, so failure-notice coverage for removals is carried by the
-role-change case instead. Companion pin NEWFRONT-398: even the
-removal-failure notice itself vanishes with the confirm dialog — it
-is only ever a flash on the way down. Slices must preserve both
-cases as pinned.
+Failed removal, observed (bugs NEWFRONT-406, NEWFRONT-398): in the
+old app, submitting a removal for a membership already deleted out
+of band makes the DELETE answer 404, which is followed by a burst of
+further 404s and then the page goes away with no navigation and no
+crash signal; even an ordinary refused removal only flashed its
+notice while the confirm dialog came down. Intended, and what the
+new surface does: a refused removal is one request whose refusal is
+shown, nothing is re-read or re-routed, the confirmation withdraws
+on settle (success or failure), the table keeps its rows, and the
+tab stays usable. The notice names the action and carries the
+server's message, and stays up after the dialog is gone. The oracle
+still pins removal failure through the role-change path and does
+not submit a doomed removal, because the old app cannot survive
+it; if that door is ever opened by an old-app fix, a
+removal-failure step can join PSET-027.
 
 ## Project defaults (PSET-026)
 
