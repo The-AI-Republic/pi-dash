@@ -12,12 +12,14 @@
 //! Both names are registered in `worker()` (the standalone rule): an
 //! unregistered name parks as failed, never forwarded to Python.
 
+pub mod provider_errors;
 pub mod run_turn;
 pub mod sweep;
 
+pub use provider_errors::{classify_provider_error, provider_detail, BYOK, GATEWAY};
 pub use run_turn::{
-    cancel_key, classify_error, context_eligible, register_turn_handler, DriveResult, SeamError,
-    SkippedServer, StreamItem, StreamSink, TurnContext, TurnSeam, TurnUsage, RUN_TURN_TASK,
+    cancel_key, context_eligible, register_turn_handler, DriveResult, SeamError, SkippedServer,
+    StreamItem, StreamSink, TurnContext, TurnSeam, TurnUsage, RUN_TURN_TASK,
 };
 pub use sweep::{drive_sweep, register_sweep_handler, SWEEP_TASK};
 
@@ -164,6 +166,23 @@ mod tests {
         }
         async fn cancel_turn(&self, _: &TurnContext) -> Result<(), SeamError> {
             Ok(())
+        }
+        async fn turn_error_for_user(
+            &self,
+            _: &TurnContext,
+            message: &str,
+            status_code: Option<u16>,
+            body_detail: &str,
+            model_name: &str,
+        ) -> Result<Option<(String, String)>, SeamError> {
+            use super::provider_errors::{classify_provider_error, BYOK};
+            Ok(classify_provider_error(
+                status_code,
+                message,
+                body_detail,
+                BYOK,
+                model_name,
+            ))
         }
     }
 

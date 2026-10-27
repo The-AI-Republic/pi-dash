@@ -51,6 +51,14 @@ black-box shape of the resolver blowing up entirely — and the turn must
 run without tools (``toolsets_unavailable`` skipped event, then
 ``turn_completed``). The Rust replay mirrors it in
 ``tasks_assistant/test_rust_replay.py``.
+
+Django main ``52df56b9e`` (PDASHOSS01-287, PR #1430) replaced the text
+table with a status-first classifier plus the ``turn_error_for_user``
+seam (PIDASHCONV-1566): the mid-stream live case moved to
+``test_turn_errors_drift.py`` (held out of CI until the next main-sync;
+its detail changed), the static tests below re-pin to the new
+``_classify_error`` / ``_turn_error`` shape, and the fixture vectors
+cover the new table.
 """
 
 from __future__ import annotations
@@ -81,7 +89,9 @@ PASSWORD = "contract-suite-password"
 
 # The origin/main commit the static tests below are pinned to (PIDASHCONV-1055
 # audit tip; CI provisions exactly this worktree for the worker-plane job).
-MAIN_PIN = "3267ceb9cda65c90e6cb66e4a3ef8aaa26ca3a4e"
+# PIDASHCONV-1566: re-pinned past 52df56b9e (PDASHOSS01-287), which replaced
+# the text table _classify_error matched with the status-first seam call.
+MAIN_PIN = "0a6fb8eca0f459802045f22e02af5748a6bdc768"
 
 
 def _django_main_root() -> Path:
@@ -109,13 +119,13 @@ def _classify_fn():
 
 def test_classify_error_typed_branch_first():
     """``_classify_error`` returns an ``AssistantError``'s own code/detail from
-    the cause chain before any text matching (``tasks.py:443-451``)."""
+    the cause chain before asking the provider seam (``tasks.py:447-461``)."""
     fn, source = _classify_fn()
 
-    # The cause-chain walk precedes the text fallback in source order.
+    # The cause-chain walk precedes the seam call in source order.
     walk_at = source.index("cause.__cause__")
-    text_at = source.index("text = str(exc).lower()")
-    assert walk_at < text_at, "typed walk must precede text matching"
+    seam_at = source.index("_turn_error(exc, user)")
+    assert walk_at < seam_at, "typed walk must precede the seam call"
 
     # Structural shape: while over the chain, isinstance gate, (code, detail).
     loops = [n for n in ast.walk(fn) if isinstance(n, ast.While)]
@@ -144,6 +154,52 @@ def test_classify_error_typed_branch_first():
                 assert attrs == ["code", "detail"], f"typed pair drifted: {attrs}"
                 return
     raise AssertionError("no isinstance(cause, AssistantError) gate in _classify_error")
+
+
+def test_turn_error_seam_shape():
+    """``_turn_error`` asks the ee hook and falls back to the default
+    classifier when the hook is missing or raises (``tasks.py:468-486``)."""
+    path = _django_main_root() / TASKS_MODULE
+    assert path.exists(), f"Django source not found: {path}"
+    source = path.read_text()
+    module = ast.parse(source)
+    fns = [n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_turn_error"]
+    assert fns, "_turn_error not found in tasks.py"
+    fn_source = ast.get_source_segment(source, fns[0]) or ""
+    assert 'getattr(model_provider, "turn_error_for_user", None)' in fn_source, (
+        "the hook must be looked up (an overlay without it still classifies)"
+    )
+    assert "hook(user, exc)" in fn_source, "the hook words the failure for the user"
+    tries = [n for n in ast.walk(fns[0]) if isinstance(n, ast.Try)]
+    assert tries, "a failing hook must be caught (it must not strand the turn)"
+    assert "return classify_provider_error(exc)" in fn_source, (
+        "missing/failing hook falls back to the default classifier"
+    )
+
+
+def test_new_error_codes_match_django():
+    """The #1430 codes exist on Django's taxonomy with these code strings."""
+    root = _django_main_root()
+    errors_mod = ast.parse((root / ERRORS_MODULE).read_text())
+    codes = {}
+    for node in errors_mod.body:
+        if isinstance(node, ast.ClassDef) and node.name in (
+            "ProviderRateLimited",
+            "ProviderSessionExpired",
+            "ModelUnavailable",
+        ):
+            for stmt in node.body:
+                if (
+                    isinstance(stmt, ast.Assign)
+                    and len(stmt.targets) == 1
+                    and getattr(stmt.targets[0], "id", "") == "code"
+                ):
+                    codes[node.name] = ast.literal_eval(stmt.value)
+    assert codes == {
+        "ProviderRateLimited": "provider_rate_limited",
+        "ProviderSessionExpired": "provider_session_expired",
+        "ModelUnavailable": "model_unavailable",
+    }, f"turn-error codes drifted: {codes}"
 
 
 def test_typed_fixture_vectors_match_django():
@@ -197,8 +253,14 @@ def test_typed_fixture_vectors_match_django():
     assert typed["vectors"]["unreachable_direct"] == ["provider_unreachable", "Stream ended early."]
 
 
-def test_text_vectors_unchanged():
-    """The #1126 port adds typed vectors; the six text vectors are untouched."""
+def test_classifier_vectors_match_new_table():
+    """The fixture pins the #1430 status-first table (PIDASHCONV-1566).
+
+    Each vector is a ``[code, detail]`` pair the Rust unit test executes
+    through ``classify_provider_error``; the live suites pin the same
+    bytes on both backends. This test guards the vector set itself
+    against silent add/remove/rename rot.
+    """
     fx_path = (
         taskspec.source_root().parent.parent
         / "rust-api"
@@ -208,13 +270,26 @@ def test_text_vectors_unchanged():
     )
     vectors = json.loads(fx_path.read_text())["tasks"]["classify_error"]["vectors"]
     assert set(vectors) == {
-        "payment_required",
-        "status_402",
+        "rate_429",
+        "credit_402_body",
+        "credit_402_bare",
+        "credit_429_quota",
         "auth_401",
-        "connection",
-        "model_not_found",
-        "other",
+        "auth_400_text",
+        "model_400_named",
+        "model_noname",
+        "unreachable_500",
+        "unreachable_text",
+        "gateway_401",
+        "gateway_402_body",
+        "gateway_model",
     }
+    for name, pair in vectors.items():
+        assert (
+            isinstance(pair, list)
+            and len(pair) == 2
+            and all(isinstance(s, str) and s for s in pair)
+        ), f"vector {name} must be a [code, detail] pair of non-empty strings"
 
 
 # --------------------------------------------------------------------------- #
@@ -309,28 +384,20 @@ def _configure_llm(client, base_url):
 
 
 # --------------------------------------------------------------------------- #
-# Provider stub: streams one chunk, then sends an SSE error event mid-stream
+# Provider stub: streams one chunk, then ends the stream cleanly
 # --------------------------------------------------------------------------- #
-
-# Real provider error code, mid-stream: the OpenAI client raises APIError with
-# this message, which carries no typed wrapper, so _classify_error must route
-# it by text (model_invalid) — the untyped half of Django's stream_then_fail.
-MIDSTREAM_ERROR_MESSAGE = "model_not_found: the model 'oracle-stub' does not exist"
 
 
 class _StreamThenErrorStub:
     """Minimal OpenAI-compatible stub for the BYOK openai_compatible branch.
 
     Serves ``POST /v1/chat/completions``: on a streaming request it sends one
-    SSE text chunk, flushes, then sends an SSE error event and closes cleanly.
-    The client raises the error out of the stream iteration, so the run fails
-    with an untyped provider error after text has streamed — the black-box
-    shape of Django's ``stream_then_fail`` case. With
-    ``error_message=None`` the stub ends the stream cleanly (``[DONE]``)
-    instead, for tests whose failure comes from elsewhere (a seam fault).
+    SSE text chunk, flushes, then ends the stream cleanly (``[DONE]``) — for
+    tests whose failure comes from elsewhere (a seam fault). The mid-stream
+    error-event case moved to ``test_turn_errors_drift.py`` (PIDASHCONV-1566).
     """
 
-    def __init__(self, chunk="Hello", error_message=MIDSTREAM_ERROR_MESSAGE):
+    def __init__(self, chunk="Hello", error_message=None):
         self.chunk = chunk
         self.error_message = error_message
         self.requests = []
@@ -442,77 +509,6 @@ class _StreamThenErrorStub:
 
 def test_worker_registration(broker_url):
     broker_probe.wait_for_registration({RUN_TURN})
-
-
-def test_untyped_midstream_failure_keeps_text_classification(db_conn, broker_url):
-    """One chunk streams, then an SSE error event arrives: the turn fails with
-    the text classification (``_classify_error`` fallback, unchanged by #1126)
-    and the exact failed-turn shape — partial row failed, error row carries
-    the detail, ``turn_failed`` payload, ``active_turn`` cleared."""
-    stub = _StreamThenErrorStub()
-    base = stub.start()
-    try:
-        user, workspace, client = _seed_member(db_conn, "midstream")
-        _configure_llm(client, base)
-        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
-
-        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url)
-        row = wait_for(
-            lambda: _turn_row(db_conn, turn_id)
-            if _turn_row(db_conn, turn_id)["status"] == "failed"
-            else None,
-            what="midstream-error turn failed",
-        )
-        # `_fail_turn` commits the turn row first, then writes the error row,
-        # the `turn_failed` event and the delta prune (`tasks.py:181-201`),
-        # so the failed status alone does not mean those exist yet. Wait for
-        # the last of them before reading any (else the error-row read races).
-        def _failure_writes_complete():
-            kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
-            if "turn_failed" in kinds and "assistant_delta" not in kinds:
-                return kinds
-            return None
-
-        kinds = wait_for(_failure_writes_complete, what="midstream-error failure writes")
-        assert row["error_code"] == "model_invalid"
-        assert row["error_detail"] == "The configured model name was not accepted by the provider."
-        assert row["completed_at"] is not None
-        assert row["started_at"] is not None
-
-        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
-
-        # The text that had already streamed is closed out as failed, and the
-        # user-visible error row carries the actionable detail.
-        with db_conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT display_content, status FROM assistant_message "
-                "WHERE turn_id = %s AND kind = 'assistant' ORDER BY seq",
-                (turn_id,),
-            )
-            streamed = cur.fetchall()
-        assert streamed, "the streamed chunk wrote an assistant row"
-        assert "".join(r["display_content"] for r in streamed) == "Hello"
-        assert all(r["status"] == "failed" for r in streamed)
-
-        with db_conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT display_content, status FROM assistant_message "
-                "WHERE turn_id = %s AND kind = 'error'",
-                (turn_id,),
-            )
-            err = cur.fetchone()
-        assert err is not None and err["status"] == "failed"
-        assert err["display_content"] == row["error_detail"]
-
-        failed = next(e for e in _turn_events(db_conn, turn_id) if e["kind"] == "turn_failed")
-        assert failed["payload"] == {
-            "turn_id": turn_id,
-            "error_code": "model_invalid",
-            "detail": "The configured model name was not accepted by the provider.",
-        }
-        assert "assistant_delta" not in kinds, "deltas are pruned on failure"
-    finally:
-        stub.stop()
 
 
 # --------------------------------------------------------------------------- #

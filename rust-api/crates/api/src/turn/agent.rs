@@ -256,12 +256,18 @@ pub enum TurnLoopError {
     /// `_agent_graph.py:146-160`). Maps to `response_truncated`,
     /// never text-classified (`_hit_output_limit`, `tasks.py:489-499`).
     OutputTruncated,
-    /// Any other failure, classified from its message (the typed-first
-    /// walk has no counterpart here: pydantic-ai raises untyped
-    /// errors, and an ee provider's typed error crosses the seam).
+    /// Any other failure, worded by the
+    /// [`TurnSeam::turn_error_for_user`][pidash_jobs::assistant::run_turn::TurnSeam::turn_error_for_user]
+    /// hook (the typed-first walk has no counterpart here: pydantic-ai
+    /// raises untyped errors, and an ee provider's typed error crosses
+    /// the seam). `body_detail` is the provider's own one-line
+    /// explanation (`""` when it gave none); `model_name` the model the
+    /// failing call used (`""` when unknown).
     Provider {
         message: String,
         status_code: Option<u16>,
+        body_detail: String,
+        model_name: String,
     },
 }
 
@@ -273,9 +279,13 @@ impl From<TurnLoopError> for AgentError {
             TurnLoopError::Provider {
                 message,
                 status_code,
+                body_detail,
+                model_name,
             } => AgentError::Provider {
                 message,
                 status_code,
+                body_detail,
+                model_name,
             },
         }
     }
@@ -328,6 +338,8 @@ impl RunState {
             return Err(TurnLoopError::Provider {
                 message: format!("Exceeded maximum output retries ({MAX_RETRIES})"),
                 status_code: None,
+                body_detail: String::new(),
+                model_name: String::new(),
             });
         }
         Ok(())
@@ -364,6 +376,8 @@ impl RunState {
             return Err(TurnLoopError::Provider {
                 message: format!("Tool '{name}' exceeded max retries count of {MAX_RETRIES}"),
                 status_code: None,
+                body_detail: String::new(),
+                model_name: String::new(),
             });
         }
         Ok(())
@@ -513,6 +527,8 @@ where
                     return Err(TurnLoopError::Provider {
                         message: content_filter_message(&state),
                         status_code: None,
+                        body_detail: String::new(),
+                        model_name: String::new(),
                     });
                 }
                 _ => {}
@@ -668,6 +684,8 @@ async fn process_tool_calls<T: Toolset>(
                         return Err(TurnLoopError::Provider {
                             message,
                             status_code: None,
+                            body_detail: String::new(),
+                            model_name: String::new(),
                         });
                     }
                 };
@@ -690,6 +708,8 @@ async fn process_tool_calls<T: Toolset>(
                         return Err(TurnLoopError::Provider {
                             message,
                             status_code: None,
+                            body_detail: String::new(),
+                            model_name: String::new(),
                         });
                     }
                 }
@@ -821,11 +841,15 @@ fn retry_details_part(
     let list = details.as_array().ok_or_else(|| TurnLoopError::Provider {
         message: format!("tool '{name}' returned non-array validation details"),
         status_code: None,
+        body_detail: String::new(),
+        model_name: String::new(),
     })?;
     let parsed: Vec<RetryErrorDetail> =
         parse_retry_details(list).map_err(|error| TurnLoopError::Provider {
             message: format!("tool '{name}' returned unparsable validation details: {error}"),
             status_code: None,
+            body_detail: String::new(),
+            model_name: String::new(),
         })?;
     Ok(TurnRequestPart::Retry {
         tool_name: Some(name.to_owned()),
@@ -836,18 +860,27 @@ fn retry_details_part(
 }
 
 /// `ModelHTTPError` / `APITimeoutError` / `APIConnectionError` from the
-/// streaming transport, classified the same way the drive's text
-/// fallback does.
+/// streaming transport, worded downstream by the `turn_error_for_user`
+/// hook. Only `Http` carries a status, a structured body and (via the
+/// lane) the model the call used — timeouts, connections, mid-stream
+/// errors, and malformed payloads classify on text alone.
 fn provider_error(lane: &Lane, error: &ProviderError) -> TurnLoopError {
-    let status_code = match error {
-        ProviderError::Http { status, .. } => Some(*status),
+    let (status_code, body_detail) = match error {
+        ProviderError::Http {
+            status, body_json, ..
+        } => (
+            Some(*status),
+            pidash_jobs::assistant::provider_detail(body_json.as_ref()),
+        ),
         ProviderError::Timeout | ProviderError::Connection | ProviderError::InvalidResponse(_) => {
-            None
+            (None, String::new())
         }
     };
     TurnLoopError::Provider {
         message: error.message(lane),
         status_code,
+        body_detail,
+        model_name: lane.model_name().to_owned(),
     }
 }
 
@@ -953,7 +986,8 @@ mod tests {
         reply_for, request_body_of, request_bytes_of, stub_server, wire_tools_from_body,
     };
     use super::*;
-    use pidash_jobs::assistant::run_turn::{classify_error, CODE_ITERATION_LIMIT};
+    use pidash_jobs::assistant::run_turn::CODE_ITERATION_LIMIT;
+    use pidash_jobs::assistant::{classify_provider_error, BYOK};
     use pidash_jobs::oss_worker::model_runtime::schemas::Golden;
     use std::collections::BTreeMap;
 
@@ -1383,8 +1417,8 @@ mod tests {
         }
     }
 
-    /// The provider-error captures: the loop's message/status classify
-    /// into the stored code.
+    /// The provider-error captures: the loop's failure words into the
+    /// stored code/detail through the default classifier.
     async fn provider_failure_capture(name: &str) {
         let fixture = load_fixture(name);
         let replies = vec![reply_for(&fixture["provider_exchanges"][0])];
@@ -1396,11 +1430,15 @@ mod tests {
         let TurnLoopError::Provider {
             message,
             status_code,
+            body_detail,
+            model_name,
         } = error
         else {
             panic!("{name}: expected a provider error");
         };
-        let (code, detail) = classify_error(&message, status_code);
+        let (code, detail) =
+            classify_provider_error(status_code, &message, &body_detail, BYOK, &model_name)
+                .unwrap_or_else(|| panic!("{name}: classifies"));
         assert_eq!(code, fixture["turn"]["error_code"], "{name}: code");
         assert_eq!(detail, fixture["turn"]["error_detail"], "{name}: detail");
     }

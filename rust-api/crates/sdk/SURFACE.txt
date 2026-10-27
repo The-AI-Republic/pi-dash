@@ -111,7 +111,7 @@ pidash_sdk::assistant::body_get
 pidash_sdk::assistant::build_toolset_spec
 pidash_sdk::assistant::cancel_key
 pidash_sdk::assistant::cancel_turn_update
-pidash_sdk::assistant::classify_error
+pidash_sdk::assistant::classify_provider_error
 pidash_sdk::assistant::classify_probe
 pidash_sdk::assistant::clean_title
 pidash_sdk::assistant::clear_active_turn_update

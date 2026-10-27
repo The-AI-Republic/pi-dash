@@ -659,6 +659,17 @@ mod tests {
         async fn cancel_turn(&self, _ctx: &TurnContext) -> Result<(), SeamError> {
             unreachable!("fake turn seam is never driven")
         }
+
+        async fn turn_error_for_user(
+            &self,
+            _ctx: &TurnContext,
+            _message: &str,
+            _status_code: Option<u16>,
+            _body_detail: &str,
+            _model_name: &str,
+        ) -> Result<Option<(String, String)>, SeamError> {
+            unreachable!("fake turn seam is never driven")
+        }
     }
 
     /// Assistant-seam double with a marker title.

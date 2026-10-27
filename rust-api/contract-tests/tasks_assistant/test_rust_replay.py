@@ -1503,3 +1503,281 @@ def test_create_issue_bounce_reports_backlog_tool_result(db_conn):
     assert len(comments) == 1, "the bounce posts exactly one comment"
     assert comments[0]["comment_stripped"] == BOUNCE_STRIPPED
     assert _run_rows(db_conn, issue["id"]) == []
+
+# --------------------------------------------------------------------------- #
+# Status-first turn-error classification (PIDASHCONV-1566 mirrors)
+# --------------------------------------------------------------------------- #
+
+#: Mirrors of ``assistant/test_turn_errors_drift.py`` (Django main 52df56b9e,
+#: PDASHOSS01-287) against the Rust worker: the same stub refusals must
+#: classify to the same ``(error_code, error_detail)`` pairs. Unlike the
+#: Django half, these run in CI (the tasks-assistant-rust job builds the
+#: worker from the branch under test), so no holding pattern applies.
+
+_DRIFT_RATE_LIMIT_DETAIL = "Too many requests to the model provider. Wait a moment and try again."
+_DRIFT_CREDIT_BODY = "Insufficient balance, top up at https://billing.example/topup"
+_DRIFT_CREDIT_DETAIL = (
+    "The provider rejected the request for lack of credit. The provider said: " + _DRIFT_CREDIT_BODY
+)
+_DRIFT_MODEL_DETAIL = (
+    f'The model "{MODEL_NAME}" was not accepted by the provider. Check the model name in Settings.'
+)
+_DRIFT_UNREACHABLE_DETAIL = "Could not reach the configured provider endpoint."
+_DRIFT_INTERNAL_DETAIL = "The assistant hit an unexpected error."
+
+
+class _FixedStatusStub:
+    """Answers every POST with a fixed ``(status, body)`` error."""
+
+    def __init__(self, status: int, body: dict):
+        self.status = status
+        self.body = body
+        self.requests = []
+        self._server = None
+        self._thread = None
+
+    def start(self):
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                stub.requests.append({"path": self.path, "bytes": len(raw)})
+                content = json.dumps(stub.body).encode()
+                self.send_response(stub.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return f"http://127.0.0.1:{port}/v1"
+
+    def stop(self):
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+
+
+class _StreamThenErrorStub:
+    """Streams one chunk, then sends an SSE error event mid-stream."""
+
+    def __init__(self, chunk="Hello", error_message="boom"):
+        self.chunk = chunk
+        self.error_message = error_message
+        self._server = None
+        self._thread = None
+
+    def start(self):
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length) if length else b""
+                try:
+                    payload = json.loads(body or b"{}")
+                except ValueError:
+                    payload = {}
+                if self.path.endswith("/chat/completions") and payload.get("stream"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    self.wfile.write(
+                        (
+                            'data: {"id":"stub","object":"chat.completion.chunk",'
+                            '"created":0,"model":"oracle-stub","choices":[{"index":0,'
+                            '"delta":{"content":'
+                            + json.dumps(stub.chunk)
+                            + '},"finish_reason":null}]}\n\n'
+                        ).encode()
+                    )
+                    self.wfile.flush()
+                    time.sleep(0.2)
+                    self.wfile.write(
+                        (
+                            "data: "
+                            + json.dumps({"error": {"message": stub.error_message}})
+                            + "\n\n"
+                        ).encode()
+                    )
+                    self.wfile.flush()
+                else:
+                    content = json.dumps(
+                        {
+                            "id": "stub",
+                            "object": "chat.completion",
+                            "created": 0,
+                            "model": "oracle-stub",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "stub"},
+                                    "finish_reason": "stop",
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2,
+                            },
+                        }
+                    ).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return f"http://127.0.0.1:{port}/v1"
+
+    def stop(self):
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+
+
+def _run_drift_case(db_conn, tag: str, stub):
+    """Seed, point the BYOK row at the stub, enqueue, wait for failed."""
+    base = stub.start()
+    try:
+        user, workspace = _seed_member(db_conn, tag)
+        _configure_llm(db_conn, user["id"], base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        _run_and_settle(db_conn, turn_id)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what=f"{tag} turn failed",
+        )
+
+        def _failure_writes_complete():
+            kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
+            if "turn_failed" in kinds and "assistant_delta" not in kinds:
+                return kinds
+            return None
+
+        kinds = wait_for(_failure_writes_complete, what=f"{tag} failure writes")
+        return thread_id, turn_id, row, kinds
+    finally:
+        stub.stop()
+
+
+def _assert_drift_failed_shape(db_conn, thread_id, turn_id, row, kinds, code, detail):
+    assert row["error_code"] == code
+    assert row["error_detail"] == detail
+    assert row["completed_at"] is not None
+    assert row["started_at"] is not None
+
+    assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT display_content, status FROM assistant_message "
+            "WHERE turn_id = %s AND kind = 'error'",
+            (turn_id,),
+        )
+        err = cur.fetchone()
+    assert err is not None and err["status"] == "failed"
+    assert err["display_content"] == detail
+
+    failed = next(e for e in _turn_events(db_conn, turn_id) if e["kind"] == "turn_failed")
+    assert failed["payload"] == {
+        "turn_id": turn_id,
+        "error_code": code,
+        "detail": detail,
+    }
+    assert "assistant_delta" not in kinds, "deltas are pruned on failure"
+
+
+def test_drift_429_is_rate_limited(db_conn):
+    stub = _FixedStatusStub(
+        429, {"error": {"message": "Rate limit reached for requests", "type": "requests"}}
+    )
+    thread_id, turn_id, row, kinds = _run_drift_case(db_conn, "drift429", stub)
+    assert len(stub.requests) == 3, "initial attempt plus two stainless retries"
+    _assert_drift_failed_shape(
+        db_conn, thread_id, turn_id, row, kinds, "provider_rate_limited", _DRIFT_RATE_LIMIT_DETAIL
+    )
+
+
+def test_drift_402_keeps_the_providers_text(db_conn):
+    stub = _FixedStatusStub(402, {"error": {"message": _DRIFT_CREDIT_BODY}})
+    thread_id, turn_id, row, kinds = _run_drift_case(db_conn, "drift402", stub)
+    assert len(stub.requests) == 1, "no retry on 402"
+    _assert_drift_failed_shape(
+        db_conn, thread_id, turn_id, row, kinds, "provider_out_of_credit", _DRIFT_CREDIT_DETAIL
+    )
+
+
+def test_drift_400_unsupported_model_names_the_configured_model(db_conn):
+    stub = _FixedStatusStub(400, {"error": {"message": "unsupported model: foo"}})
+    thread_id, turn_id, row, kinds = _run_drift_case(db_conn, "drift400", stub)
+    _assert_drift_failed_shape(
+        db_conn, thread_id, turn_id, row, kinds, "model_invalid", _DRIFT_MODEL_DETAIL
+    )
+
+
+def test_drift_500_mentioning_authentication_is_internal(db_conn):
+    stub = _FixedStatusStub(500, {"error": {"message": "authentication service exploded"}})
+    thread_id, turn_id, row, kinds = _run_drift_case(db_conn, "drift500a", stub)
+    assert len(stub.requests) == 3, "initial attempt plus two stainless retries"
+    _assert_drift_failed_shape(
+        db_conn, thread_id, turn_id, row, kinds, "internal", _DRIFT_INTERNAL_DETAIL
+    )
+
+
+def test_drift_500_mentioning_connection_is_unreachable(db_conn):
+    stub = _FixedStatusStub(500, {"error": {"message": "connection reset by upstream"}})
+    thread_id, turn_id, row, kinds = _run_drift_case(db_conn, "drift500c", stub)
+    _assert_drift_failed_shape(
+        db_conn,
+        thread_id,
+        turn_id,
+        row,
+        kinds,
+        "provider_unreachable",
+        _DRIFT_UNREACHABLE_DETAIL,
+    )
+
+
+def test_drift_statusless_401_in_text_is_internal(db_conn):
+    stub = _StreamThenErrorStub(error_message="request req_401x7 failed: boom")
+    thread_id, turn_id, row, kinds = _run_drift_case(db_conn, "drift401t", stub)
+    _assert_drift_failed_shape(
+        db_conn, thread_id, turn_id, row, kinds, "internal", _DRIFT_INTERNAL_DETAIL
+    )
+
+
+def test_drift_untyped_midstream_failure_names_the_configured_model(db_conn):
+    stub = _StreamThenErrorStub(
+        error_message="model_not_found: the model 'oracle-stub' does not exist"
+    )
+    thread_id, turn_id, row, kinds = _run_drift_case(db_conn, "driftmid", stub)
+    _assert_drift_failed_shape(
+        db_conn, thread_id, turn_id, row, kinds, "model_invalid", _DRIFT_MODEL_DETAIL
+    )

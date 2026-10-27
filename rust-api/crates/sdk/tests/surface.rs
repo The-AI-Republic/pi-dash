@@ -169,7 +169,7 @@ surface_snapshot! {
     assistant::build_toolset_spec,
     assistant::cancel_key,
     assistant::cancel_turn_update,
-    assistant::classify_error,
+    assistant::classify_provider_error,
     assistant::classify_probe,
     assistant::clean_title,
     assistant::clear_active_turn_update,

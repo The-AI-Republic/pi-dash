@@ -239,13 +239,21 @@
       ]
     },
     "classify_error": {
-      "source": "apps/api/pi_dash/assistant/tasks.py:442-480 (origin/main, past #1126)",
+      "source": "apps/api/pi_dash/assistant/runtime/provider_errors.py:117-171 (origin/main, past #1430)",
       "vectors": {
-        "payment_required": [
+        "rate_429": [
+          "provider_rate_limited",
+          "Too many requests to the model provider. Wait a moment and try again."
+        ],
+        "credit_402_body": [
+          "provider_out_of_credit",
+          "The provider rejected the request for lack of credit. The provider said: Insufficient credits. Top up at https://example.test/billing."
+        ],
+        "credit_402_bare": [
           "provider_out_of_credit",
           "The provider rejected the request for lack of credit."
         ],
-        "status_402": [
+        "credit_429_quota": [
           "provider_out_of_credit",
           "The provider rejected the request for lack of credit."
         ],
@@ -253,20 +261,40 @@
           "provider_auth_failed",
           "Your API key was rejected by the provider."
         ],
-        "connection": [
+        "auth_400_text": [
+          "provider_auth_failed",
+          "Your API key was rejected by the provider."
+        ],
+        "model_400_named": [
+          "model_invalid",
+          "The model \"oracle-stub\" was not accepted by the provider. Check the model name in Settings."
+        ],
+        "model_noname": [
+          "model_invalid",
+          "The selected model was not accepted by the provider. Check the model name in Settings."
+        ],
+        "unreachable_500": [
           "provider_unreachable",
           "Could not reach the configured provider endpoint."
         ],
-        "model_not_found": [
-          "model_invalid",
-          "The configured model name was not accepted by the provider."
+        "unreachable_text": [
+          "provider_unreachable",
+          "Could not reach the configured provider endpoint."
         ],
-        "other": [
-          "internal",
-          "The assistant hit an unexpected error."
+        "gateway_401": [
+          "provider_session_expired",
+          "Your session with the model provider has expired. Sign out and sign back in to continue."
+        ],
+        "gateway_402_body": [
+          "provider_out_of_credit",
+          "You are out of credit for the model provider. Add credit to keep going. The provider said: Insufficient credits. Top up at https://example.test/billing."
+        ],
+        "gateway_model": [
+          "model_unavailable",
+          "The model \"acme/gone-1\" is not available right now. Pick another model in Settings."
         ]
       },
-      "rule": "402 read from status_code attr (never substring); credit phrases -> provider_out_of_credit",
+      "rule": "status read from the failure (never substring-matched); credit first (402, or 429 with quota codes); auth 401 or (None/400/403 with markers, never 5xx); 429 or status-less rate text -> rate_limited; (400/404/None with model markers) naming the model; (None/408/5xx with unreachable markers); unrecognised -> None (internal)",
       "typed_vectors": {
         "source": "apps/api/pi_dash/tests/contract/assistant/test_turn_errors.py (bb3d99c6)",
         "vectors": {
@@ -279,7 +307,7 @@
             "Stream ended early."
           ]
         },
-        "rule": "a typed AssistantError anywhere in __cause__ returns its own (code, detail) before text matching (tasks.py:443-451); the Rust seam boundary emits AgentError::Typed for it"
+        "rule": "a typed AssistantError anywhere in __cause__ returns its own (code, detail) before the seam call (tasks.py:453-457); the Rust seam boundary emits AgentError::Typed for it"
       }
     },
     "cancel_key": {

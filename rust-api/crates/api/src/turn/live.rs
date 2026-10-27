@@ -1868,6 +1868,40 @@ impl TurnSeam for LiveTurnSeam {
             .map_err(db_error)?;
         Ok(())
     }
+
+    /// `turn_error_for_user` (`ee/assistant/model_provider.py:72-87`), CE:
+    /// every connection is BYOK. The model names the failure's own when
+    /// it carries one, else the prepared lane's — the lane was built
+    /// from the user's configured model, exactly what the hook's
+    /// `cfg.model_name` fallback reads.
+    async fn turn_error_for_user(
+        &self,
+        ctx: &TurnContext,
+        message: &str,
+        status_code: Option<u16>,
+        body_detail: &str,
+        model_name: &str,
+    ) -> Result<Option<(String, String)>, SeamError> {
+        use pidash_jobs::assistant::{classify_provider_error, BYOK};
+        let model = if model_name.is_empty() {
+            let runs = self
+                .runs
+                .lock()
+                .map_err(|error| SeamError(error.to_string()))?;
+            runs.get(&ctx.turn_id)
+                .map(|prepared| prepared.lane.model_name().to_owned())
+                .unwrap_or_default()
+        } else {
+            model_name.to_owned()
+        };
+        Ok(classify_provider_error(
+            status_code,
+            message,
+            body_detail,
+            BYOK,
+            &model,
+        ))
+    }
 }
 
 fn internal_agent_error(error: impl std::fmt::Display) -> AgentError {

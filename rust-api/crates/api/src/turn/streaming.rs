@@ -23,9 +23,10 @@
 //!   through the lane parser.
 //! * Error mapping ([`classify_provider_error`]): the D-11
 //!   [`ProviderError`][provider::ProviderError] message plus its HTTP
-//!   status into [`classify_error`][pidash_jobs::assistant::run_turn::classify_error]
-//!   (`tasks.py` `_classify_error`), so 401/402/timeout failures record
-//!   the same codes Django records.
+//!   status, structured-body one-liner and lane model name into
+//!   [`classify_provider_error`][pidash_jobs::assistant::classify_provider_error]
+//!   (`tasks.py` `_classify_error`), so 401/402/429/timeout failures
+//!   record the same codes Django records.
 //! * Usage accounting ([`add_request_usage`] plus the per-lane
 //!   extractors): OpenAI per-chunk accumulation, Anthropic
 //!   start/replace-with-merged-details.
@@ -57,7 +58,6 @@
 //!   it (some OpenAI-lane captures do); the inference itself belongs
 //!   to the schema layer (PIDASHCONV-1113).
 
-use pidash_jobs::assistant::run_turn::classify_error;
 use pidash_jobs::oss_worker::model_runtime::provider::{
     generate_tool_call_id, py_repr, Finish, Lane, ProviderError, ToolArgs, WireTool,
     ANTHROPIC_VERSION, USER_AGENT,
@@ -1724,23 +1724,34 @@ async fn post_stream(
 // Error mapping
 // ---------------------------------------------------------------------------
 
-/// Classify a streaming provider failure into the `(code, detail)`
-/// pair Django records: the [`ProviderError`] message (the
-/// `ModelHTTPError` / `ModelAPIError` text) plus the HTTP status
-/// when the failure carries one, through
-/// [`classify_error`][pidash_jobs::assistant::run_turn::classify_error]
-/// (`tasks.py` `_classify_error:442-480`). Only `Http` carries a
-/// `status_code` attribute — timeouts, connections, mid-stream
-/// errors, and malformed payloads classify on text alone.
-#[allow(dead_code)] // the loop hands the raw message/status to `drive_turn`'s classifier; pinned here by tests
-pub fn classify_provider_error(lane: &Lane, error: &ProviderError) -> (&'static str, &'static str) {
-    let status = match error {
-        ProviderError::Http { status, .. } => Some(*status),
+/// Word a streaming provider failure the way the drive's
+/// `turn_error_for_user` hook does: the [`ProviderError`] message (the
+/// `ModelHTTPError` / `ModelAPIError` text), the HTTP status and the
+/// structured-body one-liner when the failure carries them, and the
+/// lane's model name, through
+/// [`classify_provider_error`][pidash_jobs::assistant::classify_provider_error]
+/// with the BYOK connection (`tasks.py` `_classify_error:447-486`).
+/// Only `Http` carries a `status_code` attribute and a body —
+/// timeouts, connections, mid-stream errors, and malformed payloads
+/// classify on text alone. `None` is the generic `internal` bucket.
+#[allow(dead_code)] // the loop hands the `TurnLoopError` to the drive's seam hook; pinned here by tests
+pub fn classify_provider_error(lane: &Lane, error: &ProviderError) -> Option<(String, String)> {
+    use pidash_jobs::assistant::{classify_provider_error, provider_detail, BYOK};
+    let (status, body_detail) = match error {
+        ProviderError::Http {
+            status, body_json, ..
+        } => (Some(*status), provider_detail(body_json.as_ref())),
         ProviderError::Timeout | ProviderError::Connection | ProviderError::InvalidResponse(_) => {
-            None
+            (None, String::new())
         }
     };
-    classify_error(&error.message(lane), status)
+    classify_provider_error(
+        status,
+        &error.message(lane),
+        &body_detail,
+        BYOK,
+        lane.model_name(),
+    )
 }
 
 #[cfg(test)]
@@ -2955,8 +2966,8 @@ mod tests {
             );
             assert_eq!(
                 classify_provider_error(&openai, &error),
-                ("internal", "The assistant hit an unexpected error."),
-                "{name} classifies"
+                None,
+                "{name} classifies internal"
             );
         }
         let anthropic = Lane::Anthropic {
@@ -2976,8 +2987,8 @@ mod tests {
             );
             assert_eq!(
                 classify_provider_error(&anthropic, &error),
-                ("internal", "The assistant hit an unexpected error."),
-                "{name} classifies"
+                None,
+                "{name} classifies internal"
             );
         }
     }
@@ -3047,10 +3058,7 @@ mod tests {
             matches!(&error, ProviderError::InvalidResponse(message) if message == "boom"),
             "openai error message: {error:?}"
         );
-        assert_eq!(
-            classify_provider_error(&openai, &error),
-            ("internal", "The assistant hit an unexpected error.")
-        );
+        assert_eq!(classify_provider_error(&openai, &error), None);
         let mut stream = OpenAIStream::new(&table, "http://stub/v1/", "m");
         let error = stream.feed(b"data: {\"error\": {}}\n\n").unwrap_err();
         assert!(
@@ -3073,10 +3081,7 @@ mod tests {
             message, "{'type': 'error', 'error': {'type': 'overloaded', 'message': 'busy'}}",
             "python str of the parsed body"
         );
-        assert_eq!(
-            classify_provider_error(&anthropic, &error),
-            ("internal", "The assistant hit an unexpected error.")
-        );
+        assert_eq!(classify_provider_error(&anthropic, &error), None);
         let mut stream = AnthropicStream::new(&table, "https://api.anthropic.com/", "c");
         let error = stream
             .feed(b"event: error\ndata: not json\n\n")
@@ -3133,8 +3138,10 @@ mod tests {
             };
             assert_eq!(error.message(&lane), want_message, "{name} message text");
             let turn = fixture.get("turn").unwrap();
+            let (code, detail) = classify_provider_error(&lane, &error)
+                .unwrap_or_else(|| panic!("{name} classifies"));
             assert_eq!(
-                classify_provider_error(&lane, &error),
+                (code.as_str(), detail.as_str()),
                 (
                     turn.get("error_code").and_then(Value::as_str).unwrap(),
                     turn.get("error_detail").and_then(Value::as_str).unwrap()
@@ -3159,25 +3166,29 @@ mod tests {
         };
         for lane in [&openai, &anthropic] {
             assert_eq!(
-                classify_provider_error(lane, &ProviderError::Timeout),
-                (
+                classify_provider_error(lane, &ProviderError::Timeout)
+                    .as_ref()
+                    .map(|(code, detail)| (code.as_str(), detail.as_str())),
+                Some((
                     "provider_unreachable",
                     "Could not reach the configured provider endpoint."
-                )
+                ))
             );
             assert_eq!(
-                classify_provider_error(lane, &ProviderError::Connection),
-                (
+                classify_provider_error(lane, &ProviderError::Connection)
+                    .as_ref()
+                    .map(|(code, detail)| (code.as_str(), detail.as_str())),
+                Some((
                     "provider_unreachable",
                     "Could not reach the configured provider endpoint."
-                )
+                ))
             );
             assert_eq!(
                 classify_provider_error(
                     lane,
                     &ProviderError::InvalidResponse("bad payload".to_owned())
                 ),
-                ("internal", "The assistant hit an unexpected error.")
+                None
             );
         }
         // A 402 hiding in message text (request ids, token counts)
@@ -3187,9 +3198,9 @@ mod tests {
                 &openai,
                 &ProviderError::InvalidResponse("request 402abc failed".to_owned())
             ),
-            ("internal", "The assistant hit an unexpected error.")
+            None
         );
-        // Unknown-model text still maps.
+        // Unknown-model text still maps, naming the lane's model.
         assert_eq!(
             classify_provider_error(
                 &openai,
@@ -3198,11 +3209,13 @@ mod tests {
                     body_text: "model_not_found".to_owned(),
                     body_json: None,
                 }
-            ),
-            (
-                "model_invalid",
-                "The configured model name was not accepted by the provider."
             )
+            .as_ref()
+            .map(|(code, detail)| (code.as_str(), detail.as_str())),
+            Some((
+                "model_invalid",
+                "The model \"m\" was not accepted by the provider. Check the model name in Settings."
+            ))
         );
     }
 
@@ -3830,8 +3843,10 @@ mod tests {
                         "{context} error body"
                     );
                     let turn = fixture.get("turn").unwrap();
+                    let (code, detail) = classify_provider_error(&lane, &error)
+                        .unwrap_or_else(|| panic!("{context} classifies"));
                     assert_eq!(
-                        classify_provider_error(&lane, &error),
+                        (code.as_str(), detail.as_str()),
                         (
                             turn.get("error_code").and_then(Value::as_str).unwrap(),
                             turn.get("error_detail").and_then(Value::as_str).unwrap()
@@ -3993,11 +4008,13 @@ mod tests {
             "timeout surfaces: {error:?}"
         );
         assert_eq!(
-            classify_provider_error(&lane, &error),
-            (
+            classify_provider_error(&lane, &error)
+                .as_ref()
+                .map(|(code, detail)| (code.as_str(), detail.as_str())),
+            Some((
                 "provider_unreachable",
                 "Could not reach the configured provider endpoint."
-            )
+            ))
         );
         assert_eq!(state.requests.lock().unwrap().len(), 3, "two retries");
     }
