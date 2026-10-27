@@ -268,9 +268,10 @@ export function KanbanBoard({
   /**
    * One released drag: the delete zone hands the card to the delete
    * confirmation, a drop back onto its own seat stays silent, a refused
-   * drop explains itself — even a reorder inside its own cell — and
-   * every other drop writes the destination value plus its new sort
-   * position and highlights the landed card.
+   * drop explains itself — even a reorder inside its own cell, and even
+   * when the destination cell data is missing — and every other drop
+   * writes the destination value plus its new sort position and
+   * highlights the landed card.
    */
   function commitDrop(dragged: DraggedCard, target: BoardDropPoint | null): void {
     if (target === null) return;
@@ -279,16 +280,9 @@ export function KanbanBoard({
       return;
     }
     const sameCell = target.columnKey === dragged.groupKey && (target.laneKey ?? "") === (dragged.laneKey ?? "");
-    const destCell = boardCellOf(board, target.columnKey, target.laneKey);
-    if (destCell === null) return;
-    const index = insertionIndexForDrop(
-      destCell.rows,
-      dragged.issue.id,
-      dragged.sourceIndex,
-      target.issueId,
-      target.edge
-    );
-    if (sameCell && index === dragged.sourceIndex) return;
+    // The refusal needs no cell data, so it is read before the cell
+    // lookup: a drop the board refuses still warns when the data lags
+    // the rendered column.
     const refusal = boardDropRefusal({
       orderBy: prefs.orderBy,
       groupDimension: prefs.groupBy,
@@ -300,6 +294,19 @@ export function KanbanBoard({
         ? {}
         : { workflowBlockedReason: workflowReasonFor(target.columnKey, dragged.issue.state_id) }),
     });
+    const destCell = boardCellOf(board, target.columnKey, target.laneKey);
+    if (destCell === null) {
+      if (refusal !== null) notifyInfo(MOVE_REFUSED_TITLE, refusal.toast);
+      return;
+    }
+    const index = insertionIndexForDrop(
+      destCell.rows,
+      dragged.issue.id,
+      dragged.sourceIndex,
+      target.issueId,
+      target.edge
+    );
+    if (sameCell && index === dragged.sourceIndex) return;
     if (refusal !== null) {
       notifyInfo(MOVE_REFUSED_TITLE, refusal.toast);
       return;

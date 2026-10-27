@@ -126,6 +126,31 @@ describe("useBoardDrag", () => {
     expect(drops[0]).toBeNull();
   });
 
+  it("releases to the last hovered target when the release point misses", () => {
+    mountCard();
+    const boardRef = React.createRef<HTMLElement>();
+    const drops: Array<BoardDropPoint | null> = [];
+    const { result } = renderHook(() => useBoardDrag(boardRef, (_dragged, target) => drops.push(target)));
+    act(() => result.current.startDrag(draggedCard()));
+    act(() => fire("pointermove", 50, 120));
+    expect(result.current.target?.kind).toBe("card");
+    // The content shifts under the stationary pointer between the last
+    // move and the release (scroll, re-render), so the release point
+    // hit-tests nothing although a hover was indicated.
+    act(() => {
+      document.body.innerHTML = "";
+    });
+    act(() => fire("pointerup", 50, 120));
+    expect(drops).toHaveLength(1);
+    expect(drops[0]).toEqual({
+      kind: "card",
+      columnKey: COLUMN,
+      laneKey: null,
+      issueId: ISSUE,
+      edge: "above",
+    });
+  });
+
   it("cancels without committing", () => {
     const boardRef = React.createRef<HTMLElement>();
     const onDrop = vi.fn();
