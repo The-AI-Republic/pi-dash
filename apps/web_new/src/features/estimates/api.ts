@@ -110,13 +110,12 @@ export function useCreateEstimate(workspaceSlug: string, projectId: string) {
 }
 
 /**
- * Delete one system. Deleting the active system also clears the project's
+ * Delete one system. Deleting the linked system also clears the project's
  * reference, so the switch cannot point at a system that no longer exists
- * (EST-016); a superseded system needs only the delete. The screen passes
- * active only when the deleted system is the active one and the project
- * is linked, which reproduces the old client's observable rule — a linked
- * project ends up unlinked after any offered delete (spec §4.3,
- * NEWFRONT-809) — because delete is offered on the active row alone.
+ * (EST-016); deleting any other system needs only the delete. The screen
+ * passes active only when the deleted id equals the stored project
+ * reference — the narrow unlink rule (spec §4.3, NEWFRONT-809) — never
+ * on "the project has any link".
  */
 export function useDeleteEstimate(workspaceSlug: string, projectId: string) {
   const queryClient = useQueryClient();

@@ -861,26 +861,24 @@ Confirm:
 1. `DELETE /estimates/{eid}/` (soft delete server-side), which also
    strips the value from every work item (the issue's estimate point
    becomes null through the point relation).
-2. The old client's second write is conditioned on **estimates being
-   enabled for the project**, i.e. the project reference being non-null —
-   not on the reference pointing at the system being deleted. So it
-   `PATCH /projects/{pid}/` with `{estimate: null}` whenever the project
-   is linked, whichever system is deleted. Two consequences that are
-   visible and must be stated rather than smoothed over:
-   - deleting the linked active system unlinks it, as intended;
-   - deleting an unlinked system while the project is still linked to a
-     _different_ (for example older) system clears that other link too.
-     That second case is the old behaviour: the client cannot tell the
-     two apart because it only asks whether the project has any linked
-     system. It is a pinned quirk, **bug: NEWFRONT-809**, and is not
-     specced as intended behaviour (see §9.2).
-     The new app reproduces the observable outcome: after a successful
-     delete of any system, a linked project ends up unlinked. If a slice
-     prefers the narrower rule ("unlink only when the deleted id equals the
-     reference"), it must record that as a deliberate divergence with the
-     oracle evidence, because the oracle's delete scenario links the system
-     it deletes and would not distinguish the two. Slices must not silently
-     assume the two conditions are equivalent.
+2. The second write is the project unlink, and it follows the **narrow
+   rule**: after the delete succeeds, `PATCH /projects/{pid}/` with
+   `{estimate: null}` **only when the deleted system's id equals the
+   project's stored estimate reference**. Deleting any other system —
+   an unlinked active system while the project still points at a
+   different (for example older) system, or any archived system —
+   leaves the reference untouched, and estimates stay on for the
+   project. The comparison is against the stored reference, not
+   against the flagged/active row and not against "any link exists":
+   a freshly created system is flagged active while the reference may
+   still point at its predecessor, and those two must not be confused.
+   The old client instead unlinked whenever the project had _any_
+   linked system, so deleting an unlinked system cleared an unrelated
+   link too. That broad outcome is the old behaviour, pinned by the
+   oracle as **bug: NEWFRONT-809** (see §9.2); the narrow rule above
+   is the specified behaviour for the new app, chosen deliberately in
+   NEWFRONT-809. Slices must not silently treat "active" or "enabled"
+   as equivalent to "is the linked system".
 3. Success: notice saying the estimate was deleted (_pinned_ "deleted"),
    close the dialog, refetch systems and the project; when the last
    system went, the screen shows the empty state and the active row is
@@ -1389,7 +1387,7 @@ the difference. The spec above is binding where it differs.
 | EST-013 | Create with family name/type/last_used and keys 1..n; success closes + refetch; failure keeps dialog open; no project write                                                                                                       | Slice 742: prove the flag is set and the project link is untouched (§3.8); time never submitted in OSS                                                                                                                                                  |
 | EST-014 | — (not built)                                                                                                                                                                                                                     | Slice 743 (cloud): update dialog, PATCH existing ids + point add/delete routing, empty-set failure, persistence across refetch                                                                                                                          |
 | EST-015 | — (not built)                                                                                                                                                                                                                     | Slice 743 (cloud): single-value delete confirmation, reassignment/clear, renumber, history caveat                                                                                                                                                       |
-| EST-016 | Row delete + confirmation copy; success/failure notices; unlinks only when the deleted system is the active one | Slice 743: confirm dialog title/body contain the name and "permanently"; failure body says "unable to delete" (602's copy does not); do not reproduce the old wrong title; **match §4.3** — the old client clears the project reference whenever the project is linked, whichever system is deleted (bug NEWFRONT-809), while 602 unlinks only the active system's delete. Reproduce the old observable outcome or record the narrower rule as a divergence |
+| EST-016 | Row delete + confirmation copy; success/failure notices; unlinks only when the deleted id equals the stored project reference (narrow rule, NEWFRONT-809) | Slice 743 + NEWFRONT-809: confirm dialog title/body contain the name and "permanently"; failure body says "unable to delete" (602's copy does not); do not reproduce the old wrong title; **match §4.3** — the old client clears the reference whenever the project is linked (bug NEWFRONT-809), while the new app unlinks only the linked system's own delete and leaves any other link untouched |
 | EST-017 | Picker options, clear row, humanized time, optimistic write + rollback                                                                                                                                                            | Issues slices mount it everywhere; slice 744 sorts options by key before rendering (602 maps `points` as received and the server orders by value text), proves the full searchable picker, persistence, clear and history                                                                                                                                          |
 | EST-018 | `hideEstimate` flag into issues layout/spreadsheet; create/edit field                                                                                                                                                             | Slice 744/Issues: sidebar, list, drafts, inbox; prove on/off via project flip                                                                                                                                                                           |
 | EST-019 | —                                                                                                                                                                                                                                 | Slice 747 (Cycles surface)                                                                                                                                                                                                                              |
@@ -1489,14 +1487,15 @@ behaviour (noted per row).
   marker. New app: intended behaviour (value visible) — slice 774; the
   gate aligns the scenario (drop the bug marker, assert the value).
 - **NEWFRONT-809 — whole-system delete clears an unrelated project
-  link.** Deleting any system while the project is linked clears the
-  reference, even when a different system is the linked one. Intended:
-  unlink only the deleted system's own reference. Not pinned by an
-  oracle scenario (EST-016's delete links the system it deletes), so
-  neither rule is tested today. New app: reproduce the observable
-  outcome (linked project ends up unlinked after any successful delete)
-  and let slice 743 decide only with oracle evidence; do not subtly
-  claim the two conditions are the same. Gate: align when 809 is fixed.
+  link.** The old client unlinks whenever the project has any linked
+  system, so deleting an unlinked system while the project points at a
+  different system clears that other link too. Decided in NEWFRONT-809:
+  the new app implements the narrow rule — unlink only when the
+  deleted id equals the stored reference (§4.3). Oracle: the old
+  broad outcome is pinned by a `bug:` scenario (deleting the unlinked
+  active system while linked elsewhere still clears the link); the
+  gate aligns that scenario on the new app to assert the preserved
+  link instead.
 - **NEWFRONT-820 — the estimate picker searches the stored value, not
   the label — RESOLVED.** Time options display "1h 30m" while the old
   search index was the stored `90`, so a label search failed and a
@@ -1591,7 +1590,7 @@ is part of the contract; elsewhere write copy in the product's voice.
 | EST-013 | 3.7, 3.8      | `create-dialog.spec.ts` (stored active; link untouched; failure keeps dialog)                          |
 | EST-014 | 4.1, 4.4, 5   | `edit-delete.spec.ts` (OSS no edit; PATCH persists; empty set 400)                                     |
 | EST-015 | 4.2, 6.7      | `edit-delete.spec.ts` (OSS no value confirm; reassign; clear; bug 345 history)                         |
-| EST-016 | 4.3, 5        | `edit-delete.spec.ts` (strip + unlink; cancel; refused delete)                                         |
+| EST-016 | 4.3, 5        | `edit-delete.spec.ts` (strip + unlink; cancel; refused delete; bug: unlinked delete clears the other link) |
 | EST-017 | 6.1, 7.2      | `consumers.spec.ts` (picker options, assign/clear, history)                                            |
 | EST-018 | 6.2           | `consumers.spec.ts` (sidebar + spreadsheet follow the flag)                                            |
 | EST-019 | 6.3           | `consumers.spec.ts` (measure options; estimates totals; categories hidden)                             |

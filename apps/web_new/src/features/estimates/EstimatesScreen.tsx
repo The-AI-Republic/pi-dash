@@ -264,11 +264,13 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
                     disabled={remove.isPending}
                     onClick={() => {
                       const target = deleting;
-                      // The unlink follows the stored reference, not the
-                      // row: deleting the active system while the project
-                      // is unlinked needs no project write (EST-016).
+                      // The narrow unlink rule (EST-016, NEWFRONT-809):
+                      // unlink only when the deleted id equals the stored
+                      // project reference. Deleting any other system —
+                      // including the flagged row while the reference
+                      // still points elsewhere — leaves the link alone.
                       remove.mutate(
-                        { estimate: target, active: target.id === active?.id && enabled },
+                        { estimate: target, active: target.id === project.data?.estimate },
                         { onSuccess: () => setDeleting(null) }
                       );
                     }}
