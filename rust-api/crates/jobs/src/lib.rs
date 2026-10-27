@@ -74,6 +74,9 @@ pub mod orchestration;
 pub mod oss_worker;
 pub mod pyformat;
 pub mod queue;
+/// Runner revoke/delete executor (OVL-06, PIDASHCONV-1544): the revoke
+/// bundle as one public service call over the services drivers.
+pub mod runner_enroll;
 /// Runner task executors (D-15 L6, PIDASHCONV-539/540): the executing
 /// half of `runner/tasks.py` over the L4/L5 planners — approval expiry
 /// + runner/session sweeps (L6a) and dedupe + chat sweeps +

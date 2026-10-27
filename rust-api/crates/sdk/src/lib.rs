@@ -203,12 +203,20 @@ pub mod ops {
     pub use pidash_jobs::orchestration::complete_project_move_handoff_inline;
     pub use pidash_jobs::orchestration::drain_publish_effects;
     pub use pidash_jobs::orchestration::fire_pending_entry;
+    pub use pidash_jobs::orchestration::move_issue;
     pub use pidash_jobs::orchestration::pending_entry_ticker_for;
     pub use pidash_jobs::orchestration::post_run_orchestration;
     pub use pidash_jobs::orchestration::post_run_orchestration_in_tx;
     pub use pidash_jobs::orchestration::run_work_item_id;
     pub use pidash_jobs::orchestration::HandoffInlineDeps;
     pub use pidash_jobs::orchestration::HandoffStore;
+    pub use pidash_jobs::runner_enroll::fire_revoke_bundle;
+    pub use pidash_jobs::runner_enroll::revoke as runners_revoke; // renamed: `revoke` is the services revoke module.
+    pub use pidash_jobs::runner_enroll::RevokeBundle;
+    pub use pidash_jobs::runner_enroll::RevokeCollected;
+    pub use pidash_jobs::runner_enroll::RevokeCtx;
+    pub use pidash_jobs::runner_enroll::RevokeFireError;
+    pub use pidash_jobs::runner_enroll::RevokeScope;
     pub use pidash_jobs::runner_runs::emit_terminal_effects;
     pub use pidash_jobs::tasks_ticker::scan::emit_fire_tick;
     pub use pidash_ops::connect_primary;

@@ -377,8 +377,13 @@ pidash_sdk::ops::PoolPubsubStore
 pidash_sdk::ops::PrLinksSurface
 pidash_sdk::ops::ProjectClockPolicy
 pidash_sdk::ops::RedisAdmissionCache
+pidash_sdk::ops::RevokeBundle
+pidash_sdk::ops::RevokeCollected
+pidash_sdk::ops::RevokeCtx
 pidash_sdk::ops::RevokeError
+pidash_sdk::ops::RevokeFireError
 pidash_sdk::ops::RevokeOutcome
+pidash_sdk::ops::RevokeScope
 pidash_sdk::ops::RevokeStore
 pidash_sdk::ops::RunView
 pidash_sdk::ops::SAVE_CLOCK_PARAMS
@@ -416,6 +421,7 @@ pidash_sdk::ops::fallback_creator_select
 pidash_sdk::ops::finalization
 pidash_sdk::ops::fire_pending_entry
 pidash_sdk::ops::fire_plan
+pidash_sdk::ops::fire_revoke_bundle
 pidash_sdk::ops::get_setting
 pidash_sdk::ops::has_open_blockers_sql
 pidash_sdk::ops::is_ticking_state
@@ -434,6 +440,7 @@ pidash_sdk::ops::revoke
 pidash_sdk::ops::run
 pidash_sdk::ops::run_select_sql
 pidash_sdk::ops::run_work_item_id
+pidash_sdk::ops::runners_revoke
 pidash_sdk::ops::saved_sequence_id
 pidash_sdk::ops::saved_sort_order
 pidash_sdk::ops::select_parent_for_next_run
