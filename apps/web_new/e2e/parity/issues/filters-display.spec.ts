@@ -5,7 +5,8 @@
 // (panel container plus per-layout matrix), ISS-076 (group by), ISS-077
 // (sub-group by), ISS-078 (order by), ISS-079 (sub-issue switch), ISS-080
 // (empty-groups switch), ISS-081 (shown-fields pills), ISS-106 (server-side
-// per-user persistence), ISS-107 (analytics entry). Written from the area
+// per-user persistence), ISS-107 (analytics entry), ISS-243 (board switch
+// seeds state grouping, NEWFRONT-970). Written from the area
 // spec parity/specs/issues-filters-display.md and verified against the
 // running old app through drivers/web (extend-never-fork).
 //
@@ -58,6 +59,9 @@ type DisplayDriver = {
   signInWithPassword(email: string, password: string): Promise<void>;
   openProjectIssues(workspaceSlug: string, projectId: string): Promise<void>;
   visibleIssueNames(): Promise<string[]>;
+  layoutsSwitchTo(layout: string): Promise<void>;
+  kanbanColumns(): Promise<Array<{ name: string }>>;
+  kanbanColumnCards(columnName: string): Promise<string[]>;
 };
 
 /**
@@ -294,6 +298,35 @@ test(
       const panel = await driver.displayPanelText();
       expect(panel).toContain("Sub-group by");
       await driver.closeDisplayOptions();
+    });
+  }
+);
+
+const SEED_ROWS = ["ISS-243"];
+test(
+  specTitle(SEED_ROWS, "switching list to board seeds state grouping and persists it"),
+  { tag: specTags(SEED_ROWS) },
+  async ({ driver, seed }) => {
+    await test.step("sign in and open the seeded project", async () => {
+      await openSeededList(driver, seed);
+    });
+
+    await test.step("the reset leaves the list ungrouped", async () => {
+      const props = await serverUserProperties(seed.workspaceSlug, seed.projectId, session);
+      expect(props.display_filters["layout"]).toBe("list");
+      expect(props.display_filters["group_by"] ?? null).toBeNull();
+    });
+
+    await test.step("the board switch renders state columns and stores the seed", async () => {
+      await driver.layoutsSwitchTo("kanban");
+      await expect
+        .poll(async () => (await driver.kanbanColumns()).length, { timeout: 120_000 })
+        .toBeGreaterThanOrEqual(1);
+      const columns = await driver.kanbanColumns();
+      const cards = (await Promise.all(columns.map((column) => driver.kanbanColumnCards(column.name)))).flat();
+      for (const name of seed.issueNames) expect(cards).toContain(name);
+      await expectStoredDisplayFilter(seed, "layout", "kanban");
+      await expectStoredDisplayFilter(seed, "group_by", "state");
     });
   }
 );

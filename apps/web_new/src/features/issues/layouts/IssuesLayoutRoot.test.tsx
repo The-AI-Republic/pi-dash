@@ -203,6 +203,15 @@ describe("IssuesLayoutRoot", () => {
     expect(h.segment("Calendar layout")).toHaveAttribute("data-active", "true");
   });
 
+  it("seeds state grouping when switching to board with no group by (ISS-243)", async () => {
+    const h = renderRoot({ seed: { layout: "list", group_by: null, order_by: "sort_order" } });
+    expect(await screen.findByText("layout:list")).toBeInTheDocument();
+    fireEvent.click(h.segment("Board layout"));
+    await waitFor(() => expect(screen.getByText("layout:kanban")).toBeInTheDocument());
+    const sent = JSON.parse(h.calls.find((call) => call.method === "PATCH")?.body ?? "{}").display_filters;
+    expect(sent).toMatchObject({ layout: "kanban", group_by: "state", sub_group_by: null });
+  });
+
   it("hands a header switch to a supplied callback instead of writing preferences", async () => {
     const switches: LayoutKind[] = [];
     const h = renderRoot({
