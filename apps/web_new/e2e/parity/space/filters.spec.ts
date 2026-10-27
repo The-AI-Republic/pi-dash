@@ -209,6 +209,19 @@ test(
         [todo.id, extra.id].sort()
       );
 
+      if (driver.target === "web_new") {
+        // Intended behavior (NEWFRONT-464): the survivor rewrites under the
+        // singular state key, so the address keeps reproducing the board.
+        await driver.spaceFiltersRemoveValue("state", "Todo");
+        const next = new URL(driver.page.url());
+        expect(next.searchParams.get("state")).toBe(extra.id);
+        expect(next.searchParams.has("states")).toBe(false);
+        await expectBoardNames(driver, []);
+        await driver.page.reload();
+        await expectBoardNames(driver, []);
+        expect(await driver.spaceFiltersAppliedFacets()).toEqual([{ facet: "state", values: [extra.name] }]);
+        return;
+      }
       // Removing one pill keeps the store correct but rewrites the survivor
       // under states= (plural), a key no reader understands.
       await driver.spaceFiltersRemoveValue("state", "Todo");
