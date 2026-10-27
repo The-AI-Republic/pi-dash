@@ -11,12 +11,15 @@
 //!
 //! # Layering: a seam, not direct calls
 //!
-//! This crate carries no database handle, so the move is generic over
-//! the [`MoveStore`] seam (the `PubsubStore` / `CreationSeam`
-//! precedent): one method per underlying effect, each naming the SQL
-//! text the pool implementation executes verbatim. Guards run before
-//! the transaction, the transaction body runs inside it, and the
-//! outcome carries everything after it — in Python order:
+//! The move is generic over the [`MoveStore`] seam (the `PubsubStore` /
+//! `CreationSeam` precedent): one method per underlying effect, each
+//! naming the SQL text the store executes verbatim. The only store
+//! implementation is the SeaORM one behind
+//! [`crate::domain::issues::move_to_project`], which both entry points
+//! (the API-key surface and the web-app surface) call so the two stay
+//! byte-for-byte identical. Guards run before the transaction, the
+//! transaction body runs inside it, and the outcome carries everything
+//! after it — in Python order:
 //!
 //! 1. guards (`:136-171`): blank-ref check → source fetch → resolve →
 //!    same-project no-op → membership → `current_instance` capture →
@@ -106,9 +109,6 @@ use std::fmt::Write as _;
 pub use pidash_db::app_project::models::project::NOT_FOUND_DETAIL;
 use pidash_db::app_project::models::project::{classify_lookup, ProjectLookup};
 use pidash_db::dispatch::AgentRunStatus;
-/// Re-exported for the pool implementation: the
-/// `Pod.default_for_project_id` lookup.
-pub use pidash_db::runner_enroll::columns::pod::DEFAULT_FOR_PROJECT_ID_SQL;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use serde_json::{Map, Value};
@@ -118,13 +118,6 @@ use super::pr_links::TaskEnqueue;
 use super::serializers_detail::serialize_drf_datetime;
 use crate::app_project::tasks::ISSUE_ACTIVITY_TASK;
 use crate::dispatch::tools::{advisory_lock_key, saved_sequence_id};
-/// Re-exported for the pool implementation: the advisory lock, the
-/// sequence scan, and the default/fallback state lookups the seam
-/// methods execute.
-pub use crate::dispatch::tools::{
-    CREATE_ADVISORY_LOCK_SQL, CREATE_SAVE_DEFAULT_STATE_SQL, CREATE_SAVE_FALLBACK_STATE_SQL,
-    CREATE_SEQ_SCAN_SQL,
-};
 use crate::orchestration::blockers::{summary_list, BlockerRow};
 use crate::runner_sessions::pubsub::{send_to_runner, PubsubStore};
 use crate::v1_projects::tasks::MODEL_ACTIVITY_TASK;
@@ -294,24 +287,24 @@ pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"works
 /// for `project__archived_at` + the `workspaces` join for the slug. `$1`
 /// slug, `$2` project id, `$3` pk. (Django's `.get()` `LIMIT 21`
 /// collapses to 1: the pk lookup returns at most one row.)
-pub const SOURCE_ISSUE_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1";
+pub(crate) const SOURCE_ISSUE_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1";
 
 /// Locked re-fetch (`:182-184`): [`SOURCE_ISSUE_SQL`] with
 /// `select_for_update(of=("self",))` — the lock scopes to the base row
 /// (a bare `FOR UPDATE` would ask Postgres to lock the nullable side of
 /// the `states` outer join and 500).
-pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
+pub(crate) const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
 
 /// `Project.resolve` pk arm (`project.py:197-199`): minimal projection
 /// (`id`, `workspace_id`, `identifier` — the only columns the move
 /// reads); `workspace__slug` join; explicit `deleted_at` guard;
 /// `-created_at` ordering. `$1` pk, `$2` slug.
-pub const PROJECT_RESOLVE_BY_PK_SQL: &str = "SELECT \"projects\".\"id\", \"projects\".\"workspace_id\", \"projects\".\"identifier\" FROM \"projects\" INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2) ORDER BY \"projects\".\"created_at\" DESC LIMIT 1";
+pub(crate) const PROJECT_RESOLVE_BY_PK_SQL: &str = "SELECT \"projects\".\"id\", \"projects\".\"workspace_id\", \"projects\".\"identifier\" FROM \"projects\" INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2) ORDER BY \"projects\".\"created_at\" DESC LIMIT 1";
 
 /// `Project.resolve` identifier arm (`project.py:206-211`): exact
 /// equality on the stripped, upper-cased input (never `iexact`, so the
 /// composite btree is used). `$1` identifier, `$2` slug.
-pub const PROJECT_RESOLVE_BY_IDENTIFIER_SQL: &str = "SELECT \"projects\".\"id\", \"projects\".\"workspace_id\", \"projects\".\"identifier\" FROM \"projects\" INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"projects\".\"deleted_at\" IS NULL AND \"workspaces\".\"slug\" = $2 AND \"projects\".\"identifier\" = $1) ORDER BY \"projects\".\"created_at\" DESC LIMIT 1";
+pub(crate) const PROJECT_RESOLVE_BY_IDENTIFIER_SQL: &str = "SELECT \"projects\".\"id\", \"projects\".\"workspace_id\", \"projects\".\"identifier\" FROM \"projects\" INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"projects\".\"deleted_at\" IS NULL AND \"workspaces\".\"slug\" = $2 AND \"projects\".\"identifier\" = $1) ORDER BY \"projects\".\"created_at\" DESC LIMIT 1";
 
 /// Target-membership probe (`:146-152`): active `role >= MEMBER`
 /// membership. `$1` slug, `$2` target project id, `$3` actor id.
@@ -336,74 +329,74 @@ pub const LABEL_IDS_SQL: &str = "SELECT \"issue_labels\".\"label_id\" FROM \"iss
 /// Outstanding-work lock (`:192-199`): full rows, newest first, `FOR
 /// UPDATE` (no `SKIP LOCKED` — the move waits). `AgentRun` extends plain
 /// `models.Model`: no soft-delete scope. `$1` issue id.
-pub const HANDOFF_RUNS_LOCK_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"work_item_id\" = $1 AND \"agent_run\".\"status\" IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input')) ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE";
+pub(crate) const HANDOFF_RUNS_LOCK_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"work_item_id\" = $1 AND \"agent_run\".\"status\" IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input')) ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE";
 
 /// Issue save (`:223-235`): exactly the `update_fields`, in list order.
 /// `$1` project, `$2` workspace, `$3` sequence, `$4` state, `$5`
 /// assigned pod (NULL when no handoff and no default), `$6`-`$8` NULL
 /// parent/estimate/type, `$9` updated stamp, `$10` id.
-pub const ISSUE_MOVE_UPDATE_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9 WHERE \"issues\".\"id\" = $10";
+pub(crate) const ISSUE_MOVE_UPDATE_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9 WHERE \"issues\".\"id\" = $10";
 
 /// Issue save with the actor stamped (`stamp_updated_by`; Django has no
 /// equivalent — `:223-235` never stamps `updated_by_id`): the same
 /// `update_fields` order plus `\"updated_by_id\" = $10`, `$11` the id.
-pub const ISSUE_MOVE_UPDATE_STAMP_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9, \"updated_by_id\" = $10 WHERE \"issues\".\"id\" = $11";
+pub(crate) const ISSUE_MOVE_UPDATE_STAMP_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9, \"updated_by_id\" = $10 WHERE \"issues\".\"id\" = $11";
 
 /// Inert-run close (`:282-284`): `$1` run id, `$2` end stamp.
-pub const INERT_RUN_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $2, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" = $1";
+pub(crate) const INERT_RUN_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $2, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" = $1";
 
 /// Executing-parent barrier (`:302`): `$1` run id, `$2` run_config with
 /// the handoff marker merged.
-pub const HANDOFF_PARENT_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancel_requested', \"run_config\" = $2, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" = $1";
+pub(crate) const HANDOFF_PARENT_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancel_requested', \"run_config\" = $2, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" = $1";
 
 /// Old sequence rows detached (`:310`): `issue=NULL` where the project
 /// is not the target. `$1` issue id, `$2` target project id.
-pub const SEQUENCE_DETACH_SQL: &str = "UPDATE \"issue_sequences\" SET \"issue_id\" = NULL WHERE (\"issue_sequences\".\"deleted_at\" IS NULL AND \"issue_sequences\".\"issue_id\" = $1 AND NOT (\"issue_sequences\".\"project_id\" = $2))";
+pub(crate) const SEQUENCE_DETACH_SQL: &str = "UPDATE \"issue_sequences\" SET \"issue_id\" = NULL WHERE (\"issue_sequences\".\"deleted_at\" IS NULL AND \"issue_sequences\".\"issue_id\" = $1 AND NOT (\"issue_sequences\".\"project_id\" = $2))";
 
 /// Target sequence row (`:311`): full create; `workspace_id` resolves
 /// from the already-fetched target project row (Python pays a lazy
 /// `project.workspace` fetch at `save()` — same value, no extra query
 /// here). `$1` id, `$2`/`$3` created/updated, `$4` created_by (the move
 /// actor), `$5` issue, `$6` sequence, `$7` project, `$8` workspace.
-pub const SEQUENCE_CREATE_SQL: &str = "INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\") VALUES ($1, $2, $3, $4, NULL, NULL, $7, $8, $5, $6, FALSE)";
+pub(crate) const SEQUENCE_CREATE_SQL: &str = "INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\") VALUES ($1, $2, $3, $4, NULL, NULL, $7, $8, $5, $6, FALSE)";
 
 /// Assignee prune (`:313-319`, soft): drop rows whose assignee is not an
 /// active `role >= MEMBER` member of the TARGET (nested subquery,
 /// verbatim). `$1` deleted stamp, `$2` issue, `$3` target project.
-pub const ASSIGNEE_PRUNE_SQL: &str = "UPDATE \"issue_assignees\" SET \"deleted_at\" = $1 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2 AND NOT (\"issue_assignees\".\"assignee_id\" IN (SELECT \"project_members\".\"member_id\" FROM \"project_members\" WHERE (\"project_members\".\"deleted_at\" IS NULL AND \"project_members\".\"project_id\" = $3 AND \"project_members\".\"member_id\" IN (SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2)) AND \"project_members\".\"role\" >= 15 AND \"project_members\".\"is_active\"))))";
+pub(crate) const ASSIGNEE_PRUNE_SQL: &str = "UPDATE \"issue_assignees\" SET \"deleted_at\" = $1 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2 AND NOT (\"issue_assignees\".\"assignee_id\" IN (SELECT \"project_members\".\"member_id\" FROM \"project_members\" WHERE (\"project_members\".\"deleted_at\" IS NULL AND \"project_members\".\"project_id\" = $3 AND \"project_members\".\"member_id\" IN (SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2)) AND \"project_members\".\"role\" >= 15 AND \"project_members\".\"is_active\"))))";
 
 /// Surviving assignees re-pointed (`:320-323`). `$1` target project,
 /// `$2` target workspace, `$3` issue.
-pub const ASSIGNEE_REPOINT_SQL: &str = "UPDATE \"issue_assignees\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $3)";
+pub(crate) const ASSIGNEE_REPOINT_SQL: &str = "UPDATE \"issue_assignees\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $3)";
 
 /// Label wipe (`:325`, soft). `$1` deleted stamp, `$2` issue.
-pub const LABEL_DELETE_SQL: &str = "UPDATE \"issue_labels\" SET \"deleted_at\" = $1 WHERE (\"issue_labels\".\"deleted_at\" IS NULL AND \"issue_labels\".\"issue_id\" = $2)";
+pub(crate) const LABEL_DELETE_SQL: &str = "UPDATE \"issue_labels\" SET \"deleted_at\" = $1 WHERE (\"issue_labels\".\"deleted_at\" IS NULL AND \"issue_labels\".\"issue_id\" = $2)";
 
 /// Cycle wipe (`:326`, soft). `$1` deleted stamp, `$2` issue.
-pub const CYCLE_DELETE_SQL: &str = "UPDATE \"cycle_issues\" SET \"deleted_at\" = $1 WHERE (\"cycle_issues\".\"deleted_at\" IS NULL AND \"cycle_issues\".\"issue_id\" = $2)";
+pub(crate) const CYCLE_DELETE_SQL: &str = "UPDATE \"cycle_issues\" SET \"deleted_at\" = $1 WHERE (\"cycle_issues\".\"deleted_at\" IS NULL AND \"cycle_issues\".\"issue_id\" = $2)";
 
 /// Module wipe (`:327`, soft). `$1` deleted stamp, `$2` issue.
-pub const MODULE_DELETE_SQL: &str = "UPDATE \"module_issues\" SET \"deleted_at\" = $1 WHERE (\"module_issues\".\"deleted_at\" IS NULL AND \"module_issues\".\"issue_id\" = $2)";
+pub(crate) const MODULE_DELETE_SQL: &str = "UPDATE \"module_issues\" SET \"deleted_at\" = $1 WHERE (\"module_issues\".\"deleted_at\" IS NULL AND \"module_issues\".\"issue_id\" = $2)";
 
 /// Relation wipe (`:328`, soft): both directions. `$1` deleted stamp, `$2` issue.
-pub const RELATION_DELETE_SQL: &str = "UPDATE \"issue_relations\" SET \"deleted_at\" = $1 WHERE (\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = $2 OR \"issue_relations\".\"related_issue_id\" = $2))";
+pub(crate) const RELATION_DELETE_SQL: &str = "UPDATE \"issue_relations\" SET \"deleted_at\" = $1 WHERE (\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = $2 OR \"issue_relations\".\"related_issue_id\" = $2))";
 
 /// Children of other projects detached (`:329`): `Issue.objects`
 /// (plain soft-delete scope — triage/draft children detach too). `$1`
 /// issue, `$2` target project.
-pub const CHILDREN_DETACH_SQL: &str = "UPDATE \"issues\" SET \"parent_id\" = NULL WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"parent_id\" = $1 AND NOT (\"issues\".\"project_id\" = $2))";
+pub(crate) const CHILDREN_DETACH_SQL: &str = "UPDATE \"issues\" SET \"parent_id\" = NULL WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"parent_id\" = $1 AND NOT (\"issues\".\"project_id\" = $2))";
 
 /// Moved comment ids (`:331`): `-created_at` order (list order feeds the
 /// `IN` lists below; order is unobservable there). `$1` issue.
-pub const COMMENT_IDS_SQL: &str = "SELECT \"issue_comments\".\"id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1) ORDER BY \"issue_comments\".\"created_at\" DESC";
+pub(crate) const COMMENT_IDS_SQL: &str = "SELECT \"issue_comments\".\"id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1) ORDER BY \"issue_comments\".\"created_at\" DESC";
 
 /// Moved comment description ids (`:332-334`). `$1` issue.
-pub const DESCRIPTION_IDS_SQL: &str = "SELECT \"issue_comments\".\"description_id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1 AND \"issue_comments\".\"description_id\" IS NOT NULL) ORDER BY \"issue_comments\".\"created_at\" DESC";
+pub(crate) const DESCRIPTION_IDS_SQL: &str = "SELECT \"issue_comments\".\"description_id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1 AND \"issue_comments\".\"description_id\" IS NOT NULL) ORDER BY \"issue_comments\".\"created_at\" DESC";
 
 /// Final refetch (`:393`): `issue_objects` scope + `select_related`
 /// joins; minimal projection (full issue row + the url parts the
 /// handler re-renders). `$1` pk.
-pub const MOVED_ISSUE_REFETCH_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", \"workspaces\".\"slug\", \"projects\".\"identifier\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"id\" = $1) LIMIT 1";
+pub(crate) const MOVED_ISSUE_REFETCH_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", \"workspaces\".\"slug\", \"projects\".\"identifier\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"id\" = $1) LIMIT 1";
 
 // ---------------------------------------------------------------------------
 // Project/workspace repoints (`:336-351`)
@@ -1674,7 +1667,9 @@ pub async fn move_work_item_to_project<S: MoveStore>(
         issue: moved,
         current_instance,
         requested_data,
-        dispatch_immediate: options.dispatch_immediate.unwrap_or(handoff_runs.is_empty()),
+        dispatch_immediate: options
+            .dispatch_immediate
+            .unwrap_or(handoff_runs.is_empty()),
         post_commit,
         enqueues,
     }))
