@@ -703,16 +703,22 @@ fn normalize_label(raw: &str) -> String {
 pub(crate) fn charset_to_supported(raw: &str) -> SupportedCharset {
     match normalize_label(raw).as_str() {
         "utf_8" | "utf8" | "u8" | "utf" | "cp65001" => SupportedCharset::Utf8,
-        "ascii" | "us_ascii" | "646" | "ansi_x3.4_1968" => SupportedCharset::Ascii,
-        "latin_1" | "latin1" | "latin" | "l1" | "iso_8859_1" | "iso8859_1" | "8859" | "cp819" => {
+        // Every `encodings.aliases` entry for the nine (review fix: the
+        // short list dropped `u32`, `utf_32be`, `unicodebigunmarked` and
+        // the long ascii/latin-1 aliases to the utf-8/WHATWG fallback).
+        "ascii" | "us_ascii" | "us" | "646" | "ansi_x3.4_1968" | "ansi_x3.4_1986"
+        | "ansi_x3_4_1968" | "cp367" | "csascii" | "ibm367" | "iso646_us" | "iso_646.irv_1991"
+        | "iso_ir_6" => SupportedCharset::Ascii,
+        "latin_1" | "latin1" | "latin" | "l1" | "iso_8859_1" | "iso8859_1" | "8859" | "cp819"
+        | "csisolatin1" | "ibm819" | "iso8859" | "iso_8859_1_1987" | "iso_ir_100" => {
             SupportedCharset::Latin1
         }
         "utf_16" | "utf16" | "u16" => SupportedCharset::Utf16,
         "utf_16_le" | "utf_16le" | "unicodelittleunmarked" => SupportedCharset::Utf16Le,
-        "utf_16_be" | "utf_16be" => SupportedCharset::Utf16Be,
-        "utf_32" | "utf32" => SupportedCharset::Utf32,
+        "utf_16_be" | "utf_16be" | "unicodebigunmarked" => SupportedCharset::Utf16Be,
+        "utf_32" | "utf32" | "u32" => SupportedCharset::Utf32,
         "utf_32_le" | "utf_32le" => SupportedCharset::Utf32Le,
-        "utf_32_be" => SupportedCharset::Utf32Be,
+        "utf_32_be" | "utf_32be" => SupportedCharset::Utf32Be,
         _ => match Encoding::for_label(raw.as_bytes()) {
             Some(encoding) => SupportedCharset::Other(encoding),
             None => SupportedCharset::Utf8,
@@ -1987,7 +1993,21 @@ mod codec_tests {
         for name in ["utf-8", "UTF-8", "utf_8", "UTF8", "u8", "utf", "cp65001"] {
             assert_eq!(charset_to_supported(name), SupportedCharset::Utf8, "{name}");
         }
-        for name in ["ascii", "us-ascii", "646", "ANSI_X3.4-1968"] {
+        for name in [
+            "ascii",
+            "us-ascii",
+            "us",
+            "646",
+            "ANSI_X3.4-1968",
+            "ANSI_X3.4-1986",
+            "ansi_x3_4_1968",
+            "cp367",
+            "csascii",
+            "ibm367",
+            "iso646_us",
+            "iso_646.irv_1991",
+            "iso_ir_6",
+        ] {
             assert_eq!(
                 charset_to_supported(name),
                 SupportedCharset::Ascii,
@@ -2004,6 +2024,11 @@ mod codec_tests {
             "iso8859-1",
             "8859",
             "cp819",
+            "csisolatin1",
+            "ibm819",
+            "iso8859",
+            "iso-8859-1-1987",
+            "iso-ir-100",
         ] {
             assert_eq!(
                 charset_to_supported(name),
@@ -2025,14 +2050,14 @@ mod codec_tests {
                 "{name}"
             );
         }
-        for name in ["utf-16-be", "utf_16be"] {
+        for name in ["utf-16-be", "utf_16be", "unicodebigunmarked"] {
             assert_eq!(
                 charset_to_supported(name),
                 SupportedCharset::Utf16Be,
                 "{name}"
             );
         }
-        for name in ["utf-32", "utf32"] {
+        for name in ["utf-32", "utf32", "u32"] {
             assert_eq!(
                 charset_to_supported(name),
                 SupportedCharset::Utf32,
@@ -2046,8 +2071,7 @@ mod codec_tests {
                 "{name}"
             );
         }
-        {
-            let name = "utf-32-be";
+        for name in ["utf-32-be", "utf-32be"] {
             assert_eq!(
                 charset_to_supported(name),
                 SupportedCharset::Utf32Be,
