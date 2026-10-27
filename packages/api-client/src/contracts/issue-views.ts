@@ -115,9 +115,9 @@ function viewFromRetrieve(client: ApiClient, body: unknown, path: string): Saved
 /** Create payload: the name plus the filter/display snapshot. */
 /**
  * Create payload: the dialog's title and description plus the filter and
- * display snapshot. `access` and `is_locked` are serializer read-only, so
- * they are deliberately absent — a typed selector here would build a
- * control whose writes the server drops (spec §1).
+ * display snapshot. `access` rides its own owner-only write
+ * (setProjectViewAccess / setWorkspaceViewAccess, VIEW-019) rather than
+ * the create body; `is_locked` is serializer read-only and stays absent.
  */
 export interface SavedViewCreate {
   name: string;
@@ -219,8 +219,8 @@ export async function updateWorkspaceView(
 /**
  * PATCH .../projects/<id>/views/<viewId>/ with `{ access }` — the cloud
  * access write (VIEW-019, NEWFRONT-948; Decisions D23). The key rides its
- * own call because the create/patch payloads omit it; the OSS serializer
- * drops read-only keys, so the caller keeps the echo and only treats the
+ * own call because the create/patch payloads omit it; the server stores it
+ * for the view owner, and the caller keeps the echo and only treats the
  * choice as stored when the echo carries it back.
  */
 export async function setProjectViewAccess(

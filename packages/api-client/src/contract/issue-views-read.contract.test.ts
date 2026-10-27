@@ -4,9 +4,9 @@
 // Contract: the views area's reads and writes against live Django
 // (parity/specs/views.md §2, NEWFRONT-718) — both scopes' lists and
 // retrieves, the blank-record stand-in for a missing id, the patch echo
-// for every dialog-written field, guest narrowing, the generic favorites
-// round trip behind a view star, and the issue lists the view bodies
-// mount.
+// for every dialog-written field, the access and anchor write echoes
+// (VIEW-019/020), guest narrowing, the generic favorites round trip
+// behind a view star, and the issue lists the view bodies mount.
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
 import { ApiError } from "../errors.js";
@@ -21,7 +21,10 @@ import {
   getWorkspaceView,
   listProjectViews,
   listWorkspaceViews,
+  publishProjectView,
   removeViewFavorite,
+  setWorkspaceViewAccess,
+  unpublishProjectView,
   updateProjectView,
   updateWorkspaceView,
 } from "../contracts/issue-views.js";
@@ -109,8 +112,9 @@ describe.skipIf(!contractEnabled)("project view list and retrieve", () => {
     const projectId = await seededProjectId(client);
     const created = await createProjectView(client, CONTRACT_WORKSPACE, projectId, { name: PROJECT_PROBE });
     try {
-      // access/is_locked are serializer read-only: posting them proves the
-      // server keeps its own values rather than the caller's.
+      // access is an owner-only write the server stores (VIEW-019); only
+      // is_locked stays read-only, so posting it proves the server keeps
+      // its own value rather than the caller's.
       const body = {
         name: `${PROJECT_PROBE} edited`,
         description: "edited description",
@@ -132,7 +136,7 @@ describe.skipIf(!contractEnabled)("project view list and retrieve", () => {
       expect(updated.display_properties).toEqual(body.display_properties);
       expect(updated.rich_filters).toEqual(body.rich_filters);
       expect(updated.logo_props).toEqual(body.logo_props);
-      expect(updated.access).toBe(1);
+      expect(updated.access).toBe(0);
       expect(updated.is_locked).toBe(false);
       const reread = await getProjectView(client, CONTRACT_WORKSPACE, projectId, created.id);
       expect(reread).toMatchObject({
@@ -140,7 +144,33 @@ describe.skipIf(!contractEnabled)("project view list and retrieve", () => {
         display_filters: body.display_filters,
         rich_filters: body.rich_filters,
         logo_props: body.logo_props,
+        access: 0,
       });
+    } finally {
+      await deleteProjectView(client, CONTRACT_WORKSPACE, projectId, created.id);
+    }
+  });
+
+  it("publishes and unpublishes a project view through the anchor echo", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await createProjectView(client, CONTRACT_WORKSPACE, projectId, { name: PROJECT_PROBE });
+    try {
+      expect(created.anchor ?? null).toBeNull();
+      const published = await publishProjectView(
+        client,
+        CONTRACT_WORKSPACE,
+        projectId,
+        created.id,
+        "contract-view-anchor"
+      );
+      expect(published.anchor).toBe("contract-view-anchor");
+      const reread = await getProjectView(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(reread.anchor).toBe("contract-view-anchor");
+      const unpublished = await unpublishProjectView(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(unpublished.anchor).toBeNull();
+      const cleared = await getProjectView(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(cleared.anchor).toBeNull();
     } finally {
       await deleteProjectView(client, CONTRACT_WORKSPACE, projectId, created.id);
     }
@@ -227,7 +257,22 @@ describe.skipIf(!contractEnabled)("workspace view list and retrieve", () => {
       expect(updated.display_filters).toEqual({ layout: "calendar", calendar: { mode: "month", weekend: false } });
       expect(updated.rich_filters).toEqual({ state_group__in: ["started"] });
       expect(updated.logo_props).toEqual({ in_use: true, emoji: "y" });
+      // A patch that never sends access keeps the historical default.
       expect(updated.access).toBe(1);
+    } finally {
+      await deleteWorkspaceView(client, CONTRACT_WORKSPACE, created.id);
+    }
+  });
+
+  it("stores a workspace view access choice through the access echo", async () => {
+    const client = await signedIn();
+    const created = await createWorkspaceView(client, CONTRACT_WORKSPACE, { name: WORKSPACE_PROBE });
+    try {
+      expect(created.access).toBe(1);
+      const updated = await setWorkspaceViewAccess(client, CONTRACT_WORKSPACE, created.id, 0);
+      expect(updated.access).toBe(0);
+      const reread = await getWorkspaceView(client, CONTRACT_WORKSPACE, created.id);
+      expect(reread.access).toBe(0);
     } finally {
       await deleteWorkspaceView(client, CONTRACT_WORKSPACE, created.id);
     }
