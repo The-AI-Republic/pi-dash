@@ -1579,7 +1579,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async rulesReadClipboard(): Promise<string> {
-    return todo("rulesReadClipboard");
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the read.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
 
   async rulesOpenDeepLink(_url: string): Promise<void> {
@@ -7881,6 +7884,15 @@ export class WebNewDriver implements ParityDriver {
 
   async layoutsReloadIssues(): Promise<void> {
     await this.page.reload({ waitUntil: "domcontentloaded" });
+    // Either surface settles the reload: the profile tab or a project
+    // list (project, cycle, module, archived), rows or empty state.
+    await this.page
+      .locator(
+        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"]'
+      )
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if ((await this.page.getByTestId("profile-list").count()) === 0) return;
     await this.page.getByTestId("profile-issues-tab").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await this.page
       .locator('[data-testid="profile-list"], [data-testid="profile-board"]')
@@ -7940,11 +7952,24 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsListGroups(): Promise<string[]> {
-    const groups = this.page.locator('[data-testid="profile-list"] [data-profile-group]');
-    const count = await groups.count();
+    // The profile surface keeps its own groups; every project surface
+    // (project, cycle, module lists) reads its section headers instead.
+    if ((await this.page.getByTestId("profile-list").count()) > 0) {
+      const groups = this.page.locator('[data-testid="profile-list"] [data-profile-group]');
+      const count = await groups.count();
+      const titles: string[] = [];
+      for (let index = 0; index < count; index += 1) {
+        titles.push(((await groups.nth(index).getAttribute("data-profile-group")) ?? "").trim());
+      }
+      return titles.filter((title) => title.length > 0);
+    }
+    // The header's spans are the title then the count; the glyph is an
+    // svg and the selection control an input, so the first span reads it.
+    const headers = this.page.locator('[data-testid="list-group-header"]');
+    const count = await headers.count();
     const titles: string[] = [];
     for (let index = 0; index < count; index += 1) {
-      titles.push(((await groups.nth(index).getAttribute("data-profile-group")) ?? "").trim());
+      titles.push((await headers.nth(index).locator("span").first().innerText()).trim());
     }
     return titles.filter((title) => title.length > 0);
   }
@@ -7958,13 +7983,31 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsListGroupIssueNames(title: string): Promise<string[]> {
-    const group = this.page.locator(`[data-testid="profile-list"] [data-profile-group="${title}"]`).first();
-    await group.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    const rows = group.locator("[data-profile-row]");
+    if ((await this.page.getByTestId("profile-list").count()) > 0) {
+      const group = this.page.locator(`[data-testid="profile-list"] [data-profile-group="${title}"]`).first();
+      await group.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      const rows = group.locator("[data-profile-row]");
+      const count = await rows.count();
+      const names: string[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const name = (await rows.nth(index).locator("span").nth(1).innerText()).trim();
+        if (name !== "") names.push(name);
+      }
+      return names;
+    }
+    // Project surfaces wrap each section (header plus rows) in its own
+    // section element; the row's name paragraph carries the exact title.
+    const section = this.page
+      .locator("section", {
+        has: this.page.locator('[data-testid="list-group-header"]').filter({ hasText: title }),
+      })
+      .first();
+    await section.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const rows = section.locator('[data-testid="list-row"]');
     const count = await rows.count();
     const names: string[] = [];
     for (let index = 0; index < count; index += 1) {
-      const name = (await rows.nth(index).locator("span").nth(1).innerText()).trim();
+      const name = ((await rows.nth(index).locator("p[title]").first().getAttribute("title")) ?? "").trim();
       if (name !== "") names.push(name);
     }
     return names;
@@ -7990,12 +8033,31 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsRowCanEditState");
   }
 
-  async layoutsRowHref(_issueName: string): Promise<string | null> {
-    return todo("layoutsRowHref");
+  /** The row's anchor: the list row marks it, the global row's link is first. */
+  private async layoutsRowAnchor(issueName: string): Promise<Locator> {
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const marked = row.locator("a[data-row-anchor]");
+    if ((await marked.count()) > 0) return marked.first();
+    return row.locator("a").first();
   }
 
-  async layoutsRowOpenPeek(_issueName: string): Promise<void> {
-    return todo("layoutsRowOpenPeek");
+  async layoutsRowHref(issueName: string): Promise<string | null> {
+    const anchor = await this.layoutsRowAnchor(issueName);
+    if ((await anchor.count()) === 0) return null;
+    return anchor.getAttribute("href");
+  }
+
+  async layoutsRowOpenPeek(issueName: string): Promise<void> {
+    // A plain click on the row's name opens the peek (ISS-066): the
+    // anchor keeps its href for modified clicks and reports through
+    // the peek address param.
+    const anchor = await this.layoutsRowAnchor(issueName);
+    await anchor.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page.getByTestId("issue-preview").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsPeekVisible(): Promise<boolean> {
@@ -8051,16 +8113,84 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsRowSetPriority");
   }
 
-  async layoutsRowMenuItems(_issueName: string): Promise<string[]> {
-    return todo("layoutsRowMenuItems");
+  /**
+   * Project-shape row for `name` (ISS-060): the list row's name paragraph
+   * carries the exact title, and the global list stamps it on the row
+   * itself, so both shapes resolve without substring guessing.
+   */
+  private layoutsRowByName(issueName: string): Locator {
+    const escaped = issueName.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return this.page
+      .locator(`[data-testid="list-row"]:has(p[title="${escaped}"]), [data-row-name="${escaped}"]`)
+      .first();
   }
 
-  async layoutsRowMenuChoose(_issueName: string, _item: string): Promise<void> {
-    return todo("layoutsRowMenuChoose");
+  /** Opens the row's ellipsis menu and waits for its popup (ISS-060). */
+  private async layoutsOpenRowMenu(issueName: string): Promise<void> {
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The trigger reveals on hover; hovering the row first matches the eye.
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByTestId("row-menu-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async layoutsRowContextMenuItems(_issueName: string): Promise<string[]> {
-    return todo("layoutsRowContextMenuItems");
+  /**
+   * One open item's label: the title span when it carries a note,
+   * otherwise the full text, whitespace-collapsed like the menu reads.
+   */
+  private async layoutsMenuItemLabel(item: Locator): Promise<string> {
+    const titled = item.locator('[data-menu-title="true"]');
+    if ((await titled.count()) > 0) {
+      return (await titled.first().innerText()).trim().replace(/\s+/g, " ");
+    }
+    return (await item.innerText()).trim().replace(/\s+/g, " ");
+  }
+
+  /** The open menu's entry for `label`, matched on its title (ISS-060). */
+  private async layoutsOpenMenuItem(label: string): Promise<Locator> {
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    for (let index = 0; index < count; index += 1) {
+      if ((await this.layoutsMenuItemLabel(items.nth(index))) === label) return items.nth(index);
+    }
+    throw new Error(`[parity] open menu has no ${label}.`);
+  }
+
+  /** Dismisses the open popup the way a reader leaves it. */
+  private async layoutsCloseOpenMenu(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+
+  async layoutsRowMenuItems(issueName: string): Promise<string[]> {
+    await this.layoutsOpenRowMenu(issueName);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
+  }
+
+  async layoutsRowMenuChoose(issueName: string, item: string): Promise<void> {
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the pick.
+    if (item === "Copy link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.layoutsOpenRowMenu(issueName);
+    await (await this.layoutsOpenMenuItem(item)).click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async layoutsRowContextMenuItems(issueName: string): Promise<string[]> {
+    // The row wraps itself in the shared context menu (ISS-060): a
+    // right-click on the row raises the same entries as the ellipsis.
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await row.click({ button: "right", timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   async layoutsSheetHeaders(): Promise<string[]> {
@@ -8467,7 +8597,7 @@ export class WebNewDriver implements ParityDriver {
     const count = await items.count();
     const texts: string[] = [];
     for (let index = 0; index < count; index += 1) {
-      texts.push(((await items.nth(index).innerText()) ?? "").trim().replace(/\s+/g, " "));
+      texts.push(await this.layoutsMenuItemLabel(items.nth(index)));
     }
     return texts;
   }
@@ -8540,12 +8670,28 @@ export class WebNewDriver implements ParityDriver {
     return [...new Set(names)];
   }
 
-  async layoutsRowMenuItemDisabled(_issueName: string, _item: string): Promise<boolean> {
-    return todo("layoutsRowMenuItemDisabled");
+  async layoutsRowMenuItemDisabled(issueName: string, item: string): Promise<boolean> {
+    await this.layoutsOpenRowMenu(issueName);
+    try {
+      const entry = await this.layoutsOpenMenuItem(item);
+      // Base-ui marks disabled items both ways; either marker counts.
+      if ((await entry.getAttribute("aria-disabled")) === "true") return true;
+      return (await entry.getAttribute("data-disabled")) !== null;
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
-  async layoutsRowMenuItemNote(_issueName: string, _item: string): Promise<string | null> {
-    return todo("layoutsRowMenuItemNote");
+  async layoutsRowMenuItemNote(issueName: string, item: string): Promise<string | null> {
+    await this.layoutsOpenRowMenu(issueName);
+    try {
+      const entry = await this.layoutsOpenMenuItem(item);
+      const note = entry.locator('[data-menu-description="true"]');
+      if ((await note.count()) === 0) return null;
+      return (await note.first().innerText()).trim().replace(/\s+/g, " ") || null;
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   // The work-item dialog (create, edit, draft) is the one carrying the
@@ -8616,27 +8762,53 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsDeleteModalVisible(): Promise<boolean> {
-    return todo("layoutsDeleteModalVisible");
+    return this.isShown(this.page.getByRole("dialog", { name: "Delete work item" }));
   }
 
   async layoutsDeleteModalConfirm(): Promise<void> {
-    return todo("layoutsDeleteModalConfirm");
+    const dialog = this.page.getByRole("dialog", { name: "Delete work item" });
+    await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    // The dialog closes once the write lands; settle before returning
+    // so an immediate visibility read sees the outcome, not the flight.
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /**
+   * The archive confirmation (ISS-061): its heading names the record
+   * ("Archive work item WEB 42"), so the dialog matches on the heading
+   * prefix rather than an exact title.
+   */
+  private layoutsArchiveDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: /^Archive work item/ }) });
   }
 
   async layoutsArchiveModalVisible(): Promise<boolean> {
-    return todo("layoutsArchiveModalVisible");
+    return this.isShown(this.layoutsArchiveDialog());
   }
 
   async layoutsArchiveModalConfirm(): Promise<void> {
-    return todo("layoutsArchiveModalConfirm");
+    const dialog = this.layoutsArchiveDialog();
+    await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Archive", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsMoveModalVisible(): Promise<boolean> {
-    return todo("layoutsMoveModalVisible");
+    return this.isShown(this.page.getByRole("dialog", { name: "Move to project" }));
   }
 
-  async layoutsMoveModalChoose(_projectName: string): Promise<void> {
-    return todo("layoutsMoveModalChoose");
+  async layoutsMoveModalChoose(projectName: string): Promise<void> {
+    const dialog = this.page.getByRole("dialog", { name: "Move to project" });
+    await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await dialog
+      .getByTestId("move-target")
+      .filter({ hasText: projectName })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   private layoutsAddExistingDialog(): Locator {
@@ -8671,7 +8843,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsDetailMenuItems(): Promise<string[]> {
-    return todo("layoutsDetailMenuItems");
+    // The detail and peek headers share one menu control (ISS-066).
+    await this.page.getByTestId("detail-menu-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   async layoutsDetailMenuChoose(_item: string): Promise<void> {
@@ -8679,15 +8858,49 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsPeekCopyLinkVisible(): Promise<boolean> {
-    return todo("layoutsPeekCopyLinkVisible");
+    // Scoped to the peek panel, which is absent on the full page: the
+    // header's standalone copy control names the work-item link.
+    const panel = this.page.getByTestId("issue-preview").first();
+    if ((await panel.count()) === 0) return false;
+    return this.isShown(panel.getByRole("button", { name: "Copy work item link" }));
   }
 
   async layoutsListPageMenuItems(): Promise<string[]> {
-    return todo("layoutsListPageMenuItems");
+    await this.page.getByTestId("list-page-actions").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
-  async layoutsGroupHeaderAddMenu(_groupTitle: string): Promise<string[] | null> {
-    return todo("layoutsGroupHeaderAddMenu");
+  /** Section header for `title` on a project surface (ISS-012). */
+  private layoutsGroupHeader(groupTitle: string): Locator {
+    return this.page.locator('[data-testid="list-group-header"]').filter({ hasText: groupTitle }).first();
+  }
+
+  private async layoutsGroupHeaderAddControl(groupTitle: string): Promise<{ menu: boolean; control: Locator }> {
+    // Cycle/module headers wrap the plus in a menu trigger (span); plain
+    // project headers render it as a bare div opening create directly.
+    const header = this.layoutsGroupHeader(groupTitle);
+    await header.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const labelled = `Add to ${groupTitle}`;
+    const menuPlus = header.locator(`span[aria-label="${labelled}"]`);
+    if ((await menuPlus.count()) > 0) return { menu: true, control: menuPlus.first() };
+    return { menu: false, control: header.locator(`div[aria-label="${labelled}"]`).first() };
+  }
+
+  async layoutsGroupHeaderAddMenu(groupTitle: string): Promise<string[] | null> {
+    const { menu, control } = await this.layoutsGroupHeaderAddControl(groupTitle);
+    if (!menu) return null;
+    await control.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   /**
@@ -8894,8 +9107,18 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsMobileDisplayCycleModuleDisabled");
   }
 
-  async layoutsRowMenuOpenNewTabUrl(_issueName: string): Promise<string> {
-    return todo("layoutsRowMenuOpenNewTabUrl");
+  async layoutsRowMenuOpenNewTabUrl(issueName: string): Promise<string> {
+    // window.open lands in a popup page: read its URL without waiting
+    // for the app to boot there, then close it again.
+    await this.layoutsOpenRowMenu(issueName);
+    const entry = await this.layoutsOpenMenuItem("Open in new tab");
+    const [popup] = await Promise.all([
+      this.page.context().waitForEvent("page", { timeout: 15_000 }),
+      entry.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const url = popup.url();
+    await popup.close();
+    return url;
   }
 
   async layoutsWorkItemModalHasText(text: string): Promise<boolean> {
@@ -8909,12 +9132,32 @@ export class WebNewDriver implements ParityDriver {
     }, text);
   }
 
-  async layoutsListPageMenuChoose(_item: string): Promise<void> {
-    return todo("layoutsListPageMenuChoose");
+  async layoutsListPageMenuChoose(item: string): Promise<void> {
+    if (item === "Copy link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.page.getByTestId("list-page-actions").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await (await this.layoutsOpenMenuItem(item)).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async layoutsGroupHeaderAddChoose(_groupTitle: string, _item: string | null): Promise<void> {
-    return todo("layoutsGroupHeaderAddChoose");
+  async layoutsGroupHeaderAddChoose(groupTitle: string, item: string | null): Promise<void> {
+    const { menu, control } = await this.layoutsGroupHeaderAddControl(groupTitle);
+    if (!menu || item === null) {
+      // The plain-project plus (and a null pick) opens create directly.
+      await control.click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await control.click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await (await this.layoutsOpenMenuItem(item)).click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    // Both dialogs lazy-load their chunk on first open; settle so an
+    // immediate visibility read sees the outcome, not the flight.
+    if (item === "Add an existing work item") {
+      await this.page
+        .getByRole("button", { name: "Add selected work items", exact: true })
+        .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await this.layoutsWorkItemDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    }
   }
 
   async layoutsSheetToggleSubIssues(_issueName: string): Promise<void> {

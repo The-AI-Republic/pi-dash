@@ -107,6 +107,10 @@ test(
     try {
       await resetPrefs(seed.workspaceSlug, seed.projectId, ownerSession);
       await openPath(driver, projectIssuesPath(seed), guestSession);
+      // resetPrefs patches the owner's row; the guest keeps whatever
+      // layout an earlier run persisted, so settle on the list before
+      // reading its rows (best-effort on both legs).
+      await driver.ensureListLayout();
       expect(await driver.layoutsRowMenuItems(first)).toEqual(["Open in new tab", "Copy link"]);
     } finally {
       await serverPatchProject(seed.workspaceSlug, seed.projectId, ownerSession, { guest_view_all_features: false });
@@ -459,9 +463,14 @@ test(
     const archivedPath = `/${seed.workspaceSlug}/projects/${seed.projectId}/archives/issues`;
     try {
       await openPath(driver, archivedPath, session);
-      // bug:NEWFRONT-165 — the menu omits Delete (readOnly wiring hides
-      // it); ISS-064 intends Restore, Open in new tab, Copy link, Delete.
-      expect(await driver.layoutsRowMenuItems(title)).toEqual(["Restore", "Open in new tab", "Copy link"]);
+      // bug:NEWFRONT-165 — the oracle menu omits Delete (readOnly wiring
+      // hides it); ISS-064 intends Restore, Open in new tab, Copy link,
+      // Delete, which the new app renders (spec §10 gate alignment).
+      if (driver.target === "web_new") {
+        expect(await driver.layoutsRowMenuItems(title)).toEqual(["Restore", "Open in new tab", "Copy link", "Delete"]);
+      } else {
+        expect(await driver.layoutsRowMenuItems(title)).toEqual(["Restore", "Open in new tab", "Copy link"]);
+      }
 
       await driver.layoutsRowMenuChoose(title, "Restore");
       // The toast fires after the restore API resolves, so poll for

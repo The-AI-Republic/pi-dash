@@ -100,7 +100,7 @@ function GlobalRow({
   // The menu trigger sits beside the link, not inside it: a button nested
   // in an anchor is invalid and swallows the link's own click.
   const body = (
-    <div className="flex h-full items-center border-b border-(--border) hover:bg-(--subtle)">
+    <div data-row-name={row.name} className="flex h-full items-center border-b border-(--border) hover:bg-(--subtle)">
       <Link
         to="/$ws/browse/$issueKey"
         params={{ ws: workspaceSlug, issueKey: key }}
