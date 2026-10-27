@@ -3,22 +3,25 @@
 // See the LICENSE file for details.
 // Self-test for the coexistence generator (run: pnpm --filter web_new
 // test:coexistence). Exercises entry validation, matcher rendering for
-// literal and workspace-scoped entries, the reserved-path exclusion, and the
-// insert/replace/check cycle on throwaway Caddyfile copies, and the CLI
-// entry point.
+// literal and workspace-scoped entries, the reserved-path exclusion, the
+// legacy-shadow guard (NEWFRONT-953), and the insert/replace/check cycle on
+// throwaway Caddyfile copies, and the CLI entry point.
 import { strict as assert } from "node:assert";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   buildAioLines,
   buildCeLines,
   entryRegex,
+  findShadowingRoutes,
   isWorkspaceScoped,
   loadEntries,
   main,
+  matcherCoversEntry,
   parseEntry,
   reservedTopLevelOf,
   syncFile,
@@ -197,6 +200,131 @@ describe("validateList and loadEntries", () => {
   });
 });
 
+describe("matcherCoversEntry", () => {
+  it("covers the entry in every exact and subtree spelling", () => {
+    for (const matcher of ["/god-mode", "/god-mode/", "/god-mode/*", "/god-mode*"]) {
+      assert.equal(matcherCoversEntry(matcher, "/god-mode"), true, matcher);
+    }
+  });
+
+  it("covers the entry below an ancestor subtree spelling, but not a bare ancestor", () => {
+    assert.equal(matcherCoversEntry("/auth/*", "/auth/device"), true);
+    assert.equal(matcherCoversEntry("/auth*", "/auth/device"), true);
+    assert.equal(matcherCoversEntry("/auth", "/auth/device"), false);
+    assert.equal(matcherCoversEntry("/auth/", "/auth/device"), false);
+  });
+
+  it("stops at segment boundaries and ignores unrelated prefixes", () => {
+    assert.equal(matcherCoversEntry("/auth*", "/authn/device"), false);
+    assert.equal(matcherCoversEntry("/god-modefoo*", "/god-mode"), false);
+    assert.equal(matcherCoversEntry("/other/*", "/auth/device"), false);
+    assert.equal(matcherCoversEntry("/auth/device/other", "/auth/device"), false);
+    assert.equal(matcherCoversEntry("/{$BUCKET_NAME}/*", "/god-mode"), false);
+    assert.equal(matcherCoversEntry("/{$BUCKET_NAME}", "/god-mode"), false);
+  });
+
+  it("treats a catch-all as covering everything and a non-path as covering nothing", () => {
+    assert.equal(matcherCoversEntry("/*", "/god-mode"), true);
+    assert.equal(matcherCoversEntry("*", "/auth/device"), true);
+    assert.equal(matcherCoversEntry("@legacy", "/god-mode"), false);
+    assert.equal(matcherCoversEntry("localhost:3004", "/god-mode"), false);
+    assert.equal(matcherCoversEntry("web_new:3000", "/god-mode"), false);
+  });
+
+  it("compares case-sensitively, like Caddy path matching", () => {
+    assert.equal(matcherCoversEntry("/GOD-MODE/*", "/god-mode"), false);
+  });
+});
+
+describe("findShadowingRoutes", () => {
+  function markedCe(headLines) {
+    const { ce } = scratch({ ce: ceFixture });
+    syncFile(ce, CE_ANCHOR, "\t", buildCeLines(["/sign-in"]));
+    const lines = readFileSync(ce, "utf8").split("\n");
+    const at = lines.findIndex((line) => line.includes("BEGIN MIGRATED ROUTES"));
+    lines.splice(at, 0, ...headLines);
+    return lines.join("\n");
+  }
+
+  function markedAio(headLines) {
+    const { aio } = scratch({ aio: aioFixture });
+    syncFile(aio, AIO_ANCHOR, "    ", buildAioLines(["/sign-in"]));
+    const lines = readFileSync(aio, "utf8").split("\n");
+    const at = lines.findIndex((line) => line.includes("BEGIN MIGRATED ROUTES"));
+    lines.splice(at, 0, ...headLines);
+    return lines.join("\n");
+  }
+
+  it("flags the CE hand-written redir plus proxy pair", () => {
+    const text = markedCe(["\tredir /god-mode /god-mode/ permanent", "\treverse_proxy /god-mode/* admin:3000"]);
+    assert.deepEqual(findShadowingRoutes(text, ["/god-mode"]), [
+      { line: 3, directive: "redir", matcher: "/god-mode", entries: ["/god-mode"] },
+      { line: 4, directive: "reverse_proxy", matcher: "/god-mode/*", entries: ["/god-mode"] },
+    ]);
+  });
+
+  it("flags the AIO handle_path block while ignoring its inner upstream line", () => {
+    const text = markedAio([
+      "    handle_path /god-mode* {",
+      "        root * /app/admin",
+      "        try_files {path} {path}/ /index.html",
+      "        file_server",
+      "    }",
+    ]);
+    assert.deepEqual(findShadowingRoutes(text, ["/god-mode"]), [
+      { line: 4, directive: "handle_path", matcher: "/god-mode*", entries: ["/god-mode"] },
+    ]);
+  });
+
+  it("flags an ancestor prefix covering a deeper entry in both flavors", () => {
+    assert.deepEqual(findShadowingRoutes(markedCe(["\treverse_proxy /auth/* api:8000"]), ["/auth/device"]), [
+      { line: 3, directive: "reverse_proxy", matcher: "/auth/*", entries: ["/auth/device"] },
+    ]);
+    assert.deepEqual(findShadowingRoutes(markedAio(["    handle /auth/* {"]), ["/auth/device"]), [
+      { line: 4, directive: "handle", matcher: "/auth/*", entries: ["/auth/device"] },
+    ]);
+  });
+
+  it("ignores bare ancestors, unmigrated prefixes, matchers without paths, and comments", () => {
+    const text = markedCe([
+      "\treverse_proxy /auth api:8000",
+      "\treverse_proxy /spaces/* space:3000",
+      "\treverse_proxy @legacy api:8000",
+      "\treverse_proxy /{$BUCKET_NAME}/* pi-dash-minio:9000",
+      "\t# reverse_proxy /god-mode/* admin:3000",
+    ]);
+    assert.deepEqual(findShadowingRoutes(text, ["/auth/device", "/god-mode", "/sign-in"]), []);
+  });
+
+  it("allows a legacy fallback below the generated block", () => {
+    const lines = markedCe([]).split("\n");
+    const end = lines.findIndex((line) => line.includes("END MIGRATED ROUTES"));
+    lines.splice(end + 1, 0, "\treverse_proxy /sign-in/* old:3000");
+    assert.deepEqual(findShadowingRoutes(lines.join("\n"), ["/sign-in"]), []);
+  });
+
+  it("reports nothing without markers, and skips workspace-scoped and catch-all entries", () => {
+    assert.deepEqual(findShadowingRoutes(ceFixture, ["/api"]), []);
+    assert.deepEqual(findShadowingRoutes(markedCe(["\treverse_proxy /ws/* api:8000"]), ["/{ws}/runners/*"]), []);
+    assert.deepEqual(findShadowingRoutes(markedCe(["\treverse_proxy /acme/* old:3000"]), ["/"]), []);
+  });
+
+  it("flags a pre-block catch-all against every literal entry", () => {
+    const text = markedCe(["\treverse_proxy /* old:3000"]);
+    assert.deepEqual(findShadowingRoutes(text, ["/sign-in", "/god-mode"]), [
+      { line: 3, directive: "reverse_proxy", matcher: "/*", entries: ["/sign-in", "/god-mode"] },
+    ]);
+  });
+
+  it("finds no shadows in the repo's own Caddyfiles", () => {
+    const proxyDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "proxy");
+    const { entries } = loadEntries();
+    for (const name of ["Caddyfile.ce", "Caddyfile.aio.ce"]) {
+      assert.deepEqual(findShadowingRoutes(readFileSync(join(proxyDir, name), "utf8"), entries), [], name);
+    }
+  });
+});
+
 describe("syncFile", () => {
   it("inserts the block before the anchor, then reports unchanged", () => {
     const { ce } = scratch({ ce: ceFixture });
@@ -279,5 +407,30 @@ describe("main", () => {
 
   it("rejects an unknown argument", () => {
     assert.throws(() => runMain(["--bogus"]), /unknown argument/);
+  });
+
+  it("refuses to generate or check a project with a shadowed entry", () => {
+    const { argv, ce, aio } = project();
+    runMain(argv);
+    const shadow = (path, line) => {
+      const lines = readFileSync(path, "utf8").split("\n");
+      const at = lines.findIndex((candidate) => candidate.includes("BEGIN MIGRATED ROUTES"));
+      lines.splice(at, 0, line);
+      writeFileSync(path, lines.join("\n"));
+    };
+    shadow(ce, "\treverse_proxy /sign-in/* old:3000");
+    assert.throws(() => runMain([...argv, "--check"]), /shadows migrated route \/sign-in/);
+    assert.throws(() => runMain(argv), /shadows migrated route \/sign-in/);
+    writeFileSync(ce, readFileSync(ce, "utf8").replace("\treverse_proxy /sign-in/* old:3000\n", ""));
+    shadow(aio, "    handle /sign-in* {");
+    assert.throws(
+      () => runMain([...argv, "--check"]),
+      (error) => {
+        assert.match(error.message, /hand-written `handle \/sign-in\*`/);
+        assert.ok(error.message.includes(aio));
+        return true;
+      },
+      "expected the error to name the shadowed AIO file"
+    );
   });
 });
