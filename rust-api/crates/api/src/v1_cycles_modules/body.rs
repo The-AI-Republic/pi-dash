@@ -30,11 +30,16 @@
 //! never touch `request.data` (GET/DELETE/archive) never call this module,
 //! so they can never 415.
 //
-//! Exotic codecs (PIDASHCONV-693): every other `codecs.lookup`-reachable
-//! module dispatches through [`SupportedCharset::Exotic`] to
-//! `body_decoders` (same URL paths, same JSON, same SQL semantics).
+//! Other charsets (PIDASHCONV-1552, tier 3): every `charset=` outside the
+//! nine 627 decoders resolves through `encoding_rs::Encoding::for_label`
+//! and decodes with encoding_rs ([`SupportedCharset::Other`]); labels
+//! without an encoding_rs label degrade to utf-8 like a bogus name does
+//! under Django. Status codes and the detail envelope are unchanged; only
+//! error texts, unlabelled codecs and lone-surrogate spans differ from
+//! CPython (listed in the PR, per the 2026-10-26 maintainer decision).
 
 use axum::http::HeaderMap;
+use encoding_rs::Encoding;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -103,9 +108,11 @@ pub type FormMaps = (Map<String, Value>, FilesMap);
 /// Mirrors DRF's `_full_data` (`data.copy().update(files)` — Django's
 /// `MultiValueDict.update` *extends* key lists, so per key the values are
 /// the text values followed by the file values).
-/// One form/multipart text value: decoded text (U+FFFD placeholders where
-/// the codec emitted lone surrogates) plus the placeholder spans (byte
-/// offset, surrogate value) for the coerce layer's surrogate check.
+/// One form/multipart text value: decoded text plus the lone-surrogate
+/// placeholder spans (byte offset, surrogate value) for the coerce
+/// layer's surrogate check. Always empty since PIDASHCONV-1552 (only the
+/// utf-7 codec filled them, and it now falls back to utf-8); the field
+/// stays because the cycle/module coerce layers read it.
 #[derive(Debug, Clone, Default)]
 pub struct FormValue {
     pub text: String,
@@ -148,10 +155,9 @@ pub enum NegotiatedBody {
     /// Content-Length says empty: `{}` whatever the content type is.
     Empty,
     /// Decoded JSON source text (charset applied, trailing incomplete
-    /// sequence dropped) plus lone-surrogate spans: byte offset of a
-    /// U+FFFD placeholder in `text` plus the surrogate value. The caller
-    /// parses with its existing serde + CPython-error mapping, swapping
-    /// placeholders for dirty units.
+    /// sequence dropped for the nine 627 charsets) plus lone-surrogate
+    /// spans, always empty since PIDASHCONV-1552 (only utf-7 filled them).
+    /// The caller parses with its existing serde + CPython-error mapping.
     JsonText {
         text: String,
         surr: Vec<(usize, u16)>,
@@ -160,8 +166,9 @@ pub enum NegotiatedBody {
     /// `spec` (list fields as arrays, blank skips). `map` holds text-only
     /// values; `files` holds uploads per key (DRF merges files into
     /// `request.data`, so `in` checks must consult both maps); `surr`
-    /// holds the lone-surrogate spans per key, aligned with the selected
-    /// values (scalars: one entry; list fields: one per array item).
+    /// holds the lone-surrogate spans per key, always empty since
+    /// PIDASHCONV-1552, aligned with the selected values (scalars: one
+    /// entry; list fields: one per array item).
     Form {
         map: Map<String, Value>,
         files: FilesMap,
@@ -601,8 +608,7 @@ fn parse_header_parameters(line: &str) -> Result<(String, Vec<(String, String)>)
             if let (Some(charset), Some(_lang), Some(raw)) =
                 (pieces.next(), pieces.next(), pieces.next())
             {
-                // Header values never validate: surrogate spans drop.
-                value = percent_decode_str(raw, &charset_to_supported(charset), &[])?.0;
+                value = percent_decode_str(raw, &charset_to_supported(charset))?;
             }
         }
         params.push((name, value));
@@ -653,11 +659,12 @@ fn split_header_params(line: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-/// Charsets the port resolves (`codecs.lookup` over all 118 importable
-/// codec modules; rejected names degrade to utf-8, exactly like a bogus
-/// name does under Django). The nine 627 decoders stay inline; every
-/// other module dispatches to `body_decoders` by module name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Charsets the port resolves. The nine 627 decoders stay inline and
+/// match first, on an explicit alias list (unit-pinned in
+/// `charset_aliases`); every other `Encoding::for_label` hit decodes via
+/// encoding_rs (tier 3, PIDASHCONV-1552); anything else degrades to utf-8,
+/// exactly like a bogus name does under Django.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum SupportedCharset {
     Utf8,
     Ascii,
@@ -668,26 +675,48 @@ pub(crate) enum SupportedCharset {
     Utf32,
     Utf32Le,
     Utf32Be,
-    Exotic(&'static str),
+    Other(&'static Encoding),
 }
 
-/// Resolve a `charset=` parameter the way `request._set_content_type_params`
-/// plus `codecs.lookup` do: byte-oriented `normalize_encoding`, then the
-/// full `encodings.aliases` table, then the dotless importable module
-/// itself. Anything else is utf-8.
+/// Decoded text from the strict/lossy one-shot decoders.
+pub(crate) struct Decoded {
+    pub text: String,
+}
+
+/// Simplified label normalization (tier 3): lowercase, `-`/space to `_`.
+/// Dots are kept (the `ANSI_X3.4-1968` ascii alias carries one).
+fn normalize_label(raw: &str) -> String {
+    let bytes: Vec<u8> = raw
+        .bytes()
+        .map(|b| match b {
+            b'-' | b' ' => b'_',
+            _ => b.to_ascii_lowercase(),
+        })
+        .collect();
+    String::from_utf8(bytes).expect("ascii-only buffer")
+}
+
+/// Resolve a `charset=` parameter: the nine 627 charsets by explicit
+/// alias, then `Encoding::for_label`, else utf-8. The nine match first
+/// because WHATWG folds `latin1`/`iso-8859-1`/`ascii` into windows-1252,
+/// which differs from the pinned tier 1 behaviour for 0x80-0x9F.
 pub(crate) fn charset_to_supported(raw: &str) -> SupportedCharset {
-    match super::body_decoders::resolve_module(raw) {
-        Some("utf_8") => SupportedCharset::Utf8,
-        Some("ascii") => SupportedCharset::Ascii,
-        Some("latin_1") => SupportedCharset::Latin1,
-        Some("utf_16") => SupportedCharset::Utf16,
-        Some("utf_16_le") => SupportedCharset::Utf16Le,
-        Some("utf_16_be") => SupportedCharset::Utf16Be,
-        Some("utf_32") => SupportedCharset::Utf32,
-        Some("utf_32_le") => SupportedCharset::Utf32Le,
-        Some("utf_32_be") => SupportedCharset::Utf32Be,
-        Some(module) => SupportedCharset::Exotic(module),
-        None => SupportedCharset::Utf8,
+    match normalize_label(raw).as_str() {
+        "utf_8" | "utf8" | "u8" | "utf" | "cp65001" => SupportedCharset::Utf8,
+        "ascii" | "us_ascii" | "646" | "ansi_x3.4_1968" => SupportedCharset::Ascii,
+        "latin_1" | "latin1" | "latin" | "l1" | "iso_8859_1" | "iso8859_1" | "8859" | "cp819" => {
+            SupportedCharset::Latin1
+        }
+        "utf_16" | "utf16" | "u16" => SupportedCharset::Utf16,
+        "utf_16_le" | "utf_16le" | "unicodelittleunmarked" => SupportedCharset::Utf16Le,
+        "utf_16_be" | "utf_16be" => SupportedCharset::Utf16Be,
+        "utf_32" | "utf32" => SupportedCharset::Utf32,
+        "utf_32_le" | "utf_32le" => SupportedCharset::Utf32Le,
+        "utf_32_be" => SupportedCharset::Utf32Be,
+        _ => match Encoding::for_label(raw.as_bytes()) {
+            Some(encoding) => SupportedCharset::Other(encoding),
+            None => SupportedCharset::Utf8,
+        },
     }
 }
 
@@ -704,20 +733,26 @@ fn content_type_charset(content_type: &str) -> Result<SupportedCharset, BodyErro
         .unwrap_or(SupportedCharset::Utf8))
 }
 
-/// Decode a JSON body: `codecs.getreader(charset)(stream)` semantics. The
-/// stream decode drops a trailing *incomplete* sequence (utf-8 lead
-/// prefix, utf-16 odd byte or pending high surrogate, utf-32 short tail)
-/// and raises on everything else, with CPython's exact texts. Exotic
-/// charsets (including the bytes transforms) dispatch to `body_decoders`.
-/// Returns the text plus lone-surrogate spans (always empty for the nine
-/// 627 charsets, which cannot emit surrogates).
+/// Decode a JSON body: `codecs.getreader(charset)(stream)` semantics for
+/// the nine 627 charsets (the stream decode drops a trailing *incomplete*
+/// sequence — utf-8 lead prefix, utf-16 odd byte or pending high
+/// surrogate, utf-32 short tail — and raises on everything else, with
+/// CPython's exact texts). Any other charset decodes strictly with
+/// encoding_rs (tier 3): no tail drop, and a stable non-CPython text on
+/// failure. Returns the text plus lone-surrogate spans (always empty).
 fn decode_json_body(
     body: &[u8],
     content_type: &str,
 ) -> Result<(String, Vec<(usize, u16)>), BodyError> {
     let charset = content_type_charset(content_type)?;
-    if let SupportedCharset::Exotic(_) = charset {
-        return super::body_decoders::decode_json_exotic(body, &charset);
+    if let SupportedCharset::Other(encoding) = charset {
+        return match encoding.decode_without_bom_handling_and_without_replacement(body) {
+            Some(text) => Ok((text.into_owned(), Vec::new())),
+            None => Err(BodyError::ParseDetail(format!(
+                "JSON parse error - '{}' codec can't decode bytes",
+                encoding.name()
+            ))),
+        };
     }
     decode_stream_body(body, charset)
         .map(|text| (text, Vec::new()))
@@ -735,32 +770,28 @@ fn decode_stream_body(body: &[u8], charset: SupportedCharset) -> Result<String, 
         SupportedCharset::Utf32 => decode_stream_utf32(body, None),
         SupportedCharset::Utf32Le => decode_stream_utf32(body, Some(false)),
         SupportedCharset::Utf32Be => decode_stream_utf32(body, Some(true)),
-        SupportedCharset::Exotic(_) => {
-            unreachable!("exotic JSON decodes dispatch in decode_json_body")
+        SupportedCharset::Other(_) => {
+            unreachable!("other-charset JSON decodes dispatch in decode_json_body")
         }
     }
 }
 
 /// Strict one-shot decode for the form layer-1 (`QueryDict(bytes)` calls
 /// `bytes.decode(encoding)`): tails fail here (no stream drop). `Ok(None)`
-/// is the `UnicodeDecodeError` whole-body latin-1 fallback; `Err` is any
-/// other exception (the pinned 500). Surrogate spans survive: a raw
-/// `+2AE-` in a utf-7 form body must 400 at the CharField, exactly as a
-/// percent-encoded one does (live probe).
+/// is the `UnicodeDecodeError` whole-body latin-1 fallback; any other
+/// charset decodes strictly with encoding_rs (tier 3), whose failure is
+/// the same latin-1 fallback.
 fn decode_oneshot_strict(
     body: &[u8],
     charset: SupportedCharset,
-) -> Result<Option<super::body_decoders::Decoded>, BodyError> {
-    if let SupportedCharset::Exotic(_) = charset {
-        use super::body_decoders::OneshotFail;
-        return match super::body_decoders::decode_oneshot_strict(body, &charset) {
-            Ok(decoded) => Ok(Some(decoded)),
-            Err(OneshotFail::Fallback) => Ok(None),
-            Err(OneshotFail::Server) => Err(BodyError::ServerError),
-        };
+) -> Result<Option<Decoded>, BodyError> {
+    if let SupportedCharset::Other(encoding) = charset {
+        return Ok(encoding
+            .decode_without_bom_handling_and_without_replacement(body)
+            .map(|text| Decoded {
+                text: text.into_owned(),
+            }));
     }
-    // The nine 627 charsets never emit lone surrogates in strict mode
-    // (unpaired surrogates are errors), so spans stay empty.
     let text = match charset {
         SupportedCharset::Utf8 => std::str::from_utf8(body).ok().map(str::to_owned),
         SupportedCharset::Ascii => {
@@ -777,31 +808,27 @@ fn decode_oneshot_strict(
         SupportedCharset::Utf32 => decode_oneshot_utf32(body, None),
         SupportedCharset::Utf32Le => decode_oneshot_utf32(body, Some(false)),
         SupportedCharset::Utf32Be => decode_oneshot_utf32(body, Some(true)),
-        SupportedCharset::Exotic(_) => {
+        SupportedCharset::Other(_) => {
             unreachable!("handled above")
         }
     };
-    Ok(text.map(|text| super::body_decoders::Decoded {
-        text,
-        surr: Vec::new(),
-    }))
+    Ok(text.map(|text| Decoded { text }))
 }
 
 /// Lossy one-shot decode (`force_str(..., errors="replace")`, `unquote`
 /// runs, RFC 2231 values): undecodable spans become U+FFFD. The BOM
 /// codecs assume little-endian when no BOM is present (verified against
-/// CPython) and incomplete tails become a single U+FFFD. Exotic codecs
-/// that reject `replace` fail with the pinned 500. The spans are always
-/// empty for the nine 627 charsets.
-fn decode_oneshot_replace(
-    bytes: &[u8],
-    charset: SupportedCharset,
-) -> Result<super::body_decoders::Decoded, BodyError> {
-    if let SupportedCharset::Exotic(_) = charset {
-        return super::body_decoders::decode_oneshot_replace(bytes, &charset)
-            .map_err(|_| BodyError::ServerError);
+/// CPython) and incomplete tails become a single U+FFFD. Any other
+/// charset decodes lossily with encoding_rs (tier 3), which never rejects
+/// `replace`, so the old pinned-500 arm is gone.
+fn decode_oneshot_replace(bytes: &[u8], charset: SupportedCharset) -> Result<Decoded, BodyError> {
+    if let SupportedCharset::Other(encoding) = charset {
+        let (text, _) = encoding.decode_without_bom_handling(bytes);
+        return Ok(Decoded {
+            text: text.into_owned(),
+        });
     }
-    Ok(super::body_decoders::Decoded {
+    Ok(Decoded {
         text: match charset {
             SupportedCharset::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
             SupportedCharset::Ascii => bytes
@@ -815,11 +842,10 @@ fn decode_oneshot_replace(
             SupportedCharset::Utf32 => decode_replace_utf32(bytes, None),
             SupportedCharset::Utf32Le => decode_replace_utf32(bytes, Some(false)),
             SupportedCharset::Utf32Be => decode_replace_utf32(bytes, Some(true)),
-            SupportedCharset::Exotic(_) => {
+            SupportedCharset::Other(_) => {
                 unreachable!("handled above")
             }
         },
-        surr: Vec::new(),
     })
 }
 
@@ -1209,63 +1235,36 @@ fn decode_replace_utf32(bytes: &[u8], big_endian: Option<bool>) -> String {
 /// Percent-decode with a charset (`unquote(..., errors="replace")`):
 /// `+` is already handled by the caller for form data. ASCII runs go
 /// through `%XX` unescaping + `decode(encoding, replace)`; non-ASCII
-/// chars pass through verbatim (`_generate_unquoted_parts`). `incoming`
-/// carries layer-1 surrogate spans (byte offsets in `raw`); they can
-/// only sit on non-ASCII placeholders, which pass through 1:1, so each
-/// one re-attaches at the output byte length when its char is copied.
-fn percent_decode_str(
-    raw: &str,
-    charset: &SupportedCharset,
-    incoming: &[(usize, u16)],
-) -> Result<(String, Vec<(usize, u16)>), BodyError> {
+/// chars pass through verbatim (`_generate_unquoted_parts`).
+fn percent_decode_str(raw: &str, charset: &SupportedCharset) -> Result<String, BodyError> {
     // `unquote` fast path (`urllib/parse.py`): no `%` anywhere means the
     // value passes through untouched — the charset decoder never runs.
-    // Without this, `idna` and the bytes transforms (which reject plain
-    // ASCII under `replace`) 500 on %-less values, and punycode mangles
-    // %-less keys (`name` -> controls); verified live against Django.
+    // Without this the decoder would reinterpret %-less values (utf-16
+    // reads `name` as two CJK units); verified live against Django.
     if !raw.contains('%') {
-        return Ok((raw.to_owned(), incoming.to_vec()));
+        return Ok(raw.to_owned());
     }
     let mut out = String::new();
-    let mut surr = Vec::new();
     let mut run = Vec::new();
-    // One ASCII run: decode, append, shift its spans to output offsets.
-    let flush = |out: &mut String,
-                 surr: &mut Vec<(usize, u16)>,
-                 run: &mut Vec<u8>|
-     -> Result<(), BodyError> {
+    let flush = |out: &mut String, run: &mut Vec<u8>| -> Result<(), BodyError> {
         if run.is_empty() {
             return Ok(());
         }
-        let base = out.len();
         let decoded = decode_oneshot_replace(&percent_unescape(run), *charset)?;
         out.push_str(&decoded.text);
-        surr.extend(decoded.surr.iter().map(|(off, v)| (base + off, *v)));
         run.clear();
         Ok(())
     };
-    let mut inc = incoming.iter().peekable();
-    for (at, c) in raw.char_indices() {
+    for c in raw.chars() {
         if c.is_ascii() {
             run.push(c as u8);
             continue;
         }
-        flush(&mut out, &mut surr, &mut run)?;
-        // Spans arrive in offset order; stale ones (no char starts
-        // here — unreachable from strict decoders) drop.
-        while let Some((off, v)) = inc.peek() {
-            if *off > at {
-                break;
-            }
-            if *off == at {
-                surr.push((out.len(), *v));
-            }
-            inc.next();
-        }
+        flush(&mut out, &mut run)?;
         out.push(c);
     }
-    flush(&mut out, &mut surr, &mut run)?;
-    Ok((out, surr))
+    flush(&mut out, &mut run)?;
+    Ok(out)
 }
 
 /// `_unquote_impl`: `%` + two hex digits becomes the byte; anything else
@@ -1306,11 +1305,9 @@ fn hex_val(byte: u8) -> Option<u8> {
 /// generic 500 (`TooManyFieldsSent`).
 fn parse_form_body(body: &[u8], content_type: &str) -> Result<FormBody, BodyError> {
     let charset = content_type_charset(content_type)?;
-    let layer1 =
-        decode_oneshot_strict(body, charset)?.unwrap_or_else(|| super::body_decoders::Decoded {
-            text: body.iter().map(|b| *b as char).collect(),
-            surr: Vec::new(),
-        });
+    let layer1 = decode_oneshot_strict(body, charset)?.unwrap_or_else(|| Decoded {
+        text: body.iter().map(|b| *b as char).collect(),
+    });
     let text = layer1.text;
     if text.is_empty() {
         return Ok(FormBody::default());
@@ -1320,35 +1317,24 @@ fn parse_form_body(body: &[u8], content_type: &str) -> Result<FormBody, BodyErro
         return Err(BodyError::ServerError);
     }
     let mut form = FormBody::default();
-    let mut seg_start = 0;
     for segment in text.split('&') {
-        let seg_end = seg_start + segment.len();
         if !segment.is_empty() {
             let (name, value) = match segment.split_once('=') {
                 Some((name, value)) => (name, value),
                 // No `=`: kept with a blank value (`keep_blank_values`).
                 None => (segment, ""),
             };
-            // Layer-1 spans inside the value re-base to the value start
-            // (`+`→space is byte-preserving, so they stay valid through
-            // the replacement); spans in keys drop (unknown keys never
-            // validate, so a mangled key behaves identically).
-            let val_start = seg_start + name.len() + usize::from(segment.contains('='));
-            let incoming: Vec<(usize, u16)> = layer1
-                .surr
-                .iter()
-                .filter(|(off, _)| *off >= val_start && *off < seg_end)
-                .map(|(off, v)| (off - val_start, *v))
-                .collect();
-            let key = percent_decode_str(&name.replace('+', " "), &charset, &[])?.0;
-            let (text, surr) = percent_decode_str(&value.replace('+', " "), &charset, &incoming)?;
+            let key = percent_decode_str(&name.replace('+', " "), &charset)?;
+            let text = percent_decode_str(&value.replace('+', " "), &charset)?;
             let slot = form.texts.entry(key.clone()).or_default();
             if slot.is_empty() {
                 form.text_order.push(key);
             }
-            slot.push(FormValue { text, surr });
+            slot.push(FormValue {
+                text,
+                surr: Vec::new(),
+            });
         }
-        seg_start = seg_end + 1;
     }
     Ok(form)
 }
@@ -1493,7 +1479,7 @@ fn parse_multipart_parts(
                 }
                 slot.push(FormValue {
                     text: decoded.text,
-                    surr: decoded.surr,
+                    surr: Vec::new(),
                 });
             }
             PartItem::File {
@@ -2068,15 +2054,29 @@ mod codec_tests {
                 "{name}"
             );
         }
-        // Bogus, empty, and punctuation-only degrade to utf-8
-        // (exotic codecs resolve since PIDASHCONV-693 — pinned by
-        // `body_battery::battery_resolution` — so they left this list).
-        // Windows-only aliases (`ansi`/`dbcs` -> `mbcs`) reject like
-        // CPython's LookupError on Linux (review fix: the engine-less
-        // module used to reach the dispatcher `todo!` and panic).
+        // Bogus, empty, punctuation-only and unlabelled names degrade
+        // to utf-8 (no encoding_rs label, like a bogus name under Django).
+        // Labels outside the nine with an encoding_rs label resolve to
+        // `Other` instead (tier 3, PIDASHCONV-1552); labels without one
+        // (utf-7, the bytes transforms) fall through to utf-8.
         for name in ["bogus", "", "---", "utf 8x", "ansi", "dbcs", "ANSI", "oem"] {
             assert_eq!(charset_to_supported(name), SupportedCharset::Utf8, "{name}");
         }
+        for name in ["utf-7", "base64", "rot13", "undefined", "charmap"] {
+            assert_eq!(charset_to_supported(name), SupportedCharset::Utf8, "{name}");
+        }
+        assert_eq!(
+            charset_to_supported("cp1252"),
+            SupportedCharset::Other(encoding_rs::WINDOWS_1252)
+        );
+        assert_eq!(
+            charset_to_supported("CP1252"),
+            SupportedCharset::Other(encoding_rs::WINDOWS_1252)
+        );
+        assert_eq!(
+            charset_to_supported("shift_jis"),
+            SupportedCharset::Other(encoding_rs::SHIFT_JIS)
+        );
         // Interior space collapses to `_`, like CPython (`utf 8` is utf-8).
         assert_eq!(charset_to_supported("utf 8"), SupportedCharset::Utf8);
     }
@@ -2514,39 +2514,58 @@ mod codec_tests {
     #[test]
     fn form_unquote_fast_path() {
         // `unquote` never runs the charset decoder on %-less values
-        // (PIDASHCONV-693): `idna` accepts plain ASCII, and punycode
-        // falls non-ASCII bodies back to latin-1 without mangling the
-        // `name` key (contract TestCharsetExotic693 pins the 201s).
-        let form = |ct: &str, body: &[u8]| match negotiate(ct, body, &CYCLE_BODY_SPEC).unwrap() {
-            NegotiatedBody::Form {
-                map,
-                files,
-                surr: _,
-            } => {
-                assert!(files.is_empty());
-                map
-            }
-            other => panic!("expected form, got {other:?}"),
-        };
-        let map = form(
-            "application/x-www-form-urlencoded; charset=idna",
-            b"name=FIDNA693",
-        );
-        assert_eq!(map["name"], Value::String("FIDNA693".to_owned()));
-        let map = form(
-            "application/x-www-form-urlencoded; charset=punycode",
-            b"name=\xff",
-        );
-        assert_eq!(map["name"], Value::String("ÿ".to_owned()));
-        // With a `%` present the decoder runs, and `idna` rejects.
+        // (`urllib/parse.py`): without the fast path the decoder would
+        // reinterpret them (utf-16 reads `name` as CJK units).
         assert_eq!(
-            negotiate(
-                "application/x-www-form-urlencoded; charset=idna",
-                b"a%20=b",
-                &CYCLE_BODY_SPEC,
+            percent_decode_str("name", &SupportedCharset::Utf16).unwrap(),
+            "name"
+        );
+        assert_ne!(
+            decode_oneshot_replace(b"name", SupportedCharset::Utf16)
+                .unwrap()
+                .text,
+            "name"
+        );
+        // With a `%` present the decoder runs (utf-8 `replace` here).
+        assert_eq!(
+            percent_decode_str("a%20b", &SupportedCharset::Utf8).unwrap(),
+            "a b"
+        );
+    }
+
+    #[test]
+    fn other_charset_tier3_shapes() {
+        // PIDASHCONV-1552: non-627 charsets with an encoding_rs label
+        // decode strictly on the JSON path (stable tier-3 text, not
+        // CPython's bytes), fall back to latin-1 on the strict form
+        // layer-1, and decode lossily under `replace`. (windows-1252
+        // never fails strict: WHATWG maps 0x81 to U+0081 where CPython
+        // leaves it undefined — so the failure pins use Shift_JIS.)
+        assert_eq!(
+            decode_json_body(
+                b"{\"name\": \"a\x82\"}",
+                "application/json; charset=shift_jis"
             )
             .unwrap_err(),
-            BodyError::ServerError,
+            BodyError::ParseDetail(
+                "JSON parse error - 'Shift_JIS' codec can't decode bytes".to_owned()
+            )
+        );
+        assert!(
+            decode_oneshot_strict(b"\x82", SupportedCharset::Other(encoding_rs::SHIFT_JIS))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            decode_oneshot_replace(b"\x82", SupportedCharset::Other(encoding_rs::SHIFT_JIS))
+                .unwrap()
+                .text,
+            "\u{FFFD}"
+        );
+        // Unlabelled charsets decode as utf-8.
+        assert_eq!(
+            decode_json_body(b"{\"a\": 1}", "application/json; charset=utf-7").unwrap(),
+            ("{\"a\": 1}".to_owned(), Vec::new())
         );
     }
 
