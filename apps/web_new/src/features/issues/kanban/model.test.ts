@@ -664,8 +664,8 @@ describe("label ghost reconciliation on the main axis (ISS-028/NEWFRONT-961)", (
   };
 
   /** A labels-grouped board with its None column and the rows it draws. */
-  function labelsBoard(results: Record<string, { rows: IssueListItem[]; total: number }>): BoardData {
-    return groupedBoard(grouped(results), { dimension: "labels", labels, showEmpty: true });
+  function labelsBoard(results: Record<string, { rows: IssueListItem[]; total: number }>, showEmpty = true): BoardData {
+    return groupedBoard(grouped(results), { dimension: "labels", labels, showEmpty });
   }
 
   it("returns a deleted-label row to the None column with matching counts", () => {
@@ -719,8 +719,36 @@ describe("label ghost reconciliation on the main axis (ISS-028/NEWFRONT-961)", (
   it("adds the None column when the labels read dropped it whole", () => {
     const kept = row({ id: "kept", label_ids: [LABEL] });
     const ghost = row({ id: "ghost", label_ids: [] });
-    const board = labelsBoard({ [LABEL]: { rows: [kept], total: 1 } });
+    // With empty groups hidden the envelope's keys stay the whole domain
+    // (NEWFRONT-965), so a labels read with no None bucket yields no None
+    // column for recovery to fill. Recovery itself runs in both modes.
+    const board = labelsBoard({ [LABEL]: { rows: [kept], total: 1 } }, false);
     expect(board.columns.map((column) => column.key)).toEqual([LABEL]);
+    const fallback = flatBoard({
+      ...flatEnvelope,
+      results: [kept, ghost],
+      total_count: 2,
+    });
+    const result = reconcileLabelGhosts(board, fallback, "main");
+    expect(result.columns.map((column) => [column.key, column.title, column.total])).toEqual([
+      [LABEL, "Bug", 1],
+      ["None", "None", 1],
+    ]);
+    expect(result.lanes[0]?.cells["None"]?.rows.map((entry) => entry.id)).toEqual(["ghost"]);
+    expect(result.total).toBe(2);
+  });
+
+  it("recovers a ghost into the synthetic empty None column", () => {
+    const kept = row({ id: "kept", label_ids: [LABEL] });
+    const ghost = row({ id: "ghost", label_ids: [] });
+    // With empty groups visible the builder draws the synthetic None
+    // column at zero total (NEWFRONT-965); recovery fills that column
+    // rather than appending a second one.
+    const board = labelsBoard({ [LABEL]: { rows: [kept], total: 1 } });
+    expect(board.columns.map((column) => [column.key, column.total])).toEqual([
+      [LABEL, 1],
+      ["None", 0],
+    ]);
     const fallback = flatBoard({
       ...flatEnvelope,
       results: [kept, ghost],
