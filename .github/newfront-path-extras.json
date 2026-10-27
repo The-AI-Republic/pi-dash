@@ -34,7 +34,8 @@
     "NEWFRONT-931": { "reason": "PAGE-037 text-align server projection", "paths": ["^packages/editor/src/core/helpers/yjs-utils\\.ts$", "^apps/live/tests/controllers/document-conversion\\.test\\.ts$"] },
     "NEWFRONT-932": { "reason": "PAGE-040 stored-embed structured snapshot read", "paths": ["^apps/api/pi_dash/app/serializers/page\\.py$", "^apps/api/pi_dash/tests/contract/api/test_pages\\.py$"] },
     "NEWFRONT-128": { "reason": "merged issue history endpoint 500 (CMT-013)", "paths": ["^apps/api/pi_dash/app/views/issue/activity\\.py$", "^apps/api/pi_dash/tests/contract/api/test_issue_history\\.py$"] },
-    "NEWFRONT-227": { "reason": "VIEW-022 project view retrieve 404 for unknown ids", "paths": ["^apps/api/pi_dash/app/views/view/base\\.py$", "^apps/api/pi_dash/tests/contract/app/test_view_app\\.py$"] }
+    "NEWFRONT-227": { "reason": "VIEW-022 project view retrieve 404 for unknown ids", "paths": ["^apps/api/pi_dash/app/views/view/base\\.py$", "^apps/api/pi_dash/tests/contract/app/test_view_app\\.py$"] },
+    "NEWFRONT-151": { "reason": "project-invite sign-in join crash (PDASHOSS01-324)", "paths": ["^apps/api/pi_dash/authentication/utils/workspace_project_join\\.py$", "^apps/api/pi_dash/tests/contract/[a-z_]+/test_[a-z_]*(join|invit)[a-z_]*\\.py$"] }
   },
   "oracleIssues": {
     "$comment": "Oracle issues may add data-testid attributes to the old apps, nothing else.",
