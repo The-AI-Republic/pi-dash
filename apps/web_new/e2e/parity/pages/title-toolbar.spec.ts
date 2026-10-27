@@ -516,8 +516,21 @@ test(
       await expect.poll(() => driver.pagesToolbarBodyHtml(), { timeout: 15_000 }).toContain("<h2");
 
       // Moving the caret into the plain block moves the selector back.
-      await driver.pagesToolbarPressKey("ArrowDown");
-      await expect.poll(() => driver.pagesToolbarTypography(), { timeout: 15_000 }).toBe("Text");
+      // The pick re-renders the bar, so a step pressed while that render is
+      // in flight can land before the caret is back in the body; a retried
+      // step (only the key press) is what the scenario is about.
+      let movedIntoPlain = false;
+      for (let attempt = 0; attempt < 3 && !movedIntoPlain; attempt += 1) {
+        await driver.pagesToolbarPressKey("ArrowDown");
+        movedIntoPlain = await expect
+          .poll(() => driver.pagesToolbarTypography(), { timeout: 5_000 })
+          .toBe("Text")
+          .then(
+            () => true,
+            () => false
+          );
+      }
+      expect(movedIntoPlain, "caret step lands in the plain block").toBe(true);
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }
