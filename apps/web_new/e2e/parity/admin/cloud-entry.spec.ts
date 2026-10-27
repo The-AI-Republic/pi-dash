@@ -121,6 +121,10 @@ test(
     // return_to, replacing history. Observed: the retry screen loops.
     await driver.cloudArmSignInCapture();
     await driver.adminCloudStartGateFetchSpy();
+    // Baseline: the tab sits on its blank start entry, so a single goto
+    // to the gate makes the history one longer. A replace handoff keeps
+    // that length; a push handoff adds a second entry.
+    const entriesBefore = await driver.adminHistoryLength();
     await driver.adminCloudOpenRootWithCookies([]);
     if (driver.target === "web_new") {
       // Intended (NEWFRONT-496): the anonymous 401 is already proof of
@@ -133,11 +137,15 @@ test(
       const counts = await driver.adminCloudGateFetchCounts();
       expect(counts.adminCheck).toBe(1);
       expect(counts.probe).toBe(0);
-      // The handoff replaced the gate's entry: going back leaves the
-      // console behind rather than re-entering it (a push would land
-      // the visitor back on /god-mode/ and start the loop again).
+      // The handoff replaced the gate's entry: the tab lands on the
+      // provider stub without growing the history, so going back leaves
+      // the console behind rather than re-entering it (a push would add
+      // an entry and land the visitor back on /god-mode/ for another
+      // bounce).
+      await expect.poll(async () => driver.adminCurrentPath(), { timeout: 30_000 }).toBe("/api/auth/sign-in/");
+      expect(await driver.adminHistoryLength()).toBe(entriesBefore + 1);
       const backAfterHandoff = await driver.adminCloudGoBack();
-      expect(new URL(backAfterHandoff).pathname).not.toBe("/god-mode/");
+      expect(backAfterHandoff).toBe("about:blank");
     } else {
       await driver.adminCloudWaitForHomeBranch("error");
       const facts = await driver.adminCloudHomeFacts();
@@ -184,6 +192,8 @@ test(
       expect(facts.deniedHref).toBe("/");
       expect(facts.retryVisible).toBe(false);
       expect((await driver.adminCloudGateFetchCounts()).probe).toBe(1);
+      // Exactly one way out: a single root link, nothing else to click.
+      expect(await driver.page.getByRole("link").count()).toBe(1);
       expect(await driver.page.getByRole("button").count()).toBe(0);
       expect(await driver.cloudSignInRequests()).toEqual([]);
       // Terminal means terminal: the gate stays on its own address
@@ -252,10 +262,10 @@ test(
 
 test(
   specTitle(
-    ["ADM-079"],
+    ["ADM-078", "ADM-079"],
     "bug: NEWFRONT-496 a probe blip reaches the retry screen unprobed (intended: probed, retried)"
   ),
-  { tag: specTags(["ADM-079"]) },
+  { tag: specTags(["ADM-078", "ADM-079"]) },
   async ({ driver }: { driver: ParityDriver }) => {
     // A signed-in non-admin reaches the probe (the check answers 403),
     // then the probe blips. Guessing "anonymous" here would hand a
