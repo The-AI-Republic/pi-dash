@@ -9468,12 +9468,24 @@ export class WebNewDriver implements ParityDriver {
       await this.page.getByRole("button", { name: "--", exact: true }).last().click();
       await this.layoutsWaitForCount(popup, 1, WEB_NEW_LAYOUTS_WAIT_MS);
     }
-    const found = await this.layoutsWaitForCount(
-      async () => this.page.getByRole("checkbox", { name: valueLabel, exact: true }).count(),
-      1,
-      WEB_NEW_LAYOUTS_WAIT_MS
-    );
-    if (found === 0) throw new Error(`[parity] no filter value ${valueLabel}.`);
+    // Long value lists cap at five rows behind "View all", so a wanted
+    // value past the cap needs one expansion first. The click fires at
+    // most once: re-clicking while React re-renders would collapse the
+    // list again and oscillate forever.
+    const values = async (): Promise<number> =>
+      this.page.getByRole("checkbox", { name: valueLabel, exact: true }).count();
+    const viewAll = this.page.getByRole("button", { name: "View all", exact: true });
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    let expanded = false;
+    for (;;) {
+      if ((await values()) > 0) break;
+      if (!expanded && (await viewAll.count()) > 0) {
+        await viewAll.first().click({ timeout: WebNewDriver.WAIT_MS });
+        expanded = true;
+      }
+      if (Date.now() >= deadline) throw new Error(`[parity] no filter value ${valueLabel}.`);
+      await this.page.waitForTimeout(500);
+    }
     await this.page.getByRole("checkbox", { name: valueLabel, exact: true }).first().click();
   }
 

@@ -323,109 +323,170 @@ describe("rich filter operators", () => {
 });
 
 describe("rich filter add-condition", () => {
-  /** A filter row with one pill, an auto-opened value popup, and the wanted value. */
-  function autoOpenPage(clicks: string[]): Page {
+  interface AddConditionHooks {
+    popup: () => boolean;
+    checkbox: () => boolean;
+    viewAll: () => boolean;
+    onViewAll?: () => void;
+    onPlaceholder?: () => void;
+    clicks: string[];
+    tick?: () => void;
+  }
+
+  function addConditionPage(hooks: AddConditionHooks): Page {
     return pageOf({
       role: (role, options) => {
         const name = (options as { name?: unknown } | undefined)?.name;
         if (role === "button" && name === "Remove filter") return locator();
         if (role === "button" && name === "Add filter") {
-          return locator({ click: async () => void clicks.push("add") });
+          return locator({ click: async () => void hooks.clicks.push("add") });
         }
-        if (role === "option") return locator({ click: async () => void clicks.push(`property:${String(name)}`) });
-        if (role === "checkbox") return locator({ click: async () => void clicks.push(`value:${String(name)}`) });
+        if (role === "option") {
+          return locator({ click: async () => void hooks.clicks.push(`property:${String(name)}`) });
+        }
         if (role === "button" && name === "--") {
-          return locator({ click: async () => void clicks.push("placeholder") });
+          return locator({
+            click: async () => {
+              hooks.clicks.push("placeholder");
+              hooks.onPlaceholder?.();
+            },
+          });
+        }
+        if (role === "button" && name === "View all") {
+          if (!hooks.viewAll()) return locator({ count: async () => 0 });
+          return locator({
+            click: async () => {
+              hooks.clicks.push("view-all");
+              hooks.onViewAll?.();
+            },
+          });
+        }
+        if (role === "checkbox") {
+          if (!hooks.checkbox()) return locator({ count: async () => 0 });
+          return locator({ click: async () => void hooks.clicks.push(`value:${String(name)}`) });
         }
         return locator({ count: async () => 0 });
       },
       locator: (selector) =>
-        selector === '[data-testid^="rich-section-"]' ? locator() : locator({ count: async () => 0 }),
+        selector === '[data-testid^="rich-section-"]'
+          ? locator({ count: async () => (hooks.popup() ? 1 : 0) })
+          : locator({ count: async () => 0 }),
+      tick: hooks.tick,
     });
   }
 
-  it("picks the value without touching the placeholder when the popup auto-opens", async () => {
+  function tickedClock(): { tick: () => void; restore: () => void } {
+    let now = 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    return {
+      tick: () => {
+        now += 60_000;
+      },
+      restore: () => spy.mockRestore(),
+    };
+  }
+
+  it("picks the value without helpers when the popup auto-opens", async () => {
     const clicks: string[] = [];
-    await new WebNewDriver(autoOpenPage(clicks)).layoutsFilterAddConditionViaRow("State group", "Started");
+    const page = addConditionPage({
+      popup: () => true,
+      checkbox: () => true,
+      viewAll: () => false,
+      clicks,
+    });
+    await new WebNewDriver(page).layoutsFilterAddConditionViaRow("State group", "Started");
     expect(clicks).toEqual(["add", "property:State group", "value:Started"]);
   });
 
   it("opens the value list by hand when the popup stays closed", async () => {
-    let now = 1_000;
-    const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const clock = tickedClock();
     try {
       const clicks: string[] = [];
       let popup = false;
-      const page = autoOpenPage(clicks);
-      const stub = pageOf({
-        role: (role, options) => {
-          const name = (options as { name?: unknown } | undefined)?.name;
-          if (role === "button" && name === "--") {
-            return locator({
-              click: async () => {
-                clicks.push("placeholder");
-                popup = true;
-              },
-            });
-          }
-          return page.getByRole(role, options);
-        },
-        locator: (selector) =>
-          selector === '[data-testid^="rich-section-"]'
-            ? locator({ count: async () => (popup ? 1 : 0) })
-            : locator({ count: async () => 0 }),
-        tick: () => {
-          now += 60_000;
-        },
+      const page = addConditionPage({
+        popup: () => popup,
+        checkbox: () => true,
+        viewAll: () => false,
+        onPlaceholder: () => void (popup = true),
+        clicks,
+        tick: clock.tick,
       });
-      await new WebNewDriver(stub).layoutsFilterAddConditionViaRow("State", "Todo");
+      await new WebNewDriver(page).layoutsFilterAddConditionViaRow("State", "Todo");
       expect(clicks).toEqual(["add", "property:State", "placeholder", "value:Todo"]);
     } finally {
-      spy.mockRestore();
+      clock.restore();
+    }
+  });
+
+  it("expands a capped list before picking", async () => {
+    const clicks: string[] = [];
+    let revealed = false;
+    const page = addConditionPage({
+      popup: () => true,
+      checkbox: () => revealed,
+      viewAll: () => !revealed,
+      onViewAll: () => void (revealed = true),
+      clicks,
+    });
+    await new WebNewDriver(page).layoutsFilterAddConditionViaRow("State", "Parity EFilt x");
+    expect(clicks).toEqual(["add", "property:State", "view-all", "value:Parity EFilt x"]);
+  });
+
+  it("expands at most once even when the button sticks around", async () => {
+    const clock = tickedClock();
+    try {
+      const clicks: string[] = [];
+      const page = addConditionPage({
+        popup: () => true,
+        checkbox: () => false,
+        viewAll: () => true,
+        clicks,
+        tick: clock.tick,
+      });
+      await expect(new WebNewDriver(page).layoutsFilterAddConditionViaRow("State", "Missing")).rejects.toThrow(
+        "[parity] no filter value Missing."
+      );
+      expect(clicks.filter((entry) => entry === "view-all")).toHaveLength(1);
+    } finally {
+      clock.restore();
     }
   });
 
   it("throws when no value ever appears", async () => {
-    let now = 1_000;
-    const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const clock = tickedClock();
     try {
-      const page = pageOf({
-        role: (role, options) => {
-          const name = (options as { name?: unknown } | undefined)?.name;
-          if (role === "button" && (name === "Remove filter" || name === "Add filter" || name === "--")) {
-            return locator();
-          }
-          if (role === "option") return locator();
-          return locator({ count: async () => 0 });
-        },
-        locator: () => locator({ count: async () => 0 }),
-        tick: () => {
-          now += 60_000;
-        },
+      const page = addConditionPage({
+        popup: () => true,
+        checkbox: () => false,
+        viewAll: () => false,
+        clicks: [],
+        tick: clock.tick,
       });
       await expect(new WebNewDriver(page).layoutsFilterAddConditionViaRow("State group", "Started")).rejects.toThrow(
         "[parity] no filter value Started."
       );
     } finally {
-      spy.mockRestore();
+      clock.restore();
     }
   });
 
   it("throws when no pill is seeded", async () => {
-    let now = 1_000;
-    const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const clock = tickedClock();
     try {
-      const page = pageOf({
-        role: () => locator({ count: async () => 0 }),
-        tick: () => {
-          now += 60_000;
+      const nopills = pageOf({
+        role: (role, options) => {
+          if (role === "button" && (options as { name?: unknown } | undefined)?.name === "Remove filter") {
+            return locator({ count: async () => 0 });
+          }
+          return locator();
         },
+        tick: clock.tick,
       });
-      await expect(new WebNewDriver(page).layoutsFilterAddConditionViaRow("State group", "Started")).rejects.toThrow(
+      await expect(new WebNewDriver(nopills).layoutsFilterAddConditionViaRow("State group", "Started")).rejects.toThrow(
         "[parity] no filter pill: seed one before adding a condition."
       );
     } finally {
-      spy.mockRestore();
+      clock.restore();
     }
   });
 });
