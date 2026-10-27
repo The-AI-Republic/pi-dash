@@ -6,7 +6,7 @@
 // workspace-scoped route with no per-draft address. Rows: DRAFT-001,
 // DRAFT-002, DRAFT-007, DRAFT-024. Green on apps/web first.
 import { test, expect } from "../fixtures";
-import { ROLE, browserSessionCookies, serverCreateDraft, serverDraftsPage } from "../helpers/api";
+import { ROLE, browserSessionCookies, serverCreateDraft, serverDraftsPage, serverSeedWorkType } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import { draftsHarness, draftsOpenAs, draftsSeat } from "./support";
 
@@ -86,21 +86,35 @@ test(
 
 // The row's type-identifier component renders an empty fragment, so rows
 // never show what kind of item the draft will become; DRAFT-007 requires
-// the mark. Pinned here until NEWFRONT-301 lands the fix.
+// the mark. Spec §7 makes the mark the target, so the oracle leg pins the
+// missing mark (NEWFRONT-301) and the web_new leg asserts it renders — and
+// that an untyped row still shows none.
 test(
   specTitle(["DRAFT-007"], "bug: rows carry no work-type mark (NEWFRONT-301)"),
   { tag: specTags(["DRAFT-007"]) },
   async ({ driver }) => {
     const harness = await draftsHarness("parity-d7bug");
-    const { owner, workspaceSlug, projectId } = harness;
-    const name = `D7 Untyped ${harness.tag}`;
-    await serverCreateDraft(workspaceSlug, owner.cookie, { name, project_id: projectId });
+    const { owner, workspaceSlug, projectId, projectIdentifier } = harness;
+    const typed = `D7 Typed ${harness.tag}`;
+    const untyped = `D7 Untyped ${harness.tag}`;
+    const workTypeId = await serverSeedWorkType(workspaceSlug, `Work type ${harness.tag}`);
+    await serverCreateDraft(workspaceSlug, owner.cookie, { name: typed, project_id: projectId, type: workTypeId });
+    await serverCreateDraft(workspaceSlug, owner.cookie, { name: untyped, project_id: projectId });
+    const isTarget = driver.target === "web_new";
 
-    await test.step("the marker area holds only the project button", async () => {
-      await draftsOpenAs(driver, harness);
-      await expect.poll(() => driver.draftRowNames(), { timeout: 60_000 }).toContain(name);
-      expect(await driver.draftRowTypeMarkPresent(name)).toBe(false);
-    });
+    await test.step(
+      isTarget
+        ? "a typed row carries the mark and the title; an untyped one does not"
+        : "the marker area holds only the project button",
+      async () => {
+        await draftsOpenAs(driver, harness);
+        await expect.poll(() => driver.draftRowNames(), { timeout: 60_000 }).toContain(typed);
+        expect(await driver.draftRowTypeMarkPresent(typed)).toBe(isTarget);
+        expect(await driver.draftRowNames()).toContain(typed);
+        expect(await driver.draftRowProjectMarker(typed)).toBe(projectIdentifier);
+        expect(await driver.draftRowTypeMarkPresent(untyped)).toBe(false);
+      }
+    );
   }
 );
 

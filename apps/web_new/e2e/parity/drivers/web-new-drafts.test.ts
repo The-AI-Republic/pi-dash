@@ -22,6 +22,7 @@ const ACTIONS = [
   "isDisabled",
   "click",
   "dblclick",
+  "hover",
   "dispatchEvent",
   "waitFor",
   "textContent",
@@ -53,16 +54,26 @@ class Recorder {
   readonly calls: Call[] = [];
   // Unstated paths answer with their type's quiet value, so a test only
   // has to describe the paths it cares about.
-  respond: Respond = ({ method }) => {
+  /** Whether a row's quick menu is open; the trigger toggles it. */
+  private menuOpen = false;
+
+  /** The quiet answers; a test's own `respond` falls through to these. */
+  defaults: Respond = ({ method, path }) => {
     if (method === "count") return 0;
     if (method === "allTextContents" || method === "allInnerTexts") return [];
     if (method === "textContent" || method === "inputValue" || method === "title" || method === "innerText") {
       return "";
     }
-    if (method === "getAttribute") return null;
+    if (method === "getAttribute") {
+      // The row's ellipsis reports whether its menu is open, so the driver
+      // can open it without toggling it shut.
+      return path.includes("Actions for") ? String(this.menuOpen) : null;
+    }
     if (method === "isDisabled" || method === "isVisible") return false;
     return undefined;
   };
+
+  respond: Respond = (call) => this.defaults(call);
 
   locator(path: string): Locator {
     const node: Record<string, unknown> = {};
@@ -73,6 +84,10 @@ class Recorder {
       node[method] = async (...args: unknown[]) => {
         const call = { path, method, args };
         this.calls.push(call);
+        // Play the row menu's state: the ellipsis toggles it, and choosing
+        // an entry closes it.
+        if (method === "click" && path.includes("Actions for")) this.menuOpen = !this.menuOpen;
+        if (method === "click" && path.includes("menuitem")) this.menuOpen = false;
         return this.respond(call);
       };
     }
@@ -411,11 +426,45 @@ describe("block quick actions", () => {
 });
 
 describe("the modal project chip", () => {
-  it("reads the chip's text", async () => {
+  // The chip pairs a decorative project-mark initial (aria-hidden) with the
+  // project name; the name is the non-hidden span, never the tile glyph.
+  const LABEL_SPAN = "span:not([aria-hidden=";
+  const isLabel = (path: string): boolean => path.includes(LABEL_SPAN);
+  const isChip = (path: string): boolean => path.endsWith(CHIP);
+
+  it("reads the chip's name from its label span, not the hidden mark", async () => {
     const recorder = new Recorder();
-    recorder.respond = ({ method }) => (method === "textContent" ? " Atlas " : undefined);
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && isLabel(path)) return 1;
+      if (method === "textContent" && isLabel(path)) return " Atlas ";
+      // The tile glyph would leak if the whole button were read.
+      if (method === "textContent" && isChip(path)) return " AAtlas ";
+      return undefined;
+    };
     await expect(new WebNewDriver(recorder.page()).modalProjectName()).resolves.toBe("Atlas");
-    expectTrace(recorder.trace(), ["waitFor", CHIP, "textContent", CHIP]);
+    expectTrace(recorder.trace(), ["waitFor", CHIP, "count", LABEL_SPAN, "textContent", LABEL_SPAN]);
+  });
+
+  it("falls back to the chip's own text when it has no label span", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && isLabel(path)) return 0;
+      if (method === "textContent" && isChip(path)) return " Atlas ";
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).modalProjectName()).resolves.toBe("Atlas");
+    expectTrace(recorder.trace(), ["waitFor", CHIP, "count", LABEL_SPAN, "textContent", CHIP]);
+  });
+
+  it("answers an empty name when the chip shows only its mark", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && isLabel(path)) return 1;
+      if (method === "textContent" && isLabel(path)) return null;
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).modalProjectName()).resolves.toBe("");
+    expectTrace(recorder.trace(), ["waitFor", CHIP, "count", LABEL_SPAN, "textContent", LABEL_SPAN]);
   });
 
   it("picks an option and confirms the chip flipped", async () => {
@@ -425,7 +474,8 @@ describe("the modal project chip", () => {
       if (method === "click" && path.includes('getByRole("option"') && path.includes("Atlas")) {
         picked = true;
       }
-      if (method === "textContent") return picked ? "Atlas" : "Current";
+      if (method === "count" && isLabel(path)) return 1;
+      if (method === "textContent" && isLabel(path)) return picked ? "Atlas" : "Current";
       return undefined;
     };
     await new WebNewDriver(recorder.page()).selectModalProject("Atlas");
@@ -440,8 +490,10 @@ describe("the modal project chip", () => {
       "Atlas",
       "waitFor",
       CHIP,
+      "count",
+      LABEL_SPAN,
       "textContent",
-      CHIP,
+      LABEL_SPAN,
     ]);
   });
 });
@@ -496,6 +548,189 @@ describe("discard guard and modal fields (DRAFT-005/006)", () => {
       return undefined;
     };
     await expect(new WebNewDriver(nullish.page()).createTitleError()).resolves.toBe("");
+  });
+});
+
+describe("row menus, quick actions and deletes (DRAFT-009/010/011)", () => {
+  const MENU = 'page.getByRole("menu"';
+
+  it("reads the ellipsis menu's entries, then closes it", async () => {
+    const recorder = new Recorder();
+    recorder.respond = (call) =>
+      call.method === "allInnerTexts" && call.path.includes(MENU)
+        ? [" Edit ", "", "Make a copy"]
+        : recorder.defaults(call);
+    await expect(new WebNewDriver(recorder.page()).draftRowMenuEntries("One")).resolves.toEqual([
+      "Edit",
+      "Make a copy",
+    ]);
+    expectTrace(recorder.trace(), [
+      "waitFor",
+      NAME_BLOCK,
+      "hover",
+      NAME_BLOCK,
+      "click",
+      "Actions for One",
+      "waitFor",
+      MENU,
+      "allInnerTexts",
+      MENU,
+      "press keyboard",
+    ]);
+    expect(recorder.pressed()).toEqual(["Escape"]);
+  });
+
+  it("opens the same menu by right-click and reads its entries", async () => {
+    const recorder = new Recorder();
+    recorder.respond = (call) =>
+      call.method === "allInnerTexts" && call.path.includes(MENU) ? ["Edit", "Delete"] : recorder.defaults(call);
+    await expect(new WebNewDriver(recorder.page()).draftContextMenuEntries("One")).resolves.toEqual(["Edit", "Delete"]);
+    expectTrace(recorder.trace(), [
+      "waitFor",
+      NAME_BLOCK,
+      "click",
+      NAME_BLOCK,
+      "allInnerTexts",
+      MENU,
+      "press keyboard",
+    ]);
+    const rightClick = recorder.calls.find((call) => call.method === "click");
+    expect((rightClick?.args[0] as { button?: string } | undefined)?.button).toBe("right");
+  });
+
+  it("translates a catalog id into the label the menu renders", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).draftRowMenuClick("One", "make_a_copy");
+    await new WebNewDriver(recorder.page()).draftRowMenuClick("One", "Delete");
+    expectTrace(recorder.clicks(), ["Actions for One", "Make a copy", "Actions for One", "Delete"]);
+  });
+
+  it("answers whether the quick action shows after hovering the row", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => {
+      if (method === "count") return 1;
+      if (method === "isVisible") return true;
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).draftRowQuickActionVisible("One")).resolves.toBe(true);
+    expectTrace(recorder.trace(), ["waitFor", NAME_BLOCK, "hover", NAME_BLOCK, "count", "isVisible"]);
+
+    const hidden = new Recorder();
+    hidden.respond = ({ method, path }) => {
+      if (method === "isVisible" && path.includes("Actions for One")) return false;
+      if (method === "count") return 1;
+      return undefined;
+    };
+    await expect(new WebNewDriver(hidden.page()).draftRowQuickActionVisible("One")).resolves.toBe(false);
+  });
+
+  it("cancels the delete confirmation without confirming", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).cancelDraftDelete("One");
+    expectTrace(recorder.clicks(), ["Actions for One", "menuitem", "Delete", 'getByRole("dialog")', "Cancel"]);
+    // The menu's own Delete entry is the only Delete click.
+    expect(recorder.clicks().filter((path) => path.includes('"name":"Delete"'))).toHaveLength(1);
+  });
+
+  it("confirms deletion inside the dialog headed Delete draft", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).confirmDraftDelete();
+    const traces = recorder.trace();
+    expectTrace(traces, ["waitFor", 'getByRole("dialog")', 'getByRole("button"', "Delete"]);
+    // The dialog is scoped by its heading, not by every dialog on the page.
+    expect(traces.filter((line) => line.startsWith("waitFor")).every((line) => line.includes("filter("))).toBe(true);
+  });
+
+  it("routes the old delete-by-name path through the confirmation", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).deleteDraftByName("One");
+    expectTrace(recorder.clicks(), ["Actions for One", "menuitem", "Delete", 'getByRole("dialog")', "Delete"]);
+  });
+
+  it("reads a refused publish from the toast stack", async () => {
+    const stack = new Recorder();
+    stack.respond = ({ method, path }) => {
+      if (method === "count" && path.includes("toast-stack")) return 1;
+      if (method === "textContent" && path.includes("toast-stack")) return " Project is required ";
+      return undefined;
+    };
+    await expect(new WebNewDriver(stack.page()).draftPublishError()).resolves.toBe("Project is required");
+    expect(stack.trace().some((line) => line.includes("toast-stack"))).toBe(true);
+  });
+});
+
+describe("draft edit and draft save targets", () => {
+  it("double-clicks the row's title so the property strip never opens", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).openDraftForEdit("One");
+    expectTrace(recorder.trace(), ["waitFor", NAME_BLOCK, "dblclick", "p[data-draft-name]", 'getByRole("dialog")']);
+    expect(recorder.clicks().filter((path) => path.includes("data-draft-property"))).toEqual([]);
+  });
+
+  it("saves inside the guard dialog, not the form behind it", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).confirmSaveDraft();
+    expectTrace(recorder.trace(), ["waitFor", 'getByRole("dialog"', "Save this draft?", "click", "Save to Drafts"]);
+    // The Save click is scoped to the guard; the bare page button is never used.
+    expect(recorder.clicks()).toHaveLength(1);
+  });
+});
+
+describe("picker settling (DRAFT-012–019)", () => {
+  const STATUS = 'getByRole("status")';
+
+  it("waits out a loading status before reading options", async () => {
+    const recorder = new Recorder();
+    let statusReads = 0;
+    recorder.respond = ({ method, path }) => {
+      if (method === "allInnerTexts" && path.includes(STATUS)) {
+        statusReads += 1;
+        // Still fetching on the first read, settled-but-empty afterwards.
+        return statusReads === 1 ? ["Loading states"] : ["No matching results"];
+      }
+      if (method === "count" && path.includes('getByRole("option")')) return 0;
+      if (method === "count" && path.includes("Project labels")) return 0;
+      if (method === "count" && path.includes('getByRole("alert")')) return 0;
+      if (method === "allInnerTexts") return [" Doing "];
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).pickerOptionTexts()).resolves.toEqual(["Doing"]);
+    // It polled more than once, then read the label list.
+    expect(statusReads).toBeGreaterThan(1);
+  });
+
+  it("reads the label list when the popup renders no listbox", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "allInnerTexts" && path.includes(STATUS)) return ["No matching results"];
+      if (method === "count" && path.includes("Project labels")) return 1;
+      if (method === "allInnerTexts") return ["Bug", " "];
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).pickerOptionTexts()).resolves.toEqual(["Bug"]);
+    expectTrace(recorder.trace(), ["allInnerTexts", "Project labels", "allInnerTexts"]);
+  });
+
+  it("picks through the label list when no listbox mounts", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "allInnerTexts" && path.includes(STATUS)) return ["No matching results"];
+      if (method === "count" && path.includes("Project labels")) return 1;
+      return undefined;
+    };
+    await new WebNewDriver(recorder.page()).pickerPick("Bug");
+    expect(recorder.clicks().some((path) => path.includes("Project labels") && path.includes("Bug"))).toBe(true);
+  });
+
+  it("gives up quietly when the popup reports a load error", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && path.includes('getByRole("alert")')) return 1;
+      if (method === "count") return 0;
+      if (method === "allInnerTexts") return [];
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).pickerOptionTexts()).resolves.toEqual([]);
   });
 });
 

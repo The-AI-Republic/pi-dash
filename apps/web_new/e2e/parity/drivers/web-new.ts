@@ -382,6 +382,18 @@ function schedulerParityToast(toast: { title: string; message: string }): { titl
   return toast;
 }
 
+/**
+ * The row menu's catalog ids as the labels the menu renders
+ * (drafts spec §3.1, DRAFT-009; NEWFRONT-298). Scenarios name entries by
+ * their stable ids; the product shows translated text.
+ */
+const DRAFT_ROW_ACTION_LABEL_IDS: Readonly<Record<string, string>> = {
+  edit: "Edit",
+  make_a_copy: "Make a copy",
+  move_to_project: "Move to project",
+  delete: "Delete",
+};
+
 function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
 }
@@ -2300,7 +2312,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async confirmSaveDraft(): Promise<void> {
-    await this.page.getByRole("dialog").getByRole("button", { name: "Save to Drafts", exact: true }).last().click();
+    // Scoped to the guard by its own heading: the draft form behind it
+    // also renders a Save to Drafts, and `.last()` on the whole page can
+    // answer the form's button before the guard finishes mounting.
+    const guard = this.page.getByRole("dialog", { name: "Save this draft?" });
+    await guard.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await guard.getByRole("button", { name: "Save to Drafts", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async cancelDiscardDialog(): Promise<void> {
@@ -2320,12 +2337,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openDraftForEdit(name: string): Promise<void> {
+    // Double-click the title, not the block's centre: the centre lands in
+    // the inline property strip, where the second click would open a
+    // picker instead of the editor. The title bubbles to the row's
+    // double-click handler, which is the gesture the screen documents.
     const block = this.draftBlock(name);
     await block.waitFor({ timeout: 60_000 });
-    // Double-click the name, not the block's center: the center can land
-    // on an inline property control (state, labels, dates), which opens
-    // its picker instead of the edit dialog (ISS-130).
-    await block.locator("p[data-draft-name]").dblclick();
+    await block.locator("p[data-draft-name]").first().dblclick({ timeout: WebNewDriver.WAIT_MS });
     await this.draftDialogTitle().waitFor({ timeout: 60_000 });
   }
 
@@ -2620,7 +2638,7 @@ export class WebNewDriver implements ParityDriver {
 
   async deleteDraftByName(name: string): Promise<void> {
     await this.openDraftMenu(name, "Delete");
-    await this.page.getByRole("button", { name: "Delete", exact: true }).last().click();
+    await this.confirmDraftDelete();
   }
 
   async signInWithPasswordRetry(email: string, password: string): Promise<void> {
@@ -2647,16 +2665,21 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalProjectName(): Promise<string> {
-    // Read the chip's name span, not the whole chip: the trigger also
-    // carries the project mark, whose initial would prefix the name
-    // ("PParity Project", ISS-130).
+    return this.modalProjectChipLabel();
+  }
+
+  /**
+   * The chip's label text: the trigger also carries the project mark,
+   * whose initial would prefix the name ("PParity Project", ISS-130), so
+   * prefer the non-hidden label span and fall back to the raw text.
+   */
+  private async modalProjectChipLabel(): Promise<string> {
     const chip = this.modalProjectChip();
     await chip.waitFor({ timeout: 30_000 });
-    const label = chip.locator("span.truncate");
-    if ((await label.count()) > 0) {
-      return ((await label.first().textContent()) ?? "").replace(/\s+/g, " ").trim();
-    }
-    return ((await chip.textContent()) ?? "").replace(/\s+/g, " ").trim();
+    const labels = chip.locator(':scope > span:not([aria-hidden="true"])');
+    const text =
+      (await labels.count()) > 0 ? await labels.first().textContent() : await chip.textContent();
+    return (text ?? "").replace(/\s+/g, " ").trim();
   }
 
   async selectModalProject(name: string): Promise<void> {
@@ -2664,7 +2687,7 @@ export class WebNewDriver implements ParityDriver {
     const option = this.page.getByRole("option", { name, exact: true }).first();
     await option.waitFor({ timeout: 30_000 });
     await option.click();
-    await expect.poll(() => this.modalProjectName(), { timeout: 30_000 }).toBe(name);
+    await expect.poll(() => this.modalProjectChipLabel(), { timeout: 30_000 }).toBe(name);
   }
 
   /** The create/edit dialog: scoped by its title field, since toasts and
@@ -2729,11 +2752,44 @@ export class WebNewDriver implements ParityDriver {
     return this.draftPropertyTrigger(name, property);
   }
 
+  /** The row's hover quick-action trigger (the ellipsis labelled for the row). */
+  private draftQuickActionTrigger(name: string): Locator {
+    return this.draftBlock(name).getByRole("button", { name: `Actions for ${name}`, exact: true });
+  }
+
+  /** Open one row's quick menu from the block it belongs to. */
+  private async openDraftQuickMenu(block: Locator, name: string): Promise<void> {
+    // The trigger sits in a hover group; hovering the block first puts it
+    // in view the way a pointer would, then the click opens the menu.
+    await block.hover({ timeout: WebNewDriver.WAIT_MS });
+    const trigger = block.getByRole("button", { name: `Actions for ${name}`, exact: true });
+    // The trigger toggles. A menu still open from an earlier read would be
+    // closed by an unconditional click, so only a collapsed trigger is
+    // clicked; an open one is left exactly as the user would find it.
+    if ((await trigger.getAttribute("aria-expanded")) !== "true") {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await expect.poll(() => trigger.getAttribute("aria-expanded"), { timeout: WebNewDriver.WAIT_MS }).toBe("true");
+  }
+
+  /** The open row menu's item labels, in render order. */
+  private async draftMenuLabels(): Promise<string[]> {
+    const menu = this.page.getByRole("menu", { name: "Draft actions" }).first();
+    await menu.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await menu.getByRole("menuitem").allInnerTexts();
+    return texts.map((text) => WebNewDriver.cleanDraftText(text)).filter((text) => text.length > 0);
+  }
+
+  /** The delete confirmation scoped to its own heading. */
+  private draftDeleteDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ has: this.page.getByRole("heading", { name: "Delete draft" }) });
+  }
+
   /** Open a draft's ellipsis menu and choose one entry. */
   private async openDraftMenu(name: string, entry: string): Promise<void> {
     const block = this.draftBlock(name);
     await block.waitFor({ timeout: 60_000 });
-    await block.getByRole("button", { name: `Actions for ${name}`, exact: true }).click();
+    await this.openDraftQuickMenu(block, name);
     await this.page.getByRole("menuitem", { name: entry, exact: true }).first().click();
   }
 
@@ -5335,7 +5391,39 @@ export class WebNewDriver implements ParityDriver {
     return this.propertyRow(label).getByRole("button").first();
   }
 
+  /**
+   * Wait for an open picker to have something to read: a listbox option,
+   * the popup's empty or error line, or a label-list button (that picker
+   * renders no listbox). Gives up quietly so a caller's own assertion
+   * reports what was missing.
+   */
+  private async settlePickerRead(): Promise<void> {
+    const popup = this.pickerPopup();
+    // Bounded polls: a picker that never mounts a popup must not hold the
+    // caller for the whole wait, and the count keeps the loop small.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (let poll = 0; poll < 40; poll += 1) {
+      // The kit marks both states with role="status": the fetching row
+      // carries the spinner's "Loading …" label, the settled-but-empty
+      // row carries the empty text. Only the first means "wait".
+      const statusTexts = await popup.getByRole("status").allInnerTexts();
+      const statuses = Array.isArray(statusTexts) ? statusTexts : [];
+      const loading = statuses.some((text) => text.trim().startsWith("Loading"));
+      const options = await this.pickerListbox().getByRole("option").count();
+      const labels = await this.page.locator('ul[aria-label="Project labels"]').getByRole("button").count();
+      const failed = (await popup.getByRole("alert").count()) > 0;
+      // Settled: rows to read, an empty row, or a load error.
+      if (failed || options > 0 || labels > 0 || (!loading && statuses.length > 0)) return;
+      if (Date.now() > deadline) return;
+      await this.page.waitForTimeout(150);
+    }
+  }
+
   async pickerOptionTexts(): Promise<string[]> {
+    // A picker reads its rows lazily on open, so the listbox appears a
+    // fetch later; wait for the popup to have rows (or say it has none)
+    // before reading it.
+    await this.settlePickerRead();
     // Kit combobox options pair an aria-hidden glyph with the label, so
     // only the label spans are read: avatar initials would otherwise
     // glue onto member names. The label picker renders no listbox; its
@@ -5379,6 +5467,7 @@ export class WebNewDriver implements ParityDriver {
   async pickerPick(text: string): Promise<void> {
     // The kit popup mounts a moment after the trigger click; wait for the
     // option list before deciding the picker is the label list instead.
+    await this.settlePickerRead();
     const listbox = this.page.getByRole("listbox").last();
     if ((await listbox.count()) > 0) {
       await listbox.getByRole("option", { name: text }).first().click({ timeout: 30_000 });
@@ -27255,26 +27344,58 @@ export class WebNewDriver implements ParityDriver {
     await block.waitFor({ timeout: 60_000 });
     return (await block.locator("[data-draft-type-mark]").count()) > 0;
   }
-  async draftRowMenuEntries(_name: string): Promise<string[]> {
-    return todo("draftRowMenuEntries");
+  async draftRowMenuEntries(name: string): Promise<string[]> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    await this.openDraftQuickMenu(block, name);
+    const entries = await this.draftMenuLabels();
+    await this.page.keyboard.press("Escape");
+    return entries;
   }
-  async draftContextMenuEntries(_name: string): Promise<string[]> {
-    return todo("draftContextMenuEntries");
+  async draftContextMenuEntries(name: string): Promise<string[]> {
+    // The right-click opener renders the same catalog as the hover
+    // ellipsis (draftActions.ts drives both), so this reads the open
+    // menu's item names rather than asserting markup.
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    await block.click({ button: "right", timeout: WebNewDriver.WAIT_MS });
+    const entries = await this.draftMenuLabels();
+    await this.page.keyboard.press("Escape");
+    return entries;
   }
-  async draftRowMenuClick(_name: string, _entry: string): Promise<void> {
-    return todo("draftRowMenuClick");
+  async draftRowMenuClick(name: string, entry: string): Promise<void> {
+    // Entries arrive as the shared catalog's ids (edit, make_a_copy,
+    // move_to_project, delete); menu items carry the labels, so ids are
+    // translated here and an already-labelled call passes through.
+    await this.openDraftMenu(name, DRAFT_ROW_ACTION_LABEL_IDS[entry] ?? entry);
   }
-  async draftRowQuickActionVisible(_name: string): Promise<boolean> {
-    return todo("draftRowQuickActionVisible");
+  async draftRowQuickActionVisible(name: string): Promise<boolean> {
+    // The ellipsis stays in the row but only shows on hover or focus;
+    // hover the block the way a pointer would before reading it.
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    await block.hover({ timeout: WebNewDriver.WAIT_MS });
+    const trigger = this.draftQuickActionTrigger(name);
+    return (await trigger.count()) > 0 && (await trigger.first().isVisible());
   }
   async editDraftByName(name: string): Promise<void> {
     await this.openDraftMenu(name, "Edit");
   }
-  async cancelDraftDelete(_name: string): Promise<void> {
-    return todo("cancelDraftDelete");
+  async cancelDraftDelete(name: string): Promise<void> {
+    await this.draftRowMenuClick(name, "delete");
+    const dialog = this.draftDeleteDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.draftDeleteDialog()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
   async confirmDraftDelete(): Promise<void> {
-    return todo("confirmDraftDelete");
+    const dialog = this.draftDeleteDialog();
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.draftDeleteDialog()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
   async draftStateText(name: string): Promise<string> {
     return this.draftPropertyText(name, "state");
@@ -27424,7 +27545,9 @@ export class WebNewDriver implements ParityDriver {
     await this.page.keyboard.press(key);
   }
   async draftPublishError(): Promise<string | null> {
-    return todo("draftPublishError");
+    // A refused publish surfaces its notice in the shared toast stack;
+    // modal dialogs and inline form notes never pollute that region.
+    return this.toastText();
   }
   async draftsEmptyCreateState(): Promise<"enabled" | "disabled" | "absent"> {
     const action = this.page.getByRole("button", { name: "Create draft work item", exact: true });

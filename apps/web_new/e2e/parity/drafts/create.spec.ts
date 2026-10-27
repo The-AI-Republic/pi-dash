@@ -84,38 +84,71 @@ test(
   }
 );
 
-// The creation-dialog submit half of DRAFT-006 is a bug: scenario (the
-// oracle blocks a blank title with "Title is required" instead of
-// defaulting). Pinned here until NEWFRONT-302 lands the fix.
+// The creation-dialog submit half of DRAFT-006: the old app blocks a blank
+// title with "Title is required" (bug NEWFRONT-302). Spec §7 makes the
+// defaulting the target, so the oracle leg keeps pinning the old behavior
+// and the web_new leg asserts the fixed behavior — the same target-aware
+// shape other areas use for bug rows that are also target behavior. The row
+// stays linked to NEWFRONT-302.
 test(
   specTitle(["DRAFT-006"], "bug: blank-title submit fails validation instead of defaulting (NEWFRONT-302)"),
   { tag: specTags(["DRAFT-006"]) },
   async ({ driver }) => {
     const harness = await draftsHarness("parity-d6bug");
     const { workspaceSlug, projectName } = harness;
+    const isTarget = driver.target === "web_new";
 
     for (const title of ["", "   "]) {
-      await test.step(`submitting ${JSON.stringify(title)} keeps the dialog open with an error`, async () => {
-        await draftsOpenAs(driver, harness);
-        await driver.openCreateDraftModal();
-        if ((await driver.modalProjectName()) !== projectName) {
-          await driver.selectModalProject(projectName);
+      await test.step(
+        isTarget
+          ? `submitting ${JSON.stringify(title)} stores an Untitled draft`
+          : `submitting ${JSON.stringify(title)} keeps the dialog open with an error`,
+        async () => {
+          await draftsOpenAs(driver, harness);
+          await driver.openCreateDraftModal();
+          if ((await driver.modalProjectName()) !== projectName) {
+            await driver.selectModalProject(projectName);
+          }
+          if (title.length > 0) {
+            await driver.fillCreateTitle(title);
+          }
+          await driver.submitCreateModal();
+          if (isTarget) {
+            // Target (NEWFRONT-302): no title-required error; the draft is
+            // stored under the placeholder title and the dialog closes.
+            await expect.poll(() => driver.createModalOpen(), { timeout: 60_000 }).toBe(false);
+            expect(await driver.createTitleError()).toBe("");
+            await expect.poll(() => driver.draftRowNames(), { timeout: 60_000 }).toContain("Untitled");
+            await expect
+              .poll(() => serverDraftNames(workspaceSlug, harness.owner.cookie), { timeout: 60_000 })
+              .toContain("Untitled");
+          } else {
+            await expect.poll(() => driver.createTitleError(), { timeout: 30_000 }).toBe("Title is required");
+            expect(await driver.createModalOpen()).toBe(true);
+            await driver.clickModalDiscard();
+            // The guard mounts a beat after the close click, so discard
+            // whichever close path shows up rather than sampling once.
+            await expect
+              .poll(
+                async () => {
+                  if (await driver.pageTextContains("Save this draft?")) {
+                    await driver.discardDialogDiscard();
+                    return "prompted";
+                  }
+                  return (await driver.createModalOpen()) ? "open" : "closed";
+                },
+                { timeout: 30_000 }
+              )
+              .not.toBe("open");
+            await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+            expect(await driver.draftRowNames()).not.toContain("Untitled");
+          }
         }
-        if (title.length > 0) {
-          await driver.fillCreateTitle(title);
-        }
-        await driver.submitCreateModal();
-        await expect.poll(() => driver.createTitleError(), { timeout: 30_000 }).toBe("Title is required");
-        expect(await driver.createModalOpen()).toBe(true);
-        await driver.clickModalDiscard();
-        if (await driver.pageTextContains("Save this draft?")) {
-          await driver.discardDialogDiscard();
-        }
-        await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
-        expect(await driver.draftRowNames()).not.toContain("Untitled");
-      });
+      );
     }
-    expect(await serverDraftNames(workspaceSlug, harness.owner.cookie)).not.toContain("Untitled");
+    if (!isTarget) {
+      expect(await serverDraftNames(workspaceSlug, harness.owner.cookie)).not.toContain("Untitled");
+    }
   }
 );
 

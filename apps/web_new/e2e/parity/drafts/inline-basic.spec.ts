@@ -64,8 +64,9 @@ test(
 );
 
 // The oracle rolls a rejected inline save back without any error
-// notice; DRAFT-012 requires one. Pinned here until NEWFRONT-303 lands
-// the fix.
+// notice; DRAFT-012 requires one. Spec §7 makes the notice the target,
+// so the oracle leg pins the silent rollback (NEWFRONT-303) and the
+// web_new leg asserts the fixed behavior.
 test(
   specTitle(["DRAFT-012"], "bug: rejected inline save rolls back silently (NEWFRONT-303)"),
   { tag: specTags(["DRAFT-012"]) },
@@ -75,25 +76,35 @@ test(
     const name = `D12 Silent ${harness.tag}`;
     const draft = await serverCreateDraft(workspaceSlug, owner.cookie, { name, project_id: projectId });
     const doingId = await serverCreateState(workspaceSlug, projectId, "Doing", "started", owner.cookie);
+    const isTarget = driver.target === "web_new";
 
-    await test.step("a rejected save snaps back with no notice", async () => {
-      await draftsOpenAs(driver, harness);
-      const initialName = await driver.draftStateText(name);
-      await driver.draftOpenStatePicker(name);
-      await driver.pickerPick("Doing");
-      await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe("Doing");
-      try {
-        await driver.draftFailNextPatch(500, 1500);
+    await test.step(
+      isTarget ? "a rejected save snaps back and names the failure" : "a rejected save snaps back with no notice",
+      async () => {
+        await draftsOpenAs(driver, harness);
+        const initialName = await driver.draftStateText(name);
         await driver.draftOpenStatePicker(name);
-        await driver.pickerPick(initialName);
-        await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe(initialName);
+        await driver.pickerPick("Doing");
         await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe("Doing");
-        expect(await driver.toastText()).toBeNull();
-        expect((await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).stateId).toBe(doingId);
-      } finally {
-        await driver.draftClearPatchFailure().catch(() => {});
+        try {
+          await driver.draftFailNextPatch(500, 1500);
+          await driver.draftOpenStatePicker(name);
+          await driver.pickerPick(initialName);
+          await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe(initialName);
+          await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe("Doing");
+          if (isTarget) {
+            // Target (NEWFRONT-303): the rollback is accompanied by a visible
+            // notice telling the viewer the change did not stick.
+            await expect.poll(() => driver.toastText(), { timeout: 30_000 }).toContain("Couldn't save the change");
+          } else {
+            expect(await driver.toastText()).toBeNull();
+          }
+          expect((await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).stateId).toBe(doingId);
+        } finally {
+          await driver.draftClearPatchFailure().catch(() => {});
+        }
       }
-    });
+    );
   }
 );
 

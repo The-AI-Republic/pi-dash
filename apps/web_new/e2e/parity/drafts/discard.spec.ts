@@ -29,7 +29,7 @@ test(
       await expect.poll(() => driver.pageTextContains("Save this draft?"), { timeout: 30_000 }).toBe(true);
       await driver.confirmSaveDraft();
       await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
-      expect(await driver.pageTextContains("Save this draft?")).toBe(false);
+      await expect.poll(() => driver.pageTextContains("Save this draft?"), { timeout: 30_000 }).toBe(false);
       await expect.poll(() => driver.draftRowNames(), { timeout: 60_000 }).toContain(kept);
       await expect.poll(() => serverDraftNames(workspaceSlug, owner.cookie), { timeout: 60_000 }).toContain(kept);
     });
@@ -41,7 +41,7 @@ test(
       await expect.poll(() => driver.pageTextContains("Save this draft?"), { timeout: 30_000 }).toBe(true);
       await driver.discardDialogDiscard();
       await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
-      expect(await driver.pageTextContains("Save this draft?")).toBe(false);
+      await expect.poll(() => driver.pageTextContains("Save this draft?"), { timeout: 30_000 }).toBe(false);
       expect(await driver.draftRowNames()).not.toContain(dropped);
       expect(await serverDraftNames(workspaceSlug, owner.cookie)).not.toContain(dropped);
     });
@@ -59,7 +59,7 @@ test(
       await driver.openCreateDraftModal();
       await driver.clickModalDiscard();
       await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
-      expect(await driver.pageTextContains("Save this draft?")).toBe(false);
+      await expect.poll(() => driver.pageTextContains("Save this draft?"), { timeout: 30_000 }).toBe(false);
     });
   }
 );
