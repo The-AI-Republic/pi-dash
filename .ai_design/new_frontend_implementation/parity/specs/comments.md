@@ -48,9 +48,9 @@ interleaves two server sources: **property activities** (a field changed, the
 item was created, deleted, archived, triaged…), fetched from the history
 endpoint with `activity_type=issue-property`, and **comments**, fetched from
 the same history endpoint with `activity_type=issue-comment`. The client
-merges them by creation time; the server is never asked for a merged list
-(§11 explains why, and NEWFRONT-128 is the old bug that makes this a hard
-rule).
+merges them by creation time. The server also serves the combined list from
+the same path without `activity_type` (NEWFRONT-128 fixed the 500 that used
+to make that read unusable), so either shape works behind the same model.
 
 **Mentions** are stored inside the comment HTML as a `mention-component`
 element carrying `entity_name="user_mention"`, `entity_identifier` (the
@@ -401,11 +401,10 @@ entry's link and requires the URL to contain `profile`).
 
 Reads: `GET /api/workspaces/{ws}/projects/{pid}/issues/{iid}/history/` with
 `activity_type=issue-property` for activities and `activity_type=issue-comment`
-for comments. **Do not call the history endpoint without `activity_type`**:
-the old merged read returns 500 (NEWFRONT-128); the client merges. Intended
-behaviour is that a merged read would return the combined list, but the
-new app should keep the split reads until that bug is fixed, then a single
-read is a permissible refactor behind the same model.
+for comments. The endpoint without `activity_type` returns the same combined
+list, ascending by `created_at` (NEWFRONT-128 fixed the 500 that used to make
+the merged read unusable), so a single read is a permissible refactor behind
+the same model; the splits remain supported.
 
 **Verified gap.** Built (`activity/api.ts` + `model.ts` `buildFeed`/`sortFeed`).
 The exception: a **deletion** activity arrives with `field="issue"` and
@@ -742,7 +741,7 @@ issue UUID, `{cid}` a comment UUID.
 | ------------------------ | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Comment list             | `GET /api/workspaces/{ws}/projects/{pid}/issues/{iid}/history/`                                  | `activity_type=issue-comment`, `created_at__gt` (optional)                                                          | 200, array of comments                                                  |
 | Property activities      | same                                                                                             | `activity_type=issue-property`, `created_at__gt` (optional)                                                         | 200, array                                                              |
-| Merged read              | same, no `activity_type`                                                                         | —                                                                                                                   | **500 today** (NEWFRONT-128); do not use                                |
+| Merged read              | same, no `activity_type`                                                                         | `created_at__gt` (optional)                                                                                         | 200, combined array ascending by `created_at` (NEWFRONT-128)            |
 | Create comment           | `POST …/issues/{iid}/comments/`                                                                  | `comment_html`, `comment_json`, `access`, `labels` (no create-time `attachments`; images are linked after creation) | 201, comment; guest refusal 400 `{error}`                               |
 | Update comment           | `PATCH …/issues/{iid}/comments/{cid}/`                                                           | `comment_html`, `comment_json`, `access`, `labels`                                                                  | 200, comment; synced body fields refused 400                            |
 | Delete comment           | `DELETE …/issues/{iid}/comments/{cid}/`                                                          | —                                                                                                                   | 204; git-synced 409 `{error: …unbind…}`                                 |
@@ -886,7 +885,9 @@ does not pin, and this rule does not apply to it.
 
 ### 11.4 NEWFRONT-128 — merged history read 500s
 
-Split reads only (§4.1). Not a client bug.
+Fixed: the merged read now serializes each side first and returns the combined
+ascending list, so both the split reads and the merged read work (§4.1,
+§11 endpoint table). Not a client bug; no client change is required.
 
 ## 12. Existing code, gap, and closing slice per row
 
