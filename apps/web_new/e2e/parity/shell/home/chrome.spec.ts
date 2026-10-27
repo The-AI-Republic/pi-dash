@@ -10,6 +10,9 @@
 // widget show their own skeleton shape until resolved, the header pairs
 // a home breadcrumb with the manage-widgets control, and widget, link
 // and recent state survive refocus while failed edits toast in place.
+// A failed widget toggle is the one old-app deviation (bug NEWFRONT-131):
+// apps/web keeps prior visibility but shows nothing, while apps/web_new
+// rolls back and names the failure like reorder does.
 import { test, expect } from "../../fixtures";
 import type { ParityDriver } from "../../drivers/parity-driver";
 import {
@@ -163,13 +166,14 @@ test(
 );
 
 test(
-  specTitle(ROWS, "bug: a failed toggle keeps prior state without a notice (NEWFRONT-131)"),
+  specTitle(ROWS, "bug: old toggle failure is silent; web_new keeps state and toasts (NEWFRONT-131)"),
   { tag: specTags(ROWS) },
   async ({ driver, seed }) => {
-    // Observed oracle deviation, tracked in NEWFRONT-131: the toggle path
-    // calls the store directly, so a failed toggle keeps state
-    // (server-first ordering) but toasts nothing, unlike reorder and
-    // link edits. Intended behavior: toast the failure like reorder does.
+    // Intended behavior: a failed toggle keeps the prior visibility and
+    // surfaces an error notice, matching reorder and link edits. apps/web_new
+    // paints optimistically, rolls back and names the failure. The old app is
+    // the deviation (bug NEWFRONT-131): it PATCHes before touching local
+    // state, so the toggle stays put but nothing tells the user.
     const session = await signInSessionRetry(seed.email, seed.password);
     await serverSetTourCompleted(session, true);
     await serverEnsureWidgets(seed.workspaceSlug, session, ["quick_links", "recents"]);
@@ -184,6 +188,28 @@ test(
     });
     await driver.homeOpenManageWidgets();
     await driver.homeToggleManageWidget("Recents");
+
+    if (driver.target === "web_new") {
+      await test.step("the failure rolls back and names itself", async () => {
+        // Read the notice first: the toggle paints optimistically, so an
+        // enabled check here could pass before the flip lands, and toasts
+        // dismiss after a few seconds. Once the notice is up the failed
+        // write has rolled back, so the switch must read as before.
+        await expect.poll(() => driver.homeLastToast(), { timeout: 15_000 }).not.toBeNull();
+        const toast = await driver.homeLastToast();
+        expect(`${toast?.title ?? ""} ${toast?.message ?? ""}`.toLowerCase()).toMatch(/error|fail/);
+        await expect.poll(() => driver.homeManageWidgetEnabled("Recents"), { timeout: 15_000 }).toBe(recentsBefore);
+      });
+    } else {
+      await test.step("bug NEWFRONT-131: the old app rolls back silently", async () => {
+        await expect.poll(() => driver.homeManageWidgetEnabled("Recents"), { timeout: 15_000 }).toBe(recentsBefore);
+        // The aborted PATCH settles well inside this window on the oracle;
+        // anything the toggle failed to say would have surfaced by now.
+        await driver.page.waitForTimeout(2_000);
+        expect(await driver.homeLastToast()).toBeNull();
+      });
+    }
+
     await driver.homeCloseManageWidgets();
     const storedAfter = await serverWidgets(seed.workspaceSlug, session);
     expect(storedAfter.find((widget) => widget.key === "recents")?.is_enabled).toBe(recentsBefore);

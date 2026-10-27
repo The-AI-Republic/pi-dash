@@ -181,10 +181,13 @@ Display chrome only. Oracle: `home/chrome.spec.ts`.
 SHELL-023 — Home data never refreshes silently and failures never get a retry
 panel. Refocus or reconnect does not reorder widgets, links or recents (no
 focus refetch); failed reorder and link edits toast and leave prior state;
-list-fetch failure logs without a retry button. Known deviation
-(NEWFRONT-131): failed toggles keep state silently, while the intended
-behavior is a toast like reorder — the scenario records actual behavior and
-the fix lands separately. Oracle: `home/chrome.spec.ts`.
+list-fetch failure logs without a retry button. A failed toggle also
+toasts and keeps the prior visibility: the new app paints optimistically,
+rolls back on error and names the failure, matching reorder. The old app is
+the deviation (old bug NEWFRONT-131): it PATCHes before updating local state,
+so a failed toggle keeps state but shows nothing; its scenario leg pins that
+silence as the bug while the new-app leg proves the intended toast. Oracle:
+`home/chrome.spec.ts`.
 
 ## 3. Projects list (NEWFRONT-281, NEWFRONT-282, NEWFRONT-283, NEWFRONT-284)
 
