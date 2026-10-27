@@ -3895,6 +3895,12 @@ export class WebNewDriver implements ParityDriver {
   private static readonly SUB_ISSUES_WIDGET = "Sub-work items";
 
   private widgetSection(widget: string): Locator {
+    if (widget === "Relations" || widget === "Links") {
+      // Relations and Links mount the shared WidgetSection, whose
+      // testid derives from the title — not the data-widget root the
+      // attachment slices carry.
+      return this.page.getByTestId(`widget-${widget.toLowerCase()}`).first();
+    }
     return this.page.locator(`[data-widget-root="${widget}"]`).first();
   }
 
@@ -3907,6 +3913,11 @@ export class WebNewDriver implements ParityDriver {
     if (widget === WebNewDriver.SUB_ISSUES_WIDGET || widget === "Work items") {
       return this.page.locator('[data-testid="sub-issues-collapsible"]').first();
     }
+    if (widget === "Relations" || widget === "Links") {
+      // The shared section's disclosure is the first button of its
+      // header row (any add control follows it).
+      return this.widgetSection(widget).locator(":scope > div").first().getByRole("button").first();
+    }
     return this.page.locator(`[data-widget-header="${widget}"]`).first();
   }
 
@@ -3914,17 +3925,25 @@ export class WebNewDriver implements ParityDriver {
     if (widget === WebNewDriver.SUB_ISSUES_WIDGET || widget === "Work items") {
       return this.page.locator('[data-testid="sub-issues-section"]').first();
     }
+    if (widget === "Relations" || widget === "Links") {
+      return this.widgetSection(widget);
+    }
     return this.page.locator(`[data-widget-rows="${widget}"]`).first();
   }
 
   async widgetRowNames(widget: string): Promise<string[]> {
     // Sub-work items render one row block per child (nested children
-    // included); the attachment and code-review panels mark their direct
-    // rows instead.
+    // included); relations and links prefix their row testids per row;
+    // the attachment and code-review panels mark their direct rows
+    // instead.
     const rows =
       widget === WebNewDriver.SUB_ISSUES_WIDGET || widget === "Work items"
         ? this.widgetPanel(widget).locator("[data-sub-issue-row]")
-        : this.widgetPanel(widget).locator(":scope > [data-widget-row]");
+        : widget === "Relations"
+          ? this.widgetPanel(widget).locator('[data-testid^="relation-row-"]')
+          : widget === "Links"
+            ? this.widgetPanel(widget).locator('[data-testid^="link-row-"]')
+            : this.widgetPanel(widget).locator(":scope > [data-widget-row]");
     const count = await rows.count();
     const out: string[] = [];
     for (let i = 0; i < count; i++) {
@@ -3947,8 +3966,27 @@ export class WebNewDriver implements ParityDriver {
     const match = /(\d+\s*\/\s*\d+\s*Done)/.exec(text);
     return match ? match[1].replace(/\s+/g, " ").replace(/\s*\/\s*/, "/") : null;
   }
-  async widgetGroupNames(_widget: string): Promise<string[]> {
-    return todo("widgetGroupNames");
+  async widgetGroupNames(widget: string): Promise<string[]> {
+    // Only Relations groups its rows (one collapsible per present kind);
+    // every other widget is ungrouped.
+    if (widget !== "Relations") return [];
+    const groups = this.widgetPanel(widget).locator('[data-testid^="relation-group-"]');
+    const count = await groups.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const text = (
+        (await groups
+          .nth(i)
+          .getByRole("button")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text !== "") out.push(text);
+    }
+    return out;
   }
   async openWidgetSection(widget: string): Promise<void> {
     if (await this.widgetExpanded(widget)) return;
@@ -4070,8 +4108,22 @@ export class WebNewDriver implements ParityDriver {
   async toggleWidgetSection(widget: string): Promise<void> {
     await this.widgetHeader(widget).click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async widgetAddMenuNames(_widget: string): Promise<string[]> {
-    return todo("widgetAddMenuNames");
+  /** Widget action-row buttons by section title. */
+  private static readonly WIDGET_ADD_ACTIONS: Record<string, string> = {
+    "Sub-work items": "Add sub-work item",
+    Relations: "Add relation",
+    Links: "Add link",
+    Attachments: "Attach",
+  };
+
+  async widgetAddMenuNames(widget: string): Promise<string[]> {
+    const action = WebNewDriver.WIDGET_ADD_ACTIONS[widget];
+    if (!action) throw new Error(`[parity] no add menu for widget ${JSON.stringify(widget)}.`);
+    await this.page.locator(`[data-widget-action="${action}"]`).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The menu stays open for the caller, which closes it.
+    return (await items.allTextContents()).map((text) => text.trim()).filter((text) => text.length > 0);
   }
   /** The widget action-row button that opens the sub-issue add menu. */
   private subIssueAddAction(): Locator {
@@ -4133,6 +4185,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("clickWidgetRow");
   }
   private widgetRow(widget: string, rowName: string): Locator {
+    if (widget === "Relations" || widget === "Links") {
+      const prefix = widget === "Relations" ? "relation-row-" : "link-row-";
+      return this.widgetPanel(widget).locator(`[data-testid^="${prefix}"]`).filter({ hasText: rowName }).first();
+    }
     return this.widgetPanel(widget).locator(":scope > [data-widget-row]").filter({ hasText: rowName }).first();
   }
 
@@ -4221,20 +4277,76 @@ export class WebNewDriver implements ParityDriver {
     if (dialog === null) throw new Error("[parity] no open confirmation dialog.");
     await dialog.getByRole("button", { name: label, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async addRelationViaModal(_type: string, _search: string, _name: string): Promise<void> {
-    return todo("addRelationViaModal");
+  async addRelationViaModal(type: string, search: string, name: string): Promise<void> {
+    await this.page.locator('[data-widget-action="Add relation"]').first().click({ timeout: WebNewDriver.WAIT_MS });
+    // Substring match: the scenario passes "Blocked" for the
+    // "Blocked by" entry ("Blocking" never contains "Blocked").
+    const entry = this.page.getByRole("menuitem").filter({ hasText: type }).first();
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    const searchBox = this.page.getByLabel("Search work items").first();
+    await searchBox.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await searchBox.fill(search, { timeout: WebNewDriver.WAIT_MS });
+    const option = this.page
+      .getByRole("listbox", { name: "Work item candidates" })
+      .getByRole("option", { name })
+      .first();
+    await option.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await option.click({ timeout: WebNewDriver.WAIT_MS });
+    const submit = this.page.getByRole("button", { name: "Add selected work items", exact: true }).first();
+    await submit.click({ timeout: WebNewDriver.WAIT_MS });
+    await submit.waitFor({ state: "detached", timeout: 60_000 });
+    // Ends with the edge rendered: the add invalidates the widget.
+    await expect
+      .poll(async () => (await this.widgetRowNames("Relations")).join("\n"), { timeout: WebNewDriver.WAIT_MS })
+      .toContain(name);
   }
-  async addLinkModal(_url: string, _title?: string): Promise<void> {
-    return todo("addLinkModal");
+  async addLinkModal(url: string, title?: string): Promise<void> {
+    await this.page.locator('[data-widget-action="Add link"]').first().click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.page.getByRole("dialog", { name: "Add link" });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("URL").first().fill(url, { timeout: WebNewDriver.WAIT_MS });
+    if (title !== undefined) {
+      await dialog.getByLabel("Display title (optional)").first().fill(title, { timeout: WebNewDriver.WAIT_MS });
+    }
+    await dialog
+      .getByRole("button", { name: "Add link", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: 60_000 });
   }
-  async clickLinkCopy(_rowName: string): Promise<void> {
-    return todo("clickLinkCopy");
+  async clickLinkCopy(rowName: string): Promise<void> {
+    // The row's anchor opens the URL, so copy through the row's own
+    // control; the caller reads the clipboard and toast itself.
+    await this.widgetRow("Links", rowName)
+      .getByRole("button", { name: /^Copy link / })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async editLinkTitle(_rowName: string, _title: string): Promise<void> {
-    return todo("editLinkTitle");
+  async editLinkTitle(rowName: string, title: string): Promise<void> {
+    const row = this.widgetRow("Links", rowName);
+    await row
+      .getByRole("button", { name: /^Link actions for / })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const entry = this.page.getByRole("menuitem", { name: "Edit", exact: true });
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.page.getByRole("dialog", { name: "Edit link" });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("Display title (optional)").first().fill(title, { timeout: WebNewDriver.WAIT_MS });
+    await dialog
+      .getByRole("button", { name: "Save link", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: 60_000 });
   }
-  async linkRowTarget(_rowName: string): Promise<{ href: string; target: string | null } | null> {
-    return todo("linkRowTarget");
+  async linkRowTarget(rowName: string): Promise<{ href: string; target: string | null } | null> {
+    const link = this.widgetRow("Links", rowName).locator("a[href]").first();
+    if ((await link.count()) === 0) return null;
+    const href = await link.getAttribute("href");
+    if (!href) return null;
+    return { href, target: await link.getAttribute("target") };
   }
   async uploadAttachment(file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
     const chooserWait = this.page.waitForEvent("filechooser", { timeout: WebNewDriver.WAIT_MS }).catch(() => null);
@@ -4248,20 +4360,32 @@ export class WebNewDriver implements ParityDriver {
     await input.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
     await input.setInputFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
   }
-  async clickWidgetAction(_name: string): Promise<void> {
-    return todo("clickWidgetAction");
+  async clickWidgetAction(name: string): Promise<void> {
+    // The Run AI slot renders its own dispatch button instead of the
+    // generic action-row button, so fall back to it by testid.
+    if (name === "Manually Run AI" && (await this.page.getByTestId("issue-run-ai").count()) > 0) {
+      await this.page.getByTestId("issue-run-ai").first().click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.page.locator(`[data-widget-action="${name}"]`).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async postComment(_text: string): Promise<void> {
     return todo("postComment");
   }
-  async typeComment(_text: string): Promise<void> {
-    return todo("typeComment");
+  async typeComment(text: string): Promise<void> {
+    // Type like a user: fill() never reaches the rich editor's state.
+    // No submit — the draft stays editable for the run control.
+    const editor = this.composerEditor();
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
   }
   async clickCommentAndRun(): Promise<void> {
-    return todo("clickCommentAndRun");
+    await this.page.getByRole("button", { name: "Comment & Run" }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async commentAndRunDisabled(): Promise<boolean> {
-    return todo("commentAndRunDisabled");
+    const button = this.page.getByRole("button", { name: "Comment & Run" }).first();
+    await button.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return button.isDisabled().catch(() => true);
   }
 
   async sidebarBrandVisible(): Promise<boolean> {
