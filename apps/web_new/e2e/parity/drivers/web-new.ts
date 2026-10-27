@@ -3362,11 +3362,19 @@ export class WebNewDriver implements ParityDriver {
     if ((await saved.count()) > 0) return "Saved";
     return null;
   }
+  /** The description editor, labelled apart from the composer's draft. */
+  private descriptionEditor(): Locator {
+    return this.page.locator("[contenteditable='true'][aria-label='Description']").first();
+  }
+
   async descriptionText(): Promise<string | null> {
-    // Editing renders a contenteditable; the settled view renders the
-    // "Edit description" surface; an untouched issue shows the add
-    // button, which reads as empty.
-    const editor = this.page.locator("[contenteditable='true']").first();
+    // Editing renders the description editor; the settled view renders
+    // the "Edit description" surface; an untouched issue shows the add
+    // button, which reads as empty. The editor is label-scoped because
+    // the comment composer mounts its own always-on editor: a restore
+    // closes the description editor, leaving the composer's empty draft
+    // as the first bare contenteditable (ISS-147).
+    const editor = this.descriptionEditor();
     if ((await editor.count()) > 0) return ((await editor.innerText()) ?? "").trim();
     const view = this.page.getByRole("button", { name: "Edit description" }).first();
     if ((await view.count()) > 0) return ((await view.innerText()) ?? "").trim();
@@ -3381,7 +3389,9 @@ export class WebNewDriver implements ParityDriver {
       const view = this.page.getByRole("button", { name: "Edit description" }).first();
       if ((await view.count()) > 0) await view.click({ timeout: WebNewDriver.WAIT_MS });
     }
-    const editor = this.page.locator("[contenteditable='true']").first();
+    // Label-scoped: waiting on a bare contenteditable returns at once
+    // (the composer is always mounted) and types into the wrong editor.
+    const editor = this.descriptionEditor();
     await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
     await editor.click({ timeout: WebNewDriver.WAIT_MS });
     // fill() never reaches the rich editor's state; type instead.

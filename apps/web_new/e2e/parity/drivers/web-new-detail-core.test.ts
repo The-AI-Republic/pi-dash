@@ -170,9 +170,26 @@ describe("detailCoreDriver", () => {
   it("reads the live editor first when a description edit is open", async () => {
     const page = pageOf({
       locator: (selector: string) =>
-        selector === "[contenteditable='true']" ? node({ innerText: async () => "draft body" }) : absent(),
+        selector === "[contenteditable='true'][aria-label='Description']"
+          ? node({ innerText: async () => "draft body" })
+          : absent(),
     });
     await expect(new WebNewDriver(page).descriptionText()).resolves.toBe("draft body");
+  });
+
+  it("ignores the composer draft and reads the settled surface", async () => {
+    // ISS-147: a restore closes the description editor, leaving only
+    // the composer's always-mounted (empty) draft — labelled apart.
+    const page = pageOf({
+      role: (role: string, options?: unknown) => {
+        const name = (options as { name?: string } | undefined)?.name;
+        if (role === "button" && name === "Edit description") {
+          return node({ innerText: async () => "restored body" });
+        }
+        return absent();
+      },
+    });
+    await expect(new WebNewDriver(page).descriptionText()).resolves.toBe("restored body");
   });
 
   it("reads the settled description surface when not editing", async () => {
@@ -218,7 +235,7 @@ describe("detailCoreDriver", () => {
         return absent();
       },
       locator: (selector: string) =>
-        selector === "[contenteditable='true']"
+        selector === "[contenteditable='true'][aria-label='Description']"
           ? node({
               click: async () => {
                 calls.push("click:editor");
@@ -247,7 +264,8 @@ describe("detailCoreDriver", () => {
         if (role === "button" && name === "Edit description") return node({});
         return absent();
       },
-      locator: (selector: string) => (selector === "[contenteditable='true']" ? node({}) : absent()),
+      locator: (selector: string) =>
+        selector === "[contenteditable='true'][aria-label='Description']" ? node({}) : absent(),
       keyboardPress: async (key: string) => {
         calls.push(`kbd:${key}`);
       },
