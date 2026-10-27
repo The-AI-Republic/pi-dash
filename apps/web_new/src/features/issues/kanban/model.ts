@@ -16,6 +16,7 @@ import type {
   IssueGroupBucket,
   IssueListItem,
   IssueListResponse,
+  SubGroupedIssueBucket,
   SubGroupedIssueListResponse,
 } from "@pidash/api-client";
 
@@ -68,6 +69,28 @@ export interface BoardData {
 const NO_ROWS: readonly IssueListItem[] = [];
 
 /**
+ * Reconciled bucket total (NEWFRONT-153): the grouped count filter can
+ * exclude rows the grouped results include (the pending-triage issue),
+ * so the server total undercounts the cards. The header count equals the
+ * number of issues in the group, hence at least the rows already seen.
+ */
+export function bucketTotal(bucket: Pick<IssueGroupBucket, "results" | "total_results">): number {
+  return Math.max(bucket.total_results, bucket.results.length);
+}
+
+/**
+ * Reconciled group total of a sub-grouped bucket: the server group total
+ * already sums its sub-buckets, but each sub-bucket total undercounts the
+ * same way grouped buckets do, so the reconciled sub-buckets win unless
+ * the server total counts rows beyond them.
+ */
+function subGroupTotal(bucket: Pick<SubGroupedIssueBucket, "results" | "total_results">): number {
+  let rows = 0;
+  for (const sub of Object.values(bucket.results)) rows += bucketTotal(sub);
+  return Math.max(bucket.total_results, rows);
+}
+
+/**
  * Columns from a grouped envelope: the server's declared order, the
  * synthetic empty-value bucket last, each with its own full count. The
  * rows of the first page ride their own cells, so callers can render a
@@ -82,11 +105,12 @@ export function boardColumns(
   for (const key of orderGroupKeys(Object.keys(response.results))) {
     const bucket = response.results[key] as IssueGroupBucket | undefined;
     if (bucket === undefined) continue;
-    if (!options.showEmpty && bucket.total_results === 0) continue;
+    const total = bucketTotal(bucket);
+    if (!options.showEmpty && total === 0) continue;
     columns.push({
       key,
       title: groupTitle(key, labels, { dimension: options.dimension }),
-      total: bucket.total_results,
+      total,
     });
   }
   return columns;
@@ -102,7 +126,7 @@ export function boardCells(
     cells[key] = {
       columnKey: key,
       rows: bucket.results.map((row) => normalizeGroupedRow(row, dimension)),
-      total: bucket.total_results,
+      total: bucketTotal(bucket),
     };
   }
   return cells;
@@ -140,14 +164,16 @@ export function laneKeys(response: Pick<SubGroupedIssueListResponse, "results">,
 export function laneTotal(response: Pick<SubGroupedIssueListResponse, "results">, laneKey: string): number {
   let total = 0;
   for (const bucket of Object.values(response.results)) {
-    total += bucket.results[laneKey]?.total_results ?? 0;
+    const sub = bucket.results[laneKey];
+    total += sub === undefined ? 0 : bucketTotal(sub);
   }
   return total;
 }
 
 /**
  * Columns of a sub-grouped envelope. A column's count is the server's
- * group total, which already sums its sub-buckets.
+ * group total reconciled with its sub-buckets' rendered rows, since the
+ * sub-bucket totals undercount the same way grouped buckets do.
  */
 export function subGroupedColumns(
   response: Pick<SubGroupedIssueListResponse, "results">,
@@ -158,11 +184,12 @@ export function subGroupedColumns(
   for (const key of orderGroupKeys(Object.keys(response.results))) {
     const bucket = response.results[key];
     if (bucket === undefined) continue;
-    if (!options.showEmpty && bucket.total_results === 0) continue;
+    const total = subGroupTotal(bucket);
+    if (!options.showEmpty && total === 0) continue;
     columns.push({
       key,
       title: groupTitle(key, labels, { dimension: options.dimension }),
-      total: bucket.total_results,
+      total,
     });
   }
   return columns;
@@ -190,7 +217,7 @@ export function subGroupedLanes(
           bucket === undefined
             ? [...NO_ROWS]
             : bucket.results.map((row) => normalizeGroupedRow(row, options.groupDimension)),
-        total: bucket?.total_results ?? 0,
+        total: bucket === undefined ? 0 : bucketTotal(bucket),
       };
     }
     lanes.push({
@@ -361,7 +388,9 @@ export type BoardPageOwner =
  * With an owner, only the owner's rows append and only the owner joins
  * the tail: other cells keep their rows (totals still refresh, since
  * every envelope carries full counts), and a newly discovered non-owner
- * bucket stays out rather than joining with a partial window.
+ * bucket stays out rather than joining with a partial window. Every
+ * merged total stays at or above the rows it covers, so an undercounted
+ * server total never drops a header below its rendered cards.
  */
 export function mergeBoardPage(current: BoardData, incoming: BoardData, owner?: BoardPageOwner): BoardData {
   const ownsCell = (laneKey: string, columnKey: string): boolean => {
@@ -399,17 +428,20 @@ export function mergeBoardPage(current: BoardData, incoming: BoardData, owner?: 
         continue;
       }
       if (!ownsCell(lane.key, key)) {
-        cells[key] = { ...existing, total: cell.total };
+        cells[key] = { ...existing, total: Math.max(cell.total, existing.rows.length) };
         continue;
       }
       const seen = new Set(existing.rows.map((row) => row.id));
+      const mergedRows = [...existing.rows, ...cell.rows.filter((row) => !seen.has(row.id))];
       cells[key] = {
         ...existing,
-        rows: [...existing.rows, ...cell.rows.filter((row) => !seen.has(row.id))],
-        total: cell.total,
+        rows: mergedRows,
+        total: Math.max(cell.total, mergedRows.length),
       };
     }
-    return { ...lane, cells, total: next.total };
+    let laneRows = 0;
+    for (const cell of Object.values(cells)) laneRows += cell.rows.length;
+    return { ...lane, cells, total: Math.max(next.total, laneRows) };
   });
   for (const lane of incoming.lanes) {
     if (lanes.some((entry) => entry.key === lane.key)) continue;
@@ -417,7 +449,12 @@ export function mergeBoardPage(current: BoardData, incoming: BoardData, owner?: 
     const cells = Object.fromEntries(Object.entries(lane.cells).filter(([key]) => ownsCell(lane.key, key)));
     lanes.push({ ...lane, cells });
   }
-  return { columns, lanes, subGrouped: current.subGrouped, total: incoming.total };
+  const reconciled = columns.map((column) => {
+    let rendered = 0;
+    for (const lane of lanes) rendered += lane.cells[column.key]?.rows.length ?? 0;
+    return { ...column, total: Math.max(column.total, rendered) };
+  });
+  return { columns: reconciled, lanes, subGrouped: current.subGrouped, total: incoming.total };
 }
 
 /** Cell prefill translated to the create dialog's initial values. */
