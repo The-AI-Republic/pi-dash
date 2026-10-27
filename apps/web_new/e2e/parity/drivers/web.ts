@@ -12763,7 +12763,15 @@ export class WebDriver implements ParityDriver {
   }
 
   private boardMain(): Locator {
-    return this.page.getByRole("main");
+    // CSS scope, never a role query: opening any HeadlessUI Dialog marks
+    // the whole app container inert + aria-hidden until the dialog closes,
+    // which removes <main> from the accessibility tree and blinds
+    // getByRole("main") — and every board locator rooted at it — for the
+    // entire modal-open duration (NEWFRONT-177). Tag matching ignores the
+    // inert/aria-hidden state, so column, lane and card reads keep working
+    // behind an open modal. The route <main> nests inside the layout
+    // <main>; chained matches dedupe to one column set either way.
+    return this.page.locator("main");
   }
 
   private async boardWaitForLayout(layout: BoardLayoutKey): Promise<void> {
