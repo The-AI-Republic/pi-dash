@@ -55,9 +55,6 @@ crates/api/src/auth_session/password.rs | UPDATE users | c83e0aa5a562 | sql
 crates/api/src/license/handlers_admin.rs | UPDATE users | 09eb2fbe56c7 | sql
 crates/api/src/license/handlers_admin.rs | UPDATE users | c83e0aa5a562 | sql
 crates/api/src/license/handlers_admin.rs | UPDATE users | f9ca47c65665 | sql
-crates/api/src/space/intake.rs | INSERT issue_sequences | 76e312c3bf47 | sql
-crates/api/src/space/intake.rs | INSERT issues | ae35674a2b90 | sql
-crates/api/src/space/intake.rs | UPDATE issues | dbfa955cefd2 | sql
 crates/api/src/space/social.rs | INSERT descriptions | 3d110c8f69c6 | sql
 crates/api/src/space/social.rs | INSERT descriptions | 8179e181d84a | sql
 crates/api/src/space/social.rs | INSERT issue_comments | c76d5f33befd | sql
