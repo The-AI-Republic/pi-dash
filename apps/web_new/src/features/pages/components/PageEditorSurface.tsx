@@ -33,6 +33,7 @@ import { clonePastedAssets, rewritePastedAssets } from "../lib/pageMedia.js";
 import { parseEntityAddress } from "../lib/entityReferences.js";
 import { entityReferenceHtml, pageEntityReferenceFor, resolvePastedEntity } from "../lib/pageEmbeds.js";
 import { pageBodyActionsFor, registerPageBodyActions } from "../lib/pageBodyActions.js";
+import { preferLiveBodyHtml } from "../lib/pageBodyRead.js";
 import { titleIsEmpty } from "../lib/pageTitle.js";
 import type { PageLiveDocBinding } from "../lib/pageLiveBackend.js";
 import { PageBodyEditor, type PageEditorHandle } from "./PageBodyEditor.js";
@@ -204,8 +205,9 @@ export function PageEditorSurface({
 
   // The options menu's copy entry reads the live body; read-only pages
   // never mount here, so the registry exists only for editors (PAGE-044).
+  // A blank live read falls back to the visible body (bug NEWFRONT-360).
   React.useEffect(
-    () => registerPageBodyActions(pageBodyActionsFor(() => handleRef.current?.html() ?? bodyHtml)),
+    () => registerPageBodyActions(pageBodyActionsFor(() => preferLiveBodyHtml(handleRef.current?.html(), bodyHtml))),
     [bodyHtml]
   );
 

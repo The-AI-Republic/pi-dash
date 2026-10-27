@@ -39,6 +39,7 @@ import { pageKeys } from "../api/keys.js";
 import { pageForestQueryOptions } from "../api/treeQueries.js";
 import { isPageBodyReady, markPageBodyReady } from "../lib/pageBodyCache.js";
 import { getPageBodyDraft } from "../lib/pageBodyDraft.js";
+import { preferLiveBodyHtml } from "../lib/pageBodyRead.js";
 import { pageBodyMarkdown } from "../lib/pageMarkup.js";
 import { usePageSaveFallback } from "../lib/pageSaveFallback.js";
 import {
@@ -399,9 +400,11 @@ export function PageDetailScreen({
   );
 
   // The newest local body, whatever surface holds it: the live editor
-  // when one is mounted, otherwise the session draft, otherwise the stored
-  // snapshot (PAGE-064, PAGE-074).
-  const readLiveHtml = (): string => editorHandle.current?.html() ?? getPageBodyDraft(pageId) ?? storedHtml;
+  // when its read carries content, otherwise the session draft, otherwise
+  // the stored snapshot — a blank live read never shadows visible content
+  // (PAGE-064, PAGE-074, bug NEWFRONT-360).
+  const readLiveHtml = (): string =>
+    preferLiveBodyHtml(editorHandle.current?.html(), getPageBodyDraft(pageId) ?? storedHtml);
   // The socket-loss fallback (PAGE-064) owns body persistence while the
   // sync state reports the fault badge on an editable page; its manual
   // save is the surface's save-gesture handler.
