@@ -561,9 +561,11 @@ test(
     });
 
     await test.step("the three names disagree (the bug)", async () => {
-      // bug: NEWFRONT-191 decides the canonical name; until then the
-      // oracle pins the current split (the CLI `runner` verb is the
-      // fourth witness, recorded on the follow-up, not drivable here).
+      // bug: NEWFRONT-191 has decided the canonical name (D27: "AI
+      // Workers"); this scenario still pins the current split until the
+      // rename slice lands, then it must be replaced by the canonical-name
+      // assertion. The CLI `runner` verb stays the technical noun and is
+      // not part of the display rename (not drivable here).
       expect(title).toContain("AI Agents");
       expect(railHeader).toBe("AI Agents");
       expect(headings).toEqual(expect.arrayContaining(["Pods", "Runners"]));
