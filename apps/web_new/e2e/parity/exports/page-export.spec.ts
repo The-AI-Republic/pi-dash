@@ -6,7 +6,9 @@
 // choice + conditional page size), EXP-018 (content scope), EXP-019
 // (paginated document download), EXP-020 (plain-text download), EXP-021
 // (feedback + reset), EXP-023 (keyboard + focus), EXP-024 (uniform
-// behavior across editions and desktop). Green on apps/web first.
+// behavior across editions and desktop). Green on apps/web first, except
+// the NEWFRONT-951 re-pins below: they assert the intended behavior the
+// new app builds, so they fail on the old app by design.
 //
 // Fixture shape: page scenarios create pages in the seeded project
 // through the API with per-attempt unique names (additive only; shared
@@ -24,13 +26,16 @@
 // the product typeface subset, sizes the page media box to the chosen
 // size, and embeds fetchable absolute-URL pictures as image objects while
 // the image-free scope drops them; both renders are fully client-side
-// (no export-shaped API traffic). Markdown image syntax survives the
-// image-free scope (bug NEWFRONT-356). Uploaded (relative-URL) pictures
-// draw their frame but drop their raster under the full-fidelity scope
-// (bug NEWFRONT-470). Keyboard: the Tab-reachable buttons operate via
-// Enter and no screen defines custom bindings, but every picker sits
-// outside the tab order, the dialog menus do not navigate by keyboard,
-// and no export control shows a visible focus change (bug NEWFRONT-471).
+// (no export-shaped API traffic).
+//
+// Re-pinned to the intended behavior (NEWFRONT-951; these scenarios fail
+// on the old app, where the bugs live): the full markdown scope emits
+// `![](url)` and the image-free scope drops the image line while keeping
+// the text (old-app bug NEWFRONT-356); the full-fidelity document scope
+// embeds uploaded pictures (old-app bug NEWFRONT-470); every export
+// control is Tab-reachable with a visible focus indicator and the dialog
+// menus navigate and select by keyboard (old-app bug NEWFRONT-471).
+//
 // Content-bearing exports re-roll the load until the marker lands (bug
 // NEWFRONT-360: the shared editor reference can lose its load race and
 // export empty content).
@@ -300,7 +305,7 @@ test(
 );
 
 test(
-  specTitle(ROW_018, "bug: NEWFRONT-356 markdown image syntax survives the image-free scope"),
+  specTitle(ROW_018, "image-free scope drops markdown image syntax while keeping the text"),
   { tag: specTags(ROW_018) },
   async ({ driver, seed }) => {
     test.setTimeout(600_000);
@@ -311,7 +316,9 @@ test(
     const shot = `shot018-${tag}`;
 
     // Land text plus a pasted picture (the editor serializes pictures as
-    // markdown image syntax, which the scope strip never matches).
+    // markdown image syntax). Re-pinned to intended (NEWFRONT-951; old-app
+    // bug NEWFRONT-356): the full scope emits it correctly and the
+    // image-free scope drops it.
     let marker = "";
     for (let attempt = 0; attempt < 5; attempt += 1) {
       marker = `mdimg-${tag}-a${attempt}`;
@@ -335,22 +342,22 @@ test(
     const full = await driver.pageExportConfirmFull();
     await expect.poll(() => driver.pagesHeaderExportDialogVisible(), { timeout: 30_000 }).toBe(false);
     expect(full.content).toContain(marker);
-    expect(full.content).toContain(`![undefined](https://example.com/${shot}.png)`);
+    expect(full.content).toContain(`![](https://example.com/${shot}.png)`);
 
-    // Intended: the image-free scope drops the image reference. Live: both
-    // scopes emit it identically (bug NEWFRONT-356).
+    // Intended: the image-free scope drops the image line while keeping
+    // the text (the image URL appears nowhere else in the document).
     await reopenExportDialog(driver);
     await driver.pagesHeaderExportSetFormat("Markdown");
     await driver.pagesHeaderExportSetScope("No images");
     const stripped = await driver.pageExportConfirmFull();
     await expect.poll(() => driver.pagesHeaderExportDialogVisible(), { timeout: 30_000 }).toBe(false);
     expect(stripped.content).toContain(marker);
-    expect(stripped.content).toContain(`![undefined](https://example.com/${shot}.png)`);
+    expect(stripped.content).not.toContain(shot);
   }
 );
 
 test(
-  specTitle(ROW_018, "bug: NEWFRONT-470 uploaded pictures draw their frame but drop their raster"),
+  specTitle(ROW_018, "full-fidelity scope embeds uploaded pictures while image-free drops them"),
   { tag: specTags(ROW_018) },
   async ({ driver, seed }) => {
     test.setTimeout(600_000);
@@ -378,11 +385,12 @@ test(
     const stripped = pdfFacts(strippedFile);
     expect(stripped.text).toContain(marker);
 
-    // Intended: the full-fidelity scope embeds the uploaded raster. Live:
-    // the frame draws (the full-fidelity file is larger) but no raster
-    // embeds (bug NEWFRONT-470: the base64 step rejects relative URLs).
+    // Re-pinned to intended (NEWFRONT-951; old-app bug NEWFRONT-470):
+    // the full-fidelity scope embeds the uploaded raster, so the full
+    // file is larger and carries one image object; the image-free scope
+    // drops it.
     expect(fullFile.byteLength).toBeGreaterThan(strippedFile.byteLength);
-    expect(full.imageCount).toBe(0);
+    expect(full.imageCount).toBe(1);
     expect(stripped.imageCount).toBe(0);
   }
 );
@@ -604,24 +612,34 @@ async function tabToFocusedLabel(
   return null;
 }
 
-/** tabIndex of the first control whose accessible name contains `sub`, or null when absent. */
-async function controlTabIndex(driver: ParityDriver, scope: "page" | "dialog", sub: string): Promise<number | null> {
+/**
+ * tabIndex of the first control whose accessible name contains `sub` (or
+ * equals it when `exact`), or null when absent. Selects are included:
+ * the new app renders the dialog rows as native selects, matched by
+ * their option text.
+ */
+async function controlTabIndex(
+  driver: ParityDriver,
+  scope: "page" | "dialog",
+  sub: string,
+  exact = false
+): Promise<number | null> {
   return driver.page.evaluate(
-    ({ scope: which, needle }) => {
+    ({ scope: which, needle, exact: isExact }) => {
       const root =
         which === "dialog"
           ? ([...document.querySelectorAll("[role='dialog']")].at(-1) ?? document)
           : (document.querySelector("main") ?? document);
-      const hit = [...root.querySelectorAll("button, a, input, [role='button']")].find((el) =>
-        ((el as HTMLElement).getAttribute("aria-label") ?? el.textContent ?? "")
+      const hit = [...root.querySelectorAll("button, a, input, select, [role='button']")].find((el) => {
+        const name = ((el as HTMLElement).getAttribute("aria-label") ?? el.textContent ?? "")
           .trim()
           .replace(/\s+/g, " ")
-          .toLowerCase()
-          .includes(needle.toLowerCase())
-      ) as HTMLElement | undefined;
+          .toLowerCase();
+        return isExact ? name === needle.toLowerCase() : name.includes(needle.toLowerCase());
+      }) as HTMLElement | undefined;
       return hit ? hit.tabIndex : null;
     },
-    { scope, needle: sub }
+    { scope, needle: sub, exact }
   );
 }
 
@@ -642,7 +660,7 @@ async function focusStyleUnchanged(
         which === "dialog"
           ? ([...document.querySelectorAll("[role='dialog']")].at(-1) ?? document)
           : (document.querySelector("main") ?? document);
-      const hit = [...root.querySelectorAll("button, a, input, [role='button']")].find((el) => {
+      const hit = [...root.querySelectorAll("button, a, input, select, [role='button']")].find((el) => {
         const name = ((el as HTMLElement).getAttribute("aria-label") ?? el.textContent ?? "")
           .trim()
           .replace(/\s+/g, " ")
@@ -669,26 +687,31 @@ async function focusStyleUnchanged(
   );
 }
 
-/** Focus the control by name; resolves false when absent. */
-async function focusControlByName(driver: ParityDriver, scope: "page" | "dialog", sub: string): Promise<boolean> {
+/** Focus the control by name (exact when `exact`); resolves false when absent. */
+async function focusControlByName(
+  driver: ParityDriver,
+  scope: "page" | "dialog",
+  sub: string,
+  exact = false
+): Promise<boolean> {
   return driver.page.evaluate(
-    ({ scope: which, needle }) => {
+    ({ scope: which, needle, exact: isExact }) => {
       const root =
         which === "dialog"
           ? ([...document.querySelectorAll("[role='dialog']")].at(-1) ?? document)
           : (document.querySelector("main") ?? document);
-      const hit = [...root.querySelectorAll("button, a, input, [role='button']")].find((el) =>
-        ((el as HTMLElement).getAttribute("aria-label") ?? el.textContent ?? "")
+      const hit = [...root.querySelectorAll("button, a, input, select, [role='button']")].find((el) => {
+        const name = ((el as HTMLElement).getAttribute("aria-label") ?? el.textContent ?? "")
           .trim()
           .replace(/\s+/g, " ")
-          .toLowerCase()
-          .includes(needle.toLowerCase())
-      ) as HTMLElement | undefined;
+          .toLowerCase();
+        return isExact ? name === needle.toLowerCase() : name.includes(needle.toLowerCase());
+      }) as HTMLElement | undefined;
       if (!hit) return false;
       hit.focus();
       return document.activeElement === hit;
     },
-    { scope, needle: sub }
+    { scope, needle: sub, exact }
   );
 }
 
@@ -789,35 +812,47 @@ test(
 );
 
 test(
-  specTitle(ROW_023, "bug: NEWFRONT-471 pickers unreachable by Tab and controls lack visible focus"),
+  specTitle(ROW_023, "every control is Tab-reachable with a visible focus indicator and keyboard-navigable menus"),
   { tag: specTags(ROW_023) },
   async ({ driver, seed }) => {
     test.setTimeout(720_000);
     const world = await setupCrossSurfaceWorld("parity-exp023b");
 
-    await test.step("settings pickers sit outside the tab order", async () => {
+    // Re-pinned to intended (NEWFRONT-951; old-app bug NEWFRONT-471 left
+    // every picker at tabIndex -1, menus ignoring arrows/Enter, and no
+    // control showing a focus change).
+    await test.step("settings pickers are Tab-reachable", async () => {
       await driver.exportsSettingsOpen(world.workspaceSlug, browserSessionCookies(world.owner));
       await expect.poll(() => driver.exportsSettingsAccess(), { timeout: 60_000 }).toBe("form");
-      // Intended: every control tab-reachable. Live: both pickers are -1.
-      expect(await controlTabIndex(driver, "page", "all projects")).toBe(-1);
-      expect(await controlTabIndex(driver, "page", "csv")).toBe(-1);
+      // Intended: every control tab-reachable.
+      expect(await controlTabIndex(driver, "page", "all projects")).toBe(0);
+      expect(await controlTabIndex(driver, "page", "csv")).toBe(0);
       expect(await controlTabIndex(driver, "page", "refresh status")).toBe(0);
     });
 
-    await test.step("settings, analytics and profile controls show no focus change", async () => {
-      // Intended: a visible focus indicator. Live: focusing changes no
-      // rendered style on any of these controls.
-      expect(await focusStyleUnchanged(driver, "page", "export", true)).toBe(true);
-      expect(await focusStyleUnchanged(driver, "page", "refresh status")).toBe(true);
+    await test.step("settings, analytics and profile controls show a focus change", async () => {
+      // Intended: a visible focus indicator. A Tab first establishes
+      // keyboard modality so :focus-visible outlines render; the tabIndex
+      // reads alongside prove the control exists (an absent control
+      // reports its style trivially unchanged).
+      await driver.page.keyboard.press("Tab");
+      expect(await controlTabIndex(driver, "page", "export", true)).toBe(0);
+      expect(await focusStyleUnchanged(driver, "page", "export", true)).toBe(false);
+      expect(await controlTabIndex(driver, "page", "refresh status")).toBe(0);
+      expect(await focusStyleUnchanged(driver, "page", "refresh status")).toBe(false);
       await driver.analyticsExportOpen(world.workspaceSlug, browserSessionCookies(world.owner));
       await expect.poll(() => driver.analyticsExportButtonCount(), { timeout: 120_000 }).toBe(2);
-      expect(await focusStyleUnchanged(driver, "page", "export as csv")).toBe(true);
+      await driver.page.keyboard.press("Tab");
+      expect(await controlTabIndex(driver, "page", "export as csv")).toBe(0);
+      expect(await focusStyleUnchanged(driver, "page", "export as csv")).toBe(false);
       await driver.profileActivityOpen(world.workspaceSlug, world.owner.userId, browserSessionCookies(world.owner));
       await expect.poll(() => driver.profileActivityDownloadVisible(), { timeout: 60_000 }).toBe(true);
-      expect(await focusStyleUnchanged(driver, "page", "download")).toBe(true);
+      await driver.page.keyboard.press("Tab");
+      expect(await controlTabIndex(driver, "page", "download")).toBe(0);
+      expect(await focusStyleUnchanged(driver, "page", "download")).toBe(false);
     });
 
-    await test.step("dialog rows sit outside the tab order and show no focus change on the footer", async () => {
+    await test.step("dialog rows are Tab-reachable and the footer shows a focus change", async () => {
       const tag = stamp();
       const session = await seedSession(seed);
       const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Kbd023b ${tag}`);
@@ -827,38 +862,35 @@ test(
       await driver.pagesHeaderChooseMenuItem("Export");
       await expect.poll(() => driver.pagesHeaderExportDialogVisible(), { timeout: 15_000 }).toBe(true);
 
-      // The row buttons show their current values, so match on those.
-      expect(await controlTabIndex(driver, "dialog", "pdf")).toBe(-1);
-      expect(await controlTabIndex(driver, "dialog", "everything")).toBe(-1);
-      expect(await controlTabIndex(driver, "dialog", "a4")).toBe(-1);
-      expect(await focusStyleUnchanged(driver, "dialog", "cancel")).toBe(true);
-      expect(await focusStyleUnchanged(driver, "dialog", "export")).toBe(true);
-
-      // The pickers would show a ring if they could be reached: after a
-      // Tab establishes keyboard modality, focusing one programmatically
-      // draws the browser default outline.
+      // The row selects show their current values, so match on those.
+      expect(await controlTabIndex(driver, "dialog", "pdf")).toBe(0);
+      expect(await controlTabIndex(driver, "dialog", "everything")).toBe(0);
+      expect(await controlTabIndex(driver, "dialog", "a4")).toBe(0);
       await driver.page.keyboard.press("Tab");
+      expect(await focusStyleUnchanged(driver, "dialog", "cancel")).toBe(false);
+      expect(await focusStyleUnchanged(driver, "dialog", "export")).toBe(false);
+
+      // After a Tab establishes keyboard modality, focusing the format
+      // select draws its visible indicator.
       expect(await focusControlByName(driver, "dialog", "pdf")).toBe(true);
-      expect((await driver.pageExportFocusedFacts())?.indicator).toBe("outline");
+      const focused = await driver.pageExportFocusedFacts();
+      expect(focused?.indicator).toBe("outline");
+      expect(focused?.focusVisible).toBe(true);
     });
 
-    await test.step("dialog picker menus do not navigate or select by keyboard", async () => {
+    await test.step("dialog picker menus navigate and select by keyboard", async () => {
       // The dialog is still open from the previous step.
       await expect.poll(() => driver.pagesHeaderExportDialogVisible(), { timeout: 15_000 }).toBe(true);
       expect(await focusControlByName(driver, "dialog", "pdf")).toBe(true);
-      await driver.page.keyboard.press("Space");
-      await driver.page.getByRole("option").first().waitFor({ timeout: 10_000 });
-      expect(await driver.page.getByRole("option").count()).toBe(2);
-      await driver.page.keyboard.press("ArrowDown");
-      await driver.page.keyboard.press("ArrowDown");
-      const focusAfterArrows = await driver.pageExportFocusedFacts();
-      // Intended: focus/selection moves through the menu. Live: focus stays
-      // put and Enter selects nothing.
-      expect(focusAfterArrows?.label).toBe("button :: PDF");
-      await driver.page.keyboard.press("Enter");
-      await driver.page.waitForTimeout(500);
       expect((await driver.pagesHeaderExportForm()).format).toBe("PDF");
-      await driver.page.keyboard.press("Escape");
+      expect(await driver.pageExportOfferedOptions("format")).toEqual(["PDF", "Markdown"]);
+      // A focused native select moves its selection with arrows.
+      await driver.page.keyboard.press("ArrowDown");
+      await expect
+        .poll(async () => (await driver.pagesHeaderExportForm()).format, { timeout: 15_000 })
+        .toBe("Markdown");
+      await driver.page.keyboard.press("ArrowUp");
+      await expect.poll(async () => (await driver.pagesHeaderExportForm()).format, { timeout: 15_000 }).toBe("PDF");
     });
   }
 );
