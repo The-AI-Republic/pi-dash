@@ -130,9 +130,12 @@ chip bar renders on issues surfaces; removal runs through each
 condition's own control (NEWFRONT-148, now the inventory's documented
 behavior rather than a deviation). The legacy page-level dropdown
 chrome (the old ISS-082–095 entry point) renders on no issues
-surface — the picker plus the row is the filter UI; the shared
-section chrome instead lives in the rich value lists, the display
-dropdown, and the sub-issue widget (ISS-094). Operators render
+surface — the picker plus the row is the filter UI, and each value
+picker is a search box over an uncapped option list. The legacy
+collapsible sections survive only in the sub-issue widget dropdown;
+the shared section control for the rich value lists, the display
+dropdown, and the widget is rebuild target behavior (ISS-094, §22),
+not an oracle property. Operators render
 lowercase; joined conditions show no AND text; valueless conditions
 are UI-ephemeral and collapse away on the next expression write.
 

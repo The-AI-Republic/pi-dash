@@ -10,11 +10,14 @@
 // SCOPE NOTE (verified by code-wide composer search plus live recon): the
 // rows' entry point is the condition-row builder on main issues pages, not
 // a page-level legacy "Filters" dropdown (NEWFRONT-148 corrected the
-// inventory). Each dimension's value list uses the shared section chrome
-// (ISS-094): applied count, collapse, search, and the five-row cap. The
-// sub-issue widget is the only surface with the older dropdown shape, and
-// these scenarios prove the main-page filtering behavior through the live
-// condition row. ISS-094 carries no filtering behavior of its own here.
+// inventory). Each dimension's value picker is a search box over an
+// uncapped option list — no applied count, collapse, or five-row cap;
+// the shared section chrome is rebuild target behavior (ISS-094, §22),
+// not an oracle property. The sub-issue widget is the only surface with
+// the older dropdown shape (state, priority, assignees, dates, and issue
+// types only), and these scenarios prove the main-page filtering behavior
+// through the live condition row. ISS-094 carries no filtering behavior
+// of its own here.
 //
 // REVEAL PATTERN (verified live): the row renders only while the stored
 // expression is non-empty, so every scenario seeds an expression through
