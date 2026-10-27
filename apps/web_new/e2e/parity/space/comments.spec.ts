@@ -190,6 +190,37 @@ test(
     const admin = await signInSession(seed.email, seed.password);
     const before = await setFlags(seed, { comments: false, reactions: false, votes: false }, admin);
     try {
+      if (driver.target === "web_new") {
+        // Intended behavior (NEWFRONT-461): commenting disabled hides the
+        // whole section in every presentation — no heading, no thread, no
+        // composer, and no invitation, signed-in or anonymous.
+        await test.step("full-screen hides the whole section while disabled", async () => {
+          await driver.page.context().addCookies(sessionBrowserCookies(admin));
+          await driver.spaceCommentOpenIssue(anchor, issueName);
+          await driver.spaceCommentPeekMode("full");
+          await expect.poll(() => driver.spacePeekMode(), { timeout: 30_000 }).toBe("full");
+          expect(await driver.spaceCommentSection()).toEqual({
+            sectionVisible: false,
+            threadCount: 0,
+            composerVisible: false,
+            signInInviteVisible: false,
+          });
+        });
+
+        await test.step("anonymous full-screen offers no sign-in invitation", async () => {
+          await driver.page.context().clearCookies();
+          await driver.spaceCommentOpenIssue(anchor, issueName);
+          await driver.spaceCommentPeekMode("full");
+          await expect.poll(() => driver.spacePeekMode(), { timeout: 30_000 }).toBe("full");
+          expect(await driver.spaceCommentSection()).toEqual({
+            sectionVisible: false,
+            threadCount: 0,
+            composerVisible: false,
+            signInInviteVisible: false,
+          });
+        });
+        return;
+      }
       await driver.page.context().addCookies(sessionBrowserCookies(admin));
 
       await test.step("full-screen renders the shell with an empty thread while disabled", async () => {
