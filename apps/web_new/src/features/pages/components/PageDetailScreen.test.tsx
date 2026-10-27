@@ -89,6 +89,45 @@ vi.mock("../lib/pageLiveSession.js", () => ({
   usePageReadOnlySyncReport: live.snapshot,
 }));
 
+// The stuck-mount seam (NEWFRONT-360): off by default, so every
+// pre-existing test renders the real surface. A blank-handle test flips
+// it on and the surface reports a mounted editor whose read serializes
+// blank while the draft or the stored body still holds content.
+const surfaceStub = vi.hoisted(() => ({
+  blankHandle: false as boolean,
+  blankHtml: "" as string,
+  handles: [] as { html: () => string }[],
+}));
+vi.mock("./PageEditorSurface.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./PageEditorSurface.js")>();
+  const React = await import("react");
+  function BlankHandleSurface(props: {
+    onHandle?: ((handle: unknown) => void) | undefined;
+  }): React.ReactElement | null {
+    const { onHandle } = props;
+    React.useEffect(() => {
+      // Recorded so the test proves the stuck state — a mounted handle
+      // reading blank — rather than passing with no handle at all.
+      const handle = { html: () => surfaceStub.blankHtml };
+      surfaceStub.handles.push(handle);
+      onHandle?.(handle);
+      return () => {
+        onHandle?.(null);
+      };
+    }, [onHandle]);
+    return null;
+  }
+  return {
+    ...actual,
+    PageEditorSurface: (props: Record<string, unknown>): React.ReactElement | null =>
+      surfaceStub.blankHandle ? (
+        <BlankHandleSurface onHandle={props.onHandle as ((handle: unknown) => void) | undefined} />
+      ) : (
+        <actual.PageEditorSurface {...(props as unknown as React.ComponentProps<typeof actual.PageEditorSurface>)} />
+      ),
+  };
+});
+
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const OTHER = "323e4567-e89b-12d3-a456-426614174009";
 const MID = "423e4567-e89b-12d3-a456-426614174010";
@@ -101,6 +140,7 @@ interface Harness {
   pageCalls: string[];
   pageWrites: { method: string; body: unknown }[];
   descriptionWrites: { method: string; body: unknown }[];
+  convertBodies: unknown[];
   pages: PageRow[];
   childrenByParent: Record<string, PageRow[]>;
   pagesStatus: number;
@@ -151,6 +191,7 @@ beforeEach(() => {
     pageCalls: [],
     pageWrites: [],
     descriptionWrites: [],
+    convertBodies: [],
     pages: [],
     childrenByParent: {},
     pagesStatus: 200,
@@ -312,6 +353,7 @@ beforeEach(() => {
       };
     }
     if (url.endsWith("/live/convert-document/") && init.method === "POST") {
+      harness.convertBodies.push(JSON.parse(init.body ?? "{}") as unknown);
       return jsonResponse(url, 200, {
         description_binary: "e30=",
         description_html: "<p>Draft body</p>",
@@ -400,6 +442,9 @@ afterEach(() => {
   live.mount = null;
   live.options = null;
   live.snapshot.mockClear();
+  surfaceStub.blankHandle = false;
+  surfaceStub.blankHtml = "";
+  surfaceStub.handles = [];
   window.localStorage.clear();
 });
 
@@ -425,6 +470,15 @@ function renderScreen(search: PageDetailSearch = {}): {
     </QueryClientProvider>
   );
   return { changes };
+}
+
+// The stuck mount NEWFRONT-360 pins: the screen is up with a mounted
+// handle whose read serializes blank. The stub surface renders no title
+// box, so blank-handle tests wait on the screen itself.
+async function expectBlankHandleMounted(blankHtml: string): Promise<void> {
+  await screen.findByTestId("page-detail-screen");
+  await waitFor(() => expect(surfaceStub.handles).toHaveLength(1));
+  expect(surfaceStub.handles[0]?.html()).toBe(blankHtml);
 }
 
 const SNAPSHOT_ROW = {
@@ -1552,6 +1606,15 @@ describe("PageDetailScreen fallback persistence (PAGE-064)", () => {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     expect(harness.descriptionWrites).toEqual([]);
   });
+
+  it("saves the session draft when the mounted handle reads blank (NEWFRONT-360)", async () => {
+    surfaceStub.blankHandle = true;
+    setPageBodyDraft(harness.pageId, "<p>Draft save words</p>");
+    renderScreen();
+    await expectBlankHandleMounted("");
+    await waitFor(() => expect(harness.convertBodies.length).toBeGreaterThan(0), { timeout: 10_000 });
+    expect(harness.convertBodies[0]).toMatchObject({ description_html: "<p>Draft save words</p>" });
+  });
 });
 
 describe("PageDetailScreen export entry (PAGE-074)", () => {
@@ -1638,6 +1701,47 @@ describe("PageDetailScreen export entry (PAGE-074)", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Export" }));
     expect(await screen.findByTestId("stub-export-dialog")).toBeInTheDocument();
     expect(screen.getByTestId("stub-export-html")).toHaveTextContent("Draft body");
+  });
+
+  it("exports the session draft when the mounted handle reads blank (NEWFRONT-360)", async () => {
+    surfaceStub.blankHandle = true;
+    registerPageExportDialog(StubExportDialog);
+    setPageBodyDraft(harness.pageId, "<p>Draft export words</p>");
+    renderScreen();
+    await expectBlankHandleMounted("");
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Export" }));
+    expect(await screen.findByTestId("stub-export-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("stub-export-html")).toHaveTextContent("Draft export words");
+    expect(screen.getByTestId("stub-export-markdown")).toHaveTextContent("Draft export words");
+  });
+
+  it("exports the stored snapshot without a draft when the handle reads an empty paragraph (NEWFRONT-360)", async () => {
+    surfaceStub.blankHandle = true;
+    surfaceStub.blankHtml = "<p></p>";
+    registerPageExportDialog(StubExportDialog);
+    renderScreen();
+    await expectBlankHandleMounted("<p></p>");
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Export" }));
+    expect(await screen.findByTestId("stub-export-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("stub-export-html")).toHaveTextContent("Draft body");
+    expect(screen.getByTestId("stub-export-markdown")).toHaveTextContent("Draft body");
+  });
+
+  it("exports nothing once the draft records an emptied page (NEWFRONT-360)", async () => {
+    surfaceStub.blankHandle = true;
+    registerPageExportDialog(StubExportDialog);
+    setPageBodyDraft(harness.pageId, "");
+    renderScreen();
+    await expectBlankHandleMounted("");
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Export" }));
+    expect(await screen.findByTestId("stub-export-dialog")).toBeInTheDocument();
+    // The blank draft is authoritative: falling past it would resurrect
+    // the stored words the author deleted.
+    expect(screen.getByTestId("stub-export-html")).toBeEmptyDOMElement();
+    expect(screen.getByTestId("stub-export-markdown")).toBeEmptyDOMElement();
   });
 });
 
