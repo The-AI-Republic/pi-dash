@@ -8,6 +8,13 @@
 // expression), and unknown, forbidden or blank records settle into the
 // same missing-view state as the project detail. The layout selector is
 // cloud-only: OSS renders the spreadsheet body with no selector.
+//
+// The screen owns the issues mutation loader (ISS-005). Its defaults and
+// customs are issues surfaces like a project list: the filter row and the
+// Display control write preferences through the loader, and the all-issues
+// default reaches a display write before any issues layout root mounts.
+// One provider sits at the edge so every write in the tree finds it; the
+// surface renders no floating spinner, matching the old workspace list.
 
 import { updateWorkspaceView, type IssueListQuery, type SavedView, type SavedViewList } from "@pidash/api-client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -30,6 +37,7 @@ import {
   selectCreatableProjects,
   selectDisplayPrefs,
   useEntityPrefs,
+  IssuesLoaderProvider,
   useUpdateDisplayPrefs,
   withRichFilters,
   type DisplayPrefs,
@@ -114,7 +122,19 @@ function WorkspaceDetailError({ onRetry }: { onRetry: () => void }): React.React
   );
 }
 
-export function WorkspaceViewScreen({ params, peek }: WorkspaceViewScreenProps): React.ReactElement {
+/**
+ * The workspace view with its issues mutation loader mounted. Everything
+ * below this edge may read or raise the loader; nothing above it should.
+ */
+export function WorkspaceViewScreen(props: WorkspaceViewScreenProps): React.ReactElement {
+  return (
+    <IssuesLoaderProvider>
+      <WorkspaceViewScreenBody {...props} />
+    </IssuesLoaderProvider>
+  );
+}
+
+function WorkspaceViewScreenBody({ params, peek }: WorkspaceViewScreenProps): React.ReactElement {
   const client = getAppClient();
   const navigate = useNavigate();
   const { workspace } = useWorkspace(params.ws);
