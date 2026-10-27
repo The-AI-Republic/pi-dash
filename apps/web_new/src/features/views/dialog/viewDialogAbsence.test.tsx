@@ -5,12 +5,13 @@
 // Views dialog absence proofs (VIEW-043, VIEW-044, from
 // parity/specs/views.md §13): every save dialog tabs in field order
 // (title, description, the remaining controls, Cancel, submit) with
-// no positive tabindex anywhere; the delete confirmations order
-// Cancel before their danger action; and the acting user's own
-// project create adopts the created row into the list cache without
-// a refetch. Escape itself is pinned per dialog in the owning
-// suites; the node scan beside this holds the no-other-handlers half
-// of VIEW-044 across every views source.
+// no positive tabindex anywhere; a live Tab from the title lands on
+// the description (NEWFRONT-241's old skip, pinned as the keypress
+// itself); the delete confirmations order Cancel before their danger
+// action; and the acting user's own project create adopts the created
+// row into the list cache without a refetch. Escape itself is pinned
+// per dialog in the owning suites; the node scan beside this holds
+// the no-other-handlers half of VIEW-044 across every views source.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -150,6 +151,28 @@ function expectFieldOrder(root: ParentNode, submit: string): void {
   expect(names.slice(-2), `footer trails: ${names.join(" | ")}`).toEqual(["Cancel", submit]);
 }
 
+/**
+ * NEWFRONT-241's exact repro as a live traversal: from the focused
+ * title, one Tab must land on the description. The old project dialog
+ * skipped it (title, Cancel, submit, wrap); the DOM-order suite above
+ * infers the order, this pins the keypress itself, inside the dialog.
+ */
+async function expectTabReachesDescription(ui: React.ReactElement, status: number, body: unknown): Promise<void> {
+  const user = userEvent.setup();
+  seedSession();
+  transport(() => ({ status, body }));
+  renderSaveDialog(ui);
+  await screen.findByTestId("rich-filter-add");
+  const dialog = screen.getByRole("dialog");
+  const title = screen.getByPlaceholderText("Title");
+  await user.click(title);
+  expect(title).toHaveFocus();
+  await user.tab();
+  // Base UI's focus guard hands focus over asynchronously.
+  await waitFor(() => expect(screen.getByPlaceholderText("Description")).toHaveFocus());
+  expect(dialog.contains(document.activeElement)).toBe(true);
+}
+
 describe("save dialog tab order (VIEW-044)", () => {
   it("tabs the project create dialog in field order", async () => {
     seedSession();
@@ -208,6 +231,55 @@ describe("save dialog tab order (VIEW-044)", () => {
     expect(await screen.findByTestId("rich-filter-add")).toBeInTheDocument();
     expectFieldOrder(document, "Update View");
     expectNoPositiveTabindex(document);
+  });
+});
+
+describe("live Tab reaches Description (NEWFRONT-241, VIEW-044)", () => {
+  it("tabs the project create dialog from Title into Description", async () => {
+    await expectTabReachesDescription(
+      <CreateViewDialog
+        open={true}
+        onOpenChange={() => undefined}
+        workspaceSlug="acme"
+        projectId={PROJECT}
+        hideCycle={false}
+        hideModule={false}
+      />,
+      201,
+      CREATED
+    );
+  });
+
+  it("tabs the project update dialog from Title into Description", async () => {
+    await expectTabReachesDescription(
+      <UpdateViewDialog
+        open={true}
+        onOpenChange={() => undefined}
+        workspaceSlug="acme"
+        projectId={PROJECT}
+        hideCycle={false}
+        hideModule={false}
+        view={STORED}
+      />,
+      200,
+      STORED
+    );
+  });
+
+  it("tabs the workspace create dialog from Title into Description", async () => {
+    await expectTabReachesDescription(
+      <WorkspaceViewDialog open={true} onOpenChange={() => undefined} workspaceSlug="acme" mode="create" />,
+      201,
+      CREATED
+    );
+  });
+
+  it("tabs the workspace edit dialog from Title into Description", async () => {
+    await expectTabReachesDescription(
+      <WorkspaceViewDialog open={true} onOpenChange={() => undefined} workspaceSlug="acme" mode="edit" view={STORED} />,
+      200,
+      STORED
+    );
   });
 });
 
