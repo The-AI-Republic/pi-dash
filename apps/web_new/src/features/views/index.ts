@@ -56,6 +56,17 @@ export { DeleteWorkspaceViewDialog } from "./dialog/DeleteWorkspaceViewDialog.js
 export type { DeleteWorkspaceViewDialogProps } from "./dialog/DeleteWorkspaceViewDialog.js";
 export { ViewAccessField, OWNER_ACCESS, SHARED_ACCESS } from "./dialog/ViewAccessField.js";
 export type { ViewAccessFieldProps } from "./dialog/ViewAccessField.js";
+export { CloudViewAccessField } from "./edition/CloudViewAccessField.js";
+export {
+  CLOUD_WORKSPACE_VIEW_LAYOUTS,
+  cloudViewAccessSlot,
+  cloudViewPublishSlot,
+  cloudWorkspaceViewLayouts,
+  publishedViewPath,
+  VIEW_ACCESS_STORE_FAILED,
+  VIEW_PUBLISH_FAILED,
+  VIEW_UNPUBLISH_FAILED,
+} from "./edition/cloudSlots.js";
 export { ViewAccessSummary } from "./dialog/ViewAccessSummary.js";
 export type { ViewAccessSummaryProps } from "./dialog/ViewAccessSummary.js";
 export { DeleteViewDialog, DELETE_VIEW_BODY, DELETE_VIEW_TITLE } from "./dialog/DeleteViewDialog.js";
