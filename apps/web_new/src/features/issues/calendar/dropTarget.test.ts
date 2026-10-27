@@ -53,4 +53,45 @@ describe("calendarDayAtPoint", () => {
     const doc = { querySelectorAll: document.querySelectorAll.bind(document) };
     expect(calendarDayAtPoint(doc, 150, 50)).toBe("2026-10-16");
   });
+
+  it("ignores the hover preview card and resolves the tile under it (ISS-024)", () => {
+    document.body.innerHTML = "";
+    const source = tile("2026-10-02", { left: 0, top: 0, right: 100, bottom: 100 });
+    tile("2026-10-03", { left: 100, top: 0, right: 200, bottom: 100 });
+    const preview = document.createElement("div");
+    preview.setAttribute("data-calendar-preview", "true");
+    const inner = document.createElement("span");
+    inner.textContent = "PAR-1";
+    preview.append(inner);
+    source.append(preview);
+    const doc = {
+      elementFromPoint: () => inner,
+      querySelectorAll: document.querySelectorAll.bind(document),
+    };
+    // Release over the adjacent tile's center, where the source tile's
+    // overflowed preview card sits: must resolve the destination day, not
+    // the source day the card is mounted in.
+    expect(calendarDayAtPoint(doc, 150, 50)).toBe("2026-10-03");
+    // The same preview over its own tile still resolves the source day, so
+    // the same-day no-op is preserved.
+    expect(calendarDayAtPoint(doc, 50, 50)).toBe("2026-10-02");
+  });
+
+  it("still resolves direct tile hits through elementFromPoint", () => {
+    document.body.innerHTML = "";
+    const dest = tile("2026-10-03", { left: 100, top: 0, right: 200, bottom: 100 });
+    const inner = document.createElement("span");
+    dest.append(inner);
+    const direct = {
+      elementFromPoint: () => inner,
+      querySelectorAll: document.querySelectorAll.bind(document),
+    };
+    expect(calendarDayAtPoint(direct, 150, 50)).toBe("2026-10-03");
+    const missed = {
+      elementFromPoint: () => null,
+      querySelectorAll: document.querySelectorAll.bind(document),
+    };
+    expect(calendarDayAtPoint(missed, 150, 50)).toBe("2026-10-03");
+    expect(calendarDayAtPoint(missed, 300, 50)).toBeNull();
+  });
 });

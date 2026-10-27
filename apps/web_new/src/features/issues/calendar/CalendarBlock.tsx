@@ -101,6 +101,9 @@ export function CalendarBlock({
   const PriorityIcon = PRIORITY_ICONS[issue.priority];
 
   function openPreview(): void {
+    // A tooltip popping open mid-drag would cover the adjacent tile and
+    // blind the drop resolution (ISS-024).
+    if (draggedRef.current) return;
     const anchor = anchorRef.current;
     if (anchor !== null && typeof globalThis.window !== "undefined") {
       setPlacement(
@@ -154,6 +157,11 @@ export function CalendarBlock({
       if (Math.hypot(dx, dy) < CALENDAR_DRAG_THRESHOLD_PX) return;
       pressRef.current = null;
       draggedRef.current = true;
+      // The hover card lives in the source tile's subtree and overflows
+      // over the neighbor; dismiss it (and any pending hover timer) so the
+      // drop resolution sees the tile under the pointer (ISS-024).
+      clearHoverTimer();
+      setPreviewOpen(false);
       dragListenersRef.current?.();
       dragListenersRef.current = null;
       onDragStart(issue, moveEvent as unknown as React.PointerEvent<HTMLElement>);
@@ -271,6 +279,7 @@ export function CalendarBlock({
         <div
           className={`shadow-popover absolute z-30 w-72 space-y-2 rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-4) ${previewPlacementClasses(placement)}`}
           role="tooltip"
+          data-calendar-preview="true"
           data-placement={placement}
         >
           <div className="flex items-center justify-between gap-(--space-2)">

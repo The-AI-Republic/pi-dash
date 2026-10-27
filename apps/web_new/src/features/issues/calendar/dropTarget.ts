@@ -7,6 +7,8 @@
 // of relying on the tile's own pointer handlers.
 
 export const CALENDAR_DAY_SELECTOR = "[data-calendar-day]";
+/** Hover preview card; it overflows its source tile into the neighbor. */
+export const CALENDAR_PREVIEW_SELECTOR = "[data-calendar-preview]";
 
 interface PointDocument {
   elementFromPoint?: ((x: number, y: number) => Element | null) | undefined;
@@ -31,9 +33,16 @@ export function calendarDayAtPoint(doc: PointDocument | null | undefined, x: num
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   if (typeof doc.elementFromPoint === "function") {
     const hit = doc.elementFromPoint(x, y);
-    const tile = hit?.closest?.(CALENDAR_DAY_SELECTOR) ?? null;
-    const day = tile?.getAttribute("data-calendar-day") ?? null;
-    if (day !== null && day !== "") return day;
+    // The block hover preview is mounted in the source tile but overflows
+    // over the adjacent tile; a hit inside it would climb back to the
+    // source day, so ignore it and resolve from the tile rectangles
+    // instead (ISS-024).
+    const preview = hit?.closest?.(CALENDAR_PREVIEW_SELECTOR) ?? null;
+    if (preview === null) {
+      const tile = hit?.closest?.(CALENDAR_DAY_SELECTOR) ?? null;
+      const day = tile?.getAttribute("data-calendar-day") ?? null;
+      if (day !== null && day !== "") return day;
+    }
   }
   for (const tile of Array.from(doc.querySelectorAll(CALENDAR_DAY_SELECTOR))) {
     const day = tile.getAttribute("data-calendar-day");

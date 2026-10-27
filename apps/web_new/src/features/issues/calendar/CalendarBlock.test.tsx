@@ -337,4 +337,33 @@ describe("CalendarBlock", () => {
     const edge = screen.getByRole("link", { name: "WEB-42" }).querySelector("span[aria-hidden='true']") as HTMLElement;
     expect(edge.style.backgroundColor).toBe("");
   });
+
+  it("dismisses the hover preview when a drag starts and keeps it shut mid-drag (ISS-024)", () => {
+    vi.useFakeTimers();
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent.pointerEnter(link);
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
+    expect(handlers.onDragStart).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    // A re-hover mid-drag must not pop the card back open over the drop target.
+    fireEvent.pointerEnter(link);
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
+  it("drops a pending hover preview when the press becomes a drag (ISS-024)", () => {
+    vi.useFakeTimers();
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent.pointerEnter(link);
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
+    expect(handlers.onDragStart).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
 });
