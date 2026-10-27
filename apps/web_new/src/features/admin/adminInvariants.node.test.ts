@@ -8,6 +8,10 @@
 // including screens no render test mounts. Fixtures below prove each
 // token family flags real usage while passing the auditors' own
 // oracle-mirroring selectors.
+//
+// The same scan carries the image-area absence (ADM-049/050): the
+// console offers no third-party image search, so no admin module may
+// name the Unsplash setting or an image-page skeleton.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -135,6 +139,31 @@ describe("admin live-update scan (ADM-069)", () => {
     expect(files.some((file) => file.endsWith("queries.ts"))).toBe(true);
     for (const file of files) {
       expect(hits(liveBody(readFileSync(file, "utf8")), LIVE_TOKENS), file).toEqual([]);
+    }
+  });
+});
+
+/** The removed image area's surviving identifiers (ADM-049/050). */
+const IMAGE_AREA_TOKENS = [/\bUNSPLASH_ACCESS_KEY\b/, /\badmin-image-skeleton\b/, /\badmin-nav-image\b/];
+
+describe("admin image-area scan (ADM-049/050)", () => {
+  it("flags the Unsplash key and the image-page skeleton ids", () => {
+    expect(hits(scanBody('const key = "UNSPLASH_ACCESS_KEY";'), IMAGE_AREA_TOKENS)).not.toEqual([]);
+    expect(hits(scanBody('<div data-testid="admin-image-skeleton" />'), IMAGE_AREA_TOKENS)).not.toEqual([]);
+    expect(
+      hits(scanBody('<a data-testid="admin-nav-image" href="/god-mode/image/" />'), IMAGE_AREA_TOKENS)
+    ).not.toEqual([]);
+  });
+
+  it("passes unrelated uses of the word image and prose", () => {
+    expect(hits(scanBody('const logo: "image" | "initial" = kind;'), IMAGE_AREA_TOKENS)).toEqual([]);
+    expect(hits(scanBody("const pageSize = 25;"), IMAGE_AREA_TOKENS)).toEqual([]);
+    expect(hits(scanBody("// no image area: /image/ falls through"), IMAGE_AREA_TOKENS)).toEqual([]);
+  });
+
+  it("finds no image-area identifiers in admin sources", () => {
+    for (const file of adminSources(here)) {
+      expect(hits(scanBody(readFileSync(file, "utf8")), IMAGE_AREA_TOKENS), file).toEqual([]);
     }
   });
 });

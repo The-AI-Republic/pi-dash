@@ -109,16 +109,15 @@ export interface AdminCrumb {
 
 /**
  * Fixed segment label map. Unmapped segments (loop, runners, raw ids)
- * render uppercased. The image row is dead — `/image/` falls through
- * to the not-found screen — and stays only for table parity with the
- * removal target branch, which left the map untouched.
+ * render uppercased. There is no image entry: the console offers no
+ * image settings area, so `/god-mode/image/` never reaches this map —
+ * it falls through to the not-found screen (ADM-049).
  */
 export const ADMIN_SEGMENT_LABELS: Readonly<Record<string, string>> = {
   general: "General",
   ai: "Artificial Intelligence",
   email: "Email",
   authentication: "Authentication",
-  image: "Image",
   google: "Google",
   github: "GitHub",
   gitlab: "GitLab",
