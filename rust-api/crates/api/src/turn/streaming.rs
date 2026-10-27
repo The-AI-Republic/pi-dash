@@ -63,6 +63,7 @@ use pidash_jobs::oss_worker::model_runtime::provider::{
     ANTHROPIC_VERSION, USER_AGENT,
 };
 use pidash_jobs::oss_worker::model_runtime::usage::{ProviderTable, RequestUsage};
+use pidash_services::assistant::retry::{should_retry_status, sleep_for_retry, MAX_RETRIES};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -1715,78 +1716,9 @@ async fn post_stream(
     }
 }
 
-/// Stainless retry contract (`openai/_constants.py:10-14`, identical
-/// in `anthropic/_constants.py`).
-const MAX_RETRIES: u32 = 2;
-const INITIAL_RETRY_DELAY_SECS: f64 = 0.5;
-const MAX_RETRY_DELAY_SECS: f64 = 8.0;
-const RETRY_AFTER_MAX_SECS: f64 = 60.0;
-
-/// `_should_retry` (`openai/_base_client.py:773-807`): the
-/// `x-should-retry` override wins, else 408/409/429/5xx retry.
-fn should_retry_status(status: u16, headers: &reqwest::header::HeaderMap) -> bool {
-    if let Some(flag) = headers
-        .get("x-should-retry")
-        .and_then(|value| value.to_str().ok())
-    {
-        if flag == "true" {
-            return true;
-        }
-        if flag == "false" {
-            return false;
-        }
-    }
-    status == 408 || status == 409 || status == 429 || status >= 500
-}
-
-/// `_sleep_for_retry` / `_calculate_retry_timeout`: the parsed
-/// `retry-after` wins when within `(0, 60]`, else exponential
-/// backoff with jitter.
-async fn sleep_for_retry(retries_taken: u32, headers: Option<&reqwest::header::HeaderMap>) {
-    let mut seconds = retry_after_seconds(headers)
-        .filter(|secs| secs.is_finite() && *secs > 0.0 && *secs <= RETRY_AFTER_MAX_SECS);
-    if seconds.is_none() {
-        let capped = retries_taken.min(1000) as f64;
-        let backoff = (INITIAL_RETRY_DELAY_SECS * 2_f64.powf(capped)).min(MAX_RETRY_DELAY_SECS);
-        seconds = Some((backoff * (1.0 - 0.25 * unit_random())).max(0.0));
-    }
-    if let Some(secs) = seconds {
-        tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
-    }
-}
-
-/// `_parse_retry_after_header`: `retry-after-ms` first, then
-/// `retry-after` as seconds (floats honoured), then as an HTTP-date
-/// (`email.utils.parsedate_tz` / `mktime_tz`: IMF-fixdate parses as
-/// RFC 2822). Same port as the D-11 send loop.
-fn retry_after_seconds(headers: Option<&reqwest::header::HeaderMap>) -> Option<f64> {
-    let headers = headers?;
-    if let Some(millis) = headers
-        .get("retry-after-ms")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|text| text.parse::<f64>().ok())
-    {
-        return Some(millis / 1000.0);
-    }
-    let text = headers
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())?;
-    if let Ok(seconds) = text.parse::<f64>() {
-        return Some(seconds);
-    }
-    let when = chrono::DateTime::parse_from_rfc2822(text).ok()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs_f64())
-        .unwrap_or(0.0);
-    Some(when.timestamp() as f64 - now)
-}
-
-/// A uniform `[0, 1)` draw for retry jitter, from UUID randomness
-/// (same source as the D-11 send loop).
-fn unit_random() -> f64 {
-    (uuid::Uuid::new_v4().as_u128() as f64) / (u128::MAX as f64)
-}
+// The stainless retry contract (`openai/_constants.py:10-14`) lives in
+// the canonical [`pidash_services::assistant::retry`] policy (OVL-07
+// moved the former private copy there; the D-11 send loop shares it).
 
 // ---------------------------------------------------------------------------
 // Error mapping

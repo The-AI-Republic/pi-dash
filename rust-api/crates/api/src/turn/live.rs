@@ -139,7 +139,10 @@ fn empty_payload() -> Value {
 /// `ASSISTANT_MCP_*` settings are not part of the ported `Settings`, so the
 /// environment is read directly (unset in every shipped profile, where the
 /// pinned defaults apply).
-fn mcp_timeouts() -> (f64, f64) {
+///
+/// Public for the cloud overlay's turn seam (OVL-07), which copied this
+/// read; the overlay's twin stays until OVL-12 re-points it here.
+pub fn mcp_timeouts() -> (f64, f64) {
     let read = |name: &str| -> Option<f64> {
         std::env::var(name)
             .ok()
@@ -152,7 +155,10 @@ fn mcp_timeouts() -> (f64, f64) {
 }
 
 /// `max_servers` (`mcp.py:307-309`), same environment read as above.
-fn mcp_max_servers() -> usize {
+///
+/// Public for the cloud overlay's turn seam (OVL-07), which copied this
+/// read; the overlay's twin stays until OVL-12 re-points it here.
+pub fn mcp_max_servers() -> usize {
     let override_value = std::env::var("ASSISTANT_MCP_MAX_SERVERS")
         .ok()
         .and_then(|raw| raw.trim().parse::<i64>().ok());
@@ -414,6 +420,182 @@ fn mcp_content_value(content: &McpContent) -> Value {
 }
 
 // --------------------------------------------------------------------------- //
+// Public event/message steps (OVL-07)
+// --------------------------------------------------------------------------- //
+// The `events.py` steps as free functions over the pool (and the
+// multiplexed redis client for the publish): the cloud overlay's turn
+// seam copied all three, and calls these once OVL-12 re-points it.
+// [`LiveTurnSeam`]'s private methods below delegate to them.
+
+/// `append_event` (`events.py:90-104`): own transaction, thread row
+/// locked, thread-scoped `seq`; the publish happens after commit and
+/// swallows every failure (`events.py:53-70`).
+#[allow(clippy::too_many_arguments)]
+pub async fn append_event(
+    pool: &PgPool,
+    redis: Option<&RedisClient>,
+    thread_id: Uuid,
+    turn_id: Option<Uuid>,
+    kind: &str,
+    payload: &Value,
+    message_id: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> Result<(), SeamError> {
+    let kind = events::truncate_kind(kind);
+    let mut tx = pool.begin().await.map_err(db_error)?;
+    let locked: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM assistant_thread WHERE id = $1 FOR UPDATE")
+            .bind(thread_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_error)?;
+    if locked.is_none() {
+        return Err(SeamError(
+            "AssistantThread matching query does not exist.".to_owned(),
+        ));
+    }
+    let max: Option<i64> = sqlx::query_scalar(&format!(
+        "SELECT MAX(m) FROM ({}) AS seqs",
+        events::next_event_seq_sql()
+    ))
+    .bind(thread_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_error)?;
+    let seq = max.unwrap_or(0) + 1;
+    pidash_services::domain::assistant::append_event(
+        &mut *tx,
+        &pidash_services::domain::assistant::NewEvent {
+            thread_id,
+            turn_id,
+            seq,
+            kind,
+            message_id,
+            payload,
+            created_at: now,
+        },
+    )
+    .await
+    .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
+    publish_event(pool, redis, thread_id, seq, kind, payload, message_id, now).await;
+    Ok(())
+}
+
+/// `publish_event` (`events.py:53-70`): re-read the committed row id,
+/// render the frame, publish, swallow every failure.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_event(
+    pool: &PgPool,
+    redis: Option<&RedisClient>,
+    thread_id: Uuid,
+    seq: i64,
+    kind: &str,
+    payload: &Value,
+    message_id: Option<Uuid>,
+    now: DateTime<Utc>,
+) {
+    let Some(redis) = redis else {
+        return;
+    };
+    let event_id: Option<i64> = match sqlx::query_scalar(
+        "SELECT id FROM assistant_event WHERE thread_id = $1 AND seq = $2",
+    )
+    .bind(thread_id)
+    .bind(seq)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::warn!(%error, "assistant: event id re-read failed");
+            return;
+        }
+    };
+    let Some(event_id) = event_id else {
+        return;
+    };
+    let thread = thread_id.to_string();
+    let message = message_id.map(|id| id.to_string());
+    let payload_json = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(payload);
+    let created_at = render_stamp(now);
+    let frame = events::serialize_event_json(&events::EventParts {
+        id: event_id,
+        thread_id: &thread,
+        message_id: message.as_deref(),
+        seq,
+        kind,
+        payload_json: &payload_json,
+        created_at: &created_at,
+    });
+    let (channel, body) = events::publish_frame(&thread, &frame);
+    let publish = async {
+        use redis::AsyncCommands;
+        let mut connection = redis.get_multiplexed_async_connection().await?;
+        connection.publish::<_, _, ()>(&channel, &body).await
+    };
+    if let Err(error) = publish.await {
+        tracing::warn!(%error, "assistant: publish failed for thread {thread_id}");
+    }
+}
+
+/// `create_message` (`events.py:108-125`): own transaction, thread row
+/// locked, thread-scoped message `seq`.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_message(
+    pool: &PgPool,
+    thread_id: Uuid,
+    turn_id: Option<Uuid>,
+    kind: &str,
+    display_content: &str,
+    payload: &Value,
+    status: &str,
+    now: DateTime<Utc>,
+) -> Result<(Uuid, i64), SeamError> {
+    let message_id = Uuid::new_v4();
+    let mut tx = pool.begin().await.map_err(db_error)?;
+    let locked: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM assistant_thread WHERE id = $1 FOR UPDATE")
+            .bind(thread_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_error)?;
+    if locked.is_none() {
+        return Err(SeamError(
+            "AssistantThread matching query does not exist.".to_owned(),
+        ));
+    }
+    let max: Option<i64> = sqlx::query_scalar(&format!(
+        "SELECT MAX(m) FROM ({}) AS seqs",
+        events::next_message_seq_sql()
+    ))
+    .bind(thread_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_error)?;
+    let seq = max.unwrap_or(0) + 1;
+    pidash_services::domain::assistant::create_message_row(
+        &mut *tx,
+        &pidash_services::domain::assistant::NewMessage {
+            id: message_id,
+            thread_id,
+            turn_id,
+            seq,
+            kind,
+            display_content,
+            payload,
+            status,
+            created_at: now,
+            completed_at: None,
+        },
+    )
+    .await
+    .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
+    Ok((message_id, seq))
+}
+
+// --------------------------------------------------------------------------- //
 // The seam
 // --------------------------------------------------------------------------- //
 
@@ -539,9 +721,7 @@ impl LiveTurnSeam {
         Ok(cache.get_or_decrypt(token, || decrypted.clone()))
     }
 
-    /// `append_event` (`events.py:90-104`): own transaction, thread row
-    /// locked, thread-scoped `seq`; the publish happens after commit and
-    /// swallows every failure (`events.py:53-70`).
+    /// The public `append_event` step over this seam's handles.
     async fn append_event(
         &self,
         thread_id: Uuid,
@@ -551,105 +731,20 @@ impl LiveTurnSeam {
         message_id: Option<Uuid>,
         now: DateTime<Utc>,
     ) -> Result<(), SeamError> {
-        let kind = events::truncate_kind(kind);
-        let mut tx = self.pool.begin().await.map_err(db_error)?;
-        let locked: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM assistant_thread WHERE id = $1 FOR UPDATE")
-                .bind(thread_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_error)?;
-        if locked.is_none() {
-            return Err(SeamError(
-                "AssistantThread matching query does not exist.".to_owned(),
-            ));
-        }
-        let max: Option<i64> = sqlx::query_scalar(&format!(
-            "SELECT MAX(m) FROM ({}) AS seqs",
-            events::next_event_seq_sql()
-        ))
-        .bind(thread_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(db_error)?;
-        let seq = max.unwrap_or(0) + 1;
-        pidash_services::domain::assistant::append_event(
-            &mut *tx,
-            &pidash_services::domain::assistant::NewEvent {
-                thread_id,
-                turn_id,
-                seq,
-                kind,
-                message_id,
-                payload,
-                created_at: now,
-            },
-        )
-        .await
-        .map_err(db_error)?;
-        tx.commit().await.map_err(db_error)?;
-        self.publish_event(thread_id, seq, kind, payload, message_id, now)
-            .await;
-        Ok(())
-    }
-
-    /// `publish_event` (`events.py:53-70`): re-read the committed row id,
-    /// render the frame, publish, swallow every failure.
-    async fn publish_event(
-        &self,
-        thread_id: Uuid,
-        seq: i64,
-        kind: &str,
-        payload: &Value,
-        message_id: Option<Uuid>,
-        now: DateTime<Utc>,
-    ) {
-        let Some(redis) = &self.redis else {
-            return;
-        };
-        let event_id: Option<i64> = match sqlx::query_scalar(
-            "SELECT id FROM assistant_event WHERE thread_id = $1 AND seq = $2",
-        )
-        .bind(thread_id)
-        .bind(seq)
-        .fetch_optional(&self.pool)
-        .await
-        {
-            Ok(id) => id,
-            Err(error) => {
-                tracing::warn!(%error, "assistant: event id re-read failed");
-                return;
-            }
-        };
-        let Some(event_id) = event_id else {
-            return;
-        };
-        let thread = thread_id.to_string();
-        let message = message_id.map(|id| id.to_string());
-        let payload_json = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(payload);
-        let created_at = render_stamp(now);
-        let frame = events::serialize_event_json(&events::EventParts {
-            id: event_id,
-            thread_id: &thread,
-            message_id: message.as_deref(),
-            seq,
+        append_event(
+            &self.pool,
+            self.redis.as_ref(),
+            thread_id,
+            turn_id,
             kind,
-            payload_json: &payload_json,
-            created_at: &created_at,
-        });
-        let (channel, body) = events::publish_frame(&thread, &frame);
-        let publish = async {
-            use redis::AsyncCommands;
-            let mut connection = redis.get_multiplexed_async_connection().await?;
-            connection.publish::<_, _, ()>(&channel, &body).await
-        };
-        if let Err(error) = publish.await {
-            tracing::warn!(%error, "assistant: publish failed for thread {thread_id}");
-        }
+            payload,
+            message_id,
+            now,
+        )
+        .await
     }
 
-    /// `create_message` (`events.py:108-125`): own transaction, thread row
-    /// locked, thread-scoped message `seq`.
+    /// The public `create_message` step over this seam's pool.
     #[allow(clippy::too_many_arguments)]
     async fn create_message(
         &self,
@@ -661,53 +756,27 @@ impl LiveTurnSeam {
         status: &str,
         now: DateTime<Utc>,
     ) -> Result<(Uuid, i64), SeamError> {
-        let message_id = Uuid::new_v4();
-        let mut tx = self.pool.begin().await.map_err(db_error)?;
-        let locked: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM assistant_thread WHERE id = $1 FOR UPDATE")
-                .bind(thread_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(db_error)?;
-        if locked.is_none() {
-            return Err(SeamError(
-                "AssistantThread matching query does not exist.".to_owned(),
-            ));
-        }
-        let max: Option<i64> = sqlx::query_scalar(&format!(
-            "SELECT MAX(m) FROM ({}) AS seqs",
-            events::next_message_seq_sql()
-        ))
-        .bind(thread_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(db_error)?;
-        let seq = max.unwrap_or(0) + 1;
-        pidash_services::domain::assistant::create_message_row(
-            &mut *tx,
-            &pidash_services::domain::assistant::NewMessage {
-                id: message_id,
-                thread_id,
-                turn_id,
-                seq,
-                kind,
-                display_content,
-                payload,
-                status,
-                created_at: now,
-                completed_at: None,
-            },
+        create_message(
+            &self.pool,
+            thread_id,
+            turn_id,
+            kind,
+            display_content,
+            payload,
+            status,
+            now,
         )
         .await
-        .map_err(db_error)?;
-        tx.commit().await.map_err(db_error)?;
-        Ok((message_id, seq))
     }
 
     /// `events.message_envelope` (`events.py:127-140`) as the JSON embedded
     /// in the `message_created`/`message_completed` payloads.
+    ///
+    /// Public for the cloud overlay's turn seam (OVL-07), which copied
+    /// this envelope; the overlay's twin stays until OVL-12 re-points
+    /// it here.
     #[allow(clippy::too_many_arguments)]
-    fn envelope_json(
+    pub fn envelope_json(
         message_id: Uuid,
         kind: &str,
         display_content: &str,
