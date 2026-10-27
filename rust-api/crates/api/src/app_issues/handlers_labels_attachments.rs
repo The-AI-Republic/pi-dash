@@ -1363,7 +1363,7 @@ async fn workspace_row(pool: &sqlx::PgPool, slug: &str) -> Result<(Uuid, String)
         .await
         .map_err(|error| match error {
             read::Error::NotFound => Denial::NotFound,
-            read::Error::Db(_) => Denial::ServerError,
+            read::Error::Db(_) | read::Error::Failed(_) => Denial::ServerError,
         })
 }
 

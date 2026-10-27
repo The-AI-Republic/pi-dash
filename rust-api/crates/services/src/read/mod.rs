@@ -13,6 +13,7 @@
 //! Re-exported through `pidash-sdk::read` once OVL-02
 //! (PIDASHCONV-1540) lands the facade crate.
 
+pub mod comment;
 pub mod identity;
 pub mod issues;
 pub mod render;
@@ -75,8 +76,17 @@ pub enum Error {
     /// The row is missing (the handler's 404 branch, whatever its body).
     #[error("object not found")]
     NotFound,
+    /// A 500-class row failure: undecodable shape, unparseable id, or a
+    /// row that must exist but does not (the tag names the site).
+    #[error("read failed: {0}")]
+    Failed(&'static str),
 }
 
+pub use comment::{
+    comment_is_synced, render_actor_detail, render_comment, render_comment_reaction_row,
+    ActorDetailView, CommentReactionView, CommentRow, CommentView, IssueFlatView, ProjectLiteView,
+    WorkspaceLiteView,
+};
 pub use identity::{fetch_asset, fetch_profile, fetch_user, AssetRow, ProfileRow, UserShape};
 pub use issues::{comment_url, fetch_blocker_summary, resolve_workpad_state, workpad_stripped};
 pub use render::{render_state, state_row_from, StateRow, StateRowTuple};

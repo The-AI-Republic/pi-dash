@@ -1247,8 +1247,8 @@ async fn comment_url(
     read::comment_url(pool, workspace_id, project_id, issue_id, web_base)
         .await
         .map_err(|error| match error {
-            // Unreachable: the URL lookup never 404s.
-            read::Error::NotFound => Denial::ServerError,
+            // Unreachable: this read never 404s or fails mid-row.
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
             read::Error::Db(err) => {
                 let (site, source) = err.split();
                 db_error(source, site)
@@ -1287,8 +1287,8 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
         read::workspace_slug(pool, workspace_id)
             .await
             .map_err(|error| match error {
-                // Unreachable: the slug lookup never 404s.
-                read::Error::NotFound => Denial::ServerError,
+                // Unreachable: this read never 404s or fails mid-row.
+                read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
                 read::Error::Db(err) => {
                     let (site, source) = err.split();
                     db_error(source, site)

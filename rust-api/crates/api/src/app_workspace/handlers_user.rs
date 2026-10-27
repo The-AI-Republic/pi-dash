@@ -426,7 +426,7 @@ async fn fetch_profile(pool: &PgPool, user_id: uuid::Uuid) -> Result<ProfileRow,
         .await
         .map_err(|error| match error {
             read::Error::NotFound => Denial::ObjectNotFound,
-            read::Error::Db(_) => Denial::ServerError,
+            read::Error::Db(_) | read::Error::Failed(_) => Denial::ServerError,
         })
 }
 
@@ -456,7 +456,7 @@ async fn fetch_asset(pool: &PgPool, asset_id: uuid::Uuid) -> Result<AssetRow, De
         .await
         .map_err(|error| match error {
             read::Error::NotFound => Denial::ObjectNotFound,
-            read::Error::Db(_) => Denial::ServerError,
+            read::Error::Db(_) | read::Error::Failed(_) => Denial::ServerError,
         })
 }
 

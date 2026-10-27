@@ -105,6 +105,7 @@ use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_services::read::{self, ActorDetailView, CommentReactionView, CommentRow, CommentView};
 use pidash_services::space::{guards, queries};
 
 // ---------------------------------------------------------------------------
@@ -438,10 +439,6 @@ fn req_bool(obj: &serde_json::Map<String, Value>, key: &str) -> Result<bool, Han
     }
 }
 
-fn req_json(obj: &serde_json::Map<String, Value>, key: &str) -> Result<Value, HandlerError> {
-    obj.get(key).cloned().ok_or(HandlerError::ServerError)
-}
-
 /// Render a `row_to_json` timestamptz value exactly like DRF `DateTimeField`
 /// with the default `iso-8601` format: ISO-8601 in the request's zone with
 /// `+00:00` rewritten to `Z` (serializer kernel rule).
@@ -730,141 +727,54 @@ async fn ensure_public_member(
 }
 
 // ---------------------------------------------------------------------------
-// Shared nests: users, assets, lite leaves
+// Comment rendering (the public read service owns the row types, the
+// views and the renderers; the wrappers map every failure to the 500
+// the moved code raised).
 // ---------------------------------------------------------------------------
 
-/// `SELECT` for the user row behind `actor_detail` nests. Unlike every
-/// other forward FK here, this carries no soft-deletion guard: `User`
-/// (`db/models/user.py:56`, `AbstractBaseUser` + `PermissionsMixin`) has no
-/// `deleted_at` column, so Django emits no filter for it.
-fn user_detail_sql() -> String {
-    "SELECT \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" WHERE (\"users\".\"id\" = $1)".to_string()
-}
-
-/// `SELECT` for the `display_name` behind reaction/vote rows
-/// (`source="actor.display_name"`). Same unguarded `users` read as
-/// [`user_detail_sql`]: no `deleted_at` column exists to filter on.
-fn display_name_sql() -> String {
-    "SELECT display_name FROM users WHERE id = $1".to_string()
-}
-
-/// `SELECT` for the logo/cover asset row behind `*_url` properties (the
-/// project_meta shape).
-fn logo_asset_sql() -> String {
-    "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"deleted_at\" IS NULL AND \"a\".\"id\" = $1)".to_string()
-}
-
-/// Port of `FileAsset.asset_url` (`db/models/asset.py:80-99`): static-asset
-/// branches render `/api/assets/v2/static/<id>/`; attachment/description
-/// branches interpolate ids; anything else renders `None`.
-fn asset_url(
-    asset_id: &str,
-    entity_type: Option<&str>,
-    workspace_slug: Option<&str>,
-    project_id: Option<&str>,
-    issue_id: Option<&str>,
-) -> Option<String> {
-    match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
-            Some(format!("/api/assets/v2/static/{asset_id}/"))
-        }
-        Some("ISSUE_ATTACHMENT") => {
-            let (slug, project, issue) = match (workspace_slug, project_id, issue_id) {
-                (Some(s), Some(p), Some(i)) => (s, p, i),
-                _ => return None,
-            };
-            Some(format!(
-                "/api/assets/v2/workspaces/{slug}/projects/{project}/issues/{issue}/attachments/{asset_id}/"
-            ))
-        }
-        Some(
-            "ISSUE_DESCRIPTION"
-            | "COMMENT_DESCRIPTION"
-            | "PAGE_DESCRIPTION"
-            | "DRAFT_ISSUE_DESCRIPTION",
-        ) => {
-            let (slug, project) = match (workspace_slug, project_id) {
-                (Some(s), Some(p)) => (s, p),
-                _ => return None,
-            };
-            Some(format!(
-                "/api/assets/v2/workspaces/{slug}/projects/{project}/{asset_id}/"
-            ))
-        }
-        _ => None,
-    }
-}
-
-/// Resolve a logo/cover/avatar URL the way the model properties do: the
-/// asset's `asset_url` when the FK is set (even when that computes to
-/// `None`), else the raw string column, else `None`. Empty strings are
-/// falsy in Python (`if self.avatar`), so they render `None` too.
-async fn logo_or_cover_url(
-    pool: &sqlx::PgPool,
-    raw: Option<String>,
-    asset_id: Option<String>,
-) -> Result<Option<String>, HandlerError> {
-    let Some(asset_id) = asset_id else {
-        return Ok(raw.filter(|text| !text.is_empty()));
-    };
-    let row = fetch_optional_object(pool, &logo_asset_sql(), &[uuid_param(&asset_id)?])
-        .await?
-        .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let entity_type = opt_str(o, "entity_type")?;
-    let workspace_slug = opt_str(o, "workspace_slug")?;
-    let project_id = opt_str(o, "project_id")?;
-    let issue_id = opt_str(o, "issue_id")?;
-    let id = req_str(o, "id")?;
-    Ok(asset_url(
-        &id,
-        entity_type.as_deref(),
-        workspace_slug.as_deref(),
-        project_id.as_deref(),
-        issue_id.as_deref(),
-    ))
-}
-
-/// App `UserLiteSerializer` (`app/serializers/user.py:141-154`), in
-/// `Meta.fields` order.
-#[derive(Debug, Serialize)]
-struct ActorDetailView {
-    id: String,
-    first_name: String,
-    last_name: String,
-    avatar: Option<String>,
-    avatar_url: Option<String>,
-    is_bot: bool,
-    display_name: String,
-}
-
-/// Render one user row as `actor_detail`. A dangling FK is a 500 like
-/// Python's `DoesNotExist` → fallback envelope.
+/// Render one user row as `actor_detail` via the public read service.
 async fn render_actor_detail(
     pool: &sqlx::PgPool,
     user_id: &str,
 ) -> Result<ActorDetailView, HandlerError> {
-    let row = fetch_optional_object(pool, &user_detail_sql(), &[uuid_param(user_id)?])
-        .await?
-        .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let avatar = opt_str(o, "avatar")?;
-    let avatar_url =
-        logo_or_cover_url(pool, avatar.clone(), opt_str(o, "avatar_asset_id")?).await?;
-    Ok(ActorDetailView {
-        id: req_str(o, "id")?,
-        first_name: opt_str(o, "first_name")?.unwrap_or_default(),
-        last_name: opt_str(o, "last_name")?.unwrap_or_default(),
-        // `avatar` is the raw column: DRF renders `""` verbatim. Only the
-        // `avatar_url` property folds falsy values to `None`
-        // (`db/models/user.py:143-151`, via `logo_or_cover_url` above).
-        avatar,
-        avatar_url,
-        is_bot: req_bool(o, "is_bot")?,
-        display_name: opt_str(o, "display_name")?.unwrap_or_default(),
-    })
+    read::render_actor_detail(pool, user_id)
+        .await
+        .map_err(|_| HandlerError::ServerError)
 }
 
+/// Render one comment row with its nests via the public read service.
+async fn render_comment(
+    pool: &sqlx::PgPool,
+    row: &CommentRow,
+    tz: &chrono_tz::Tz,
+    include_member: bool,
+) -> Result<CommentView, HandlerError> {
+    read::render_comment(pool, row, tz, include_member)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
+
+/// Render one reaction row via the public read service.
+async fn render_comment_reaction_row(
+    pool: &sqlx::PgPool,
+    row: &Value,
+    tz: &chrono_tz::Tz,
+) -> Result<CommentReactionView, HandlerError> {
+    read::render_comment_reaction_row(pool, row, tz)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
+
+/// The synced-comment lock via the public read service.
+async fn comment_is_synced(
+    pool: &sqlx::PgPool,
+    external_source: Option<&str>,
+    comment_id: &str,
+) -> Result<bool, HandlerError> {
+    read::comment_is_synced(pool, external_source, comment_id)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
 // ---------------------------------------------------------------------------
 // Query strings (Django QueryDict.get: last value wins)
 // ---------------------------------------------------------------------------
@@ -919,439 +829,6 @@ fn parse_body(raw: &[u8]) -> Result<Value, HandlerError> {
 /// Django's `<uuid:>` converter would never route to these views.
 async fn proxy(state: &AppState, req: Request) -> Response {
     crate::edge::proxy(State(state.clone()), req).await
-}
-
-// ---------------------------------------------------------------------------
-// Comment shapes (app IssueCommentSerializer, issue.py:948-989)
-// ---------------------------------------------------------------------------
-
-/// App `IssueFlatSerializer` for `issue_detail`
-/// (`app/serializers/issue.py:105-123`), in `Meta.fields` order.
-#[derive(Debug, Serialize)]
-struct IssueFlatView {
-    id: String,
-    name: String,
-    description_json: Value,
-    description_html: Option<String>,
-    priority: String,
-    complexity_score: Value,
-    start_date: Option<String>,
-    target_date: Option<String>,
-    sequence_id: i64,
-    sort_order: Value,
-    is_draft: bool,
-}
-
-/// App `ProjectLiteSerializer` for `project_detail`
-/// (`app/serializers/project.py:120-133`), in `Meta.fields` order.
-#[derive(Debug, Serialize)]
-struct ProjectLiteView {
-    id: String,
-    identifier: String,
-    name: String,
-    cover_image: Option<String>,
-    cover_image_url: Option<String>,
-    logo_props: Value,
-    description: Option<String>,
-    is_default: bool,
-}
-
-/// App `WorkspaceLiteSerializer` for `workspace_detail`
-/// (`app/serializers/workspace.py:79-83`), in `Meta.fields` order.
-#[derive(Debug, Serialize)]
-struct WorkspaceLiteView {
-    name: String,
-    slug: String,
-    id: String,
-    logo_url: Option<String>,
-}
-
-/// App `CommentReactionSerializer` (`app/serializers/issue.py:917-937`),
-/// in `Meta.fields` order. `display_name` reads `actor.display_name`.
-#[derive(Debug, Serialize)]
-struct CommentReactionView {
-    id: String,
-    actor: String,
-    comment: String,
-    reaction: String,
-    display_name: String,
-    deleted_at: Option<String>,
-    workspace: Option<String>,
-    project: Option<String>,
-    created_at: String,
-    updated_at: String,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-}
-
-/// App `IssueCommentSerializer` (`app/serializers/issue.py:948-972`):
-/// `Meta.fields = "__all__"`, which DRF orders as pk, declared fields in
-/// creation order, concrete model fields, then forward relations
-/// (`get_default_field_names`). `is_member` is only present on
-/// queryset-annotated rows (list/retrieve), never on create/update
-/// responses.
-#[derive(Debug, Serialize)]
-struct CommentView {
-    id: String,
-    actor_detail: Option<ActorDetailView>,
-    issue_detail: IssueFlatView,
-    project_detail: ProjectLiteView,
-    workspace_detail: WorkspaceLiteView,
-    comment_reactions: Vec<CommentReactionView>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    is_member: Option<bool>,
-    is_synced: bool,
-    created_at: String,
-    updated_at: String,
-    deleted_at: Option<String>,
-    comment_stripped: Option<String>,
-    comment_json: Value,
-    comment_html: Option<String>,
-    attachments: Value,
-    labels: Value,
-    access: Option<String>,
-    external_source: Option<String>,
-    external_id: Option<String>,
-    speaker_type: Option<String>,
-    speaker_label: Option<String>,
-    speaker_agent_run_id: Option<String>,
-    edited_at: Option<String>,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-    project: Option<String>,
-    workspace: Option<String>,
-    description: Option<String>,
-    issue: Option<String>,
-    actor: Option<String>,
-    parent: Option<String>,
-}
-
-/// The `issue_comments` columns one render needs, read from the
-/// `row_to_json` object. `created_by`/`updated_by` arrive as
-/// `created_by_id` from `SELECT *` (the column names); the `or_else`
-/// fallback covers aliased selects.
-struct CommentRow {
-    id: String,
-    created_at: String,
-    updated_at: String,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-    deleted_at: Option<String>,
-    project_id: Option<String>,
-    workspace_id: Option<String>,
-    comment_stripped: Option<String>,
-    comment_json: Value,
-    comment_html: Option<String>,
-    description_id: Option<String>,
-    attachments: Value,
-    labels: Value,
-    issue_id: Option<String>,
-    actor_id: Option<String>,
-    access: Option<String>,
-    external_source: Option<String>,
-    external_id: Option<String>,
-    speaker_type: Option<String>,
-    speaker_label: Option<String>,
-    speaker_agent_run_id: Option<String>,
-    edited_at: Option<String>,
-    parent_id: Option<String>,
-    is_member: Option<bool>,
-}
-
-impl CommentRow {
-    fn from_value(value: &Value) -> Result<Self, HandlerError> {
-        let o = obj(value)?;
-        let is_member = match o.get("is_member") {
-            None => None,
-            Some(Value::Bool(b)) => Some(*b),
-            Some(Value::Null) => None,
-            _ => return Err(HandlerError::ServerError),
-        };
-        Ok(Self {
-            id: req_str(o, "id")?,
-            created_at: req_str(o, "created_at")?,
-            updated_at: req_str(o, "updated_at")?,
-            created_by: opt_str(o, "created_by_id")?
-                .or_else(|| opt_str(o, "created_by").unwrap_or(None)),
-            updated_by: opt_str(o, "updated_by_id")?
-                .or_else(|| opt_str(o, "updated_by").unwrap_or(None)),
-            deleted_at: opt_str(o, "deleted_at")?,
-            project_id: opt_str(o, "project_id")?,
-            workspace_id: opt_str(o, "workspace_id")?,
-            comment_stripped: opt_str(o, "comment_stripped")?,
-            comment_json: o.get("comment_json").cloned().unwrap_or(Value::Null),
-            comment_html: opt_str(o, "comment_html")?,
-            description_id: opt_str(o, "description_id")?,
-            attachments: o.get("attachments").cloned().unwrap_or(Value::Null),
-            labels: o.get("labels").cloned().unwrap_or(Value::Null),
-            issue_id: opt_str(o, "issue_id")?,
-            actor_id: opt_str(o, "actor_id")?,
-            access: opt_str(o, "access")?,
-            external_source: opt_str(o, "external_source")?,
-            external_id: opt_str(o, "external_id")?,
-            speaker_type: opt_str(o, "speaker_type")?,
-            speaker_label: opt_str(o, "speaker_label")?,
-            speaker_agent_run_id: opt_str(o, "speaker_agent_run_id")?,
-            edited_at: opt_str(o, "edited_at")?,
-            parent_id: opt_str(o, "parent_id")?,
-            is_member,
-        })
-    }
-}
-
-/// Render one comment row with its nests. `include_member` is true for
-/// list/retrieve (annotated queryset) and false for create/update (plain
-/// instance: the key is skipped, like DRF's `SkipField`).
-async fn render_comment(
-    pool: &sqlx::PgPool,
-    row: &CommentRow,
-    tz: &chrono_tz::Tz,
-    include_member: bool,
-) -> Result<CommentView, HandlerError> {
-    let issue_detail = render_issue_flat(pool, row.issue_id.as_deref()).await?;
-    let project_detail = render_project_lite(pool, row.project_id.as_deref()).await?;
-    let workspace_detail = render_workspace_lite(pool, row.workspace_id.as_deref()).await?;
-    let comment_reactions = render_comment_reactions(pool, &row.id, tz).await?;
-    let actor_detail = match row.actor_id.as_deref() {
-        None => None,
-        Some(actor) => Some(render_actor_detail(pool, actor).await?),
-    };
-    let is_synced = comment_is_synced(pool, row.external_source.as_deref(), &row.id).await?;
-    Ok(CommentView {
-        id: row.id.clone(),
-        actor_detail,
-        issue_detail,
-        project_detail,
-        workspace_detail,
-        comment_reactions,
-        is_member: if include_member { row.is_member } else { None },
-        is_synced,
-        created_at: render_dt(&row.created_at, tz)?,
-        updated_at: render_dt(&row.updated_at, tz)?,
-        created_by: row.created_by.clone(),
-        updated_by: row.updated_by.clone(),
-        deleted_at: render_dt_opt(row.deleted_at.clone(), tz)?,
-        project: row.project_id.clone(),
-        workspace: row.workspace_id.clone(),
-        comment_stripped: row.comment_stripped.clone(),
-        comment_json: row.comment_json.clone(),
-        comment_html: row.comment_html.clone(),
-        description: row.description_id.clone(),
-        attachments: row.attachments.clone(),
-        labels: row.labels.clone(),
-        issue: row.issue_id.clone(),
-        actor: row.actor_id.clone(),
-        access: row.access.clone(),
-        external_source: row.external_source.clone(),
-        external_id: row.external_id.clone(),
-        speaker_type: row.speaker_type.clone(),
-        speaker_label: row.speaker_label.clone(),
-        speaker_agent_run_id: row.speaker_agent_run_id.clone(),
-        edited_at: render_dt_opt(row.edited_at.clone(), tz)?,
-        parent: row.parent_id.clone(),
-    })
-}
-
-/// `issue_detail`: the flat leaf over the comment's issue FK. The read
-/// mirrors `_base_manager` (no `deleted_at` filter), so a soft-deleted
-/// issue still renders; only a genuinely missing row is a 500 like
-/// Python's `DoesNotExist` → fallback envelope (PIDASHCONV-1260).
-async fn render_issue_flat(
-    pool: &sqlx::PgPool,
-    issue_id: Option<&str>,
-) -> Result<IssueFlatView, HandlerError> {
-    let Some(issue_id) = issue_id else {
-        return Err(HandlerError::ServerError);
-    };
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"id\" = $1)",
-        &[uuid_param(issue_id)?],
-    )
-    .await?
-    .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let sequence_id = match o.get("sequence_id") {
-        Some(Value::Number(n)) => n.as_i64().ok_or(HandlerError::ServerError)?,
-        _ => return Err(HandlerError::ServerError),
-    };
-    // DRF `FloatField` renders `65535.0`, never Postgres `float8out`'s
-    // `65535` (the project_meta kernel rule).
-    let sort_order = match o.get("sort_order") {
-        Some(Value::Number(n)) => {
-            let float = n.as_f64().ok_or(HandlerError::ServerError)?;
-            serde_json::Number::from_f64(float)
-                .map(Value::Number)
-                .ok_or(HandlerError::ServerError)?
-        }
-        _ => return Err(HandlerError::ServerError),
-    };
-    Ok(IssueFlatView {
-        id: req_str(o, "id")?,
-        name: req_str(o, "name")?,
-        description_json: req_json(o, "description_json")?,
-        description_html: opt_str(o, "description_html")?,
-        priority: req_str(o, "priority")?,
-        complexity_score: req_json(o, "complexity_score")?,
-        start_date: opt_str(o, "start_date")?,
-        target_date: opt_str(o, "target_date")?,
-        sequence_id,
-        sort_order,
-        is_draft: req_bool(o, "is_draft")?,
-    })
-}
-
-/// `project_detail`: the app lite leaf over the comment's project FK.
-/// Unfiltered `_base_manager` read: a soft-deleted project still renders
-/// (PIDASHCONV-1260).
-async fn render_project_lite(
-    pool: &sqlx::PgPool,
-    project_id: Option<&str>,
-) -> Result<ProjectLiteView, HandlerError> {
-    let Some(project_id) = project_id else {
-        return Err(HandlerError::ServerError);
-    };
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
-        &[uuid_param(project_id)?],
-    )
-    .await?
-    .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let cover_image_url = logo_or_cover_url(
-        pool,
-        opt_str(o, "cover_image")?,
-        opt_str(o, "cover_image_asset_id")?,
-    )
-    .await?;
-    Ok(ProjectLiteView {
-        id: req_str(o, "id")?,
-        identifier: req_str(o, "identifier")?,
-        name: req_str(o, "name")?,
-        cover_image: opt_str(o, "cover_image")?,
-        cover_image_url,
-        logo_props: req_json(o, "logo_props")?,
-        description: opt_str(o, "description")?,
-        is_default: req_bool(o, "is_default")?,
-    })
-}
-
-/// `workspace_detail`: the app lite leaf over the comment's workspace FK.
-/// Unfiltered `_base_manager` read: a soft-deleted workspace still renders
-/// (PIDASHCONV-1260).
-async fn render_workspace_lite(
-    pool: &sqlx::PgPool,
-    workspace_id: Option<&str>,
-) -> Result<WorkspaceLiteView, HandlerError> {
-    let Some(workspace_id) = workspace_id else {
-        return Err(HandlerError::ServerError);
-    };
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"id\" = $1)",
-        &[uuid_param(workspace_id)?],
-    )
-    .await?
-    .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let logo_url =
-        logo_or_cover_url(pool, opt_str(o, "logo")?, opt_str(o, "logo_asset_id")?).await?;
-    Ok(WorkspaceLiteView {
-        name: req_str(o, "name")?,
-        slug: req_str(o, "slug")?,
-        id: req_str(o, "id")?,
-        logo_url,
-    })
-}
-
-/// `comment_reactions`: the live reaction rows for one comment, newest
-/// first (model `ordering = ("-created_at",)`).
-async fn render_comment_reactions(
-    pool: &sqlx::PgPool,
-    comment_id: &str,
-    tz: &chrono_tz::Tz,
-) -> Result<Vec<CommentReactionView>, HandlerError> {
-    let rows = fetch_all_objects(
-        pool,
-        "SELECT \"comment_reactions\".* FROM \"comment_reactions\" WHERE (\"comment_reactions\".\"deleted_at\" IS NULL AND \"comment_reactions\".\"comment_id\" = $1) ORDER BY \"comment_reactions\".\"created_at\" DESC",
-        &[uuid_param(comment_id)?],
-    )
-    .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        out.push(render_comment_reaction_row(pool, row, tz).await?);
-    }
-    Ok(out)
-}
-
-async fn render_comment_reaction_row(
-    pool: &sqlx::PgPool,
-    row: &Value,
-    tz: &chrono_tz::Tz,
-) -> Result<CommentReactionView, HandlerError> {
-    let o = obj(row)?;
-    let actor_id = req_str(o, "actor_id")?;
-    let display_name = fetch_display_name(pool, &actor_id).await?;
-    Ok(CommentReactionView {
-        id: req_str(o, "id")?,
-        actor: actor_id,
-        comment: req_str(o, "comment_id")?,
-        reaction: req_str(o, "reaction")?,
-        display_name,
-        deleted_at: render_dt_opt(opt_str(o, "deleted_at")?, tz)?,
-        workspace: opt_str(o, "workspace_id")?,
-        project: opt_str(o, "project_id")?,
-        created_at: render_dt(&req_str(o, "created_at")?, tz)?,
-        updated_at: render_dt(&req_str(o, "updated_at")?, tz)?,
-        created_by: opt_str(o, "created_by_id")?
-            .or_else(|| opt_str(o, "created_by").unwrap_or(None)),
-        updated_by: opt_str(o, "updated_by_id")?
-            .or_else(|| opt_str(o, "updated_by").unwrap_or(None)),
-    })
-}
-
-/// `display_name` for reaction rows (`source="actor.display_name"`).
-async fn fetch_display_name(pool: &sqlx::PgPool, user_id: &str) -> Result<String, HandlerError> {
-    let id = uuid::Uuid::parse_str(user_id).map_err(|_| HandlerError::ServerError)?;
-    let row: Option<(Option<String>,)> = sqlx::query_as(&display_name_sql())
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
-    row.map(|row| row.0.unwrap_or_default())
-        .ok_or(HandlerError::ServerError)
-}
-
-/// The synced-comment lock (`app/serializers/issue.py:79-91`): native rows
-/// (`external_source` empty) short-circuit before any DB probe.
-async fn comment_is_synced(
-    pool: &sqlx::PgPool,
-    external_source: Option<&str>,
-    comment_id: &str,
-) -> Result<bool, HandlerError> {
-    if external_source.unwrap_or("").is_empty() {
-        return Ok(false);
-    }
-    let id = uuid::Uuid::parse_str(comment_id).map_err(|_| HandlerError::ServerError)?;
-    let git: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM git_comment_syncs WHERE deleted_at IS NULL AND comment_id = $1 LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM github_comment_syncs WHERE deleted_at IS NULL AND comment_id = $1 LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    Ok(github.is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -1863,7 +1340,13 @@ async fn comment_list_inner(
     let tz = request_tz(actor.as_ref());
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let rendered = render_comment(pool, &CommentRow::from_value(row)?, &tz, true).await?;
+        let rendered = render_comment(
+            pool,
+            &CommentRow::from_value(row).map_err(|_| HandlerError::ServerError)?,
+            &tz,
+            true,
+        )
+        .await?;
         out.push(serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?);
     }
     serde_json::to_string(&out).map_err(|_| HandlerError::ServerError)
@@ -1982,7 +1465,13 @@ async fn comment_retrieve_inner(
     .await?;
     let row = rows.first().ok_or(HandlerError::NotFoundDetail)?;
     let tz = request_tz(actor.as_ref());
-    let rendered = render_comment(pool, &CommentRow::from_value(row)?, &tz, true).await?;
+    let rendered = render_comment(
+        pool,
+        &CommentRow::from_value(row).map_err(|_| HandlerError::ServerError)?,
+        &tz,
+        true,
+    )
+    .await?;
     serde_json::to_string(&rendered).map_err(|_| HandlerError::ServerError)
 }
 
@@ -2122,7 +1611,7 @@ async fn comment_create_inner(
     // before the `update_fields` save, and the view returns `serializer.data`
     // from that instance — so the 201 carries the actor while the row keeps
     // NULL (`handlers_engage.rs:5120-5124` renders the same split).
-    let mut created = CommentRow::from_value(&row)?;
+    let mut created = CommentRow::from_value(&row).map_err(|_| HandlerError::ServerError)?;
     created.updated_by = Some(actor.id.to_string());
     let tz = request_tz(Some(&actor));
     let rendered = render_comment(pool, &created, &tz, false).await?;
@@ -2268,7 +1757,7 @@ async fn comment_partial_update_inner(
     )
     .await?
     .ok_or(HandlerError::NotFound)?;
-    let old = CommentRow::from_value(&old_row)?;
+    let old = CommentRow::from_value(&old_row).map_err(|_| HandlerError::ServerError)?;
     let input = validate_comment(pool, body.as_object().ok_or(HandlerError::ServerError)?).await?;
     // The synced lock (`IssueCommentSerializer.validate`, `:977-989`):
     // changed locked fields fail per field.
@@ -2340,7 +1829,13 @@ async fn comment_partial_update_inner(
         .await?
         .ok_or(HandlerError::ServerError)?;
     let tz = request_tz(Some(&actor));
-    let rendered = render_comment(pool, &CommentRow::from_value(&row)?, &tz, false).await?;
+    let rendered = render_comment(
+        pool,
+        &CommentRow::from_value(&row).map_err(|_| HandlerError::ServerError)?,
+        &tz,
+        false,
+    )
+    .await?;
     let value = serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?;
     // `requested_data` is the raw input dump; `current_instance` is the
     // after image: `save()` at `:307` mutates the in-memory instance, so
@@ -2553,7 +2048,7 @@ async fn comment_destroy_inner(
     )
     .await?
     .ok_or(HandlerError::NotFound)?;
-    let old = CommentRow::from_value(&old_row)?;
+    let old = CommentRow::from_value(&old_row).map_err(|_| HandlerError::ServerError)?;
     let tz = request_tz(Some(&actor));
     let old_view = render_comment(pool, &old, &tz, false).await?;
     let old_value = serde_json::to_value(&old_view).map_err(|_| HandlerError::ServerError)?;
@@ -3477,6 +2972,7 @@ async fn vote_destroy_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_services::read::{IssueFlatView, ProjectLiteView, WorkspaceLiteView};
     use tower::ServiceExt;
 
     #[test]

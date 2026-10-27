@@ -2592,8 +2592,8 @@ async fn resolve_workpad_state(
     read::resolve_workpad_state(txn, project_id, state_id, state_group, completed_at)
         .await
         .map_err(|error| match error {
-            // Unreachable: the state resolution never 404s.
-            read::Error::NotFound => Denial::ServerError,
+            // Unreachable: this read never 404s or fails mid-row.
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
             read::Error::Db(err) => {
                 let (site, source) = err.split();
                 db_error(source, site)

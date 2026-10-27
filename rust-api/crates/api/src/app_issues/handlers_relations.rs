@@ -3633,6 +3633,8 @@ impl PrStore {
             .map_err(|error| match error {
                 read::Error::NotFound => PrStoreError(PROJECT_WORKSPACE_MISS.to_owned()),
                 read::Error::Db(err) => pr_store_error("project workspace", err.into_source()),
+                // Unreachable: the lookup never fails mid-row.
+                read::Error::Failed(site) => PrStoreError(format!("project workspace: {site}")),
             })
     }
 }
