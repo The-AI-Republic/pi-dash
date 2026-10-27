@@ -86,6 +86,7 @@ use super::gates;
 use crate::app_issues::Denial;
 use crate::state::AppState;
 pub(crate) use pidash_compat::response::{empty_response, json_response};
+use pidash_compat::validate::push_pairs_error as push_error;
 
 /// Collection path in `app/urls/module.py:19-23` form.
 pub const MODULES_PATH: &str = "/api/workspaces/{slug}/projects/{project_id}/modules/";
@@ -694,18 +695,6 @@ struct WriteInput {
 /// or an index-keyed object for per-item list errors (`module.py`
 /// `member_ids` children render `{0: [...]}`).
 type FieldErrors = Vec<(String, Value)>;
-
-fn push_error(errors: &mut FieldErrors, field: &str, message: String) {
-    let message = Value::String(message);
-    match errors.iter_mut().find(|(name, _)| name == field) {
-        Some((_, Value::Array(list))) => list.push(message),
-        Some((_, node)) => {
-            let first = std::mem::replace(node, Value::Null);
-            *node = Value::Array(vec![first, message]);
-        }
-        None => errors.push((field.to_owned(), Value::Array(vec![message]))),
-    }
-}
 
 /// Per-item list error (`ListField` children): `{"0": ["..."]}`.
 fn push_index_error(errors: &mut FieldErrors, field: &str, index: usize, message: String) {

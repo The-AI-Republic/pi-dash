@@ -44,6 +44,9 @@ use crate::state::AppState;
 
 use super::common::{parse_body, request_content_type, BodyField, BodyMap, ParsedBody};
 use super::{error_response, json_body, pool_of, request_actor, Denial};
+use pidash_compat::validate::{
+    push_error, BLANK_MSG, INVALID_BOOL_MSG, INVALID_STR_MSG, NULL_MSG, REQUIRED_MSG,
+};
 
 /// `users/me/ai-assistant/mcp-servers/` (under the `api/` include).
 pub const SERVERS_PATH: &str = "/api/users/me/ai-assistant/mcp-servers/";
@@ -82,11 +85,6 @@ pub fn routes() -> Router<AppState> {
 
 /// DRF default messages used below (stable English strings, verified
 /// live against the installed DRF).
-const REQUIRED_MSG: &str = "This field is required.";
-const NULL_MSG: &str = "This field may not be null.";
-const BLANK_MSG: &str = "This field may not be blank.";
-const INVALID_STR_MSG: &str = "Not a valid string.";
-const INVALID_BOOL_MSG: &str = "Must be a valid boolean.";
 const INVALID_URL_MSG: &str = "Enter a valid URL.";
 const NULL_CHARS_MSG: &str = "Null characters are not allowed.";
 const NAME_REQUIRED_MSG: &str = "A name is required.";
@@ -224,7 +222,7 @@ fn validate_char_field(
         push_error(
             errors,
             field,
-            &format!("Ensure this field has no more than {max_length} characters."),
+            format!("Ensure this field has no more than {max_length} characters."),
         );
         clean = false;
     }
@@ -341,15 +339,6 @@ fn validate_bool_field(
             None
         }
     }
-}
-
-fn push_error(errors: &mut Map<String, Value>, field: &str, message: &str) {
-    errors
-        .entry(field.to_string())
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error list")
-        .push(Value::String(message.to_string()));
 }
 
 // ---------------------------------------------------------------------------

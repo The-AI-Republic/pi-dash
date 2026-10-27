@@ -99,6 +99,9 @@ use super::gates;
 use crate::app_issues::{query_last, Denial, QueryMap};
 use crate::state::AppState;
 use pidash_compat::response::{empty_response, json_response};
+use pidash_compat::validate::{
+    BLANK_MSG, INVALID_BOOL_MSG as BOOL_MSG, INVALID_STR_MSG, NULL_MSG, REQUIRED_MSG,
+};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -601,11 +604,6 @@ fn push_field_msg(errors: &mut FieldErrors, field: &str, message: String) {
     errors.push((field.to_owned(), Value::Array(vec![Value::String(message)])));
 }
 
-const REQUIRED_MSG: &str = "This field is required.";
-const NULL_MSG: &str = "This field may not be null.";
-const BLANK_MSG: &str = "This field may not be blank.";
-const INVALID_STR_MSG: &str = "Not a valid string.";
-const BOOL_MSG: &str = "Must be a valid boolean.";
 const INT_MSG: &str = "A valid integer is required.";
 const FLOAT_MSG: &str = "A valid number is required.";
 const TOO_LARGE_MSG: &str = "String value too large.";

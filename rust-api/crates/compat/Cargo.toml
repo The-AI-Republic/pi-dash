@@ -21,11 +21,13 @@ axum = "0.8"
 http = "1"
 serde = "1"
 serde_json = "1"
+# Datetime validators (OVL-04 part 3) return `DateTime<Utc>`.
+# Same locked chrono 0.4.x as the workspace (no lock churn).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-# Unit tests only (the library names no chrono/uuid types directly).
+# Unit tests only (the library names no uuid types directly).
 # All already in rust-api/Cargo.lock.
-chrono = { version = "0.4", default-features = false, features = ["std"] }
 uuid = "1"
 # Envelope tests read bodies back with `axum::body::to_bytes`
 # (async); the current-thread runtime is enough.

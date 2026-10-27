@@ -99,6 +99,7 @@ use super::{
     filters::{self, FilterValue},
     guards_error, owned, raw_json_response, Denial, QueryMap,
 };
+use pidash_compat::validate::char_internal;
 
 /// Owned intake routes: the collection (both aliases share the viewset)
 /// and the detail. Every other method proxies to Django.
@@ -1644,20 +1645,6 @@ fn json_truthy(value: &serde_json::Value) -> bool {
         serde_json::Value::String(text) => !text.is_empty(),
         serde_json::Value::Array(items) => !items.is_empty(),
         serde_json::Value::Object(map) => !map.is_empty(),
-    }
-}
-
-/// DRF `CharField.to_internal_value` (`trim_whitespace=True`): bools,
-/// dicts and lists fail; numbers stringify; strings strip. `None` is
-/// rejected upstream (`may not be null`).
-fn char_internal(value: &serde_json::Value) -> Result<String, ()> {
-    match value {
-        serde_json::Value::String(text) => Ok(text.trim().to_string()),
-        serde_json::Value::Number(number) => Ok(number.to_string().trim().to_string()),
-        serde_json::Value::Bool(_) | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Err(())
-        }
-        serde_json::Value::Null => Err(()),
     }
 }
 

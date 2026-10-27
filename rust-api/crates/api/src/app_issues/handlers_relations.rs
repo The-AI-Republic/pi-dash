@@ -102,6 +102,7 @@ use crate::v1_cycles_modules::body as shared_body;
 
 use pidash_compat::db::{is_integrity_error, is_unique_violation};
 use pidash_compat::response::{empty_response_no_content_type as empty_response, json_response};
+use pidash_compat::validate::push_pairs_error as push_error;
 use pidash_services::app_issues::relation_mapper::get_actual_relation;
 
 // ---- owned paths ------------------------------------------------------------
@@ -2063,17 +2064,6 @@ fn idna_ace_url(url: &str) -> Option<String> {
 /// One field's message list, in writable-field order (`title`, `url`,
 /// `metadata` — model declaration order).
 type FieldErrors = Vec<(String, Value)>;
-
-fn push_error(errors: &mut FieldErrors, field: &str, message: Value) {
-    match errors.iter_mut().find(|(name, _)| name == field) {
-        Some((_, Value::Array(messages))) => messages.push(message),
-        Some((_, slot)) => {
-            let prior = std::mem::replace(slot, Value::Null);
-            *slot = Value::Array(vec![prior, message]);
-        }
-        None => errors.push((field.to_owned(), Value::Array(vec![message]))),
-    }
-}
 
 /// Direct (unlisted) field detail: `ValidationError({"url": {...}})`.
 fn set_error(errors: &mut FieldErrors, field: &str, value: Value) {

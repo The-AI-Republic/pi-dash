@@ -2707,7 +2707,7 @@ fn char_validators(
     })
 }
 
-fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceFail> {
+pub(crate) fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceFail> {
     if let Some(max) = max_length {
         // DRF counts Unicode scalar values (`len(str)`).
         if text.chars().count() > max {

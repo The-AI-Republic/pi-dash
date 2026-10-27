@@ -76,6 +76,9 @@ use crate::license::AssetUrl;
 use crate::state::AppState;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_compat::response::{json_created, json_ok, no_content};
+pub use pidash_compat::validate::{
+    BLANK_MSG, INVALID_BOOL_MSG, INVALID_STR_MSG, NULL_MSG, REQUIRED_MSG,
+};
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -1376,11 +1379,6 @@ pub enum FieldValue {
     Json(Value),
 }
 
-pub const REQUIRED_MSG: &str = "This field is required.";
-pub const NULL_MSG: &str = "This field may not be null.";
-pub const BLANK_MSG: &str = "This field may not be blank.";
-pub const INVALID_STR_MSG: &str = "Not a valid string.";
-pub const INVALID_BOOL_MSG: &str = "Must be a valid boolean.";
 pub const INVALID_INT_MSG: &str = "A valid integer is required.";
 pub const INVALID_JSON_MSG: &str = "Value must be valid JSON.";
 pub const NULL_CHAR_MSG: &str = "Null characters are not allowed.";

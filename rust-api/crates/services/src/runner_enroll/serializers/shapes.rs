@@ -63,6 +63,7 @@
 //! writes, of which this port has none; the enroll request serializer is
 //! the only write shape here.
 
+use pidash_compat::validate::push_error;
 use pidash_types::runner_runs::flat_token_fields;
 use serde::Serialize;
 use serde_json::Value;
@@ -914,16 +915,6 @@ const OS_ARCH_VERSION_SPEC: CharSpec = CharSpec {
     allow_blank: true,
     charset: false,
 };
-
-/// Push one message onto a field's error list (DRF collects per field).
-fn push_error(errors: &mut serde_json::Map<String, Value>, field: &str, message: String) {
-    errors
-        .entry(field.to_owned())
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error list")
-        .push(Value::String(message));
-}
 
 /// Port of DRF 3.15.2 `CharField` validation (`fields.py:749-766`):
 /// missing -> required/default; `None` -> null; whitespace-only (Python
