@@ -64,7 +64,7 @@ function attribute(name: string) {
  */
 function createCallout(Node: Core["Node"], mergeAttributes: MergeAttributes) {
   return Node.create({
-    name: "pageCallout",
+    name: "calloutComponent",
     group: "block",
     content: "block+",
     defining: true,
@@ -113,10 +113,17 @@ function createHorizontalRule(Node: Core["Node"], mergeAttributes: MergeAttribut
   });
 }
 
-/** One inline body emoji; the glyph is the node's text content. */
+/**
+ * One inline body emoji. The shared document schema stores it as an
+ * `emoji` node carrying the shortcode, so that is the node name here
+ * too: any other name is dropped when the live server re-serialises the
+ * document. Its shortcode attribute is `name` (stored as `data-name`),
+ * the shared spelling, and the glyph stays the node's text content so
+ * copy and read surfaces keep seeing the character.
+ */
 function createEmoji(Node: Core["Node"], mergeAttributes: MergeAttributes) {
   return Node.create({
-    name: "pageEmoji",
+    name: "emoji",
     group: "inline",
     inline: true,
     atom: true,
@@ -127,6 +134,14 @@ function createEmoji(Node: Core["Node"], mergeAttributes: MergeAttributes) {
           default: "",
           parseHTML: (element: HTMLElement) => element.textContent ?? "",
           renderHTML: () => ({}),
+        },
+        name: {
+          default: null,
+          parseHTML: (element: HTMLElement) => element.getAttribute("data-name"),
+          renderHTML: (attributes: Record<string, unknown>) => {
+            const value = attributes.name;
+            return typeof value === "string" && value !== "" ? { "data-name": value } : {};
+          },
         },
       };
     },
@@ -156,7 +171,7 @@ function createEmoji(Node: Core["Node"], mergeAttributes: MergeAttributes) {
  */
 function createEmbed(Node: Core["Node"], mergeAttributes: MergeAttributes) {
   return Node.create({
-    name: "pageEmbed",
+    name: "issue-embed-component",
     group: "block",
     atom: true,
     selectable: true,
@@ -206,7 +221,7 @@ function createEmbed(Node: Core["Node"], mergeAttributes: MergeAttributes) {
  */
 function createEntityReference(Node: Core["Node"], mergeAttributes: MergeAttributes) {
   return Node.create({
-    name: "pageEntityReference",
+    name: "entity-reference-component",
     group: "inline",
     inline: true,
     atom: true,
@@ -263,6 +278,111 @@ function createEntityReference(Node: Core["Node"], mergeAttributes: MergeAttribu
   });
 }
 
+/** A picture source that is an address rather than a stored asset id. */
+const PAGE_IMAGE_URL = /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i;
+
+/**
+ * One picture inside a page body (PAGE-034, PAGE-039). The page body
+ * stores it in the shared document form — an `imageComponent` node whose
+ * element is `image-component`, carrying the asset id in `src` and the
+ * upload status — so the server keeps the node, the asset id and the
+ * assets pane's row when it re-serialises the document. The editing
+ * surface paints the resolved picture inside the element; the stored id
+ * travels in `data-stored-src` so an edit never rewrites it to a URL.
+ */
+function createPageImage(Node: Core["Node"]) {
+  return Node.create({
+    name: "imageComponent",
+    group: "block",
+    atom: true,
+    selectable: true,
+    draggable: true,
+    addAttributes() {
+      return {
+        // The picture's own identity, kept in the shared document form (the
+        // oracle's node id). The assets pane names a row `image-<id>` when
+        // the picture carries no alt text, so the row stays readable after
+        // a reload instead of falling back to the asset's UUID.
+        id: { default: null },
+        src: { default: null },
+        alt: { default: null },
+        title: { default: null },
+        width: { default: "35%" },
+        height: { default: null },
+        // The shared node spells the ratio this way; HTML attribute names
+        // are case-insensitive, so a stored `aspectRatio` reads back.
+        aspectRatio: { default: null },
+        alignment: { default: "left" },
+        status: { default: null },
+        "data-stored-src": {
+          default: null,
+          parseHTML: (element: HTMLElement) => {
+            const stored = element.getAttribute("data-stored-src");
+            if (stored !== null && stored !== "") return stored;
+            // A body written before the shared form kept a bare `<img>`
+            // whose source was the asset id itself. That id is what the
+            // node has to keep, so a save upgrades the picture to the
+            // stored element instead of writing the bare tag back.
+            const source = element.getAttribute("src") ?? "";
+            return element.tagName.toLowerCase() === "img" && source !== "" && !PAGE_IMAGE_URL.test(source)
+              ? source
+              : null;
+          },
+          renderHTML: (attributes: Record<string, unknown>) => {
+            const value = attributes["data-stored-src"];
+            return typeof value === "string" && value !== "" ? { "data-stored-src": value } : {};
+          },
+        },
+      };
+    },
+    parseHTML() {
+      return [{ tag: "image-component" }, { tag: "img" }];
+    },
+    renderHTML({
+      node,
+      HTMLAttributes,
+    }: {
+      node: { attrs: Record<string, unknown> };
+      HTMLAttributes: Record<string, unknown>;
+    }) {
+      const stored = node.attrs["data-stored-src"];
+      const attributes = { ...HTMLAttributes };
+      delete attributes["data-stored-src"];
+      const asElement = typeof stored === "string" && stored !== "";
+      if (asElement) attributes.src = stored;
+      return [asElement ? "image-component" : "img", attributes];
+    },
+    addNodeView() {
+      return ({ node }: { node: { attrs: Record<string, unknown> } }) => {
+        const attributes = node.attrs;
+        const dom = document.createElement("image-component");
+        dom.setAttribute("contenteditable", "false");
+        for (const [name, value] of Object.entries(attributes)) {
+          if (name === "src" || name === "data-stored-src") continue;
+          if (typeof value === "string" && value !== "") dom.setAttribute(name, value);
+        }
+        const image = document.createElement("img");
+        image.setAttribute("src", typeof attributes["src"] === "string" ? attributes["src"] : "");
+        for (const name of ["title", "width", "height", "aspectRatio"]) {
+          const value = attributes[name];
+          if (typeof value === "string" && value !== "") image.setAttribute(name, value);
+        }
+        const alt = attributes["alt"];
+        const id = attributes["id"];
+        if (typeof alt === "string" && alt !== "") {
+          image.setAttribute("alt", alt);
+        } else if (typeof id === "string" && id !== "") {
+          image.setAttribute("alt", `image-${id}`);
+        }
+        dom.append(image);
+        const stored = attributes["data-stored-src"];
+        if (typeof stored === "string" && stored !== "") dom.setAttribute("data-stored-src", stored);
+        return { dom };
+      };
+    },
+  });
+}
+
 /** The five attributes an embed stores, narrowed from a node's attrs. */
 export function pageEmbedAttributesOf(attrs: Record<string, unknown>): PageEmbedNodeAttributes {
   const stringOf = (name: string): string => (typeof attrs[name] === "string" ? (attrs[name] as string) : "");
@@ -306,7 +426,8 @@ function communityEmbedCard(attributes: PageEmbedNodeAttributes) {
 }
 
 /**
- * The five page block nodes, built only after the Tiptap chunk resolves.
+ * The page block nodes, built only after the Tiptap chunk resolves: the
+ * callout, divider, emoji, embed, entity reference and the body picture.
  */
 export async function loadPageBlockExtensions(): Promise<unknown[]> {
   const [{ Node, mergeAttributes }] = await Promise.all([import("@tiptap/core")]);
@@ -316,5 +437,6 @@ export async function loadPageBlockExtensions(): Promise<unknown[]> {
     createEmoji(Node, mergeAttributes),
     createEmbed(Node, mergeAttributes),
     createEntityReference(Node, mergeAttributes),
+    createPageImage(Node),
   ];
 }

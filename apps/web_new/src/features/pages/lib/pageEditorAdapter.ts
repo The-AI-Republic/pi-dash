@@ -407,6 +407,7 @@ export function runInsertImage(editor: PageEditorRef, src: string, storedSrc: st
     .insertContent({
       type: "imageComponent",
       attrs: {
+        id: pagePictureId(),
         src,
         "data-stored-src": storedSrc,
         status: "uploaded",
@@ -414,6 +415,18 @@ export function runInsertImage(editor: PageEditorRef, src: string, storedSrc: st
       },
     })
     .run();
+}
+
+/**
+ * A fresh identity for one inserted picture (PAGE-039). It uses the
+ * shared document's own id form (hex and dashes), so a runtime without
+ * `randomUUID` still names the node the way every other client does.
+ */
+function pagePictureId(): string {
+  const random = globalThis.crypto?.randomUUID;
+  if (typeof random === "function") return random.call(globalThis.crypto);
+  const chunk = (length: number) => Array.from({ length }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  return `${chunk(8)}-${chunk(4)}-${chunk(4)}-${chunk(4)}-${chunk(12)}`;
 }
 
 /** Restyle the caret's block as plain text or one heading level. */
@@ -458,6 +471,8 @@ export function editorFormattingState(editor: PageEditorRef): PageFormattingStat
  * The colour mark's attributes over the caret, or null when the range
  * holds no colour. Tiptap reports a mark's attributes through
  * `getAttributes`; the reader stays optional so older probes keep working.
+ * The shared mark stores the letter colour as `color`, so that spelling
+ * is reported back as the bar's `textColor`.
  */
 function pageColorAttrs(editor: PageEditorRef): { textColor?: unknown; backgroundColor?: unknown } | null {
   if (editor.getAttributes === undefined) return null;
@@ -693,7 +708,7 @@ export function runCatalogBlock(editor: PageEditorRef, block: PageCatalogBlockKi
       editor
         .chain()
         .focus()
-        .insertContent({ type: "pageCallout", content: [{ type: "paragraph" }] })
+        .insertContent({ type: "calloutComponent", content: [{ type: "paragraph" }] })
         .run();
       return;
     case "divider":
@@ -728,7 +743,7 @@ export function insertPageEntityReference(editor: PageEditorRef, attributes: Pag
     .chain()
     .focus()
     .insertContent({
-      type: "pageEntityReference",
+      type: "entity-reference-component",
       attrs: attributes,
     })
     .run();

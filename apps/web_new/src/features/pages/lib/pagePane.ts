@@ -179,7 +179,11 @@ function assetRowOf(element: Element, scope: PageAssetScope): PageAssetRow | nul
   const image = element.tagName.toLowerCase() !== "attachment-component";
   const alt = (element.getAttribute("alt") ?? "").trim();
   const title = (element.getAttribute("title") ?? "").trim();
-  const label = alt !== "" ? alt : title !== "" ? title : assetFileName(source);
+  // A stored editor picture is named after its own node id, the readable
+  // label the editor writes on upload; only a picture without one falls
+  // back to the file name (PAGE-048, PAGE-039).
+  const nodeId = image ? (element.getAttribute("id") ?? "").trim() : "";
+  const label = alt !== "" ? alt : title !== "" ? title : nodeId !== "" ? `image-${nodeId}` : assetFileName(source);
   const viewHref = pageAssetViewHref(source, scope);
   return {
     source,

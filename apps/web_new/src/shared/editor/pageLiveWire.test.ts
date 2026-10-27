@@ -17,7 +17,6 @@ import type { AnyExtension } from "@tiptap/core";
 import { describe, expect, it } from "vitest";
 
 import { loadPageExtensions } from "./pageExtensions.js";
-import { loadStoredImageExtension } from "./extensions.js";
 import { loadPageColorMark } from "./pageTableExtensions.js";
 
 /** A structured node or mark in the editor's JSON form. */
@@ -122,8 +121,10 @@ describe("live-sync wire names", () => {
   it("names the colour mark and the stored-image node for the server schema", async () => {
     const mark = await loadPageColorMark();
     expect(mark.name).toBe("customColor");
-    const image = (await loadStoredImageExtension()) as unknown as { name: string };
-    expect(image.name).toBe("imageComponent");
+    // The page set carries the stored-image node; it is not attached
+    // separately any more, so the assertion reads the set it ships in.
+    const page = (await loadPageExtensions()) as unknown as Array<{ name: string }>;
+    expect(page.map((extension) => extension.name)).toContain("imageComponent");
   });
 
   it("keeps letter and wash colours through the server's view (PAGE-036)", async () => {

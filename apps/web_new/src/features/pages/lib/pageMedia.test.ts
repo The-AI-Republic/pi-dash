@@ -84,6 +84,64 @@ describe("clonePageImage", () => {
       assetUrl: "/api/assets/v2/workspaces/acme/projects/p/clone-1/",
     });
   });
+
+  it("copies the bytes through the page pipeline when the server's copy leg fails (NEWFRONT-351)", async () => {
+    vi.clearAllMocks();
+    pageAssets.duplicatePageAsset.mockRejectedValue(new ApiError({ status: 500, code: "http", message: "500" }));
+    pageAssets.pageAssetUrl.mockReturnValue("/api/assets/v2/workspaces/acme/projects/p/asset-a/");
+    const bytes = new Uint8Array([1, 2, 3]).buffer;
+    const get = vi.fn().mockResolvedValue({
+      status: 200,
+      url: "/served",
+      headers: { get: (name: string) => (name === "content-type" ? "image/jpeg" : null) },
+      text: async () => "",
+      arrayBuffer: async () => bytes,
+    });
+    pageAssets.uploadPageAsset.mockResolvedValue({ assetId: "clone-bytes", assetUrl: "/served/clone-bytes/" });
+    const clone = await clonePageImage({ get } as never, {
+      workspaceSlug: "acme",
+      projectId: "p",
+      pageId: "page-b",
+      sourceAssetId: "asset-a",
+    });
+    expect(get).toHaveBeenCalledWith("/api/assets/v2/workspaces/acme/projects/p/asset-a/");
+    expect(clone).toEqual({ assetId: "clone-bytes", assetUrl: "/served/clone-bytes/" });
+    const uploaded = pageAssets.uploadPageAsset.mock.calls[0]?.[4] as File;
+    expect(uploaded.type).toBe("image/jpeg");
+    expect(uploaded.size).toBe(bytes.byteLength);
+  });
+
+  it("leaves a refusal by the server's copy leg for the caller to report", async () => {
+    vi.clearAllMocks();
+    const refused = new ApiError({ status: 403, code: "forbidden", message: "Clone refused." });
+    pageAssets.duplicatePageAsset.mockRejectedValue(refused);
+    const get = vi.fn();
+    await expect(
+      clonePageImage({ get } as never, {
+        workspaceSlug: "acme",
+        projectId: "p",
+        pageId: "page-b",
+        sourceAssetId: "asset-a",
+      })
+    ).rejects.toBe(refused);
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("fails the clone when the picture cannot be read as bytes", async () => {
+    pageAssets.duplicatePageAsset.mockRejectedValue(new ApiError({ status: 500, code: "http", message: "500" }));
+    pageAssets.pageAssetUrl.mockReturnValue("/served/asset-a/");
+    const get = vi
+      .fn()
+      .mockResolvedValue({ status: 200, url: "/served", headers: { get: () => null }, text: async () => "" });
+    await expect(
+      clonePageImage({ get } as never, {
+        workspaceSlug: "acme",
+        projectId: "p",
+        pageId: "page-b",
+        sourceAssetId: "asset-a",
+      })
+    ).rejects.toThrow("The image could not be copied.");
+  });
 });
 
 describe("pastedAssetIds", () => {

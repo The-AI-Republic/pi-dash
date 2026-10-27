@@ -370,6 +370,12 @@ describe(
         expect(image).not.toBeNull();
         expect(image?.getAttribute("status")).toBe("uploaded");
       });
+      // The inserted picture carries its own id, so the assets row keeps a
+      // readable `image-<id>` name after a reload even once the server's
+      // re-serialisation drops the alt text (PAGE-039).
+      const inserted = editable.querySelector("image-component");
+      expect(inserted?.getAttribute("id")).toMatch(/^[0-9a-f-]{16,}$/);
+      expect(inserted?.querySelector("img")?.getAttribute("alt")).toBe("image-asset-1");
       expect(toaster.notifyError).not.toHaveBeenCalled();
     });
 

@@ -22,12 +22,12 @@ async function editorFor(html: string) {
 }
 
 describe("page block nodes", () => {
-  it("registers callout, emoji, embed, entity reference and mention", async () => {
+  it("registers callout, emoji, embed, entity reference and mention under their stored names", async () => {
     const names = (await loadPageExtensions()).map((extension) => extension.name);
-    expect(names).toContain("pageCallout");
-    expect(names).toContain("pageEmoji");
-    expect(names).toContain("pageEmbed");
-    expect(names).toContain("pageEntityReference");
+    expect(names).toContain("calloutComponent");
+    expect(names).toContain("emoji");
+    expect(names).toContain("issue-embed-component");
+    expect(names).toContain("entity-reference-component");
     expect(names).toContain("mention");
   });
 
@@ -82,7 +82,7 @@ describe("page block nodes", () => {
       }
       let found = false;
       editor.state.doc.descendants((node) => {
-        if (node.type.name === "pageEmbed") found = true;
+        if (node.type.name === "issue-embed-component") found = true;
       });
       expect(found).toBe(true);
     } finally {
@@ -161,8 +161,8 @@ describe("page block nodes", () => {
       let reference: string | null = null;
       editor.state.doc.descendants((node) => {
         const text = node.type.spec.toText?.({ node, pos: 0, parent: node } as never) ?? node.textContent;
-        if (node.type.name === "pageEmoji") emoji = text;
-        if (node.type.name === "pageEntityReference") reference = text;
+        if (node.type.name === "emoji") emoji = text;
+        if (node.type.name === "entity-reference-component") reference = text;
       });
       expect(emoji).toBe("");
       expect(reference).toBe("");
@@ -176,7 +176,7 @@ describe("page block nodes", () => {
     try {
       const emoji = editor.state.doc.firstChild?.firstChild;
       if (emoji === null || emoji === undefined) throw new Error("no emoji node");
-      editor.commands.insertContentAt({ from: 1, to: 1 }, { type: "pageEmoji", attrs: { glyph: 7 } });
+      editor.commands.insertContentAt({ from: 1, to: 1 }, { type: "emoji", attrs: { glyph: 7 } });
       expect(editor.getHTML()).not.toContain(">7<");
     } finally {
       editor.destroy();
@@ -196,10 +196,128 @@ describe("page block nodes", () => {
   it("serializes a missing emoji glyph and a missing entity label as empty text", async () => {
     const editor = await editorFor("<p>start</p>");
     try {
-      editor.commands.insertContentAt(1, { type: "pageEmoji", attrs: {} });
-      editor.commands.insertContentAt(1, { type: "pageEntityReference", attrs: {} });
+      editor.commands.insertContentAt(1, { type: "emoji", attrs: {} });
+      editor.commands.insertContentAt(1, { type: "entity-reference-component", attrs: {} });
       expect(editor.getHTML()).toContain('<span data-type="emoji"></span>');
       expect(editor.getHTML()).toContain("<entity-reference-component></entity-reference-component>");
+    } finally {
+      editor.destroy();
+    }
+  });
+});
+
+describe("page body picture", () => {
+  it("keeps an inserted picture in the stored element with its asset id (PAGE-039)", async () => {
+    const editor = await editorFor("<p>before</p>");
+    try {
+      editor.commands.insertContent({
+        type: "imageComponent",
+        attrs: { src: "/api/assets/v2/a/", "data-stored-src": "asset-a", status: "uploaded", alt: "shot" },
+      });
+      const html = editor.getHTML();
+      expect(html).toContain("<image-component");
+      expect(html).toContain('src="asset-a"');
+      expect(html).toContain('status="uploaded"');
+      expect(html).toContain('alt="shot"');
+      const names: string[] = [];
+      editor.state.doc.descendants((node) => {
+        names.push(node.type.name);
+      });
+      expect(names).toContain("imageComponent");
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  it("upgrades a legacy bare picture whose source is the asset id", async () => {
+    const editor = await editorFor('<p>before</p><img src="asset-legacy" alt="old">');
+    try {
+      const html = editor.getHTML();
+      expect(html).toContain("<image-component");
+      expect(html).toContain('src="asset-legacy"');
+      expect(html).not.toContain("<img");
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  it("leaves a picture addressed by a URL as a plain img", async () => {
+    for (const source of ["https://example.test/a.png", "/api/assets/v2/a/", "//cdn.example.test/a.png"]) {
+      const editor = await editorFor(`<p>before</p><img src="${source}">`);
+      try {
+        const html = editor.getHTML();
+        expect(html).toContain(`<img src="${source}"`);
+        expect(html).not.toContain("<image-component");
+      } finally {
+        editor.destroy();
+      }
+    }
+  });
+
+  it("paints the served source inside the stored element's node view", async () => {
+    const editor = await editorFor(
+      '<p>before</p><image-component src="asset-a" data-stored-src="asset-a" alt="shot" status="uploaded"></image-component>'
+    );
+    try {
+      const element = editor.view.dom.querySelector("image-component");
+      expect(element).not.toBeNull();
+      expect(element?.getAttribute("contenteditable")).toBe("false");
+      expect(element?.getAttribute("data-stored-src")).toBe("asset-a");
+      const image = await vi.waitFor(() => {
+        const found = element?.querySelector("img");
+        expect(found).not.toBeNull();
+        return found as HTMLImageElement;
+      });
+      expect(image.getAttribute("src")).toBe("asset-a");
+      expect(image.getAttribute("alt")).toBe("shot");
+    } finally {
+      editor.destroy();
+    }
+  });
+});
+
+describe("picture identity", () => {
+  it("keeps a stored picture's own id through a round trip", async () => {
+    const editor = await editorFor(
+      '<image-component id="pic-1" src="asset-a" width="35%" alignment="left" status="uploaded"></image-component>'
+    );
+    try {
+      const html = editor.getHTML();
+      expect(html).toContain('id="pic-1"');
+      expect(html).toContain('src="asset-a"');
+      let stored: string | null = null;
+      editor.state.doc.descendants((node) => {
+        if (node.type.name === "imageComponent") stored = node.attrs["id"] as string | null;
+      });
+      expect(stored).toBe("pic-1");
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  it("labels the painted picture image-<id> when it carries no alt text", async () => {
+    const editor = await editorFor('<image-component id="pic-2" src="asset-b"></image-component>');
+    try {
+      const image = await vi.waitFor(() => {
+        const found = editor.view.dom.querySelector("image-component img");
+        expect(found).not.toBeNull();
+        return found as HTMLImageElement;
+      });
+      expect(image.getAttribute("alt")).toBe("image-pic-2");
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  it("leaves the painted picture unlabelled when it has neither alt nor id", async () => {
+    const editor = await editorFor('<image-component src="asset-c"></image-component>');
+    try {
+      const image = await vi.waitFor(() => {
+        const found = editor.view.dom.querySelector("image-component img");
+        expect(found).not.toBeNull();
+        return found as HTMLImageElement;
+      });
+      expect(image.getAttribute("alt")).toBeNull();
     } finally {
       editor.destroy();
     }

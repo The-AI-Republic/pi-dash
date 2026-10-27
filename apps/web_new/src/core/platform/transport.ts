@@ -36,6 +36,9 @@ export function toApiTransport(platform: Platform): Transport {
       url: response.url,
       headers: headerProxy(response.headers),
       text: () => response.text(),
+      // Binary legs (a pasted picture cloned by copying its bytes,
+      // PAGE-039) need the body itself, not its text.
+      arrayBuffer: () => response.arrayBuffer(),
     };
   };
 }

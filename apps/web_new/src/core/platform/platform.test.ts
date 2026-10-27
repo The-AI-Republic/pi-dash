@@ -238,6 +238,20 @@ describe("toApiTransport", () => {
     expect(await response.text()).toBe(JSON.stringify({ hello: 1 }));
   });
 
+  it("carries a binary body through the transport (PAGE-039 clone)", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const fake: Platform = {
+      ...webPlatform,
+      fetch: (async () => new Response(bytes, { status: 200 })) as typeof fetch,
+    };
+    const response = await toApiTransport(fake)("https://example.test/api/assets/a/", {
+      method: "GET",
+      headers: {},
+      credentials: "include",
+    });
+    expect(new Uint8Array((await response.arrayBuffer?.()) ?? new ArrayBuffer(0))).toEqual(bytes);
+  });
+
   it("maps the multipart channel onto the request body", async () => {
     const seen: { body?: unknown }[] = [];
     const fake: Platform = {

@@ -216,6 +216,53 @@ export const PAGE_BODY_EMOJIS: readonly string[] = [
 /** The stored `data-type` an inline body emoji carries. */
 export const PAGE_EMOJI_DATA_TYPE = "emoji";
 
+/**
+ * The shortcode each picker glyph stores. Emoji are saved as a
+ * shortcode beside the glyph (`data-name`), the form every client and
+ * the live document schema share, so the picker carries the mapping
+ * instead of guessing a name at insert time. Glyphs missing here store
+ * no shortcode; the glyph alone still survives a save.
+ */
+export const PAGE_EMOJI_SHORTCODES: Readonly<Record<string, string>> = {
+  "😀": "grinning",
+  "😄": "grinning_face_with_closed_eyes",
+  "😊": "blush",
+  "🙂": "slightly_smiling_face",
+  "😉": "wink",
+  "😍": "heart_eyes",
+  "🤩": "star_struck",
+  "😎": "smiling_face_with_sunglasses",
+  "🤔": "thinking",
+  "😅": "grinning_face_with_sweat",
+  "😂": "joy",
+  "🙃": "upside_down_face",
+  "😴": "sleeping",
+  "🥳": "hooray",
+  "😇": "halo",
+  "🤯": "exploding_head",
+  "👍": "+1",
+  "👏": "clap",
+  "🙌": "raised_hands",
+  "🙏": "folded_hands",
+  "💪": "muscle",
+  "👀": "eyes",
+  "🔥": "fire",
+  "✨": "sparkles",
+  "🎉": "party",
+  "🚀": "rocket",
+  "✅": "check_mark_button",
+  "❌": "cross_mark",
+  "⚠️": "warning",
+  "💡": "bulb",
+  "📌": "pushpin",
+  "📝": "memo",
+};
+
+/** The stored shortcode for one picker glyph, when it has one. */
+export function pageEmojiShortcode(glyph: string): string | null {
+  return PAGE_EMOJI_SHORTCODES[glyph] ?? null;
+}
+
 /** Attributes a work-item embed stores (PAGE-040). */
 export interface PageEmbedAttributes {
   id: string;
@@ -243,9 +290,11 @@ function escapeAttribute(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Markdown placeholder for a body emoji (copy/export keeps the glyph). */
+/** Markup for a body emoji (copy/export keeps the glyph; the shortcode rides in `data-name`). */
 export function emojiHtml(glyph: string): string {
-  return `<span data-type="${PAGE_EMOJI_DATA_TYPE}">${glyph}</span>`;
+  const shortcode = pageEmojiShortcode(glyph);
+  const name = shortcode === null ? "" : ` data-name="${escapeAttribute(shortcode)}"`;
+  return `<span data-type="${PAGE_EMOJI_DATA_TYPE}"${name}>${glyph}</span>`;
 }
 
 /** The typography block a catalogue entry restyles the caret to. */

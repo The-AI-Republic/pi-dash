@@ -115,6 +115,15 @@ describe("parsePageDocument", () => {
     expect(doc.assets[0]?.name).toBe("Chart");
   });
 
+  it("names a stored picture after its own node id when it carries no alt (PAGE-039, PAGE-048)", () => {
+    const doc = parsePageDocument(
+      '<image-component id="1cdc3de5" src="asset-9" status="uploaded"></image-component>',
+      SCOPE
+    );
+    expect(doc.assets[0]?.name).toBe("image-1cdc3de5");
+    expect(doc.assets[0]?.source).toBe("asset-9");
+  });
+
   it("falls back through title, then file name for the row name", () => {
     expect(parsePageDocument('<img src="https://x.test/set/hill.png" title="A hill">', SCOPE).assets[0]?.name).toBe(
       "A hill"

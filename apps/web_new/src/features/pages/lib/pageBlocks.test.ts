@@ -12,9 +12,12 @@ import {
   emojiHtml,
   filterPickerCommands,
   filterSlashEntries,
+  PAGE_BODY_EMOJIS,
   PAGE_EMBED_TAG,
   PAGE_EMOJI_DATA_TYPE,
+  PAGE_EMOJI_SHORTCODES,
   pageCatalogBlockKind,
+  pageEmojiShortcode,
   pageSlashLabels,
   slashQueryAt,
 } from "./pageBlocks.js";
@@ -117,8 +120,22 @@ describe("page body markup fragments", () => {
     expect(html).toContain('entity_name="Issue &gt; 1"');
   });
 
-  it("marks an inline emoji with its stored data type", () => {
-    expect(emojiHtml("🎉")).toBe(`<span data-type="${PAGE_EMOJI_DATA_TYPE}">🎉</span>`);
+  it("marks an inline emoji with its stored data type and shortcode", () => {
+    expect(emojiHtml("🎉")).toBe(`<span data-type="${PAGE_EMOJI_DATA_TYPE}" data-name="party">🎉</span>`);
+    expect(emojiHtml("👍")).toBe(`<span data-type="${PAGE_EMOJI_DATA_TYPE}" data-name="+1">👍</span>`);
+  });
+
+  it("stores no shortcode attribute for a glyph outside the picker table", () => {
+    expect(pageEmojiShortcode("🦜")).toBe(null);
+    expect(emojiHtml("🦜")).toBe(`<span data-type="${PAGE_EMOJI_DATA_TYPE}">🦜</span>`);
+  });
+
+  it("names a shortcode for every glyph the picker offers", () => {
+    // Picker glyphs all have a stored shortcode, so a saved page keeps the
+    // character the picker inserted.
+    expect(Object.keys(PAGE_EMOJI_SHORTCODES).sort()).toEqual([...PAGE_BODY_EMOJIS].sort());
+    expect(pageEmojiShortcode("😀")).toBe("grinning");
+    expect(pageEmojiShortcode("⚠️")).toBe("warning");
   });
 });
 
