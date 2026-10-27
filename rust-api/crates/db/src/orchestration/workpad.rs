@@ -79,9 +79,11 @@ where
 }
 
 // NOTE: the agent system user flow (`get_agent_system_user` +
-// helpers) moved to `pidash_services::domain::identity`
-// (PIDASHCONV-1525); the `users` write belongs to the identity
-// domain. This module keeps the workpad accessors only.
+// helpers, plus the own-transaction `agent_system_user_id` wrapper)
+// moved to `pidash_services::domain::identity` (PIDASHCONV-1525;
+// the wrapper is OVL-06 PIDASHCONV-1544); the `users` write belongs
+// to the identity domain. This module keeps the workpad accessors
+// only.
 
 #[cfg(test)]
 mod tests {

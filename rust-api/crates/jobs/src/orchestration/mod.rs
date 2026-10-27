@@ -44,7 +44,8 @@ pub use fire_tick_seam::{
     wait_ticker, DispatchJobsError, DispatchOutcome, FireTickShim, StateView,
 };
 pub use runner_seams::{
-    complete_project_move_handoff_live, disarm_on_terminal_signal, maybe_apply_deferred_pause_live,
-    DisarmError,
+    complete_project_move_handoff_live, disarm_on_terminal_signal, fire_pending_entry,
+    maybe_apply_deferred_pause_live, pending_entry_ticker_for, post_run_orchestration,
+    run_work_item_id, DisarmError,
 };
 pub use scheduler_dispatch::{dispatch_scheduler_run, live_scheduler_dispatch};

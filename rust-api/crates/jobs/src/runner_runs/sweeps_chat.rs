@@ -115,6 +115,22 @@ pub const RECONCILE_TERMINAL_EFFECTS_TASK: &str = "runner.reconcile_agent_run_te
 /// (`runner.apply_agent_run_terminal_effects`, `tasks.py:333`).
 pub use finalization::TERMINAL_EFFECTS_TASK;
 
+/// Enqueue one `apply_agent_run_terminal_effects` task for a run
+/// (`apply_agent_run_terminal_effects.delay(str(run_id))`):
+/// `args=[str(run_id)]`, `kwargs={}`. Moved from the api ports
+/// (`runner_runs::LivePorts::emit_terminal_effects`, OVL-06
+/// PIDASHCONV-1544) so the overlay shares the emit instead of
+/// copying it; the ports method is now a thin caller. Re-exported
+/// through `pidash-sdk::ops`.
+pub async fn emit_terminal_effects(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx::Error> {
+    let job = NewJob::new(
+        TERMINAL_EFFECTS_TASK,
+        Value::Array(vec![Value::String(run_id.to_string())]),
+        Value::Object(Default::default()),
+    );
+    enqueue(pool, &job).await.map(|_| ())
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------

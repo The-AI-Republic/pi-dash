@@ -200,6 +200,11 @@ pub mod read {
 pub mod ops {
     pub use pidash_db::runner_sessions::outbox::OutboxError;
     pub use pidash_jobs::dispatch::dispatch_waiting;
+    pub use pidash_jobs::orchestration::fire_pending_entry;
+    pub use pidash_jobs::orchestration::pending_entry_ticker_for;
+    pub use pidash_jobs::orchestration::post_run_orchestration;
+    pub use pidash_jobs::orchestration::run_work_item_id;
+    pub use pidash_jobs::runner_runs::emit_terminal_effects;
     pub use pidash_jobs::tasks_ticker::scan::emit_fire_tick;
     pub use pidash_ops::connect_primary;
     pub use pidash_ops::run;
@@ -215,6 +220,8 @@ pub mod ops {
     pub use pidash_services::dispatch::tools::CREATE_SEQ_SCAN_SQL;
     pub use pidash_services::dispatch::tools::CREATE_SORT_ORDER_MAX_SQL;
     pub use pidash_services::dispatch::LlmProfile;
+    pub use pidash_services::domain::identity::agent_system_user_id;
+    pub use pidash_services::domain::identity::GetAgentUserError;
     pub use pidash_services::integrations::adapters_github::ClientAuth;
     pub use pidash_services::integrations::adapters_github::GitHubAdapter;
     pub use pidash_services::integrations::adapters_github::GithubClient;
@@ -259,6 +266,8 @@ pub mod ops {
     pub use pidash_services::runner_enroll::revoke::RevokeError;
     pub use pidash_services::runner_enroll::revoke::RevokeOutcome;
     pub use pidash_services::runner_enroll::revoke::RevokeStore;
+    pub use pidash_services::runner_runs::chat::next_event_seq;
+    pub use pidash_services::runner_runs::chat::next_message_seq;
     pub use pidash_services::runner_runs::finalization;
     pub use pidash_services::runner_runs::LifecycleEffect;
     pub use pidash_services::runner_runs::SetValue;

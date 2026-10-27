@@ -255,6 +255,103 @@ pub async fn maybe_apply_deferred_pause_live(
 }
 
 // ---------------------------------------------------------------------------
+// Post-run orchestration (run-ended reconcile + deferred pause +
+// pending-entry fire)
+// ---------------------------------------------------------------------------
+
+/// `_fire_pending_entry` lookup half (`run_lifecycle.py:141-155`): the
+/// run's work item id, if the run exists and names one. Executor-generic
+/// so the pool path and the hooks-transaction path share it. Moved
+/// from the api ports (OVL-06 PIDASHCONV-1544).
+pub async fn run_work_item_id<'e, E>(ex: E, run_id: Uuid) -> Result<Option<Uuid>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row: Option<Option<Uuid>> =
+        sqlx::query_scalar(r#"SELECT "work_item_id" FROM "agent_run" WHERE "id" = $1"#)
+            .bind(run_id)
+            .fetch_optional(ex)
+            .await?;
+    Ok(row.flatten())
+}
+
+/// `_fire_pending_entry` lookup half (`run_lifecycle.py:141-155`): the
+/// work item's pending ticker, if any. Executor-generic so the pool
+/// path and the hooks-transaction path share it. Moved from the api
+/// ports (OVL-06 PIDASHCONV-1544).
+pub async fn pending_entry_ticker_for<'e, E>(
+    ex: E,
+    work_item_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query_scalar(
+        r#"SELECT "id" FROM "issue_agent_ticker"
+           WHERE "issue_id" = $1 AND "enabled" = true AND "pending_entry" = true
+           LIMIT 1"#,
+    )
+    .bind(work_item_id)
+    .fetch_optional(ex)
+    .await
+}
+
+/// `_fire_pending_entry` (`run_lifecycle.py:141-155`): the run's work
+/// item pending ticker, if any, fires now. Moved from the api ports
+/// (OVL-06 PIDASHCONV-1544); the ports method and the in-tx variant's
+/// lookup half are thin callers. Re-exported through
+/// `pidash-sdk::ops`.
+pub async fn fire_pending_entry(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx::Error> {
+    let Some(work_item_id) = run_work_item_id(pool, run_id).await? else {
+        return Ok(());
+    };
+    let Some(ticker_id) = pending_entry_ticker_for(pool, work_item_id).await? else {
+        return Ok(());
+    };
+    crate::tasks_ticker::scan::emit_fire_tick(pool, ticker_id).await
+}
+
+/// `_apply_post_run_orchestration` (`run_lifecycle.py:103-139`):
+/// disarm, deferred pause, pending-entry fire — each isolated in
+/// Python (try/except + log), so every failure is logged and the
+/// call still returns. Moved from the api ports
+/// (`runner_runs::LivePorts::post_run_orchestration`, OVL-06
+/// PIDASHCONV-1544) so the overlay shares the recipe instead of
+/// copying it; the ports method is now a thin caller. Re-exported
+/// through `pidash-sdk::ops`.
+pub async fn post_run_orchestration(
+    pool: &PgPool,
+    cloud: &CloudAgentSettings,
+    managed: &ManagedRunnerSettings,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    run_id: Uuid,
+) {
+    if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
+        tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: run-ended reconcile failed"
+        );
+    }
+    if let Err(error) =
+        maybe_apply_deferred_pause_live(pool, cloud, managed, run_id, toolsets).await
+    {
+        tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: deferred-pause failed"
+        );
+    }
+    if let Err(error) = fire_pending_entry(pool, run_id).await {
+        tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: pending-entry fire failed"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Disarm (row loading + clock planner + writes)
 // ---------------------------------------------------------------------------
 

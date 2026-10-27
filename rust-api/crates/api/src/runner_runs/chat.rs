@@ -1075,37 +1075,6 @@ async fn commit_tx(tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), Resp
     tx.commit().await.map_err(|_| server_error())
 }
 
-/// `next_event_seq` (`chat.py:218-224`): one past the session max.
-async fn next_event_seq(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    session_id: Uuid,
-) -> Result<i32, Response> {
-    let max: Option<i32> =
-        sqlx::query_scalar(r#"SELECT MAX("seq") FROM "agent_chat_event" WHERE "session_id" = $1"#)
-            .bind(session_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| server_error())?
-            .flatten();
-    Ok(chat_kernel::next_seq_after_max(max))
-}
-
-/// `next_message_seq` (`chat.py:227-233`): one past the session max.
-async fn next_message_seq(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    session_id: Uuid,
-) -> Result<i32, Response> {
-    let max: Option<i32> = sqlx::query_scalar(
-        r#"SELECT MAX("seq") FROM "agent_chat_message" WHERE "session_id" = $1"#,
-    )
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?
-    .flatten();
-    Ok(chat_kernel::next_seq_after_max(max))
-}
-
 /// `append_event_locked` (`services/chat.py:149-173`): the
 /// idempotent event insert. An existing `source_key` returns the
 /// stored row without queuing a publish; otherwise the row inserts
@@ -1137,7 +1106,9 @@ pub async fn append_event(
             return event_from_row(existing);
         }
     }
-    let seq = next_event_seq(tx, session_id).await?;
+    let seq = chat_kernel::next_event_seq(&mut **tx, session_id)
+        .await
+        .map_err(|_| server_error())?;
     let created_at = Utc::now();
     let id: i64 = sqlx::query_scalar(
         r#"INSERT INTO "agent_chat_event"
@@ -1216,7 +1187,9 @@ pub async fn create_assistant(
 ) -> Result<AgentChatMessage, Response> {
     let inputs =
         chat_kernel::create_assistant_inputs(local_turn_id, "", AgentChatMessageStatus::Streaming);
-    let seq = next_message_seq(tx, session_id).await?;
+    let seq = chat_kernel::next_message_seq(&mut **tx, session_id)
+        .await
+        .map_err(|_| server_error())?;
     let id = Uuid::new_v4();
     let created_at = Utc::now();
     sqlx::query(
@@ -2645,9 +2618,9 @@ pub async fn chat_message_create(
         Some(other) => super::run_endpoints::py_str_value(other),
         None => String::new(),
     };
-    let seq = match next_message_seq(&mut tx, session_id).await {
+    let seq = match chat_kernel::next_message_seq(&mut *tx, session_id).await {
         Ok(seq) => seq,
-        Err(response) => return response,
+        Err(_) => return server_error(),
     };
     let message_id = Uuid::new_v4();
     let message_created_at = Utc::now();

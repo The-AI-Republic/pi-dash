@@ -351,6 +351,7 @@ pidash_sdk::ops::CreateDispatchRequest
 pidash_sdk::ops::DrainError
 pidash_sdk::ops::EffectBundle
 pidash_sdk::ops::FireOp
+pidash_sdk::ops::GetAgentUserError
 pidash_sdk::ops::GitHubAdapter
 pidash_sdk::ops::GithubClient
 pidash_sdk::ops::GithubError
@@ -386,6 +387,7 @@ pidash_sdk::ops::TransportContext
 pidash_sdk::ops::TransportGuard
 pidash_sdk::ops::UserSettingsSchema
 pidash_sdk::ops::advisory_lock_key
+pidash_sdk::ops::agent_system_user_id
 pidash_sdk::ops::base_settings_schema
 pidash_sdk::ops::blockers
 pidash_sdk::ops::builtins
@@ -397,9 +399,11 @@ pidash_sdk::ops::drain_for_runner_by_id
 pidash_sdk::ops::drain_pod_by_id
 pidash_sdk::ops::effective_interval_seconds
 pidash_sdk::ops::emit_fire_tick
+pidash_sdk::ops::emit_terminal_effects
 pidash_sdk::ops::extend_settings_schema
 pidash_sdk::ops::fallback_creator_select
 pidash_sdk::ops::finalization
+pidash_sdk::ops::fire_pending_entry
 pidash_sdk::ops::fire_plan
 pidash_sdk::ops::get_setting
 pidash_sdk::ops::has_open_blockers_sql
@@ -407,11 +411,16 @@ pidash_sdk::ops::is_ticking_state
 pidash_sdk::ops::latest_prior_run_sql
 pidash_sdk::ops::lock_ticker_sql
 pidash_sdk::ops::merge_settings
+pidash_sdk::ops::next_event_seq
+pidash_sdk::ops::next_message_seq
+pidash_sdk::ops::pending_entry_ticker_for
+pidash_sdk::ops::post_run_orchestration
 pidash_sdk::ops::py_stripped
 pidash_sdk::ops::reconcile
 pidash_sdk::ops::revoke
 pidash_sdk::ops::run
 pidash_sdk::ops::run_select_sql
+pidash_sdk::ops::run_work_item_id
 pidash_sdk::ops::saved_sequence_id
 pidash_sdk::ops::saved_sort_order
 pidash_sdk::ops::select_parent_for_next_run
