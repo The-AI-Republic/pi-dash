@@ -515,4 +515,49 @@ describe("chip parsing", () => {
     });
     await expect(new WebNewDriver(page).reactionsArchivedCommentClusterVisible("Body")).resolves.toBe(false);
   });
+
+  it("opens the first entry profile link and returns the url", async () => {
+    const clicked: string[] = [];
+    const seen: unknown[] = [];
+    const link = locator({ click: async () => void clicked.push("profile") });
+    const { page } = pageOf({
+      role: (role) =>
+        role === "region"
+          ? locator({
+              locator: (selector) => {
+                expect(selector).toBe('a[href*="/profile/"]');
+                return link;
+              },
+            })
+          : locator(),
+    });
+    const mutable = page as unknown as Record<string, unknown>;
+    mutable.waitForURL = async (pattern: unknown) => void seen.push(pattern);
+    mutable.url = () => "https://p.test/acme/profile/member-1";
+    await expect(new WebNewDriver(page).activityOpenFirstEntryLink()).resolves.toBe(
+      "https://p.test/acme/profile/member-1"
+    );
+    expect(clicked).toEqual(["profile"]);
+    expect(String(seen[0])).toContain("profile");
+  });
+
+  it("throws when the feed carries no profile link", async () => {
+    const { page } = pageOf({
+      role: (role) =>
+        role === "region"
+          ? locator({
+              locator: () =>
+                locator({
+                  first: () =>
+                    locator({
+                      waitFor: async () => {
+                        throw new Error("no link");
+                      },
+                    }),
+                }),
+            })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).activityOpenFirstEntryLink()).rejects.toThrow("no link");
+  });
 });

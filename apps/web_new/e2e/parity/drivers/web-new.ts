@@ -4659,7 +4659,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityOpenFirstEntryLink(): Promise<string> {
-    return todo("activityOpenFirstEntryLink");
+    // Member actors link to their profile from every entry row; the
+    // first such link is the feed's way into the member surface
+    // (EST-023). Product-authored rows render no link.
+    const link = this.activitySection().locator('a[href*="/profile/"]').first();
+    await link.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await Promise.all([
+      this.page.waitForURL(/profile/, { timeout: WebNewDriver.WAIT_MS }),
+      link.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    return this.page.url();
   }
 
   // --- Issue activity & comments (NEWFRONT-122, ISS-194–206). The
