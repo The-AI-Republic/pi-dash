@@ -223,8 +223,10 @@ test(
       .toEqual(expect.arrayContaining([...seed.issueNames]));
 
     // Intended: a pulsing temp row from submit until the server
-    // confirms. Actual: no temp row renders at any point; the row
-    // appears only at confirm (bug:NEWFRONT-170).
+    // confirms. Actual on the oracle: no temp row renders at any point;
+    // the row appears only at confirm (bug:NEWFRONT-170). The new app
+    // renders the temp row, so its leg pins presence below (spec §10
+    // gate alignment).
     const title = `Parity optimistic ${uniqueSuffix()}`;
     await driver.layoutsStallIssueMutation(20_000);
     try {
@@ -242,7 +244,8 @@ test(
         }
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
-      expect(sawTemp).toEqual(false);
+      if (driver.target === "web_new") expect(sawTemp).toEqual(true);
+      else expect(sawTemp).toEqual(false);
       await driver.layoutsReleaseStalls();
       await settled;
       // Reconcile half passes: the row lands with its real server id.
@@ -291,11 +294,12 @@ test(
       await driver.layoutsWorkItemModalSetTitle(freshName);
       await driver.layoutsWorkItemModalSubmit();
       // Intended: the fresh row renders immediately via the recency
-      // bypass. Actual: the intersection observer clears the bypass on
-      // the first frame, so the row never renders without scrolling
-      // (bug:NEWFRONT-171). A live bypass renders within seconds — the
-      // same flow lands in 5s on a small list — so a 45s watch that
-      // never sees the row pins the absence.
+      // bypass. Actual on the oracle: the intersection observer clears
+      // the bypass on the first frame, so the row never renders without
+      // scrolling (bug:NEWFRONT-171). A live bypass renders within
+      // seconds — the same flow lands in 5s on a small list — so a 45s
+      // watch that never sees the row pins the absence. The new app
+      // keeps the bypass, so its leg pins presence (spec §10).
       let sawFresh = false;
       const watchUntil = Date.now() + 45_000;
       while (Date.now() < watchUntil) {
@@ -306,10 +310,14 @@ test(
         }
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
-      expect(sawFresh).toEqual(false);
+      if (driver.target === "web_new") expect(sawFresh).toEqual(true);
+      else expect(sawFresh).toEqual(false);
       // Intended: the fresh row also carries the transient highlight.
-      // Actual: only drops highlight; creates never do (bug:NEWFRONT-168).
-      expect(await driver.layoutsRowHighlighted(freshName)).toEqual(false);
+      // Actual on the oracle: only drops highlight; creates never do
+      // (bug:NEWFRONT-168). The new app highlights creates, so its leg
+      // pins presence (spec §10).
+      if (driver.target === "web_new") expect(await driver.layoutsRowHighlighted(freshName)).toEqual(true);
+      else expect(await driver.layoutsRowHighlighted(freshName)).toEqual(false);
       const rows = await serverIssues(seed.workspaceSlug, seed.projectId, session);
       const fresh = rows.find((row) => row.name === freshName);
       expect(fresh?.id ?? "").not.toEqual("");
@@ -322,6 +330,11 @@ test(
             .map((id) => serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session).catch(() => {}))
         );
       }
+      // A failure between the modal submit and the id lookup leaves the
+      // fresh issue out of createdIds; sweep it by title like T5 does.
+      const swept = await serverIssues(seed.workspaceSlug, seed.projectId, session).catch(() => []);
+      const stray = swept.find((row) => row.name === freshName);
+      if (stray) await serverDeleteIssue(seed.workspaceSlug, seed.projectId, stray.id, session).catch(() => {});
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     }
   }
