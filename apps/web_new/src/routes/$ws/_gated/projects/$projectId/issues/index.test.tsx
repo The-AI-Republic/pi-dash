@@ -40,6 +40,7 @@ import { loadKanbanLayout } from "../../../../../../features/issues/kanban/lazy.
 import { sheetIssuesQueryOptions } from "../../../../../../features/issues/spreadsheet/data.js";
 import { pickerCyclesQueryOptions } from "../../../../../../shared/pickers/reference.js";
 import { Route } from "./index.js";
+import { loadIssuesListContent } from "./lazy.js";
 
 // The peek is the full detail composition; this suite proves the route hands
 // each layout the address it should bind, not the panel's internals.
@@ -542,11 +543,14 @@ afterEach(() => {
 });
 
 describe("project issues screen", () => {
-  // The route awaits the list layout, empty state and filter chunks in
-  // beforeLoad; these tests render the component directly, so resolve the
-  // same chunks first.
+  // The route awaits the screen, list layout, empty state and filter chunks
+  // in beforeLoad; these tests render the component directly, so resolve the
+  // same chunks first. The screen chunk is the route's own render dependency:
+  // without it here, a case only mounted because an earlier describe's
+  // beforeLoad happened to prime it, and filtering the file by test name
+  // (vitest -t) failed every case.
   beforeAll(async () => {
-    await Promise.all([loadListLayout(), loadProjectEmptyState(), loadIssueFilters()]);
+    await Promise.all([loadIssuesListContent(), loadListLayout(), loadProjectEmptyState(), loadIssueFilters()]);
   });
 
   it("composes the layout root with the project title and its rows", async () => {
