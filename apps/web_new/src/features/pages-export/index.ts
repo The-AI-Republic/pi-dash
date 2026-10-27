@@ -9,7 +9,7 @@ export type { PageExportDialogProps } from "./components/PageExportDialog.js";
 export { browserPageExportSink } from "./lib/downloadSink.js";
 export type { PageExportSink } from "./lib/downloadSink.js";
 export { extractExportContent } from "./lib/extractExportContent.js";
-export type { ExtractedExportContent } from "./lib/extractExportContent.js";
+export type { ExtractedExportContent, ExtractExportContentOptions } from "./lib/extractExportContent.js";
 export { browserFetchExportImageBytes, fetchExportImages } from "./lib/fetchExportImages.js";
 export type { FetchExportImageBytes } from "./lib/fetchExportImages.js";
 export { applyMarkdownScope, stripMarkdownImages } from "./lib/markdownExport.js";

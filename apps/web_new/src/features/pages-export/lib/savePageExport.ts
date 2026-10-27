@@ -6,7 +6,11 @@
 // download surface. Fully client-side: no export endpoint is ever called.
 import { applyMarkdownScope } from "./markdownExport.js";
 import { browserPageExportSink, type PageExportSink } from "./downloadSink.js";
-import { extractExportContent, type ExtractedExportContent } from "./extractExportContent.js";
+import {
+  extractExportContent,
+  type ExtractedExportContent,
+  type ExtractExportContentOptions,
+} from "./extractExportContent.js";
 import { browserFetchExportImageBytes, fetchExportImages, type FetchExportImageBytes } from "./fetchExportImages.js";
 import type { PageExportHost } from "./pageExportDialogRegistry.js";
 import { pageExportMarkdownFilename, pageExportPdfFilename, type PageExportForm } from "./pageExportModel.js";
@@ -21,7 +25,7 @@ export interface SavePageExportDeps {
   fontBytes?: Uint8Array | undefined;
   loadFontBytes?: LoadInterFontBytes | undefined;
   /** Editor-HTML reader; the DOM extractor unless a test stands in. */
-  extractContent?: ((html: string) => ExtractedExportContent) | undefined;
+  extractContent?: ((html: string, options?: ExtractExportContentOptions) => ExtractedExportContent) | undefined;
 }
 
 export interface SavedPageExport {
@@ -42,7 +46,7 @@ export async function savePageExport(
     filename = pageExportMarkdownFilename(host.pageTitle);
     blob = new Blob([applyMarkdownScope(host.getMarkdown(), form.scope)], { type: "text/markdown" });
   } else {
-    const content = extract(host.getHtml());
+    const content = extract(host.getHtml(), { workspaceSlug: host.workspaceSlug, projectId: host.projectId });
     const imageUrls = form.scope === "No images" ? [] : content.imageUrls;
     const imageBytes = await fetchExportImages(imageUrls, deps.origin, deps.fetchBytes ?? browserFetchExportImageBytes);
     const document = await renderPagePdf(

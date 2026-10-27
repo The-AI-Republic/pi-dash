@@ -204,6 +204,65 @@ describe("savePageExport", () => {
     expect(pdfFacts({ content: Buffer.from(bytes).toString("latin1") }).imageCount).toBeGreaterThan(0);
   }, 60_000);
 
+  it("hands the host's workspace context to the content extractor", async () => {
+    const sink = recordingSink();
+    const extractContent = vi.fn((): ExtractedExportContent => ({ paragraphs: ["body marker probe"], imageUrls: [] }));
+    await savePageExport(
+      host(),
+      { format: "PDF", scope: "No images", size: "A4" },
+      {
+        sink,
+        origin: "https://app.example",
+        fontBytes: interFontBytes(),
+        extractContent,
+        fetchBytes: async () => {
+          throw new Error("must not fetch");
+        },
+      }
+    );
+    expect(extractContent).toHaveBeenCalledTimes(1);
+    expect(extractContent).toHaveBeenCalledWith("<p>body marker probe</p>", {
+      workspaceSlug: "acme",
+      projectId: "project-1",
+    });
+  }, 60_000);
+
+  it("embeds the fetched raster only under full fidelity", async () => {
+    // An opaque pixel (color type 2): one image object, no alpha mask, so the
+    // count mirrors the parity scenario's 1-vs-0 shape exactly.
+    const opaque = new Uint8Array(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+        "base64"
+      )
+    );
+    const render = async (scope: "Everything" | "No images"): Promise<{ bytes: Uint8Array; imageCount: number }> => {
+      const sink = recordingSink();
+      await savePageExport(
+        host(),
+        { format: "PDF", scope, size: "A4" },
+        {
+          sink,
+          origin: "https://app.example",
+          fontBytes: interFontBytes(),
+          extractContent: () => ({
+            paragraphs: ["body marker probe"],
+            imageUrls: ["/api/assets/v2/workspaces/acme/projects/project-1/asset-1/"],
+          }),
+          fetchBytes: async () => opaque,
+        }
+      );
+      const bytes = await savedBytes(sink);
+      const facts = pdfFacts({ content: Buffer.from(bytes).toString("latin1") });
+      return { bytes, imageCount: facts.imageCount };
+    };
+    const full = await render("Everything");
+    const stripped = await render("No images");
+    expect(full.bytes.byteLength).toBeGreaterThan(stripped.bytes.byteLength);
+    expect(full.imageCount).toBe(1);
+    expect(stripped.imageCount).toBe(0);
+  }, 120_000);
+
   it("still revokes the object URL when the save throws", async () => {
     const sink = recordingSink();
     sink.save = () => {
