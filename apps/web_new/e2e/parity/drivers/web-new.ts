@@ -29130,6 +29130,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesHeaderChooseMenuItem(label: string): Promise<void> {
+    // Headless browsing denies clipboard writes, and the page reports a
+    // denied copy honestly (an error notice, no success toast), so the
+    // copy entry needs the grant before it runs — the same read the
+    // blocks options menu and every other copy control uses. The fixture
+    // context dies with the scenario, so nothing leaks.
+    if (label === "Copy markdown") {
+      await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    }
     await this.pagesHeaderMenuEntries()
       .filter({ hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) })
       .first()
@@ -29226,16 +29234,31 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesHeaderCanvasMaxWidth(): Promise<string> {
-    // The canvas eases width changes, so settle on two agreeing reads.
+    // The preference commits a frame or two after the menu click returns,
+    // and the canvas then eases to the new measure (a max-width
+    // transition). A plain read can therefore catch the outgoing width
+    // before the commit lands, or an intermediate width mid-ease — both
+    // looked like the toggle did nothing (NEWFRONT-851, PAGE-060). Each
+    // sample first lets the pending commit paint (two frames) and then
+    // waits for that element's transitions to finish, so a read is always
+    // a settled width; two agreeing settled reads are the answer.
     const canvas = this.page.locator(".frame-renderer").first();
-    let previous = await canvas.evaluate((element) => getComputedStyle(element).maxWidth);
+    let previous: string | null = null;
     for (let attempt = 0; attempt < 25; attempt += 1) {
-      await this.page.waitForTimeout(100);
-      const current = await canvas.evaluate((element) => getComputedStyle(element).maxWidth);
-      if (current === previous) return current;
-      previous = current;
+      const width = (await canvas.evaluate(async (element) => {
+        const node = element as HTMLElement;
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        });
+        const running = node.getAnimations().filter((animation) => animation.playState !== "idle");
+        await Promise.all(running.map((animation) => animation.finished.catch(() => undefined)));
+        return getComputedStyle(node).maxWidth;
+      })) as string;
+      if (width === previous) return width;
+      previous = width;
+      await this.page.waitForTimeout(50);
     }
-    return previous;
+    return previous ?? "";
   }
 
   async pagesHeaderToolbarVisible(): Promise<boolean> {

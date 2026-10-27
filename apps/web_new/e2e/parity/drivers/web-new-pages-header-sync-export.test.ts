@@ -434,6 +434,22 @@ describe("options menu", () => {
     expect(expression.test("Make private (a+b)")).toBe(true);
     expect(expression.test("Make private (a+b) plus more")).toBe(false);
     expect(menuFake.click).toHaveBeenCalledWith({ timeout: 30_000 });
+    // Choosing an ordinary entry never touches permissions.
+    expect(stub.grantPermissions).not.toHaveBeenCalled();
+  });
+
+  it("grants the clipboard before choosing Copy markdown", async () => {
+    // The page reports a denied clipboard write with an error notice and
+    // no success toast, so without the grant the entry can never pass.
+    const menuFake = new FakeLocator({ count: 8 });
+    const stub = pageDouble({ roles: { menuitem: menuFake as unknown as Locator } });
+    const driver = new WebNewDriver(stub.page);
+
+    await driver.pagesHeaderChooseMenuItem("Copy markdown");
+
+    expect(stub.grantPermissions).toHaveBeenCalledTimes(1);
+    expect(stub.grantPermissions).toHaveBeenCalledWith(["clipboard-read", "clipboard-write"]);
+    expect(menuFake.click).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 });
 
@@ -619,17 +635,41 @@ describe("archived marker and delete dialog", () => {
 });
 
 describe("canvas, toolbar and pane", () => {
-  it("settles the canvas max width on two agreeing reads", async () => {
-    const reads = ["720px", "900px", "1152px", "1152px"];
-    const canvasFake = new FakeLocator({ count: 1, evaluate: async () => reads.shift() ?? "1152px" });
+  /**
+   * A canvas double whose reads follow the app's paint order: the click
+   * returns before React commits, so the first reads still report the
+   * outgoing width, then the ease runs at intermediate widths, and only
+   * the settled frame reports the new measure. The driver must skip the
+   * former two and report the latter.
+   */
+  function easingCanvas(widths: readonly string[]): FakeLocator {
+    const reads = [...widths];
+    return new FakeLocator({ count: 1, evaluate: async () => reads.shift() ?? widths.at(-1) ?? "" });
+  }
+
+  it("reports a settled width against the outgoing one right after a toggle", async () => {
+    // First read lands pre-commit (still 1152px), then the settled 720px
+    // pair. A driver that trusted the first two agreeing reads would have
+    // answered 1152px and looked like the toggle was a no-op.
+    const canvasFake = easingCanvas(["1152px", "720px", "720px"]);
     const stub = pageDouble({ selectors: { ".frame-renderer": canvasFake as unknown as Locator } });
     const driver = new WebNewDriver(stub.page);
 
-    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("1152px");
+    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("720px");
+    expect(canvasFake.evaluate).toHaveBeenCalledTimes(3);
+    expect(stub.waitForTimeout).toHaveBeenCalledWith(50);
+  });
+
+  it("settles the canvas max width on two agreeing reads", async () => {
+    const canvasFake = easingCanvas(["720px", "720px"]);
+    const stub = pageDouble({ selectors: { ".frame-renderer": canvasFake as unknown as Locator } });
+    const driver = new WebNewDriver(stub.page);
+
+    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("720px");
     expect(stub.locator).toHaveBeenCalledWith(".frame-renderer");
-    expect(canvasFake.evaluate).toHaveBeenCalledTimes(4);
-    expect(stub.waitForTimeout).toHaveBeenCalledTimes(3);
-    expect(stub.waitForTimeout).toHaveBeenCalledWith(100);
+    expect(canvasFake.evaluate).toHaveBeenCalledTimes(2);
+    // One gap between the two samples; the settling read needs no pause.
+    expect(stub.waitForTimeout).toHaveBeenCalledTimes(1);
   });
 
   it("returns the latest canvas read when the width never settles", async () => {
@@ -638,8 +678,8 @@ describe("canvas, toolbar and pane", () => {
     const stub = pageDouble({ selectors: { ".frame-renderer": canvasFake as unknown as Locator } });
     const driver = new WebNewDriver(stub.page);
 
-    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("746px");
-    expect(canvasFake.evaluate).toHaveBeenCalledTimes(26);
+    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("745px");
+    expect(canvasFake.evaluate).toHaveBeenCalledTimes(25);
     expect(stub.waitForTimeout).toHaveBeenCalledTimes(25);
   });
 
