@@ -216,6 +216,17 @@ describe("CyclesListScreen", () => {
     expect(screen.queryByRole("button", { name: "Add cycle" })).not.toBeInTheDocument();
   });
 
+  it("keeps the guest list body — search and filters — while gating only creation", async () => {
+    // CYC-047/NEWFRONT-268: the create gate must not swallow the body,
+    // which owns the read-only search box and Filters menu.
+    harness.roles = { [CYCLES_PROJECT_ID]: 5 };
+    harness.cycles = [makeCycleRow({ name: "Cycle 7" })];
+    renderScreen();
+    expect(await screen.findByTestId("cycles-list-body")).toBeInTheDocument();
+    expect(screen.getByTestId("cycles-list-header")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add cycle" })).not.toBeInTheDocument();
+  });
+
   it("prefers an explicit opener over the screen dialog", async () => {
     const onCreateCycle = vi.fn();
     renderScreen({ onCreateCycle });
