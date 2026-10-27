@@ -5544,6 +5544,13 @@ export class WebDriver implements ParityDriver {
     const chrome = new Set(["Favorites", "Open favorites menu", "Close favorites menu", "Create favorites folder"]);
     return names.filter((name) => !chrome.has(name));
   }
+  async favoriteEntryHref(name: string): Promise<string | null> {
+    const aside = await this.screenAside();
+    const link = aside.getByRole("link", { name, exact: true }).first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
+  }
+
   private async favoritesToggle(): Promise<Locator> {
     const aside = await this.screenAside();
     return aside.getByRole("button", { name: /favorites menu/i }).first();

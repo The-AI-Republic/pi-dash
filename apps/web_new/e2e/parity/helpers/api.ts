@@ -4558,6 +4558,8 @@ export interface ParityFavorite {
   id: string;
   entity_type: string;
   entity_identifier: string | null;
+  /** Serialized target details; null when the type is unknown or the target is gone. */
+  entity_data: Record<string, unknown> | null;
   name: string;
   is_folder: boolean;
   parent: string | null;

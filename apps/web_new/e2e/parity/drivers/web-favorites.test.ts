@@ -58,6 +58,38 @@ function driverWithStates(script: ScriptedPage, states: boolean[]): WebDriver {
   return driver;
 }
 
+describe("favoriteEntryHref", () => {
+  /** A driver on a page whose favorites aside always reports a link. */
+  function driverWithAnchor(attributes: Record<string, string | null>): WebDriver {
+    const link = {
+      count: async () => 1,
+      getAttribute: async (name: string) => attributes[name] ?? null,
+    };
+    const aside = { getByRole: () => ({ first: () => link, count: async () => 1 }) };
+    const page = {
+      locator: () => ({
+        evaluateAll: async () => [[0, 100, 100]],
+        nth: () => aside,
+        first: () => aside,
+      }),
+    };
+    return new WebDriver(page as unknown as Page);
+  }
+
+  it("returns the entry's href from the sidebar", async () => {
+    const driver = driverWithAnchor({ href: "/acme" });
+    await expect(driver.favoriteEntryHref("Mystery")).resolves.toBe("/acme");
+  });
+
+  it("returns null when no entry carries the name", async () => {
+    const driver = driverWithAnchor({});
+    const link = { count: async () => 0 };
+    const aside = { getByRole: () => ({ first: () => link, count: async () => 0 }) };
+    (driver as unknown as { screenAside: () => Promise<unknown> }).screenAside = async () => aside;
+    await expect(driver.favoriteEntryHref("Missing")).resolves.toBeNull();
+  });
+});
+
 describe("setFavoritesOpen", () => {
   it("returns without clicking when already open", async () => {
     const script = scriptedPage();

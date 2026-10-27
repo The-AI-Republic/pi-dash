@@ -944,6 +944,8 @@ export interface ParityDriver {
   dragSidebarProjectBefore(sourceName: string, targetName: string): Promise<void>;
   /** Entry labels of the sidebar Favorites section, in display order. */
   favoriteEntryNames(): Promise<string[]>;
+  /** Href of the Favorites entry with this exact display name, or null when absent. */
+  favoriteEntryHref(name: string): Promise<string | null>;
   /** Item labels of the currently open help menu. */
   helpMenuTexts(): Promise<string[]>;
   /** Whether the sidebar project-creation button is rendered. */
