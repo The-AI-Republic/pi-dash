@@ -53,6 +53,7 @@ function row(overrides: Partial<EditableRow> = {}): EditableRow {
     module_ids: [MODULE_A],
     estimate_point: "e-1",
     parent_id: PARENT,
+    git_work_branch: "team/stored",
     ...overrides,
   };
 }
@@ -79,8 +80,13 @@ describe("formFromRow", () => {
       estimatePoint: "e-1",
       execution: null,
       parentId: PARENT,
-      gitWorkBranch: "",
+      gitWorkBranch: "team/stored",
     });
+  });
+
+  it("defaults the branch when the row carries none", () => {
+    expect(formFromRow(row({ git_work_branch: null }), PROJECT).gitWorkBranch).toBe("");
+    expect(formFromRow(row({ git_work_branch: undefined }), PROJECT).gitWorkBranch).toBe("");
   });
 
   it("normalizes absent and empty optional fields to null", () => {
@@ -344,7 +350,17 @@ describe("formFromSnapshot", () => {
   it("restores the fields a persisted snapshot carries", () => {
     const form = formFromSnapshot({ ...row(), extra: "ignored" }, PROJECT);
     expect(form).not.toBeNull();
-    expect(form).toMatchObject({ name: "Existing row", stateId: STATE, moduleIds: [MODULE_A] });
+    expect(form).toMatchObject({
+      name: "Existing row",
+      stateId: STATE,
+      moduleIds: [MODULE_A],
+      gitWorkBranch: "team/stored",
+    });
+  });
+
+  it("carries a stored branch from a snapshot and drops a wrongly typed one", () => {
+    expect(formFromSnapshot({ ...row(), git_work_branch: "team/saved" }, PROJECT)?.gitWorkBranch).toBe("team/saved");
+    expect(formFromSnapshot({ ...row(), git_work_branch: 7 }, PROJECT)?.gitWorkBranch).toBe("");
   });
 
   it("rejects a snapshot that is not a row", () => {

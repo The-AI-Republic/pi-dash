@@ -1452,6 +1452,7 @@ describe("issue contracts", () => {
   const issueDetail = {
     ...issue,
     complexity_score: 0,
+    git_work_branch: "team/stored",
     agent_executor: null,
     is_synced: false,
     description_html: "<p></p>",
@@ -1557,6 +1558,7 @@ describe("issue contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json(issueDetail) });
     const parsed = await getIssue(client, "acme", UUID2, UUID);
     expect(parsed.name).toBe("Fix login");
+    expect(parsed.git_work_branch).toBe("team/stored");
     expect(parsed.has_open_blockers).toBe(false);
     expect(parsed.is_epic).toBeUndefined();
   });

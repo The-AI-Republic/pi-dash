@@ -16,10 +16,8 @@ import type { ModuleMembershipInput } from "./modules.js";
  * Full work-item update (issues area): every field the layouts, modal and
  * detail write through PATCH .../issues/<id>/. Cycle and module
  * membership are NOT here — they go through the bridge calls below.
- * `git_work_branch` is write-only: no read returns it (backend pin
- * NEWFRONT-140), so callers treat the 204 as the only confirmation.
  * The endpoint answers 204 with no body, so callers re-read through
- * getIssue to prove the write.
+ * getIssue to prove a write.
  */
 export interface IssuePatch {
   name?: string;
@@ -42,6 +40,7 @@ export interface IssuePatch {
   target_date?: string | null;
   parent_id?: string | null;
   sort_order?: number;
+  /** Branch to pin for this item; empty clears it (ISS-128). */
   git_work_branch?: string;
 }
 

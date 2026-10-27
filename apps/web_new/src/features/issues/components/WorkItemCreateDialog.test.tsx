@@ -2155,6 +2155,38 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
     expect(patches(h.calls)).toEqual([]);
   });
 
+  it("shows the stored branch and expands Advanced without sending a change (ISS-128)", async () => {
+    const { props } = editProps();
+    const h = setup({ issueDetail: detailRow("<p>stored words</p>", { git_work_branch: "team/stored" }) }, props);
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await waitFor(() => expect(screen.getByLabelText("Work branch")).toHaveValue("team/stored"));
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(patches(h.calls)).toEqual([]);
+  });
+
+  it("sends a changed stored branch (ISS-128)", async () => {
+    const { props } = editProps();
+    const h = setup({ issueDetail: detailRow("<p>stored words</p>", { git_work_branch: "team/stored" }) }, props);
+    await waitFor(() => expect(screen.getByLabelText("Work branch")).toHaveValue("team/stored"));
+    fireEvent.change(screen.getByLabelText("Work branch"), { target: { value: "team/next" } });
+    save();
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    expect(patches(h.calls)[0]).toEqual({ git_work_branch: "team/next" });
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it("clears a stored branch when the field is emptied (ISS-128)", async () => {
+    const user = userEvent.setup();
+    const { props } = editProps();
+    const h = setup({ issueDetail: detailRow("<p>stored words</p>", { git_work_branch: "team/stored" }) }, props);
+    await waitFor(() => expect(screen.getByLabelText("Work branch")).toHaveValue("team/stored"));
+    await user.clear(screen.getByLabelText("Work branch"));
+    save();
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    expect(patches(h.calls)[0]).toEqual({ git_work_branch: "" });
+  });
+
   it("sends an image uploaded into an empty description", async () => {
     const upload = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, status: 200 } as Response);
     const { props } = editProps({ description_html: "" });

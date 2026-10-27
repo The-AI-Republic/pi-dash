@@ -38,9 +38,9 @@ export function saveFailureDetail(error: unknown): string {
 }
 
 /**
- * Row fields a property patch may paint optimistically. `git_work_branch`
- * stays out (write-only), and every field named here is read back by the
- * detail and list projections, so a painted value matches the server row.
+ * Row fields a property patch may paint optimistically. Every field named
+ * here is read back by the detail and list projections, so a painted value
+ * matches the server row.
  */
 const PATCHED_ROW_FIELDS = [
   "name",
@@ -70,6 +70,7 @@ export function applyIssuePatchDetail(previous: Issue | undefined, patch: IssueP
   return {
     ...previous,
     ...painted,
+    ...(patch.git_work_branch !== undefined ? { git_work_branch: patch.git_work_branch } : {}),
     ...(patch.description_html !== undefined ? { description_html: patch.description_html } : {}),
   };
 }
