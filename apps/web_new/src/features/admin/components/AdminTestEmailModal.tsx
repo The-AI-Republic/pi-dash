@@ -5,12 +5,14 @@
 // three-step flow — compose a receiver address, then a success step
 // (advising to check spam and re-verify settings) or a failure step
 // showing the server's error message. The parent unmounts the modal on
-// close, so every opening composes fresh. The check POST carries only
-// the receiver and grades the stored configuration; callers open the
-// modal only from a valid, saved form (NEWFRONT-477 save-first interim).
+// close, so every opening composes fresh. The check POST carries the
+// receiver together with the SMTP values the form shows, so the server
+// grades the entered settings even when they are not saved yet
+// (NEWFRONT-477).
 import { Button, Dialog, Input } from "@pidash/kit";
 import * as React from "react";
 
+import type { EmailFormValues } from "../emailConfig.js";
 import { useCheckEmailCredentials } from "../hooks.js";
 
 /** Compose-step heading (wording pinned by the parity scenario). */
@@ -22,7 +24,13 @@ export const TEST_EMAIL_FAILED_TITLE = "Failed";
 
 export type TestEmailStep = "compose" | "success" | "failed";
 
-export function AdminTestEmailModal({ onClose }: { onClose: () => void }): React.ReactElement {
+export interface AdminTestEmailModalProps {
+  /** The form values to grade — entered, possibly unsaved. */
+  candidate: EmailFormValues;
+  onClose: () => void;
+}
+
+export function AdminTestEmailModal({ candidate, onClose }: AdminTestEmailModalProps): React.ReactElement {
   const [receiver, setReceiver] = React.useState("");
   const [step, setStep] = React.useState<TestEmailStep>("compose");
   const [failure, setFailure] = React.useState("");
@@ -36,15 +44,18 @@ export function AdminTestEmailModal({ onClose }: { onClose: () => void }): React
         : TEST_EMAIL_COMPOSE_TITLE;
 
   const send = () => {
-    check.mutate(receiver, {
-      onSuccess: () => setStep("success"),
-      // The client rejects with ApiError, whose message is the server's
-      // own error text, shown verbatim on the failure step.
-      onError: (error) => {
-        setFailure(error.message);
-        setStep("failed");
-      },
-    });
+    check.mutate(
+      { receiverEmail: receiver, candidate },
+      {
+        onSuccess: () => setStep("success"),
+        // The client rejects with ApiError, whose message is the server's
+        // own error text, shown verbatim on the failure step.
+        onError: (error) => {
+          setFailure(error.message);
+          setStep("failed");
+        },
+      }
+    );
   };
 
   return (

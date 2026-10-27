@@ -563,15 +563,22 @@ its state on close. The check POSTs to
 `/api/instances/email-credentials-check/` with the receiver address
 under `receiver_email` and sends a real message.
 
-Intended behavior behind NEWFRONT-477: the old check grades the stored
-SMTP configuration, not the values currently entered in the form, so an
+Intent behind NEWFRONT-477: the old check grades the stored SMTP
+configuration, not the values currently entered in the form, so an
 admin who edits and tests without saving actually tests the previous
-saved settings. The new flow grades the entered settings (sending them
-along with the check) or requires a save first — either way, testing
-before saving must mean what the page promises. This needs a backend
-capable of grading unsaved settings; if the backend cannot, the slice
-files a backend issue and requires save-first in the meantime. (See the
-contracts slices for who owns that edge.)
+saved settings. The new flow grades the entered settings: the check
+carries the receiver plus the form's current values (host, port,
+sender, username, password and the TLS/SSL/none choice) as candidate
+settings — `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_FROM`,
+`EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS`,
+`EMAIL_USE_SSL` alongside `receiver_email`. The endpoint grades the
+candidate values it is given and falls back to the stored value for
+anything omitted; a blank password also means "keep the stored one",
+because stored secrets never read back. So a cleared password field
+grades the saved secret, while any other cleared field is sent as
+given. The test action therefore opens on any valid form, saved or
+not. Requests without candidate fields keep the receiver-only
+behavior. Backend contract: NEWFRONT-524.
 
 ### 3.5 Loading states (ADM-022)
 
@@ -1388,7 +1395,7 @@ params are prose; see the row sections for exact field names.
 | `GET /api/instances/configurations/`                          | ADM-019, ADM-022, ADM-024, ADM-027, ADM-036, ADM-046, ADM-048, ADM-069                                                       | Shared single fetch; string key/value list.                                                                                                                               |
 | `PATCH /api/instances/configurations/`                        | ADM-018, ADM-019, ADM-020, ADM-023, ADM-025, ADM-027, ADM-028, ADM-029, ADM-030, ADM-031, ADM-032, ADM-035, ADM-037, ADM-046 | Partial string map; response re-seeds saved forms.                                                                                                                        |
 | `DELETE /api/instances/configurations/disable-email-feature/` | ADM-018                                                                                                                      | Master email off; optimistic blank with restore on failure.                                                                                                               |
-| `POST /api/instances/email-credentials-check/`                | ADM-021                                                                                                                      | Test email; receiver address under `receiver_email`; intended scope is the entered settings.                                                                              |
+| `POST /api/instances/email-credentials-check/`                | ADM-021                                                                                                                      | Test email; `receiver_email` plus optional candidate SMTP settings (`EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_FROM`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS`, `EMAIL_USE_SSL`); omitted fields fall back to stored values, blank password = stored.                                             |
 | `GET /api/instances/workspaces/`                              | ADM-038, ADM-040, ADM-041                                                                                                    | Cursor-paginated list, ten per page.                                                                                                                                      |
 | `GET /api/instances/workspace-slug-check/?slug=`              | ADM-044                                                                                                                      | Availability probe before create.                                                                                                                                         |
 | `POST /api/instances/workspaces/`                             | ADM-044, ADM-045                                                                                                             | Create; no owner in the body.                                                                                                                                             |

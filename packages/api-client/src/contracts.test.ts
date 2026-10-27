@@ -3905,6 +3905,51 @@ describe("instance configuration contracts", () => {
     expect(postCall?.init.body).toBe(JSON.stringify({ receiver_email: "probe@example.com" }));
   });
 
+  it("sends candidate SMTP settings alongside the receiver", async () => {
+    const transport = csrfThen((url) => {
+      expect(url.endsWith("/api/instances/email-credentials-check/")).toBe(true);
+      return { status: 200, body: JSON.stringify({ message: "Email successfully sent." }) };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await checkEmailCredentials(client, "probe@example.com", {
+      host: "entered.smtp.example",
+      port: "2525",
+      from: "entered@example.com",
+      user: "entered-user",
+      password: "entered-secret",
+      security: "ssl",
+    });
+    const postCall = transport.calls.find((call) => call.url.endsWith("/api/instances/email-credentials-check/"));
+    expect(JSON.parse(String(postCall?.init.body))).toEqual({
+      receiver_email: "probe@example.com",
+      EMAIL_HOST: "entered.smtp.example",
+      EMAIL_PORT: "2525",
+      EMAIL_FROM: "entered@example.com",
+      EMAIL_HOST_USER: "entered-user",
+      EMAIL_HOST_PASSWORD: "entered-secret",
+      EMAIL_USE_TLS: "0",
+      EMAIL_USE_SSL: "1",
+    });
+  });
+
+  it("omits blank candidate fields so the endpoint keeps stored settings", async () => {
+    const transport = csrfThen(() => ({
+      status: 200,
+      body: JSON.stringify({ message: "Email successfully sent." }),
+    }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await checkEmailCredentials(client, "probe@example.com", {
+      host: " ",
+      port: null,
+      from: undefined,
+      user: null,
+      password: "",
+      security: null,
+    });
+    const postCall = transport.calls.find((call) => call.url.endsWith("/api/instances/email-credentials-check/"));
+    expect(JSON.parse(String(postCall?.init.body))).toEqual({ receiver_email: "probe@example.com" });
+  });
+
   it("surfaces the server mail error on a failed check", async () => {
     const transport = csrfThen(() => ({
       status: 400,

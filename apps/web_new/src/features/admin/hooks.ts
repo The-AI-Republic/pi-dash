@@ -18,6 +18,7 @@ import {
   updateInstanceConfigurations,
   updateLoopJob,
   type ApiClient,
+  type EmailCredentialCandidate,
   type InstanceBootstrap,
   type InstanceConfigurationList,
   type InstancePatch,
@@ -385,15 +386,21 @@ export function createLoopJobMutationOptions(client: ApiClient, queryClient: Que
   });
 }
 
+/** What the test-email modal hands the check: a receiver plus the form's values. */
+export interface TestEmailInput {
+  receiverEmail: string;
+  candidate: EmailCredentialCandidate;
+}
+
 /**
- * Send the test email (ADM-021): POST the receiver address and report the
- * outcome. The check grades the stored configuration, so callers open it
- * only from a valid, saved form (NEWFRONT-477 save-first interim).
+ * Send the test email (ADM-021): POST the receiver address together with
+ * the SMTP settings the form currently shows, so the endpoint grades the
+ * entered values rather than the last saved ones (NEWFRONT-477).
  */
 export function useCheckEmailCredentials() {
   const client = getAppClient();
   return useMutation({
-    mutationFn: (receiverEmail: string) => checkEmailCredentials(client, receiverEmail),
+    mutationFn: (input: TestEmailInput) => checkEmailCredentials(client, input.receiverEmail, input.candidate),
   });
 }
 

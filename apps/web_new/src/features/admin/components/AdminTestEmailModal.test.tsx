@@ -9,6 +9,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import type { EmailFormValues } from "../emailConfig.js";
 import {
   AdminTestEmailModal,
   TEST_EMAIL_COMPOSE_TITLE,
@@ -29,10 +30,19 @@ function stubTransport(routes: Record<string, { status: number; body: unknown }>
   };
 }
 
+const CANDIDATE: EmailFormValues = {
+  host: "smtp.example.com",
+  port: "587",
+  from: "team@example.com",
+  user: "mailer",
+  password: "",
+  security: "ssl",
+};
+
 function renderModal(onClose: () => void): void {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <AdminTestEmailModal onClose={onClose} />
+      <AdminTestEmailModal candidate={CANDIDATE} onClose={onClose} />
     </QueryClientProvider>
   );
 }
@@ -80,8 +90,20 @@ describe("AdminTestEmailModal", () => {
     expect(screen.getByTestId("admin-test-email-body")).toHaveTextContent("spam");
     expect(screen.queryByTestId("admin-test-email-send")).not.toBeInTheDocument();
     expect(screen.getByTestId("admin-test-email-dismiss")).toHaveTextContent("Close");
-    // The check POST carries only the receiver address.
-    expect(calls).toEqual([{ receiver_email: "admin@example.com" }]);
+    // The check POST carries the receiver plus the values on screen, so
+    // the server grades what the admin entered. The blank password is
+    // left out, meaning "grade against the stored one".
+    expect(calls).toEqual([
+      {
+        receiver_email: "admin@example.com",
+        EMAIL_HOST: "smtp.example.com",
+        EMAIL_PORT: "587",
+        EMAIL_FROM: "team@example.com",
+        EMAIL_HOST_USER: "mailer",
+        EMAIL_USE_TLS: "0",
+        EMAIL_USE_SSL: "1",
+      },
+    ]);
 
     fireEvent.click(screen.getByTestId("admin-test-email-dismiss"));
     expect(onClose).toHaveBeenCalledTimes(1);

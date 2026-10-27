@@ -155,7 +155,7 @@ describe("AdminEmailForm", () => {
     expect(onSaved).not.toHaveBeenCalled();
   });
 
-  it("opens save on valid+dirty while the test action waits for a save", () => {
+  it("opens save on valid+dirty and keeps the test action open too (NEWFRONT-477)", () => {
     createAppClient("https://api.test", stubTransport({}));
     renderForm(SAVED_VALUES, vi.fn());
     expect(screen.getByTestId("admin-email-save")).toBeDisabled();
@@ -165,8 +165,16 @@ describe("AdminEmailForm", () => {
     expect(screen.getByTestId("admin-email-save")).toBeDisabled();
     fill("admin-email-host", "smtp2.example.com");
     expect(screen.getByTestId("admin-email-save")).not.toBeDisabled();
+    // The check grades the entered values, so unsaved edits no longer
+    // close the test action and there is no save-first hint.
+    expect(screen.getByTestId("admin-email-test-email")).not.toBeDisabled();
+  });
+
+  it("shuts the test action the moment a required field goes blank", () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderForm(SAVED_VALUES, vi.fn());
+    fill("admin-email-host", "");
     expect(screen.getByTestId("admin-email-test-email")).toBeDisabled();
-    expect(screen.getByTestId("admin-email-save-first-hint")).toHaveTextContent("Save your changes before testing");
   });
 
   it("saves valid+dirty values with SMTP forced on, then turns pristine", async () => {
@@ -319,7 +327,9 @@ describe("AdminEmailForm", () => {
     expect(notifyError).not.toHaveBeenCalled();
     expect(screen.getByTestId("admin-email-save")).toHaveTextContent(SMTP_SAVE_LABEL);
     expect(screen.getByTestId("admin-email-save")).not.toBeDisabled();
-    expect(screen.getByTestId("admin-email-test-email")).toBeDisabled();
+    // A failed save leaves a valid, dirty form — the test action stays open.
+    expect(screen.getByTestId("admin-email-test-email")).not.toBeDisabled();
+    expect(screen.queryByTestId("admin-email-save-first-hint")).not.toBeInTheDocument();
   });
 
   it("flips the password field between hidden and shown without touching the value", () => {
@@ -372,12 +382,25 @@ describe("AdminEmailForm", () => {
   });
 
   it("opens the test modal from a pristine valid form and resets it on close", async () => {
-    createAppClient(
-      "https://api.test",
-      stubTransport({
-        "/api/instances/email-credentials-check/": { status: 200, body: { message: "Email successfully sent." } },
-      })
-    );
+    const bodies: unknown[] = [];
+    createAppClient("https://api.test", ((url: string, options?: { body?: string }) => {
+      const path = new URL(url, "https://api.test").pathname;
+      if (path === "/api/instances/email-credentials-check/") {
+        bodies.push(options?.body === undefined ? undefined : JSON.parse(options.body));
+        return Promise.resolve({
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({ message: "Email successfully sent." })),
+        });
+      }
+      return Promise.resolve({
+        status: 404,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ detail: "not found" })),
+      });
+    }) as Transport);
     renderForm(SAVED_VALUES, vi.fn());
     fireEvent.click(screen.getByTestId("admin-email-test-email"));
     expect(screen.getByTestId("admin-test-email-step")).toHaveAttribute("data-step", "compose");
@@ -386,10 +409,68 @@ describe("AdminEmailForm", () => {
     });
     fireEvent.click(screen.getByTestId("admin-test-email-send"));
     await waitFor(() => expect(screen.getByTestId("admin-test-email-step")).toHaveAttribute("data-step", "success"));
+    // The saved form's values ride along with the receiver.
+    expect(bodies).toEqual([
+      {
+        receiver_email: "admin@example.com",
+        EMAIL_HOST: "smtp.example.com",
+        EMAIL_PORT: "587",
+        EMAIL_FROM: "team@example.com",
+        EMAIL_HOST_USER: "mailer",
+        EMAIL_HOST_PASSWORD: "secret",
+        EMAIL_USE_TLS: "1",
+        EMAIL_USE_SSL: "0",
+      },
+    ]);
     fireEvent.click(screen.getByTestId("admin-test-email-dismiss"));
     await waitFor(() => expect(screen.queryByTestId("admin-test-email-step")).not.toBeInTheDocument());
     fireEvent.click(screen.getByTestId("admin-email-test-email"));
     expect(screen.getByTestId("admin-test-email-step")).toHaveAttribute("data-step", "compose");
     expect(screen.getByTestId("admin-test-email-receiver")).toHaveValue("");
+  });
+
+  it("tests unsaved edits: the check carries the entered values, not the saved ones", async () => {
+    const bodies: unknown[] = [];
+    createAppClient("https://api.test", ((url: string, options?: { body?: string }) => {
+      const path = new URL(url, "https://api.test").pathname;
+      if (path === "/api/instances/email-credentials-check/") {
+        bodies.push(options?.body === undefined ? undefined : JSON.parse(options.body));
+        return Promise.resolve({
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({ message: "Email successfully sent." })),
+        });
+      }
+      return Promise.resolve({
+        status: 404,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ detail: "not found" })),
+      });
+    }) as Transport);
+    renderForm(SAVED_VALUES, vi.fn());
+    fill("admin-email-host", "entered.example.com");
+    fill("admin-email-from", "entered@example.com");
+    fill("admin-email-password", "");
+    fireEvent.click(screen.getByRole("radio", { name: "SSL" }));
+    fireEvent.click(screen.getByTestId("admin-email-test-email"));
+    fireEvent.change(screen.getByTestId("admin-test-email-receiver"), {
+      target: { value: "admin@example.com" },
+    });
+    fireEvent.click(screen.getByTestId("admin-test-email-send"));
+    await waitFor(() => expect(screen.getByTestId("admin-test-email-step")).toHaveAttribute("data-step", "success"));
+    expect(bodies).toEqual([
+      {
+        receiver_email: "admin@example.com",
+        EMAIL_HOST: "entered.example.com",
+        EMAIL_PORT: "587",
+        EMAIL_FROM: "entered@example.com",
+        EMAIL_HOST_USER: "mailer",
+        // A cleared password means "keep the stored one", so it is left out.
+        EMAIL_USE_TLS: "0",
+        EMAIL_USE_SSL: "1",
+      },
+    ]);
   });
 });
