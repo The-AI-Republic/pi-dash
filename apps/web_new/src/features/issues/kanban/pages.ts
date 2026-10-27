@@ -63,6 +63,13 @@ export interface BoardReadInput {
   groupLabels: ReadonlyMap<string, string>;
   /** Resolves sub-group bucket ids to the lane names they show. */
   subLabels: ReadonlyMap<string, string>;
+  /**
+   * Project values the grouped read may leave out (labels, modules,
+   * cycles, assignees) so empty groups can still render (ISS-029/038).
+   * Shape only: it never rides in the query key.
+   */
+  groupDomain?: readonly string[] | undefined;
+  subDomain?: readonly string[] | undefined;
 }
 
 /** The three envelope shapes a board read can answer. */
@@ -241,6 +248,8 @@ export function toBoard(response: BoardResponse, input: BoardReadInput): BoardDa
       groupLabels: input.groupLabels,
       subLabels: input.subLabels,
       showEmpty: input.showEmpty,
+      groupDomain: input.groupDomain,
+      subDomain: input.subDomain,
     });
   }
   if (isGrouped(response)) {
@@ -248,6 +257,7 @@ export function toBoard(response: BoardResponse, input: BoardReadInput): BoardDa
       dimension: input.groupBy,
       labels: input.groupLabels,
       showEmpty: input.showEmpty,
+      domain: input.groupDomain,
     });
   }
   return flatBoard(response as IssueListResponse);

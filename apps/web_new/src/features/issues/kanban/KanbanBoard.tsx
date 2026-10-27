@@ -180,6 +180,14 @@ export function KanbanBoard({
   const groupLabels = refs.labels[prefs.groupBy ?? ""] ?? new Map<string, string>();
   const subLabels =
     subGroup === null ? new Map<string, string>() : (refs.labels[subGroup] ?? new Map<string, string>());
+  const domains: Record<string, readonly string[]> = {
+    labels: [...refs.labelNames.keys()],
+    module: [...refs.moduleNames.keys()],
+    cycle: [...refs.cycleNames.keys()],
+    assignees: [...refs.assigneeNames.keys()],
+  };
+  const groupDomain = prefs.groupBy === null ? undefined : domains[prefs.groupBy];
+  const subDomain = subGroup === null ? undefined : domains[subGroup];
   const read = useBoard(client, workspaceSlug, {
     entity,
     groupBy: prefs.groupBy,
@@ -190,6 +198,8 @@ export function KanbanBoard({
     richFilters,
     groupLabels,
     subLabels,
+    groupDomain,
+    subDomain,
   });
   const { data: projects } = useQuery(projectsQueryOptions(client, workspaceSlug));
   const { data: details } = useQuery(projectDetailsQueryOptions(client, workspaceSlug));

@@ -22,7 +22,14 @@ import type {
 
 import { GROUP_NONE_LABEL } from "../display/matrix.js";
 import type { CreateFormInitialValues } from "../create/createForm.js";
-import { FLAT_GROUP_TITLE, groupTitle, normalizeGroupedRow, orderGroupKeys, sectionPrefill } from "../list/grouping.js";
+import {
+  FLAT_GROUP_TITLE,
+  NONE_GROUP_KEY,
+  groupTitle,
+  normalizeGroupedRow,
+  orderGroupKeys,
+  sectionPrefill,
+} from "../list/grouping.js";
 import type { IssueGroupSection } from "../list/grouping.js";
 
 /** Issues read per board column (spec §5: thirty per page). */
@@ -69,6 +76,45 @@ export interface BoardData {
 const NO_ROWS: readonly IssueListItem[] = [];
 
 /**
+ * Dimensions whose project value list the grouped read can leave out:
+ * the server only emits buckets for used labels, modules, cycles and
+ * assignees.
+ * With empty groups visible the project's own values join the board, so
+ * an unused value still gets its column or lane. The empty-value bucket
+ * is synthetic for these dimensions too, because a fully assigned board
+ * carries no None bucket.
+ */
+const REFERENCE_FILLED_DIMENSIONS: ReadonlySet<string> = new Set(["labels", "module", "cycle", "assignees"]);
+
+/**
+ * Group keys to draw: the envelope's own keys in its order, then the
+ * project values the envelope did not mention, then the empty-value
+ * bucket last. Filling only happens while empty groups are visible; with
+ * the flag off zero-count groups are dropped anyway, so the envelope's
+ * keys remain the whole domain.
+ */
+function filledGroupKeys(
+  keys: readonly string[],
+  options: { dimension: string | null; showEmpty: boolean; domain?: readonly string[] | undefined }
+): { keys: string[]; synthetic: ReadonlySet<string> } {
+  if (!options.showEmpty) return { keys: orderGroupKeys(keys), synthetic: new Set<string>() };
+  const seen = new Set(keys);
+  const synthetic = new Set<string>();
+  const filled: string[] = [...keys];
+  for (const value of options.domain ?? []) {
+    if (value === NONE_GROUP_KEY || seen.has(value)) continue;
+    seen.add(value);
+    synthetic.add(value);
+    filled.push(value);
+  }
+  if (options.dimension !== null && REFERENCE_FILLED_DIMENSIONS.has(options.dimension) && !seen.has(NONE_GROUP_KEY)) {
+    synthetic.add(NONE_GROUP_KEY);
+    filled.push(NONE_GROUP_KEY);
+  }
+  return { keys: orderGroupKeys(filled), synthetic };
+}
+
+/**
  * Reconciled bucket total (NEWFRONT-153): the grouped count filter can
  * exclude rows the grouped results include (the pending-triage issue),
  * so the server total undercounts the cards. The header count equals the
@@ -99,12 +145,21 @@ function subGroupTotal(bucket: Pick<SubGroupedIssueBucket, "results" | "total_re
 export function boardColumns(
   response: Pick<GroupedIssueListResponse, "results">,
   labels: ReadonlyMap<string, string>,
-  options: { dimension: string | null; showEmpty: boolean }
+  options: { dimension: string | null; showEmpty: boolean; domain?: readonly string[] | undefined }
 ): BoardColumn[] {
   const columns: BoardColumn[] = [];
-  for (const key of orderGroupKeys(Object.keys(response.results))) {
+  const filled = filledGroupKeys(Object.keys(response.results), options);
+  for (const key of filled.keys) {
     const bucket = response.results[key] as IssueGroupBucket | undefined;
-    if (bucket === undefined) continue;
+    if (bucket === undefined) {
+      if (!filled.synthetic.has(key)) continue;
+      columns.push({
+        key,
+        title: groupTitle(key, labels, { dimension: options.dimension }),
+        total: 0,
+      });
+      continue;
+    }
     const total = bucketTotal(bucket);
     if (!options.showEmpty && total === 0) continue;
     columns.push({
@@ -149,13 +204,26 @@ export function flatBoard(response: Pick<IssueListResponse, "results" | "total_c
   };
 }
 
-/** Sub-group keys in first-seen server order with the empty bucket last. */
-export function laneKeys(response: Pick<SubGroupedIssueListResponse, "results">, showEmpty: boolean): string[] {
+/**
+ * Sub-group keys in first-seen server order with the empty bucket last.
+ * With empty groups visible, a reference-backed sub-group (labels,
+ * modules, cycles, assignees) also draws its project values and a
+ * synthetic empty lane, since the envelope only carries used values.
+ */
+export function laneKeys(
+  response: Pick<SubGroupedIssueListResponse, "results">,
+  showEmpty: boolean,
+  options: { dimension?: string | null; domain?: readonly string[] | undefined } = {}
+): string[] {
   const seen = new Set<string>();
   for (const bucket of Object.values(response.results)) {
     for (const key of Object.keys(bucket.results)) seen.add(key);
   }
-  const ordered = orderGroupKeys([...seen]);
+  const ordered = filledGroupKeys([...seen], {
+    dimension: options.dimension ?? null,
+    showEmpty,
+    domain: options.domain,
+  }).keys;
   if (showEmpty) return ordered;
   return ordered.filter((key) => laneTotal(response, key) > 0);
 }
@@ -178,12 +246,21 @@ export function laneTotal(response: Pick<SubGroupedIssueListResponse, "results">
 export function subGroupedColumns(
   response: Pick<SubGroupedIssueListResponse, "results">,
   labels: ReadonlyMap<string, string>,
-  options: { dimension: string | null; showEmpty: boolean }
+  options: { dimension: string | null; showEmpty: boolean; domain?: readonly string[] | undefined }
 ): BoardColumn[] {
   const columns: BoardColumn[] = [];
-  for (const key of orderGroupKeys(Object.keys(response.results))) {
+  const filled = filledGroupKeys(Object.keys(response.results), options);
+  for (const key of filled.keys) {
     const bucket = response.results[key];
-    if (bucket === undefined) continue;
+    if (bucket === undefined) {
+      if (!filled.synthetic.has(key)) continue;
+      columns.push({
+        key,
+        title: groupTitle(key, labels, { dimension: options.dimension }),
+        total: 0,
+      });
+      continue;
+    }
     const total = subGroupTotal(bucket);
     if (!options.showEmpty && total === 0) continue;
     columns.push({
@@ -204,10 +281,14 @@ export function subGroupedLanes(
     labels: ReadonlyMap<string, string>;
     columns: readonly BoardColumn[];
     showEmpty: boolean;
+    domain?: readonly string[] | undefined;
   }
 ): BoardLane[] {
   const lanes: BoardLane[] = [];
-  for (const laneKey of laneKeys(response, options.showEmpty)) {
+  for (const laneKey of laneKeys(response, options.showEmpty, {
+    dimension: options.subDimension,
+    domain: options.domain,
+  })) {
     const cells: Record<string, BoardCell> = {};
     for (const column of options.columns) {
       const bucket = response.results[column.key]?.results[laneKey];
@@ -239,11 +320,14 @@ export function subGroupedBoard(
     groupLabels: ReadonlyMap<string, string>;
     subLabels: ReadonlyMap<string, string>;
     showEmpty: boolean;
+    groupDomain?: readonly string[] | undefined;
+    subDomain?: readonly string[] | undefined;
   }
 ): BoardData {
   const columns = subGroupedColumns(response, options.groupLabels, {
     dimension: options.groupDimension,
     showEmpty: options.showEmpty,
+    domain: options.groupDomain,
   });
   return {
     columns,
@@ -253,6 +337,7 @@ export function subGroupedBoard(
       labels: options.subLabels,
       columns,
       showEmpty: options.showEmpty,
+      domain: options.subDomain,
     }),
     subGrouped: true,
     total: response.total_count,
@@ -269,14 +354,15 @@ export function groupedBoard(
     dimension: string | null;
     labels: ReadonlyMap<string, string>;
     showEmpty: boolean;
+    domain?: readonly string[] | undefined;
   }
 ): BoardData {
-  const columns = boardColumns(response, options.labels, {
-    dimension: options.dimension,
-    showEmpty: options.showEmpty,
-  });
+  const columns = boardColumns(response, options.labels, options);
   const cells = boardCells(response, options.dimension);
-  const visible = new Set(columns.map((column) => column.key));
+  const visibleCells: Record<string, BoardCell> = {};
+  for (const column of columns) {
+    visibleCells[column.key] = cells[column.key] ?? { columnKey: column.key, rows: [...NO_ROWS], total: 0 };
+  }
   return {
     columns,
     lanes: [
@@ -284,7 +370,7 @@ export function groupedBoard(
         key: "",
         title: "",
         total: response.total_count,
-        cells: Object.fromEntries(Object.entries(cells).filter(([key]) => visible.has(key))),
+        cells: visibleCells,
       },
     ],
     subGrouped: false,
