@@ -182,8 +182,8 @@ export function monthTitle(year: number, month0: number): string {
 }
 
 /**
- * Week title: a single month name when the week fits one month, otherwise
- * the short range form ("Sep 28 – Oct 4, 2026").
+ * Week title, always the short range form ("Oct 11 – Oct 17, 2026"), so
+ * every week step moves the header (ISS-022).
  */
 export function weekTitle(week: readonly CalendarCell[]): string {
   const first = week[0];
@@ -192,7 +192,6 @@ export function weekTitle(week: readonly CalendarCell[]): string {
   const from = parseIsoDay(first.iso);
   const to = parseIsoDay(last.iso);
   if (from === null || to === null) return "";
-  if (from.year === to.year && from.month0 === to.month0) return monthTitle(from.year, from.month0);
   if (from.year === to.year) {
     return `${SHORT_MONTH_TITLES[from.month0]} ${from.day} – ${SHORT_MONTH_TITLES[to.month0]} ${to.day}, ${from.year}`;
   }
