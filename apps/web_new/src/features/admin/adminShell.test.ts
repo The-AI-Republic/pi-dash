@@ -73,7 +73,6 @@ describe("adminSegmentLabel", () => {
       ai: "Artificial Intelligence",
       email: "Email",
       authentication: "Authentication",
-      image: "Image",
       google: "Google",
       github: "GitHub",
       gitlab: "GitLab",
@@ -81,6 +80,11 @@ describe("adminSegmentLabel", () => {
       workspace: "Workspace",
       create: "Create",
     });
+  });
+
+  it("carries no image label, since the console has no image area (ADM-049)", () => {
+    expect(Object.keys(ADMIN_SEGMENT_LABELS)).not.toContain("image");
+    expect(adminSegmentLabel("image")).toBe("IMAGE");
   });
 
   it("uppercases unmapped segments", () => {

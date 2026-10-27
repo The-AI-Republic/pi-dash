@@ -859,12 +859,25 @@ yields to the form. Data comes from the shared configurations fetch.
 No Image page, route, sidebar entry, Unsplash key field, or loading
 skeleton exists anywhere: no third-party image search is offered. The
 removal deletes the old page sources, the route-table entry, the
-sidebar entry, and the `UNSPLASH_ACCESS_KEY` config key. Observed old
-behavior behind NEWFRONT-493 (sidebar Images entry, a served
-`/image/` route rendering the key form with save, a loading skeleton)
-is pre-target: the oracle pins it until the removal lands, and the new
-app builds the absence — `/god-mode/image/` falls through to the
-not-found screen like any unmatched path.
+sidebar entry, and the `UNSPLASH_ACCESS_KEY` config key.
+
+The old console still serves the pre-removal behavior (a sidebar
+Images entry, an `/image/` route rendering the key form with save, and
+a skeleton while configurations load). That is the bug NEWFRONT-493
+records, and the oracle leg of `ai-image.spec.ts` keeps pinning it
+with a `bug:` title until the upstream removal, PDASHOSS01-237, lands
+on `main`.
+
+The new console builds the absence, and its own leg asserts it: the
+sidebar exposes no image entry, `/god-mode/image/` falls through to
+the catch-all not-found screen like any unmatched path (so no page
+mounts, no key field or save renders, and no skeleton shows even while
+a configurations read is stalled), and the breadcrumb label map
+carries no image entry — `image` uppercases like any unknown segment.
+Two unit suites back that up outside the browser: the route test pins
+the fall-through and the sidebar absence, the shell test pins the
+label map, and the source-level absence scan rejects the Unsplash key
+and the image-page test ids in every admin module.
 
 ## 7. Loop jobs (ADM-051–061, ADM-073)
 
