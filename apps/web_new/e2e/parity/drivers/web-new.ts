@@ -9565,6 +9565,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsMobileDisplayVisible(): Promise<boolean> {
+    // Project surfaces hang Display off the compact bar; the profile tab
+    // keeps its own trigger. Either visible control satisfies the read.
+    if (
+      await this.isShown(
+        this.layoutsMobileHeader().getByTestId("display-options-trigger").filter({ visible: true }).first()
+      )
+    ) {
+      return true;
+    }
     return this.isShown(this.page.getByTestId("profile-display-trigger").filter({ visible: true }).first());
   }
 

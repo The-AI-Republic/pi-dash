@@ -172,6 +172,27 @@ describe("web_new mobile header", () => {
     await expect(new WebNewDriver(missing.page).layoutsMobileAnalyticsVisible()).resolves.toBe(false);
   });
 
+  it("reads Display off the compact bar or the profile trigger", async () => {
+    const bar = pageOf({
+      testId: (id: string) =>
+        id === "issues-mobile-header"
+          ? node({
+              getByTestId: (inner: string) =>
+                inner === "display-options-trigger" ? node() : node({ count: async () => 0 }),
+            })
+          : node({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(bar.page).layoutsMobileDisplayVisible()).resolves.toBe(true);
+
+    const profile = pageOf({
+      testId: (id: string) => (id === "profile-display-trigger" ? node() : node({ count: async () => 0 })),
+    });
+    await expect(new WebNewDriver(profile.page).layoutsMobileDisplayVisible()).resolves.toBe(true);
+
+    const neither = pageOf({ testId: () => node({ count: async () => 0 }) });
+    await expect(new WebNewDriver(neither.page).layoutsMobileDisplayVisible()).resolves.toBe(false);
+  });
+
   it("reads hidden group-by rows as disabled display options", async () => {
     const panel = (cycle: boolean, module: boolean): Locator =>
       node({
