@@ -260,23 +260,26 @@ test(
 
     await test.step("both switches flip on and off, persisted server-side", async () => {
       await driver.openDisplayOptions();
-      // The reset omits both keys, which renders unchecked; flip on, prove
-      // it stored, then flip back off and prove that too.
+      // The reset omits both keys, which the old app renders unchecked.
+      // ISS-079 intends sub-work items default-on, so the new app renders
+      // it checked after a reset (spec §10 gate alignment); both legs
+      // still prove both directions persisted server-side.
+      const subDefault = driver.target === "web_new";
       expect(await driver.isDisplayOptionChecked("Show empty groups")).toBe(false);
-      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(false);
+      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(subDefault);
       await driver.setDisplayExtraOption("Show empty groups", true);
-      await driver.setDisplayExtraOption("Show sub-work items", true);
+      await driver.setDisplayExtraOption("Show sub-work items", !subDefault);
       expect(await driver.isDisplayOptionChecked("Show empty groups")).toBe(true);
-      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(true);
+      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(!subDefault);
       await expectStoredDisplayFilter(seed, "show_empty_groups", true);
-      await expectStoredDisplayFilter(seed, "sub_issue", true);
+      await expectStoredDisplayFilter(seed, "sub_issue", !subDefault);
       await driver.setDisplayExtraOption("Show empty groups", false);
-      await driver.setDisplayExtraOption("Show sub-work items", false);
+      await driver.setDisplayExtraOption("Show sub-work items", subDefault);
       expect(await driver.isDisplayOptionChecked("Show empty groups")).toBe(false);
-      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(false);
+      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(subDefault);
       await driver.closeDisplayOptions();
       await expectStoredDisplayFilter(seed, "show_empty_groups", false);
-      await expectStoredDisplayFilter(seed, "sub_issue", false);
+      await expectStoredDisplayFilter(seed, "sub_issue", subDefault);
       await expect
         .poll(() => driver.visibleIssueNames(), LIST_POLL)
         .toEqual(expect.arrayContaining([...seed.issueNames]));
