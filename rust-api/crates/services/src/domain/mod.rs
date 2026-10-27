@@ -52,6 +52,7 @@
 //! `pidash-db` never depends on this crate.
 
 pub mod activity;
+pub mod assistant;
 pub mod ctx;
 pub mod error;
 pub mod tokens;

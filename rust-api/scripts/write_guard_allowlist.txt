@@ -90,12 +90,6 @@ crates/api/src/app_workspace/handlers_workspace.rs | INSERT workspaces | 46ce094
 crates/api/src/app_workspace/handlers_workspace.rs | UPDATE profiles | a47927e8a305 | sql
 crates/api/src/app_workspace/handlers_workspace.rs | UPDATE workspaces | 3aff5d4fad30 | sql
 crates/api/src/app_workspace/handlers_workspace.rs | UPDATE workspaces | e9a8018f9963 | sql
-crates/api/src/assistant/llm_config.rs | DELETE assistant_user_llm_config | 3e0f241a2fb7 | sql
-crates/api/src/assistant/llm_config.rs | INSERT assistant_user_llm_config | 41a04375dcc4 | sql
-crates/api/src/assistant/llm_config.rs | UPDATE assistant_user_llm_config | 3a5e5d3c2fa8 | sql
-crates/api/src/assistant/llm_config.rs | UPDATE assistant_user_llm_config | 81b591a1461e | sql
-crates/api/src/assistant/messages.rs | INSERT assistant_message | d045133e7e12 | sql
-crates/api/src/assistant/threads.rs | DELETE assistant_message | dc769722e020 | sql
 crates/api/src/auth_oauth/login.rs | UPDATE users | f9ca47c65665 | sql
 crates/api/src/auth_oauth/mod.rs | UPDATE users | 7bd990973d04 | sql
 crates/api/src/auth_oauth/oauth_gitea.rs | INSERT profiles | 5e69105f277d | sql
@@ -245,7 +239,6 @@ crates/jobs/src/integrations/github_sync.rs | UPDATE descriptions | ef6e5f08dd04
 crates/jobs/src/integrations/github_sync.rs | UPDATE issue_comments | c44584f00d18 | sql
 crates/jobs/src/integrations/github_sync.rs | UPDATE issues | 9c18d36ab1b1 | sql
 crates/jobs/src/integrations/github_sync.rs | UPDATE issues | e1b027d4ed7c | sql
-crates/jobs/src/loop/dispatch.rs | INSERT assistant_message | ee6e9d74d756 | sql
 crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issue_assignees | c2cedf21ec47 | sql
 crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issue_sequences | b5f228b9985d | sql
 crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issues | 7f4e35179110 | sql
@@ -298,7 +291,6 @@ crates/services/src/app_workspace/queries_user.rs | UPDATE project_members | 551
 crates/services/src/app_workspace/queries_user.rs | UPDATE users | 389c0d015506 | sql
 crates/services/src/app_workspace/queries_user.rs | UPDATE users | bc3c7c4f3fd1 | sql
 crates/services/src/app_workspace/queries_user.rs | UPDATE workspace_members | 9ef6b65c2784 | sql
-crates/services/src/assistant/tools_issues.rs | INSERT assistant_message | e98a6794b856 | sql
 crates/services/src/assistant/tools_issues.rs | INSERT issues | 242754da201d | sql
 crates/services/src/dispatch/tools.rs | INSERT descriptions | b83444b9d5e0 | sql
 crates/services/src/dispatch/tools.rs | INSERT issue_comments | 9000854426e0 | sql

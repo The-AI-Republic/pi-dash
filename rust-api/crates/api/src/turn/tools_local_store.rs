@@ -2413,22 +2413,22 @@ impl ToolStore for PgToolStore {
             .fetch_one(&mut *tx)
             .await?;
             message_seq = max.unwrap_or(0) + 1;
-            // `insert_message_sql` binds in `COLUMNS` order:
-            // id, thread, turn, seq, kind, display_content, payload,
-            // status, created_at, completed_at.
-            sqlx::query(&events::insert_message_sql())
-                .bind(message_id)
-                .bind(deps.thread_id)
-                .bind(turn)
-                .bind(message_seq)
-                .bind(pidash_services::assistant::tools_results::TOOL_RESULT_KIND)
-                .bind(summary)
-                .bind(&message_payload)
-                .bind("completed")
-                .bind(now)
-                .bind(None::<DateTime<Utc>>)
-                .execute(&mut *tx)
-                .await?;
+            pidash_services::domain::assistant::create_message_row(
+                &mut *tx,
+                &pidash_services::domain::assistant::NewMessage {
+                    id: message_id,
+                    thread_id: deps.thread_id,
+                    turn_id: turn,
+                    seq: message_seq,
+                    kind: pidash_services::assistant::tools_results::TOOL_RESULT_KIND,
+                    display_content: summary,
+                    payload: &message_payload,
+                    status: "completed",
+                    created_at: *now,
+                    completed_at: None,
+                },
+            )
+            .await?;
             tx.commit().await?;
         }
         // Event row (`events.append_event`): own transaction, thread
@@ -2470,18 +2470,19 @@ impl ToolStore for PgToolStore {
             .fetch_one(&mut *tx)
             .await?;
             event_seq = max.unwrap_or(0) + 1;
-            // `insert_event_sql` binds in `COLUMNS` order minus the pk:
-            // thread, turn, seq, kind, message, payload, created_at.
-            sqlx::query(&events::insert_event_sql())
-                .bind(deps.thread_id)
-                .bind(turn)
-                .bind(event_seq)
-                .bind(pidash_services::assistant::tools_results::TOOL_RESULT_KIND)
-                .bind(message_id)
-                .bind(&event_payload)
-                .bind(now)
-                .execute(&mut *tx)
-                .await?;
+            pidash_services::domain::assistant::append_event(
+                &mut *tx,
+                &pidash_services::domain::assistant::NewEvent {
+                    thread_id: deps.thread_id,
+                    turn_id: turn,
+                    seq: event_seq,
+                    kind: pidash_services::assistant::tools_results::TOOL_RESULT_KIND,
+                    message_id: Some(message_id),
+                    payload: &event_payload,
+                    created_at: *now,
+                },
+            )
+            .await?;
             tx.commit().await?;
         }
         // Best-effort publish (`events.publish_event` swallows every
