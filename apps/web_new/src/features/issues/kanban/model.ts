@@ -458,83 +458,74 @@ export function mergeBoardPage(current: BoardData, incoming: BoardData, owner?: 
 }
 
 /**
- * Whether a sub-grouped board is missing rows from its buckets. The
- * server's total counts every issue; the lane totals sum only the rows it
- * could place. A smaller sum is the observable shape of NEWFRONT-158 and
- * makes the label recovery read worthwhile.
- */
-export function needsLabelRecovery(board: BoardData): boolean {
-  if (!board.subGrouped) return false;
-  const placed = board.lanes.reduce((sum, lane) => sum + lane.total, 0);
-  return placed < board.total;
-}
-
-/**
  * Fold rows the labels sub-grouped read omits back into the None lane
  * (ISS-031/NEWFRONT-158). A deleted label leaves a soft-deleted join row:
- * the server's labels grouping filters it out of every lane while the flat
- * read still shows the issue unlabeled. The recovery read is grouped only
- * by the board's main dimension. It is trusted only when a column's rows
- * are complete, so an ordinary later page cannot be mistaken for ghosting;
- * only unlabeled rows absent from every lane are added, and the column,
- * lane and board counts grow with them.
+ * the server's labels grouping filters it out of every lane and out of
+ * the envelope total, while the flat read still shows the issue as
+ * unlabeled. Nothing in the sub-grouped envelope marks the omission, so
+ * the caller always reads the board once without the label axis and this
+ * merge decides what is missing.
+ *
+ * The fallback read is grouped only by the board's main dimension. A
+ * column is trusted only when its fallback rows and every lane's window
+ * for it are complete, so a partially paged column is never mistaken for
+ * a ghost. Unlabeled rows
+ * the board does not already show join None; the fallback's unlabeled
+ * count is the count authority for the cell, and a column the ghost
+ * emptied joins the board so its row has somewhere to render.
  */
 export function reconcileLabelGhosts(board: BoardData, fallback: BoardData): BoardData {
   if (!board.subGrouped || fallback.subGrouped) return board;
   const fallbackLane = fallback.lanes[0];
   if (fallbackLane === undefined) return board;
-  const recovered = new Map<string, { rows: IssueListItem[]; total: number }>();
-  for (const column of board.columns) {
+  const recovered = new Map<string, { rows: IssueListItem[]; unlabeled: number; total: number }>();
+  const known = new Set(board.columns.map((column) => column.key));
+  const candidates = [...board.columns, ...fallback.columns.filter((column) => !known.has(column.key))];
+  for (const column of candidates) {
     const fallbackCell = fallbackLane.cells[column.key];
     if (fallbackCell === undefined || fallbackCell.rows.length < fallbackCell.total) continue;
-    // Every lane must have its whole column window before a row absent from
-    // the board can be called ghosted rather than simply not paged in yet.
-    const complete = board.lanes.every((lane) => {
+    // Every lane must hold its whole window for this column before a row
+    // missing from the board can be called ghosted rather than simply not
+    // paged in yet.
+    const settled = board.lanes.every((lane) => {
       const cell = lane.cells[column.key];
       return cell === undefined || cell.rows.length >= cell.total;
     });
-    if (!complete) continue;
+    if (!settled) continue;
+    const unlabeled = fallbackCell.rows.filter((row) => row.label_ids.length === 0);
     const present = new Set<string>();
     for (const lane of board.lanes) {
       for (const row of lane.cells[column.key]?.rows ?? []) present.add(row.id);
     }
-    const missing = fallbackCell.rows.filter((row) => row.label_ids.length === 0 && !present.has(row.id));
-    // A complete fallback column is also the count authority: the
-    // sub-grouped count may already include the ghost, so adding to it
-    // would double-count.
-    if (missing.length > 0) recovered.set(column.key, { rows: missing, total: fallbackCell.total });
+    const missing = unlabeled.filter((row) => !present.has(row.id));
+    if (missing.length === 0) continue;
+    recovered.set(column.key, { rows: missing, unlabeled: unlabeled.length, total: fallbackCell.total });
   }
   if (recovered.size === 0) return board;
-  const extra = [...recovered.values()].reduce((sum, entry) => sum + entry.rows.length, 0);
-  const columns = board.columns.map((column) => {
+  const columns = candidates.map((column) => {
     const entry = recovered.get(column.key);
     return entry === undefined ? column : { ...column, total: entry.total };
   });
-  let noneFound = false;
-  const lanes = board.lanes.map((lane) => {
-    if (lane.key !== "None") return lane;
-    noneFound = true;
+  const growNone = (lane: BoardLane): BoardLane => {
     const cells = { ...lane.cells };
-    for (const column of columns) {
-      const entry = recovered.get(column.key);
-      if (entry === undefined) continue;
-      const cell = cells[column.key];
-      cells[column.key] = {
-        columnKey: column.key,
-        rows: [...(cell?.rows ?? NO_ROWS), ...entry.rows],
-        total: (cell?.total ?? 0) + entry.rows.length,
-      };
+    for (const [key, entry] of recovered) {
+      const rows = [...(cells[key]?.rows ?? NO_ROWS), ...entry.rows];
+      cells[key] = { columnKey: key, rows, total: Math.max(entry.unlabeled, rows.length) };
     }
-    return { ...lane, cells, total: lane.total + extra };
-  });
-  if (!noneFound) {
+    return { ...lane, cells, total: Object.values(cells).reduce((sum, cell) => sum + cell.total, 0) };
+  };
+  const lanes = board.lanes.map((lane) => (lane.key === "None" ? growNone(lane) : lane));
+  if (!lanes.some((lane) => lane.key === "None")) {
     const cells: Record<string, BoardCell> = {};
-    for (const column of columns) {
-      const entry = recovered.get(column.key);
-      if (entry === undefined) continue;
-      cells[column.key] = { columnKey: column.key, rows: [...entry.rows], total: entry.rows.length };
+    for (const [key, entry] of recovered) {
+      cells[key] = { columnKey: key, rows: [...entry.rows], total: Math.max(entry.unlabeled, entry.rows.length) };
     }
-    lanes.push({ key: "None", title: GROUP_NONE_LABEL, total: extra, cells });
+    lanes.push({
+      key: "None",
+      title: GROUP_NONE_LABEL,
+      total: Object.values(cells).reduce((sum, cell) => sum + cell.total, 0),
+      cells,
+    });
   }
   return {
     columns,

@@ -38,7 +38,6 @@ import {
   BOARD_SUB_PAGE_SIZE,
   boardHasMore,
   boardPageCursor,
-  needsLabelRecovery,
   effectiveSubGroup,
   flatBoard,
   groupedBoard,
@@ -342,7 +341,11 @@ export function useBoard(client: ApiClient, workspaceSlug: string, input: BoardR
     () => (first.data === undefined ? null : toBoard(first.data, input)),
     [first.data, input]
   );
-  const recover = subKey === "labels__id" && primaryBoard !== null && needsLabelRecovery(primaryBoard);
+  // The sub-grouped envelope carries no signal for a ghosted row: the
+  // server drops it from the lanes and from the total alike. Only the
+  // main-dimension read can show it, so labels boards always read one
+  // (NEWFRONT-158).
+  const recover = subKey === "labels__id" && input.entity.scope === "project";
   const extras = React.useMemo<BoardExtraPage[]>(
     () => [
       ...Object.entries(columnCursors).flatMap(([key, cursors]) =>
@@ -360,7 +363,7 @@ export function useBoard(client: ApiClient, workspaceSlug: string, input: BoardR
   });
   const recovery = useQuery({
     ...labelRecoveryQueryOptions(client, workspaceSlug, input),
-    enabled: recover && input.entity.scope === "project",
+    enabled: recover,
   });
 
   const board = React.useMemo(() => {

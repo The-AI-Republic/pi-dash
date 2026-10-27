@@ -238,18 +238,21 @@ describe("label recovery", () => {
       label_ids: ["423e4567-e89b-12d3-a456-426614174003"],
     });
     const plain = row({ id: "123e4567-e89b-12d3-a456-426614174012", label_ids: [] });
+    // The server drops the ghost from the lanes and from every count, so
+    // the envelope claims two rows and sums to two (NEWFRONT-158).
     const subEnvelope = {
       ...envelope,
       grouped_by: "state_id",
       sub_grouped_by: "labels__id",
-      total_count: 3,
+      total_count: 2,
+      total_results: 2,
       results: {
         [STATE]: {
           results: {
             "423e4567-e89b-12d3-a456-426614174003": { results: [kept], total_results: 1 },
             None: { results: [plain], total_results: 1 },
           },
-          total_results: 3,
+          total_results: 2,
         },
       },
     };
@@ -284,6 +287,9 @@ describe("label recovery", () => {
       ["None", 2],
     ]);
     expect(board?.lanes[1]?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual([plain.id, ghost.id]);
+    expect(board?.lanes[1]?.cells[STATE]?.total).toBe(2);
+    expect(board?.columns[0]?.total).toBe(3);
+    expect(board?.total).toBe(3);
     expect(calls.some((url) => new URL(url).searchParams.get("sub_group_by") === null)).toBe(true);
   });
 
@@ -451,6 +457,11 @@ function deferredClient(first: Record<string, unknown>, second: Record<string, u
   return { client, calls, release };
 }
 
+/** Board reads that ask for a sub-group, in request order. */
+function subGroupCalls(calls: readonly string[]): string[] {
+  return calls.filter((url) => new URL(url).searchParams.get("sub_group_by") === "labels__id");
+}
+
 function boardClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
@@ -551,11 +562,12 @@ describe("board pagination", () => {
     act(() => result.current.loadMoreCell(STATE, "None"));
     await waitFor(() => expect(result.current.cellHasMore(STATE, "None")).toBe(false));
     expect(boardCellOf(result.current.board, STATE, "None")?.rows).toHaveLength(12);
-    expect(calls).toHaveLength(2);
-    expect(new URL(calls[1]!).searchParams.get("cursor")).toBe("10:1:0");
+    const pages = subGroupCalls(calls);
+    expect(pages).toHaveLength(2);
+    expect(new URL(pages[1]!).searchParams.get("cursor")).toBe("10:1:0");
     act(() => result.current.loadMoreCell(STATE, "None"));
     act(() => result.current.loadMoreCell(STATE, "missing"));
-    expect(calls).toHaveLength(2);
+    expect(subGroupCalls(calls)).toHaveLength(2);
   });
 
   it("follows the flat cursor chain on the single column", async () => {
@@ -614,10 +626,10 @@ describe("board pagination", () => {
     });
     await waitFor(() => expect(result.current.board).not.toBeNull());
     act(() => result.current.loadMoreCell(STATE, "None"));
-    await waitFor(() => expect(calls).toHaveLength(2));
+    await waitFor(() => expect(subGroupCalls(calls)).toHaveLength(2));
     expect(result.current.cellHasMore(STATE, "None")).toBe(true);
     act(() => result.current.loadMoreCell(STATE, "None"));
-    expect(calls).toHaveLength(2);
+    expect(subGroupCalls(calls)).toHaveLength(2);
   });
 
   it("holds a flat cursor the server repeats", async () => {

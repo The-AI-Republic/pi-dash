@@ -21,7 +21,6 @@ import {
   laneKeys,
   laneTotal,
   mergeBoardPage,
-  needsLabelRecovery,
   reconcileLabelGhosts,
   showsGroup,
   subGroupedBoard,
@@ -318,36 +317,20 @@ describe("sub-grouped lanes", () => {
   });
 });
 
-describe("needsLabelRecovery", () => {
-  it("compares placed lane totals with the envelope total", () => {
-    const missing = subGroupedBoard(subGrouped({ [STATE]: { None: { rows: [row({ id: "plain" })], total: 1 } } }), {
-      groupDimension: "state",
-      subDimension: "labels",
-      groupLabels: labels,
-      subLabels: labels,
-      showEmpty: true,
-    });
-    expect(needsLabelRecovery({ ...missing, total: 2 })).toBe(true);
-    expect(needsLabelRecovery({ ...missing, total: 1 })).toBe(false);
-    expect(needsLabelRecovery(flatBoard({ results: [], total_count: 0 }))).toBe(false);
-  });
-});
-
 describe("label ghost reconciliation (ISS-031/NEWFRONT-158)", () => {
-  it("returns the ghosted row to None while live and plain rows keep their lanes", () => {
+  it("returns the ghosted row to None with counts that match the rendered cards", () => {
     const ghost = row({ id: "ghost", label_ids: [] });
     const kept = row({ id: "kept", label_ids: [LABEL] });
     const plain = row({ id: "plain", label_ids: [] });
+    // The real envelope: the server drops the ghost from its lanes and from
+    // total_count alike, so the lanes already sum to the total.
     const board = subGroupedBoard(
-      {
-        ...subGrouped({
-          [STATE]: {
-            [LABEL]: { rows: [kept], total: 1 },
-            None: { rows: [plain], total: 1 },
-          },
-        }),
-        total_count: 3,
-      },
+      subGrouped({
+        [STATE]: {
+          [LABEL]: { rows: [kept], total: 1 },
+          None: { rows: [plain], total: 1 },
+        },
+      }),
       {
         groupDimension: "state",
         subDimension: "labels",
@@ -356,6 +339,7 @@ describe("label ghost reconciliation (ISS-031/NEWFRONT-158)", () => {
         showEmpty: true,
       }
     );
+    expect(board.total).toBe(2);
     const fallback = groupedBoard(grouped({ [STATE]: { rows: [kept, ghost, plain], total: 3 } }), {
       dimension: "state",
       labels,
@@ -370,6 +354,36 @@ describe("label ghost reconciliation (ISS-031/NEWFRONT-158)", () => {
     expect(result.lanes[1]?.cells[STATE]?.total).toBe(2);
     expect(result.columns[0]?.total).toBe(3);
     expect(result.total).toBe(3);
+    // Every count equals the cards behind it.
+    const cards = result.lanes.reduce((sum, lane) => sum + (lane.cells[STATE]?.rows.length ?? 0), 0);
+    expect(result.columns[0]?.total).toBe(cards);
+    expect(result.lanes.reduce((sum, lane) => sum + lane.total, 0)).toBe(cards);
+  });
+
+  it("keeps a live-labeled row in its label lane and a never-labeled row under None", () => {
+    const kept = row({ id: "kept", label_ids: [LABEL] });
+    const plain = row({ id: "plain", label_ids: [] });
+    const board = subGroupedBoard(
+      subGrouped({
+        [STATE]: {
+          [LABEL]: { rows: [kept], total: 1 },
+          None: { rows: [plain], total: 1 },
+        },
+      }),
+      {
+        groupDimension: "state",
+        subDimension: "labels",
+        groupLabels: labels,
+        subLabels: labels,
+        showEmpty: true,
+      }
+    );
+    const fallback = groupedBoard(grouped({ [STATE]: { rows: [kept, plain], total: 2 } }), {
+      dimension: "state",
+      labels,
+      showEmpty: true,
+    });
+    expect(reconcileLabelGhosts(board, fallback)).toBe(board);
   });
 
   it("creates the None lane when the server omitted it entirely", () => {
@@ -402,6 +416,33 @@ describe("label ghost reconciliation (ISS-031/NEWFRONT-158)", () => {
     ]);
     expect(result.columns.map((column) => column.total)).toEqual([2, 1]);
     expect(result.lanes[1]?.cells[second]).toBeUndefined();
+  });
+
+  it("adds a column the labels read dropped entirely so its ghost can render", () => {
+    const second = "623e4567-e89b-12d3-a456-426614174005";
+    const ghost = row({ id: "ghost", state_id: second });
+    const board = subGroupedBoard(subGrouped({ [STATE]: { None: { rows: [row({ id: "plain" })], total: 1 } } }), {
+      groupDimension: "state",
+      subDimension: "labels",
+      groupLabels: labels,
+      subLabels: labels,
+      showEmpty: true,
+    });
+    const fallback = groupedBoard(
+      grouped({
+        [STATE]: { rows: [row({ id: "plain" })], total: 1 },
+        [second]: { rows: [ghost], total: 1 },
+      }),
+      { dimension: "state", labels: new Map([...labels, [second, "Done"]]), showEmpty: true }
+    );
+    const result = reconcileLabelGhosts(board, fallback);
+    expect(result.columns.map((column) => [column.key, column.total])).toEqual([
+      [STATE, 1],
+      [second, 1],
+    ]);
+    expect(result.lanes.map((lane) => [lane.key, lane.total])).toEqual([["None", 2]]);
+    expect(result.lanes[0]?.cells[second]?.rows.map((entry) => entry.id)).toEqual(["ghost"]);
+    expect(result.total).toBe(2);
   });
 
   it("waits for every lane's column window before recovering", () => {
@@ -459,19 +500,16 @@ describe("label ghost reconciliation (ISS-031/NEWFRONT-158)", () => {
     const second = "623e4567-e89b-12d3-a456-426614174005";
     const ghost = row({ id: "ghost" });
     const board = subGroupedBoard(
-      {
-        ...subGrouped({
-          [STATE]: {
-            [LABEL]: { rows: [row({ label_ids: [LABEL] })], total: 1 },
-            None: { rows: [], total: 0 },
-          },
-          [second]: {
-            [LABEL]: { rows: [row({ id: "kept-2", state_id: second, label_ids: [LABEL] })], total: 1 },
-            None: { rows: [], total: 0 },
-          },
-        }),
-        total_count: 3,
-      },
+      subGrouped({
+        [STATE]: {
+          [LABEL]: { rows: [row({ label_ids: [LABEL] })], total: 1 },
+          None: { rows: [], total: 0 },
+        },
+        [second]: {
+          [LABEL]: { rows: [row({ id: "kept-2", state_id: second, label_ids: [LABEL] })], total: 1 },
+          None: { rows: [], total: 0 },
+        },
+      }),
       {
         groupDimension: "state",
         subDimension: "labels",
