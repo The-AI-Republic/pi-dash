@@ -17,6 +17,7 @@ pub mod comment;
 pub mod identity;
 pub mod issues;
 pub mod render;
+pub mod work_items;
 pub mod workspace;
 
 use std::fmt;
@@ -67,6 +68,43 @@ impl std::error::Error for DbError {
     }
 }
 
+/// Render an aware datetime through a zone: ISO-8601 with `+00:00`
+/// rewritten to `Z` (the `pidash-api` serializer kernel, moved with the
+/// comment render; shared by the read renderers).
+pub(crate) fn render_datetime_in<TzFrom: chrono::TimeZone, TzTo: chrono::TimeZone>(
+    dt: &chrono::DateTime<TzFrom>,
+    tz: &TzTo,
+) -> String
+where
+    TzTo::Offset: std::fmt::Display,
+{
+    let local = dt.with_timezone(tz);
+    let suffix = local.format("%:z").to_string();
+    let suffix = if suffix == "+00:00" {
+        "Z".to_owned()
+    } else {
+        suffix
+    };
+    render_utc_parts(
+        &local.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        local.timestamp_subsec_nanos(),
+        &suffix,
+    )
+}
+
+pub(crate) fn render_utc_parts(base: &str, nanos: u32, suffix: &str) -> String {
+    // DRF `DateTimeField` renders Python datetimes, which carry only
+    // microseconds: no fraction when micros == 0, exactly 6 digits
+    // otherwise. Truncate sub-microsecond nanos (e.g. `Utc::now()`
+    // stamps) so HTTP output never carries 9 digits (PIDASHCONV-867).
+    let micros = nanos / 1000;
+    if micros == 0 {
+        format!("{base}{suffix}")
+    } else {
+        format!("{base}.{:06}{suffix}", micros)
+    }
+}
+
 /// Failure modes of the public read surface.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -90,4 +128,11 @@ pub use comment::{
 pub use identity::{fetch_asset, fetch_profile, fetch_user, AssetRow, ProfileRow, UserShape};
 pub use issues::{comment_url, fetch_blocker_summary, resolve_workpad_state, workpad_stripped};
 pub use render::{render_state, state_row_from, StateRow, StateRowTuple};
+pub use work_items::{
+    decode_issue, expand_estimate_point, expand_parent, expand_project, expand_state, expand_user,
+    expand_workspace, fetch_assignee_ids, fetch_assignee_rows, fetch_blocker_rows,
+    fetch_expanded_labels, fetch_grouped_rows, fetch_issue_for_write, fetch_label_ids,
+    render_decoded, render_write_response, requested_names, BlockerRows, DecodedIssue,
+    OwnedAssigneeRow, OwnedRelationItem, RenderRequest, ISSUE_EXTRA_COLS, ISSUE_SELECT_COLS,
+};
 pub use workspace::{workspace_of, workspace_row, workspace_slug};

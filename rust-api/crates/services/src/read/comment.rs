@@ -6,7 +6,7 @@
 //! handlers call [`render_comment`]; the file keeps its own copies of
 //! the shared fetch/getter helpers for its other (non-comment) callers.
 
-use chrono::{DateTime, TimeZone};
+use chrono::DateTime;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -139,45 +139,11 @@ fn req_json(obj: &serde_json::Map<String, Value>, key: &'static str) -> Result<V
 /// `+00:00` rewritten to `Z` (serializer kernel rule).
 fn render_dt(raw: &str, tz: &chrono_tz::Tz) -> Result<String, Error> {
     let dt = DateTime::parse_from_rfc3339(raw).map_err(|_| Error::Failed("render-dt"))?;
-    Ok(render_datetime_in(&dt, tz))
+    Ok(super::render_datetime_in(&dt, tz))
 }
 
 fn render_dt_opt(raw: Option<String>, tz: &chrono_tz::Tz) -> Result<Option<String>, Error> {
     raw.map(|text| render_dt(&text, tz)).transpose()
-}
-
-/// Render an aware datetime through a zone: ISO-8601 with `+00:00`
-/// rewritten to `Z` (the `pidash-api` serializer kernel, moved with the
-/// comment render).
-fn render_datetime_in<TzFrom: TimeZone, TzTo: TimeZone>(dt: &DateTime<TzFrom>, tz: &TzTo) -> String
-where
-    TzTo::Offset: std::fmt::Display,
-{
-    let local = dt.with_timezone(tz);
-    let suffix = local.format("%:z").to_string();
-    let suffix = if suffix == "+00:00" {
-        "Z".to_owned()
-    } else {
-        suffix
-    };
-    render_utc_parts(
-        &local.format("%Y-%m-%dT%H:%M:%S").to_string(),
-        local.timestamp_subsec_nanos(),
-        &suffix,
-    )
-}
-
-fn render_utc_parts(base: &str, nanos: u32, suffix: &str) -> String {
-    // DRF `DateTimeField` renders Python datetimes, which carry only
-    // microseconds: no fraction when micros == 0, exactly 6 digits
-    // otherwise. Truncate sub-microsecond nanos (e.g. `Utc::now()`
-    // stamps) so HTTP output never carries 9 digits (PIDASHCONV-867).
-    let micros = nanos / 1000;
-    if micros == 0 {
-        format!("{base}{suffix}")
-    } else {
-        format!("{base}.{:06}{suffix}", micros)
-    }
 }
 
 // ---------------------------------------------------------------------------
