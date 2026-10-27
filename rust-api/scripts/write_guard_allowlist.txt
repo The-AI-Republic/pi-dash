@@ -138,7 +138,6 @@ crates/services/src/app_workspace/queries_user.rs | UPDATE profiles | f46194691e
 crates/services/src/app_workspace/queries_user.rs | UPDATE users | 389c0d015506 | sql
 crates/services/src/app_workspace/queries_user.rs | UPDATE users | bc3c7c4f3fd1 | sql
 crates/services/src/app_workspace/queries_user.rs | UPDATE workspace_members | 9ef6b65c2784 | sql
-crates/services/src/assistant/tools_issues.rs | INSERT issues | 242754da201d | sql
 crates/services/src/dispatch/tools.rs | INSERT descriptions | b83444b9d5e0 | sql
 crates/services/src/dispatch/tools.rs | INSERT issue_comments | 9000854426e0 | sql
 crates/services/src/dispatch/tools.rs | UPDATE issue_comments | 90dc6a588e62 | sql

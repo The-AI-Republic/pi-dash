@@ -518,13 +518,6 @@ pub fn should_dispatch_transition(state_given: bool, from_state: &str, to_state:
     state_given && from_state != to_state
 }
 
-/// `create_issue` sequence allocation (`issues.py:256-264`): the project
-/// row is locked first, then `MAX(sequence_id) + 1` (0 when empty).
-/// Returns the next sequence for a locked project row.
-pub fn next_sequence(max_sequence_id: Option<i64>) -> i64 {
-    max_sequence_id.unwrap_or(0) + 1
-}
-
 /// Columns written by `Issue.objects.create` (`issues.py:265-277`):
 /// `description_html` comes from `to_safe_html` (`None` renders `<p></p>`)
 /// and `description_json` is always empty (no Tiptap converter).
@@ -1440,27 +1433,6 @@ pub fn message_envelope(
         "completed_at": completed_at_iso,
     })
 }
-
-/// `create_issue` write transaction (`issues.py:256-277`): impersonation
-/// makes `BaseModel.save()` attribute `created_by` to the acting user
-/// (the tool runs with no request, so crum's current user is `None`);
-/// the project row is locked, the sequence allocated, and the issue
-/// inserted atomically. `created_via` comes from the deps mode
-/// (`assistant` for chat, `loop` otherwise).
-pub const CREATE_ISSUE_SQL: &str = "SELECT id FROM projects WHERE id = $1 FOR UPDATE";
-
-/// `Issue.objects` is the soft-delete default manager, so the maximum is
-/// taken over live rows only — a sequence held by a soft-deleted row can
-/// be reallocated, exactly as in Python (ported behavior, not fixed).
-pub const CREATE_ISSUE_MAX_SEQ_SQL: &str =
-    "SELECT COALESCE(MAX(sequence_id), 0) FROM issues WHERE project_id = $1 AND deleted_at IS NULL";
-
-pub const CREATE_ISSUE_INSERT_SQL: &str =
-    "INSERT INTO issues (id, name, description_html, description_json, priority, \
-     sequence_id, state_id, project_id, workspace_id, parent_id, \
-     created_by_id, updated_by_id, created_via) \
-     VALUES ($1, $2, $3, '{}', $4, $5, $6, $7, $8, $9, $10, $10, $11) \
-     RETURNING id";
 
 /// `update_issue` write transaction (`issues.py:334-381`): the row is
 /// re-fetched under `SELECT ... FOR UPDATE` so concurrent UI edits are
@@ -2392,7 +2364,8 @@ mod tests {
         assert!(PAIR_ROWS_SQL.contains("FROM issue_relations"));
         assert!(GROUPED_RELATIONS_SQL.contains("workspace_id = $2"));
         assert!(ISSUE_COMMENTS_SQL.contains("ORDER BY issue_comments.created_at DESC LIMIT 10"));
-        assert!(CREATE_ISSUE_INSERT_SQL.contains("created_via"));
+        // The dead `create_issue` write consts (lock, MAX probe, INSERT)
+        // were deleted with the statements (ORM-03 C6).
     }
 
     #[test]
@@ -2400,8 +2373,9 @@ mod tests {
         assert!(should_dispatch_transition(true, "a", "b"));
         assert!(!should_dispatch_transition(true, "a", "a"));
         assert!(!should_dispatch_transition(false, "a", "b"));
-        assert_eq!(next_sequence(None), 1);
-        assert_eq!(next_sequence(Some(41)), 42);
+        // The sequence kernel folded into
+        // `app_project::ser_project::next_work_item_sequence` (pinned by
+        // `next_sequence_kernel_matches_fixture` there).
     }
 
     #[test]
@@ -2431,7 +2405,6 @@ mod tests {
         assert!(SCOPED_ISSUES_SQL.contains("issues.deleted_at IS NULL"));
         assert!(MEMBER_PROJECTS_SQL.contains("projects.deleted_at IS NULL"));
         assert!(RESOLVE_IDENTIFIER_SQL.contains("issues.deleted_at IS NULL"));
-        assert!(CREATE_ISSUE_MAX_SEQ_SQL.contains("deleted_at IS NULL"));
         assert!(PROJECT_WRITE_GATE_SQL.contains("project_members.deleted_at IS NULL"));
         assert!(PROJECT_WRITE_GATE_SQL.contains("workspace_members.deleted_at IS NULL"));
         // M2M traversals join the through tables with no manager filter
