@@ -987,9 +987,10 @@ async fn complete_login_or_signup(
                 first_name: &first_name,
                 last_name: &last_name,
                 display_name: display_name.clone(),
-                // Preserved verbatim (see `domain::identity`): the github
-                // insert stores the provider avatar URL, not `''`.
-                avatar: &avatar,
+                // Django inserts `''` (the field default, `user.py:68`)
+                // and persists the provider URL after the insert
+                // (`base.py:330-340`; PIDASHCONV-1560).
+                avatar: "",
                 is_email_verified: true,
                 is_password_autoset: true,
                 last_active: Some(now),
@@ -1015,10 +1016,14 @@ async fn complete_login_or_signup(
         .map_err(|_| CallbackFailure::Server)?;
 
         // `avatar_asset = download_and_upload_avatar(...)` (`base.py:330-339`):
-        // success sets the FK too, failure keeps the provider URL the
-        // INSERT already stored. No old avatar exists to delete.
+        // the provider URL lands first (the INSERT stored `''`), then
+        // success sets the FK too; failure keeps the stamped URL. No old
+        // avatar exists to delete (same shape as the google signup).
         let mut created_asset = None;
         if !avatar.is_empty() {
+            identity::stamp_avatar_url(pool, id, &avatar)
+                .await
+                .map_err(|_| CallbackFailure::Server)?;
             if let Some(asset_id) = super::download_and_upload_avatar(
                 client, pool, storage, scheme, host, "github", &avatar, id, max_bytes, now,
             )

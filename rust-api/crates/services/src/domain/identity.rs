@@ -30,18 +30,13 @@
 //!
 //! Per-caller deltas (design D6) ride on the input structs, each citing
 //! the Python file:line that has the same difference. Three Rust-side
-//! divergences the survey found are preserved verbatim and tracked by
-//! PIDASHCONV-1560 (fix separately; this consolidation changes nothing):
-//!
-//! * email/gitea signup inserts store `last_active = NULL`; Django's
-//!   field default is `timezone.now` (observable only when the stamps
-//!   save never runs — a mid-signup database failure).
-//! * the github signup stores the provider avatar URL at insert; Django
-//!   stores `''` and persists the URL in `save_user_data` (same
-//!   failure-arm-only window).
-//! * the gitea stamps bind `''` for a missing ip/user-agent where Django
-//!   (and every other path) stores NULL into the NOT NULL columns and
-//!   the request 500s.
+//! divergences the ORM-07 survey found are fixed here (PIDASHCONV-1560):
+//! every signup insert stores `last_active = now` (Django's field
+//! default, `user.py:105`) and `avatar = ''` (the field default,
+//! `user.py:68`), and every stamps call binds a missing ip/user-agent
+//! as NULL into the NOT NULL columns (Django 500s the same way,
+//! `adapter/base.py:225-226`). Each was observable only when a later
+//! save never ran (a mid-signup database failure).
 //!
 //! Statement order moves one step on the gitlab path: its prefs insert
 //! used to run after the profile insert; the hook fires at the user
@@ -76,10 +71,10 @@ pub struct NewProfile<'a> {
 /// already (gitlab/gitea/github). `username`, `password_hash`,
 /// `display_name` and the names are caller-resolved (uuid-hex vs
 /// `new_state`, PBKDF2 vs pre-encoded, email-local backfill vs provider
-/// display). `avatar` is `''` everywhere but the github signup, which
-/// stores the provider URL at insert (see the module docs).
-/// `last_active` is `Some(now)` but `None` on the email/gitea paths
-/// (see the module docs). `login_ip`/`login_uagent` are `Some("")` but
+/// display). `avatar` is `''` on every path (Django's field default,
+/// `user.py:68`); provider URLs land after the insert. `last_active`
+/// is `Some(now)` on every path (Django's field default,
+/// `user.py:105`). `login_ip`/`login_uagent` are `Some("")` but
 /// the magic path's request values. `is_bot` forwards to the hook
 /// (bots get no prefs row); `profile` is `None` for bots (Django
 /// creates no profile for them) and `Some` for every human signup.
@@ -573,9 +568,8 @@ pub enum StaffSync {
 ///   normalized (no fixture pins it). `None` omits the column: the
 ///   license stamps never assign it (`admin.py:220-226`).
 /// * `avatar` / `avatar_asset_id`: gitlab binds the URL, gitea the URL
-///   plus the asset id; everyone else persists avatars elsewhere
-///   (insert-time, or the [`stamp_avatar_asset`]/[`stamp_avatar_url`]
-///   singles).
+///   plus the asset id; everyone else persists avatars through the
+///   [`stamp_avatar_asset`]/[`stamp_avatar_url`] singles.
 /// * `display_name` / `is_staff`: the `User.save()` backfill + sync
 ///   (`user.py:169-187`), in bound or `CASE`/expression form — or
 ///   omitted where the stored row already matches.
@@ -583,8 +577,8 @@ pub enum StaffSync {
 ///   (`auto_now`); email's missing bump is preserved verbatim (see the
 ///   module docs).
 /// * `login_ip`/`login_uagent` bind NULL when `None` (the NOT NULL
-///   columns raise into the same 500 Python hits) — except gitea, which
-///   pre-renders `''` (see the module docs).
+///   columns raise into the same 500 Python hits,
+///   `adapter/base.py:225-226`), on every path including gitea.
 ///
 /// `rotated_token` is caller-generated (`uuid4hex + uuid4hex`,
 /// `user.py:174`); the activation-mail branch that precedes this write
@@ -819,8 +813,8 @@ where
 }
 
 /// `UPDATE users SET avatar = $1 WHERE id = $2`: the sync URL stamp
-/// when the avatar upload fails (google twice). Runs on the caller's
-/// executor.
+/// when the avatar upload fails (google twice) and the github signup
+/// URL stamp after its `''` insert. Runs on the caller's executor.
 pub async fn stamp_avatar_url<'e, E>(
     ex: E,
     user_id: Uuid,
@@ -1942,5 +1936,246 @@ mod tests {
             GetAgentUserError::Db(db) => assert!(is_unique_violation(&db), "got {db:?}"),
             GetAgentUserError::Collision(_) => panic!("wrong error: collision"),
         }
+    }
+
+    /// Temp `profiles`: the columns [`create_user`] inserts (entity
+    /// names); types accept the call-site values.
+    const PROFILES_DDL: &str = "CREATE TEMPORARY TABLE profiles (
+        id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL, user_id UUID NOT NULL,
+        theme JSONB NOT NULL, is_app_rail_docked BOOLEAN NOT NULL,
+        is_tour_completed BOOLEAN NOT NULL, onboarding_step JSONB NOT NULL,
+        use_case TEXT, role TEXT, is_onboarded BOOLEAN NOT NULL,
+        last_workspace_id UUID, billing_address_country TEXT NOT NULL,
+        billing_address JSONB, has_billing_address BOOLEAN NOT NULL,
+        company_name TEXT NOT NULL, notification_view_mode TEXT NOT NULL,
+        is_smooth_cursor_enabled BOOLEAN NOT NULL,
+        is_mobile_onboarded BOOLEAN NOT NULL,
+        mobile_onboarding_step JSONB NOT NULL,
+        mobile_timezone_auto_set BOOLEAN NOT NULL, language TEXT NOT NULL,
+        start_of_the_week SMALLINT NOT NULL, goals JSONB NOT NULL,
+        background_color TEXT NOT NULL,
+        is_navigation_tour_completed BOOLEAN NOT NULL,
+        has_marketing_email_consent BOOLEAN NOT NULL,
+        is_subscribed_to_changelog BOOLEAN NOT NULL,
+        product_tour JSONB NOT NULL, settings JSONB NOT NULL)";
+
+    /// Temp `user_notification_preferences`: the columns the users
+    /// `after_save` hook inserts.
+    const PREFS_DDL: &str = "CREATE TEMPORARY TABLE user_notification_preferences (
+        id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID,
+        updated_by_id UUID, deleted_at TIMESTAMPTZ, user_id UUID NOT NULL,
+        workspace_id UUID, project_id UUID,
+        property_change BOOLEAN NOT NULL, state_change BOOLEAN NOT NULL,
+        comment BOOLEAN NOT NULL, mention BOOLEAN NOT NULL,
+        issue_completed BOOLEAN NOT NULL)";
+
+    /// Single-connection scratch pool: temp tables live on the session,
+    /// and the SeaORM handle shares it (no explicit transaction — the
+    /// one connection serializes the sequential awaits).
+    async fn live_single_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// PIDASHCONV-1560: each signup path's exact `NewUser` inputs (no
+    /// stamps save) store Django's insert-time row — `last_active = now`
+    /// (`user.py:105`) and `avatar = ''` (`user.py:68`).
+    #[tokio::test]
+    async fn live_signup_insert_stores_django_last_active_and_avatar() {
+        let Some(pool) = live_single_pool().await else {
+            return;
+        };
+        for ddl in [USERS_DDL, PROFILES_DDL, PREFS_DDL] {
+            sqlx::query(ddl)
+                .execute(&pool)
+                .await
+                .expect("temp identity tables");
+        }
+        let db = pidash_db::sea_orm_connection(&pool);
+        let now: DateTime<Utc> = "2026-10-27T12:00:00+00:00".parse().expect("T0");
+        // `password_hash` is fixed, not PBKDF2: the value is irrelevant
+        // to the pinned columns and 600k rounds would slow the test.
+        let paths = [
+            // `auth_session/email.rs` signup arm.
+            NewUser {
+                id: None,
+                email: "insert1560-email@example.test",
+                username: "email1560user".to_owned(),
+                password_hash: "pbkdf2-fixed".to_owned(),
+                first_name: "",
+                last_name: "",
+                display_name: "insert1560-email".to_owned(),
+                avatar: "",
+                is_email_verified: false,
+                is_password_autoset: false,
+                last_active: Some(now),
+                login_ip: Some(""),
+                login_uagent: Some(""),
+                is_bot: false,
+                now,
+                profile: Some(NewProfile {
+                    company_name: "",
+                    background_color: "#abcdef".to_owned(),
+                }),
+            },
+            // `auth_oauth/oauth_gitea.rs` signup arm.
+            NewUser {
+                id: Some(live_uuid("000000005601")),
+                email: "insert1560-gitea@example.test",
+                username: "gitea1560user".to_owned(),
+                password_hash: "pbkdf2-fixed".to_owned(),
+                first_name: "Gi",
+                last_name: "Tea",
+                display_name: "gitea-display".to_owned(),
+                avatar: "",
+                is_email_verified: true,
+                is_password_autoset: true,
+                last_active: Some(now),
+                login_ip: Some(""),
+                login_uagent: Some(""),
+                is_bot: false,
+                now,
+                profile: Some(NewProfile {
+                    company_name: "",
+                    background_color: "#abcdef".to_owned(),
+                }),
+            },
+            // `auth_oauth/oauth_github.rs` signup arm.
+            NewUser {
+                id: Some(live_uuid("000000005602")),
+                email: "insert1560-github@example.test",
+                username: "github1560user".to_owned(),
+                password_hash: "pbkdf2-fixed".to_owned(),
+                first_name: "Git",
+                last_name: "Hub",
+                display_name: "insert1560-github".to_owned(),
+                avatar: "",
+                is_email_verified: true,
+                is_password_autoset: true,
+                last_active: Some(now),
+                login_ip: Some(""),
+                login_uagent: Some(""),
+                is_bot: false,
+                now,
+                profile: Some(NewProfile {
+                    company_name: "",
+                    background_color: "#abcdef".to_owned(),
+                }),
+            },
+        ];
+        for user in &paths {
+            let id = create_user(&db, user).await.expect("insert runs");
+            let row: sqlx::postgres::PgRow =
+                sqlx::query("SELECT last_active, avatar FROM users WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read back");
+            let last_active: Option<DateTime<Utc>> =
+                row.try_get("last_active").expect("last_active");
+            let avatar: String = row.try_get("avatar").expect("avatar");
+            assert_eq!(last_active, Some(now), "insert-time last_active");
+            assert_eq!(avatar, "", "insert-time avatar");
+        }
+    }
+
+    fn assert_not_null_violation(err: &sqlx::Error) {
+        match err {
+            sqlx::Error::Database(db) => {
+                assert_eq!(db.code().as_deref(), Some("23502"), "not-null violation")
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    /// PIDASHCONV-1560: the gitea stamps with missing ip/user-agent bind
+    /// NULL into the NOT NULL columns and raise 23502 — the same error
+    /// the other paths' stamps raise (Django 500s the same way,
+    /// `adapter/base.py:225-226`). A savepoint separates the two
+    /// expected failures (each aborts to it, not the transaction).
+    #[tokio::test]
+    async fn live_gitea_stamps_none_ip_uagent_raise_not_null() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(USERS_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("temp users");
+        let now: DateTime<Utc> = "2026-10-27T12:00:00+00:00".parse().expect("T0");
+        let user_id = live_uuid("000000005603");
+        sqlx::query(
+            "INSERT INTO users (password, id, username, email, display_name, first_name,
+             last_name, avatar, date_joined, created_at, updated_at, last_location,
+             created_location, is_superuser, is_managed, is_password_expired, is_active,
+             is_staff, is_email_verified, is_password_autoset, is_password_reset_required,
+             token, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent,
+             is_bot, user_timezone, is_email_valid)
+             VALUES ('usable-hash', $1, 'stamp1560', 'stamp1560@example.test', 'stamp',
+             'St', 'Amp', '', $2, $2, $2, '', '', false, false, false, true, false,
+             false, false, false, '', '', '', 'email', '', false, 'UTC', false)",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .expect("seed user");
+        // The gitea call site with missing inputs (`oauth_gitea.rs`
+        // `save_user_data` passes its `Option`s straight through).
+        let gitea = LoginStamps {
+            medium: Some("gitea"),
+            login_ip: None,
+            login_uagent: None,
+            avatar: Some(""),
+            avatar_asset_id: Some(None),
+            display_name: Some(DisplayNameUpdate::BackfillCase),
+            is_staff: Some(StaffSync::OrSuperuser),
+            touch_updated_at: true,
+            rotated_token: "tok",
+            now,
+        };
+        sqlx::query("SAVEPOINT sp_gitea")
+            .execute(&mut *tx)
+            .await
+            .expect("savepoint");
+        let err = save_user_data(&mut *tx, user_id, &gitea)
+            .await
+            .expect_err("missing ip/uagent fails");
+        assert_not_null_violation(&err);
+        sqlx::query("ROLLBACK TO SAVEPOINT sp_gitea")
+            .execute(&mut *tx)
+            .await
+            .expect("rollback to savepoint");
+        // The same inputs through the email shape fail identically.
+        let email = LoginStamps {
+            medium: Some("email"),
+            login_ip: None,
+            login_uagent: None,
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: None,
+            is_staff: None,
+            touch_updated_at: false,
+            rotated_token: "tok",
+            now,
+        };
+        let err = save_user_data(&mut *tx, user_id, &email)
+            .await
+            .expect_err("email shape fails identically");
+        assert_not_null_violation(&err);
     }
 }
