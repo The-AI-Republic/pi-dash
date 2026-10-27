@@ -217,6 +217,71 @@ export async function updateWorkspaceView(
 }
 
 /**
+ * PATCH .../projects/<id>/views/<viewId>/ with `{ access }` — the cloud
+ * access write (VIEW-019, NEWFRONT-948; Decisions D23). The key rides its
+ * own call because the create/patch payloads omit it; the OSS serializer
+ * drops read-only keys, so the caller keeps the echo and only treats the
+ * choice as stored when the echo carries it back.
+ */
+export async function setProjectViewAccess(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  viewId: string,
+  access: number
+): Promise<SavedView> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/views/${viewId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: { access } });
+  return client.parse(SavedView, envelope.data, `PATCH ${path}`);
+}
+
+/** PATCH /api/workspaces/<slug>/views/<id>/ with `{ access }` (VIEW-019). */
+export async function setWorkspaceViewAccess(
+  client: ApiClient,
+  slug: string,
+  viewId: string,
+  access: number
+): Promise<SavedView> {
+  const path = `/api/workspaces/${slug}/views/${viewId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: { access } });
+  return client.parse(SavedView, envelope.data, `PATCH ${path}`);
+}
+
+/**
+ * PATCH .../projects/<id>/views/<viewId>/ with `{ anchor }` — publish a
+ * project view (VIEW-020, NEWFRONT-948; Decisions D24). The client proposes
+ * the opaque public token and the server is the authority: the call only
+ * counts as published when the echo carries the anchor back.
+ */
+export async function publishProjectView(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  viewId: string,
+  anchor: string
+): Promise<SavedView> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/views/${viewId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: { anchor } });
+  return client.parse(SavedView, envelope.data, `PATCH ${path}`);
+}
+
+/**
+ * PATCH .../projects/<id>/views/<viewId>/ with `{ anchor: null }` —
+ * unpublish a project view (VIEW-020). Resolves with the echo; the caller
+ * treats a cleared anchor as unpublished.
+ */
+export async function unpublishProjectView(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  viewId: string
+): Promise<SavedView> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/views/${viewId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: { anchor: null } });
+  return client.parse(SavedView, envelope.data, `PATCH ${path}`);
+}
+
+/**
  * DELETE — remove a view the caller owns (204). The row is blanked in
  * place and drops out of lists; retrieve still 200s. Test cleanup only.
  */

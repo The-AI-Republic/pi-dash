@@ -19,7 +19,11 @@ import {
   getWorkspaceView,
   listProjectViews,
   listWorkspaceViews,
+  publishProjectView,
   removeViewFavorite,
+  setProjectViewAccess,
+  setWorkspaceViewAccess,
+  unpublishProjectView,
   updateProjectView,
   updateWorkspaceView,
 } from "./issue-views.js";
@@ -251,5 +255,45 @@ describe("view writes", () => {
       `DELETE /api/workspaces/acme/views/${UUID}/`,
     ]);
     expect(JSON.parse(calls[1]?.body ?? "{}")).toEqual({ display_filters: { layout: "calendar" } });
+  });
+});
+
+describe("cloud access and publish writes", () => {
+  it("stores a project view access choice through its own PATCH", async () => {
+    const { client, calls } = stubClient(() => ({ ...VIEW_ROW, access: 0 }));
+    const echo = await setProjectViewAccess(client, "acme", UUID2, UUID, 0);
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      `PATCH /api/workspaces/acme/projects/${UUID2}/views/${UUID}/`,
+    ]);
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ access: 0 });
+    expect(echo.access).toBe(0);
+  });
+
+  it("stores a workspace view access choice on the workspace route", async () => {
+    const { client, calls } = stubClient(() => ({ ...VIEW_ROW, project: null, access: 0 }));
+    const echo = await setWorkspaceViewAccess(client, "acme", UUID, 0);
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([`PATCH /api/workspaces/acme/views/${UUID}/`]);
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ access: 0 });
+    expect(echo.access).toBe(0);
+  });
+
+  it("publishes a project view by proposing an anchor", async () => {
+    const { client, calls } = stubClient(() => ({ ...VIEW_ROW, anchor: "view-anchor-1" }));
+    const echo = await publishProjectView(client, "acme", UUID2, UUID, "view-anchor-1");
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      `PATCH /api/workspaces/acme/projects/${UUID2}/views/${UUID}/`,
+    ]);
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ anchor: "view-anchor-1" });
+    expect(echo.anchor).toBe("view-anchor-1");
+  });
+
+  it("unpublishes a project view by clearing the anchor", async () => {
+    const { client, calls } = stubClient(() => ({ ...VIEW_ROW, anchor: null }));
+    const echo = await unpublishProjectView(client, "acme", UUID2, UUID);
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      `PATCH /api/workspaces/acme/projects/${UUID2}/views/${UUID}/`,
+    ]);
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ anchor: null });
+    expect(echo.anchor).toBeNull();
   });
 });

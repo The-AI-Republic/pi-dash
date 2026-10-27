@@ -1075,6 +1075,20 @@ spec does not settle it; until that decision lands, the slices build the
 OSS legs and the local seam modules only, never an ad-hoc condition on the
 OSS build.
 
+**Write path, settled (NEWFRONT-948; Decisions D23/D24 amendments).** Each
+cloud write is the owning scope's standard view PATCH with its own key,
+and each only counts when the PATCH echo carries the value back — the
+server stays the authority, and a server that drops the key fails loudly
+instead of faking the state. Access stores `{ access }` on the project or
+workspace view route; publish proposes an opaque `{ anchor }` token and
+unpublish clears it with `{ anchor: null }` on the project view route.
+The public link is the edition's shareable origin plus
+`/views/published/{anchor}/`; no public read route serves that address
+yet, so the gate proves derivation and copy only. The workspace surface
+offers `list` and `spreadsheet` (the old `my_issues` page's known
+layouts); the workspace body renders the flat list for any offered layout
+until the issues area builds workspace-capable renderers.
+
 **Blocked cloud leg.** If a cloud edition of `web_new` cannot be built in
 the checkout the gate runs in, the gate marks each cloud leg
 `blocked: cloud build not available in this checkout` (or the specific

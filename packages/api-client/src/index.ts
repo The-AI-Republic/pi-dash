@@ -371,7 +371,11 @@ export {
   getWorkspaceView,
   listProjectViews,
   listWorkspaceViews,
+  publishProjectView,
   removeViewFavorite,
+  setProjectViewAccess,
+  setWorkspaceViewAccess,
+  unpublishProjectView,
   updateProjectView,
   updateWorkspaceView,
 } from "./contracts/issue-views.js";

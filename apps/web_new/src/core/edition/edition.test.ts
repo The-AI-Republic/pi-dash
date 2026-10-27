@@ -16,6 +16,15 @@ import {
 } from "./index.js";
 import { edition as ossEdition } from "./oss.js";
 import type { Edition } from "./types.js";
+// The public values the private cloud module references through the
+// @web_new alias (NEWFRONT-948). The OSS assertions above pin absence;
+// these pin that the fillings the cloud build points at exist.
+import {
+  CLOUD_WORKSPACE_VIEW_LAYOUTS,
+  cloudViewAccessSlot,
+  cloudViewPublishSlot,
+  cloudWorkspaceViewLayouts,
+} from "../../features/views/edition/cloudSlots.js";
 
 describe("edition", () => {
   it("resolves the OSS edition through the index", () => {
@@ -82,6 +91,24 @@ describe("edition", () => {
     expect(edition.slots?.["page.headerActions"]).toBeUndefined();
     expect(edition.slots?.["page.extraPaneTabs"]).toBeUndefined();
     expect(edition.slots?.["page.slashRegistry"]).toBeUndefined();
+  });
+});
+
+describe("cloud views slot values", () => {
+  it("ships the access selector and its write (VIEW-019)", () => {
+    expect(typeof cloudViewAccessSlot.Field).toBe("function");
+    expect(typeof cloudViewAccessSlot.storeAccess).toBe("function");
+  });
+
+  it("ships the publish seam (VIEW-020)", () => {
+    expect(typeof cloudViewPublishSlot.publish).toBe("function");
+    expect(typeof cloudViewPublishSlot.unpublish).toBe("function");
+    expect(typeof cloudViewPublishSlot.publicLink).toBe("function");
+  });
+
+  it("ships the workspace layouts (VIEW-040)", () => {
+    expect(cloudWorkspaceViewLayouts.layouts).toEqual(CLOUD_WORKSPACE_VIEW_LAYOUTS);
+    expect(cloudWorkspaceViewLayouts.layouts.length).toBeGreaterThan(0);
   });
 });
 
