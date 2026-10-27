@@ -53,10 +53,8 @@ use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
 use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgRow, Postgres};
 use sqlx::{Row, Transaction};
 use uuid::Uuid;
@@ -106,10 +104,7 @@ pub const TICKET_KEY_PREFIX: &str = "machine_token_ticket:";
 /// exactly `(ModelBackend,)` (`settings/common.py:125`).
 const MODEL_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
 
-/// Salt for `user.get_session_auth_hash()`
-/// (`django.contrib.auth` `HASH_SESSION_KEY` verification).
-const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
+use pidash_compat::http::verify_session_hash;
 
 // ---------------------------------------------------------------------------
 // Shared responses (the `runner_runs` shape, restated: no cross-domain dep)
@@ -375,39 +370,6 @@ pub fn next_auto_runner_name(pod_runner_count: i64) -> String {
 // ---------------------------------------------------------------------------
 // Session resolve (`BaseSessionAuthentication` + `IsAuthenticated`)
 // ---------------------------------------------------------------------------
-
-/// `user.get_session_auth_hash()`: `salted_hmac(<salt>, password)` with
-/// SHA256, compared constant-time (the `license::resolve_actor`
-/// precedent, restated without the timezone arm: runner views render no
-/// datetimes, so a bad `user_timezone` must not 500 here).
-fn verify_session_hash(session_hash: &str, password_field: &str, secret_key: &[u8]) -> bool {
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let expected = hex_encode(&mac.finalize().into_bytes());
-    constant_time_eq(expected.as_bytes(), session_hash.as_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
 
 /// `request.user` from the Django session, or `None` for anonymous.
 /// Mirrors `django.contrib.auth.get_user` + DRF `SessionAuthentication`

@@ -62,8 +62,6 @@ use axum::{
     response::{IntoResponse, Response},
     Router,
 };
-use hmac::Hmac;
-use sha2::{Digest, Sha256};
 
 use pidash_auth::csrf as csrf_kernel;
 use pidash_auth::session as session_kernel;
@@ -98,10 +96,9 @@ const AUTHENTICATION_THROTTLE: ThrottleSpec = ThrottleSpec {
 /// resolves this backend string (`settings/common.py:125`).
 const MODEL_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
 
-/// Salt for `user.get_session_auth_hash()` (same value as the D-01
-/// license wiring).
-const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
+use pidash_compat::http::{
+    csrf_failure_json, csrf_failure_response, csrf_token_source, session_auth_hash, TokenSource,
+};
 
 /// Django 4.2 `PBKDF2PasswordHasher`: 600000 iterations, 22-char
 /// alphanumeric salt (128 bits of entropy over 62 chars).
@@ -267,46 +264,6 @@ enum CsrfDenial {
     BadToken,
 }
 
-/// Where the request token came from (`CsrfViewMiddleware._check_token`:
-/// the `csrfmiddlewaretoken` POST field wins when non-empty, else the
-/// `X-CSRFToken` header).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenSource {
-    Post,
-    Header,
-}
-
-impl TokenSource {
-    /// `_bad_token_message` source rendering (`csrf.py:347-352`;
-    /// `CSRF_HEADER_NAME` is the default, parsed as `X-Csrftoken`).
-    fn describe(self) -> &'static str {
-        match self {
-            TokenSource::Post => "POST",
-            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
-        }
-    }
-}
-
-/// Resolve the request token in Django's order: the last
-/// `csrfmiddlewaretoken` form value when non-empty, else the header
-/// when present (even empty — an empty header fails format, it does
-/// not fall through to "missing").
-fn csrf_token_source(
-    pairs: &[(String, String)],
-    header_token: Option<&str>,
-) -> Option<(String, TokenSource)> {
-    if let Some(value) = pairs
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "csrfmiddlewaretoken")
-        .map(|(_, v)| v.as_str())
-        .filter(|v| !v.is_empty())
-    {
-        return Some((value.to_owned(), TokenSource::Post));
-    }
-    header_token.map(|token| (token.to_owned(), TokenSource::Header))
-}
-
 /// `_check_token` + `_does_token_match` over one token: the format
 /// gate first (`has incorrect length` / `has invalid characters`),
 /// then the unmask-and-compare, rendered exactly like
@@ -345,39 +302,6 @@ fn csrf_gate(prov: &Provenance, pairs: &[(String, String)]) -> Result<(), CsrfDe
         return Err(CsrfDenial::BadToken);
     };
     csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
-}
-
-/// DRF `SessionAuthentication.enforce_csrf` denial
-/// (`authentication.py:148`): 403 with the middleware's reason after
-/// `CSRF Failed: `. Only reachable for authenticated callers —
-/// anonymous requests return `None` before the check.
-fn csrf_failure_json(reason: &str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        [
-            (header::CONTENT_TYPE, "application/json"),
-            (header::VARY, "Cookie"),
-        ],
-        format!(
-            "{{\"detail\":\"CSRF Failed: {}\"}}",
-            reason.replace('\\', "\\\\").replace('"', "\\\"")
-        ),
-    )
-        .into_response()
-}
-
-/// The `csrf_failure` page: 200 + `text/html`, `root_url` =
-/// `base_host(request)` with no surface flags.
-fn csrf_failure_response(root_url: &str) -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::VARY, "Cookie"),
-        ],
-        render_csrf_failure(root_url),
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -611,26 +535,6 @@ fn encode_password(password: &str) -> String {
         }
     }
     pidash_auth::password::hash_password(password, &salt, PBKDF2_ITERATIONS)
-}
-
-/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()` (same construction as the D-01 wiring).
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    use hmac::Mac as _;
-    mac.update(password_field.as_bytes());
-    hex_encode(&mac.finalize().into_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
 }
 
 /// `zxcvbn(password)["score"]` (same estimator, 0-4 scale; an
@@ -1639,7 +1543,7 @@ async fn run_authenticated(
 /// either the error redirect or the authenticated tail.
 async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &str) -> Response {
     if csrf_gate(&req.prov, &req.pairs).is_err() {
-        return csrf_failure_response(&req.hosts.root_base);
+        return csrf_failure_response(render_csrf_failure(&req.hosts.root_base));
     }
     let Some(pool) = state.pools().map(|pools| pools.primary()) else {
         return server_error();
@@ -2207,7 +2111,7 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
         .map(|info| info.0.ip().to_string());
     let prov = provenance(&parts.headers, peer, &cookie_name);
     if csrf_gate(&prov, &form_pairs(prov.content_type.as_deref(), &body)).is_err() {
-        return csrf_failure_response(&hosts.root_base);
+        return csrf_failure_response(render_csrf_failure(&hosts.root_base));
     }
     let hosts_ref = allowed_hosts_ref(&hosts.allowed_hosts);
     let next_path = form_pairs(prov.content_type.as_deref(), &body)

@@ -1412,9 +1412,8 @@ pub fn truncate_note(note: &str) -> Option<String> {
 
 /// Read the whole body.
 async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
-    axum::body::to_bytes(body, usize::MAX)
+    pidash_compat::http::read_body(body)
         .await
-        .map(|bytes| bytes.to_vec())
         .map_err(|error| db_error(error, "read-body"))
 }
 

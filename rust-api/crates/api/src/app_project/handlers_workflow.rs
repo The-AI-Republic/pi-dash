@@ -330,24 +330,7 @@ fn no_content() -> Response {
 // Query map (Django QueryDict: repeats legal, .get returns the last)
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (the pilot `OneOrMany` shape).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map the list handler extracts.
-type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None` when absent.
-fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
+use pidash_compat::http::{query_last, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Request context: auth + rewrite + tenant + membership

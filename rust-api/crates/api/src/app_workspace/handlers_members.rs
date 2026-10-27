@@ -121,8 +121,6 @@
 //! session [`actor`], exact denial bodies, manual envelope assembly for
 //! DRF key order/bytes.
 
-use std::collections::HashMap;
-
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -603,25 +601,7 @@ fn python_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// One query value, repeated or not: axum's `Query` backend does not coerce
-/// a lone `?key=value` into a sequence, so the extractor uses this untagged
-/// shape and callers read the last value — mirroring Django's `QueryDict`,
-/// where repeats are legal and `.get` returns the last value.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-type QueryMap = HashMap<String, OneOrMany>;
-
-fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    match query.get(key)? {
-        OneOrMany::One(value) => Some(value.clone()),
-        OneOrMany::Many(values) => values.last().cloned(),
-    }
-}
+use pidash_compat::http::{query_last, QueryMap};
 
 /// `SearchFilter` terms (`rest_framework/filters.py`
 /// `search_smart_split` over Django `smart_split`): the last `?search=`
@@ -3501,6 +3481,8 @@ async fn last_visited(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_compat::http::OneOrMany;
+    use std::collections::HashMap;
 
     /// F-W24-15 golden
     /// (`rust-api/fixtures/app_workspace/handlers/routes.golden.json`),

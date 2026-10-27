@@ -227,12 +227,7 @@ async fn workspace_role_in(
     Ok(role.map(i32::from))
 }
 
-/// Django `request.query_params.get`: the last value wins on repeats
-/// (`QueryDict`), and a missing or empty param disables the filter
-/// (every source gate is an `if …:` truthiness check).
-fn query_param(params: &crate::license::QueryMap, key: &str) -> Option<String> {
-    crate::license::query_last(params, key).filter(|raw| !raw.is_empty())
-}
+use pidash_compat::http::query_param;
 
 /// UUID-typed query/body strings: Django's `UUIDField.get_prep_value`
 /// raises `ValidationError` (an unhandled 500) on garbage — the

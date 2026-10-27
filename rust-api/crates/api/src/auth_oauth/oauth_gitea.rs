@@ -58,8 +58,6 @@
 //! and answering 405 in Rust would break the contract).
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
-
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -102,26 +100,7 @@ pub const REDIRECT_STATUS: u16 = 302;
 // §2 Pure kernels: query encoding, urljoin, redirect builders
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not. Mirrors the D-26 `app_issues` shape:
-/// axum's `Query` backend does not coerce a lone `?key=value` into a
-/// sequence, so callers read the last value like Django's `QueryDict.get`.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).and_then(|value| match value {
-        OneOrMany::One(one) => Some(one.clone()),
-        OneOrMany::Many(many) => many.last().cloned(),
-    })
-}
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// `urllib.parse.urlencode` over an ordered pair list (insertion order is
 /// the `get_error_dict` order: `error_code`, `error_message`, then

@@ -290,20 +290,7 @@ pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 
-/// One query value, repeated or not. `serde_html_form` (axum's `Query`
-/// backend) does not coerce a lone `?key=value` into a sequence, so the
-/// extractor uses this untagged shape and callers read first/last —
-/// mirroring Django's `QueryDict`, where repeats are legal and `.get`
-/// returns the last value.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every list handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// All values for `key`, in order; `None` when absent.
 pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
@@ -311,11 +298,6 @@ pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
         OneOrMany::One(one) => vec![one.clone()],
         OneOrMany::Many(many) => many.clone(),
     })
-}
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query_values(query, key).and_then(|values| values.into_iter().last())
 }
 
 /// Plain multi-map for the services layer (pure, axum-free).
